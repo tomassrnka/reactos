@@ -60,9 +60,16 @@ KiDpcInterruptHandler(VOID)
         /* Acquire the PRCB lock */
         KiAcquirePrcbLock(Prcb);
 
+        /* Another processor may have taken back the standby thread */
+        NewThread = Prcb->NextThread;
+        if (!NewThread)
+        {
+            KiReleasePrcbLock(Prcb);
+            goto Exit;
+        }
+
         /* Capture current thread data */
         OldThread = Prcb->CurrentThread;
-        NewThread = Prcb->NextThread;
 
         /* Set new thread data */
         Prcb->NextThread = NULL;
@@ -72,6 +79,9 @@ KiDpcInterruptHandler(VOID)
         NewThread->State = Running;
         OldThread->WaitReason = WrDispatchInt;
 
+        /* Another processor may pick the old thread once it is queued */
+        KiSetThreadSwapBusy(OldThread);
+
         /* Make the old thread ready */
         KxQueueReadyThread(OldThread, Prcb);
 
@@ -79,6 +89,7 @@ KiDpcInterruptHandler(VOID)
         KiSwapContext(APC_LEVEL, OldThread);
     }
 
+Exit:
     /* Disable interrupts and go back to old irql */
     _disable();
     KeLowerIrql(OldIrql);

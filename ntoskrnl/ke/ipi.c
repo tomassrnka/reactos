@@ -16,9 +16,40 @@
 
 extern KSPIN_LOCK KiReverseStallIpiLock;
 
-/* PRIVATE FUNCTIONS *********************************************************/
+/*
+ * The packet fields. x64 has no SignalDone and keeps the packet in a request
+ * mailbox; the protocol below uses a single slot per processor, so it takes
+ * the first mailbox and PacketBarrier as the slot.
+ */
+#ifdef _M_AMD64
+#define KiIpiSlot(Prcb)         (*(PKPRCB volatile*)&(Prcb)->PacketBarrier)
+#define KiIpiSummary(Prcb)      ((Prcb)->RequestMailbox[0].RequestSummary)
+#define KiIpiWorker(Prcb)       (*(PKIPI_WORKER*)&(Prcb)->RequestMailbox[0].RequestPacket.WorkerRoutine)
+#define KiIpiParameters(Prcb)   ((Prcb)->RequestMailbox[0].RequestPacket.CurrentPacket)
+#define KiIpiOrSummary(Prcb, Request) \
+    InterlockedOr64(&KiIpiSummary(Prcb), (LONG64)(Request))
+#define KiIpiTakeSummary(Prcb) \
+    ((ULONG)InterlockedExchange64(&KiIpiSummary(Prcb), 0))
+#define KiIpiJoinTargetSet(Prcb, Set) \
+    InterlockedOr64((PLONG64)&(Prcb)->TargetSet, (LONG64)(Set))
+#define KiIpiLeaveTargetSet(Prcb, Set) \
+    InterlockedAnd64((PLONG64)&(Prcb)->TargetSet, ~(LONG64)(Set))
+#else
+#define KiIpiSlot(Prcb)         ((Prcb)->SignalDone)
+#define KiIpiSummary(Prcb)      ((Prcb)->RequestSummary)
+#define KiIpiWorker(Prcb)       ((Prcb)->WorkerRoutine)
+#define KiIpiParameters(Prcb)   ((Prcb)->CurrentPacket)
+#define KiIpiOrSummary(Prcb, Request) \
+    InterlockedOr((PLONG)&KiIpiSummary(Prcb), (LONG)(Request))
+#define KiIpiTakeSummary(Prcb) \
+    ((ULONG)InterlockedExchange((PLONG)&KiIpiSummary(Prcb), 0))
+#define KiIpiJoinTargetSet(Prcb, Set) \
+    InterlockedOr((PLONG)&(Prcb)->TargetSet, (LONG)(Set))
+#define KiIpiLeaveTargetSet(Prcb, Set) \
+    InterlockedAnd((PLONG)&(Prcb)->TargetSet, ~(LONG)(Set))
+#endif
 
-#ifndef _M_AMD64
+/* PRIVATE FUNCTIONS *********************************************************/
 
 /*
  * Packet protocol. A sender publishes the worker and its parameters in its
@@ -44,10 +75,10 @@ KiIpiPublishPacket(
 {
     ASSERT(Prcb->TargetSet == 0);
 
-    Prcb->WorkerRoutine = WorkerRoutine;
-    Prcb->CurrentPacket[0] = Parameter1;
-    Prcb->CurrentPacket[1] = Parameter2;
-    Prcb->CurrentPacket[2] = Parameter3;
+    KiIpiWorker(Prcb) = WorkerRoutine;
+    KiIpiParameters(Prcb)[0] = Parameter1;
+    KiIpiParameters(Prcb)[1] = Parameter2;
+    KiIpiParameters(Prcb)[2] = Parameter3;
     KeMemoryBarrier();
 }
 
@@ -74,10 +105,10 @@ KiIpiDeliverPacket(
         {
             BOOLEAN Enable = KeDisableInterrupts();
 
-            if (InterlockedCompareExchangePointer((PVOID*)&TargetPrcb->SignalDone, Prcb, NULL) == NULL)
+            if (InterlockedCompareExchangePointer((PVOID*)&KiIpiSlot(TargetPrcb), Prcb, NULL) == NULL)
             {
-                InterlockedOr((PLONG)&Prcb->TargetSet, (LONG)AFFINITY_MASK(Processor));
-                InterlockedOr((PLONG)&TargetPrcb->RequestSummary, IPI_PACKET_READY);
+                KiIpiJoinTargetSet(Prcb, AFFINITY_MASK(Processor));
+                KiIpiOrSummary(TargetPrcb, IPI_PACKET_READY);
                 HalRequestIpi(AFFINITY_MASK(Processor));
                 KeRestoreInterrupts(Enable);
                 break;
@@ -151,12 +182,13 @@ KiIpiSend(IN KAFFINITY TargetProcessors,
         if (!IpiRequest) return;
     }
 
-    /* Mark the requests before interrupting, the interrupt takes them all */
-    while (Remaining)
+    /* Mark the requests before interrupting, the interrupt takes them all;
+       an IPI without requests only ends a halt */
+    while (Remaining && IpiRequest)
     {
         BitScanForwardAffinity(&Processor, Remaining);
         Remaining &= Remaining - 1;
-        InterlockedOr((PLONG)&KiProcessorBlock[Processor]->RequestSummary, (LONG)IpiRequest);
+        KiIpiOrSummary(KiProcessorBlock[Processor], IpiRequest);
     }
 
     HalRequestIpi(TargetProcessors);
@@ -186,7 +218,7 @@ KiIpiSignalPacketDone(IN PKIPI_CONTEXT PacketContext)
     PKPRCB Sender = (PKPRCB)PacketContext;
 
     /* Lets the sender go on early; the slot is freed once the worker returns */
-    InterlockedAnd((PLONG)&Sender->TargetSet, ~(LONG)KeGetCurrentPrcb()->SetMember);
+    KiIpiLeaveTargetSet(Sender, KeGetCurrentPrcb()->SetMember);
 #endif
 }
 
@@ -216,7 +248,7 @@ KiIpiServiceRoutine(IN PKTRAP_FRAME TrapFrame,
 
     ASSERT(KeGetCurrentIrql() == IPI_LEVEL);
 
-    Request = InterlockedExchange((PLONG)&Prcb->RequestSummary, 0);
+    Request = KiIpiTakeSummary(Prcb);
 
     if (Request & IPI_APC)
     {
@@ -225,23 +257,22 @@ KiIpiServiceRoutine(IN PKTRAP_FRAME TrapFrame,
 
     if (Request & IPI_DPC)
     {
-        Prcb->DpcInterruptRequested = TRUE;
         HalRequestSoftwareInterrupt(DISPATCH_LEVEL);
     }
 
     if (Request & IPI_PACKET_READY)
     {
-        Sender = (PKPRCB)Prcb->SignalDone;
+        Sender = (PKPRCB)KiIpiSlot(Prcb);
         ASSERT(Sender != NULL);
 
-        Sender->WorkerRoutine((PKIPI_CONTEXT)Sender,
-                              Sender->CurrentPacket[0],
-                              Sender->CurrentPacket[1],
-                              Sender->CurrentPacket[2]);
+        KiIpiWorker(Sender)((PKIPI_CONTEXT)Sender,
+                            KiIpiParameters(Sender)[0],
+                            KiIpiParameters(Sender)[1],
+                            KiIpiParameters(Sender)[2]);
 
         /* Leave the sender's target set before freeing the slot, see the protocol above */
-        InterlockedAnd((PLONG)&Sender->TargetSet, ~(LONG)Prcb->SetMember);
-        InterlockedExchangePointer((PVOID*)&Prcb->SignalDone, NULL);
+        KiIpiLeaveTargetSet(Sender, Prcb->SetMember);
+        InterlockedExchangePointer((PVOID*)&KiIpiSlot(Prcb), NULL);
     }
 #endif
     return TRUE;
@@ -340,11 +371,17 @@ KiIpiSendRequest(
     /* Above SYNCH_LEVEL no other processor may be waited for. That happens
        while this is the only one running, and in the debugger with the others
        frozen; it requests TLB flushes, and frozen processors flush their
-       entire TLB when they thaw */
-    if (KeGetCurrentIrql() > SYNCH_LEVEL)
+       entire TLB when they thaw. KDBG lowers the IRQL to DISPATCH_LEVEL while
+       the others stay frozen, so the freeze owner never waits either */
+    if ((KeGetCurrentIrql() > SYNCH_LEVEL)
+#ifdef CONFIG_SMP
+        || (KiFreezeOwner == KeGetCurrentPrcb())
+#endif
+       )
     {
 #ifdef CONFIG_SMP
         ASSERT((KiFreezeOwner == KeGetCurrentPrcb()) ||
+               (KeGetCurrentPrcb()->IpiFrozen & IPI_FROZEN_FLAG_ACTIVE) ||
                ((TargetSet & KeActiveProcessors & ~KeGetCurrentPrcb()->SetMember) == 0));
 #endif
         if (TargetSet & KeGetCurrentPrcb()->SetMember)
@@ -357,7 +394,15 @@ KiIpiSendRequest(
 
 #ifdef CONFIG_SMP
     Prcb = KeGetCurrentPrcb();
-    Remote = TargetSet & KeActiveProcessors & ~Prcb->SetMember;
+    /* KDBG lowers the IRQL while the others stay frozen, and after a KD
+       processor switch the debugger runs on a frozen processor: do not
+       wait there. A starting processor serves its requests once it enables
+       interrupts; it takes the dispatcher and PRCB locks before that, so no
+       request may be sent holding them */
+    if (Prcb->IpiFrozen & IPI_FROZEN_FLAG_ACTIVE)
+        Remote = 0;
+    else
+        Remote = TargetSet & KiGetTbFlushProcessors() & ~Prcb->SetMember;
     if (Remote)
     {
         KiIpiPublishPacket(Prcb, WorkerRoutine, Parameter1, Parameter2, Parameter3);
@@ -383,4 +428,3 @@ KiIpiSendRequest(
     KeLowerIrql(OldIrql);
 }
 
-#endif // !_M_AMD64

@@ -11,6 +11,7 @@
 #include <asm.inc>
 
 #ifdef _M_AMD64
+#define APIC_X2APIC_MODE HalpX2ApicEnabled
 #include <ksamd64.inc>
 #include <trapamd64.inc>
 .code

@@ -232,6 +232,10 @@ MiMapLockedPagesInUserSpace(
             }
         }
 
+        /* The page must not still be cached as write-back elsewhere */
+        if (EffectiveCacheAttribute != MiCached)
+            MiFlushReleasedSystemPtesBeforeUncachedMapping();
+
         /* Configure caching */
         switch (EffectiveCacheAttribute)
         {
@@ -738,6 +742,9 @@ MmMapLockedPagesSpecifyCache(IN PMDL Mdl,
         // Get the template
         //
         TempPte = ValidKernelPte;
+
+        /* The pages must not still be cached as write-back elsewhere */
+        if (CacheAttribute != MiCached) MiFlushReleasedSystemPtesBeforeUncachedMapping();
         switch (CacheAttribute)
         {
             case MiNonCached:

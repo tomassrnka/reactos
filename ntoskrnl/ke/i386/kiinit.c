@@ -548,7 +548,7 @@ KiInitializeKernel(IN PKPROCESS InitProcess,
     InitThread->State = Running;
     InitThread->Affinity = 1 << Number;
     InitThread->WaitIrql = DISPATCH_LEVEL;
-    InterlockedOr((PLONG)&InitProcess->ActiveProcessors, 1 << Number);
+    if (!Number) InterlockedOr((PLONG)&InitProcess->ActiveProcessors, 1 << Number);
 
     /* HACK for MmUpdatePageDir */
     ((PETHREAD)InitThread)->ThreadsProcess = (PEPROCESS)InitProcess;
@@ -627,11 +627,20 @@ KiInitializeKernel(IN PKPROCESS InitProcess,
 
     /* If there's no thread scheduled, put this CPU in the Idle summary */
     KiAcquirePrcbLock(Prcb);
-    if (!Prcb->NextThread) KiIdleSummary |= 1 << Number;
+    if (!Prcb->NextThread) InterlockedOr((PLONG)&KiIdleSummary, (LONG)Prcb->SetMember);
     KiReleasePrcbLock(Prcb);
 
     /* Raise back to HIGH_LEVEL and clear the PRCB for the loader block */
     KeRaiseIrql(HIGH_LEVEL, &DummyIrql);
+    if (Number)
+    {
+        /* Become a target of all requests right before taking interrupts. Flushes
+           sent above SYNCH_LEVEL meanwhile were local only, so flush once more */
+        InterlockedOr((PLONG)&KeActiveProcessors, Prcb->SetMember);
+        InterlockedOr((PLONG)&InitProcess->ActiveProcessors, Prcb->SetMember);
+        InterlockedAnd((PLONG)&KiStartingProcessors, ~Prcb->SetMember);
+        KxFlushEntireCurrentTb();
+    }
     LoaderBlock->Prcb = 0;
 }
 
@@ -847,9 +856,20 @@ AppCpuInit:
     KeGetPcr()->TSS->CR3 = __readcr3();
     KeGetPcr()->TSS->LDT = 0;
 
-    /* Set active processors */
-    KeActiveProcessors |= __readfsdword(KPCR_SET_MEMBER);
+    /* Count the processor. An application processor joins the active ones
+       at the end of KiInitializeKernel, when it can take requests */
     KeNumberProcessors++;
+    if (!Cpu)
+    {
+        KeActiveProcessors |= __readfsdword(KPCR_SET_MEMBER);
+    }
+    else
+    {
+        /* Take TLB flushes from now on (served once interrupts are enabled),
+           then drop the translations cached before */
+        InterlockedOr((PLONG)&KiStartingProcessors, __readfsdword(KPCR_SET_MEMBER));
+        KxFlushEntireCurrentTb();
+    }
 
     /* Let the next processor start */
     InterlockedAnd((PLONG)&KiFreezeExecutionLock, 0);

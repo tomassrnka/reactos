@@ -17,6 +17,10 @@ VOID
 NTAPI
 ApicInitializeLocalApic(ULONG Cpu);
 
+VOID
+ApicSelectMode(
+    _In_ PLOADER_PARAMETER_BLOCK LoaderBlock);
+
 /* FUNCTIONS ****************************************************************/
 
 VOID
@@ -28,6 +32,7 @@ HalpInitProcessor(
     if (ProcessorNumber == 0)
     {
         HalpParseApicTables(LoaderBlock);
+        ApicSelectMode(LoaderBlock);
     }
 
     HalpSetupProcessorsTable(ProcessorNumber);

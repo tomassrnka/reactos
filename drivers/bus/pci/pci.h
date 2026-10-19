@@ -27,6 +27,10 @@ typedef struct _PCI_DEVICE
     BOOLEAN EnableBusMaster;
     // Whether the device is owned by the KD
     BOOLEAN IsDebuggingDevice;
+    // Offset of the MSI-X capability, 0 if the device has none
+    UCHAR MsixCapability;
+    // Whether MSI-X is enabled in the device
+    BOOLEAN MsixEnabled;
 } PCI_DEVICE, *PPCI_DEVICE;
 
 

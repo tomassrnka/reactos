@@ -352,9 +352,9 @@ static u16 vdev_get_msix_vector(void *context, int queue)
     PARANDIS_ADAPTER *pContext = (PARANDIS_ADAPTER *)context;
     u16 vector = VIRTIO_MSI_NO_VECTOR;
 
-    /* we don't run on MSI support so this will never be true */
-    if (pContext->bUsingMSIX && queue >= 0) {
-        vector = (u16)pContext->AdapterResources.Vector;
+    /* The configuration and all queues share the only MSI-X message, entry 0 */
+    if (pContext->bUsingMSIX) {
+        vector = 0;
     }
 
     return vector;
