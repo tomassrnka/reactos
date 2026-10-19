@@ -154,7 +154,7 @@ typedef struct
 /* Stack the worker needs below its caller: the guest frame and the native
  * CONTEXT it builds, plus its saved registers and the frames of the calls it
  * makes on the way to NtContinue (Wow64NativeToContext, the copy, NtContinue) */
-#define WOW64_DISPATCH_RESERVE (sizeof(WOW64_EXCEPTION_FRAME) + sizeof(CONTEXT) + 0x200)
+#define WOW64_DISPATCH_RESERVE (sizeof(WOW64_EXCEPTION_FRAME) + sizeof(CONTEXT) + 0x100)
 
 static DECLSPEC_NOINLINE VOID DispatchGuestException(PEXCEPTION_RECORD Record, PCONTEXT Context, TEB32 *Teb32)
 {
@@ -200,7 +200,7 @@ Failed:
 VOID NTAPI Wow64PrepareForException(PEXCEPTION_RECORD Record, PCONTEXT Context)
 {
     TEB32 *Teb32;
-    ULONG_PTR Low;
+    ULONG_PTR Low, Deallocation, Guarantee;
 
     if (Context->SegCs != 0x23) return;
     Teb32 = WOW64_TEB32(NtCurrentTeb());
@@ -223,21 +223,46 @@ VOID NTAPI Wow64PrepareForException(PEXCEPTION_RECORD Record, PCONTEXT Context)
         NtTerminateProcess(NtCurrentProcess(), Record->ExceptionCode);
         return;
     }
-    _SEH2_TRY
+    /* Touching the guard pages down to Low would reach the last ones, where MM
+     * commits the rest of the stack and raises STATUS_STACK_OVERFLOW
+     * (MiCheckForUserStackOverflow): raised here, natively on the guest stack,
+     * it would not reach the guest. Do what MM does then, without the fault:
+     * commit the stack down to its floor and give the guest the overflow, as
+     * i386 does when the exception frame does not fit on the stack. */
+    Deallocation = PAGE_ROUND_DOWN(Teb32->DeallocationStack);
+    Guarantee = ROUND_TO_PAGES(min((ULONG_PTR)Teb32->GuaranteedStackBytes, Teb32->NtTib.StackBase - Deallocation));
+    if (Teb32->NtTib.StackLimit > GuestStackFloor(Teb32) &&
+        PAGE_ROUND_DOWN(Low) - Deallocation <= 2 * PAGE_SIZE + Guarantee)
     {
-        WOW64_GROW_GUEST_STACK(Teb32, Low);
-    }
-    _SEH2_EXCEPT(_SEH2_GetExceptionCode() == STATUS_STACK_OVERFLOW ?
-                 EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
-    {
-        /* The growth reached the last guard page: the stack is committed down
-         * to its floor now. The guest gets the overflow, as on i386, where the
-         * exception frame itself overflows the stack. */
+        PVOID Base = (PVOID)(ULONG_PTR)GuestStackFloor(Teb32);
+        SIZE_T Size = Teb32->NtTib.StackLimit - PAGE_SIZE - GuestStackFloor(Teb32);
+        ULONG OldProtect;
+        NTSTATUS Status = STATUS_SUCCESS;
+
+        /* Below the guard page nothing is committed; the guard page loses its guard */
+        if (Size)
+            Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Base, 0, &Size, MEM_COMMIT, PAGE_READWRITE);
+        if (NT_SUCCESS(Status))
+        {
+            Base = (PVOID)(ULONG_PTR)(Teb32->NtTib.StackLimit - PAGE_SIZE);
+            Size = PAGE_SIZE;
+            Status = NtProtectVirtualMemory(NtCurrentProcess(), &Base, &Size, PAGE_READWRITE, &OldProtect);
+        }
+        if (!NT_SUCCESS(Status))
+        {
+            DbgPrint("WoW64: cannot commit the guest stack for exception %08lx: %08lx\n", Record->ExceptionCode, Status);
+            NtTerminateProcess(NtCurrentProcess(), Record->ExceptionCode);
+            return;
+        }
+        Teb32->NtTib.StackLimit = GuestStackFloor(Teb32);
         Record->ExceptionCode = STATUS_STACK_OVERFLOW;
         Record->ExceptionFlags = 0;
         Record->NumberParameters = 0;
     }
-    _SEH2_END;
+    else
+    {
+        WOW64_GROW_GUEST_STACK(Teb32, Low);
+    }
     DispatchGuestException(Record, Context, Teb32);
 }
 
