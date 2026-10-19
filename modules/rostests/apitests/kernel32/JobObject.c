@@ -433,28 +433,24 @@ test_CompletionPort(VOID)
     ResumeThread(Child.hThread);
     WaitForSingleObject(Child.hProcess, 30000);
 
-    for (i = 0; i < 8 && !SeenZero; i++)
+    for (i = 0; i < 16 && !SeenZero; i++)
     {
         if (!GetQueuedCompletionStatus(hPort, &Message, &Key, &Overlapped, 5000))
             break;
         ok(Key == 0x1234, "Message %lu with key 0x%Ix\n", Message, Key);
-        if (Message == JOB_OBJECT_MSG_NEW_PROCESS)
-        {
+        /* Windows 10 also reports the console host the child starts in the job */
+        if (Message == JOB_OBJECT_MSG_NEW_PROCESS && (ULONG_PTR)Overlapped == Child.dwProcessId)
             SeenNew = TRUE;
-            ok((ULONG_PTR)Overlapped == Child.dwProcessId, "New process %Iu, child %lu\n", (ULONG_PTR)Overlapped, Child.dwProcessId);
-        }
-        else if (Message == JOB_OBJECT_MSG_EXIT_PROCESS || Message == JOB_OBJECT_MSG_ABNORMAL_EXIT_PROCESS)
-        {
+        else if ((Message == JOB_OBJECT_MSG_EXIT_PROCESS || Message == JOB_OBJECT_MSG_ABNORMAL_EXIT_PROCESS) &&
+                 (ULONG_PTR)Overlapped == Child.dwProcessId)
             SeenExit = TRUE;
-            ok((ULONG_PTR)Overlapped == Child.dwProcessId, "Exited process %Iu, child %lu\n", (ULONG_PTR)Overlapped, Child.dwProcessId);
-        }
         else if (Message == JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO)
         {
             SeenZero = TRUE;
         }
     }
-    ok(SeenNew, "No JOB_OBJECT_MSG_NEW_PROCESS\n");
-    ok(SeenExit, "No exit message\n");
+    ok(SeenNew, "No JOB_OBJECT_MSG_NEW_PROCESS for the child\n");
+    ok(SeenExit, "No exit message for the child\n");
     ok(SeenZero, "No JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO\n");
     CloseHandle(Child.hThread);
     CloseHandle(Child.hProcess);
