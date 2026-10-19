@@ -266,25 +266,6 @@ KeRestoreInterrupts(BOOLEAN WereEnabled)
     if (WereEnabled) _enable();
 }
 
-//
-// Invalidates the TLB entry for a specified address
-//
-FORCEINLINE
-VOID
-KeInvalidateTlbEntry(IN PVOID Address)
-{
-    /* Invalidate the TLB entry for this address */
-    __invlpg(Address);
-}
-
-FORCEINLINE
-VOID
-KeFlushProcessTb(VOID)
-{
-    /* Flush the TLB by resetting CR3 */
-    __writecr3(__readcr3());
-}
-
 FORCEINLINE
 VOID
 KeSweepICache(IN PVOID BaseAddress,
@@ -501,11 +482,6 @@ KiUserCallbackExit(
 DECLSPEC_NORETURN
 VOID
 KiExceptionExit(
-    _In_ PKTRAP_FRAME TrapFrame,
-    _In_ PKEXCEPTION_FRAME ExceptionFrame);
-
-BOOLEAN
-KiProcessorFreezeHandler(
     _In_ PKTRAP_FRAME TrapFrame,
     _In_ PKEXCEPTION_FRAME ExceptionFrame);
 

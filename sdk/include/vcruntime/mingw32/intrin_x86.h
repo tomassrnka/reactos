@@ -120,7 +120,7 @@ __INTRIN_INLINE void _mm_lfence(void)
 __INTRIN_INLINE void __faststorefence(void)
 {
 	long local;
-	__asm__ __volatile__("lock; orl $0, %0;" : : "m"(local));
+	__asm__ __volatile__("lock; orl $0, %0;" : : "m"(local) : "memory");
 }
 #endif
 

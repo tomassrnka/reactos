@@ -34,6 +34,11 @@ MiArchCreateProcessAddressSpace(
         return FALSE;
     PteTable = MiPteToAddress(PointerPte);
 
+    /* The PTE is remapped below with a local flush only, so stay on this
+       processor: after a move away and back, it would still map PteTable
+       to the earlier page */
+    KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+
     /* Build a page table for hyper space */
     MI_MAKE_HARDWARE_PTE_KERNEL(&PdePte,
                                 PointerPte,
@@ -85,6 +90,8 @@ MiArchCreateProcessAddressSpace(
     PdeOffset = MiGetPdeOffset(PTE_BASE);
     TempPte.u.Hard.PageFrameNumber = PdeIndex;
     PteTable[PdeOffset] = TempPte;
+
+    KeLowerIrql(OldIrql);
 
     /* Let go of the system PTE */
     MiReleaseSystemPtes(PointerPte, 1, SystemPteSpace);

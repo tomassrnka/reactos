@@ -283,16 +283,7 @@ GetComputerIdentifier(
 #else
     if (IsAcpiComputer())
     {
-        if (pFullInfo->SubKeys == 1)
-        {
-            /* Computer is mono-CPU */
-            ComputerIdentifier = L"ACPI UP";
-        }
-        else
-        {
-            /* Computer is multi-CPUs */
-            ComputerIdentifier = L"ACPI MP";
-        }
+        ComputerIdentifier = L"ACPI MP";
     }
     else
     {

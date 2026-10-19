@@ -460,11 +460,10 @@ __cdecl
 KiTrap02Handler(VOID)
 {
     PKTSS Tss, NmiTss;
-    PKTHREAD Thread;
-    PKPROCESS Process;
     PKGDTENTRY TssGdt;
     KTRAP_FRAME TrapFrame;
     KIRQL OldIrql;
+    BOOLEAN Frozen;
 
     /*
      * In some sort of strange recursion case, we might end up here with the IF
@@ -476,15 +475,12 @@ KiTrap02Handler(VOID)
      */
     _disable();
 
-    /* Get the current TSS, thread, and process */
+    /*
+     * Get the current TSS. The code that loads CR3, LDTR and the I/O map base
+     * keeps them current in it; the current thread cannot tell, since it is
+     * already the incoming one during a context switch.
+     */
     Tss = KeGetPcr()->TSS;
-    Thread = ((PKIPCR)KeGetPcr())->PrcbData.CurrentThread;
-    Process = Thread->ApcState.Process;
-
-    /* Save data usually not present in the TSS */
-    Tss->CR3 = Process->DirectoryTableBase[0];
-    Tss->IoMapBase = Process->IopmOffset;
-    Tss->LDT = Process->LdtDescriptor.LimitLow ? KGDT_LDT : 0;
 
     /* Now get the base address of the NMI TSS */
     TssGdt = &((PKIPCR)KeGetPcr())->GDT[KGDT_NMI_TSS / sizeof(KGDTENTRY)];
@@ -534,6 +530,12 @@ KiTrap02Handler(VOID)
     TrapFrame.DbgEip = Tss->Eip;
     TrapFrame.DbgEbp = Tss->Ebp;
 
+    /* Freeze requests from other processors come as NMIs and save the
+       processor state themselves; saving twice would record DR7 cleared */
+    Frozen = KiProcessorFreezeHandler(&TrapFrame, NULL);
+    if (Frozen)
+        goto Handled;
+
     /* Store the trap frame in the KPRCB */
     KiSaveProcessorState(&TrapFrame, NULL);
 
@@ -553,6 +555,7 @@ KiTrap02Handler(VOID)
         KeGetPcr()->Irql = OldIrql;
     }
 
+Handled:
     /*
      * Although the CPU disabled NMIs, we just did a BIOS call, which could've
      * totally changed things.
@@ -576,6 +579,16 @@ KiTrap02Handler(VOID)
 
     /* Restore nested flag */
     __writeeflags(__readeflags() | EFLAGS_NESTED_TASK);
+
+    /*
+     * A freeze target reports that it runs again only now, with the NMI TSS
+     * busy, so that the next freeze NMI cannot task-switch into the NMI TSS
+     * while this handler still uses it. If that NMI arrives before the iretd,
+     * which some hypervisors allow, it raises a GPF on the busy NMI TSS and
+     * KiTrap0DHandler freezes this processor from there.
+     */
+    if (Frozen)
+        KeGetCurrentPrcb()->IpiFrozen = IPI_FROZEN_STATE_RUNNING;
 
     /* Handled, return from interrupt */
 }
@@ -722,11 +735,32 @@ FASTCALL
 KiTrap07Handler(IN PKTRAP_FRAME TrapFrame)
 {
     PKTHREAD Thread, NpxThread;
-    PFX_SAVE_AREA SaveArea, NpxSaveArea;
+    PFX_SAVE_AREA SaveArea;
     ULONG Cr0;
+    BOOLEAN WasLoaded;
 
     /* Save trap frame */
     KiEnterTrap(TrapFrame);
+
+    /*
+     * The NMI task switch sets TS even with interrupts disabled. On SMP the
+     * NPX owner is either NULL or the thread whose state is in the registers
+     * (the outgoing one during a context switch), so TS on a loaded state is
+     * spurious: clear it without touching any NPX state. On UP the owner
+     * keeps the registers across switches, so only TS on the current
+     * thread's own loaded state, without a delayed error, is spurious.
+     */
+    NpxThread = KeGetCurrentPrcb()->NpxThread;
+    if (NpxThread && (NpxThread->NpxState == NPX_STATE_LOADED) &&
+#ifndef CONFIG_SMP
+        (NpxThread == KeGetCurrentThread()) &&
+        !(KiGetThreadNpxArea(NpxThread)->Cr0NpxState & CR0_TS) &&
+#endif
+        !(KiGetThreadNpxArea(NpxThread)->Cr0NpxState & CR0_EM))
+    {
+        __writecr0(__readcr0() & ~CR0_TS);
+        KiEoiHelper(TrapFrame);
+    }
 
     /* Try to handle NPX delay load */
     for (;;)
@@ -748,30 +782,9 @@ KiTrap07Handler(IN PKTRAP_FRAME TrapFrame)
         Cr0 = __readcr0();
         if (Thread->NpxState != NPX_STATE_LOADED)
         {
-            /* Update CR0 */
-            Cr0 &= ~(CR0_MP | CR0_EM | CR0_TS);
-            __writecr0(Cr0);
-
-            /* Get the NPX thread */
-            NpxThread = KeGetCurrentPrcb()->NpxThread;
-            if (NpxThread)
-            {
-                /* Get the NPX frame */
-                NpxSaveArea = KiGetThreadNpxArea(NpxThread);
-
-                /* Save FPU state */
-                Ke386SaveFpuState(NpxSaveArea);
-
-                /* Update NPX state */
-                NpxThread->NpxState = NPX_STATE_NOT_LOADED;
-           }
-
-            /* Load FPU state */
+            /* Own the registers before saving the previous owner, then load */
+            Cr0 = KiTakeNpxOwnership(KeGetCurrentPrcb(), Thread, &WasLoaded);
             Ke386LoadFpuState(SaveArea);
-
-            /* Update NPX state */
-            Thread->NpxState = NPX_STATE_LOADED;
-            KeGetCurrentPrcb()->NpxThread = Thread;
 
             /* Enable interrupts */
             _enable();
@@ -983,6 +996,15 @@ KiTrap0DHandler(IN PKTRAP_FRAME TrapFrame)
 
     /* Save trap frame */
     KiEnterTrap(TrapFrame);
+
+    /* A freeze NMI that arrived while the NMI handler was returning (see KiTrap02Handler) */
+    if ((TrapFrame->ErrCode == (KGDT_NMI_TSS | 1)) &&
+        (Ke386GetTr() == KGDT_NMI_TSS) &&
+        KiProcessorFreezeHandler(TrapFrame, NULL))
+    {
+        KeGetCurrentPrcb()->IpiFrozen = IPI_FROZEN_STATE_RUNNING;
+        KiTrapReturn(TrapFrame);
+    }
 
     /* Check for user-mode GPF */
     if (KiUserTrap(TrapFrame))

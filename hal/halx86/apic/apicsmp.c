@@ -241,41 +241,6 @@ HalpRequestIpi(
     HalRequestIpiSpecifyVector(TargetSet, APIC_IPI_VECTOR);
 }
 
-#ifdef _M_AMD64
-
-/*!
- *  \brief Requests a software interrupt on the specified processors.
- *
- *  \param TargetSet - Specifies the set of processors to send the IPI to.
- *  \param Irql - Specifies the IRQL of the software interrupt.
- */
-VOID
-NTAPI
-HalpSendSoftwareInterrupt(
-    _In_ KAFFINITY TargetSet,
-    _In_ KIRQL Irql)
-{
-    UCHAR Vector;
-
-    /* Get the vector for the requested IRQL */
-    if (Irql == APC_LEVEL)
-    {
-        Vector = APC_VECTOR;
-    }
-    else if (Irql == DISPATCH_LEVEL)
-    {
-        Vector = DISPATCH_VECTOR;
-    }
-    else
-    {
-        ASSERT(FALSE);
-        return;
-    }
-
-    /* Request the IPI with the specified vector */
-    HalRequestIpiSpecifyVector(TargetSet, Vector);
-}
-
 /*!
  *  \brief Requests an NMI interrupt on the specified processors.
  *
@@ -310,6 +275,41 @@ HalpSendNMI(
                                    APIC_TGM_Edge,
                                    APIC_DSH_Destination);
     }
+}
+
+#ifdef _M_AMD64
+
+/*!
+ *  \brief Requests a software interrupt on the specified processors.
+ *
+ *  \param TargetSet - Specifies the set of processors to send the IPI to.
+ *  \param Irql - Specifies the IRQL of the software interrupt.
+ */
+VOID
+NTAPI
+HalpSendSoftwareInterrupt(
+    _In_ KAFFINITY TargetSet,
+    _In_ KIRQL Irql)
+{
+    UCHAR Vector;
+
+    /* Get the vector for the requested IRQL */
+    if (Irql == APC_LEVEL)
+    {
+        Vector = APC_VECTOR;
+    }
+    else if (Irql == DISPATCH_LEVEL)
+    {
+        Vector = DISPATCH_VECTOR;
+    }
+    else
+    {
+        ASSERT(FALSE);
+        return;
+    }
+
+    /* Request the IPI with the specified vector */
+    HalRequestIpiSpecifyVector(TargetSet, Vector);
 }
 
 #endif // _M_AMD64

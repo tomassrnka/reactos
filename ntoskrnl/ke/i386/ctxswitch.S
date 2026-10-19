@@ -106,8 +106,49 @@ PUBLIC @KiSwapContext@8
 
 PUBLIC @KiSwitchThreads@8
 @KiSwitchThreads@8:
+    /*
+     * The old thread's context is saved, so another processor may resume it
+     * on this stack as soon as its swap busy flag is clear: from here on the
+     * old stack is not used. Interrupts are disabled, and NMIs and double
+     * faults come through task gates with stacks of their own. Releasing the
+     * old thread before waiting for the new one keeps two processors that
+     * exchange threads from waiting for each other.
+     */
+    mov byte ptr [ecx + KTHREAD_SWAP_BUSY], 0
+
+    /* Usually the processor that last ran the new thread has left its stack */
+    cmp byte ptr [edx + KTHREAD_SWAP_BUSY], 0
+    je KiSwitchThreadsReady
+
+    /*
+     * Otherwise wait on the DPC stack, which is idle during a switch, with
+     * interrupts enabled: that processor may be waiting for this one to
+     * serve an IPI. Interrupts that arrive here leave the IRQL at or above
+     * DISPATCH_LEVEL, so no DPC runs on that stack meanwhile.
+     */
+    mov eax, fs:[KPCR_PRCB_DPC_STACK]
+    test eax, eax
+    jz KiSwitchThreadsSpin
+    mov esp, eax
+    xor ebp, ebp
+    sti
+KiSwitchThreadsWait:
+    pause
+    cmp byte ptr [edx + KTHREAD_SWAP_BUSY], 0
+    jne KiSwitchThreadsWait
+    cli
+    jmp KiSwitchThreadsReady
+
+    /* No DPC stack yet: early in boot nothing sends IPIs */
+KiSwitchThreadsSpin:
+    pause
+    cmp byte ptr [edx + KTHREAD_SWAP_BUSY], 0
+    jne KiSwitchThreadsSpin
+
+KiSwitchThreadsReady:
     /* Load the new kernel stack and switch OS to new thread */
-    mov esp, edx
+    mov esp, [edx + KTHREAD_KERNEL_STACK]
+    mov edx, esp
 #if DBG
     /* Restore the frame pointer early to get sensible backtraces */
     mov ebp, [esp+12]

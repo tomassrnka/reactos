@@ -377,25 +377,6 @@ KeQueryInterruptHandler(IN ULONG Vector)
                     (Pcr->IDT[Entry].Offset & 0xFFFF));
 }
 
-//
-// Invalidates the TLB entry for a specified address
-//
-FORCEINLINE
-VOID
-KeInvalidateTlbEntry(IN PVOID Address)
-{
-    /* Invalidate the TLB entry for this address */
-    __invlpg(Address);
-}
-
-FORCEINLINE
-VOID
-KeFlushProcessTb(VOID)
-{
-    /* Flush the TLB by resetting CR3 */
-    __writecr3(__readcr3());
-}
-
 FORCEINLINE
 VOID
 KeSweepICache(IN PVOID BaseAddress,
@@ -413,21 +394,39 @@ FORCEINLINE
 PRKTHREAD
 KeGetCurrentThread(VOID)
 {
-    /* Return the current thread */
-    return ((PKIPCR)KeGetPcr())->PrcbData.CurrentThread;
+    /* One read: a thread moved between loading the PCR address and reading
+       through it would get the old processor's current thread */
+    return (PRKTHREAD)__readfsdword(FIELD_OFFSET(KIPCR, PrcbData.CurrentThread));
 }
 
 FORCEINLINE
 VOID
 KiRundownThread(IN PKTHREAD Thread)
 {
+    PKPRCB Prcb;
+    ULONG_PTR EFlags;
+    ULONG Cr0;
+
+    EFlags = __readeflags();
+    _disable();
+
     /* Check if this is the NPX Thread */
-    if (KeGetCurrentPrcb()->NpxThread == Thread)
+    Prcb = KeGetCurrentPrcb();
+    if (Prcb->NpxThread == Thread)
     {
-        /* Clear it */
-        KeGetCurrentPrcb()->NpxThread = NULL;
+        /* Stay the owner until after FNINIT, so that a TS set meanwhile by
+           an NMI task switch traps as spurious */
+        Cr0 = __readcr0() & ~(CR0_MP | CR0_EM | CR0_TS);
+        __writecr0(Cr0);
         Ke386FnInit();
+        KeMemoryBarrierWithoutFence();
+
+        Thread->NpxState = NPX_STATE_NOT_LOADED;
+        Prcb->NpxThread = NULL;
+        __writecr0(Cr0 | NPX_STATE_NOT_LOADED);
     }
+
+    __writeeflags(EFlags);
 }
 
 CODE_SEG("INIT")
@@ -457,6 +456,39 @@ KiSetTebBase(PKPCR Pcr, PNT_TIB TebAddress)
     Pcr->NtTib.Self = TebAddress;
     Ke386SetGdtEntryBase(&Pcr->GDT[KGDT_R3_TEB / sizeof(KGDTENTRY)], TebAddress);
 }
+
+//
+// The NMI and double fault tasks return through the main TSS, and the task
+// switch reloads CR3 and LDTR from it without having saved them there.
+// Update the TSS first, so that an NMI in between returns to the new value.
+//
+FORCEINLINE
+VOID
+KiSetCr3(PKPCR Pcr, ULONG_PTR Cr3)
+{
+    Pcr->TSS->CR3 = Cr3;
+    __writecr3(Cr3);
+}
+
+FORCEINLINE
+VOID
+KiSetLdt(PKPCR Pcr, USHORT Selector)
+{
+    Pcr->TSS->LDT = Selector;
+    Ke386SetLocalDescriptorTable(Selector);
+}
+
+CODE_SEG("INIT")
+VOID
+NTAPI
+KiInitializeTSS2(
+    IN PKTSS Tss,
+    IN PKGDTENTRY TssEntry OPTIONAL);
+
+VOID
+NTAPI
+KiInitializeTSS(
+    IN PKTSS Tss);
 
 CODE_SEG("INIT")
 VOID
@@ -770,6 +802,47 @@ KiGetThreadNpxArea(IN PKTHREAD Thread)
 {
     ASSERT((ULONG_PTR)Thread->InitialStack % 16 == 0);
     return (PFX_SAVE_AREA)((ULONG_PTR)Thread->InitialStack - sizeof(FX_SAVE_AREA));
+}
+
+/*
+ * With interrupts disabled, make the current thread the owner of the NPX
+ * registers, marked loaded, and clear TS, MP and EM; a previous owner's
+ * state is saved to its NPX area. The bookkeeping changes before the first
+ * NPX instruction, so that a TS set meanwhile by an NMI task switch traps
+ * as spurious: the lazy-load path would move registers between the wrong
+ * threads. Returns the new CR0, and whether the registers already held the
+ * thread's state.
+ */
+FORCEINLINE
+ULONG
+KiTakeNpxOwnership(
+    _In_ PKPRCB Prcb,
+    _In_ PKTHREAD Thread,
+    _Out_ PBOOLEAN WasLoaded)
+{
+    PKTHREAD NpxThread = Prcb->NpxThread;
+    PFX_SAVE_AREA NpxSaveArea;
+    ULONG Cr0;
+
+    *WasLoaded = (NpxThread == Thread) && (Thread->NpxState == NPX_STATE_LOADED);
+
+    Thread->NpxState = NPX_STATE_LOADED;
+    Prcb->NpxThread = Thread;
+    KeMemoryBarrierWithoutFence();
+
+    Cr0 = __readcr0() & ~(CR0_MP | CR0_TS | CR0_EM);
+    __writecr0(Cr0);
+
+    if (NpxThread && (NpxThread != Thread) && (NpxThread->NpxState == NPX_STATE_LOADED))
+    {
+        NpxSaveArea = KiGetThreadNpxArea(NpxThread);
+        Ke386SaveFpuState(NpxSaveArea);
+        NpxSaveArea->NpxSavedCpu = 0;
+        KeMemoryBarrierWithoutFence();
+        NpxThread->NpxState = NPX_STATE_NOT_LOADED;
+    }
+
+    return Cr0;
 }
 
 //

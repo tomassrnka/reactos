@@ -41,14 +41,19 @@ HalpSetupProcessorsTable(
 }
 
 VOID
+HalpInitializeIpi(
+    _In_ ULONG ProcessorNumber)
+{
+    /* No inter-processor interrupts in UP mode */
+}
+
+VOID
 FASTCALL
 HalpBroadcastClockIpi(
     _In_ UCHAR Vector)
 {
     NOTHING;
 }
-
-#ifdef _M_AMD64
 
 VOID
 NTAPI
@@ -57,6 +62,8 @@ HalSendNMI(
 {
     NOTHING;
 }
+
+#ifdef _M_AMD64
 
 VOID
 NTAPI
