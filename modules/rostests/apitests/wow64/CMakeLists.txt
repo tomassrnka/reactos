@@ -269,3 +269,8 @@ add_importlibs(wow64_time_zone msvcrt kernel32)
 add_executable(wow64_socket_event EXCLUDE_FROM_ALL socket_event.c)
 set_module_type(wow64_socket_event win32cui)
 add_importlibs(wow64_socket_event ws2_32 msvcrt kernel32 ntdll)
+
+# Explicit fixture: build for amd64 and i386 and run the amd64 file with the i386 file as its child.
+add_executable(wow64_command_line EXCLUDE_FROM_ALL command_line.c)
+set_module_type(wow64_command_line win32cui UNICODE)
+add_importlibs(wow64_command_line msvcrt kernel32)

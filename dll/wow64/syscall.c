@@ -1069,6 +1069,30 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             if (a[4]) U(4) = sizeof(ULONG);
             return Status;
         }
+        if (a[1] == ProcessImageFileName || a[1] == ProcessImageFileNameWin32)
+        {
+            /* A UNICODE_STRING followed by its characters: the guest header is
+             * eight bytes, the native one sixteen, and the buffer pointer is
+             * rewritten to the characters behind the guest header. */
+            UNICODE_STRING *Native;
+            WOW64_STRING *Guest = P(2);
+            ULONG Needed = 0, Extra = sizeof(UNICODE_STRING) - sizeof(WOW64_STRING);
+            if (a[3] > MAXULONG - Extra) return STATUS_INVALID_PARAMETER;
+            if (a[4]) PROBE(4);
+            Native = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, a[3] + Extra);
+            if (!Native) return STATUS_NO_MEMORY;
+            Status = NtQueryInformationProcess(H(0), a[1], Native, a[3] + Extra, &Needed);
+            if (a[4] && Needed) U(4) = Needed >= sizeof(UNICODE_STRING) ? Needed - Extra : Needed;
+            if (NT_SUCCESS(Status))
+            {
+                Guest->Length = Native->Length;
+                Guest->MaximumLength = Native->MaximumLength;
+                Guest->Buffer = Native->Buffer ? PtrToUlong(Guest + 1) : 0;
+                if (Native->Buffer)
+                    RtlCopyMemory(Guest + 1, Native->Buffer, Native->MaximumLength);
+            }
+            return Status;
+        }
         switch (a[1])
         {
         case ProcessDefaultHardErrorMode: case ProcessExecuteFlags: case ProcessPriorityClass:
