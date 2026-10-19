@@ -477,7 +477,8 @@ START_TEST(DeleteProfile)
     ok(ProfileKeyExists(pszSid), "No profile list entry for %S\n", pszSid);
     bHive = HiveLoaded(pszSid);
     /* CreateUserProfileExW() cannot unload the new hive: RegUnLoadKeyW() fails with ERROR_ACCESS_DENIED */
-    todo_ros ok(!bHive, "The hive of %S is still loaded\n", pszSid);
+    /* Not todo_ros: the test system does not set WINETEST_PLATFORM, so winetest_platform stays "windows" */
+    todo_if(is_reactos()) ok(!bHive, "The hive of %S is still loaded\n", pszSid);
     if (GetProfilePath(pszSid, szRealProfile, ARRAYSIZE(szRealProfile)))
         TestProfileInUse(pszSid, szRealProfile, !bHive);
     else
