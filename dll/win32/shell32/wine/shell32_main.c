@@ -1126,12 +1126,68 @@ static INT_PTR CALLBACK AboutDlgProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM
                 SetDlgItemTextW(hWnd, IDC_ABOUT_OTHERSTUFF, info->szOtherStuff);
 #ifdef __REACTOS__
                 {
-                    /* the nitro lines make this text one line taller than the dialog template allows */
+                    /*
+                     * The nitro lines make this text taller than the dialog template allows:
+                     * measure it with the control's font, grow the control, and move everything
+                     * below it (and the dialog's bottom edge) down by what no longer fits.
+                     */
                     HWND hOther = GetDlgItem(hWnd, IDC_ABOUT_OTHERSTUFF);
-                    RECT rcOther;
+                    HWND hChild;
+                    RECT rcOther, rcChild, rcText, rcDlg;
+                    HDC hdc;
+                    HGDIOBJ hOldFont = NULL;
+                    HFONT hFont = (HFONT)SendMessageW(hOther, WM_GETFONT, 0, 0);
+                    LONG yBelow = MAXLONG, cyShift = 0;
+
                     GetWindowRect(hOther, &rcOther);
-                    SetWindowPos(hOther, NULL, 0, 0, rcOther.right - rcOther.left,
-                                 rcOther.bottom - rcOther.top + 12, SWP_NOMOVE | SWP_NOZORDER);
+                    MapWindowPoints(NULL, hWnd, (POINT *)&rcOther, 2);
+                    SetRect(&rcText, 0, 0, rcOther.right - rcOther.left, 0);
+                    hdc = GetDC(hOther);
+                    if (hdc)
+                    {
+                        if (hFont)
+                            hOldFont = SelectObject(hdc, hFont);
+                        DrawTextW(hdc, info->szOtherStuff, -1, &rcText, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+                        if (hOldFont)
+                            SelectObject(hdc, hOldFont);
+                        ReleaseDC(hOther, hdc);
+                    }
+
+                    rcText.bottom += 4; /* a small gap above the next control */
+                    if (rcText.bottom > rcOther.bottom - rcOther.top)
+                    {
+                        SetWindowPos(hOther, NULL, 0, 0, rcOther.right - rcOther.left, rcText.bottom,
+                                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+
+                        for (hChild = GetWindow(hWnd, GW_CHILD); hChild; hChild = GetWindow(hChild, GW_HWNDNEXT))
+                        {
+                            if (hChild == hOther)
+                                continue;
+                            GetWindowRect(hChild, &rcChild);
+                            MapWindowPoints(NULL, hWnd, (POINT *)&rcChild, 2);
+                            if (rcChild.top > rcOther.top && rcChild.top < yBelow)
+                                yBelow = rcChild.top;
+                        }
+                        if (yBelow != MAXLONG && rcOther.top + rcText.bottom > yBelow)
+                            cyShift = rcOther.top + rcText.bottom - yBelow;
+                    }
+
+                    if (cyShift > 0)
+                    {
+                        for (hChild = GetWindow(hWnd, GW_CHILD); hChild; hChild = GetWindow(hChild, GW_HWNDNEXT))
+                        {
+                            if (hChild == hOther)
+                                continue;
+                            GetWindowRect(hChild, &rcChild);
+                            MapWindowPoints(NULL, hWnd, (POINT *)&rcChild, 2);
+                            if (rcChild.top > rcOther.top)
+                                SetWindowPos(hChild, NULL, rcChild.left, rcChild.top + cyShift, 0, 0,
+                                             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                        }
+                        GetWindowRect(hWnd, &rcDlg);
+                        SetWindowPos(hWnd, NULL, 0, 0, rcDlg.right - rcDlg.left, rcDlg.bottom - rcDlg.top + cyShift,
+                                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+                    }
                 }
 #endif
 
@@ -1339,7 +1395,8 @@ BOOL WINAPI ShellAboutW( HWND hWnd, LPCWSTR szApp, LPCWSTR szOtherStuff,
     BOOL bRet;
 #ifdef __REACTOS__
     WCHAR szVersionString[256];
-    WCHAR szOtherStuff2[512];
+    WCHAR szFormat[256];
+    WCHAR szOtherStuff2[1024];
 #endif
 
     TRACE("\n");
@@ -1354,10 +1411,13 @@ BOOL WINAPI ShellAboutW( HWND hWnd, LPCWSTR szApp, LPCWSTR szOtherStuff,
         return FALSE;
 
 #ifdef __REACTOS__
-    /* nitro build identification: the title replaces the version line, the notice goes in front of the caller's text */
-    StringCchPrintfW(szVersionString, _countof(szVersionString), L"%S", NITRO_TITLE_STR);
-    StringCchPrintfW(szOtherStuff2, _countof(szOtherStuff2), L"%S\n%s\nBased on ReactOS %S (%S)",
-                     NITRO_NOTICE_STR, szOtherStuff ? szOtherStuff : L"", KERNEL_VERSION_STR, NITRO_UPSTREAM_SHA_STR);
+    /* Output the version OS kernel strings */
+    LoadStringW(shell32_hInstance, IDS_ABOUT_VERSION_STRING, szFormat, _countof(szFormat));
+    StringCchPrintfW(szVersionString, _countof(szVersionString), szFormat, KERNEL_VERSION_STR, KERNEL_VERSION_BUILD_STR);
+    /* nitro build identification, in front of the caller's text: title, notice, upstream base */
+    StringCchPrintfW(szOtherStuff2, _countof(szOtherStuff2), L"%S\n%S\nBased on ReactOS %S (%S)%s%s",
+                     NITRO_TITLE_STR, NITRO_NOTICE_STR, KERNEL_VERSION_STR, NITRO_UPSTREAM_SHA_STR,
+                     (szOtherStuff && *szOtherStuff) ? L"\n" : L"", szOtherStuff ? szOtherStuff : L"");
 #endif
 
     info.szApp        = szApp;
