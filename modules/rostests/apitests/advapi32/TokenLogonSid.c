@@ -10,6 +10,12 @@
 
 #define LOGON_SID_CLASS ((TOKEN_INFORMATION_CLASS)28) /* TokenLogonSid */
 
+static BOOL IsWow64(void)
+{
+    BOOL Wow64 = FALSE;
+    return IsWow64Process(GetCurrentProcess(), &Wow64) && Wow64;
+}
+
 /* Returns the token's groups (caller frees) */
 static PTOKEN_GROUPS QueryGroups(HANDLE hToken, TOKEN_INFORMATION_CLASS Class, PDWORD ReturnedLength)
 {
@@ -131,18 +137,19 @@ static void TestLogonSid(HANDLE hToken, const char *What)
         ok(NtLength == Length, "%s: NT length %lu, expected %lu\n", What, NtLength, Length);
     }
 
-    /* The return length is written last: it may share storage with the result */
+    /* Windows stores the length before the result, so a result sharing its storage wins */
     if (Length <= sizeof(Small))
     {
         Status = NtQueryInformationToken(hToken, LOGON_SID_CLASS, Small, sizeof(Small), (PULONG)Small);
         ok(Status == STATUS_SUCCESS, "%s: aliased query status 0x%lx\n", What, Status);
-        ok(*(PULONG)Small == Length, "%s: aliased length %lu, expected %lu\n", What, *(PULONG)Small, Length);
+        ok(*(PULONG)Small == 1, "%s: aliased first field %lu, expected the group count 1\n", What, *(PULONG)Small);
     }
-    /* A misaligned or inaccessible buffer is refused before the token is looked at */
+    /* Natively a misaligned or inaccessible buffer is refused before the token is looked at;
+     * WOW64 converts the result, does not require alignment and checks the handle first */
     Status = NtQueryInformationToken(hToken, LOGON_SID_CLASS, Small + 1, sizeof(Small) - 4, &NtLength);
-    ok(Status == STATUS_DATATYPE_MISALIGNMENT, "%s: misaligned status 0x%lx\n", What, Status);
+    ok(Status == (IsWow64() ? STATUS_SUCCESS : STATUS_DATATYPE_MISALIGNMENT), "%s: misaligned status 0x%lx\n", What, Status);
     Status = NtQueryInformationToken(NULL, LOGON_SID_CLASS, (PVOID)(ULONG_PTR)0x10, sizeof(Small), &NtLength);
-    ok(Status == STATUS_ACCESS_VIOLATION, "%s: bad buffer status 0x%lx\n", What, Status);
+    ok(Status == (IsWow64() ? STATUS_INVALID_HANDLE : STATUS_ACCESS_VIOLATION), "%s: bad buffer status 0x%lx\n", What, Status);
     Status = NtQueryInformationToken(hToken, LOGON_SID_CLASS, Small, sizeof(Small), (PULONG)(ULONG_PTR)0x10);
     ok(Status == STATUS_ACCESS_VIOLATION, "%s: bad length pointer status 0x%lx\n", What, Status);
 

@@ -179,39 +179,19 @@ static BOOLEAN GuestSpan(ULONG Address, ULONG64 Size)
     return (ULONG64)Address + Size <= (ULONG64)Wow64HighestUserAddress + 1;
 }
 
-/* Touch every page of a guest output range, as the kernel's write probe does */
-static VOID ProbeOutputPages(ULONG Address, ULONG Size)
-{
-    ULONG64 Page, Last;
-    if (!Size) return;
-    Last = (ULONG64)Address + Size - 1;
-    ProbeOutput(Address, 1);
-    for (Page = ((ULONG64)Address | (PAGE_SIZE - 1)) + 1; Page <= Last; Page += PAGE_SIZE)
-        ProbeOutput((ULONG)Page, 1);
-    ProbeOutput((ULONG)Last, 1);
-}
-
 /* TOKEN_GROUPS classes: the 32-bit layout has 4-byte SID pointers, so query the
- * native form into a scratch buffer and rebuild it in the guest buffer. The checks
- * come in the native order: buffer alignment and range, then the return length. */
+ * native form into a scratch buffer and rebuild it in the guest buffer. Measured on
+ * Windows WOW64: the token is checked before the buffer, the buffer need not be
+ * aligned, and the length is stored before the data. */
 static NTSTATUS TokenGroups32(HANDLE Token, TOKEN_INFORMATION_CLASS Class, ULONG Buffer,
                               ULONG Length, ULONG ReturnLength, WOW64_CLEANUP *Cleanup)
 {
     PTOKEN_GROUPS Native;
     ULONG Bytes = 0, Needed, SidBytes = 0, Offset, Sid, i;
-    ULONG *Guest;
+    UCHAR *Guest;
     NTSTATUS Status;
 
-    if (Buffer)
-    {
-        if (Buffer & (sizeof(ULONG) - 1)) return STATUS_DATATYPE_MISALIGNMENT;
-        if (!GuestSpan(Buffer, Length)) return STATUS_ACCESS_VIOLATION;
-        ProbeOutputPages(Buffer, Length);
-    }
-    if (ReturnLength & (sizeof(ULONG) - 1)) return STATUS_DATATYPE_MISALIGNMENT;
     if (!ReturnLength || !GuestSpan(ReturnLength, sizeof(ULONG))) return STATUS_ACCESS_VIOLATION;
-    ProbeOutput(ReturnLength, sizeof(ULONG));
-
     Status = NtQueryInformationToken(Token, Class, NULL, 0, &Bytes);
     if (Status != STATUS_BUFFER_TOO_SMALL) return Status;
     if (Bytes < sizeof(TOKEN_GROUPS)) Bytes = sizeof(TOKEN_GROUPS);
@@ -223,25 +203,21 @@ static NTSTATUS TokenGroups32(HANDLE Token, TOKEN_INFORMATION_CLASS Class, ULONG
     for (i = 0; i < Native->GroupCount; ++i)
         SidBytes += RtlLengthSid(Native->Groups[i].Sid);
     Needed = sizeof(ULONG) + Native->GroupCount * 2 * sizeof(ULONG) + SidBytes;
-    if (!Buffer && Length >= Needed) return STATUS_ACCESS_VIOLATION;
-    if (!Buffer || Length < Needed)
-    {
-        *(ULONG *)PTR32(ReturnLength) = Needed;
-        return STATUS_BUFFER_TOO_SMALL;
-    }
+    *(ULONG *)PTR32(ReturnLength) = Needed;
+    if (Length < Needed) return STATUS_BUFFER_TOO_SMALL;
+    if (!Buffer || !GuestSpan(Buffer, Needed)) return STATUS_ACCESS_VIOLATION;
+    /* Unaligned stores: the guest buffer may be misaligned */
     Guest = PTR32(Buffer);
-    Guest[0] = Native->GroupCount;
+    *(ULONG UNALIGNED *)Guest = Native->GroupCount;
     Offset = sizeof(ULONG) + Native->GroupCount * 2 * sizeof(ULONG);
     for (i = 0; i < Native->GroupCount; ++i)
     {
         Sid = RtlLengthSid(Native->Groups[i].Sid);
-        Guest[1 + 2 * i] = Buffer + Offset;
-        Guest[2 + 2 * i] = Native->Groups[i].Attributes;
-        RtlCopyMemory((UCHAR *)Guest + Offset, Native->Groups[i].Sid, Sid);
+        *(ULONG UNALIGNED *)(Guest + 4 + 8 * i) = Buffer + Offset;
+        *(ULONG UNALIGNED *)(Guest + 8 + 8 * i) = Native->Groups[i].Attributes;
+        RtlCopyMemory(Guest + Offset, Native->Groups[i].Sid, Sid);
         Offset += Sid;
     }
-    /* Last, as the kernel does, in case the length aliases the buffer */
-    *(ULONG *)PTR32(ReturnLength) = Needed;
     return STATUS_SUCCESS;
 }
 

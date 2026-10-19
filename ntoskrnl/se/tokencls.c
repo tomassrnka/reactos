@@ -1156,6 +1156,8 @@ NtQueryInformationToken(
 
                 _SEH2_TRY
                 {
+                    /* Windows stores the length first; a result sharing its storage wins */
+                    *ReturnLength = RequiredLength;
                     if (TokenInformationLength >= RequiredLength)
                     {
                         tg->GroupCount = 1;
@@ -1171,8 +1173,6 @@ NtQueryInformationToken(
                     {
                         Status = STATUS_BUFFER_TOO_SMALL;
                     }
-
-                    *ReturnLength = RequiredLength;
                 }
                 _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
                 {
