@@ -1017,7 +1017,8 @@ CcRosEnsureVacbResident(
     _In_ BOOLEAN Wait,
     _In_ BOOLEAN NoRead,
     _In_ ULONG Offset,
-    _In_ ULONG Length
+    _In_ ULONG Length,
+    _In_ BOOLEAN WaitForPages
 )
 {
     PROS_SHARED_CACHE_MAP SharedCacheMap = Vacb->SharedCacheMap;
@@ -1047,7 +1048,8 @@ CcRosEnsureVacbResident(
             NTSTATUS Status = MmMakeDataSectionResident(SharedCacheMap->FileObject->SectionObjectPointer,
                                                         Vacb->FileOffset.QuadPart + Offset,
                                                         Length,
-                                                        &SharedCacheMap->ValidDataLength);
+                                                        &SharedCacheMap->ValidDataLength,
+                                                        WaitForPages);
             if (!NT_SUCCESS(Status))
                 ExRaiseStatus(Status);
         }

@@ -1226,13 +1226,6 @@ SkipCheck:
     /* Insert this entry */
     LdrpInsertMemoryTableEntry(LdrEntry);
 
-#if (_WIN32_WINNT >= _WIN32_WINNT_VISTA) || (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA)
-    LdrpSendDllNotifications(LdrEntry, LDR_DLL_NOTIFICATION_REASON_LOADED);
-#if (_WIN32_WINNT >= _WIN32_WINNT_WIN8)
-    LdrEntry->Flags |= LDRP_LOAD_NOTIFICATIONS_SENT; /* LdrEntry->LoadNotificationsSent = TRUE; */
-#endif
-#endif
-
     /* Check for invalid CPU Image */
     if (Status == STATUS_IMAGE_MACHINE_TYPE_MISMATCH)
     {
@@ -1269,6 +1262,8 @@ SkipCheck:
 
             /* Remove the LDR Entry */
             RtlFreeHeap(LdrpHeap, 0, LdrEntry );
+            LdrpFreeUnicodeString(&FullDllName);
+            LdrpFreeUnicodeString(&BaseDllName);
 
             /* Unmap and close section */
             NtUnmapViewOfSection(NtCurrentProcess(), ViewBase);
@@ -1300,6 +1295,14 @@ SkipCheck:
             LdrEntry->EntryPoint = 0;
         }
     }
+
+#if (_WIN32_WINNT >= _WIN32_WINNT_VISTA) || (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA)
+    /* Only an image that stays loaded is announced */
+    LdrpSendDllNotifications(LdrEntry, LDR_DLL_NOTIFICATION_REASON_LOADED);
+#if (_WIN32_WINNT >= _WIN32_WINNT_WIN8)
+    LdrEntry->Flags |= LDRP_LOAD_NOTIFICATIONS_SENT; /* LdrEntry->LoadNotificationsSent = TRUE; */
+#endif
+#endif
 
     /* Return it for the caller */
     *DataTableEntry = LdrEntry;

@@ -224,10 +224,8 @@ MiMapLockedPagesInUserSpace(
                     }
                     break;
 
-                default:
-                    /* We don't support AWE magic (MiNotMapped) */
-                    DPRINT1("FIXME: MiNotMapped is not supported\n");
-                    ASSERT(FALSE);
+                case MiNotMapped:
+                    /* MmAllocatePagesForMdl pages have no type of their own: the caller's applies */
                     break;
             }
         }
@@ -306,6 +304,7 @@ MiUnmapLockedPagesInUserSpace(
     ULONG NumberOfPages;
     PPFN_NUMBER MdlPages;
     PFN_NUMBER PageTablePage;
+    MI_DEFERRED_RELEASE Deferred;
 
     DPRINT("MiUnmapLockedPagesInUserSpace(%p, %p)\n", BaseAddress, Mdl);
 
@@ -335,6 +334,8 @@ MiUnmapLockedPagesInUserSpace(
     /* MiRemoveNode should have removed us if we were the hint */
     ASSERT(Process->VadRoot.NodeHint != Vad);
 
+    /* The pages belong to the MDL; freed page tables wait for the flush */
+    MiInitializeDeferredRelease(&Deferred, FALSE, 0);
     PointerPte = MiAddressToPte(BaseAddress);
     OldIrql = MiAcquirePfnLock();
     while (NumberOfPages != 0 &&
@@ -343,8 +344,12 @@ MiUnmapLockedPagesInUserSpace(
         ASSERT(MiAddressToPte(PointerPte)->u.Hard.Valid == 1);
         ASSERT(PointerPte->u.Hard.Valid == 1);
 
+        if (MiDeferredReleaseRoom(&Deferred) < MI_DEFERRED_PDE_ENTRIES)
+            OldIrql = MiCompleteDeferredReleaseLocked(&Deferred, OldIrql);
+
         /* Invalidate it */
         MI_ERASE_PTE(PointerPte);
+        MiDeferTbFlush(&Deferred, BaseAddress);
 
         /* We invalidated this PTE, so dereference the PDE */
         PointerPde = MiAddressToPde(BaseAddress);
@@ -354,7 +359,7 @@ MiUnmapLockedPagesInUserSpace(
         if (MiDecrementPageTableReferences(BaseAddress) == 0)
         {
             ASSERT(MiIsPteOnPdeBoundary(PointerPte + 1) || (NumberOfPages == 1));
-            MiDeletePde(PointerPde, Process);
+            MiDeletePdeDeferred(PointerPde, Process, &Deferred);
         }
 
         /* Next page */
@@ -364,11 +369,33 @@ MiUnmapLockedPagesInUserSpace(
         MdlPages++;
     }
 
-    KeFlushProcessTb();
+    /* Flush before the caller can unlock the pages and before faults can reach the range */
     MiReleasePfnLock(OldIrql);
+    MiCompleteDeferredRelease(&Deferred);
+    MiCleanupDeferredRelease(&Deferred);
     MiUnlockProcessWorkingSetUnsafe(Process, Thread);
     MmUnlockAddressSpace(&Process->Vm);
     ExFreePoolWithTag(Vad, 'ldaV');
+}
+
+/* Whether a write-combined kernel mapping of these pages adds no memory type alias */
+static
+BOOLEAN
+MiMdlPagesAllowWriteCombine(
+    _In_ PPFN_NUMBER MdlPages,
+    _In_ PPFN_NUMBER LastPage)
+{
+    PMMPFN Pfn;
+
+    for (; (MdlPages < LastPage) && (*MdlPages != LIST_HEAD); MdlPages++)
+    {
+        Pfn = MiGetPfnEntry(*MdlPages);
+        if ((Pfn != NULL) && (Pfn->u3.e1.CacheAttribute != MiWriteCombined))
+        {
+            return FALSE;
+        }
+    }
+    return TRUE;
 }
 
 /* PUBLIC FUNCTIONS ***********************************************************/
@@ -758,9 +785,12 @@ MmMapLockedPagesSpecifyCache(IN PMDL Mdl,
             case MiWriteCombined:
 
                 //
-                // Enable write combining
+                // Enable write combining, unless a page is cached elsewhere
                 //
-                MI_MAKE_PTE_WRITE_COMBINE(&TempPte);
+                if (MiMdlPagesAllowWriteCombine(MdlPages, LastPage))
+                    MI_MAKE_PTE_WRITE_COMBINE(&TempPte);
+                else
+                    MI_MAKE_PTE_NON_CACHED(&TempPte);
                 break;
 
             default:
@@ -1702,6 +1732,9 @@ MmMapLockedPagesWithReservedMapping(
 
     // Get the template
     TempPte = ValidKernelPte;
+
+    /* The pages must not still be cached as write-back elsewhere */
+    if (CacheAttribute != MiCached) MiFlushReleasedSystemPtesBeforeUncachedMapping();
     switch (CacheAttribute)
     {
         case MiNonCached:
@@ -1710,8 +1743,11 @@ MmMapLockedPagesWithReservedMapping(
             break;
 
         case MiWriteCombined:
-            // Enable write combining
-            MI_MAKE_PTE_WRITE_COMBINE(&TempPte);
+            // Enable write combining, unless a page is cached elsewhere
+            if (MiMdlPagesAllowWriteCombine(MdlPages, LastPage))
+                MI_MAKE_PTE_WRITE_COMBINE(&TempPte);
+            else
+                MI_MAKE_PTE_NON_CACHED(&TempPte);
             break;
 
         default:

@@ -60,6 +60,7 @@
 #define MI_MIN_INIT_PAGED_POOLSIZE              (32 * _1MB)
 #define MI_MAX_INIT_NONPAGED_POOL_SIZE          (128ULL * 1024 * 1024 * 1024)
 #define MI_MAX_NONPAGED_POOL_SIZE               (128ULL * 1024 * 1024 * 1024)
+#define MI_MAX_PAGED_POOL_SIZE                  (4ULL * 1024 * 1024 * 1024) // pool.c and section.c use 32-bit page counts
 #define MI_SYSTEM_VIEW_SIZE                     (512 * _1MB)
 #define MI_SESSION_VIEW_SIZE                    (512 * _1MB)
 #define MI_SESSION_POOL_SIZE                    (64 * _1MB)

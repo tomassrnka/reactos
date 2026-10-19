@@ -713,6 +713,10 @@ MiSegmentDelete(IN PSEGMENT Segment)
     /* Release the PFN lock */
     MiReleasePfnLock(OldIrql);
 
+    /* The committed pages of the segment are gone */
+    MiReturnCommit(Segment->NumberOfCommittedPages);
+    InterlockedExchangeAddSizeT(&MmSharedCommit, -(LONG_PTR)Segment->NumberOfCommittedPages);
+
     /* Free the structures */
     ExFreePool(ControlArea);
     ExFreePool(Segment);
@@ -796,6 +800,9 @@ MiRemoveMappedView(IN PEPROCESS CurrentProcess,
 
     /* Release the working set */
     MiUnlockProcessWorkingSetUnsafe(CurrentProcess, CurrentThread);
+
+    /* A copy-on-write view gives back its charge */
+    MiReturnProcessCommit(CurrentProcess, Vad->u.VadFlags.CommitCharge);
 
     /* Lock the PFN database */
     OldIrql = MiAcquirePfnLock();
@@ -897,8 +904,6 @@ MiUnmapViewOfSection(IN PEPROCESS Process,
     /* Not currently supported */
     ASSERT(Vad->u.VadFlags.VadType != VadRotatePhysical);
 
-    /* FIXME: Remove VAD charges */
-
     /* Lock the working set */
     MiLockProcessWorkingSetUnsafe(Process, CurrentThread);
 
@@ -909,8 +914,6 @@ MiUnmapViewOfSection(IN PEPROCESS Process,
 
     /* Remove the PTEs for this view, which also releases the working set lock */
     MiRemoveMappedView(Process, Vad);
-
-    /* FIXME: Remove commitment */
 
     /* Update performance counter and release the lock */
     Process->VirtualSize -= RegionSize;
@@ -1178,6 +1181,8 @@ MiMapViewOfDataSection(
     PFN_NUMBER PteOffset;
     NTSTATUS Status;
     ULONG QuotaCharge = 0, QuotaExcess = 0;
+    SIZE_T ViewCommit = 0, CommitPages;
+    ULONG Round;
     PMMPTE PointerPte, LastPte;
     MMPTE TempPte;
     ULONG Granularity = MM_VIRTMEM_GRANULARITY;
@@ -1280,12 +1285,27 @@ MiMapViewOfDataSection(
     /* Calculate how many pages the region spans */
     ViewSizeInPages = BYTES_TO_PAGES(*ViewSize);
 
+    /*
+     * Any page of a copy-on-write view can become private: charge the whole
+     * view now. MiInsertVadEx moves the charge to the process with the VAD.
+     */
+    if ((ProtectionMask & MM_WRITECOPY) == MM_WRITECOPY)
+    {
+        ViewCommit = ViewSizeInPages;
+        if (!MiChargeCommitWithGrowth(ViewCommit))
+        {
+            MiDereferenceControlArea(ControlArea);
+            return STATUS_COMMITMENT_LIMIT;
+        }
+    }
+
     /* A VAD can now be allocated. Do so and zero it out */
     /* FIXME: we are allocating a LONG VAD for ReactOS compatibility only */
     ASSERT((AllocationType & MEM_RESERVE) == 0); /* ARM3 does not support this */
     Vad = ExAllocatePoolWithTag(NonPagedPool, sizeof(MMVAD_LONG), 'ldaV');
     if (!Vad)
     {
+        MiReturnCommit(ViewCommit);
         MiDereferenceControlArea(ControlArea);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
@@ -1326,8 +1346,33 @@ MiMapViewOfDataSection(
         LastPte = PointerPte + BYTES_TO_PAGES(CommitSize);
         TempPte = Segment->SegmentPteTemplate;
 
-        /* Acquire the commit lock and loop all prototype PTEs to be committed */
-        KeAcquireGuardedMutex(&MmSectionCommitMutex);
+        /*
+         * Acquire the commit lock and charge exactly the prototype PTEs that
+         * are not committed yet. At the limit, wait for a paging file to grow
+         * without the lock, then count again.
+         */
+        for (Round = 0; ; Round++)
+        {
+            KeAcquireGuardedMutex(&MmSectionCommitMutex);
+            CommitPages = 0;
+            for (PMMPTE ProtoPte = PointerPte; ProtoPte < LastPte; ProtoPte++)
+            {
+                if (ProtoPte->u.Long == 0) CommitPages++;
+            }
+            if (MiChargeCommit(CommitPages, MiCommitUser))
+                break;
+
+            KeReleaseGuardedMutex(&MmSectionCommitMutex);
+            if ((Round >= 4) || KeAreAllApcsDisabled() || !MiWaitForCommitGrowth(CommitPages))
+            {
+                MiReturnCommit(ViewCommit);
+                ExFreePoolWithTag(Vad, 'ldaV');
+                MiDereferenceControlArea(ControlArea);
+                return STATUS_COMMITMENT_LIMIT;
+            }
+        }
+
+        /* Loop all prototype PTEs to be committed */
         while (PointerPte < LastPte)
         {
             /* Make sure the PTE is already invalid */
@@ -1349,7 +1394,9 @@ MiMapViewOfDataSection(
         /* Now check how many pages exactly we committed, and update accounting */
         ASSERT(QuotaCharge >= QuotaExcess);
         QuotaCharge -= QuotaExcess;
+        ASSERT(QuotaCharge == CommitPages);
         Segment->NumberOfCommittedPages += QuotaCharge;
+        InterlockedExchangeAddSizeT(&MmSharedCommit, QuotaCharge);
         ASSERT(Segment->NumberOfCommittedPages <= Segment->TotalNumberOfPtes);
 
         /* Now that we're done, release the lock */
@@ -1375,12 +1422,10 @@ MiMapViewOfDataSection(
     Status = PsChargeProcessNonPagedPoolQuota(Process, sizeof(MMVAD_LONG));
     if (!NT_SUCCESS(Status))
     {
+        /* The committed prototype PTEs stay committed: the segment keeps their charge */
+        MiReturnCommit(ViewCommit);
         ExFreePoolWithTag(Vad, 'ldaV');
         MiDereferenceControlArea(ControlArea);
-
-        KeAcquireGuardedMutex(&MmSectionCommitMutex);
-        Segment->NumberOfCommittedPages -= QuotaCharge;
-        KeReleaseGuardedMutex(&MmSectionCommitMutex);
         return Status;
     }
 
@@ -1393,12 +1438,10 @@ MiMapViewOfDataSection(
                            AllocationType);
     if (!NT_SUCCESS(Status))
     {
+        /* The committed prototype PTEs stay committed: the segment keeps their charge */
+        MiReturnCommit(ViewCommit);
         ExFreePoolWithTag(Vad, 'ldaV');
         MiDereferenceControlArea(ControlArea);
-
-        KeAcquireGuardedMutex(&MmSectionCommitMutex);
-        Segment->NumberOfCommittedPages -= QuotaCharge;
-        KeReleaseGuardedMutex(&MmSectionCommitMutex);
 
         PsReturnProcessNonPagedPoolQuota(PsGetCurrentProcess(), sizeof(MMVAD_LONG));
         return Status;
@@ -1469,6 +1512,15 @@ MiCreatePagingFileMap(OUT PSEGMENT *Segment,
     /* For commited memory, we must have a valid protection mask */
     if (AllocationAttributes & SEC_COMMIT) ASSERT(ProtectionMask != 0);
 
+    /*
+     * Committed pages are charged before anything is allocated. From here
+     * on the segment owns the charge, and MiSegmentDelete returns it.
+     */
+    if ((AllocationAttributes & SEC_COMMIT) && !MiChargeCommitWithGrowth(PteCount))
+    {
+        return STATUS_COMMITMENT_LIMIT;
+    }
+
     /* The segment contains all the Prototype PTEs, allocate it in paged pool */
     NewSegment = ExAllocatePoolWithTag(PagedPool,
                                        sizeof(SEGMENT) +
@@ -1476,9 +1528,9 @@ MiCreatePagingFileMap(OUT PSEGMENT *Segment,
                                        'tSmM');
     if (!NewSegment)
     {
+        if (AllocationAttributes & SEC_COMMIT) MiReturnCommit(PteCount);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
-    *Segment = NewSegment;
 
     /* Now allocate the control area, which has the subsection structure */
     ControlArea = ExAllocatePoolWithTag(NonPagedPool,
@@ -1486,9 +1538,11 @@ MiCreatePagingFileMap(OUT PSEGMENT *Segment,
                                         'tCmM');
     if (!ControlArea)
     {
-        ExFreePoolWithTag(Segment, 'tSmM');
+        if (AllocationAttributes & SEC_COMMIT) MiReturnCommit(PteCount);
+        ExFreePoolWithTag(NewSegment, 'tSmM');
         return STATUS_INSUFFICIENT_RESOURCES;
     }
+    *Segment = NewSegment;
 
     /* And zero it out, filling the basic segmnet pointer and reference fields */
     RtlZeroMemory(ControlArea, sizeof(CONTROL_AREA) + sizeof(SUBSECTION));
@@ -1534,6 +1588,7 @@ MiCreatePagingFileMap(OUT PSEGMENT *Segment,
 
         /* For accounting, also mark these pages as being committed */
         NewSegment->NumberOfCommittedPages = PteCount;
+        InterlockedExchangeAddSizeT(&MmSharedCommit, PteCount);
     }
 
     /* The template PTE itself for the segment should also have the mask set */
@@ -1859,7 +1914,6 @@ MiFlushTbAndCapture(IN PMMVAD FoundVad,
     // We don't support I/O mappings in this path yet
     //
     ASSERT(Pfn1 != NULL);
-    ASSERT(Pfn1->u3.e1.CacheAttribute != MiWriteCombined);
 
     //
     // Make sure new protection mask doesn't get in conflict and fix it if it does
@@ -1887,6 +1941,17 @@ MiFlushTbAndCapture(IN PMMVAD FoundVad,
             ProtectionMask |= MM_NOCACHE;
         }
     }
+    else if (Pfn1->u3.e1.CacheAttribute == MiWriteCombined)
+    {
+        //
+        // This is a write-combined PFN
+        //
+        if ((ProtectionMask & MM_PROTECT_SPECIAL) != MM_WRITECOMBINE)
+        {
+            RebuildPte = TRUE;
+            ProtectionMask |= MM_WRITECOMBINE;
+        }
+    }
 
     if (RebuildPte)
     {
@@ -1897,16 +1962,11 @@ MiFlushTbAndCapture(IN PMMVAD FoundVad,
     }
 
     //
-    // Write the new PTE, making sure we are only changing the bits
+    // Write the new PTE, making sure we are only changing the bits. The caller
+    // flushes the TB for its whole range before it releases the working set.
     //
+    ASSERT(PreviousPte.u.Hard.Valid == 1);
     MI_UPDATE_VALID_PTE(PointerPte, TempPte);
-
-    //
-    // Flush the TLB
-    //
-    ASSERT(PreviousPte.u.Hard.Valid == 1);
-    KeFlushEntireTb(TRUE, TRUE);
-    ASSERT(PreviousPte.u.Hard.Valid == 1);
 
     //
     // Windows updates the relevant PFN1 information, we currently don't.
@@ -1942,9 +2002,13 @@ MiRemoveMappedPtes(IN PVOID BaseAddress,
     PMMPFN Pfn1, Pfn2;
     MMPTE PteContents;
     KIRQL OldIrql;
+    MI_DEFERRED_RELEASE Deferred;
     DPRINT("Removing mapped view at: 0x%p\n", BaseAddress);
 
     ASSERT(Ws == NULL);
+
+    /* A page leaves the view only after every processor has flushed its translation */
+    MiInitializeDeferredRelease(&Deferred, TRUE, NumberOfPtes);
 
     /* Get the PTE and loop each one */
     PointerPte = MiAddressToPte(BaseAddress);
@@ -1955,6 +2019,9 @@ MiRemoveMappedPtes(IN PVOID BaseAddress,
         PteContents = *PointerPte;
         if (PteContents.u.Hard.Valid == 1)
         {
+            if (MiDeferredReleaseRoom(&Deferred) == 0)
+                MiCompleteDeferredRelease(&Deferred);
+
             /* Get the PFN entry */
             Pfn1 = MiGetPfnEntry(PFN_FROM_PTE(&PteContents));
 
@@ -1964,10 +2031,6 @@ MiRemoveMappedPtes(IN PVOID BaseAddress,
             /* Lock the PFN database and make sure this isn't a mapped file */
             OldIrql = MiAcquirePfnLock();
             ASSERT(((Pfn1->u3.e1.PrototypePte) && (Pfn1->OriginalPte.u.Soft.Prototype)) == 0);
-
-            /* Mark the page as modified accordingly */
-            if (MI_IS_PAGE_DIRTY(&PteContents))
-                Pfn1->u3.e1.Modified = 1;
 
             /* Was the PDE invalid */
             if (PointerPde->u.Long == 0)
@@ -1985,11 +2048,20 @@ MiRemoveMappedPtes(IN PVOID BaseAddress,
 #endif
             }
 
-            /* Dereference the PDE and the PTE */
+            /* Clear the PTE first: from then on its dirty bit cannot change */
+            PteContents.u.Long = InterlockedExchangePte(PointerPte, 0);
+
+            /* Mark the page as modified accordingly */
+            if (MI_IS_PAGE_DIRTY(&PteContents))
+                Pfn1->u3.e1.Modified = 1;
+
+            /* Dereference the PDE. The page keeps its share count until the TB
+               flush, so it cannot be reused before then */
             Pfn2 = MiGetPfnEntry(PFN_FROM_PTE(PointerPde));
             MiDecrementShareCount(Pfn2, PFN_FROM_PTE(PointerPde));
             DBG_UNREFERENCED_LOCAL_VARIABLE(Pfn2);
-            MiDecrementShareCount(Pfn1, PFN_FROM_PTE(&PteContents));
+            MiDeferTbFlush(&Deferred, MiPteToAddress(PointerPte));
+            MiDeferShareRelease(&Deferred, Pfn1, FALSE);
 
             /* Release the PFN lock */
             MiReleasePfnLock(OldIrql);
@@ -2018,8 +2090,9 @@ MiRemoveMappedPtes(IN PVOID BaseAddress,
         NumberOfPtes--;
     }
 
-    /* Flush the TLB */
-    KeFlushEntireTb(TRUE, TRUE);
+    /* Flush the TLB, then release the pages */
+    MiCompleteDeferredRelease(&Deferred);
+    MiCleanupDeferredRelease(&Deferred);
 
     /* Acquire the PFN lock */
     OldIrql = MiAcquirePfnLock();
@@ -2933,6 +3006,14 @@ MmCommitSessionMappedView(IN PVOID MappedBase,
         return STATUS_SUCCESS;
     }
 
+    /* Charge the pages before committing them; the segment owns the charge */
+    if (!MiChargeCommit(QuotaCharge, MiCommitUser))
+    {
+        KeReleaseGuardedMutexUnsafe(&MmSectionCommitMutex);
+        KeReleaseGuardedMutex(Session->SystemSpaceViewLockPointer);
+        return STATUS_COMMITMENT_LIMIT;
+    }
+
     /* Pick the segment and template PTE */
     Segment = ControlArea->Segment;
     TempPte = Segment->SegmentPteTemplate;
@@ -3575,7 +3656,7 @@ NtExtendSection(IN HANDLE SectionHandle,
                                        NULL);
     if (!NT_SUCCESS(Status)) return Status;
 
-    Status = MmExtendSection(Section, &SafeNewMaximumSize);
+    Status = MmExtendSection(Section, &SafeNewMaximumSize, FALSE);
 
     /* Dereference the section */
     ObDereferenceObject(Section);
@@ -3595,7 +3676,7 @@ NtExtendSection(IN HANDLE SectionHandle,
     }
 
     /* Return the status */
-    return STATUS_NOT_IMPLEMENTED;
+    return Status;
 }
 
 /* EOF */

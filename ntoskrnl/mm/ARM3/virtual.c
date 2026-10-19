@@ -84,7 +84,7 @@ MiCalculatePageCommitment(IN ULONG_PTR StartingAddress,
             if (PointerPxe->u.Long == 0)
             {
                 PointerPxe++;
-                PointerPte = MiPxeToPte(PointerPde);
+                PointerPte = MiPxeToPte(PointerPxe);
                 continue;
             }
 
@@ -282,7 +282,14 @@ MiDeleteSystemPageableVm(IN PMMPTE PointerPte,
     PMMPFN Pfn1, Pfn2;
     PFN_NUMBER PageFrameIndex, PageTableIndex;
     KIRQL OldIrql;
+    MI_DEFERRED_RELEASE Deferred;
     ASSERT(KeGetCurrentIrql() <= APC_LEVEL);
+
+    /*
+     * A freed page goes back only after every processor has flushed its
+     * translation; the caller owns the range, so nothing maps it meanwhile
+     */
+    MiInitializeDeferredRelease(&Deferred, TRUE, 0);
 
     /* Lock the system working set */
     MiLockWorkingSet(CurrentThread, &MmSystemCacheWs);
@@ -296,6 +303,14 @@ MiDeleteSystemPageableVm(IN PMMPTE PointerPte,
             /* Normally this is one possibility -- freeing a valid page */
             if (PointerPte->u.Hard.Valid)
             {
+                if (MiDeferredReleaseRoom(&Deferred) == 0)
+                {
+                    /* The flush needs neither lock */
+                    MiUnlockWorkingSet(CurrentThread, &MmSystemCacheWs);
+                    MiCompleteDeferredRelease(&Deferred);
+                    MiLockWorkingSet(CurrentThread, &MmSystemCacheWs);
+                }
+
                 /* Get the page PFN */
                 PageFrameIndex = PFN_FROM_PTE(PointerPte);
                 Pfn1 = MiGetPfnEntry(PageFrameIndex);
@@ -313,18 +328,24 @@ MiDeleteSystemPageableVm(IN PMMPTE PointerPte,
                 /* Lock the PFN database */
                 OldIrql = MiAcquirePfnLock();
 
-                /* Delete it the page */
+                /* Destroy the PTE */
+                MI_ERASE_PTE(PointerPte);
+
+                /*
+                 * Delete the page, it is freed after the flush. The release does
+                 * not recheck the PTE: nothing else changes these PTEs meanwhile,
+                 * because system working set trimming is not implemented. A future
+                 * trimmer must not touch a range that is being deleted.
+                 */
                 MI_SET_PFN_DELETED(Pfn1);
-                MiDecrementShareCount(Pfn1, PageFrameIndex);
+                MiDeferTbFlush(&Deferred, MiPteToAddress(PointerPte));
+                MiDeferShareRelease(&Deferred, Pfn1, FALSE);
 
                 /* Decrement the page table too */
                 MiDecrementShareCount(Pfn2, PageTableIndex);
 
                 /* Release the PFN database */
                 MiReleasePfnLock(OldIrql);
-
-                /* Destroy the PTE */
-                MI_ERASE_PTE(PointerPte);
             }
             else
             {
@@ -357,19 +378,140 @@ MiDeleteSystemPageableVm(IN PMMPTE PointerPte,
     /* Release the working set */
     MiUnlockWorkingSet(CurrentThread, &MmSystemCacheWs);
 
-    /* Flush the entire TLB */
-    KeFlushEntireTb(TRUE, TRUE);
+    /* Flush, then free the pages */
+    MiCompleteDeferredRelease(&Deferred);
+    MiCleanupDeferredRelease(&Deferred);
 
     /* Done */
     return ActualPages;
 }
 
+#define TAG_MM_DEFERRED 'fDmM'
+
 VOID
-NTAPI
-MiDeletePte(IN PMMPTE PointerPte,
-            IN PVOID VirtualAddress,
-            IN PEPROCESS CurrentProcess,
-            IN PMMPTE PrototypePte)
+MiInitializeDeferredRelease(
+    _Out_ PMI_DEFERRED_RELEASE Deferred,
+    _In_ BOOLEAN AllProcessors,
+    _In_ PFN_NUMBER PageHint)
+{
+    MmInitializeTbFlushList(&Deferred->FlushList, AllProcessors);
+    Deferred->Count = 0;
+    Deferred->Entries = Deferred->Inline;
+    Deferred->Capacity = RTL_NUMBER_OF(Deferred->Inline);
+
+    /* One page holds a whole page table's worth; without it the inline array is flushed more often */
+    if (PageHint > RTL_NUMBER_OF(Deferred->Inline))
+    {
+        PULONG_PTR Entries = ExAllocatePoolWithTag(NonPagedPool, PAGE_SIZE, TAG_MM_DEFERRED);
+        if (Entries)
+        {
+            Deferred->Entries = Entries;
+            Deferred->Capacity = PAGE_SIZE / sizeof(ULONG_PTR);
+        }
+    }
+}
+
+VOID
+MiCleanupDeferredRelease(
+    _Inout_ PMI_DEFERRED_RELEASE Deferred)
+{
+    ASSERT(Deferred->Count == 0);
+    ASSERT(Deferred->FlushList.Count == 0);
+    if (Deferred->Entries != Deferred->Inline)
+        ExFreePoolWithTag(Deferred->Entries, TAG_MM_DEFERRED);
+}
+
+static
+VOID
+MiReleaseDeferredEntries(
+    _Inout_ PMI_DEFERRED_RELEASE Deferred)
+{
+    ULONG i;
+    PMMPFN Pfn1;
+
+    MI_ASSERT_PFN_LOCK_HELD();
+    for (i = 0; i < Deferred->Count; i++)
+    {
+        Pfn1 = (PMMPFN)(Deferred->Entries[i] & ~(ULONG_PTR)1);
+        if (Deferred->Entries[i] & 1)
+        {
+            /* A RosMm page: its owner frees it through its own reference */
+            ASSERT(Pfn1->u3.e1.PageLocation == ActiveAndValid);
+            ASSERT(Pfn1->u2.ShareCount > 0);
+            if (--Pfn1->u2.ShareCount == 0)
+                Pfn1->u3.e1.PageLocation = TransitionPage;
+        }
+        else
+        {
+            MiDecrementShareCount(Pfn1, MiGetPfnEntryIndex(Pfn1));
+        }
+    }
+    Deferred->Count = 0;
+}
+
+VOID
+MiCompleteDeferredRelease(
+    _Inout_ PMI_DEFERRED_RELEASE Deferred)
+{
+    KIRQL OldIrql;
+
+    ASSERT(KeGetCurrentIrql() <= APC_LEVEL);
+
+    /* Every processor drops its translations before any of the pages can be reused */
+    MmFlushTbList(&Deferred->FlushList);
+    if (Deferred->Count == 0)
+        return;
+
+    OldIrql = MiAcquirePfnLock();
+    MiReleaseDeferredEntries(Deferred);
+    MiReleasePfnLock(OldIrql);
+}
+
+KIRQL
+MiCompleteDeferredReleaseLocked(
+    _Inout_ PMI_DEFERRED_RELEASE Deferred,
+    _In_ KIRQL OldIrql)
+{
+    MI_ASSERT_PFN_LOCK_HELD();
+    if ((Deferred->Count == 0) && (Deferred->FlushList.Count == 0))
+        return OldIrql;
+
+    MiReleasePfnLock(OldIrql);
+    MmFlushTbList(&Deferred->FlushList);
+    OldIrql = MiAcquirePfnLock();
+    MiReleaseDeferredEntries(Deferred);
+    return OldIrql;
+}
+
+/* A VirtualLock on a private page goes with its PTE: drop the lock reference */
+static
+BOOLEAN
+MiDropVirtualLock(IN PMMPFN Pfn1)
+{
+    MI_ASSERT_PFN_LOCK_HELD();
+
+    if (!Pfn1->Wsle.u1.e1.LockedInWs && !Pfn1->Wsle.u1.e1.LockedInMemory)
+        return FALSE;
+
+    Pfn1->Wsle.u1.e1.LockedInWs = 0;
+    Pfn1->Wsle.u1.e1.LockedInMemory = 0;
+    MiDereferencePfnAndDropLockCount(Pfn1);
+    return TRUE;
+}
+
+/*
+ * Returns TRUE when a valid translation was removed. Without KeepShare the page
+ * is released at once and the caller must flush the TB before it releases the
+ * PFN lock; with it, the page keeps its last share reference and is returned
+ * there (NULL if there is none to drop) for the caller to drop after the flush.
+ */
+static
+BOOLEAN
+MiDeletePteCommon(IN PMMPTE PointerPte,
+                  IN PVOID VirtualAddress,
+                  IN PEPROCESS CurrentProcess,
+                  IN PMMPTE PrototypePte,
+                  OUT PMMPFN *KeepShare OPTIONAL)
 {
     PMMPFN Pfn1;
     MMPTE TempPte;
@@ -378,6 +520,7 @@ MiDeletePte(IN PMMPTE PointerPte,
 
     /* PFN lock must be held */
     MI_ASSERT_PFN_LOCK_HELD();
+    if (KeepShare) *KeepShare = NULL;
 
     /* WorkingSet must be exclusively locked */
     ASSERT(MM_ANY_WS_LOCK_HELD_EXCLUSIVE(PsGetCurrentThread()));
@@ -418,8 +561,15 @@ MiDeletePte(IN PMMPTE PointerPte,
             /* Delete the PFN */
             MI_SET_PFN_DELETED(Pfn1);
 
-            /* It must be either free (refcount == 0) or being written (refcount == 1) */
-            ASSERT(Pfn1->u3.e2.ReferenceCount == Pfn1->u3.e1.WriteInProgress);
+            /* Dropping a VirtualLock frees the page, unless an MDL still holds it */
+            if (MiDropVirtualLock(Pfn1))
+                return FALSE;
+
+            /*
+             * It is either on a list (refcount == 0), being written, or still
+             * locked by an MDL, whose unlock frees it.
+             */
+            ASSERT(Pfn1->u3.e2.ReferenceCount >= Pfn1->u3.e1.WriteInProgress);
 
             /* See if we must free it ourselves, or if it will be freed once I/O is over */
             if (Pfn1->u3.e2.ReferenceCount == 0)
@@ -434,7 +584,7 @@ MiDeletePte(IN PMMPTE PointerPte,
                 /* This will put it back in free list and clean properly up */
                 MiDecrementReferenceCount(Pfn1, PageFrameIndex);
             }
-            return;
+            return FALSE;
         }
     }
 
@@ -469,8 +619,11 @@ MiDeletePte(IN PMMPTE PointerPte,
         MiDecrementShareCount(MiGetPfnEntry(PointerPde->u.Hard.PageFrameNumber),
             PointerPde->u.Hard.PageFrameNumber);
 
-        /* Drop the share count */
-        MiDecrementShareCount(Pfn1, PageFrameIndex);
+        /* Drop the share count, which may make the page reusable from the standby list */
+        if (KeepShare)
+            *KeepShare = Pfn1;
+        else
+            MiDecrementShareCount(Pfn1, PageFrameIndex);
 
         /* Either a fork, or this is the shared user data page */
         if ((PointerPte <= MiHighestUserPte) && (PrototypePte != Pfn1->PteAddress))
@@ -515,14 +668,87 @@ MiDeletePte(IN PMMPTE PointerPte,
 
         /* Mark the PFN for deletion and dereference what should be the last ref */
         MI_SET_PFN_DELETED(Pfn1);
-        MiDecrementShareCount(Pfn1, PageFrameIndex);
+        MiDropVirtualLock(Pfn1);
+        if (KeepShare)
+            *KeepShare = Pfn1;
+        else
+            MiDecrementShareCount(Pfn1, PageFrameIndex);
 
         /* We should eventually do this */
         //CurrentProcess->NumberOfPrivatePages--;
     }
 
-    /* Flush the TLB */
-    KeFlushEntireTb(TRUE, TRUE);
+    return TRUE;
+}
+
+/* The flush and the last share reference go to the deferred list, if there is one */
+BOOLEAN
+NTAPI
+MiDeletePteDeferred(IN PMMPTE PointerPte,
+                    IN PVOID VirtualAddress,
+                    IN PEPROCESS CurrentProcess,
+                    IN PMMPTE PrototypePte,
+                    IN OUT PMI_DEFERRED_RELEASE Deferred OPTIONAL)
+{
+    PMMPFN Pfn1;
+
+    if (!Deferred)
+        return MiDeletePteCommon(PointerPte, VirtualAddress, CurrentProcess, PrototypePte, NULL);
+
+    if (!MiDeletePteCommon(PointerPte, VirtualAddress, CurrentProcess, PrototypePte, &Pfn1))
+        return FALSE;
+
+    if (Pfn1)
+        MiDeferShareRelease(Deferred, Pfn1, FALSE);
+    MiDeferTbFlush(Deferred, VirtualAddress);
+    return TRUE;
+}
+
+/*
+ * Copy-on-write: replace a valid PTE that maps a shared page with a fresh private
+ * page, waiting for the TB flush with the PFN lock released. The caller holds the
+ * working set lock, which keeps faults off the PTE meanwhile, and the PFN lock,
+ * which is held again on return. The new page is initialized before the lock is
+ * released, so it cannot be taken; the shared page keeps its share reference until
+ * no processor can reach it. No list, so this is cheap on the fault path's stack.
+ */
+KIRQL
+NTAPI
+MiReplaceSharedPte(IN PMMPTE PointerPte,
+                   IN PVOID VirtualAddress,
+                   IN PEPROCESS CurrentProcess,
+                   IN PMMPTE PrototypePte,
+                   IN PFN_NUMBER NewPageFrameIndex,
+                   IN KIRQL OldIrql)
+{
+    PMMPFN SharedPfn;
+    BOOLEAN Flush;
+
+    Flush = MiDeletePteCommon(PointerPte, VirtualAddress, CurrentProcess, PrototypePte, &SharedPfn);
+    ASSERT(Flush);
+    MiInitializePfn(NewPageFrameIndex, PointerPte, TRUE);
+
+    MiReleasePfnLock(OldIrql);
+    if (Flush)
+        KeFlushSingleTb(VirtualAddress, TRUE);
+    OldIrql = MiAcquirePfnLock();
+
+    /* The PTE is still empty and the new page still ours: nothing else can touch either */
+    ASSERT(PointerPte->u.Long == 0);
+    if (SharedPfn)
+        MiDecrementShareCount(SharedPfn, MiGetPfnEntryIndex(SharedPfn));
+    return OldIrql;
+}
+
+VOID
+NTAPI
+MiDeletePte(IN PMMPTE PointerPte,
+            IN PVOID VirtualAddress,
+            IN PEPROCESS CurrentProcess,
+            IN PMMPTE PrototypePte)
+{
+    if (MiDeletePteDeferred(PointerPte, VirtualAddress, CurrentProcess, PrototypePte, NULL))
+        KeFlushEntireTb(TRUE, TRUE);
 }
 
 VOID
@@ -545,9 +771,20 @@ MiDeleteVirtualAddresses(
     KIRQL OldIrql;
     BOOLEAN AddressGap = FALSE;
     PSUBSECTION Subsection;
+    MI_DEFERRED_RELEASE Deferred;
 
     /* We should never get RosMm memory areas here */
     ASSERT((Vad == NULL) || !MI_IS_MEMORY_AREA_VAD(Vad));
+
+    /*
+     * The PTEs are cleared under the PFN lock, the TB is flushed without it, and
+     * the pages are released under it again. The working set lock, held by the
+     * caller throughout, keeps faults off the range in between. User addresses
+     * are cached only by the processors running the current process.
+     */
+    MiInitializeDeferredRelease(&Deferred,
+                                Va > (ULONG_PTR)MM_HIGHEST_USER_ADDRESS,
+                                ((EndingAddress - Va) >> PAGE_SHIFT) + 1);
 
     /* Get the current process */
     CurrentProcess = PsGetCurrentProcess();
@@ -587,7 +824,8 @@ MiDeleteVirtualAddresses(
                 continue;
             }
 
-            /* Make the PXE valid */
+            /* Making it valid can drop the working set lock: flush first */
+            MiCompleteDeferredRelease(&Deferred);
             MiMakeSystemAddressValid(MiPteToAddress(PointerPxe), CurrentProcess);
         }
 #endif
@@ -607,7 +845,8 @@ MiDeleteVirtualAddresses(
                 continue;
             }
 
-            /* Make the PPE valid */
+            /* Making it valid can drop the working set lock: flush first */
+            MiCompleteDeferredRelease(&Deferred);
             MiMakeSystemAddressValid(MiPteToAddress(PointerPpe), CurrentProcess);
         }
 #endif
@@ -626,7 +865,8 @@ MiDeleteVirtualAddresses(
         /* Now check if the PDE is mapped in */
         if (!PointerPde->u.Hard.Valid)
         {
-            /* It isn't, so map it in */
+            /* It isn't, so map it in; that can drop the working set lock: flush first */
+            MiCompleteDeferredRelease(&Deferred);
             PointerPte = MiPteToAddress(PointerPde);
             MiMakeSystemAddressValid(PointerPte, CurrentProcess);
         }
@@ -663,6 +903,10 @@ MiDeleteVirtualAddresses(
             /* Making sure the PDE is still valid */
             ASSERT(PointerPde->u.Hard.Valid == 1);
 
+            /* Room for this PTE's page and the page tables it may empty */
+            if (MiDeferredReleaseRoom(&Deferred) < 1 + MI_DEFERRED_PDE_ENTRIES)
+                OldIrql = MiCompleteDeferredReleaseLocked(&Deferred, OldIrql);
+
             /* Capture the PDE and make sure it exists */
             TempPte = *PointerPte;
             if (TempPte.u.Long)
@@ -690,20 +934,33 @@ MiDeleteVirtualAddresses(
                         }
                     }
 
+                    /* Check for a user mapping of a locked MDL */
+                    if ((Vad) && (Vad->u.VadFlags.VadType == VadDevicePhysicalMemory))
+                    {
+                        /* The page belongs to the MDL owner, and might not even have
+                         * a PFN entry: only drop the page table share count that
+                         * MiMapLockedPagesInUserSpace took for this PTE. */
+                        ASSERT(TempPte.u.Hard.Valid == 1);
+                        MI_ERASE_PTE(PointerPte);
+                        MiDecrementShareCount(MiGetPfnEntry(PointerPde->u.Hard.PageFrameNumber),
+                                              PointerPde->u.Hard.PageFrameNumber);
+                        MiDeferTbFlush(&Deferred, (PVOID)Va);
+                    }
                     /* Check for prototype PTE */
-                    if ((TempPte.u.Hard.Valid == 0) &&
-                        (TempPte.u.Soft.Prototype == 1))
+                    else if ((TempPte.u.Hard.Valid == 0) &&
+                             (TempPte.u.Soft.Prototype == 1))
                     {
                         /* Just nuke it */
                         MI_ERASE_PTE(PointerPte);
                     }
                     else
                     {
-                        /* Delete the PTE proper */
-                        MiDeletePte(PointerPte,
-                                    (PVOID)Va,
-                                    CurrentProcess,
-                                    PrototypePte);
+                        /* Delete the PTE proper, the page is released after the flush */
+                        MiDeletePteDeferred(PointerPte,
+                                            (PVOID)Va,
+                                            CurrentProcess,
+                                            PrototypePte,
+                                            &Deferred);
                     }
                 }
                 else
@@ -716,8 +973,8 @@ MiDeleteVirtualAddresses(
                 {
                     ASSERT(PointerPde->u.Long != 0);
 
-                    /* Delete the PDE proper */
-                    MiDeletePde(PointerPde, CurrentProcess);
+                    /* Delete the PDE proper, its page tables are released after the flush */
+                    MiDeletePdeDeferred(PointerPde, CurrentProcess, &Deferred);
 
                     /* Continue with the next PDE */
                     Va = (ULONG_PTR)MiPdeToAddress(PointerPde + 1);
@@ -736,14 +993,18 @@ MiDeleteVirtualAddresses(
             PrototypePte++;
         } while ((Va & (PDE_MAPPED_VA - 1)) && (Va <= EndingAddress));
 
-        /* Release the lock */
+        /* Release the lock, the pages stay referenced until the flush */
         MiReleasePfnLock(OldIrql);
 
-        if (Va > EndingAddress) return;
+        if (Va > EndingAddress) break;
 
         /* Check if we exited the loop regularly */
         AddressGap = (PointerPte != MiAddressToPte(Va));
     }
+
+    /* Flush before the caller can release the working set lock or return */
+    MiCompleteDeferredRelease(&Deferred);
+    MiCleanupDeferredRelease(&Deferred);
 }
 
 LONG
@@ -1601,14 +1862,32 @@ MiQueryAddressState(IN PVOID Va,
                 /* Get protection state of this page */
                 Protect = MiGetPageProtection(PointerPte);
 
-                /* Check if this is an image-backed VAD */
+                /* Check if this PTE points to a prototype PTE of a section */
                 if ((TempPte.u.Soft.Valid == 0) &&
                     (TempPte.u.Soft.Prototype == 1) &&
                     (Vad->u.VadFlags.PrivateMemory == 0) &&
                     (Vad->ControlArea))
                 {
-                    DPRINT1("Not supported\n");
-                    ASSERT(FALSE);
+                    /* Get the prototype PTE, which holds the real state */
+                    if (TempPte.u.Soft.PageFileHigh == MI_PTE_LOOKUP_NEEDED)
+                    {
+                        ProtoPte = MI_GET_PROTOTYPE_PTE_FOR_VPN(Vad,
+                                                                (ULONG_PTR)Va >> PAGE_SHIFT);
+                    }
+                    else
+                    {
+                        ProtoPte = MiProtoPteToPte(&TempPte);
+                    }
+
+                    /* An empty prototype PTE is a reserved page, for example
+                       an uncommitted page of a SEC_RESERVE view that was
+                       accessed. Like the demand-zero path below, this reads
+                       the paged prototype PTE with the working set lock held */
+                    if (!ProtoPte->u.Long)
+                    {
+                        State = MEM_RESERVE;
+                        Protect = 0;
+                    }
                 }
             }
         }
@@ -1924,7 +2203,6 @@ MiQueryMemoryBasicInformation(IN HANDLE ProcessHandle,
         MemoryInfo.BaseAddress = Address;
         MemoryInfo.AllocationBase = (PVOID)(Vad->StartingVpn << PAGE_SHIFT);
         MemoryInfo.AllocationProtect = MmProtectToValue[Vad->u.VadFlags.Protection];
-        MemoryInfo.Type = MEM_PRIVATE;
 
         /* Acquire the working set lock (shared is enough) */
         MiLockProcessWorkingSetShared(TargetProcess, PsGetCurrentThread());
@@ -2052,7 +2330,7 @@ MiIsEntireRangeCommitted(IN ULONG_PTR StartingAddress,
                 if (!Vad->u.VadFlags.MemCommit) return FALSE;
 
                 PointerPxe++;
-                PointerPte = MiPxeToPte(PointerPte);
+                PointerPte = MiPxeToPte(PointerPxe);
                 continue;
             }
         }
@@ -2155,6 +2433,30 @@ MiIsEntireRangeCommitted(IN ULONG_PTR StartingAddress,
     return TRUE;
 }
 
+/*
+ * Flush every protection change made so far, then release the pages made
+ * inaccessible: no processor can reach them any more
+ */
+static
+VOID
+MiReleaseProtectedPages(IN OUT PMM_TB_FLUSH_LIST FlushList,
+                        IN PMMPFN *Pages,
+                        IN OUT PULONG Count)
+{
+    KIRQL OldIrql;
+    ULONG i;
+
+    MmFlushTbList(FlushList);
+    if (*Count == 0)
+        return;
+
+    OldIrql = MiAcquirePfnLock();
+    for (i = 0; i < *Count; i++)
+        MiDecrementShareCount(Pages[i], MiGetPfnEntryIndex(Pages[i]));
+    MiReleasePfnLock(OldIrql);
+    *Count = 0;
+}
+
 NTSTATUS
 NTAPI
 MiProtectVirtualMemory(IN PEPROCESS Process,
@@ -2171,13 +2473,17 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
     MMPTE PteContents;
     PMMPFN Pfn1;
     ULONG ProtectionMask, OldProtect;
-    BOOLEAN Committed;
+    BOOLEAN Committed, Unlocked = FALSE;
     NTSTATUS Status = STATUS_SUCCESS;
     PETHREAD Thread = PsGetCurrentThread();
     TABLE_SEARCH_RESULT Result;
+    MM_TB_FLUSH_LIST FlushList;
+    PMMPFN ReleasePfn[32];
+    ULONG ReleaseCount = 0;
 
     /* We must be attached */
     ASSERT(Process == PsGetCurrentProcess());
+    MmInitializeTbFlushList(&FlushList, FALSE);
 
     /* Calculate base address for the VAD */
     StartingAddress = (ULONG_PTR)PAGE_ALIGN((*BaseAddress));
@@ -2351,6 +2657,16 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
             if (MiIsPteOnPdeBoundary(PointerPte))
             {
                 PointerPde = MiPteToPde(PointerPte);
+
+                /* Making it valid can drop the working set lock, which keeps
+                   faults off the pages changed so far: flush them first */
+#if (_MI_PAGING_LEVELS == 4)
+                if (!MiIsPdeForAddressValid(MiPteToAddress(PointerPte)))
+#else
+                if (!PointerPde->u.Hard.Valid)
+#endif
+                    MiReleaseProtectedPages(&FlushList, ReleasePfn, &ReleaseCount);
+
                 MiMakePdeExistAndMakeValid(PointerPde, Process, MM_NOIRQL);
             }
 
@@ -2378,6 +2694,15 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
                 {
                     KIRQL OldIrql = MiAcquirePfnLock();
 
+                    /* A page locked with VirtualLock is unlocked, as on Windows */
+                    if (Pfn1->Wsle.u1.e1.LockedInWs)
+                    {
+                        Pfn1->Wsle.u1.e1.LockedInWs = 0;
+                        if (!Pfn1->Wsle.u1.e1.LockedInMemory)
+                            MiDereferencePfnAndDropLockCount(Pfn1);
+                        Unlocked = TRUE;
+                    }
+
                     /* Mark the PTE as transition and change its protection */
                     PteContents.u.Hard.Valid = 0;
                     PteContents.u.Soft.Transition = 1;
@@ -2385,21 +2710,24 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
                     /* Write the PTE, and release the page only when no processor can still use it */
                     // FIXME: remove the page from the WS
                     MI_WRITE_INVALID_PTE(PointerPte, PteContents);
-                    KeFlushSingleTb(MiPteToAddress(PointerPte), FALSE);
-                    MiDecrementShareCount(Pfn1, PFN_FROM_PTE(&PteContents));
-
-                    /* We are done for this PTE */
                     MiReleasePfnLock(OldIrql);
+
+                    /* The working set lock keeps faults off the page until it is released */
+                    MmAddToTbFlushList(&FlushList, MiPteToAddress(PointerPte));
+                    ReleasePfn[ReleaseCount++] = Pfn1;
+                    if (ReleaseCount == RTL_NUMBER_OF(ReleasePfn))
+                        MiReleaseProtectedPages(&FlushList, ReleasePfn, &ReleaseCount);
                 }
                 else
                 {
-                    /* Write the protection mask and write it with a TLB flush */
+                    /* Write the protection mask, the TB is flushed with the list */
                     Pfn1->OriginalPte.u.Soft.Protection = ProtectionMask;
                     MiFlushTbAndCapture(Vad,
                                         PointerPte,
                                         ProtectionMask,
                                         Pfn1,
                                         TRUE);
+                    MmAddToTbFlushList(&FlushList, MiPteToAddress(PointerPte));
                 }
             }
             else
@@ -2418,11 +2746,9 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
             PointerPte++;
         }
 
-#ifdef CONFIG_SMP
-        KeFlushRangeTb((PVOID)StartingAddress,
-                       (EndingAddress + 1 - StartingAddress) / PAGE_SIZE,
-                       FALSE);
-#endif
+        /* Flush every valid PTE changed above before the call returns, then
+           release the pages made inaccessible */
+        MiReleaseProtectedPages(&FlushList, ReleasePfn, &ReleaseCount);
 
         /* Unlock the working set */
         MiUnlockProcessWorkingSetUnsafe(Process, Thread);
@@ -2435,7 +2761,7 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
     *NumberOfBytesToProtect = EndingAddress - StartingAddress + 1;
     *BaseAddress = (PVOID)StartingAddress;
     *OldAccessProtection = OldProtect;
-    return STATUS_SUCCESS;
+    return Unlocked ? STATUS_WAS_UNLOCKED : STATUS_SUCCESS;
 
 FailPath:
     /* Unlock the address space and return the failure code */
@@ -2547,6 +2873,10 @@ MiProcessValidPteList(IN PMMPTE *ValidPteList,
     MMPTE TempPte;
     PFN_NUMBER PageFrameIndex;
     PMMPFN Pfn1, Pfn2;
+    MM_TB_FLUSH_LIST FlushList;
+
+    /* Decommitted user pages: only the processors running the process cache them */
+    MmInitializeTbFlushList(&FlushList, FALSE);
 
     //
     // Acquire the PFN lock and loop all the PTEs in the list
@@ -2568,24 +2898,36 @@ MiProcessValidPteList(IN PMMPTE *ValidPteList,
         Pfn2 = MiGetPfnEntry(Pfn1->u4.PteFrame);
 
         //
-        // Decrement the share count on the page table, and then on the page
-        // itself
-        //
-        MiDecrementShareCount(Pfn2, Pfn1->u4.PteFrame);
-        MI_SET_PFN_DELETED(Pfn1);
-        MiDecrementShareCount(Pfn1, PageFrameIndex);
-
-        //
         // Make the page decommitted
         //
         MI_WRITE_INVALID_PTE(ValidPteList[i], MmDecommittedPte);
+        MmAddToTbFlushList(&FlushList, MiPteToAddress(ValidPteList[i]));
+
+        //
+        // Decrement the share count on the page table. The page keeps its own
+        // share count until the TB flush below, so it cannot be reused before it.
+        //
+        MiDecrementShareCount(Pfn2, Pfn1->u4.PteFrame);
+        MI_SET_PFN_DELETED(Pfn1);
+        MiDropVirtualLock(Pfn1);
+
+        // The slot now holds the page to release
+        ValidPteList[i] = (PMMPTE)Pfn1;
     }
 
     //
-    // All the PTEs have been dereferenced and made invalid, flush the TLB now
-    // and then release the PFN lock
+    // All the PTEs have been made invalid. Flush the TLB without the PFN lock,
+    // then free the pages.
     //
-    KeFlushEntireTb(TRUE, TRUE);
+    MiReleasePfnLock(OldIrql);
+    MmFlushTbList(&FlushList);
+
+    OldIrql = MiAcquirePfnLock();
+    for (i = 0; i != Count; i++)
+    {
+        Pfn1 = (PMMPFN)ValidPteList[i];
+        MiDecrementShareCount(Pfn1, MiGetPfnEntryIndex(Pfn1));
+    }
     MiReleasePfnLock(OldIrql);
 }
 
@@ -2690,13 +3032,25 @@ MiDecommitPages(IN PVOID StartingAddress,
                     }
                     ValidPteList[PteCount++] = PointerPte;
                 }
+                else if ((PteContents.u.Soft.Prototype == 0) &&
+                         (PteContents.u.Soft.Transition == 1))
+                {
+                    //
+                    // A page made PAGE_NOACCESS or PAGE_GUARD after it was
+                    // touched is in transition. Free it as MEM_RELEASE does,
+                    // then decommit the PTE.
+                    //
+                    KIRQL OldIrql = MiAcquirePfnLock();
+                    MiDeletePte(PointerPte, MiPteToAddress(PointerPte), Process, NULL);
+                    MiReleasePfnLock(OldIrql);
+                    MI_WRITE_INVALID_PTE(PointerPte, MmDecommittedPte);
+                }
                 else
                 {
                     //
                     // We do not support any of these other scenarios at the moment
                     //
                     ASSERT(PteContents.u.Soft.Prototype == 0);
-                    ASSERT(PteContents.u.Soft.Transition == 0);
                     ASSERT(PteContents.u.Soft.PageFileHigh == 0);
 
                     //
@@ -3991,10 +4345,8 @@ NtUnlockVirtualMemory(IN HANDLE ProcessHandle,
     }
     _SEH2_END;
 
-    //
-    // Return status
-    //
-    return STATUS_SUCCESS;
+    /* Return what MiUnlockVirtualMemory reported */
+    return Status;
 }
 
 NTSTATUS
@@ -5071,8 +5423,14 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
             //
             MI_WRITE_INVALID_PTE(PointerPte, TempPte);
 
-            /* In a MEM_COMMIT reservation this page was charged when the VAD was inserted */
-            if (!FoundVad->u.VadFlags.MemCommit) QuotaCharge++;
+            //
+            // In a MEM_COMMIT reservation this page was charged when the VAD
+            // was inserted
+            //
+            if (!FoundVad->u.VadFlags.MemCommit)
+            {
+                QuotaCharge++;
+            }
         }
         else if (PointerPte->u.Long == MmDecommittedPte.u.Long)
         {
@@ -5400,8 +5758,10 @@ NtFreeVirtualMemory(IN HANDLE ProcessHandle,
             EndingAddress = (Vad->EndingVpn << PAGE_SHIFT) | (PAGE_SIZE - 1);
 
             //
-            // Finally lock the working set and remove the VAD from the VAD tree
+            // Return what the VAD still charges, then lock the working set and
+            // remove the VAD from the VAD tree
             //
+            CommitReduction = Vad->u.VadFlags.CommitCharge;
             MiLockProcessWorkingSetUnsafe(Process, CurrentThread);
             ASSERT(Process->VadRoot.NumberGenericTableElements >= 1);
             MiRemoveNode((PMMADDRESS_NODE)Vad, &Process->VadRoot);
@@ -5435,6 +5795,7 @@ NtFreeVirtualMemory(IN HANDLE ProcessHandle,
                     // the code path above when the caller sets a zero region size
                     // and the whole VAD is destroyed
                     //
+                    CommitReduction = Vad->u.VadFlags.CommitCharge;
                     MiLockProcessWorkingSetUnsafe(Process, CurrentThread);
                     ASSERT(Process->VadRoot.NumberGenericTableElements >= 1);
                     MiRemoveNode((PMMADDRESS_NODE)Vad, &Process->VadRoot);

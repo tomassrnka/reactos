@@ -16,6 +16,7 @@ list(APPEND SOURCE
     FindActCtxSectionStringW.c
     FindFiles.c
     FLS.c
+    ForcedRelocation.c
     FormatMessage.c
     GetComputerNameEx.c
     GetCPInfo.c
@@ -34,6 +35,7 @@ list(APPEND SOURCE
     JobObject.c
     LCMapString.c
     LoadLibraryExW.c
+    LoadLibraryMachine.c
     LocaleNameToLCID.c
     lstrcpynW.c
     lstrlen.c
@@ -48,6 +50,7 @@ list(APPEND SOURCE
     SetConsoleWindowInfo.c
     SetCurrentDirectory.c
     SetSearchPathMode.c
+    SetThreadStackGuarantee.c
     SetUnhandledExceptionFilter.c
     SuspendThreadContext.c
     SystemFirmware.c

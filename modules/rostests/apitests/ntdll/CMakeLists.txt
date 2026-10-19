@@ -37,6 +37,7 @@ add_dependencies(ntdll_crt_test_lib psdk)
 
 list(APPEND SOURCE
     DllLoadNotification.c
+    EmptyPxe.c
     LdrEnumResources.c
     LdrFindResource_U.c
     LdrLoadDll.c
@@ -55,10 +56,13 @@ list(APPEND SOURCE
     NtCreateFile.c
     NtCreateKey.c
     NtCreateProfile.c
+    NtCreateSectionImage.c
+    NtCreateSectionSize.c
     NtCreateThread.c
     NtDeleteKey.c
     NtDuplicateObject.c
     NtDuplicateToken.c
+    NtExtendSection.c
     NtFilterToken.c
     NtFreeVirtualMemory.c
     NtGetCurrentProcessorNumberEx.c
@@ -82,6 +86,7 @@ list(APPEND SOURCE
     NtQuerySystemEnvironmentValue.c
     NtQuerySystemInformation.c
     NtQueryValueKey.c
+    NtQueryVirtualMemory.c
     NtQueryVolumeInformationFile.c
     NtReadFile.c
     NtSaveKey.c

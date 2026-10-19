@@ -234,22 +234,25 @@ MmAlterRegion(PMMSUPPORT AddressSpace, PVOID BaseAddress,
     return(STATUS_SUCCESS);
 }
 
-VOID
+NTSTATUS
 NTAPI
 MmInitializeRegion(PLIST_ENTRY RegionListHead, SIZE_T Length, ULONG Type,
                    ULONG Protect)
 {
     PMM_REGION Region;
 
+    /* An empty list on failure, so that the caller can free it alike */
+    InitializeListHead(RegionListHead);
+
     Region = ExAllocatePoolWithTag(NonPagedPool, sizeof(MM_REGION),
                                    TAG_MM_REGION);
-    if (!Region) return;
+    if (!Region) return STATUS_INSUFFICIENT_RESOURCES;
 
     Region->Type = Type;
     Region->Protect = Protect;
     Region->Length = Length;
-    InitializeListHead(RegionListHead);
     InsertHeadList(RegionListHead, &Region->RegionListEntry);
+    return STATUS_SUCCESS;
 }
 
 PMM_REGION

@@ -108,7 +108,12 @@ PVOID MmPagedPoolEnd;
 //
 // And this is its default size
 //
+#ifdef _M_AMD64
+/* 0 = computed in MiBuildPagedPool unless the registry sets a size */
+SIZE_T MmSizeOfPagedPoolInBytes = 0;
+#else
 SIZE_T MmSizeOfPagedPoolInBytes = MI_MIN_INIT_PAGED_POOLSIZE;
+#endif
 PFN_NUMBER MmSizeOfPagedPoolInPages = MI_MIN_INIT_PAGED_POOLSIZE / PAGE_SIZE;
 
 //
@@ -903,7 +908,7 @@ MiBuildPfnDatabaseFromPages(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
                 Pfn1->u2.ShareCount++;
                 Pfn1->u3.e2.ReferenceCount = 1;
                 Pfn1->u3.e1.PageLocation = ActiveAndValid;
-                Pfn1->u3.e1.CacheAttribute = MiNonCached;
+                Pfn1->u3.e1.CacheAttribute = MiCached;
 #if MI_TRACE_PFNS
                 Pfn1->PfnUsage = MI_USAGE_INIT_MEMORY;
                 MI_SET_PFN_PROCESS_NAME(Pfn1, "Initial PDE");
@@ -950,7 +955,7 @@ MiBuildPfnDatabaseFromPages(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
                                 Pfn2->u2.ShareCount++;
                                 Pfn2->u3.e2.ReferenceCount = 1;
                                 Pfn2->u3.e1.PageLocation = ActiveAndValid;
-                                Pfn2->u3.e1.CacheAttribute = MiNonCached;
+                                Pfn2->u3.e1.CacheAttribute = MiCached;
 #if MI_TRACE_PFNS
                                 Pfn2->PfnUsage = MI_USAGE_INIT_MEMORY;
                                 MI_SET_PFN_PROCESS_NAME(Pfn2, "Initial PTE");
@@ -995,7 +1000,7 @@ MiBuildPfnDatabaseZeroPage(VOID)
         Pfn1->u2.ShareCount++;
         Pfn1->u3.e2.ReferenceCount = 0xFFF0;
         Pfn1->u3.e1.PageLocation = ActiveAndValid;
-        Pfn1->u3.e1.CacheAttribute = MiNonCached;
+        Pfn1->u3.e1.CacheAttribute = MiCached;
     }
 }
 
@@ -1071,7 +1076,6 @@ MiBuildPfnDatabaseFromLoaderBlock(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
                     if (!Pfn1->u3.e2.ReferenceCount)
                     {
                         /* Add it to the free list */
-                        Pfn1->u3.e1.CacheAttribute = MiNonCached;
                         MiInsertPageInFreeList(PageFrameIndex);
                     }
 
@@ -1111,7 +1115,7 @@ MiBuildPfnDatabaseFromLoaderBlock(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
                         Pfn1->u2.ShareCount++;
                         Pfn1->u3.e2.ReferenceCount = 1;
                         Pfn1->u3.e1.PageLocation = ActiveAndValid;
-                        Pfn1->u3.e1.CacheAttribute = MiNonCached;
+                        Pfn1->u3.e1.CacheAttribute = MiCached;
 #if MI_TRACE_PFNS
                         Pfn1->PfnUsage = MI_USAGE_BOOT_DRIVER;
 #endif
@@ -1297,6 +1301,9 @@ MmFreeLoaderBlock(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
     DPRINT("Loader pages freed: %lx\n", LoaderPages);
     MiReleasePfnLock(OldIrql);
     KeFlushEntireTb(TRUE, TRUE);
+
+    /* They were charged as boot-time memory */
+    MiReturnBootCommit(LoaderPages);
 
     /* Free our run structure */
     ExFreePoolWithTag(Buffer, 'lMmM');
@@ -1914,6 +1921,19 @@ MiBuildPagedPool(VOID)
     }
 #endif // _M_IX86
 
+#ifdef _M_AMD64
+    //
+    // Without a PagedPoolSize registry value (0 here), size paged pool as x86
+    // does: twice the maximum nonpaged pool. The page directories spanning it,
+    // its first page table and the two bitmaps are allocated below; further
+    // page tables and the pages are added when the pool grows.
+    //
+    if (MmSizeOfPagedPoolInBytes == 0)
+        MmSizeOfPagedPoolInBytes = 2 * MmMaximumNonPagedPoolInBytes;
+    if (MmSizeOfPagedPoolInBytes > MI_MAX_PAGED_POOL_SIZE)
+        MmSizeOfPagedPoolInBytes = MI_MAX_PAGED_POOL_SIZE;
+#endif // _M_AMD64
+
     //
     // Get the size in pages and make sure paged pool is at least 32MB.
     //
@@ -2306,7 +2326,7 @@ MmArmInitSystem(IN ULONG Phase,
                 //
                 MmNumberOfSystemPtes <<= 1;
             }
-            if (MmSpecialPoolTag != 0 && MmSpecialPoolTag != -1)
+            if (MiSpecialPoolConfigured())
             {
                 //
                 // Add some extra PTEs for special pool
@@ -2658,10 +2678,8 @@ MmArmInitSystem(IN ULONG Phase,
         /* Initialize the system cache */
         //MiInitializeSystemCache(MmSystemCacheWsMinimum, MmAvailablePages);
 
-        /* Update the commit limit */
-        MmTotalCommitLimit = MmAvailablePages;
-        if (MmTotalCommitLimit > 1024) MmTotalCommitLimit -= 1024;
-        MmTotalCommitLimitMaximum = MmTotalCommitLimit;
+        /* Set the commit limit from RAM; paging files raise it later */
+        MiInitializeCommitLimit();
 
         /* Size up paged pool and build the shadow system page directory */
         MiBuildPagedPool();

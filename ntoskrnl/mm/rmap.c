@@ -46,6 +46,9 @@ MmInitializeRmapList(VOID)
                                      50);
 }
 
+/* Pages written back (MiWritePage) or paged out (MmPageOutPhysicalAddress): an activity count */
+volatile LONG MiReclaimProgress;
+
 NTSTATUS
 NTAPI
 MmPageOutPhysicalAddress(PFN_NUMBER Page)
@@ -105,10 +108,16 @@ GetEntry:
     MemoryArea = MmLocateMemoryAreaByAddress(AddressSpace, Address);
     if (MemoryArea == NULL || MemoryArea->DeleteInProgress)
     {
+        /*
+         * The view is being unmapped, which drops this mapping, or it is
+         * gone: leave the page for a later pass. Retrying here spins the
+         * balancer, which runs at a real-time priority, for as long as the
+         * unmap takes.
+         */
         MmUnlockAddressSpace(AddressSpace);
         ExReleaseRundownProtection(&Process->RundownProtect);
         ObDereferenceObject(Process);
-        goto GetEntry;
+        return STATUS_UNSUCCESSFUL;
     }
 
 
@@ -269,6 +278,7 @@ GetEntry:
             ExReleaseRundownProtection(&Process->RundownProtect);
             ObDereferenceObject(Process);
 
+            InterlockedIncrement(&MiReclaimProgress);
             return STATUS_SUCCESS;
         }
 
@@ -283,7 +293,11 @@ GetEntry:
         ExReleaseRundownProtection(&Process->RundownProtect);
         ObDereferenceObject(Process);
 
-        if (Released) return STATUS_SUCCESS;
+        if (Released)
+        {
+            InterlockedIncrement(&MiReclaimProgress);
+            return STATUS_SUCCESS;
+        }
     }
 #ifdef NEWCC
     else if (Type == MEMORY_AREA_CACHE)
@@ -314,6 +328,7 @@ WriteSegment:
 
         if (Released)
         {
+            InterlockedIncrement(&MiReclaimProgress);
             return STATUS_SUCCESS;
         }
     }
@@ -322,28 +337,39 @@ WriteSegment:
     return STATUS_UNSUCCESSFUL;
 }
 
+PVOID
+NTAPI
+MmAllocateRmapEntry(VOID)
+{
+    return ExAllocateFromNPagedLookasideList(&RmapLookasideList);
+}
+
 VOID
 NTAPI
-MmInsertRmap(PFN_NUMBER Page, PEPROCESS Process,
-             PVOID Address)
+MmFreeRmapEntry(PVOID Entry)
+{
+    ExFreeToNPagedLookasideList(&RmapLookasideList, Entry);
+}
+
+static
+VOID
+MiInsertRmapEntry(PFN_NUMBER Page, PEPROCESS Process,
+                  PVOID Address, PVOID Entry, PVOID Caller)
 {
     PMM_RMAP_ENTRY current_entry;
-    PMM_RMAP_ENTRY new_entry;
+    PMM_RMAP_ENTRY new_entry = Entry;
     ULONG PrevSize;
     KIRQL OldIrql;
 
     if (!RMAP_IS_SEGMENT(Address))
         Address = (PVOID)PAGE_ROUND_DOWN(Address);
 
-    new_entry = ExAllocateFromNPagedLookasideList(&RmapLookasideList);
-    if (new_entry == NULL)
-    {
-        KeBugCheck(MEMORY_MANAGEMENT);
-    }
     new_entry->Address = Address;
     new_entry->Process = (PEPROCESS)Process;
 #if DBG
-    new_entry->Caller = _ReturnAddress();
+    new_entry->Caller = Caller;
+#else
+    UNREFERENCED_PARAMETER(Caller);
 #endif
 
     if (
@@ -406,6 +432,28 @@ MmInsertRmap(PFN_NUMBER Page, PEPROCESS Process,
             Process->Vm.PeakWorkingSetSize = PrevSize + PAGE_SIZE;
         }
     }
+}
+
+VOID
+NTAPI
+MmInsertRmapEntry(PFN_NUMBER Page, PEPROCESS Process,
+                  PVOID Address, PVOID Entry)
+{
+    MiInsertRmapEntry(Page, Process, Address, Entry, _ReturnAddress());
+}
+
+VOID
+NTAPI
+MmInsertRmap(PFN_NUMBER Page, PEPROCESS Process,
+             PVOID Address)
+{
+    PVOID Entry = MmAllocateRmapEntry();
+
+    if (Entry == NULL)
+    {
+        KeBugCheck(MEMORY_MANAGEMENT);
+    }
+    MiInsertRmapEntry(Page, Process, Address, Entry, _ReturnAddress());
 }
 
 VOID

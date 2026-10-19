@@ -215,6 +215,25 @@ VOID
 NTAPI
 MmRebalanceMemoryConsumersAndWait(VOID);
 
+/* Out of pages: let the balancer run. A thread that holds its process's
+   AddressCreationLock must not wait for it (CORE-20761) */
+static
+VOID
+MiWaitForFreePages(VOID)
+{
+    static LARGE_INTEGER TinyTime = {{-1L, -1L}};
+
+    if (PsGetCurrentProcess()->AddressCreationLock.Owner == KeGetCurrentThread())
+    {
+        MmRebalanceMemoryConsumers();
+        KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
+    }
+    else
+    {
+        MmRebalanceMemoryConsumersAndWait();
+    }
+}
+
 NTSTATUS
 NTAPI
 MmAccessFault(IN ULONG FaultCode,
@@ -225,6 +244,16 @@ MmAccessFault(IN ULONG FaultCode,
     PMMVAD Vad = NULL;
     NTSTATUS Status;
     BOOLEAN IsArm3Fault = FALSE;
+
+    /* Before any lock: the fault may come from DISPATCH_LEVEL or above. User mode keeps its access violation. */
+    if (MmSpecialPoolEnabled && (Mode == KernelMode) && ((ULONG_PTR)Address >= (ULONG_PTR)MmSystemRangeStart))
+    {
+        MmCheckSpecialPoolFault(FaultCode, Address, TrapInformation);
+    }
+
+Again:
+    Vad = NULL;
+    IsArm3Fault = FALSE;
 
     /* Cute little hack for ROS */
     if ((ULONG_PTR)Address >= (ULONG_PTR)MmSystemRangeStart)
@@ -245,7 +274,8 @@ MmAccessFault(IN ULONG FaultCode,
     {
         /* This is an ARM3 fault */
         DPRINT("ARM3 fault %p\n", Address);
-        return MmArmAccessFault(FaultCode, Address, Mode, TrapInformation);
+        Status = MmArmAccessFault(FaultCode, Address, Mode, TrapInformation);
+        goto Arm3Done;
     }
 
     /* Is there a ReactOS address space yet? */
@@ -288,10 +318,10 @@ MmAccessFault(IN ULONG FaultCode,
     {
         /* This is an ARM3 fault */
         DPRINT("ARM3 fault %p\n", Vad);
-        return MmArmAccessFault(FaultCode, Address, Mode, TrapInformation);
+        Status = MmArmAccessFault(FaultCode, Address, Mode, TrapInformation);
+        goto Arm3Done;
     }
 
-Retry:
     /* Keep same old ReactOS Behaviour */
     if (!MI_IS_NOT_PRESENT_FAULT(FaultCode))
     {
@@ -306,9 +336,26 @@ Retry:
 
     if (Status == STATUS_NO_MEMORY)
     {
-        MmRebalanceMemoryConsumersAndWait();
-        goto Retry;
+        MiWaitForFreePages();
+        goto Again;
     }
+
+    return Status;
+
+Arm3Done:
+    /*
+     * Out of pages: wait for the balancer, then start over. The mapping may
+     * have changed meanwhile, also to one the other memory manager owns.
+     */
+    if (Status == STATUS_NO_MEMORY)
+    {
+        MiWaitForFreePages();
+        goto Again;
+    }
+
+    /* The address became a ReactOS Mm view after the choice above */
+    if (Status == STATUS_MM_RESTART_OPERATION)
+        goto Again;
 
     return Status;
 }

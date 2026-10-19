@@ -118,6 +118,33 @@ BuildSubSysCommandLine(IN LPCWSTR SubsystemName,
     return TRUE;
 }
 
+/* The kernel maps the image elsewhere when its preferred base is unusable, and
+ * the section's TransferAddress still points to the entry at the preferred base */
+static
+PVOID
+BasepGetMappedEntryPoint(IN HANDLE ProcessHandle,
+                         IN PPEB RemotePeb,
+                         IN PVOID TransferAddress)
+{
+    PVOID ImageBase;
+    IMAGE_DOS_HEADER DosHeader;
+    ULONG EntryPoint;
+
+    if (!NT_SUCCESS(NtReadVirtualMemory(ProcessHandle, &RemotePeb->ImageBaseAddress,
+                                        &ImageBase, sizeof(ImageBase), NULL)) ||
+        !NT_SUCCESS(NtReadVirtualMemory(ProcessHandle, ImageBase,
+                                        &DosHeader, sizeof(DosHeader), NULL)) ||
+        !NT_SUCCESS(NtReadVirtualMemory(ProcessHandle,
+                                        (PUCHAR)ImageBase + DosHeader.e_lfanew +
+                                        FIELD_OFFSET(IMAGE_NT_HEADERS, OptionalHeader.AddressOfEntryPoint),
+                                        &EntryPoint, sizeof(EntryPoint), NULL)))
+    {
+        return TransferAddress;
+    }
+
+    return (PUCHAR)ImageBase + EntryPoint;
+}
+
 BOOLEAN
 WINAPI
 BasepIsImageVersionOk(IN ULONG ImageMajorVersion,
@@ -4086,7 +4113,9 @@ StartScan:
     /* Create the Thread's Context */
     BaseInitializeContext(&Context,
                           RemotePeb,
-                          ImageInformation.TransferAddress,
+                          BasepGetMappedEntryPoint(ProcessHandle,
+                                                   RemotePeb,
+                                                   ImageInformation.TransferAddress),
                           InitialTeb.StackBase,
                           0);
 

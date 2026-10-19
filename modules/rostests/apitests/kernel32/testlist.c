@@ -15,6 +15,7 @@ extern void func_ExitThread(void);
 extern void func_FindActCtxSectionStringW(void);
 extern void func_FindFiles(void);
 extern void func_FLS(void);
+extern void func_ForcedRelocation(void);
 extern void func_FormatMessage(void);
 extern void func_GetComputerNameEx(void);
 extern void func_GetCPInfo(void);
@@ -33,6 +34,7 @@ extern void func_JapaneseCalendar(void);
 extern void func_JobObject(void);
 extern void func_LCMapString(void);
 extern void func_LoadLibraryExW(void);
+extern void func_LoadLibraryMachine(void);
 extern void func_LocaleNameToLCID(void);
 extern void func_lstrcpynW(void);
 extern void func_lstrlen(void);
@@ -45,6 +47,7 @@ extern void func_RaiseFailFastException(void);
 extern void func_SetComputerNameExW(void);
 extern void func_SetConsoleWindowInfo(void);
 extern void func_SetCurrentDirectory(void);
+extern void func_SetThreadStackGuarantee(void);
 extern void func_SetUnhandledExceptionFilter(void);
 extern void func_SuspendThreadContext(void);
 extern void func_SystemFirmware(void);
@@ -71,6 +74,7 @@ const struct test winetest_testlist[] =
     { "FindActCtxSectionStringW",    func_FindActCtxSectionStringW },
     { "FindFiles",                   func_FindFiles },
     { "FLS",                         func_FLS },
+    { "ForcedRelocation",            func_ForcedRelocation },
     { "FormatMessage",               func_FormatMessage },
     { "GetComputerNameEx",           func_GetComputerNameEx },
     { "GetCPInfo",                   func_GetCPInfo },
@@ -89,6 +93,7 @@ const struct test winetest_testlist[] =
     { "JobObject",                   func_JobObject },
     { "LCMapString",                 func_LCMapString },
     { "LoadLibraryExW",              func_LoadLibraryExW },
+    { "LoadLibraryMachine",          func_LoadLibraryMachine },
     { "LocaleNameToLCID",            func_LocaleNameToLCID },
     { "lstrcpynW",                   func_lstrcpynW },
     { "lstrlen",                     func_lstrlen },
@@ -101,6 +106,7 @@ const struct test winetest_testlist[] =
     { "SetComputerNameExW",          func_SetComputerNameExW },
     { "SetConsoleWindowInfo",        func_SetConsoleWindowInfo },
     { "SetCurrentDirectory",         func_SetCurrentDirectory },
+    { "SetThreadStackGuarantee",     func_SetThreadStackGuarantee },
     { "SetUnhandledExceptionFilter", func_SetUnhandledExceptionFilter },
     { "SuspendThreadContext",        func_SuspendThreadContext },
     { "SystemFirmware",              func_SystemFirmware },

@@ -294,6 +294,7 @@ MiAllocatePagesForMdl(IN PHYSICAL_ADDRESS LowAddress,
             Pfn1->u3.e1.StartOfAllocation = 1;
             Pfn1->u3.e1.EndOfAllocation = 1;
             Pfn1->u4.VerifierAllocation = 0;
+            Pfn1->u3.e1.CacheAttribute = CacheAttribute;
 
             //
             // Save it into the MDL
@@ -347,6 +348,7 @@ MiAllocatePagesForMdl(IN PHYSICAL_ADDRESS LowAddress,
                 Pfn1->u3.e1.StartOfAllocation = 1;
                 Pfn1->u3.e1.EndOfAllocation = 1;
                 Pfn1->u4.VerifierAllocation = 0;
+                Pfn1->u3.e1.CacheAttribute = CacheAttribute;
 
                 //
                 // Save this page into the MDL

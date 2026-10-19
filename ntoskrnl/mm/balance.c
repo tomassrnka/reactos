@@ -80,7 +80,6 @@ MmReleasePageMemoryConsumer(ULONG Consumer, PFN_NUMBER Page)
     }
 
     (void)InterlockedDecrementUL(&MiMemoryConsumers[Consumer].PagesUsed);
-    UpdateTotalCommittedPages(-1);
 
     OldIrql = MiAcquirePfnLock();
 
@@ -98,6 +97,12 @@ MiTrimMemoryConsumer(ULONG Consumer, ULONG InitialTarget)
     ULONG Target = InitialTarget;
     ULONG NrFreedPages = 0;
     NTSTATUS Status;
+    /* UF-22: snapshot once; the compare and the subtract below must see the same value, or a
+     * concurrent rise above the minimum underflows the unsigned subtraction into a giant target. */
+    ULONG Available = MmAvailablePages;
+    /* UF-22: same hazard on the consumer counter; a concurrent page release between the test and the
+     * subtract would drop PagesUsed below the target and underflow it into a giant target. */
+    ULONG PagesUsed = MiMemoryConsumers[Consumer].PagesUsed;
 
     /* Make sure we can trim this consumer */
     if (!MiMemoryConsumers[Consumer].Trim)
@@ -106,21 +111,21 @@ MiTrimMemoryConsumer(ULONG Consumer, ULONG InitialTarget)
         return InitialTarget;
     }
 
-    if (MmAvailablePages < MiMinimumAvailablePages)
+    if (Available < MiMinimumAvailablePages)
     {
         /* Global page limit exceeded */
-        Target = (ULONG)max(Target, MiMinimumAvailablePages - MmAvailablePages);
+        Target = (ULONG)max(Target, MiMinimumAvailablePages - Available);
     }
-    else if (MiMemoryConsumers[Consumer].PagesUsed > MiMemoryConsumers[Consumer].PagesTarget)
+    else if (PagesUsed > MiMemoryConsumers[Consumer].PagesTarget)
     {
         /* Consumer page limit exceeded */
-        Target = max(Target, MiMemoryConsumers[Consumer].PagesUsed - MiMemoryConsumers[Consumer].PagesTarget);
+        Target = max(Target, PagesUsed - MiMemoryConsumers[Consumer].PagesTarget);
     }
 
     if (Target)
     {
         /* Now swap the pages out */
-        Status = MiMemoryConsumers[Consumer].Trim(Target, MmAvailablePages < MiMinimumAvailablePages, &NrFreedPages);
+        Status = MiMemoryConsumers[Consumer].Trim(Target, Available < MiMinimumAvailablePages, &NrFreedPages);
 
         DPRINT("Trimming consumer %lu: Freed %lu pages with a target of %lu pages\n", Consumer, NrFreedPages, Target);
 
@@ -271,7 +276,8 @@ MmTrimUserMemory(ULONG Target, ULONG Priority, PULONG NrFreedPages)
         else if (CurrentPage == FirstPage)
         {
             DPRINT1("We are back at the start, abort!\n");
-            return STATUS_SUCCESS;
+            /* Leave through the common exit: it drops our reference on CurrentPage */
+            break;
         }
     }
 
@@ -299,9 +305,30 @@ VOID
 NTAPI
 MmRebalanceMemoryConsumersAndWait(VOID)
 {
-    ASSERT(PsGetCurrentProcess()->AddressCreationLock.Owner != KeGetCurrentThread());
-    ASSERT(!MM_ANY_WS_LOCK_HELD(PsGetCurrentThread()));
     ASSERT(KeGetCurrentIrql() < DISPATCH_LEVEL);
+
+    /*
+     * A fault taken while this thread holds an address space lock (a page
+     * table brought in by NtAllocateVirtualMemory, for example) must not
+     * wait for a balancer pass, which may need that lock to page out; nor
+     * can the balancer wait for itself when it faults while writing pages
+     * back. Start it, give it a moment, and let the caller retry. This does
+     * not guarantee progress: the balancer still blocks if it needs the
+     * lock this thread keeps across the retries.
+     */
+    if ((PsGetCurrentProcess()->AddressCreationLock.Owner == KeGetCurrentThread()) ||
+        (MmGetKernelAddressSpace() &&
+         (CONTAINING_RECORD(MmGetKernelAddressSpace(), EPROCESS, Vm)->AddressCreationLock.Owner == KeGetCurrentThread())) ||
+        MM_ANY_WS_LOCK_HELD(PsGetCurrentThread()) ||
+        (PsGetCurrentThreadId() == MiBalancerThreadId.UniqueThread))
+    {
+        LARGE_INTEGER Delay;
+
+        Delay.QuadPart = -10 * 10000;
+        MmRebalanceMemoryConsumers();
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+        return;
+    }
 
     KeResetEvent(&MiBalancerDoneEvent);
     MmRebalanceMemoryConsumers();
@@ -314,16 +341,32 @@ MmRequestPageMemoryConsumer(ULONG Consumer, BOOLEAN CanWait,
                             PPFN_NUMBER AllocatedPage)
 {
     PFN_NUMBER Page;
-
-    /* Delay some requests for the Memory Manager to recover pages (CORE-17624).
-     * FIXME: This is suboptimal.
-     */
-    static INT i = 0;
+    ULONG Pace = 0, Dirty, Low, Range;
+    static LONG Requests;
     static LARGE_INTEGER TinyTime = {{-1L, -1L}};
-    if (i++ >= 100)
+
+    /*
+     * Pace the requests with one tick every Pace-th request (CORE-17624). While pages are short,
+     * every hundredth, as this function always did. While dirty cache data exceeds a quarter of
+     * the dirty page threshold, every hundredth at first and more often as it grows, up to every
+     * fourth at three eighths, so that a writer cannot fill the cache views with dirty data
+     * faster than the lazy writer cleans them. With free pages and a clean cache nothing waits.
+     */
+    if (MmAvailablePages < MiMinimumAvailablePages)
+        Pace = 100;
+
+    Dirty = CcTotalDirtyPages;
+    Low = CcDirtyPageThreshold / 4;
+    Range = max(CcDirtyPageThreshold / 8, 1);
+    if (Dirty > Low)
+        Pace = (Dirty - Low >= Range) ? 4 : 100 - (ULONG)((ULONGLONG)96 * (Dirty - Low) / Range);
+
+    if ((Pace != 0) &&
+        (PsGetCurrentThreadId() != MiBalancerThreadId.UniqueThread) &&
+        (KeGetCurrentIrql() < DISPATCH_LEVEL) &&
+        ((ULONG)InterlockedIncrement(&Requests) % Pace == 0))
     {
         KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
-        i = 0;
     }
 
     /*
@@ -339,7 +382,6 @@ MmRequestPageMemoryConsumer(ULONG Consumer, BOOLEAN CanWait,
 
     /* Update the target */
     InterlockedIncrementUL(&MiMemoryConsumers[Consumer].PagesUsed);
-    UpdateTotalCommittedPages(1);
 
     return(STATUS_SUCCESS);
 }
@@ -388,7 +430,12 @@ MiBalancerThread(PVOID Unused)
                 }
 
                 /* Trim cache */
-                Target = max(InitialTarget, abs(MiMinimumAvailablePages - MmAvailablePages));
+                /* UF-22: snapshot MmAvailablePages once, then trim the cache only for the shortfall
+                 * below the minimum. abs() of the unsigned difference evicted the whole clean cache
+                 * every timer pass when memory was plentiful; reading MmAvailablePages twice (compare
+                 * then subtract) could also race a concurrent change and underflow into a giant target. */
+                ULONG Avail = MmAvailablePages;
+                Target = max(InitialTarget, Avail < MiMinimumAvailablePages ? MiMinimumAvailablePages - Avail : 0);
                 if (Target)
                 {
                     CcRosTrimCache(Target, &NrFreedPages);

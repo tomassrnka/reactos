@@ -263,6 +263,15 @@ MmFreeMemoryArea(
 {
     ULONG_PTR Address;
     PVOID EndAddress;
+    MI_DEFERRED_RELEASE Deferred;
+    ULONG Pending;
+    struct
+    {
+        PVOID Address;
+        PFN_NUMBER Page;
+        SWAPENTRY SwapEntry;
+        BOOLEAN Dirty;
+    } PendingFree[16];
 
     /* Make sure we own the address space lock! */
     ASSERT(CONTAINING_RECORD(AddressSpace, EPROCESS, Vm)->AddressCreationLock.Owner == KeGetCurrentThread());
@@ -280,6 +289,9 @@ MmFreeMemoryArea(
             KeAttachProcess(&Process->Pcb);
         }
 
+        /* The address space lock keeps faults off the view until the batch is flushed */
+        MiInitializeDeferredRelease(&Deferred, Process == NULL, 0);
+        Pending = 0;
         EndAddress = MM_ROUND_UP(MA_GetEndingAddress(MemoryArea), PAGE_SIZE);
         for (Address = MA_GetStartingAddress(MemoryArea);
                 Address < (ULONG_PTR)EndAddress;
@@ -293,23 +305,44 @@ MmFreeMemoryArea(
             if (MmIsPageSwapEntry(Process, (PVOID)Address))
             {
                 MmDeletePageFileMapping(Process, (PVOID)Address, &SwapEntry);
+                /* MmUnmapViewOfSegment waits for paging file I/O on the view first */
+                ASSERT(SwapEntry != MM_WAIT_ENTRY);
                 /* We'll have to do some cleanup when we're on the page file */
                 DoFree = TRUE;
             }
-            else if (FreePage == NULL)
-            {
-                DoFree = MmDeletePhysicalMapping(Process, (PVOID)Address, &Dirty, &Page);
-            }
             else
             {
-                DoFree = MmDeleteVirtualMapping(Process, (PVOID)Address, &Dirty, &Page);
+                DoFree = MmDeleteVirtualMappingDeferFlush(Process, (PVOID)Address, &Dirty, &Page,
+                                                          FreePage == NULL, &Deferred);
             }
             if (DoFree && (FreePage != NULL))
             {
-                FreePage(FreePageContext, MemoryArea, (PVOID)Address,
-                         Page, SwapEntry, (BOOLEAN)Dirty);
+                PendingFree[Pending].Address = (PVOID)Address;
+                PendingFree[Pending].Page = Page;
+                PendingFree[Pending].SwapEntry = SwapEntry;
+                PendingFree[Pending].Dirty = Dirty;
+                Pending++;
+            }
+
+            /* Freeing a page needs every processor's stale translation of it gone */
+            if ((Pending == RTL_NUMBER_OF(PendingFree)) ||
+                (MiDeferredReleaseRoom(&Deferred) < 1 + MI_DEFERRED_PDE_ENTRIES) ||
+                (Address + PAGE_SIZE >= (ULONG_PTR)EndAddress))
+            {
+                ULONG i;
+
+                /* Flush, then drop the mapping counts and free the page tables */
+                MiCompleteDeferredRelease(&Deferred);
+                for (i = 0; i < Pending; i++)
+                {
+                    FreePage(FreePageContext, MemoryArea, PendingFree[i].Address,
+                             PendingFree[i].Page, PendingFree[i].SwapEntry,
+                             PendingFree[i].Dirty);
+                }
+                Pending = 0;
             }
         }
+        MiCleanupDeferredRelease(&Deferred);
 
         if (MemoryArea->VadNode.StartingVpn < (ULONG_PTR)MmSystemRangeStart >> PAGE_SHIFT)
         {
@@ -508,6 +541,18 @@ MiRosCleanupMemoryArea(
 
     MemoryArea = (PMEMORY_AREA)Vad;
     BaseAddress = (PVOID)MA_GetStartingAddress(MemoryArea);
+
+    /* Another thread is unmapping this view and waits for paging file I/O on it: let it finish */
+    if (MemoryArea->DeleteInProgress)
+    {
+        LARGE_INTEGER Delay;
+
+        Delay.QuadPart = -10 * 1000;
+        MmUnlockAddressSpace(&Process->Vm);
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+        MmLockAddressSpace(&Process->Vm);
+        return;
+    }
 
     if (MemoryArea->Type == MEMORY_AREA_SECTION_VIEW)
     {

@@ -405,6 +405,14 @@ MmCreateKernelStack(IN BOOLEAN GuiStack,
     //
     OldIrql = MiAcquirePfnLock();
 
+    /* Fail the stack instead of using page 0 when no page is free */
+    if (MiGetFreeOrZeroedPageCount() < StackPages)
+    {
+        MiReleasePfnLock(OldIrql);
+        MiReleaseSystemPtes(StackPte, StackPtes + 1, SystemPteSpace);
+        return NULL;
+    }
+
     //
     // Loop each stack page
     //
@@ -494,6 +502,15 @@ MmGrowKernelStackEx(IN PVOID StackPointer,
     // Acquire the PFN DB lock
     //
     OldIrql = MiAcquirePfnLock();
+
+    /* Fail the growth instead of using page 0 when no page is free */
+    if ((LimitPte >= NewLimitPte) &&
+        (MiGetFreeOrZeroedPageCount() <
+         (PFN_NUMBER)(LimitPte - NewLimitPte + 1)))
+    {
+        MiReleasePfnLock(OldIrql);
+        return STATUS_NO_MEMORY;
+    }
 
     //
     // Loop each stack page
@@ -662,7 +679,7 @@ MmCreatePeb(IN PEPROCESS Process,
         // Heap and Debug Data
         //
         Peb->NumberOfProcessors = KeNumberProcessors;
-        Peb->ImageProcessAffinityMask = KeActiveProcessors;
+        /* ImageProcessAffinityMask stays 0 unless set below: ntdll applies it over the inherited affinity */
         Peb->BeingDebugged = (BOOLEAN)(Process->DebugPort != NULL);
         Peb->NtGlobalFlag = NtGlobalFlag;
         Peb->HeapSegmentReserve = MmHeapSegmentReserve;
@@ -1048,14 +1065,17 @@ MmInitializeProcessAddressSpace(IN PEPROCESS Process,
     ASSERT(Process->Pcb.DirectoryTableBase[0] == PageFrameNumber * PAGE_SIZE);
     MiInitializePfn(PageFrameNumber, PointerPte, TRUE);
 
-    /* Do the same for hyperspace */
-    PointerPde = MiAddressToPde(HYPER_SPACE);
-    PageFrameNumber = PFN_FROM_PTE(PointerPde);
-    MiInitializePfn(PageFrameNumber, (PMMPTE)PointerPde, TRUE);
-#if (_MI_PAGING_LEVELS == 2)
+    /*
+     * Do the same for hyperspace, top level first: MiInitializePfn adds a
+     * share to the page table that maps the page, and that page table must
+     * already be initialized or its count is overwritten.
+     */
+#if (_MI_PAGING_LEVELS == 4)
+    PointerPxe = MiAddressToPxe((PVOID)HYPER_SPACE);
+    PageFrameNumber = PFN_FROM_PTE(PointerPxe);
+    MiInitializePfn(PageFrameNumber, PointerPxe, TRUE);
     ASSERT(Process->Pcb.DirectoryTableBase[1] == PageFrameNumber * PAGE_SIZE);
 #endif
-
 #if (_MI_PAGING_LEVELS >= 3)
     PointerPpe = MiAddressToPpe((PVOID)HYPER_SPACE);
     PageFrameNumber = PFN_FROM_PTE(PointerPpe);
@@ -1064,10 +1084,10 @@ MmInitializeProcessAddressSpace(IN PEPROCESS Process,
     ASSERT(Process->Pcb.DirectoryTableBase[1] == PageFrameNumber * PAGE_SIZE);
 #endif
 #endif
-#if (_MI_PAGING_LEVELS == 4)
-    PointerPxe = MiAddressToPxe((PVOID)HYPER_SPACE);
-    PageFrameNumber = PFN_FROM_PTE(PointerPxe);
-    MiInitializePfn(PageFrameNumber, PointerPxe, TRUE);
+    PointerPde = MiAddressToPde(HYPER_SPACE);
+    PageFrameNumber = PFN_FROM_PTE(PointerPde);
+    MiInitializePfn(PageFrameNumber, (PMMPTE)PointerPde, TRUE);
+#if (_MI_PAGING_LEVELS == 2)
     ASSERT(Process->Pcb.DirectoryTableBase[1] == PageFrameNumber * PAGE_SIZE);
 #endif
 
@@ -1220,6 +1240,7 @@ MmCreateProcessAddressSpace(IN ULONG MinWs,
 {
     KIRQL OldIrql;
     PFN_NUMBER TableBaseIndex, HyperIndex, WsListIndex;
+    BOOLEAN ZeroTableBase, ZeroHyper, ZeroWsList;
     ULONG Color;
 
     /* Make sure we don't already have a page directory setup */
@@ -1236,55 +1257,44 @@ MmCreateProcessAddressSpace(IN ULONG MinWs,
     /* Lock PFN database */
     OldIrql = MiAcquirePfnLock();
 
+    /* Fail the process instead of using page 0 when no page is free */
+    if (MiGetFreeOrZeroedPageCount() < 3)
+    {
+        MiReleasePfnLock(OldIrql);
+        return FALSE;
+    }
+
     /*
      * Get a page for the table base, one for hyper space & one for the working set list.
      * The PFNs for these pages will be initialized in MmInitializeProcessAddressSpace,
      * when we are already attached to the process.
      * The other pages (if any) are allocated in the arch-specific part.
+     * Take zeroed pages if there are any, others are zeroed outside the
+     * PFN lock.
      */
     Color = MI_GET_NEXT_PROCESS_COLOR(Process);
     MI_SET_USAGE(MI_USAGE_PAGE_DIRECTORY);
     TableBaseIndex = MiRemoveZeroPageSafe(Color);
-    if (!TableBaseIndex)
-    {
-        /* No zero pages, grab a free one */
+    ZeroTableBase = (TableBaseIndex == 0);
+    if (ZeroTableBase)
         TableBaseIndex = MiRemoveAnyPage(Color);
-
-        /* Zero it outside the PFN lock */
-        MiReleasePfnLock(OldIrql);
-        MiZeroPhysicalPage(TableBaseIndex);
-        OldIrql = MiAcquirePfnLock();
-    }
     MI_SET_USAGE(MI_USAGE_PAGE_DIRECTORY);
     Color = MI_GET_NEXT_PROCESS_COLOR(Process);
     HyperIndex = MiRemoveZeroPageSafe(Color);
-    if (!HyperIndex)
-    {
-        /* No zero pages, grab a free one */
+    ZeroHyper = (HyperIndex == 0);
+    if (ZeroHyper)
         HyperIndex = MiRemoveAnyPage(Color);
-
-        /* Zero it outside the PFN lock */
-        MiReleasePfnLock(OldIrql);
-        MiZeroPhysicalPage(HyperIndex);
-        OldIrql = MiAcquirePfnLock();
-    }
     MI_SET_USAGE(MI_USAGE_PAGE_TABLE);
     Color = MI_GET_NEXT_PROCESS_COLOR(Process);
     WsListIndex = MiRemoveZeroPageSafe(Color);
-    if (!WsListIndex)
-    {
-        /* No zero pages, grab a free one */
+    ZeroWsList = (WsListIndex == 0);
+    if (ZeroWsList)
         WsListIndex = MiRemoveAnyPage(Color);
+    MiReleasePfnLock(OldIrql);
 
-        /* Zero it outside the PFN lock */
-        MiReleasePfnLock(OldIrql);
-        MiZeroPhysicalPage(WsListIndex);
-    }
-    else
-    {
-        /* Release the PFN lock */
-        MiReleasePfnLock(OldIrql);
-    }
+    if (ZeroTableBase) MiZeroPhysicalPage(TableBaseIndex);
+    if (ZeroHyper) MiZeroPhysicalPage(HyperIndex);
+    if (ZeroWsList) MiZeroPhysicalPage(WsListIndex);
 
     /* Set the base directory pointers */
     Process->WorkingSetPage = WsListIndex;
@@ -1366,8 +1376,9 @@ MmCleanProcessAddressSpace(IN PEPROCESS Process)
         ASSERT(VadTree->NumberGenericTableElements >= 1);
         MiRemoveNode((PMMADDRESS_NODE)Vad, VadTree);
 
-        /* Only regular VADs supported for now */
-        ASSERT(Vad->u.VadFlags.VadType == VadNone);
+        /* Only regular VADs and user mappings of locked MDLs supported for now */
+        ASSERT((Vad->u.VadFlags.VadType == VadNone) ||
+               (Vad->u.VadFlags.VadType == VadDevicePhysicalMemory));
 
         /* Check if this is a section VAD */
         if (!(Vad->u.VadFlags.PrivateMemory) && (Vad->ControlArea))
@@ -1442,9 +1453,26 @@ MmDeleteProcessAddressSpace(IN PEPROCESS Process)
 
         /* Nuke it */
         MI_SET_PFN_DELETED(Pfn1);
+        PageFrameIndex = Pfn1->u4.PteFrame;
         MiDecrementShareCount(Pfn2, Pfn1->u4.PteFrame);
         MiDecrementShareCount(Pfn1, Process->WorkingSetPage);
         ASSERT((Pfn1->u3.e2.ReferenceCount == 0) || (Pfn1->u3.e1.WriteInProgress));
+
+#if (_MI_PAGING_LEVELS >= 3)
+        /* Free the hyperspace page tables between the working set page and DirectoryTableBase[1] */
+        for (ULONG Level = 0; Level < _MI_PAGING_LEVELS - 2; Level++)
+        {
+            Pfn1 = MiGetPfnEntry(PageFrameIndex);
+            Pfn2 = MiGetPfnEntry(Pfn1->u4.PteFrame);
+            ASSERT(Pfn1->u2.ShareCount == 1);
+
+            MI_SET_PFN_DELETED(Pfn1);
+            MiDecrementShareCount(Pfn2, Pfn1->u4.PteFrame);
+            MiDecrementShareCount(Pfn1, PageFrameIndex);
+            PageFrameIndex = MiGetPfnEntryIndex(Pfn2);
+        }
+        ASSERT(PageFrameIndex == (Process->Pcb.DirectoryTableBase[1] >> PAGE_SHIFT));
+#endif
 
         /* Now map hyperspace and its page table */
         PageFrameIndex = Process->Pcb.DirectoryTableBase[1] >> PAGE_SHIFT;
