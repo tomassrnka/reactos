@@ -492,6 +492,9 @@ DC_vUpdateDC(PDC pdc)
     pdc->dclevel.pSurface = PDEVOBJ_pSurface(ppdev);
 
     PDEVOBJ_sizl(pdc->ppdev, &pdc->dclevel.sizl);
+
+    /* The clip region is limited to the surface, which may now be smaller */
+    pdc->fs |= DC_DIRTY_RAO;
 #if 0
     VisRgn = IntSysCreateRectpRgn(0, 0, pdc->dclevel.sizl.cx, pdc->dclevel.sizl.cy);
     ASSERT(VisRgn);
@@ -656,6 +659,8 @@ DC_vPrepareDCsForBlitEx(
         if (pdcFirst->ppdev->pSurface != pdcFirst->dclevel.pSurface)
         {
             DC_vUpdateDC(pdcFirst);
+            if (bFirstIsDest)
+                CLIPPING_UpdateGCRegion(pdcFirst);
         }
     }
 
@@ -680,6 +685,8 @@ DC_vPrepareDCsForBlitEx(
         if (pdcSecond->ppdev->pSurface != pdcSecond->dclevel.pSurface)
         {
             DC_vUpdateDC(pdcSecond);
+            if (!bFirstIsDest)
+                CLIPPING_UpdateGCRegion(pdcSecond);
         }
     }
 
