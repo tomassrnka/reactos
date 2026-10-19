@@ -10,6 +10,7 @@ extern void func_Wow64ThreadApc(void);
 extern void func_Wow64ThreadLifetime(void);
 extern void func_Wow64ThreadExitProcess(void);
 extern void func_Wow64Run(void);
+extern void func_Wow64SystemDlls(void);
 extern void func_Wow64ReviewFixes(void);
 
 extern void func_ActCtxWithXmlNamespaces(void);
@@ -158,6 +159,7 @@ const struct test winetest_testlist[] =
     { "Wow64RemoteThread", func_Wow64RemoteThread },
     { "Wow64Process", func_Wow64Process },
     { "Wow64Run", func_Wow64Run },
+    { "Wow64SystemDlls", func_Wow64SystemDlls },
     { "Wow64ReviewFixes", func_Wow64ReviewFixes },
     { "ActCtxWithXmlNamespaces",     func_ActCtxWithXmlNamespaces },
     { "BindIoCompletionCallback",    func_BindIoCompletionCallback },
