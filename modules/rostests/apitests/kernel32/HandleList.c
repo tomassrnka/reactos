@@ -532,6 +532,7 @@ static VOID TestListCapacity(VOID)
     NTSTATUS Status;
     SIZE_T Count = (SIZE_T)ROS_PS_MAX_HANDLE_COUNT + 1, i;
     PHANDLE Handles;
+    BOOL Wow64 = FALSE;
 
     Handles = VirtualAlloc(NULL, Count * sizeof(HANDLE),
                             MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
@@ -543,6 +544,12 @@ static VOID TestListCapacity(VOID)
     }
     else skip("Memory for capacity test unavailable: %lu\n", GetLastError());
 
+    /* A private native service: a 32-bit process under WoW64 creates processes through the WoW64 layer */
+    if (IsWow64Process(GetCurrentProcess(), &Wow64) && Wow64)
+    {
+        skip("NtCreateProcessWithAttributes is not a WoW64 service\n");
+        return;
+    }
     CreateNative = (CREATE_WITH_ATTRIBUTES)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),
                                                          "NtCreateProcessWithAttributes");
     if (!CreateNative) return;

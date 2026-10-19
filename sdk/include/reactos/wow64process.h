@@ -7,6 +7,7 @@ typedef struct
     ULONG InheritHandles, CreationFlags, Environment, CurrentDirectory;
     ULONG StartupInfo, ProcessInformation, NewToken, ParentParameters;
     ULONG Error;
+    ULONG AttributeList; /* EXTENDED_STARTUPINFO_PRESENT: the guest's validated attribute list, or 0 */
 } WOW64_CREATE_PROCESS;
 
 NTSTATUS NTAPI RtlWow64CreateProcess(WOW64_CREATE_PROCESS *Request);
