@@ -1329,7 +1329,7 @@ BOOL WINAPI ShellAboutW( HWND hWnd, LPCWSTR szApp, LPCWSTR szOtherStuff,
     BOOL bRet;
 #ifdef __REACTOS__
     WCHAR szVersionString[256];
-    WCHAR szFormat[256];
+    WCHAR szOtherStuff2[512];
 #endif
 
     TRACE("\n");
@@ -1344,16 +1344,21 @@ BOOL WINAPI ShellAboutW( HWND hWnd, LPCWSTR szApp, LPCWSTR szOtherStuff,
         return FALSE;
 
 #ifdef __REACTOS__
-    /* Output the version OS kernel strings */
-    LoadStringW(shell32_hInstance, IDS_ABOUT_VERSION_STRING, szFormat, _countof(szFormat));
-    StringCchPrintfW(szVersionString, _countof(szVersionString), szFormat, KERNEL_VERSION_STR, KERNEL_VERSION_BUILD_STR);
+    /* nitro build identification: the title replaces the version line, the notice goes in front of the caller's text */
+    StringCchPrintfW(szVersionString, _countof(szVersionString), L"%S", NITRO_TITLE_STR);
+    StringCchPrintfW(szOtherStuff2, _countof(szOtherStuff2), L"%S\n%s",
+                     NITRO_NOTICE_STR, szOtherStuff ? szOtherStuff : L"");
 #endif
 
     info.szApp        = szApp;
 #ifdef __REACTOS__
     info.szOSVersion  = szVersionString;
 #endif
+#ifdef __REACTOS__
+    info.szOtherStuff = szOtherStuff2;
+#else
     info.szOtherStuff = szOtherStuff;
+#endif
     info.hIcon        = hIcon ? hIcon : LoadIconW( 0, (LPWSTR)IDI_WINLOGO );
 
     bRet = DialogBoxIndirectParamW((HINSTANCE)GetWindowLongPtrW( hWnd, GWLP_HINSTANCE ),
