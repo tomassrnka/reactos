@@ -149,6 +149,13 @@ GDIOBJ_LockObject(
 
 PGDIOBJ
 NTAPI
+GDIOBJ_LockObjectEx(
+    HGDIOBJ hobj,
+    UCHAR objt,
+    FLONG fl);
+
+PGDIOBJ
+NTAPI
 GDIOBJ_TryLockObject(
     HGDIOBJ hobj,
     UCHAR objt);

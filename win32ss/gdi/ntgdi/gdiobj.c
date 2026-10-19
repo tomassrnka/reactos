@@ -827,6 +827,28 @@ GDIOBJ_LockObject(
     HGDIOBJ hobj,
     UCHAR objt)
 {
+    return GDIOBJ_LockObjectEx(hobj, objt, GDIOBJFLAG_DEFAULT);
+}
+
+/* How long GDIOBJFLAG_IGNOREPID waits for an object that another process owns:
+ * the lock is tried, not waited for, FOREIGN_LOCK_TRIES times, a few
+ * microseconds apart */
+#define FOREIGN_LOCK_TRIES      200
+#define FOREIGN_LOCK_STALL_US   5
+
+/* Like GDIOBJ_LockObject. GDIOBJFLAG_IGNOREPID lets win32k lock an object that
+ * another process owns, for the window manager's own bookkeeping. The caller
+ * holds the USER lock, and a thread of that other process can hold the object's
+ * lock while it waits for the USER lock (NtGdiSwapBuffers, NtGdiSetPixelFormat).
+ * An object owned by another process is therefore never waited for: if its lock
+ * stays taken for the time above, the result is NULL. */
+PGDIOBJ
+NTAPI
+GDIOBJ_LockObjectEx(
+    HGDIOBJ hobj,
+    UCHAR objt,
+    FLONG fl)
+{
     PENTRY pentry;
     POBJ pobj;
     DWORD dwThreadId;
@@ -843,7 +865,7 @@ GDIOBJ_LockObject(
     ASSERT_LOCK_ORDER(objt);
 
     /* Reference the handle entry */
-    pentry = ENTRY_ReferenceEntryByHandle(hobj, 0);
+    pentry = ENTRY_ReferenceEntryByHandle(hobj, fl & GDIOBJFLAG_IGNOREPID);
     if (!pentry)
     {
         DPRINT("GDIOBJ: Requested handle 0x%p is not valid.\n", hobj);
@@ -859,7 +881,33 @@ GDIOBJ_LockObject(
     {
         /* Disable APCs and acquire the push lock */
         KeEnterCriticalRegion();
-        ExAcquirePushLockExclusive(&pobj->pushlock);
+        if ((fl & GDIOBJFLAG_IGNOREPID) &&
+            pentry->ObjectOwner.ulObj != GDI_OBJ_HMGR_PUBLIC &&
+            pentry->ObjectOwner.ulObj != PtrToUlong(PsGetCurrentProcessId()))
+        {
+            ULONG cTries = FOREIGN_LOCK_TRIES;
+
+            while (!ExTryAcquirePushLockExclusive(&pobj->pushlock))
+            {
+                if (--cTries == 0)
+                {
+                    ULONG cRefs, ulIndex;
+
+                    /* Still locked. Clean up and leave, as GDIOBJ_TryLockObject does. */
+                    KeLeaveCriticalRegion();
+                    ulIndex = GDI_HANDLE_GET_INDEX(pobj->hHmgr);
+                    ASSERT((gpaulRefCount[ulIndex] & REF_MASK_COUNT) > 0);
+                    cRefs = InterlockedDecrement((LONG*)&gpaulRefCount[ulIndex]);
+                    ASSERT(cRefs & REF_MASK_VALID);
+                    return NULL;
+                }
+                KeStallExecutionProcessor(FOREIGN_LOCK_STALL_US);
+            }
+        }
+        else
+        {
+            ExAcquirePushLockExclusive(&pobj->pushlock);
+        }
 
         /* Set us as lock owner */
         ASSERT(pobj->dwThreadId == 0);
