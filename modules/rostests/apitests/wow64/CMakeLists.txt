@@ -31,7 +31,7 @@ add_wow64_apitest(kernel32
     GetCurrentDirectory GetEnvironmentVariable GetDriveType GetCPInfo
     IsDBCSLeadByteEx lstrlen Wow64Environment Wow64ProgramFiles Wow64EnvironmentBlock Wow64SystemDlls DynamicTls HandleList JobObject)
 add_wow64_apitest(ntdll StackOverflowDispatch
-    Wow64Continue Wow64SystemRangeStart NtOpenKey NtQueryKey NtQueryValueKey
+    Wow64Continue Wow64SystemRangeStart Wow64QueryVirtualMemory NtOpenKey NtQueryKey NtQueryValueKey
     RtlDetermineDosPathNameType RtlUnicodeStringToAnsiString StackOverflow StackOverflowThread StackDeepRecursion SystemCallStubs)
 add_wow64_apitest(advapi32
     RegCreateKeyEx RegOpenKeyExW RegQueryValueExW RegEnumValueW RegWow64 RegWow64Unicode RegWow64Views RegWow64SharedCreate RegWow64Matrix RegWow64LongName RegWow64SharedLongName RegWow64Volatile RegWow64Aliases TokenLogonSid RestrictedSidsCopy TokenDefaultDacl)
