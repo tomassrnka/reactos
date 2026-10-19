@@ -62,7 +62,7 @@ InsertGptPartition(
             else if (ullSectorSize < PartEntry->SectorCount.QuadPart)
             {
                 DPRINT("Claim part of unused space\n");
-                NewPartEntry = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(PPARTENTRY));
+                NewPartEntry = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(PARTENTRY));
                 if (NewPartEntry == NULL)
                 {
                     ConPuts(StdOut, L"Memory allocation failed!\n");
@@ -397,7 +397,7 @@ CreateExtendedPartition(
         }
         else if (PartEntry->SectorCount.QuadPart > ullSectorCount)
         {
-            NewPartEntry = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(PPARTENTRY));
+            NewPartEntry = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(PARTENTRY));
             if (NewPartEntry == NULL)
             {
                 ConPuts(StdOut, L"Memory allocation failed!\n");
@@ -567,6 +567,10 @@ CreateLogicalPartition(
 
     DPRINT1("SectorCount: %I64u\n", ullSectorCount);
 
+    /* Only the partition created here and its volume get the focus */
+    CurrentPartition = NULL;
+    CurrentVolume = NULL;
+
     for (ListEntry = CurrentDisk->LogicalPartListHead.Flink;
          ListEntry != &CurrentDisk->LogicalPartListHead;
          ListEntry = ListEntry->Flink)
@@ -603,7 +607,7 @@ CreateLogicalPartition(
             }
             else if (PartEntry->SectorCount.QuadPart > ullSectorCount)
             {
-                NewPartEntry = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(PPARTENTRY));
+                NewPartEntry = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(PARTENTRY));
                 if (NewPartEntry == NULL)
                 {
                     ConPuts(StdOut, L"Memory allocation failed!\n");
@@ -634,6 +638,13 @@ CreateLogicalPartition(
         }
     }
 
+    if (CurrentPartition == NULL)
+    {
+        /* No free space was large enough */
+        ConResPuts(StdOut, IDS_CREATE_PARTITION_FAIL);
+        return EXIT_SUCCESS;
+    }
+
     UpdateMbrDiskLayout(CurrentDisk);
     Status = WriteMbrPartitions(CurrentDisk);
     if (!NT_SUCCESS(Status))
@@ -644,6 +655,8 @@ CreateLogicalPartition(
     }
 
     ConResPuts(StdOut, IDS_CREATE_PARTITION_SUCCESS);
+
+    SelectVolumeOfNewPartition(CurrentPartition);
 
     return EXIT_SUCCESS;
 }
@@ -813,6 +826,10 @@ CreatePrimaryMbrPartition(
         PartitionType = PARTITION_HUGE;
     }
 
+    /* Only the partition created here and its volume get the focus */
+    CurrentPartition = NULL;
+    CurrentVolume = NULL;
+
     if (GetPrimaryPartitionCount(CurrentDisk) >= 4)
     {
         ConPuts(StdOut, L"No space left for another primary partition!\n");
@@ -862,7 +879,7 @@ CreatePrimaryMbrPartition(
             }
             else if (PartEntry->SectorCount.QuadPart > ullSectorCount)
             {
-                NewPartEntry = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(PPARTENTRY));
+                NewPartEntry = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(PARTENTRY));
                 if (NewPartEntry == NULL)
                 {
                     ConPuts(StdOut, L"Memory allocation failed!\n");
@@ -893,6 +910,13 @@ CreatePrimaryMbrPartition(
         }
     }
 
+    if (CurrentPartition == NULL)
+    {
+        /* No free space was large enough */
+        ConResPuts(StdOut, IDS_CREATE_PARTITION_FAIL);
+        return;
+    }
+
     UpdateMbrDiskLayout(CurrentDisk);
     Status = WriteMbrPartitions(CurrentDisk);
     if (!NT_SUCCESS(Status))
@@ -903,6 +927,8 @@ CreatePrimaryMbrPartition(
     }
 
     ConResPuts(StdOut, IDS_CREATE_PARTITION_SUCCESS);
+
+    SelectVolumeOfNewPartition(CurrentPartition);
 }
 
 
@@ -943,6 +969,9 @@ CreatePrimaryGptPartition(
     DumpPartitionList(CurrentDisk);
 #endif
 
+    /* Only the partition created here and its volume get the focus */
+    CurrentVolume = NULL;
+
     PartEntry = InsertGptPartition(CurrentDisk,
                                    ullSectorCount,
                                    &guidPartitionType);
@@ -970,6 +999,8 @@ CreatePrimaryGptPartition(
     }
 
     ConResPuts(StdOut, IDS_CREATE_PARTITION_SUCCESS);
+
+    SelectVolumeOfNewPartition(CurrentPartition);
 }
 
 
@@ -1005,6 +1036,8 @@ CreatePrimaryPartition(
         if (!NT_SUCCESS(Status))
         {
             DPRINT1("CreateDisk() failed!\n");
+            CurrentPartition = NULL;
+            CurrentVolume = NULL;
             return EXIT_SUCCESS;
         }
 

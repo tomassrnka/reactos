@@ -1510,11 +1510,16 @@ AddDiskToList(
     }
     else if (DiskEntry->PartitionStyle == PARTITION_STYLE_GPT)
     {
-        /* Calculate the number of usable sectors */
+        /*
+         * Calculate the number of usable sectors: from the first aligned sector after
+         * the start of the usable area to the last sector before the last alignment
+         * boundary inside it (the backup table follows the usable area).
+         */
         DiskEntry->StartSector.QuadPart = AlignDown(DiskEntry->LayoutBuffer->Gpt.StartingUsableOffset.QuadPart / DiskEntry->BytesPerSector,
                                                     DiskEntry->SectorAlignment) + (ULONGLONG)DiskEntry->SectorAlignment;
-        DiskEntry->EndSector.QuadPart = AlignDown(DiskEntry->StartSector.QuadPart + (DiskEntry->LayoutBuffer->Gpt.UsableLength.QuadPart / DiskEntry->BytesPerSector) - 1,
-                                                  DiskEntry->SectorAlignment);
+        DiskEntry->EndSector.QuadPart = AlignDown((DiskEntry->LayoutBuffer->Gpt.StartingUsableOffset.QuadPart +
+                                                   DiskEntry->LayoutBuffer->Gpt.UsableLength.QuadPart) / DiskEntry->BytesPerSector,
+                                                  DiskEntry->SectorAlignment) - 1;
 
         if (DiskEntry->LayoutBuffer->PartitionCount == 0)
         {
@@ -1865,7 +1870,6 @@ GetDiskForVolume(
 }
 
 
-static
 PPARTENTRY
 GetPartitionForVolume(
     _In_ PVOLENTRY VolumeEntry)
@@ -3189,9 +3193,11 @@ GetVolumeFromPartition(
     while (Entry != &VolumeListHead)
     {
         VolumeEntry = CONTAINING_RECORD(Entry, VOLENTRY, ListEntry);
+        Entry = Entry->Flink;
 
+        /* Volumes that are not on a disk (CD-ROM) have no extents */
         if (VolumeEntry->pExtents == NULL)
-            return NULL;
+            continue;
 
         for (i = 0; i < VolumeEntry->pExtents->NumberOfDiskExtents; i++)
         {
@@ -3202,11 +3208,172 @@ GetVolumeFromPartition(
                     return VolumeEntry;
             }
         }
-
-        Entry = Entry->Flink;
     }
 
     return NULL;
+}
+
+
+/* Numbers of the volumes listed before a refresh */
+typedef struct _VOLUME_NUMBERS
+{
+    ULONG ulCount;
+    ULONG ulNextNumber;
+    PWSTR pszNames;     /* ulCount names of MAX_PATH characters */
+    PULONG pulNumbers;
+} VOLUME_NUMBERS, *PVOLUME_NUMBERS;
+
+static
+BOOL
+SaveVolumeNumbers(
+    _Out_ PVOLUME_NUMBERS Numbers)
+{
+    PLIST_ENTRY Entry;
+    PVOLENTRY VolumeEntry;
+    ULONG i;
+
+    ZeroMemory(Numbers, sizeof(*Numbers));
+
+    for (Entry = VolumeListHead.Flink; Entry != &VolumeListHead; Entry = Entry->Flink)
+        Numbers->ulCount++;
+
+    if (Numbers->ulCount == 0)
+        return TRUE;
+
+    Numbers->pszNames = RtlAllocateHeap(RtlGetProcessHeap(), 0, Numbers->ulCount * MAX_PATH * sizeof(WCHAR));
+    Numbers->pulNumbers = RtlAllocateHeap(RtlGetProcessHeap(), 0, Numbers->ulCount * sizeof(ULONG));
+    if ((Numbers->pszNames == NULL) || (Numbers->pulNumbers == NULL))
+        return FALSE;
+
+    i = 0;
+    for (Entry = VolumeListHead.Flink; Entry != &VolumeListHead; Entry = Entry->Flink, i++)
+    {
+        VolumeEntry = CONTAINING_RECORD(Entry, VOLENTRY, ListEntry);
+        StringCchCopyW(&Numbers->pszNames[i * MAX_PATH], MAX_PATH, VolumeEntry->VolumeName);
+        Numbers->pulNumbers[i] = VolumeEntry->VolumeNumber;
+        if (VolumeEntry->VolumeNumber >= Numbers->ulNextNumber)
+            Numbers->ulNextNumber = VolumeEntry->VolumeNumber + 1;
+    }
+
+    return TRUE;
+}
+
+static
+VOID
+FreeVolumeNumbers(
+    _Inout_ PVOLUME_NUMBERS Numbers)
+{
+    if (Numbers->pszNames)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Numbers->pszNames);
+    if (Numbers->pulNumbers)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Numbers->pulNumbers);
+    ZeroMemory(Numbers, sizeof(*Numbers));
+}
+
+/*
+ * Reads the volume list again. Volumes that were listed before keep their
+ * numbers, so that a later "select volume N" still means the same volume;
+ * new volumes get numbers after the highest one.
+ */
+static
+VOID
+RefreshVolumeList(
+    _In_ PVOLUME_NUMBERS Numbers)
+{
+    PLIST_ENTRY Entry;
+    PVOLENTRY VolumeEntry;
+    ULONG ulNextNumber = Numbers->ulNextNumber, i;
+
+    DestroyVolumeList();
+    CreateVolumeList();
+
+    for (Entry = VolumeListHead.Flink; Entry != &VolumeListHead; Entry = Entry->Flink)
+    {
+        VolumeEntry = CONTAINING_RECORD(Entry, VOLENTRY, ListEntry);
+
+        for (i = 0; i < Numbers->ulCount; i++)
+        {
+            if (_wcsicmp(&Numbers->pszNames[i * MAX_PATH], VolumeEntry->VolumeName) == 0)
+                break;
+        }
+
+        if (i < Numbers->ulCount)
+            VolumeEntry->VolumeNumber = Numbers->pulNumbers[i];
+        else
+            VolumeEntry->VolumeNumber = ulNextNumber++;
+    }
+}
+
+
+/*
+ * Gives the focus to the volume of a partition that was just written, as
+ * the partition already has it. The volume list is read again because the
+ * system adds the new volume after the layout is written, asynchronously,
+ * so it is read up to 20 times, 500 ms apart. The numbers of the volumes
+ * listed before are kept across all the reads; if they cannot be saved,
+ * the list is not read again and no volume gets the focus.
+ */
+/*
+ * The selected volume, if the selected disk and partition agree with it:
+ * NULL when a partition is selected that is not the volume's, or the volume
+ * lies on disks other than the selected one. Commands that act on a volume
+ * take it from here, so that none acts on a volume of another disk.
+ */
+PVOLENTRY
+GetFocusVolume(VOID)
+{
+    ULONG i;
+
+    if (CurrentVolume == NULL)
+        return NULL;
+
+    if (CurrentPartition != NULL &&
+        GetPartitionForVolume(CurrentVolume) != CurrentPartition)
+        return NULL;
+
+    /* Volumes that are not on a disk (CD-ROM) have no extents */
+    if (CurrentDisk != NULL && CurrentVolume->pExtents != NULL)
+    {
+        for (i = 0; i < CurrentVolume->pExtents->NumberOfDiskExtents; i++)
+        {
+            if (CurrentVolume->pExtents->Extents[i].DiskNumber == CurrentDisk->DiskNumber)
+                return CurrentVolume;
+        }
+        return NULL;
+    }
+
+    return CurrentVolume;
+}
+
+
+VOID
+SelectVolumeOfNewPartition(
+    _In_ PPARTENTRY PartEntry)
+{
+    VOLUME_NUMBERS Numbers;
+    ULONG ulTry;
+
+    CurrentVolume = NULL;
+
+    if (!SaveVolumeNumbers(&Numbers))
+    {
+        FreeVolumeNumbers(&Numbers);
+        return;
+    }
+
+    for (ulTry = 0; ulTry < 20; ulTry++)
+    {
+        if (ulTry != 0)
+            Sleep(500);
+
+        RefreshVolumeList(&Numbers);
+
+        CurrentVolume = GetVolumeFromPartition(PartEntry);
+        if (CurrentVolume != NULL)
+            break;
+    }
+
+    FreeVolumeNumbers(&Numbers);
 }
 
 

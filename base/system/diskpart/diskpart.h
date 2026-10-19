@@ -456,6 +456,27 @@ extend_main(
     _In_ INT argc,
     _In_ PWSTR *argv);
 
+NTSTATUS
+OpenPartitionDevice(
+    _In_ PPARTENTRY PartEntry,
+    _In_ BOOL bWholeDisk,
+    _Out_ PHANDLE phDevice);
+
+NTSTATUS
+GetPartitionFileSystem(
+    _In_ HANDLE hVolume,
+    _Out_writes_(cchFileSystem) PWSTR pszFileSystem,
+    _In_ ULONG cchFileSystem);
+
+PPARTENTRY
+GetFocusPartition(VOID);
+
+VOID
+RefreshAfterResize(
+    _In_ ULONG ulDiskNumber,
+    _In_ ULONGLONG ullStartSector,
+    _In_ BOOL bHadVolume);
+
 /* filesystem.c */
 EXIT_CODE
 filesystems_main(
@@ -463,6 +484,11 @@ filesystems_main(
     _In_ PWSTR *argv);
 
 /* format.c */
+BOOL
+GetFsModule(
+    _In_ PWSTR pszFileSystem,
+    _Out_ HMODULE *phModule);
+
 EXIT_CODE
 format_main(
     _In_ INT argc,
@@ -721,9 +747,23 @@ NTSTATUS
 DismountVolume(
     _In_ PPARTENTRY PartEntry);
 
+PPARTENTRY
+GetPartitionForVolume(
+    _In_ PVOLENTRY VolumeEntry);
+
 PVOLENTRY
 GetVolumeFromPartition(
     _In_ PPARTENTRY PartEntry);
+
+PVOLENTRY
+GetFocusVolume(VOID);
+
+VOID
+SelectVolumeOfNewPartition(
+    _In_ PPARTENTRY PartEntry);
+
+VOID
+ReloadVolumeList(VOID);
 
 VOID
 RemoveVolume(

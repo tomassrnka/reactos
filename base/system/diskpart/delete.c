@@ -339,6 +339,10 @@ DeletePartition(
         DeleteGptPartition(bOverride);
     }
 
+    /* The partition is gone, and the volume that SELECT PARTITION selected with it. */
+    if (CurrentPartition == NULL)
+        CurrentVolume = NULL;
+
     return EXIT_SUCCESS;
 }
 

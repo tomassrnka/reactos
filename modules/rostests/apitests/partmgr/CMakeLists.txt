@@ -1,6 +1,8 @@
 
 list(APPEND SOURCE
     GptVolumes.c
+    ExtendVolume.c
+    GrowPartition.c
     StorDeviceNumber.c)
 
 list(APPEND PCH_SKIP_SOURCE
