@@ -885,6 +885,8 @@ SepPerformTokenFiltering(
     ULONG PrimaryGroupIndex;
     ULONG RestrictedSidsInList;
     ULONG RestrictedSidsInToken;
+    PSID RestrictedSidsEnd;
+    ULONG RestrictedSidsRemaining;
     ULONG VariableLength, TotalSize;
     ULONG PrivsInToken, PrivsInList;
     ULONG GroupsInToken, GroupsInList;
@@ -1144,9 +1146,22 @@ SepPerformTokenFiltering(
         EndMem = (PVOID)((ULONG_PTR)EndMem + RestrictedSidsLength);
         VariableLength -= RestrictedSidsLength;
 
-        RtlCopyMemory(AccessToken->RestrictedSids,
-                      RestrictedSidsIntoToken,
-                      AccessToken->RestrictedSidCount * sizeof(SID_AND_ATTRIBUTES));
+        /*
+         * Copy the SIDs themselves, not only the array: the caller's list
+         * (NtFilterToken's captured copy) is freed when the call returns.
+         */
+        Status = RtlCopySidAndAttributesArray(RestrictedSidsCount,
+                                              RestrictedSidsIntoToken,
+                                              RestrictedSidsLength - RestrictedSidsCount * sizeof(SID_AND_ATTRIBUTES),
+                                              AccessToken->RestrictedSids,
+                                              &AccessToken->RestrictedSids[RestrictedSidsCount],
+                                              &RestrictedSidsEnd,
+                                              &RestrictedSidsRemaining);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("SepPerformTokenFiltering(): Failed to copy the requested restricted SIDs (Status 0x%lx)\n", Status);
+            goto Quit;
+        }
 
         /*
          * As we've copied the restricted SIDs into
