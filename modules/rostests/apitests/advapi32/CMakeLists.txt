@@ -4,6 +4,7 @@ list(APPEND SOURCE
     ConvertStringSidToSid.c
     RegWow64.c
     RegWow64Review.c
+    RestrictedSidsCopy.c
     CreateService.c
     CloseTrace.c
     DuplicateTokenEx.c
