@@ -172,11 +172,14 @@ static DWORD WINAPI EndRunThread(PVOID Param)
     return 0;
 }
 
+/* The worst case, every run retried 3 times, takes about 175 s; keep a wide margin */
+#define WATCHDOG_MS 300000
+
 static DWORD WINAPI WatchdogThread(PVOID Param)
 {
     /* A wait that never returns must not hang the test run */
-    Sleep(180000);
-    printf("FAIL: watchdog, the test did not finish in 180 s\n");
+    Sleep(WATCHDOG_MS);
+    printf("FAIL: watchdog, the test did not finish in %u s\n", WATCHDOG_MS / 1000);
     printf("IDLE summary: %u checks, %u failures\n", Checks + 1, Failures + 1);
     ExitProcess(2);
 }
