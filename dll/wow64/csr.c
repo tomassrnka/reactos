@@ -11,6 +11,75 @@
 #include <win/winmsg.h>
 #include "csr32.h"
 
+/* API names for the diagnostics, in the order of the server API enumerations */
+static const char *BaseApiNames[] =
+{
+    "BasepCreateProcess", "BasepCreateThread", "BasepGetTempFile", "BasepExitProcess", "BasepDebugProcess",
+    "BasepCheckVDM", "BasepUpdateVDMEntry", "BasepGetNextVDMCommand", "BasepExitVDM", "BasepIsFirstVDM",
+    "BasepGetVDMExitCode", "BasepSetReenterCount", "BasepSetProcessShutdownParam",
+    "BasepGetProcessShutdownParam", "BasepNlsSetUserInfo", "BasepNlsSetMultipleUserInfo",
+    "BasepNlsCreateSection", "BasepSetVDMCurDirs", "BasepGetVDMCurDirs", "BasepBatNotification",
+    "BasepRegisterWowExec", "BasepSoundSentryNotification", "BasepRefreshIniFileMapping",
+    "BasepDefineDosDevice", "BasepSetTermsrvAppInstallMode", "BasepNlsUpdateCacheCount",
+    "BasepSetTermsrvClientTimeZone", "BasepSxsCreateActivationContext", "BasepDebugProcessStop",
+    "BasepRegisterThread", "BasepNlsGetUserInfo",
+};
+static const char *ConsoleApiNames[] =
+{
+    "ConsolepOpenConsole", "ConsolepGetConsoleInput", "ConsolepWriteConsoleInput",
+    "ConsolepReadConsoleOutput", "ConsolepWriteConsoleOutput", "ConsolepReadConsoleOutputString",
+    "ConsolepWriteConsoleOutputString", "ConsolepFillConsoleOutput", "ConsolepGetMode",
+    "ConsolepGetNumberOfFonts", "ConsolepGetNumberOfInputEvents", "ConsolepGetScreenBufferInfo",
+    "ConsolepGetCursorInfo", "ConsolepGetMouseInfo", "ConsolepGetFontInfo", "ConsolepGetFontSize",
+    "ConsolepGetCurrentFont", "ConsolepSetMode", "ConsolepSetActiveScreenBuffer", "ConsolepFlushInputBuffer",
+    "ConsolepGetLargestWindowSize", "ConsolepSetScreenBufferSize", "ConsolepSetCursorPosition",
+    "ConsolepSetCursorInfo", "ConsolepSetWindowInfo", "ConsolepScrollScreenBuffer",
+    "ConsolepSetTextAttribute", "ConsolepSetFont", "ConsolepSetIcon", "ConsolepReadConsole",
+    "ConsolepWriteConsole", "ConsolepDuplicateHandle", "ConsolepGetHandleInformation",
+    "ConsolepSetHandleInformation", "ConsolepCloseHandle", "ConsolepVerifyIoHandle", "ConsolepAlloc",
+    "ConsolepFree", "ConsolepGetTitle", "ConsolepSetTitle", "ConsolepCreateScreenBuffer",
+    "ConsolepInvalidateBitMapRect", "ConsolepVDMOperation", "ConsolepSetCursor", "ConsolepShowCursor",
+    "ConsolepMenuControl", "ConsolepSetPalette", "ConsolepSetDisplayMode", "ConsolepRegisterVDM",
+    "ConsolepGetHardwareState", "ConsolepSetHardwareState", "ConsolepGetDisplayMode", "ConsolepAddAlias",
+    "ConsolepGetAlias", "ConsolepGetAliasesLength", "ConsolepGetAliasExesLength", "ConsolepGetAliases",
+    "ConsolepGetAliasExes", "ConsolepExpungeCommandHistory", "ConsolepSetNumberOfCommands",
+    "ConsolepGetCommandHistoryLength", "ConsolepGetCommandHistory", "ConsolepSetCommandHistoryMode",
+    "ConsolepGetCP", "ConsolepSetCP", "ConsolepSetKeyShortcuts", "ConsolepSetMenuClose",
+    "ConsolepNotifyLastClose", "ConsolepGenerateCtrlEvent", "ConsolepGetKeyboardLayoutName",
+    "ConsolepGetConsoleWindow", "ConsolepCharType", "ConsolepSetLocalEUDC", "ConsolepSetCursorMode",
+    "ConsolepGetCursorMode", "ConsolepRegisterOS2", "ConsolepSetOS2OemFormat", "ConsolepGetNlsMode",
+    "ConsolepSetNlsMode", "ConsolepRegisterConsoleIME", "ConsolepUnregisterConsoleIME", "ConsolepGetLangId",
+    "ConsolepAttach", "ConsolepGetSelectionInfo", "ConsolepGetProcessList", "ConsolepGetHistory",
+    "ConsolepSetHistory",
+};
+static const char *UserApiNames[] =
+{
+    "UserpExitWindowsEx", "UserpEndTask", "UserpLogon", "UserpRegisterServicesProcess",
+    "UserpActivateDebugger", "UserpGetThreadConsoleDesktop", "UserpDeviceEvent", "UserpRegisterLogonProcess",
+    "UserpCreateSystemThreads", "UserpRecordShutdownReason",
+};
+C_ASSERT(RTL_NUMBER_OF(BaseApiNames) == BasepMaxApiNumber - BASESRV_FIRST_API_NUMBER);
+C_ASSERT(RTL_NUMBER_OF(ConsoleApiNames) == ConsolepMaxApiNumber - CONSRV_FIRST_API_NUMBER);
+C_ASSERT(RTL_NUMBER_OF(UserApiNames) == UserpMaxApiNumber - USERSRV_FIRST_API_NUMBER);
+
+static NTSTATUS UnsupportedApi(ULONG Api, ULONG Size, BOOLEAN *Reported)
+{
+    ULONG Server = CSR_API_NUMBER_TO_SERVER_ID(Api), Number = CSR_API_NUMBER_TO_API_ID(Api);
+    const char *ServerName = "server", *Name = "unknown";
+#define NAME(Index, Table, First) \
+    if (Server == Index) { ServerName = #Index; \
+        if (Number - First < RTL_NUMBER_OF(Table)) Name = Table[Number - First]; }
+    NAME(BASESRV_SERVERDLL_INDEX, BaseApiNames, BASESRV_FIRST_API_NUMBER)
+    NAME(CONSRV_SERVERDLL_INDEX, ConsoleApiNames, CONSRV_FIRST_API_NUMBER)
+    NAME(USERSRV_SERVERDLL_INDEX, UserApiNames, USERSRV_FIRST_API_NUMBER)
+#undef NAME
+    if (Wow64FirstReport(WOW64_SERVICE_CSR, WOW64_UNSUPPORTED_CSR_API, Api))
+        DbgPrint("WoW64: unsupported CSR API %lx (%s %s), size %lu, pid %lx\n", Api, ServerName, Name, Size,
+                 HandleToUlong(NtCurrentTeb()->ClientId.UniqueProcess));
+    *Reported = TRUE;
+    return STATUS_NOT_SUPPORTED;
+}
+
 static NTSTATUS CopyBaseData(VOID)
 {
     PBASE_STATIC_SERVER_DATA From = NtCurrentPeb()->ReadOnlyStaticServerData[BASESRV_SERVERDLL_INDEX];
@@ -77,7 +146,7 @@ static DWORD WINAPI UnsupportedConsoleCallback(PVOID Parameter)
     return ERROR_NOT_SUPPORTED;
 }
 
-static NTSTATUS Connect(ULONG *a)
+static NTSTATUS Connect(ULONG *a, BOOLEAN *Reported)
 {
     ULONG *Length = PTR32(a[3]);
     NTSTATUS Status;
@@ -126,12 +195,12 @@ static NTSTATUS Connect(ULONG *a)
                 From->ConsoleStartInfo.InitEvents[i] = HandleToUlong(To.ConsoleStartInfo.InitEvents[i]);
         }
     }
-    else return STATUS_NOT_SUPPORTED;
+    else return Wow64Unsupported(WOW64_SERVICE_CSR, WOW64_UNSUPPORTED_CSR_SERVER, a[1], Reported);
     if (a[4]) *(BOOLEAN *)PTR32(a[4]) = InServer;
     return Status;
 }
 
-static NTSTATUS Call(ULONG *a)
+static NTSTATUS Call(ULONG *a, BOOLEAN *Reported)
 {
     /* PORT_MESSAGE32 is 24 bytes, followed by four ULONG CSR fields. */
     ULONG *Data = (ULONG *)((PUCHAR)PTR32(a[0]) + 40);
@@ -222,18 +291,17 @@ static NTSTATUS Call(ULONG *a)
         return CsrClientCallServer((PCSR_API_MESSAGE)&BaseMessage, NULL, Api, sizeof(BASE_EXIT_PROCESS));
     }
     default:
-        DbgPrint("WoW64: unsupported CSR API %lx, size %lu\n", Api, a[3]);
-        return STATUS_NOT_SUPPORTED;
+        return UnsupportedApi(Api, a[3], Reported);
     }
 }
 
-NTSTATUS Wow64CsrDispatch(ULONG Operation, ULONG *Arguments)
+NTSTATUS Wow64CsrDispatch(ULONG Operation, ULONG *Arguments, BOOLEAN *Reported)
 {
     switch (Operation)
     {
-    case 0: return Connect(Arguments);
-    case 1: return Call(Arguments);
+    case 0: return Connect(Arguments, Reported);
+    case 1: return Call(Arguments, Reported);
     case 2: return CsrNewThread();
-    default: return STATUS_INVALID_SYSTEM_SERVICE;
+    default: return Wow64Unsupported(WOW64_SERVICE_CSR, WOW64_UNSUPPORTED_OPERATION, Operation, Reported);
     }
 }

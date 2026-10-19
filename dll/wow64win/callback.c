@@ -196,17 +196,29 @@ static VOID UnpackPayload(PVOID To, const PVOID From, UINT Msg, WPARAM Wparam, U
 /* CALLWND hooks receive a CWP structure followed by the message buffer.
  * Unlike WINDOWPROC's CREATE packet, these are ordinary CREATESTRUCT fields,
  * not offsets. Other pointer messages use the same kernel packing rules. */
+/* A message whose payload has no translation (size -2): one debug line per process and message */
+static VOID ReportMessage(UINT Message, LONG Size)
+{
+    if (Wow64WinFirstReport(1, Message))
+        DbgPrint("WoW64win: unsupported callback message %x size %ld, pid %lx\n", Message, Size,
+                 HandleToUlong(NtCurrentTeb()->ClientId.UniqueProcess));
+}
+
 static LONG HookPayloadSize(const HOOKPROC_CALLBACK_ARGUMENTS *Header)
 {
     const CWPSTRUCT *Cwp;
+    LONG Size;
     if (Header->HookId == WH_CALLWNDPROC)
         Cwp = &((const CWP_Struct *)Header)->cwps;
     else
         Cwp = (const CWPSTRUCT *)&((const CWPR_Struct *)Header)->cwprs.lParam;
     if (!Header->lParamSize) return 0;
     if (Cwp->message == WM_CREATE || Cwp->message == WM_NCCREATE)
-        return Header->lParamSize == sizeof(CREATESTRUCTW) ? sizeof(CREATE32) : -2;
-    return PayloadSize(Cwp->message, Cwp->wParam, Header->lParamSize);
+        Size = Header->lParamSize == sizeof(CREATESTRUCTW) ? sizeof(CREATE32) : -2;
+    else
+        Size = PayloadSize(Cwp->message, Cwp->wParam, Header->lParamSize);
+    if (Size == -2) ReportMessage(Cwp->message, Header->lParamSize);
+    return Size;
 }
 
 static VOID PackHook(HOOK32 *To, const HOOKPROC_CALLBACK_ARGUMENTS *From, LONG Size)
@@ -304,7 +316,7 @@ static NTSTATUS Callback(ULONG Id, PVOID Buffer, ULONG Length)
             if (Length < sizeof(*Native) || Native->lParamBufferSize < -1) break;
             if (Length != sizeof(*Native) + max(Native->lParamBufferSize, 0)) break;
             Payload = PayloadSize(Native->Msg, Native->wParam, Native->lParamBufferSize);
-            if (Payload == -2) { DbgPrint("WoW64win: unsupported callback message %x size %d\n",Native->Msg,Native->lParamBufferSize); break; }
+            if (Payload == -2) { ReportMessage(Native->Msg, Native->lParamBufferSize); break; }
             GuestLength = sizeof(WINDOWPROC32) + max(Payload,0); Status = STATUS_SUCCESS; break;
         }
         case USER32_CALLBACK_SENDASYNCPROC:
@@ -433,7 +445,8 @@ static NTSTATUS Callback(ULONG Id, PVOID Buffer, ULONG Length)
         Status = _SEH2_GetExceptionCode();
     }
     _SEH2_END;
-    DbgPrint("WoW64win: callback %lu failed %lx\n",Id,Status);
+    /* An unsupported message was already reported by name */
+    if (Payload != -2) DbgPrint("WoW64win: callback %lu failed %lx\n",Id,Status);
     return NtCallbackReturn(NULL,0,Status);
 }
 
