@@ -9,6 +9,7 @@
  */
 
 #include "precomp.h"
+#include "hidbounds.h"
 
 #define NDEBUG
 #include <debug.h>
@@ -357,6 +358,7 @@ HidClass_ReadCompleteIrp(
     KIRQL OldLevel;
     PUCHAR Address;
     ULONG Offset;
+    ULONG CopyLength, DestinationLength;
     PHIDP_COLLECTION_DESC CollectionDescription;
     PHIDP_REPORT_IDS ReportDescription;
     BOOLEAN IsEmpty;
@@ -377,10 +379,10 @@ HidClass_ReadCompleteIrp(
     //
     // copy result
     //
-    if (Irp->IoStatus.Information)
+    if (Irp->IoStatus.Information && IrpContext->OriginalIrp->MdlAddress)
     {
         //
-        // get address
+        // get address (the MDL is checked first: a zero-length read has none)
         //
         Address = MmGetSystemAddressForMdlSafe(IrpContext->OriginalIrp->MdlAddress, NormalPagePriority);
         if (Address)
@@ -404,19 +406,36 @@ HidClass_ReadCompleteIrp(
                                                                  IrpContext->FileOp->DeviceExtension->CollectionNumber);
             ASSERT(ReportDescription);
 
-            if (CollectionDescription && ReportDescription)
+            if (CollectionDescription && ReportDescription &&
+                CollectionDescription->InputLength >= ReportDescription->InputLength)
             {
                 //
                 // calculate offset
                 //
-                ASSERT(CollectionDescription->InputLength >= ReportDescription->InputLength);
                 Offset = CollectionDescription->InputLength - ReportDescription->InputLength;
             }
 
             //
-            // copy result
+            // the lengths come from the device's report descriptor: place the
+            // report only when it fits the caller's buffer; the synthetic ID
+            // prefix is zeroed, a short transfer is zero-filled and the
+            // completion count covers prefix + full report
             //
-            RtlCopyMemory(&Address[Offset], IrpContext->InputReportBuffer, IrpContext->InputReportBufferLength);
+            DestinationLength = MmGetMdlByteCount(IrpContext->OriginalIrp->MdlAddress);
+            if (HidClass_PlaceInputReport(Address, DestinationLength, Offset,
+                                          IrpContext->InputReportBuffer,
+                                          (ULONG)Irp->IoStatus.Information,
+                                          IrpContext->InputReportBufferLength,
+                                          &CopyLength))
+            {
+                Irp->IoStatus.Information = CopyLength;
+            }
+            else
+            {
+                DPRINT1("[HIDCLASS] Report does not fit the read buffer (offset %lu length %lu buffer %lu)\n", Offset, IrpContext->InputReportBufferLength, DestinationLength);
+                Irp->IoStatus.Status = STATUS_BUFFER_TOO_SMALL;
+                Irp->IoStatus.Information = 0;
+            }
         }
     }
 
@@ -733,6 +752,17 @@ HidClass_Read(
     }
 
     //
+    // a zero-length read (no MDL) cannot hold a report
+    //
+    if (!HidClass_IsReadRequestValid(IoStack->Parameters.Read.Length, Irp->MdlAddress))
+    {
+        Irp->IoStatus.Status = STATUS_INVALID_BUFFER_SIZE;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_INVALID_BUFFER_SIZE;
+    }
+
+    //
     // build irp request
     //
     Status = HidClass_BuildIrp(DeviceObject,
@@ -994,7 +1024,10 @@ HidClass_DeviceControl(
                 return STATUS_INVALID_PARAMETER;
             }
             ReportDescription = HidClassPDO_GetReportDescriptionByReportID(&PDODeviceExtension->Common.DeviceDescription, ((PUCHAR)Irp->AssociatedIrp.SystemBuffer)[0]);
-            if (!ReportDescription || IoStack->Parameters.DeviceIoControl.OutputBufferLength < ReportDescription->FeatureLength)
+            if (!ReportDescription ||
+                !HidClass_IsFeatureRequestValid(ReportDescription->FeatureLength,
+                                                IoStack->Parameters.DeviceIoControl.OutputBufferLength,
+                                                Irp->MdlAddress, TRUE))
             {
                 Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
                 IoCompleteRequest(Irp, IO_NO_INCREMENT);
@@ -1054,7 +1087,10 @@ HidClass_DeviceControl(
                 return STATUS_INVALID_PARAMETER;
             }
             ReportDescription = HidClassPDO_GetReportDescriptionByReportID(&PDODeviceExtension->Common.DeviceDescription, ((PUCHAR)Irp->AssociatedIrp.SystemBuffer)[0]);
-            if (!ReportDescription || IoStack->Parameters.DeviceIoControl.InputBufferLength < ReportDescription->FeatureLength)
+            if (!ReportDescription ||
+                !HidClass_IsFeatureRequestValid(ReportDescription->FeatureLength,
+                                                IoStack->Parameters.DeviceIoControl.InputBufferLength,
+                                                NULL, FALSE))
             {
                 Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
                 IoCompleteRequest(Irp, IO_NO_INCREMENT);

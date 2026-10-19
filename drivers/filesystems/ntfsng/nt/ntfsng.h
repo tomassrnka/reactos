@@ -102,6 +102,7 @@ typedef struct _NG_VCB
     LONG PagingFiles;               /* FCBs that are paging files, listed or not, until freed (FcbListLock) */
     BOOLEAN LabelStale;             /* the VPB label is empty because reading it at mount ran out of memory */
     BOOLEAN Dismounted;             /* FSCTL_DISMOUNT_VOLUME done: no core, the storage device has a new VPB */
+    BOOLEAN RemovePending;          /* IRP_MN_QUERY_REMOVE_DEVICE granted: no new open until the removal or its cancel (CreateGate) */
     LIST_ENTRY DirNotifyList;
     KEVENT FlusherStop;
     ULONG Syncs;
@@ -300,6 +301,9 @@ VOID NgTunnelApply(PNG_VCB Vcb, ngc_node *Parent, ngc_node *Node, PUNICODE_STRIN
 
 /* fsctl.c */
 BOOLEAN NgEndLock(PNG_VCB Vcb, PFILE_OBJECT FileObject, BOOLEAN Cleanup);
+NTSTATUS NgDismountForRemoval(PNG_VCB Vcb, BOOLEAN Surprise);
+NTSTATUS NgQueryRemove(PNG_VCB Vcb);
+VOID NgCancelRemove(PNG_VCB Vcb);
 
 /* security.c */
 NTSTATUS NgQuerySecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp);
