@@ -91,7 +91,7 @@ NetScheduleJobAdd(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = RpcExceptionCode();
+        status = NetpRpcStatusToApiStatus(RpcExceptionCode());
     }
     RpcEndExcept;
 
@@ -119,7 +119,7 @@ NetScheduleJobDel(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = RpcExceptionCode();
+        status = NetpRpcStatusToApiStatus(RpcExceptionCode());
     }
     RpcEndExcept;
 
@@ -161,7 +161,7 @@ NetScheduleJobEnum(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = RpcExceptionCode();
+        status = NetpRpcStatusToApiStatus(RpcExceptionCode());
     }
     RpcEndExcept;
 
@@ -189,7 +189,7 @@ NetScheduleJobGetInfo(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = RpcExceptionCode();
+        status = NetpRpcStatusToApiStatus(RpcExceptionCode());
     }
     RpcEndExcept;
 

@@ -95,7 +95,6 @@ CriticalDeviceCoInstaller(
     {
         if (Context->PostProcessing)
         {
-            dwError = GetLastError();
             DPRINT1("Failed to read the MatchingDeviceId value! (Error %lu)\n", dwError);
             goto done;
         }

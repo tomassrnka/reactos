@@ -54,6 +54,9 @@ RunCommandAndWait(
         CloseHandle(pi.hProcess);
         if (ExitCode == 0)
             return S_OK;
+
+        /* The process ran and failed: the last error says nothing about it */
+        return HRESULT_FROM_WIN32(ExitCode);
     }
 
     return HRESULT_FROM_WIN32(GetLastError());

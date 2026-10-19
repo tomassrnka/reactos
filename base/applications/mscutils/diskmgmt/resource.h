@@ -43,10 +43,7 @@
 #define IDC_STATUSBAR           301
 #define IDC_DISKLIST            302
 #define IDC_VOLLIST             303
-#define IDC_DISKLIST2           304
-#define IDC_VOLLIST2            305
 #define IDC_GRAPH               306
-#define IDC_GRAPH2              307
 
 /* property pages */
 #define IDD_VOL_GENERAL         400

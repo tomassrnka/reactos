@@ -919,6 +919,9 @@ static void warn_skipped_32bit_custom_action( MSIPACKAGE *package, const WCHAR *
          * a custom action's MsiDoAction gets here on another thread. */
         threads[0] = GetCurrentThreadId();
         threads[1] = msi_dialog_get_ui_thread();
+        /* A message box is only shown when the internal UI is neither off nor progress only */
+        if ((package->ui_level & INSTALLUILEVEL_MASK) == INSTALLUILEVEL_NONE || (package->ui_level & INSTALLUILEVEL_PROGRESSONLY))
+            threads[0] = threads[1] = 0;
         for (i = 0; i < ARRAY_SIZE(threads) && !disabled.failed; i++)
         {
             /* A thread without windows gives TRUE here, so FALSE is a failure */

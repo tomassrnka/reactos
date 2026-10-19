@@ -205,11 +205,6 @@ PCWSTR NtTestDir(VOID)
     return TestDir;
 }
 
-BOOLEAN NtIsAdmin(VOID)
-{
-    return Admin;
-}
-
 BOOLEAN NtHaveUser(VOID)
 {
     if (!UserToken)
