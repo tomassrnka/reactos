@@ -71,6 +71,39 @@ ReadFromConsole(
     DWORD dwLength,
     BOOL bEcho);
 
+VOID
+PrintHelpMessageHint(
+    DWORD dwMessage);
+
+INT
+PrintCommandError(
+    DWORD dwMessage,
+    PCWSTR pszInsert);
+
+INT
+PrintCommandSyntax(
+    DWORD dwSyntaxMessage,
+    DWORD dwMessage,
+    PCWSTR pszInsert);
+
+VOID
+PrintCommandHelpText(
+    DWORD dwSyntaxMessage,
+    DWORD dwHelpMessage);
+
+VOID
+PrintCommandHelp(
+    DWORD dwSyntaxMessage,
+    DWORD dwHelpMessage);
+
+VOID
+PrintSpaces(
+    size_t nCount);
+
+PWSTR
+GetExeMessage(
+    DWORD dwMessage);
+
 VOID help(VOID);
 INT unimplemented(INT argc, WCHAR **argv);
 
@@ -91,3 +124,4 @@ INT cmdStop(INT argc, WCHAR **argv);
 INT cmdSyntax(INT argc, WCHAR **argv);
 INT cmdUse(INT argc, WCHAR **argv);
 INT cmdUser(INT argc, WCHAR **argv);
+INT cmdView(INT argc, WCHAR **argv);

@@ -173,9 +173,12 @@ audio_wavein::close(void)
     if (wakeup_recthread)
         SetEvent(wakeup_recthread);
 
-    /* Closing wavein stream */
-    while ((waveInClose(wavein_handle)) != MMSYSERR_NOERROR)
-        Sleep(1);
+    /* Closing wavein stream (no handle if waveInOpen failed) */
+    if (wavein_handle)
+    {
+        while (waveInClose(wavein_handle) == WAVERR_STILLPLAYING)
+            Sleep(1);
+    }
 
     /* Release buffers memory */
     free_buffers_mem_();
@@ -253,11 +256,13 @@ audio_wavein::open(void)
     {
         /* Updating status */
         status = WAVEIN_ERR;
+        wavein_handle = 0;
 
         if (err == WAVERR_BADFORMAT)
             MessageBox(0, TEXT("waveInOpen Error"), 0, 0);
 
         /* TODO: throw error */
+        return;
     }
 
     /* Update object status */

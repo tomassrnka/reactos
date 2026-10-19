@@ -276,6 +276,24 @@ SetFont(PMAP infoPtr,
 
     ReleaseDC(infoPtr->hMapWnd, hdc);
 
+    /* Keep only the characters whose name contains the search text */
+    if (infoPtr->Filter[0])
+    {
+        WCHAR szName[MAX_PATH];
+
+        for (i = 0, j = 0; i < infoPtr->NumValidGlyphs; i++)
+        {
+            szName[0] = UNICODE_NULL;
+            GetUName(infoPtr->ValidGlyphs[i], szName);
+            if (!wcscmp(szName, L"Undefined"))
+                continue;
+            CharUpperW(szName);
+            if (wcsstr(szName, infoPtr->Filter))
+                infoPtr->ValidGlyphs[j++] = infoPtr->ValidGlyphs[i];
+        }
+        infoPtr->NumValidGlyphs = j;
+    }
+
     infoPtr->NumRows = infoPtr->NumValidGlyphs / XCELLS;
     if (infoPtr->NumValidGlyphs % XCELLS)
         infoPtr->NumRows += 1;
@@ -319,6 +337,13 @@ LimitCaretXY(PMAP infoPtr, INT *pX, INT *pY)
 {
     INT i, X = *pX, Y = *pY, iYStart = infoPtr->iYStart;
 
+    /* An empty map (no match) has only the first cell */
+    if (infoPtr->NumValidGlyphs == 0)
+    {
+        *pX = *pY = 0;
+        return;
+    }
+
     i = XCELLS * (iYStart + Y) + X;
     while (i >= infoPtr->NumValidGlyphs)
     {
@@ -356,6 +381,9 @@ SetCaretXY(PMAP infoPtr, INT X, INT Y, BOOL bLarge, BOOL bInvalidateAll)
     infoPtr->CaretY = Y;
     UpdateCells(infoPtr);
 
+    if (infoPtr->NumValidGlyphs == 0)
+        bLarge = FALSE;
+
     /* set new cell to active */
     infoPtr->pActiveCell = &infoPtr->Cells[Y][X];
     if (!bInvalidateAll)
@@ -386,7 +414,7 @@ SetCaretXY(PMAP infoPtr, INT X, INT Y, BOOL bLarge, BOOL bInvalidateAll)
     if (bInvalidateAll)
         InvalidateRect(infoPtr->hMapWnd, NULL, FALSE);
 
-    UpdateStatusBar(infoPtr->pActiveCell->ch);
+    UpdateStatusBar(infoPtr->NumValidGlyphs ? infoPtr->pActiveCell->ch : 0);
 }
 
 static
@@ -545,7 +573,7 @@ OnVScroll(PMAP infoPtr,
         }
     }
 
-    UpdateStatusBar(infoPtr->pActiveCell->ch);
+    UpdateStatusBar(infoPtr->NumValidGlyphs ? infoPtr->pActiveCell->ch : 0);
 }
 
 
@@ -773,7 +801,7 @@ MapWndProc(HWND hwnd,
 
         case WM_LBUTTONDBLCLK:
         {
-            if (!infoPtr->pActiveCell || GetFocus() != hwnd)
+            if (!infoPtr->pActiveCell || GetFocus() != hwnd || !infoPtr->NumValidGlyphs)
                 break;
 
             NotifyParentOfSelection(infoPtr,
@@ -804,6 +832,21 @@ MapWndProc(HWND hwnd,
             SetCaretXY(infoPtr, infoPtr->CaretX, infoPtr->CaretY, FALSE, TRUE);
             break;
 
+        case FM_SETFILTER:
+            infoPtr->CaretX = infoPtr->CaretY = infoPtr->iYStart = 0;
+            infoPtr->Filter[0] = UNICODE_NULL;
+            if (lParam)
+            {
+                lstrcpynW(infoPtr->Filter, (LPCWSTR)lParam, SIZEOF(infoPtr->Filter));
+                CharUpperW(infoPtr->Filter);
+            }
+            wcsncpy(lfFaceName,
+                    infoPtr->CurrentFont.lfFaceName,
+                    SIZEOF(lfFaceName));
+            SetFont(infoPtr, lfFaceName);
+            SetCaretXY(infoPtr, infoPtr->CaretX, infoPtr->CaretY, FALSE, TRUE);
+            return infoPtr->NumValidGlyphs;
+
         case FM_SETFONT:
             infoPtr->CaretX = infoPtr->CaretY = infoPtr->iYStart = 0;
             SetFont(infoPtr, (LPWSTR)lParam);
@@ -812,7 +855,7 @@ MapWndProc(HWND hwnd,
 
         case FM_GETCHAR:
         {
-            if (!infoPtr->pActiveCell) return 0;
+            if (!infoPtr->pActiveCell || !infoPtr->NumValidGlyphs) return 0;
             return infoPtr->pActiveCell->ch;
         }
 

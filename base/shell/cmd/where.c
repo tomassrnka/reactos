@@ -103,7 +103,10 @@ SearchForExecutableSingle (LPCTSTR pFileName, LPTSTR pFullName, LPTSTR pPathExt,
     _tcscpy(pszPathEnd, pFileName);
     pszPathEnd += _tcslen(pszPathEnd);
 
-    if (IsExistingFile (szPathBuffer))
+    /* The typed name is tried as a file name only when it has an extension. One without
+     * an extension is tried with the PATHEXT extensions, as in Windows */
+    s = _tcsrchr(pFileName, _T('.'));
+    if (s && !_tcspbrk(s, _T("\\/:")) && IsExistingFile (szPathBuffer))
     {
         TRACE ("Found: \'%s\'\n", debugstr_aw(szPathBuffer));
         GetFullPathName(szPathBuffer, MAX_PATH, pFullName, NULL);

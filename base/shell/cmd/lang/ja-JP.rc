@@ -447,6 +447,7 @@ RESTORE       ウィンドウを元のサイズに戻します。\n\
     STRING_COPY_OPTION "YNA"
     STRING_ALIAS_ERROR "エイリアス展開後のコマンド ラインが長すぎます!\n"
     STRING_ASSOC_ERROR "拡張子 %s に対するファイル関連付けが見つかりません。\n"
+    STRING_FTYPE_ERROR "File type '%s' not found or no open command associated with it.\n"
     STRING_BATCH_ERROR "バッチ ファイルを開くときにエラーが発生しました。\n"
     STRING_CHOICE_ERROR "無効なオプションです。期待される書式: /C[:]オプション\n"
     STRING_CHOICE_ERROR_TXT "無効なオプションです。期待される書式: /T[:]c,nn\n"
@@ -527,4 +528,20 @@ RESTORE       ウィンドウを元のサイズに戻します。\n\
     STRING_EXPECTED_CLOSE_PAREN "')' が必要です。\n"
     STRING_EXPECTED_NUMBER_OR_VARIABLE "数値または変数名が必要です。\n"
     STRING_SYNTAX_COMMAND_INCORRECT "コマンドの構文が間違っています。\n"
+END
+
+STRINGTABLE
+BEGIN
+    STRING_FTYPE_HELP "Shows or changes the open command of a file type.\n\n\
+ftype [fileType[=[openCommand]]]\n\
+\n\
+ftype (shows every file type that has an open command)\n\
+ftype fileType (shows the open command of one file type)\n\
+ftype fileType= (removes the open command of the file type)\n\
+ftype fileType=openCommand (sets the open command)\n\
+\n\
+In an open command, %1 stands for the name of the file that is opened and\n\
+%* for the arguments that follow it. The command is stored in the registry\n\
+as an expandable string. Use it with ASSOC, which connects an extension\n\
+to a file type.\n"
 END

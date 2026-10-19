@@ -102,9 +102,8 @@ INT cmdHelp(INT argc, WCHAR **argv)
 
     if (_wcsicmp(argv[2], L"SHARE") == 0)
     {
-        PrintNetMessage(MSG_SHARE_SYNTAX);
-        PrintNetMessage(MSG_SHARE_HELP);
-        return 0;
+        PrintCommandHelpText(MSG_SHARE_SYNTAX, MSG_SHARE_HELP);
+        return 1;
     }
 
     if (_wcsicmp(argv[2], L"START") == 0)
@@ -151,9 +150,8 @@ INT cmdHelp(INT argc, WCHAR **argv)
 
     if (_wcsicmp(argv[2], L"VIEW") == 0)
     {
-        PrintNetMessage(MSG_VIEW_SYNTAX);
-        PrintNetMessage(MSG_VIEW_HELP);
-        return 0;
+        PrintCommandHelpText(MSG_VIEW_SYNTAX, MSG_VIEW_HELP);
+        return 1;
     }
 
 #if 0

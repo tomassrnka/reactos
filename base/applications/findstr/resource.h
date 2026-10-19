@@ -1,5 +1,12 @@
 #pragma once
 
-#define IDS_USAGE        1000
-#define IDS_NO_SUCH_FILE 1001
-#define IDS_CANNOT_OPEN  1002
+#define IDS_USAGE               1000
+#define IDS_CANNOT_OPEN         1002
+#define IDS_BAD_COMMAND_LINE    1003
+#define IDS_NO_SEARCH_STRINGS   1004
+#define IDS_SWITCH_IGNORED      1005
+#define IDS_CANNOT_READ_STRINGS 1006
+#define IDS_CANNOT_READ_FILES   1007
+#define IDS_OUT_OF_MEMORY       1008
+#define IDS_ARGUMENT_MISSING    1009
+#define IDS_CANNOT_READ_INPUT   1010

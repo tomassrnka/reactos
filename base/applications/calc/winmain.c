@@ -20,7 +20,24 @@
 
 #include "calc.h"
 
-#define HTMLHELP_PATH(_pt)  _T("%systemroot%\\Help\\calc.chm::") _T(_pt)
+#define HTMLHELP_FILE       _T("%systemroot%\\Help\\calc.chm")
+#define HTMLHELP_PATH(_pt)  HTMLHELP_FILE _T("::") _T(_pt)
+
+static BOOL IsHelpFileAvailable(void)
+{
+#ifdef DISABLE_HTMLHELP_SUPPORT
+    return FALSE;
+#else
+    TCHAR szPath[MAX_PATH];
+    DWORD cch = ExpandEnvironmentStrings(HTMLHELP_FILE, szPath, SIZEOF(szPath));
+    DWORD dwAttributes;
+
+    if (cch == 0 || cch > SIZEOF(szPath))
+        return FALSE;
+    dwAttributes = GetFileAttributes(szPath);
+    return dwAttributes != INVALID_FILE_ATTRIBUTES && !(dwAttributes & FILE_ATTRIBUTE_DIRECTORY);
+#endif
+}
 
 #define MAKE_BITMASK4(_show_b16, _show_b10, _show_b8, _show_b2) \
     (((_show_b2)  << 0) | \
@@ -743,6 +760,9 @@ static void update_menu(HWND hWnd)
         }
     }
     CheckMenuItem(hMenu, IDM_VIEW_GROUP, MF_BYCOMMAND|(calc.usesep ? MF_CHECKED : MF_UNCHECKED));
+
+    /* The menu is reloaded when the base changes */
+    EnableMenuItem(GetMenu(hWnd), IDM_HELP_HELP, MF_BYCOMMAND | (IsHelpFileAvailable() ? MF_ENABLED : MF_GRAYED));
 }
 
 typedef struct {
@@ -1196,7 +1216,7 @@ static void handle_context_menu(HWND hWnd, WPARAM wp, LPARAM lp)
     BOOL idm;
 
     LoadString(calc.hInstance, IDS_QUICKHELP, text, SIZEOF(text));
-    AppendMenu(hMenu, MF_STRING | MF_ENABLED, IDM_HELP_HELP, text);
+    AppendMenu(hMenu, MF_STRING | (IsHelpFileAvailable() ? MF_ENABLED : MF_GRAYED), IDM_HELP_HELP, text);
     idm = TrackPopupMenu( hMenu,
                           TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD | TPM_RIGHTBUTTON,
                           LOWORD(lp),
@@ -1433,9 +1453,7 @@ static INT_PTR CALLBACK DlgMainProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
         return SubclassButtonProc(hWnd, wp, lp);
 
     case WM_INITDIALOG:
-#ifdef DISABLE_HTMLHELP_SUPPORT
-        EnableMenuItem(GetMenu(hWnd), IDM_HELP_HELP, MF_BYCOMMAND | MF_GRAYED);
-#endif
+        EnableMenuItem(GetMenu(hWnd), IDM_HELP_HELP, MF_BYCOMMAND | (IsHelpFileAvailable() ? MF_ENABLED : MF_GRAYED));
         calc.hWnd=hWnd;
         /* Enumerate children and apply hover function */
         BtnCount = 0;
@@ -1518,7 +1536,9 @@ static INT_PTR CALLBACK DlgMainProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         case IDM_HELP_HELP:
 #ifndef DISABLE_HTMLHELP_SUPPORT
-            calc_HtmlHelp(hWnd, HTMLHELP_PATH("/general_information.htm"), HH_DISPLAY_TOPIC, (DWORD_PTR)NULL);
+            /* F1 sends this command even when the menu item is greyed */
+            if (IsHelpFileAvailable())
+                calc_HtmlHelp(hWnd, HTMLHELP_PATH("/general_information.htm"), HH_DISPLAY_TOPIC, (DWORD_PTR)NULL);
 #endif
             return TRUE;
         case IDM_VIEW_STANDARD:

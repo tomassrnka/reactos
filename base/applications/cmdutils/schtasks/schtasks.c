@@ -24,6 +24,11 @@
 #include "wine/debug.h"
 #include "wine/unicode.h"
 
+#ifdef __REACTOS__
+#include <conutils.h>
+#include "resource.h"
+#endif
+
 WINE_DEFAULT_DEBUG_CHANNEL(schtasks);
 
 static const WCHAR change_optW[] = {'/','c','h','a','n','g','e',0};
@@ -355,6 +360,23 @@ int wmain(int argc, WCHAR *argv[])
     TRACE("\n");
 
     CoInitialize(NULL);
+
+#ifdef __REACTOS__
+    /* Without a Task Scheduler every command would fail silently */
+    {
+        ITaskService *service;
+        HRESULT hres = CoCreateInstance(&CLSID_TaskScheduler, NULL, CLSCTX_INPROC_SERVER,
+                                        &IID_ITaskService, (void**)&service);
+        if (FAILED(hres))
+        {
+            ConInitStdStreams();
+            ConResPuts(StdErr, IDS_NOT_AVAILABLE);
+            CoUninitialize();
+            return 1;
+        }
+        ITaskService_Release(service);
+    }
+#endif
 
     if (argc < 2)
         FIXME("Print current tasks state\n");

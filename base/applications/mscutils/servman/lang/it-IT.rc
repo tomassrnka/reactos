@@ -242,6 +242,11 @@ STRINGTABLE
 BEGIN
     IDS_SERVICES_STARTED "Avviato"
     IDS_SERVICES_STOPPED "Fermato"
+    IDS_SERVICES_STARTING "Avvio in corso"
+    IDS_SERVICES_STOPPING "Arresto in corso"
+    IDS_SERVICES_PAUSING "Sospensione in corso"
+    IDS_SERVICES_PAUSED "Sospeso"
+    IDS_SERVICES_RESUMING "Ripresa in corso"
     IDS_SERVICES_AUTO "Automatico"
     IDS_SERVICES_MAN "Manuale"
     IDS_SERVICES_DIS "Disabilitato"

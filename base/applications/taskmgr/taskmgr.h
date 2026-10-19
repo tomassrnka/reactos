@@ -53,6 +53,7 @@ typedef struct
 	/* Performance page settings */
 	BOOL	CPUHistory_OneGraphPerCPU;
 	BOOL	ShowKernelTimes;
+	BOOL	CompactMode;
 } TASKMANAGER_SETTINGS, *LPTASKMANAGER_SETTINGS;
 
 /* Global Variables: */

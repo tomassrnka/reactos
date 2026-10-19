@@ -242,6 +242,11 @@ STRINGTABLE
 BEGIN
     IDS_SERVICES_STARTED "Работает"
     IDS_SERVICES_STOPPED "Остановлено"
+    IDS_SERVICES_STARTING "Запускается"
+    IDS_SERVICES_STOPPING "Останавливается"
+    IDS_SERVICES_PAUSING "Приостанавливается"
+    IDS_SERVICES_PAUSED "Приостановлено"
+    IDS_SERVICES_RESUMING "Возобновляется"
     IDS_SERVICES_AUTO "Автоматически"
     IDS_SERVICES_MAN "Вручную"
     IDS_SERVICES_DIS "Отключена"

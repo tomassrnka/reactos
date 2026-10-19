@@ -14,3 +14,6 @@ void RefreshPerformancePage(void);
 void PerformancePage_OnViewShowKernelTimes(void);
 void PerformancePage_OnViewCPUHistoryOneGraphAll(void);
 void PerformancePage_OnViewCPUHistoryOneGraphPerCPU(void);
+void PerformancePage_SetCpuHistoryMode(BOOL bOneGraphPerCPU);
+void PerformancePage_RestoreCompactMode(void);
+BOOL PerformancePage_OnMainWindowMessage(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam, LRESULT *plResult);

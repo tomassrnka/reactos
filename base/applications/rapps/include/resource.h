@@ -114,6 +114,8 @@
 #define IDS_UNABLE_TO_REMOVE     122
 #define IDS_UNABLE_TO_DOWNLOAD   123
 #define IDS_UNABLE_TO_DOWNLOAD2  124
+#define IDS_UNABLE_TO_DOWNLOAD_HTTP 1030
+#define IDS_DL_RETRY             1031
 #define IDS_UNABLE_TO_QUERY_CERT 125
 #define IDS_INTEG_CHECK_TITLE    126
 #define IDS_INTEG_CHECK_FAIL     127
@@ -132,6 +134,7 @@
 #define IDS_CFG_UPDATE_AVLIST    140
 #define IDS_CFG_LOG_ENABLED      141
 #define IDS_CFG_SMALL_ICONS      142
+#define IDS_UNABLE_TO_RUN_32BIT  143
 
 /* Tooltips */
 #define IDS_TOOLTIP_INSTALL      200
@@ -209,6 +212,8 @@
 #define IDS_STATUS_INSTALLING         805
 #define IDS_STATUS_WAITING            806
 #define IDS_STATUS_FINISHED           807
+#define IDS_STATUS_FAILED             808
+#define IDS_STATUS_CANCELLED          809
 
 /* App license names */
 #define IDS_LICENSE_OPENSOURCE      900
@@ -241,6 +246,10 @@
 /* Generated installer */
 #define IDS_INSTGEN_CONFIRMUNINST               1000
 #define IDS_INSTGEN_CONFIRMINSTRUNAPP           1001
+#define IDS_DL_STANDALONE_PROGRAM               1002
+#define IDS_DL_INSTALLER_FAILED                 1003
+#define IDS_DL_INSTALLER_CRASHED                1004
+#define IDS_DL_DEPENDENCY_FAILED                1020
 
 /* Accelerators */
 #define HOTKEYS                  715

@@ -247,6 +247,38 @@ BOOL HasFileExtension(LPCTSTR szFilename)
     return _tcsrchr(szFilename, _T('.')) != NULL;
 }
 
+/* Returns FALSE when the user cancels saving text that ANSI cannot hold */
+static BOOL ConfirmAnsiLoss(LPCTSTR pszFileName)
+{
+    BOOL bLost = FALSE;
+    INT cchText;
+    HLOCAL hLocal;
+    LPCWSTR pszText;
+    WCHAR szFormat[512], szMessage[512 + MAX_PATH], szTitle[MAX_STRING_LEN];
+
+    if (Globals.encFile != ENCODING_ANSI)
+        return TRUE;
+
+    cchText = GetWindowTextLengthW(Globals.hEdit);
+    if (cchText <= 0)
+        return TRUE;
+
+    hLocal = (HLOCAL)SendMessageW(Globals.hEdit, EM_GETHANDLE, 0, 0);
+    pszText = LocalLock(hLocal);
+    if (!pszText)
+        return TRUE;
+    WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, pszText, cchText, NULL, 0, NULL, &bLost);
+    LocalUnlock(hLocal);
+
+    if (!bLost)
+        return TRUE;
+
+    LoadStringW(Globals.hInstance, STRING_LOSEUNICODE, szFormat, _countof(szFormat));
+    StringCchPrintfW(szMessage, _countof(szMessage), szFormat, pszFileName);
+    LoadStringW(Globals.hInstance, STRING_NOTEPAD, szTitle, _countof(szTitle));
+    return MessageBoxW(Globals.hMainWnd, szMessage, szTitle, MB_ICONWARNING | MB_OKCANCEL) == IDOK;
+}
+
 static BOOL DoSaveFile(VOID)
 {
     BOOL bRet = FALSE;
@@ -462,7 +494,7 @@ BOOL DIALOG_FileSave(VOID)
     {
         return DIALOG_FileSaveAs();
     }
-    else if (DoSaveFile())
+    else if (ConfirmAnsiLoss(Globals.szFileName) && DoSaveFile())
     {
         UpdateWindowCaption(TRUE);
         return TRUE;
@@ -535,6 +567,9 @@ BOOL DIALOG_FileSaveAs(VOID)
 {
     OPENFILENAME saveas;
     TCHAR szPath[MAX_PATH];
+    TCHAR szOldFileName[MAX_PATH], szOldFileTitle[MAX_PATH];
+    ENCODING encOld = Globals.encFile;
+    EOLN iEolnOld = Globals.iEoln;
 
     ZeroMemory(&saveas, sizeof(saveas));
 
@@ -557,6 +592,16 @@ BOOL DIALOG_FileSaveAs(VOID)
 
     if (GetSaveFileName(&saveas))
     {
+        if (!ConfirmAnsiLoss(szPath))
+        {
+            Globals.encFile = encOld;
+            Globals.iEoln = iEolnOld;
+            return FALSE;
+        }
+
+        StringCchCopy(szOldFileName, _countof(szOldFileName), Globals.szFileName);
+        StringCchCopy(szOldFileTitle, _countof(szOldFileTitle), Globals.szFileTitle);
+
         /* HACK: Because in ROS, Save-As boxes don't check the validity
          * of file names and thus, here, szPath can be invalid !! We only
          * see its validity when we call DoSaveFile()... */
@@ -569,7 +614,11 @@ BOOL DIALOG_FileSaveAs(VOID)
         }
         else
         {
-            SetFileName(_T(""));
+            /* Keep the previous name and encoding */
+            StringCchCopy(Globals.szFileName, _countof(Globals.szFileName), szOldFileName);
+            StringCchCopy(Globals.szFileTitle, _countof(Globals.szFileTitle), szOldFileTitle);
+            Globals.encFile = encOld;
+            Globals.iEoln = iEolnOld;
             return FALSE;
         }
     }
