@@ -186,12 +186,16 @@ IntEngGradientFillRect(
     return IntEngLeave(&EnterLeave);
 }
 
-/* Fill triangle with solid color */
+/* Fill triangle with solid color, only the rows of the clip rectangle (the
+ * rows below it are not reached, see bt) */
 #define S_FILLLINE(linefrom,lineto) \
-  if(sx[lineto] < sx[linefrom]) \
-    DibFunctionsForBitmapFormat[psoOutput->iBitmapFormat].DIB_HLine(psoOutput, max(sx[lineto], FillRect.left), min(sx[linefrom], FillRect.right), sy, Color); \
-  else \
-    DibFunctionsForBitmapFormat[psoOutput->iBitmapFormat].DIB_HLine(psoOutput, max(sx[linefrom], FillRect.left), min(sx[lineto], FillRect.right), sy, Color);
+  if (sy >= FillRect.top) \
+  { \
+    if(sx[lineto] < sx[linefrom]) \
+      DibFunctionsForBitmapFormat[psoOutput->iBitmapFormat].DIB_HLine(psoOutput, max(sx[lineto], FillRect.left), min(sx[linefrom], FillRect.right), sy, Color); \
+    else \
+      DibFunctionsForBitmapFormat[psoOutput->iBitmapFormat].DIB_HLine(psoOutput, max(sx[linefrom], FillRect.left), min(sx[lineto], FillRect.right), sy, Color); \
+  }
 
 #define S_DOLINE(a,b,line) \
   ex[line] += dx[line]; \
