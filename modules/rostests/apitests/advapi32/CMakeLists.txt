@@ -34,6 +34,7 @@ list(APPEND SOURCE
     RegGetValue.c
     RtlEncryptMemory.c
     SaferIdentifyLevel.c
+    TokenDefaultDacl.c
     TokenIntegrity.c
     TokenLogonSid.c
     ServiceArgs.c

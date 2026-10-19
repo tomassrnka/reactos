@@ -221,6 +221,41 @@ static NTSTATUS TokenGroups32(HANDLE Token, TOKEN_INFORMATION_CLASS Class, ULONG
     return STATUS_SUCCESS;
 }
 
+/* TokenDefaultDacl: TOKEN_DEFAULT_DACL is one ACL pointer followed by the ACL, which has
+ * no pointers. Same order as TokenGroups32. */
+static NTSTATUS TokenDefaultDacl32(HANDLE Token, ULONG Buffer, ULONG Length, ULONG ReturnLength,
+                                   WOW64_CLEANUP *Cleanup)
+{
+    PTOKEN_DEFAULT_DACL Native;
+    ULONG Bytes = 0, Needed, AclBytes;
+    UCHAR *Guest;
+    NTSTATUS Status;
+
+    if (!ReturnLength || !GuestSpan(ReturnLength, sizeof(ULONG))) return STATUS_ACCESS_VIOLATION;
+    Status = NtQueryInformationToken(Token, TokenDefaultDacl, NULL, 0, &Bytes);
+    if (Status != STATUS_BUFFER_TOO_SMALL) return Status;
+    if (Bytes < sizeof(TOKEN_DEFAULT_DACL)) Bytes = sizeof(TOKEN_DEFAULT_DACL);
+    Native = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, Bytes);
+    if (!Native) return STATUS_NO_MEMORY;
+    Status = NtQueryInformationToken(Token, TokenDefaultDacl, Native, Bytes, &Bytes);
+    if (Status == STATUS_BUFFER_TOO_SMALL && Bytes >= sizeof(TOKEN_DEFAULT_DACL))
+    {
+        /* The DACL grew meanwhile: report what the 32-bit form now needs */
+        *(ULONG *)PTR32(ReturnLength) = Bytes - sizeof(TOKEN_DEFAULT_DACL) + sizeof(ULONG);
+        return Status;
+    }
+    if (!NT_SUCCESS(Status)) return Status;
+    AclBytes = Native->DefaultDacl ? Native->DefaultDacl->AclSize : 0;
+    Needed = sizeof(ULONG) + AclBytes;
+    *(ULONG *)PTR32(ReturnLength) = Needed;
+    if (Length < Needed) return STATUS_BUFFER_TOO_SMALL;
+    if (!Buffer || !GuestSpan(Buffer, Needed)) return STATUS_ACCESS_VIOLATION;
+    Guest = PTR32(Buffer);
+    *(ULONG UNALIGNED *)Guest = AclBytes ? Buffer + sizeof(ULONG) : 0;
+    if (AclBytes) RtlCopyMemory(Guest + sizeof(ULONG), Native->DefaultDacl, AclBytes);
+    return STATUS_SUCCESS;
+}
+
 /* A 32-bit TOKEN_GROUPS argument in the native layout. The SIDs stay in guest memory,
  * where the kernel captures them as caller data; Count was read and range-checked once. */
 static PTOKEN_GROUPS GroupsFrom32(ULONG Guest, ULONG Count, PUCHAR *Next)
@@ -1127,10 +1162,11 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
     case W64_NtImpersonateAnonymousToken:
         return NtImpersonateAnonymousToken(H(0));
     case W64_NtQueryInformationToken:
-        if (a[1] == TokenUser || a[1] == TokenOwner || a[1] == TokenPrimaryGroup)
+        /* TOKEN_MANDATORY_LABEL has the layout of TOKEN_USER: a SID_AND_ATTRIBUTES and the SID */
+        if (a[1] == TokenUser || a[1] == TokenOwner || a[1] == TokenPrimaryGroup || a[1] == TokenIntegrityLevel)
         {
             union { TOKEN_USER User; UCHAR Buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE]; } Info;
-            ULONG Bytes, Prefix = a[1] == TokenUser ? 2 * sizeof(ULONG) : sizeof(ULONG);
+            ULONG Bytes, Prefix = (a[1] == TokenUser || a[1] == TokenIntegrityLevel) ? 2 * sizeof(ULONG) : sizeof(ULONG);
             PROBE(4);
             Status = NtQueryInformationToken(H(0), a[1], &Info, sizeof(Info), &Bytes);
             if (!NT_SUCCESS(Status)) return Status;
@@ -1139,7 +1175,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             if (a[3] < Prefix + Bytes) return STATUS_BUFFER_TOO_SMALL;
             ProbeOutput(a[2], Prefix + Bytes);
             ((ULONG *)P(2))[0] = a[2] + Prefix;
-            if (a[1] == TokenUser) ((ULONG *)P(2))[1] = Info.User.User.Attributes;
+            if (Prefix == 2 * sizeof(ULONG)) ((ULONG *)P(2))[1] = Info.User.User.Attributes;
             RtlCopyMemory((BYTE *)P(2) + Prefix, Info.User.User.Sid, Bytes);
             return STATUS_SUCCESS;
         }
@@ -1151,6 +1187,8 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             return NtQueryInformationToken(H(0), a[1], P(2), a[3], P(4));
         case TokenGroups: case TokenRestrictedSids: case TokenLogonSid:
             return TokenGroups32(H(0), a[1], a[2], a[3], a[4], Cleanup);
+        case TokenDefaultDacl:
+            return TokenDefaultDacl32(H(0), a[2], a[3], a[4], Cleanup);
         default: return STATUS_NOT_SUPPORTED;
         }
     case W64_NtSetInformationToken:
@@ -1163,6 +1201,33 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         }
         if (a[1] == TokenSessionId)
             return NtSetInformationToken(H(0), a[1], P(2), a[3]);
+        if (a[1] == TokenIntegrityLevel)
+        {
+            /* TOKEN_MANDATORY_LABEL: a 4-byte SID pointer and the attributes; the kernel
+             * captures the SID from guest memory */
+            TOKEN_MANDATORY_LABEL Label;
+            UCHAR Sid[SECURITY_MAX_SID_SIZE];
+            ULONG Header[2], Buffer = a[2], Length = a[3], SidBytes;
+            UCHAR Count;
+            /* The arguments live on the guest stack and the label in guest memory: read once */
+            if (Length < sizeof(Header)) return STATUS_INFO_LENGTH_MISMATCH;
+            if (!GuestSpan(Buffer, sizeof(Header))) return STATUS_ACCESS_VIOLATION;
+            RtlCopyMemory(Header, PTR32(Buffer), sizeof(Header));
+            Label.Label.Attributes = Header[1];
+            Label.Label.Sid = NULL;
+            if (Header[0])
+            {
+                if (!GuestSpan(Header[0], FIELD_OFFSET(SID, SubAuthority))) return STATUS_ACCESS_VIOLATION;
+                Count = ((SID *)PTR32(Header[0]))->SubAuthorityCount;
+                if (Count > SID_MAX_SUB_AUTHORITIES) return STATUS_INVALID_PARAMETER;
+                SidBytes = FIELD_OFFSET(SID, SubAuthority) + Count * sizeof(ULONG);
+                if (!GuestSpan(Header[0], SidBytes)) return STATUS_ACCESS_VIOLATION;
+                RtlCopyMemory(Sid, PTR32(Header[0]), SidBytes);
+                ((SID *)Sid)->SubAuthorityCount = Count;
+                Label.Label.Sid = Sid;
+            }
+            return NtSetInformationToken(H(0), TokenIntegrityLevel, &Label, sizeof(Label));
+        }
         return STATUS_NOT_SUPPORTED;
     case W64_NtQueryInformationProcess:
         if (a[1] == ProcessBasicInformation)
