@@ -1124,6 +1124,16 @@ static INT_PTR CALLBACK AboutDlgProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM
                 SetDlgItemTextW(hWnd, IDC_ABOUT_APPNAME, info->szApp);
                 SetDlgItemTextW(hWnd, IDC_ABOUT_VERSION, info->szOSVersion);
                 SetDlgItemTextW(hWnd, IDC_ABOUT_OTHERSTUFF, info->szOtherStuff);
+#ifdef __REACTOS__
+                {
+                    /* the nitro lines make this text one line taller than the dialog template allows */
+                    HWND hOther = GetDlgItem(hWnd, IDC_ABOUT_OTHERSTUFF);
+                    RECT rcOther;
+                    GetWindowRect(hOther, &rcOther);
+                    SetWindowPos(hOther, NULL, 0, 0, rcOther.right - rcOther.left,
+                                 rcOther.bottom - rcOther.top + 12, SWP_NOMOVE | SWP_NOZORDER);
+                }
+#endif
 
                 // Set the registered user and organization name
                 if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
@@ -1346,8 +1356,8 @@ BOOL WINAPI ShellAboutW( HWND hWnd, LPCWSTR szApp, LPCWSTR szOtherStuff,
 #ifdef __REACTOS__
     /* nitro build identification: the title replaces the version line, the notice goes in front of the caller's text */
     StringCchPrintfW(szVersionString, _countof(szVersionString), L"%S", NITRO_TITLE_STR);
-    StringCchPrintfW(szOtherStuff2, _countof(szOtherStuff2), L"%S\n%s",
-                     NITRO_NOTICE_STR, szOtherStuff ? szOtherStuff : L"");
+    StringCchPrintfW(szOtherStuff2, _countof(szOtherStuff2), L"%S\n%s\nBased on ReactOS %S (%S)",
+                     NITRO_NOTICE_STR, szOtherStuff ? szOtherStuff : L"", KERNEL_VERSION_STR, NITRO_UPSTREAM_SHA_STR);
 #endif
 
     info.szApp        = szApp;

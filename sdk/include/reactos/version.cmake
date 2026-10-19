@@ -75,6 +75,7 @@ endif()
 # nitro identification, shown in the OS UI next to the ReactOS version (desktop watermark, About/winver).
 # Cosmetic only: no API-visible version number depends on it.
 set(NITRO_VERSION "dev" CACHE STRING "nitro release version shown in the OS UI")
+set(NITRO_UPSTREAM_SHA "unknown" CACHE STRING "short SHA of the ReactOS upstream base, shown in About/winver")
 set(NITRO_SHA "" CACHE STRING "nitro short git SHA shown in the OS UI (default: HEAD of the source tree)")
 if(NITRO_SHA STREQUAL "")
     set(NITRO_SHA "nogit")
@@ -93,7 +94,7 @@ if(NITRO_SHA STREQUAL "")
     endif()
 endif()
 
-foreach(_nitro_var NITRO_VERSION NITRO_SHA)
+foreach(_nitro_var NITRO_VERSION NITRO_SHA NITRO_UPSTREAM_SHA)
     if(NOT ${_nitro_var} MATCHES "^[A-Za-z0-9._+-]+$")
         message(FATAL_ERROR "${_nitro_var} must only contain letters, digits and . _ + - (got \"${${_nitro_var}}\")")
     endif()
