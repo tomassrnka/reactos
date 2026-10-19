@@ -613,8 +613,12 @@ static NTSTATUS NgPathFromId(PNG_VCB Vcb, PCUNICODE_STRING Id, PUNICODE_STRING P
  * A junction (mount point reparse point) on the path: the open goes back to the I/O manager with
  * STATUS_REPARSE and the reparse data, whose Reserved field counts the bytes at the end of the
  * file name that follow the junction.  Other reparse tags open the file itself.  Caller holds CoreLock.
+ * As is given when the junction is the last component, which is opened through it: the junction's
+ * own descriptor has to grant the access asked for first, as on Windows (a junction that denies
+ * FILE_LIST_DIRECTORY cannot be listed, but a path below it still resolves on FILE_TRAVERSE).
  */
-static NTSTATUS NgMountPointReparse(PNG_VCB Vcb, ngc_node *Node, PIRP Irp, PFILE_OBJECT FileObject, ULONG Tail)
+static NTSTATUS NgMountPointReparse(PNG_VCB Vcb, ngc_node *Node, PIRP Irp, PFILE_OBJECT FileObject, ULONG Tail,
+                                    PACCESS_STATE As)
 {
     PREPARSE_DATA_BUFFER Rp, Copy;
     void *Data;
@@ -641,6 +645,29 @@ static NTSTATUS NgMountPointReparse(PNG_VCB Vcb, ngc_node *Node, PIRP Irp, PFILE
         ngc_free(Data);
         return STATUS_IO_REPARSE_DATA_INVALID;
     }
+    if (As)
+    {
+        ACCESS_MASK Desired = As->RemainingDesiredAccess;
+        PSECURITY_DESCRIPTOR Sd;
+        NTSTATUS Status;
+
+        RtlMapGenericMask(&Desired, IoGetFileObjectGenericMapping());
+        Desired &= ~(As->PreviouslyGrantedAccess | MAXIMUM_ALLOWED | ACCESS_SYSTEM_SECURITY);
+        if (Desired)
+        {
+            Status = NgReadSecurity(Vcb, Node, &Sd);
+            if (NT_SUCCESS(Status))
+            {
+                Status = NgCheckAccessRight(As, Sd, Desired);
+                ExFreePoolWithTag(Sd, TAG_NTFSNG);
+            }
+            if (!NT_SUCCESS(Status))
+            {
+                ngc_free(Data);
+                return Status;
+            }
+        }
+    }
     Copy = ExAllocatePoolWithTag(PagedPool, Len, TAG_NTFSNG);
     if (!Copy)
     {
@@ -652,7 +679,6 @@ static NTSTATUS NgMountPointReparse(PNG_VCB Vcb, ngc_node *Node, PIRP Irp, PFILE
     Copy->Reserved = (USHORT)Tail;
     Irp->Tail.Overlay.AuxiliaryBuffer = (PCHAR)Copy;
     Irp->IoStatus.Information = IO_REPARSE_TAG_MOUNT_POINT;
-    UNREFERENCED_PARAMETER(Vcb);
     return STATUS_REPARSE;
 }
 
@@ -923,7 +949,7 @@ walk:
                 Comp.Length = Comp.MaximumLength = RelatedNameLength * sizeof(WCHAR);
                 RealLen = RelatedNameLength;
                 if (!(Options & FILE_OPEN_REPARSE_POINT) && Disposition != FILE_CREATE)
-                    Status = NgMountPointReparse(Vcb, Node, Irp, FileObject, 0);
+                    Status = NgMountPointReparse(Vcb, Node, Irp, FileObject, 0, Check ? As : NULL);
             }
         }
     }
@@ -1000,7 +1026,8 @@ walk:
                                                            Disposition != FILE_CREATE)))
         {
             Status = NgMountPointReparse(Vcb, Next, Irp, FileObject,
-                                         FullLength - (ULONG)(Comp.Buffer + Comp.Length / sizeof(WCHAR) - Full.Buffer) * sizeof(WCHAR));
+                                         FullLength - (ULONG)(Comp.Buffer + Comp.Length / sizeof(WCHAR) - Full.Buffer) * sizeof(WCHAR),
+                                         LastComp && Check ? As : NULL);
             if (Status != STATUS_SUCCESS)
             {
                 ngc_put(Next);
