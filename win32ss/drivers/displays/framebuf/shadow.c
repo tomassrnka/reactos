@@ -511,9 +511,18 @@ DrvGradientFill(
     FbBoundsRect(&rcl, left, top, right, bottom);
 
     /* Otherwise let the engine draw it on the screen surface, through
-     * DrvCopyBits (IntEngGradientFill does not retry another way) */
+     * DrvCopyBits (IntEngGradientFill does not retry another way). win32k
+     * gives an empty clip (a hidden window) as DC_TRIVIAL with empty
+     * bounds: nothing to draw, and no copy of the screen to make for it. */
     if (!FbInScreen(psoDest, pco, &rcl))
     {
+        if (pco != NULL && pco->iDComplexity == DC_TRIVIAL &&
+            (pco->rclBounds.left >= pco->rclBounds.right ||
+             pco->rclBounds.top >= pco->rclBounds.bottom))
+        {
+            return TRUE;
+        }
+
         return EngGradientFill(psoDest, pco, pxlo, pVertex, nVertex,
                                pMesh, nMesh, prclExtents, pptlDitherOrg, ulMode);
     }
