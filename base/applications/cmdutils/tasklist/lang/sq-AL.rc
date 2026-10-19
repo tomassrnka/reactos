@@ -9,19 +9,85 @@ LANGUAGE LANG_ALBANIAN, SUBLANG_NEUTRAL
 
 STRINGTABLE
 BEGIN
-    IDS_USAGE, "Usage: TASKLIST [/?] [/NH]\n"
+    IDS_USAGE, "\n\
+TASKLIST [/S system [/U username [/P [password]]]]\n\
+         [/M [module] | /SVC | /V] [/FI filter] [/FO format] [/NH]\n"
     IDS_DESCRIPTION, "\n\
-Desciption:\
-    This tool displays a list of currently running processes on\n\
-    the machine.\n"
-    IDS_OPTION_TOO_MUCH, "Error: Invalid syntax. '%1' option is not allowed more than '%2!d!' time(s).\n"
-    IDS_INVALID_SYNTAX, "Error: Invalid syntax.\n"
-    IDS_INVALID_OPTION, "Error: Unknown or invalid command line option specified.\n"
-    IDS_ENUM_FAILED, "Error: Unable to enumerate the process list.\n"
-    IDS_OUT_OF_MEMORY, "Error: Out of memory.\n"
+Description:\n\
+    Displays the processes that are running on this computer.\n\
+\n\
+Parameter List:\n\
+   /S     system           Remote system. Not supported: TASKLIST lists\n\
+                           only the processes of this computer.\n\
+   /U     [domain\\]user    User context for /S. Not supported.\n\
+   /P     [password]       Password for /U. Not supported.\n\
+   /M     [module]         Lists the modules that each task has loaded.\n\
+                           With a module name (a trailing * is allowed),\n\
+                           lists only the tasks that have loaded it.\n\
+   /SVC                    Lists the services that each process hosts.\n\
+   /V                      Adds the status, user name, CPU time and\n\
+                           window title of each task.\n\
+   /FI    filter           Lists only the tasks that match the filter.\n\
+                           Can be given more than once.\n\
+   /FO    format           Output format: TABLE, LIST or CSV.\n\
+   /NH                     Omits the column header (TABLE and CSV only).\n\
+   /?                      Shows this help.\n\
+\n\
+Filters:\n\
+    Filter Name     Valid Operators           Valid Value(s)\n\
+    -----------     ---------------           --------------------------\n\
+    STATUS          eq, ne                    RUNNING | NOT RESPONDING |\n\
+                                              UNKNOWN\n\
+    IMAGENAME       eq, ne                    Image name\n\
+    PID             eq, ne, gt, lt, ge, le    PID value\n\
+    SESSION         eq, ne, gt, lt, ge, le    Session number\n\
+    SESSIONNAME     eq, ne                    Session name\n\
+    CPUTIME         eq, ne, gt, lt, ge, le    CPU time as hh:mm:ss\n\
+    MEMUSAGE        eq, ne, gt, lt, ge, le    Memory usage in KB\n\
+    USERNAME        eq, ne                    User name as [domain\\]user\n\
+    SERVICES        eq, ne                    Service name\n\
+    WINDOWTITLE     eq, ne                    Window title\n\
+    MODULES         eq, ne                    DLL name\n\
+\n\
+    A text value may end with one * as a wildcard.\n\
+\n\
+Examples:\n\
+    TASKLIST /V /FO CSV\n\
+    TASKLIST /SVC /FO LIST\n\
+    TASKLIST /M ntdll.dll\n\
+    TASKLIST /FI ""IMAGENAME eq cmd.exe"" /FI ""MEMUSAGE gt 10000""\n"
+    IDS_OPTION_TOO_MUCH, "ERROR: Invalid syntax. '%1' option is not allowed more than '%2!d!' time(s).\n"
+    IDS_INVALID_SYNTAX, "ERROR: Invalid syntax.\n"
+    IDS_INVALID_ARGUMENT, "ERROR: Invalid argument/option - '%1'.\n"
+    IDS_ENUM_FAILED, "ERROR: Unable to enumerate the process list.\n"
+    IDS_OUT_OF_MEMORY, "ERROR: Out of memory.\n"
     IDS_HEADER_IMAGENAME, "Image Name"
     IDS_HEADER_PID, "PID"
     IDS_HEADER_SESSION, "Session#"
     IDS_HEADER_MEMUSAGE, "Mem Usage"
     IDS_MEMORY_STR, "%s K"
+    IDS_HEADER_SESSIONNAME, "Session Name"
+    IDS_HEADER_STATUS, "Status"
+    IDS_HEADER_USERNAME, "User Name"
+    IDS_HEADER_CPUTIME, "CPU Time"
+    IDS_HEADER_WINDOWTITLE, "Window Title"
+    IDS_HEADER_SERVICES, "Services"
+    IDS_HEADER_MODULES, "Modules"
+    IDS_USAGE_HINT, "Type ""TASKLIST /?"" for usage.\n"
+    IDS_VALUE_EXPECTED, "ERROR: Invalid syntax. Value expected for '%1'.\n"
+    IDS_VALUE_NOT_ALLOWED, "ERROR: Invalid syntax. '%1' value is not allowed for '%2' option.\n"
+    IDS_EXCLUSIVE_OPTIONS, "ERROR: Invalid syntax. /V, /M and /SVC options cannot be used together.\n"
+    IDS_NOHEADER_LIST, "ERROR: Invalid syntax. /NH option is allowed only for ""TABLE"" and ""CSV"" formats.\n"
+    IDS_USER_WITHOUT_SYSTEM, "ERROR: Invalid syntax. /U can be specified only when /S is specified.\n"
+    IDS_PASSWORD_WITHOUT_USER, "ERROR: Invalid syntax. /P can be specified only when /U is specified.\n"
+    IDS_REMOTE_NOT_SUPPORTED, "ERROR: Remote systems are not supported. TASKLIST lists only the processes of this computer.\n"
+    IDS_INVALID_FILTER, "ERROR: The search filter cannot be recognized.\n"
+    IDS_NO_TASKS, "INFO: No tasks are running which match the specified criteria.\n"
+    IDS_IDLE_PROCESS, "System Idle Process"
+    IDS_SESSION_CONSOLE, "Console"
+    IDS_SESSION_SERVICES, "Services"
+    IDS_NOT_AVAILABLE, "N/A"
+    IDS_STATUS_RUNNING, "Running"
+    IDS_STATUS_NOT_RESPONDING, "Not Responding"
+    IDS_STATUS_UNKNOWN, "Unknown"
 END
