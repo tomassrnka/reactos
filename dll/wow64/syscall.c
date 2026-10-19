@@ -1250,6 +1250,14 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             Value = U(2);
             return NtSetInformationThread(H(0), a[1], &Value, sizeof(Value));
         }
+        case ThreadImpersonationToken:
+        {
+            /* SetThreadToken and RevertToSelf: a token handle, or NULL */
+            HANDLE Token;
+            if (a[3] != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+            Token = HANDLE32(U(2));
+            return NtSetInformationThread(H(0), a[1], &Token, sizeof(Token));
+        }
         case ThreadHideFromDebugger: case ThreadPriority: case ThreadBasePriority:
         case ThreadBreakOnTermination:
             return NtSetInformationThread(H(0), a[1], P(2), a[3]);
