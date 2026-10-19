@@ -413,8 +413,10 @@ START_TEST(NtfsRelativeOpen)
 /*
  * A junction whose own DACL denies Everyone the listing (as the legacy profile junctions do), opened
  * itself with FILE_OPEN_REPARSE_POINT, then reopened relative to that handle with an empty name and
- * without FILE_OPEN_REPARSE_POINT. The reopen follows the junction like a path open does, so it must
- * check the junction's DACL like one: listing access is refused and the target is not reached.
+ * without FILE_OPEN_REPARSE_POINT. Windows never follows the junction there: Windows 10 refuses the
+ * listing by the junction's DACL (STATUS_ACCESS_DENIED), Server 2008 R2 and both of them for any other
+ * access fail the reparse (STATUS_IO_REPARSE_DATA_INVALID). ntfsng follows it like a path open, so it
+ * must at least check the junction's DACL like one: the listing must not reach the target.
  */
 START_TEST(NtfsRelativeOpenJunctionAcl)
 {
@@ -475,9 +477,10 @@ START_TEST(NtfsRelativeOpenJunctionAcl)
     IdJ = NtFileId(Hj);
     ok(IdJ != IdT, "The FILE_OPEN_REPARSE_POINT open of j followed it\n");
 
-    /* The empty-name reopen for listing: refused by the DACL of j, t is not reached. */
+    /* The empty-name reopen for listing: refused, t is not reached. */
     Status = RelOpen(Hj, L"", FILE_LIST_DIRECTORY, FILE_OPEN, FILE_DIRECTORY_FILE, &Hx);
-    ok_hex(Status, STATUS_ACCESS_DENIED);
+    ok(Status == STATUS_ACCESS_DENIED || Status == STATUS_IO_REPARSE_DATA_INVALID,
+       "The empty-name reopen of j for listing: 0x%08lx\n", Status);
     if (Hx)
     {
         ok(NtFileId(Hx) != IdT, "The empty-name reopen of j for listing reached t\n");
@@ -485,9 +488,10 @@ START_TEST(NtfsRelativeOpenJunctionAcl)
         Hx = NULL;
     }
 
-    /* The same reopen for an access that j grants follows j to t. */
+    /* The same reopen for an access that j grants: Windows fails the reparse; ntfsng follows j to t. */
     Status = RelOpen(Hj, L"", FILE_READ_ATTRIBUTES, FILE_OPEN, FILE_DIRECTORY_FILE, &Hx);
-    ok_hex(Status, STATUS_SUCCESS);
+    ok(Status == STATUS_IO_REPARSE_DATA_INVALID || (is_reactos() && Status == STATUS_SUCCESS),
+       "The empty-name reopen of j for attributes: 0x%08lx\n", Status);
     if (Hx)
     {
         ok(NtFileId(Hx) == IdT, "The empty-name reopen of j opened %I64x, not t %I64x\n", NtFileId(Hx), IdT);
