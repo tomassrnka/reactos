@@ -3347,6 +3347,8 @@ StartScan:
         Request.StartupInfo = PtrToUlong(&StartupInfo);
         Request.ProcessInformation = PtrToUlong(lpProcessInformation);
         Request.NewToken = PtrToUlong(hNewToken);
+        if (OriginalCreationFlags & EXTENDED_STARTUPINFO_PRESENT)
+            Request.AttributeList = PtrToUlong(((LPSTARTUPINFOEXW)lpStartupInfo)->lpAttributeList);
         /* Native ntdll has a different PEB lock. Snapshot the mutable guest
          * strings/environment while holding the guest lock, then release it
          * before entering the native loader/creator. */
