@@ -31,6 +31,11 @@ SysWOW64/imm32.dll
 
 # GUI applications and the common-dialog/common-control dependency closure.
 SysWOW64/bcrypt.dll
+SysWOW64/bcryptprimitives.dll
+SysWOW64/ncrypt.dll
+# DirectWrite and its user32 forwarder (Firefox renders text with it)
+SysWOW64/dwrite.dll
+SysWOW64/user32_vista.dll
 SysWOW64/atl100.dll
 SysWOW64/combase.dll
 SysWOW64/comctl32.dll
