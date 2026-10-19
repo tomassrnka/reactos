@@ -172,10 +172,10 @@ SeQueryInformationToken(
             PSID Sid;
 
             DPRINT("SeQueryInformationToken(TokenGroups)\n");
-            RequiredLength = sizeof(tg->GroupCount) +
+            RequiredLength = FIELD_OFFSET(TOKEN_GROUPS, Groups) +
                 RtlLengthSidAndAttributes(Token->UserAndGroupCount - 1, &Token->UserAndGroups[1]);
 
-            SidLen = RequiredLength - sizeof(tg->GroupCount) -
+            SidLen = RequiredLength - FIELD_OFFSET(TOKEN_GROUPS, Groups) -
                 ((Token->UserAndGroupCount - 1) * sizeof(SID_AND_ATTRIBUTES));
 
             /* Allocate the output buffer */
@@ -186,7 +186,7 @@ SeQueryInformationToken(
                 break;
             }
 
-            Sid = (PSID)((ULONG_PTR)tg + sizeof(tg->GroupCount) +
+            Sid = (PSID)((ULONG_PTR)tg + FIELD_OFFSET(TOKEN_GROUPS, Groups) +
                          ((Token->UserAndGroupCount - 1) * sizeof(SID_AND_ATTRIBUTES)));
 
             tg->GroupCount = Token->UserAndGroupCount - 1;
@@ -584,16 +584,16 @@ NtQueryInformationToken(
                 PTOKEN_GROUPS tg = (PTOKEN_GROUPS)TokenInformation;
 
                 DPRINT("NtQueryInformationToken(TokenGroups)\n");
-                RequiredLength = sizeof(tg->GroupCount) +
+                RequiredLength = FIELD_OFFSET(TOKEN_GROUPS, Groups) +
                     RtlLengthSidAndAttributes(Token->UserAndGroupCount - 1, &Token->UserAndGroups[1]);
 
                 _SEH2_TRY
                 {
                     if (TokenInformationLength >= RequiredLength)
                     {
-                        ULONG SidLen = RequiredLength - sizeof(tg->GroupCount) -
+                        ULONG SidLen = RequiredLength - FIELD_OFFSET(TOKEN_GROUPS, Groups) -
                             ((Token->UserAndGroupCount - 1) * sizeof(SID_AND_ATTRIBUTES));
-                        PSID Sid = (PSID_AND_ATTRIBUTES)((ULONG_PTR)tg + sizeof(tg->GroupCount) +
+                        PSID Sid = (PSID_AND_ATTRIBUTES)((ULONG_PTR)tg + FIELD_OFFSET(TOKEN_GROUPS, Groups) +
                                                          ((Token->UserAndGroupCount - 1) * sizeof(SID_AND_ATTRIBUTES)));
 
                         tg->GroupCount = Token->UserAndGroupCount - 1;
@@ -1010,16 +1010,16 @@ NtQueryInformationToken(
                 PTOKEN_GROUPS tg = (PTOKEN_GROUPS)TokenInformation;
 
                 DPRINT("NtQueryInformationToken(TokenRestrictedSids)\n");
-                RequiredLength = sizeof(tg->GroupCount) +
+                RequiredLength = FIELD_OFFSET(TOKEN_GROUPS, Groups) +
                 RtlLengthSidAndAttributes(Token->RestrictedSidCount, Token->RestrictedSids);
 
                 _SEH2_TRY
                 {
                     if (TokenInformationLength >= RequiredLength)
                     {
-                        ULONG SidLen = RequiredLength - sizeof(tg->GroupCount) -
+                        ULONG SidLen = RequiredLength - FIELD_OFFSET(TOKEN_GROUPS, Groups) -
                             (Token->RestrictedSidCount * sizeof(SID_AND_ATTRIBUTES));
-                        PSID Sid = (PSID)((ULONG_PTR)tg + sizeof(tg->GroupCount) +
+                        PSID Sid = (PSID)((ULONG_PTR)tg + FIELD_OFFSET(TOKEN_GROUPS, Groups) +
                                           (Token->RestrictedSidCount * sizeof(SID_AND_ATTRIBUTES)));
 
                         tg->GroupCount = Token->RestrictedSidCount;
