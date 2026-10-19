@@ -132,6 +132,7 @@ dll/win32/itircl              # Synced to Wine-10.0
 dll/win32/itss                # Synced to Wine-10.0
 dll/win32/jscript             # Synced to Wine-10.0
 dll/win32/jsproxy             # Synced to Wine-10.0
+dll/win32/ktmw32              # Synced to Wine-11.19
 dll/win32/l3codeca.acm        # Synced to Wine-10.0
 dll/win32/loadperf            # Synced to Wine-10.0
 dll/win32/lz32                # Synced to Wine-10.0
@@ -235,6 +236,7 @@ dll/win32/sti                 # Synced to Wine-10.0
 dll/win32/sxs                 # Synced to Wine-10.0
 dll/win32/t2embed             # Synced to Wine-10.0
 dll/win32/tapi32              # Synced to Wine-10.0
+dll/win32/tdh                 # Synced to Wine-11.19 (the stubs are implemented)
 dll/win32/traffic             # Synced to Wine-10.0
 dll/win32/twain_32            # Synced to Wine-10.0
 dll/win32/uiautomationcore    # Synced to Wine-10.0

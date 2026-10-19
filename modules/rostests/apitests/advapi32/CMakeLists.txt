@@ -1,9 +1,14 @@
 
 list(APPEND SOURCE
+    AddMandatoryAce.c
+    ConvertStringSidToSid.c
     CreateService.c
+    CloseTrace.c
     DuplicateTokenEx.c
+    EncryptFile.c
     eventlog.c
     EventRegister.c
+    EventProvider.c
     Hash.c
     HKEY_CLASSES_ROOT.c
     IsTextUnicode.c
@@ -11,19 +16,25 @@ list(APPEND SOURCE
     QueryServiceConfig2.c
     RegConcurrentWrite.c
     RegCreateKeyEx.c
+    RegCreateKeyTransacted.c
     RegEnumKey.c
+    RegEnumKeyClass.c
     RegEnumValueW.c
     RegFlushKey.c
     RegLoadKey.c
     RegOpenKeyExW.c
     RegQueryInfoKey.c
     RegQueryValueExW.c
+    RegGetValue.c
     RtlEncryptMemory.c
     SaferIdentifyLevel.c
     TokenIntegrity.c
     ServiceArgs.c
     ServiceEnv.c
     ServiceNetwork.c
+    SetEntriesInAclOld.c
+    SetNamedSecurityInfoInherit.c
+    SddlRights.c
     svchlp.c)
 
 list(APPEND PCH_SKIP_SOURCE

@@ -31,6 +31,7 @@ target_link_libraries(etwtrace ${PSEH_LIB})
 add_dependencies(etwtrace psdk)
 
 list(APPEND SOURCE
+    compat/ktm.c
     dbg/dbgui.c
     etw/event.c
     ldr/ldrapi.c
