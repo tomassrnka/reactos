@@ -198,3 +198,28 @@ START_TEST(StackOverflow)
     _SEH2_END;
     ok_ntstatus(Status, STATUS_ACCESS_VIOLATION);
 }
+
+/* The same overflow on a thread created with the default stack, the stack of
+ * every thread but the first one (a 32-bit thread under WoW64 included) */
+static DWORD WINAPI StackOverflowThreadProc(PVOID Parameter)
+{
+    UNREFERENCED_PARAMETER(Parameter);
+    iteration = 0;
+    func_StackOverflow();
+    return 0x50f;
+}
+
+START_TEST(StackOverflowThread)
+{
+    HANDLE Thread;
+    DWORD Exit = 0;
+
+    Thread = CreateThread(NULL, 0, StackOverflowThreadProc, NULL, 0, NULL);
+    ok(Thread != NULL, "CreateThread failed: %lu\n", GetLastError());
+    if (!Thread)
+        return;
+    ok(WaitForSingleObject(Thread, 60000) == WAIT_OBJECT_0, "The thread did not end\n");
+    ok(GetExitCodeThread(Thread, &Exit), "GetExitCodeThread failed: %lu\n", GetLastError());
+    ok(Exit == 0x50f, "Thread exit code 0x%lx\n", Exit);
+    CloseHandle(Thread);
+}

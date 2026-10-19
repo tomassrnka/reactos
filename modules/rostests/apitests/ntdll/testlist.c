@@ -179,6 +179,7 @@ extern void func_RtlxUnicodeStringToAnsiSize(void);
 extern void func_RtlxUnicodeStringToOemSize(void);
 extern void func_SectionFaultCost(void);
 extern void func_StackOverflow(void);
+extern void func_StackOverflowThread(void);
 extern void func_SystemCallStubs(void);
 extern void func_strcpy_s(void);
 extern void func_SystemDllTls(void);
@@ -361,6 +362,7 @@ const struct test winetest_testlist[] =
     { "RtlWaitOnAddress",               func_RtlWaitOnAddress },
     { "SectionFaultCost",               func_SectionFaultCost },
     { "StackOverflow",                  func_StackOverflow },
+    { "StackOverflowThread",            func_StackOverflowThread },
     { "SystemCallStubs",                func_SystemCallStubs },
     { "strcpy_s",                       func_strcpy_s },
     { "SystemDllTls",                   func_SystemDllTls },
