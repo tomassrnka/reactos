@@ -14,11 +14,15 @@ ULONG_PTR Wow64ZeroBits(ULONG ZeroBits)
 
 static NTSTATUS InitializeAddressLimit(VOID)
 {
-    PIMAGE_NT_HEADERS Header = RtlImageNtHeader(NtCurrentPeb()->ImageBaseAddress);
+    SECTION_IMAGE_INFORMATION Image;
     PVOID Boundary;
     SIZE_T Size = 0x10000;
-    if (!Header) return STATUS_INVALID_IMAGE_FORMAT;
-    Wow64HighestUserAddress = (Header->FileHeader.Characteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE) ?
+    NTSTATUS Status;
+    /* The image section's characteristics, which the kernel uses for the same
+     * limit (ProcessTlsInformation), not the mapped header a parent can change */
+    Status = NtQueryInformationProcess(NtCurrentProcess(), ProcessImageInformation, &Image, sizeof(Image), NULL);
+    if (!NT_SUCCESS(Status)) return Status;
+    Wow64HighestUserAddress = (Image.ImageCharacteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE) ?
                              0xfffeffff : 0x7ffeffff;
     /* ZeroBits masks round to their highest set bit. Reserve the final 64 KiB
      * so a top-down guest allocation cannot end at 2/4 GiB and wrap pointer

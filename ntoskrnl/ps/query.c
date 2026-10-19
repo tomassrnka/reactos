@@ -1467,7 +1467,9 @@ PspSetThreadTls32(
     if (!Vector)
         return FALSE;
 
-    /* The thread's vector and its length, as user memory */
+    /* The thread's vector and its length, as user memory; a pointer outside the guest is not touched */
+    if (!TLS32_IN_GUEST(Vector, 0))
+        ExRaiseStatus(STATUS_INVALID_PARAMETER);
     ProbeForWrite(Vector - 1, sizeof(ULONG), sizeof(ULONG));
     OldLength = Vector[-1];
     if (OldLength >= MAXLONG / sizeof(ULONG) || !TLS32_IN_GUEST(Vector, OldLength))
@@ -1486,6 +1488,8 @@ PspSetThreadTls32(
     {
         /* The new vector: at least one entry longer than the index */
         NewVector = (PULONG)NewTlsData;
+        if (!TLS32_IN_GUEST(NewVector, 0))
+            ExRaiseStatus(STATUS_INVALID_PARAMETER);
         ProbeForWrite(NewVector - 1, sizeof(ULONG), sizeof(ULONG));
         NewLength = NewVector[-1];
         if (NewLength <= Header->TlsIndex || NewLength >= MAXLONG / sizeof(ULONG) ||
