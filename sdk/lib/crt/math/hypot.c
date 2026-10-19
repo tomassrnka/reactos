@@ -36,6 +36,14 @@ _hypot(double x, double y)
   double abig = fabs(x), asmall = fabs(y);
   double ratio;
 
+  /* An infinity or a NaN makes the iteration below run forever */
+  if (!_finite(x) && !_isnan(x))
+    return abig;
+  if (!_finite(y) && !_isnan(y))
+    return asmall;
+  if (_isnan(x) || _isnan(y))
+    return abig + asmall;
+
   /* Make abig = max(|x|, |y|), asmall = min(|x|, |y|).  */
   if (abig < asmall)
     {
