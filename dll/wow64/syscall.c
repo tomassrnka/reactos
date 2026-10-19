@@ -173,6 +173,46 @@ static VOID ProbeOutput(ULONG Address, ULONG Size)
     for (i = 0; i < Size; ++i) Bytes[i] = Bytes[i];
 }
 
+/* TOKEN_GROUPS classes: the 32-bit layout has 4-byte SID pointers, so query the
+ * native form into a scratch buffer and rebuild it in the guest buffer. */
+static NTSTATUS TokenGroups32(HANDLE Token, TOKEN_INFORMATION_CLASS Class, ULONG Buffer,
+                              ULONG Length, ULONG ReturnLength, WOW64_CLEANUP *Cleanup)
+{
+    PTOKEN_GROUPS Native;
+    ULONG Bytes = 0, Needed, SidBytes = 0, Offset, Sid, i;
+    ULONG *Guest;
+    NTSTATUS Status;
+
+    /* The native service checks the buffer alignment and the return length first */
+    if (Buffer & (sizeof(ULONG) - 1)) return STATUS_DATATYPE_MISALIGNMENT;
+    ProbeOutput(ReturnLength, sizeof(ULONG));
+    Status = NtQueryInformationToken(Token, Class, NULL, 0, &Bytes);
+    if (Status != STATUS_BUFFER_TOO_SMALL) return Status;
+    if (Bytes < sizeof(TOKEN_GROUPS)) Bytes = sizeof(TOKEN_GROUPS);
+    Native = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, Bytes);
+    if (!Native) return STATUS_NO_MEMORY;
+    Status = NtQueryInformationToken(Token, Class, Native, Bytes, &Bytes);
+    if (!NT_SUCCESS(Status)) return Status;
+    for (i = 0; i < Native->GroupCount; ++i)
+        SidBytes += RtlLengthSid(Native->Groups[i].Sid);
+    Needed = sizeof(ULONG) + Native->GroupCount * 2 * sizeof(ULONG) + SidBytes;
+    *(ULONG *)PTR32(ReturnLength) = Needed;
+    if (Length < Needed) return STATUS_BUFFER_TOO_SMALL;
+    ProbeOutput(Buffer, Needed);
+    Guest = PTR32(Buffer);
+    Guest[0] = Native->GroupCount;
+    Offset = sizeof(ULONG) + Native->GroupCount * 2 * sizeof(ULONG);
+    for (i = 0; i < Native->GroupCount; ++i)
+    {
+        Sid = RtlLengthSid(Native->Groups[i].Sid);
+        Guest[1 + 2 * i] = Buffer + Offset;
+        Guest[2 + 2 * i] = Native->Groups[i].Attributes;
+        RtlCopyMemory((UCHAR *)Guest + Offset, Native->Groups[i].Sid, Sid);
+        Offset += Sid;
+    }
+    return STATUS_SUCCESS;
+}
+
 static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
 {
     NTSTATUS Status;
@@ -1027,6 +1067,8 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         case TokenPrivileges: case TokenSessionId: case TokenElevationType:
         case TokenElevation: case TokenIsAppContainer:
             return NtQueryInformationToken(H(0), a[1], P(2), a[3], P(4));
+        case TokenGroups: case TokenRestrictedSids: case TokenLogonSid:
+            return TokenGroups32(H(0), a[1], a[2], a[3], a[4], Cleanup);
         default: return STATUS_NOT_SUPPORTED;
         }
     case W64_NtSetInformationToken:
