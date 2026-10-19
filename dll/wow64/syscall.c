@@ -238,6 +238,12 @@ static NTSTATUS TokenDefaultDacl32(HANDLE Token, ULONG Buffer, ULONG Length, ULO
     Native = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, Bytes);
     if (!Native) return STATUS_NO_MEMORY;
     Status = NtQueryInformationToken(Token, TokenDefaultDacl, Native, Bytes, &Bytes);
+    if (Status == STATUS_BUFFER_TOO_SMALL && Bytes >= sizeof(TOKEN_DEFAULT_DACL))
+    {
+        /* The DACL grew meanwhile: report what the 32-bit form now needs */
+        *(ULONG *)PTR32(ReturnLength) = Bytes - sizeof(TOKEN_DEFAULT_DACL) + sizeof(ULONG);
+        return Status;
+    }
     if (!NT_SUCCESS(Status)) return Status;
     AclBytes = Native->DefaultDacl ? Native->DefaultDacl->AclSize : 0;
     Needed = sizeof(ULONG) + AclBytes;
@@ -1200,9 +1206,25 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             /* TOKEN_MANDATORY_LABEL: a 4-byte SID pointer and the attributes; the kernel
              * captures the SID from guest memory */
             TOKEN_MANDATORY_LABEL Label;
+            UCHAR Sid[SECURITY_MAX_SID_SIZE];
+            ULONG Guest, SidBytes;
             if (a[3] < 2 * sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
-            Label.Label.Sid = PTR32(U(2));
+            if (!GuestSpan(a[2], 2 * sizeof(ULONG))) return STATUS_ACCESS_VIOLATION;
+            Guest = U(2);
             Label.Label.Attributes = ((ULONG *)P(2))[1];
+            Label.Label.Sid = NULL;
+            if (Guest)
+            {
+                /* Capture the SID once, from guest memory only */
+                if (!GuestSpan(Guest, FIELD_OFFSET(SID, SubAuthority))) return STATUS_ACCESS_VIOLATION;
+                SidBytes = FIELD_OFFSET(SID, SubAuthority) +
+                           ((SID *)PTR32(Guest))->SubAuthorityCount * sizeof(ULONG);
+                if (SidBytes > sizeof(Sid)) return STATUS_INVALID_SID;
+                if (!GuestSpan(Guest, SidBytes)) return STATUS_ACCESS_VIOLATION;
+                RtlCopyMemory(Sid, PTR32(Guest), SidBytes);
+                ((SID *)Sid)->SubAuthorityCount = (UCHAR)((SidBytes - FIELD_OFFSET(SID, SubAuthority)) / sizeof(ULONG));
+                Label.Label.Sid = Sid;
+            }
             return NtSetInformationToken(H(0), a[1], &Label, sizeof(Label));
         }
         return STATUS_NOT_SUPPORTED;
