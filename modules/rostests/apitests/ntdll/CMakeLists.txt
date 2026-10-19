@@ -192,6 +192,7 @@ list(APPEND SOURCE
     RtlxUnicodeStringToAnsiSize.c
     RtlxUnicodeStringToOemSize.c
     BadSegmentFault.c
+    RaiseExceptionLeak.c
     StackOverflow.c
     SystemCallStubs.c
     SystemDllTls.c
