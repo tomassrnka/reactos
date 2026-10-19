@@ -73,10 +73,10 @@ Ki386InitializePATTarget(IN ULONG_PTR Context)
           (PAT_WB << 32) | (PAT_WC << 40) | (PAT_UCM << 48) | (PAT_UC << 56);
 
     /* Invalidate cached translations and data before changing their types. */
-    KeFlushCurrentTb();
+    KxFlushEntireCurrentTb();
     KeInvalidateAllCaches();
     __writemsr(MSR_PAT, Pat);
-    KeFlushCurrentTb();
+    KxFlushEntireCurrentTb();
 
     return 0;
 }

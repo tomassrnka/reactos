@@ -19,12 +19,11 @@
 
 /* GLOBALS ********************************************************************/
 
-/* Defined in generic/misc.c */
-extern HALP_APIC_INFO_TABLE HalpApicInfoTable;
+HALP_APIC_INFO_TABLE HalpApicInfoTable;
 
 PROCESSOR_IDENTITY HalpProcessorIdentity[MAXIMUM_PROCESSORS];
 
-extern ULONG HalpPicVectorRedirect[HALP_ISA_IRQ_COUNT];
+extern ULONG HalpPicVectorRedirect[16];
 
 /* The table is parsed before debug output works, so problems are reported later */
 static ULONG HalpMadtIgnoredEntries;
@@ -112,7 +111,7 @@ HalpMadtAddIoApic(
 
 /**
  * @brief
- * Records the routing and polarity of an interrupt source override entry.
+ * Records the routing of an interrupt source override entry.
  *
  * @param[in] Override
  * The interrupt source override entry.
@@ -122,32 +121,14 @@ VOID
 HalpMadtAddInterruptOverride(
     _In_ ACPI_MADT_INTERRUPT_OVERRIDE *Override)
 {
-    ULONG Irq = Override->SourceIrq;
-
     /* Overrides only exist for ISA IRQs */
-    if ((Override->Bus != 0) || (Irq >= HALP_ISA_IRQ_COUNT))
+    if ((Override->Bus != 0) || (Override->SourceIrq >= RTL_NUMBER_OF(HalpPicVectorRedirect)))
     {
         HalpMadtIgnoredEntries++;
         return;
     }
 
-    HalpPicVectorRedirect[Irq] = Override->GlobalIrq;
-    HalpApicInfoTable.IsaIrqGsi[Irq] = Override->GlobalIrq;
-
-    switch (Override->IntiFlags & ACPI_MADT_POLARITY_MASK)
-    {
-        case ACPI_MADT_POLARITY_ACTIVE_HIGH:
-            HalpApicInfoTable.IsaIrqPolarity[Irq] = InterruptActiveHigh;
-            break;
-
-        case ACPI_MADT_POLARITY_ACTIVE_LOW:
-            HalpApicInfoTable.IsaIrqPolarity[Irq] = InterruptActiveLow;
-            break;
-
-        default:
-            HalpApicInfoTable.IsaIrqPolarity[Irq] = InterruptPolarityUnknown;
-            break;
-    }
+    HalpPicVectorRedirect[Override->SourceIrq] = Override->GlobalIrq;
 }
 
 /**
