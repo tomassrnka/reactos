@@ -2504,40 +2504,27 @@ static void seltree_create_imagelist( HWND hwnd )
     SendMessageW( hwnd, TVM_SETIMAGELIST, TVSIL_STATE, (LPARAM)himl );
 }
 
-static UINT dialog_seltree_handler( msi_dialog *dialog, struct control *control, WPARAM param )
+/* A NULL title is no selection: both texts are emptied */
+static UINT seltree_publish_selection( msi_dialog *dialog, const WCHAR *title )
 {
-    struct msi_selection_tree_info *info = GetPropW( control->hwnd, L"MSIDATA" );
-    LPNMTREEVIEWW tv = (LPNMTREEVIEWW)param;
-    MSIRECORD *row, *rec;
+    MSIRECORD *row = NULL, *rec;
     MSIFOLDER *folder;
-    MSIFEATURE *feature;
-    LPCWSTR dir, title = NULL;
+    LPCWSTR dir;
     UINT r = ERROR_SUCCESS;
 
-    if (tv->hdr.code != TVN_SELCHANGINGW)
-        return ERROR_SUCCESS;
-
-    info->selected = tv->itemNew.hItem;
-
-    if (!(tv->itemNew.mask & TVIF_TEXT))
+    if (title)
     {
-        feature = seltree_feature_from_item( control->hwnd, tv->itemNew.hItem );
-        if (feature)
-            title = feature->Title;
+        row = MSI_QueryGetRecord( dialog->package->db, L"SELECT * FROM `Feature` WHERE `Title` = '%s'", title );
+        if (!row)
+            return ERROR_FUNCTION_FAILED;
     }
-    else
-        title = tv->itemNew.pszText;
-
-    row = MSI_QueryGetRecord( dialog->package->db, L"SELECT * FROM `Feature` WHERE `Title` = '%s'", title );
-    if (!row)
-        return ERROR_FUNCTION_FAILED;
 
     rec = MSI_CreateRecord( 1 );
 
-    MSI_RecordSetStringW( rec, 1, MSI_RecordGetString( row, 4 ) );
+    MSI_RecordSetStringW( rec, 1, row ? MSI_RecordGetString( row, 4 ) : NULL );
     msi_event_fire( dialog->package, L"SelectionDescription", rec );
 
-    dir = MSI_RecordGetString( row, 7 );
+    dir = row ? MSI_RecordGetString( row, 7 ) : NULL;
     if (dir)
     {
         folder = msi_get_loaded_folder( dialog->package, dir );
@@ -2554,10 +2541,52 @@ static UINT dialog_seltree_handler( msi_dialog *dialog, struct control *control,
     msi_event_fire( dialog->package, L"SelectionPath", rec );
 
 done:
-    msiobj_release(&row->hdr);
+    if (row) msiobj_release(&row->hdr);
     msiobj_release(&rec->hdr);
 
     return r;
+}
+
+static UINT dialog_seltree_handler( msi_dialog *dialog, struct control *control, WPARAM param )
+{
+    struct msi_selection_tree_info *info = GetPropW( control->hwnd, L"MSIDATA" );
+    LPNMTREEVIEWW tv = (LPNMTREEVIEWW)param;
+    MSIFEATURE *feature;
+    LPCWSTR title = NULL;
+
+    if (tv->hdr.code != TVN_SELCHANGINGW)
+        return ERROR_SUCCESS;
+
+    info->selected = tv->itemNew.hItem;
+
+    if (!(tv->itemNew.mask & TVIF_TEXT))
+    {
+        feature = seltree_feature_from_item( control->hwnd, tv->itemNew.hItem );
+        if (feature)
+            title = feature->Title;
+    }
+    else
+        title = tv->itemNew.pszText;
+
+    return seltree_publish_selection( dialog, title );
+}
+
+/* The tree selects its first feature while it is built, before the texts that follow the selection exist */
+static void seltree_publish_initial_selection( msi_dialog *dialog )
+{
+    struct control *control;
+
+    LIST_FOR_EACH_ENTRY( control, &dialog->controls, struct control, entry )
+    {
+        MSIFEATURE *feature;
+        struct msi_selection_tree_info *info;
+
+        if (control->handler != dialog_seltree_handler) continue;
+
+        info = GetPropW( control->hwnd, L"MSIDATA" );
+        feature = info ? seltree_feature_from_item( control->hwnd, info->selected ) : NULL;
+        seltree_publish_selection( dialog, feature ? feature->Title : NULL );
+    }
 }
 
 static UINT dialog_selection_tree( msi_dialog *dialog, MSIRECORD *rec )
@@ -3538,6 +3567,7 @@ static UINT dialog_fill_controls( msi_dialog *dialog )
 
     r = MSI_IterateRecords( view, 0, dialog_create_controls, dialog );
     msiobj_release( &view->hdr );
+    seltree_publish_initial_selection( dialog );
     return r;
 }
 
@@ -3988,6 +4018,14 @@ static void dialog_end_dialog( msi_dialog *dialog )
     PostMessageW(dialog->hwnd, WM_NULL, 0, 0);
 }
 
+#ifdef __REACTOS__
+/* The thread that owns the dialogs, 0 before the first dialog */
+DWORD msi_dialog_get_ui_thread( void )
+{
+    return uiThreadId;
+}
+
+#endif
 void msi_dialog_check_messages( HANDLE handle )
 {
     DWORD r;

@@ -7972,6 +7972,9 @@ UINT MSI_InstallPackage( MSIPACKAGE *package, LPCWSTR szPackagePath,
     msi_set_original_database_property( package->db, szPackagePath );
     msi_parse_command_line( package, szCommandLine, FALSE );
     msi_adjust_privilege_properties( package );
+#ifdef __REACTOS__
+    msi_set_context_folders( package );
+#endif
     msi_set_context( package );
 
     productcode = msi_dup_property( package->db, L"ProductCode" );
