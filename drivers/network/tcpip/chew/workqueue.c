@@ -9,6 +9,8 @@
 
 #include <wdm.h>
 
+#include <chew.h>
+
 #define FOURCC(w,x,y,z) (((w) << 24) | ((x) << 16) | ((y) << 8) | (z))
 #define CHEW_TAG FOURCC('C','H','E','W')
 
@@ -86,4 +88,112 @@ BOOLEAN ChewCreate(VOID (*Worker)(PVOID), PVOID WorkerContext)
     {
         return FALSE;
     }
+}
+
+/* Entries one run of a serial queue's work item handles before it lets other work items run */
+#define CHEW_SERIAL_BATCH 64
+
+static VOID NTAPI ChewSerialWorkItem(PDEVICE_OBJECT DeviceObject, PVOID Context)
+{
+    PCHEW_SERIAL_QUEUE Queue = Context;
+    PLIST_ENTRY Entry;
+    KIRQL OldIrql;
+    ULONG Handled;
+
+    for (Handled = 0; ; Handled++)
+    {
+        KeAcquireSpinLock(&Queue->Lock, &OldIrql);
+
+        if (IsListEmpty(&Queue->List))
+        {
+            Queue->Running = FALSE;
+            KeSetEvent(&Queue->Idle, IO_NO_INCREMENT, FALSE);
+            KeReleaseSpinLock(&Queue->Lock, OldIrql);
+            return;
+        }
+
+        if (Handled == CHEW_SERIAL_BATCH)
+        {
+            /* Still running: nobody else queues the work item, so the order is kept */
+            KeReleaseSpinLock(&Queue->Lock, OldIrql);
+            IoQueueWorkItem(Queue->WorkItem, ChewSerialWorkItem, DelayedWorkQueue, Queue);
+            return;
+        }
+
+        Entry = RemoveHeadList(&Queue->List);
+        Queue->Count--;
+        KeReleaseSpinLock(&Queue->Lock, OldIrql);
+
+        Queue->Worker(Entry);
+    }
+}
+
+BOOLEAN ChewSerialInit(PCHEW_SERIAL_QUEUE Queue, VOID (*Worker)(PLIST_ENTRY Entry), ULONG Limit)
+{
+    Queue->WorkItem = IoAllocateWorkItem(WorkQueueDevice);
+    if (!Queue->WorkItem)
+        return FALSE;
+
+    KeInitializeSpinLock(&Queue->Lock);
+    InitializeListHead(&Queue->List);
+    Queue->Worker = Worker;
+    Queue->Count = 0;
+    Queue->Limit = Limit;
+    Queue->Running = FALSE;
+    Queue->Closed = FALSE;
+    KeInitializeEvent(&Queue->Idle, NotificationEvent, TRUE);
+
+    return TRUE;
+}
+
+BOOLEAN ChewSerialInsert(PCHEW_SERIAL_QUEUE Queue, PLIST_ENTRY Entry)
+{
+    KIRQL OldIrql;
+    BOOLEAN Start = FALSE;
+
+    KeAcquireSpinLock(&Queue->Lock, &OldIrql);
+
+    if (Queue->Closed || Queue->Count >= Queue->Limit)
+    {
+        KeReleaseSpinLock(&Queue->Lock, OldIrql);
+        return FALSE;
+    }
+
+    InsertTailList(&Queue->List, Entry);
+    Queue->Count++;
+    if (!Queue->Running)
+    {
+        Queue->Running = TRUE;
+        KeClearEvent(&Queue->Idle);
+        Start = TRUE;
+    }
+
+    KeReleaseSpinLock(&Queue->Lock, OldIrql);
+
+    if (Start)
+        IoQueueWorkItem(Queue->WorkItem, ChewSerialWorkItem, DelayedWorkQueue, Queue);
+
+    return TRUE;
+}
+
+VOID ChewSerialRundown(PCHEW_SERIAL_QUEUE Queue)
+{
+    KIRQL OldIrql;
+
+    if (!Queue->WorkItem)
+        return;
+
+    KeAcquireSpinLock(&Queue->Lock, &OldIrql);
+    Queue->Closed = TRUE;
+    KeReleaseSpinLock(&Queue->Lock, OldIrql);
+
+    KeWaitForSingleObject(&Queue->Idle, Executive, KernelMode, FALSE, NULL);
+
+    /* The worker sets Idle under the lock; once we hold the lock it has released it for good */
+    KeAcquireSpinLock(&Queue->Lock, &OldIrql);
+    ASSERT(!Queue->Running && IsListEmpty(&Queue->List));
+    KeReleaseSpinLock(&Queue->Lock, OldIrql);
+
+    IoFreeWorkItem(Queue->WorkItem);
+    Queue->WorkItem = NULL;
 }
