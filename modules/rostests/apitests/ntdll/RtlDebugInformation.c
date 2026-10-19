@@ -137,20 +137,29 @@ static const char *ChildDlls[] =
 static void RunModulesChild(const char *EventName)
 {
     HANDLE Event;
-    ULONG i;
+    ULONG i, Loaded = 0;
 
     for (i = 0; i < ARRAYSIZE(ChildDlls); i++)
-        LoadLibraryA(ChildDlls[i]);
-
-    Event = OpenEventA(EVENT_MODIFY_STATE, FALSE, EventName);
-    if (Event)
     {
-        SetEvent(Event);
-        CloseHandle(Event);
+        if (LoadLibraryA(ChildDlls[i]))
+            Loaded++;
     }
 
-    /* The parent terminates this process */
-    Sleep(60000);
+    /* Report readiness only with the DLLs loaded; the exit code says how many */
+    if (Loaded == ARRAYSIZE(ChildDlls))
+    {
+        Event = OpenEventA(EVENT_MODIFY_STATE, FALSE, EventName);
+        if (Event)
+        {
+            SetEvent(Event);
+            CloseHandle(Event);
+            /* Wait for the parent to terminate this process */
+            Sleep(INFINITE);
+        }
+    }
+
+    /* Leave without the test summary, it would mix into the parent's output */
+    ExitProcess(Loaded + 1);
 }
 
 static void Test_RemoteProcessModules(void)
@@ -159,9 +168,9 @@ static void Test_RemoteProcessModules(void)
     STARTUPINFOA StartupInfo = { sizeof(StartupInfo) };
     PROCESS_INFORMATION ProcessInfo;
     PRTL_DEBUG_INFORMATION Buffer;
-    HANDLE Event;
+    HANDLE Event, Handles[2];
     NTSTATUS Status;
-    DWORD Wait;
+    DWORD Wait, ExitCode = 0;
 
     GetModuleFileNameA(NULL, ExePath, ARRAYSIZE(ExePath));
     StringCbPrintfA(EventName, sizeof(EventName), "RtlDebugInformation_%lu", GetCurrentProcessId());
@@ -171,6 +180,12 @@ static void Test_RemoteProcessModules(void)
     ok(Event != NULL, "CreateEventA failed with %lu\n", GetLastError());
     if (!Event)
         return;
+    if (GetLastError() == ERROR_ALREADY_EXISTS)
+    {
+        ok(0, "Event %s already exists\n", EventName);
+        CloseHandle(Event);
+        return;
+    }
 
     if (!CreateProcessA(ExePath, CmdLine, NULL, NULL, FALSE, 0, NULL, NULL, &StartupInfo, &ProcessInfo))
     {
@@ -179,10 +194,38 @@ static void Test_RemoteProcessModules(void)
         return;
     }
 
-    Wait = WaitForSingleObject(Event, 60000);
-    ok(Wait == WAIT_OBJECT_0, "The child did not load its DLLs: wait returned %lu\n", Wait);
+    Handles[0] = Event;
+    Handles[1] = ProcessInfo.hProcess;
+    Wait = WaitForMultipleObjects(2, Handles, FALSE, 60000);
+    if (Wait == WAIT_OBJECT_0 + 1)
+    {
+        GetExitCodeProcess(ProcessInfo.hProcess, &ExitCode);
+        ok(0, "The child loaded only %lu of %u DLLs\n", ExitCode - 1, (unsigned)ARRAYSIZE(ChildDlls));
+    }
+    else
+    {
+        ok(Wait == WAIT_OBJECT_0, "The child did not get ready: wait returned %lu\n", Wait);
+    }
     if (Wait == WAIT_OBJECT_0)
     {
+        ULONG Count = 0;
+
+        /* The default buffer takes the whole list; it is more than a page holds */
+        Buffer = RtlCreateQueryDebugBuffer(0, FALSE);
+        ok(Buffer != NULL, "Unable to create default buffer\n");
+        if (Buffer)
+        {
+            Status = RtlQueryProcessDebugInformation(ProcessInfo.dwProcessId, RTL_DEBUG_QUERY_MODULES, Buffer);
+            ok_hex(Status, STATUS_SUCCESS);
+            ok(Buffer->Modules != NULL, "Default buffer: no module list\n");
+            if (NT_SUCCESS(Status) && Buffer->Modules != NULL)
+                Count = Buffer->Modules->NumberOfModules;
+            /* The exe, ntdll, kernel32 and the DLLs above */
+            ok(Count >= ARRAYSIZE(ChildDlls), "Default buffer: only %lu modules\n", Count);
+            Status = RtlDestroyQueryDebugBuffer(Buffer);
+            ok_hex(Status, STATUS_SUCCESS);
+        }
+
         /* A buffer of one page cannot take the list: the call must fail, not
            report success without a module list */
         Buffer = RtlCreateQueryDebugBuffer(PAGE_SIZE, FALSE);
@@ -192,6 +235,10 @@ static void Test_RemoteProcessModules(void)
             Status = RtlQueryProcessDebugInformation(ProcessInfo.dwProcessId, RTL_DEBUG_QUERY_MODULES, Buffer);
             ok(!NT_SUCCESS(Status) || Buffer->Modules != NULL,
                "One-page buffer: status 0x%lx with no module list\n", Status);
+            /* The list does not fit: a size error, not some other failure */
+            ok(NT_SUCCESS(Status) || Status == STATUS_NO_MEMORY ||
+               Status == STATUS_INFO_LENGTH_MISMATCH || Status == STATUS_BUFFER_TOO_SMALL,
+               "One-page buffer: unexpected status 0x%lx\n", Status);
             if (NT_SUCCESS(Status) && Buffer->Modules != NULL)
             {
                 ok(Buffer->Modules->NumberOfModules <=
@@ -201,28 +248,13 @@ static void Test_RemoteProcessModules(void)
             Status = RtlDestroyQueryDebugBuffer(Buffer);
             ok_hex(Status, STATUS_SUCCESS);
         }
-
-        /* The default buffer takes the whole list */
-        Buffer = RtlCreateQueryDebugBuffer(0, FALSE);
-        ok(Buffer != NULL, "Unable to create default buffer\n");
-        if (Buffer)
-        {
-            Status = RtlQueryProcessDebugInformation(ProcessInfo.dwProcessId, RTL_DEBUG_QUERY_MODULES, Buffer);
-            ok_hex(Status, STATUS_SUCCESS);
-            ok(Buffer->Modules != NULL, "Default buffer: no module list\n");
-            if (NT_SUCCESS(Status) && Buffer->Modules != NULL)
-            {
-                /* The exe, ntdll, kernel32 and most of the DLLs above */
-                ok(Buffer->Modules->NumberOfModules >= 20,
-                   "Default buffer: only %lu modules\n", Buffer->Modules->NumberOfModules);
-            }
-            Status = RtlDestroyQueryDebugBuffer(Buffer);
-            ok_hex(Status, STATUS_SUCCESS);
-        }
     }
 
-    TerminateProcess(ProcessInfo.hProcess, 0);
-    WaitForSingleObject(ProcessInfo.hProcess, 10000);
+    if (WaitForSingleObject(ProcessInfo.hProcess, 0) != WAIT_OBJECT_0)
+    {
+        ok(TerminateProcess(ProcessInfo.hProcess, 0), "TerminateProcess failed with %lu\n", GetLastError());
+        ok(WaitForSingleObject(ProcessInfo.hProcess, 10000) == WAIT_OBJECT_0, "The child did not exit\n");
+    }
     CloseHandle(ProcessInfo.hProcess);
     CloseHandle(ProcessInfo.hThread);
     CloseHandle(Event);
