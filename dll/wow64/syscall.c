@@ -642,43 +642,61 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             return NtSetInformationJobObject(H(0), a[1], &To,
                        Extended ? sizeof(To) : sizeof(To.BasicLimitInformation));
         }
-        if (a[1] == JobObjectBasicUIRestrictions)
-            return NtSetInformationJobObject(H(0), a[1], P(2), a[3]); /* one DWORD */
-        if (a[1] == JobObjectAssociateCompletionPortInformation)
+        if (a[1] == JobObjectBasicUIRestrictions || a[1] == JobObjectAssociateCompletionPortInformation)
         {
-            /* { PVOID CompletionKey; HANDLE CompletionPort; } with 4-byte members. The key
-             * comes back zero-extended through NtRemoveIoCompletion, which truncates it. */
-            JOBOBJECT_ASSOCIATE_COMPLETION_PORT Port;
-            if (a[3] != 2 * sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
-            Port.CompletionKey = PTR32(((ULONG *)P(2))[0]);
-            Port.CompletionPort = HANDLE32(((ULONG *)P(2))[1]);
-            return NtSetInformationJobObject(H(0), a[1], &Port, sizeof(Port));
+            /* The arguments live on the guest stack: read each once */
+            HANDLE Job = H(0);
+            ULONG Class = a[1], Buffer = a[2], Length = a[3];
+            if (Class == JobObjectBasicUIRestrictions)
+            {
+                ULONG Restrictions;
+                if (Length != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+                if (!GuestRange32(Buffer, sizeof(ULONG))) return STATUS_ACCESS_VIOLATION;
+                Restrictions = *(ULONG *)PTR32(Buffer);
+                return NtSetInformationJobObject(Job, Class, &Restrictions, sizeof(Restrictions));
+            }
+            else
+            {
+                /* { PVOID CompletionKey; HANDLE CompletionPort; } with 4-byte members. The key
+                 * comes back zero-extended through NtRemoveIoCompletion, which truncates it. */
+                JOBOBJECT_ASSOCIATE_COMPLETION_PORT Port;
+                ULONG Guest[2];
+                if (Length != sizeof(Guest)) return STATUS_INFO_LENGTH_MISMATCH;
+                if (!GuestRange32(Buffer, sizeof(Guest))) return STATUS_ACCESS_VIOLATION;
+                RtlCopyMemory(Guest, PTR32(Buffer), sizeof(Guest));
+                Port.CompletionKey = PTR32(Guest[0]);
+                Port.CompletionPort = HANDLE32(Guest[1]);
+                return NtSetInformationJobObject(Job, Class, &Port, sizeof(Port));
+            }
         }
         return STATUS_NOT_SUPPORTED;
     case W64_NtQueryInformationJobObject:
-        switch (a[1])
+    {
+        /* The arguments live on the guest stack: read each once */
+        HANDLE Job = H(0);
+        ULONG Class = a[1], Buffer = a[2], Length = a[3], ReturnLength = a[4];
+        if (ReturnLength && !GuestRange32(ReturnLength, sizeof(ULONG))) return STATUS_ACCESS_VIOLATION;
+        switch (Class)
         {
         case JobObjectBasicUIRestrictions:            /* one DWORD */
         case JobObjectBasicAccountingInformation:     /* LARGE_INTEGERs and ULONGs */
         case JobObjectBasicAndIoAccountingInformation:
-            if (!GuestRange32(a[2], a[3]) || (a[4] && !GuestRange32(a[4], sizeof(ULONG))))
-                return STATUS_ACCESS_VIOLATION;
-            return NtQueryInformationJobObject(H(0), a[1], P(2), a[3], P(4));
+            if (!GuestRange32(Buffer, Length)) return STATUS_ACCESS_VIOLATION;
+            return NtQueryInformationJobObject(Job, Class, PTR32(Buffer), Length, PTR32(ReturnLength));
         case JobObjectBasicLimitInformation:
         case JobObjectExtendedLimitInformation:
         {
             JOBOBJECT_EXTENDED_LIMIT_INFORMATION From;
-            WOW64_JOB_EXTENDED_LIMIT *To = P(2);
-            BOOLEAN Extended = a[1] == JobObjectExtendedLimitInformation;
+            WOW64_JOB_EXTENDED_LIMIT *To = PTR32(Buffer);
+            BOOLEAN Extended = Class == JobObjectExtendedLimitInformation;
             ULONG Size = Extended ? sizeof(*To) : sizeof(To->Basic);
-            if (a[3] != Size) return STATUS_INFO_LENGTH_MISMATCH;
-            if (!GuestRange32(a[2], Size) || (a[4] && !GuestRange32(a[4], sizeof(ULONG))))
-                return STATUS_ACCESS_VIOLATION;
-            if (a[4]) PROBE(4);
-            Status = NtQueryInformationJobObject(H(0), a[1], &From,
+            if (Length != Size) return STATUS_INFO_LENGTH_MISMATCH;
+            if (!GuestRange32(Buffer, Size)) return STATUS_ACCESS_VIOLATION;
+            if (ReturnLength) ProbeOutput(ReturnLength, sizeof(ULONG));
+            Status = NtQueryInformationJobObject(Job, Class, &From,
                          Extended ? sizeof(From) : sizeof(From.BasicLimitInformation), NULL);
             if (!NT_SUCCESS(Status)) return Status;
-            ProbeOutput(a[2], Size);
+            ProbeOutput(Buffer, Size);
             To->Basic.PerProcessUserTimeLimit = From.BasicLimitInformation.PerProcessUserTimeLimit;
             To->Basic.PerJobUserTimeLimit = From.BasicLimitInformation.PerJobUserTimeLimit;
             To->Basic.LimitFlags = From.BasicLimitInformation.LimitFlags;
@@ -696,11 +714,12 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
                 To->PeakProcessMemoryUsed = (ULONG)min(From.PeakProcessMemoryUsed, (SIZE_T)MAXULONG);
                 To->PeakJobMemoryUsed = (ULONG)min(From.PeakJobMemoryUsed, (SIZE_T)MAXULONG);
             }
-            if (a[4]) U(4) = Size;
+            if (ReturnLength) *(ULONG *)PTR32(ReturnLength) = Size;
             return STATUS_SUCCESS;
         }
         default: return STATUS_NOT_SUPPORTED;
         }
+    }
     case W64_NtCreateEvent:
         PROBE(0);
         ATTR(2); Status = NtCreateEvent(&Cleanup->Handle, a[1], OA(2), a[3], a[4]); RETURN_HANDLE();
