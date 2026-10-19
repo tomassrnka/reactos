@@ -55,7 +55,10 @@ NTSTATUS Wow64Continue(const WOW64_CONTEXT *Context, BOOLEAN TestAlert)
 
 /* The native dispatcher supplies its complete interrupted context in R9.
  * Negative routine values encode a guest address; normal native APCs retain
- * the ordinary ntdll dispatch path. */
+ * the ordinary ntdll dispatch path. The dispatcher calls with RSP at the
+ * context, so its P1Home-P4Home are this function's home space and may hold
+ * spilled arguments by now: the encoded routine is read from P5Home, where
+ * the dispatcher copied it. */
 VOID NTAPI Wow64PrepareForApc(PVOID Arg1, PVOID Arg2, PVOID Arg3, PCONTEXT Native)
 {
     struct
@@ -95,7 +98,7 @@ VOID NTAPI Wow64PrepareForApc(PVOID Arg1, PVOID Arg2, PVOID Arg3, PCONTEXT Nativ
     Guest = (PVOID)(ULONG_PTR)((Context.Esp - sizeof(*Guest)) & ~15);
     _SEH2_TRY
     {
-        Guest->Routine = (ULONG)(-(LONG64)Native->P4Home >> 2);
+        Guest->Routine = (ULONG)(-(LONG64)Native->P5Home >> 2);
         Guest->Arg1 = PtrToUlong(Arg1);
         Guest->Arg2 = PtrToUlong(Arg2);
         Guest->Arg3 = PtrToUlong(Arg3);
