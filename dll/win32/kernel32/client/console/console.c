@@ -97,6 +97,20 @@ ConsoleControlDispatcher(IN LPVOID lpThreadParameter)
     DPRINT1("Console Dispatcher Active: %lx %lx\n", CodeAndFlag, nCode);
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
 
+    /*
+     * Refuse once process shutdown has begun, or if the console was never initialized.
+     * RtlDllShutdownInProgress() is a plain read of the loader's one-way shutdown BOOLEAN
+     * (no read-side barrier); LdrShutdownProcess sets it before it runs any DLL teardown.
+     * This NARROWS, but does not close, the window in which csrss injects a control
+     * dispatcher into an exiting process and a handler runs during kernel32's detach: the
+     * read is not a two-sided barrier, and the loader lock does not strictly serialize
+     * against the dispatcher (a contended critical section can be force-granted), so an
+     * injected thread can still be mid-init while detach proceeds. The residual is
+     * pre-existing and is not closeable in kernel32 alone; it needs a cross-component
+     * ordering change, tracked as UF-33. The gate is re-evaluated under ConsoleLock below.
+     */
+    if (!ConsoleInitialized || RtlDllShutdownInProgress()) ExitThread(0);
+
     switch(nCode)
     {
         case CTRL_C_EVENT:
@@ -118,6 +132,13 @@ ConsoleControlDispatcher(IN LPVOID lpThreadParameter)
                 _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
                 {
                     RtlEnterCriticalSection(&ConsoleLock);
+
+                    /* Re-check under the lock: refuse once shutdown is signalled or the flag is cleared (narrows, not closes, the UF-33 window) */
+                    if (!ConsoleInitialized || RtlDllShutdownInProgress())
+                    {
+                        RtlLeaveCriticalSection(&ConsoleLock);
+                        ExitThread(0);
+                    }
 
                     if ((nCode != CTRL_C_EVENT) ||
                         (NtCurrentPeb()->ProcessParameters->ConsoleFlags != 1))
@@ -161,9 +182,14 @@ ConsoleControlDispatcher(IN LPVOID lpThreadParameter)
             break;
     }
 
-    ASSERT(ConsoleInitialized);
-
     RtlEnterCriticalSection(&ConsoleLock);
+
+    /* Re-check under the lock: refuse once shutdown is signalled or the flag is cleared (narrows, not closes, the UF-33 window) */
+    if (!ConsoleInitialized || RtlDllShutdownInProgress())
+    {
+        RtlLeaveCriticalSection(&ConsoleLock);
+        ExitThread(0);
+    }
 
     nExitCode = 0;
     if ((nCode != CTRL_C_EVENT) || (NtCurrentPeb()->ProcessParameters->ConsoleFlags != 1))

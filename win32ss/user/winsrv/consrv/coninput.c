@@ -215,7 +215,8 @@ ConioProcessInputEvent(PCONSRV_CONSOLE Console,
              (ShiftState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) )
         {
             DPRINT1("Console_Api Ctrl-C\n");
-            ConSrvConsoleProcessCtrlEvent(Console, 0, CTRL_C_EVENT);
+            if (!NT_SUCCESS(ConSrvConsoleProcessCtrlEvent(Console, 0, CTRL_C_EVENT)))
+                DPRINT1("CONSRV: Ctrl-C event could not be queued for delivery\n");
 
             if (Console->LineBuffer && !Console->LineComplete)
             {
