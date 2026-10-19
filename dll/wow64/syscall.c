@@ -213,6 +213,56 @@ static NTSTATUS TokenGroups32(HANDLE Token, TOKEN_INFORMATION_CLASS Class, ULONG
     return STATUS_SUCCESS;
 }
 
+/* A 32-bit TOKEN_GROUPS argument in the native layout. The SIDs stay in guest memory,
+ * where the kernel captures them as caller data; Count was read once by the caller. */
+static PTOKEN_GROUPS GroupsFrom32(ULONG Guest, ULONG Count, PUCHAR *Next)
+{
+    ULONG *Source = PTR32(Guest), i;
+    PTOKEN_GROUPS Groups;
+
+    if (!Guest) return NULL;
+    Groups = (PTOKEN_GROUPS)*Next;
+    Groups->GroupCount = Count;
+    for (i = 0; i < Count; ++i)
+    {
+        Groups->Groups[i].Sid = PTR32(Source[1 + 2 * i]);
+        Groups->Groups[i].Attributes = Source[2 + 2 * i];
+    }
+    *Next += FIELD_OFFSET(TOKEN_GROUPS, Groups) + (SIZE_T)Count * sizeof(SID_AND_ATTRIBUTES);
+    return Groups;
+}
+
+/* NtFilterToken: SidsToDisable and RestrictedSids hold SID pointers; TOKEN_PRIVILEGES
+ * has the same layout for both sizes. */
+static NTSTATUS FilterToken32(ULONG *a, WOW64_CLEANUP *Cleanup)
+{
+    ULONG DisableCount = 0, RestrictCount = 0;
+    SIZE_T Bytes = 1;
+    PUCHAR Next;
+    PTOKEN_GROUPS Disable, Restrict;
+    NTSTATUS Status;
+
+    ProbeOutput(a[5], sizeof(ULONG));
+    if (a[2])
+    {
+        DisableCount = *(ULONG *)PTR32(a[2]);
+        Bytes += FIELD_OFFSET(TOKEN_GROUPS, Groups) + (SIZE_T)DisableCount * sizeof(SID_AND_ATTRIBUTES);
+    }
+    if (a[4])
+    {
+        RestrictCount = *(ULONG *)PTR32(a[4]);
+        Bytes += FIELD_OFFSET(TOKEN_GROUPS, Groups) + (SIZE_T)RestrictCount * sizeof(SID_AND_ATTRIBUTES);
+    }
+    Next = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, Bytes);
+    if (!Next) return STATUS_NO_MEMORY;
+    Disable = GroupsFrom32(a[2], DisableCount, &Next);
+    Restrict = GroupsFrom32(a[4], RestrictCount, &Next);
+    Status = NtFilterToken(HANDLE32(a[0]), a[1], Disable, PTR32(a[3]), Restrict, &Cleanup->Handle);
+    if (NT_SUCCESS(Status)) *(ULONG *)PTR32(a[5]) = HandleToUlong(Cleanup->Handle);
+    Cleanup->Handle = NULL;
+    return Status;
+}
+
 static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
 {
     NTSTATUS Status;
@@ -1044,6 +1094,10 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         PROBE(4);
         Status = NtOpenThreadTokenEx(H(0), a[1], a[2], a[3], &Cleanup->Handle);
         RETURN_HANDLE_AT(4);
+    case W64_NtFilterToken:
+        return FilterToken32(a, Cleanup);
+    case W64_NtImpersonateAnonymousToken:
+        return NtImpersonateAnonymousToken(H(0));
     case W64_NtQueryInformationToken:
         if (a[1] == TokenUser || a[1] == TokenOwner || a[1] == TokenPrimaryGroup)
         {
