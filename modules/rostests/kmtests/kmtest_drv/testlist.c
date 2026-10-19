@@ -33,7 +33,10 @@ KMT_TESTFUNC Test_FsRtlMcb;
 KMT_TESTFUNC Test_FsRtlPerStreamContext;
 KMT_TESTFUNC Test_FsRtlRemoveDotsFromPath;
 KMT_TESTFUNC Test_FsRtlTunnel;
+KMT_TESTFUNC Test_HalDma;
 #if defined(_M_IX86) || defined(_M_AMD64)
+KMT_TESTFUNC Test_HalDmaBounce;
+KMT_TESTFUNC Test_HalIoApic;
 KMT_TESTFUNC Test_HalPortIo;
 #endif
 KMT_TESTFUNC Test_HalSystemInfo;
@@ -50,6 +53,7 @@ KMT_TESTFUNC Test_IoPnpEventQueue;
 KMT_TESTFUNC Test_IoVolume;
 KMT_TESTFUNC Test_KdSystemDebugControl;
 KMT_TESTFUNC Test_KeApc;
+KMT_TESTFUNC Test_KeApcDelivery;
 KMT_TESTFUNC Test_KeDeviceQueue;
 KMT_TESTFUNC Test_KeDpc;
 KMT_TESTFUNC Test_KeEvent;
@@ -64,6 +68,7 @@ KMT_TESTFUNC Test_KeProcessor;
 KMT_TESTFUNC Test_KeQpc;
 KMT_TESTFUNC Test_KeSpinLock;
 KMT_TESTFUNC Test_KeTimer;
+KMT_TESTFUNC Test_KeClockTime;
 KMT_TESTFUNC Test_KernelType;
 KMT_TESTFUNC Test_MmMdl;
 KMT_TESTFUNC Test_MmSection;
@@ -143,7 +148,10 @@ const KMT_TEST TestList[] =
     { "FsRtlPerStreamContext",              Test_FsRtlPerStreamContext },
     { "FsRtlRemoveDotsFromPath",            Test_FsRtlRemoveDotsFromPath },
     { "FsRtlTunnel",                        Test_FsRtlTunnel },
+    { "HalDma",                             Test_HalDma },
 #if defined(_M_IX86) || defined(_M_AMD64)
+    { "-HalIoApic",                         Test_HalIoApic },
+    { "HalDmaBounce",                       Test_HalDmaBounce },
     { "HalPortIo",                          Test_HalPortIo },
 #endif
     { "HalSystemInfo",                      Test_HalSystemInfo },
@@ -160,6 +168,7 @@ const KMT_TEST TestList[] =
     { "IoVolume",                           Test_IoVolume },
     { "KdSystemDebugControl",               Test_KdSystemDebugControl },
     { "KeApc",                              Test_KeApc },
+    { "KeApcDelivery",                      Test_KeApcDelivery },
     { "KeDeviceQueue",                      Test_KeDeviceQueue },
     { "KeDpc",                              Test_KeDpc },
     { "KeEvent",                            Test_KeEvent },
@@ -174,6 +183,7 @@ const KMT_TEST TestList[] =
     { "KeQpc",                              Test_KeQpc },
     { "KeSpinLock",                         Test_KeSpinLock },
     { "KeTimer",                            Test_KeTimer },
+    { "KeClockTime",                        Test_KeClockTime },
     { "-KernelType",                        Test_KernelType },
     { "MmMdl",                              Test_MmMdl },
     { "MmSection",                          Test_MmSection },

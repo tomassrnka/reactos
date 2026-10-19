@@ -47,6 +47,7 @@ list(APPEND SOURCE
     Mailslot.c
     MappedFileGrowth.c
     MultiByteToWideChar.c
+    PerformanceCounter.c
     Pipes.c
     PrivMoveFileIdentityW.c
     QueueUserAPC.c

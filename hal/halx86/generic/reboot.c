@@ -27,6 +27,8 @@ HalpReboot(VOID)
     PHYSICAL_ADDRESS PhysicalAddress;
     UCHAR Data;
     PVOID ZeroPageMapping;
+    ULONG Tries;
+    BOOLEAN Locked = FALSE;
 
     /* Map the first physical page */
     PhysicalAddress.QuadPart = 0;
@@ -35,30 +37,44 @@ HalpReboot(VOID)
     /* Enable warm reboot */
     ((PUSHORT)ZeroPageMapping)[0x239] = 0x1234;
 
-    /* Lock CMOS Access (and disable interrupts) */
-    HalpAcquireCmosSpinLock();
+    /* Lock CMOS access with interrupts disabled, but wait only about 10 ms:
+       a processor frozen by the debugger or a bugcheck can own the lock */
+    _disable();
+    for (Tries = 0; Tries < 10000; Tries++)
+    {
+        if (!InterlockedBitTestAndSet((PLONG)&HalpSystemHardwareLock, 0))
+        {
+            Locked = TRUE;
+            break;
+        }
+        KeStallExecutionProcessor(1);
+    }
 
-    /* Setup control register B */
-    WRITE_PORT_UCHAR((PUCHAR)0x70, 0x0B);
-    KeStallExecutionProcessor(1);
+    /* Without the lock leave the CMOS alone: a live owner could redirect these writes */
+    if (Locked)
+    {
+        /* Setup control register B */
+        WRITE_PORT_UCHAR((PUCHAR)0x70, 0x0B);
+        KeStallExecutionProcessor(1);
 
-    /* Read periodic register and clear the interrupt enable */
-    Data = READ_PORT_UCHAR((PUCHAR)0x71);
-    WRITE_PORT_UCHAR((PUCHAR)0x71, Data & ~0x40);
-    KeStallExecutionProcessor(1);
+        /* Read periodic register and clear the interrupt enable */
+        Data = READ_PORT_UCHAR((PUCHAR)0x71);
+        WRITE_PORT_UCHAR((PUCHAR)0x71, Data & ~0x40);
+        KeStallExecutionProcessor(1);
 
-    /* Setup control register A */
-    WRITE_PORT_UCHAR((PUCHAR)0x70, 0x0A);
-    KeStallExecutionProcessor(1);
+        /* Setup control register A */
+        WRITE_PORT_UCHAR((PUCHAR)0x70, 0x0A);
+        KeStallExecutionProcessor(1);
 
-    /* Read divider rate and reset it */
-    Data = READ_PORT_UCHAR((PUCHAR)0x71);
-    WRITE_PORT_UCHAR((PUCHAR)0x71, (Data & ~0x9) | 0x06);
-    KeStallExecutionProcessor(1);
+        /* Read divider rate and reset it */
+        Data = READ_PORT_UCHAR((PUCHAR)0x71);
+        WRITE_PORT_UCHAR((PUCHAR)0x71, (Data & ~0x9) | 0x06);
+        KeStallExecutionProcessor(1);
 
-    /* Reset neutral CMOS address */
-    WRITE_PORT_UCHAR((PUCHAR)0x70, 0x15);
-    KeStallExecutionProcessor(1);
+        /* Reset neutral CMOS address */
+        WRITE_PORT_UCHAR((PUCHAR)0x70, 0x15);
+        KeStallExecutionProcessor(1);
+    }
 
     /* Flush write buffers and send the reset command */
     KeFlushWriteBuffer();
