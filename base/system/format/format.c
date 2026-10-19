@@ -512,16 +512,16 @@ int wmain(int argc, WCHAR *argv[])
     {
         if (volumeName[0])
         {
-            while (TRUE)
+            /* A wrong label, or no input, ends the format as on Windows */
+            ConResPrintf(StdOut, STRING_LABEL_NAME_EDIT, RootDirectory[0]);
+            if (!fgetws(input, ARRAYSIZE(input), stdin))
+                input[0] = UNICODE_NULL;
+            input[wcscspn(input, L"\r\n")] = UNICODE_NULL;
+
+            if (_wcsicmp(input, volumeName))
             {
-                ConResPrintf(StdOut, STRING_LABEL_NAME_EDIT, RootDirectory[0]);
-                fgetws(input, ARRAYSIZE(input), stdin);
-                input[wcslen(input) - 1] = UNICODE_NULL;
-
-                if (!_wcsicmp(input, volumeName))
-                    break;
-
                 ConResPuts(StdOut, STRING_ERROR_LABEL);
+                return -1;
             }
         }
 
@@ -531,7 +531,9 @@ int wmain(int argc, WCHAR *argv[])
         if (Len < 2) pszMsg = L"YN";
         while (TRUE)
         {
-            fgetws(input, ARRAYSIZE(input), stdin);
+            /* No more input means no */
+            if (!fgetws(input, ARRAYSIZE(input), stdin))
+                input[0] = pszMsg[1];
             if (towupper(input[0]) == pszMsg[0])
                 break;
             if (towupper(input[0]) == pszMsg[1])
@@ -599,8 +601,9 @@ int wmain(int argc, WCHAR *argv[])
     if (!GotALabel)
     {
         ConResPuts(StdOut, STRING_ENTER_LABEL);
-        fgetws(input, ARRAYSIZE(LabelString), stdin);
-        input[wcslen(input) - 1] = UNICODE_NULL;
+        if (!fgetws(input, ARRAYSIZE(LabelString), stdin))
+            input[0] = UNICODE_NULL;
+        input[wcscspn(input, L"\r\n")] = UNICODE_NULL;
 
         if (!SetVolumeLabelW(RootDirectory, input))
         {

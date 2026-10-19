@@ -21,6 +21,8 @@
 
 static ULONG FmIfsAttached = 0;
 LIST_ENTRY ProviderListHead;
+/* Guards the load state of the providers: several threads may format or check at once. */
+static RTL_CRITICAL_SECTION ProviderLock;
 
 PIFS_PROVIDER
 LoadProvider(
@@ -31,6 +33,7 @@ LoadProvider(
 
     DPRINT("LoadProvider(%S)\n", FileSystem);
 
+    RtlEnterCriticalSection(&ProviderLock);
     ListEntry = ProviderListHead.Flink;
     while (ListEntry != &ProviderListHead)
     {
@@ -44,6 +47,7 @@ LoadProvider(
                 if (!Provider->hModule)
                 {
                     DPRINT("Dll Loading failed!\n");
+                    RtlLeaveCriticalSection(&ProviderLock);
                     return NULL;
                 }
 
@@ -54,10 +58,13 @@ LoadProvider(
                 Provider->Format = (PULIB_FORMAT)GetProcAddress(Provider->hModule, "Format");
                 //Provider->FormatEx = (PULIB_FORMATEX)GetProcAddress(Provider->hModule, "FormatEx");
             }
+            Provider->RefCount++;
+            RtlLeaveCriticalSection(&ProviderLock);
             return Provider;
         }
         ListEntry = ListEntry->Flink;
     }
+    RtlLeaveCriticalSection(&ProviderLock);
 
     /* Provider not found */
     return NULL;
@@ -69,7 +76,10 @@ UnloadProvider(
 {
     DPRINT("UnloadProvider(%S)\n", Provider->Name);
 
-    if (Provider->hModule)
+    /* The DLL goes only when no other Format or Chkdsk call still runs in it. */
+    RtlEnterCriticalSection(&ProviderLock);
+    ASSERT(Provider->RefCount > 0);
+    if (Provider->RefCount > 0 && --Provider->RefCount == 0 && Provider->hModule)
     {
         FreeLibrary(Provider->hModule);
         Provider->hModule = NULL;
@@ -80,6 +90,7 @@ UnloadProvider(
         Provider->Format =  NULL;
         Provider->FormatEx = NULL;
     }
+    RtlLeaveCriticalSection(&ProviderLock);
 
     return TRUE;
 }
@@ -263,8 +274,12 @@ InitializeFmIfs(
         case DLL_PROCESS_ATTACH:
             if (FmIfsAttached == 0)
             {
+                RtlInitializeCriticalSection(&ProviderLock);
                 if (InitializeFmIfsOnce() == FALSE)
+                {
+                    RtlDeleteCriticalSection(&ProviderLock);
                     return FALSE;
+                }
 
                 FmIfsAttached++;
             }
@@ -279,7 +294,10 @@ InitializeFmIfs(
         case DLL_PROCESS_DETACH:
             FmIfsAttached--;
             if (FmIfsAttached == 0)
+            {
                 UninitializeFmIfsOnce();
+                RtlDeleteCriticalSection(&ProviderLock);
+            }
             break;
     }
 

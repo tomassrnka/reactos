@@ -412,15 +412,49 @@ Arguments:
     //  Turns out this was not a good assumption.  We have to do this always now.
     //
 
-    ClustersDescribableByFat = ( ((FatIsFat32(Vcb)? Vcb->Bpb.LargeSectorsPerFat :
-                                                    Vcb->Bpb.SectorsPerFat) *
-                                  Vcb->Bpb.BytesPerSector * 8)
-                                 / FatIndexBitSize(&Vcb->Bpb) ) - 2;
+    ClustersDescribableByFat = (ULONG)(( ((ULONGLONG)(FatIsFat32(Vcb)? Vcb->Bpb.LargeSectorsPerFat :
+                                                                        Vcb->Bpb.SectorsPerFat) *
+                                          Vcb->Bpb.BytesPerSector * 8)
+                                         / FatIndexBitSize(&Vcb->Bpb) )) - 2;
 
     if (Vcb->AllocationSupport.NumberOfClusters > ClustersDescribableByFat) {
 
         Vcb->AllocationSupport.NumberOfClusters = ClustersDescribableByFat;
     }
+
+#ifdef __REACTOS__
+    {
+        ULONG BitCount = FatBytesPerFat( &Vcb->Bpb ) >> Vcb->AllocationSupport.LogOfBytesPerSector;
+
+        if (BitCount > Vcb->DirtyFatBitCount) {
+
+            ULONG Bytes = ((BitCount + 31) / 32) * sizeof(ULONG);
+            PULONG NewBits = FsRtlAllocatePoolWithTag( NonPagedPool, Bytes, TAG_FAT_BITMAP );
+
+            RtlZeroMemory( NewBits, Bytes );
+
+            //
+            //  A write can still be using the old bitmap: keep it, with its
+            //  bits, until the Vcb is deleted.
+            //
+
+            if (Vcb->DirtyFatBits != NULL) {
+
+                RtlCopyMemory( NewBits, Vcb->DirtyFatBits, ((Vcb->DirtyFatBitCount + 31) / 32) * sizeof(ULONG) );
+
+                if (Vcb->DirtyFatRetired != NULL) {
+
+                    ExFreePool( Vcb->DirtyFatRetired );
+                }
+
+                Vcb->DirtyFatRetired = Vcb->DirtyFatBits;
+            }
+
+            Vcb->DirtyFatBits = NewBits;
+            Vcb->DirtyFatBitCount = BitCount;
+        }
+    }
+#endif
 
     //
     //  Extend the virtual volume file to include the Fat
@@ -3745,6 +3779,403 @@ Arguments:
 }
 
 
+#ifdef __REACTOS__
+static
+BOOLEAN
+FatDirtyFatBitRange (
+    IN PVCB Vcb,
+    IN VBO Vbo,
+    IN ULONG ByteCount,
+    OUT PULONG FirstBit,
+    OUT PULONG EndBit
+    )
+{
+    VBO FatStart = FatReservedBytes( &Vcb->Bpb );
+    VBO EndVbo = Vbo + ByteCount;
+    UCHAR Log = Vcb->AllocationSupport.LogOfBytesPerSector;
+
+    if ((Vcb->DirtyFatBits == NULL) || (EndVbo <= FatStart)) {
+
+        return FALSE;
+    }
+
+    *FirstBit = (Vbo > FatStart) ? ((Vbo - FatStart) >> Log) : 0;
+    *EndBit = (EndVbo - FatStart + (1 << Log) - 1) >> Log;
+
+    if (*EndBit > Vcb->DirtyFatBitCount) {
+
+        *EndBit = Vcb->DirtyFatBitCount;
+    }
+
+    return (*FirstBit < *EndBit);
+}
+
+
+VOID
+FatSetDirtyFatBits (
+    IN PVCB Vcb,
+    IN VBO Vbo,
+    IN ULONG ByteCount,
+    IN BOOLEAN Dirty
+    )
+
+/*++
+
+Routine Description:
+
+    This routine marks the first fat sectors in a range of the volume file
+    dirty or clean in the dirty fat bitmap.  It takes no lock and needs no
+    memory, so it cannot fail.
+
+--*/
+
+{
+    ULONG Bit;
+    ULONG EndBit;
+
+    if (!FatDirtyFatBitRange( Vcb, Vbo, ByteCount, &Bit, &EndBit )) {
+
+        return;
+    }
+
+    while (Bit < EndBit) {
+
+        ULONG Count = min( 32 - (Bit & 31), EndBit - Bit );
+        ULONG Mask = ((Count == 32) ? 0xFFFFFFFF : ((1UL << Count) - 1)) << (Bit & 31);
+        LONG volatile *Word = (LONG volatile *)&Vcb->DirtyFatBits[Bit >> 5];
+
+        if (Dirty) {
+
+            InterlockedOr( Word, (LONG)Mask );
+
+        } else {
+
+            InterlockedAnd( Word, (LONG)~Mask );
+        }
+
+        Bit += Count;
+    }
+}
+
+
+BOOLEAN
+FatFindDirtyFat (
+    IN PVCB Vcb,
+    IN VBO StartingVbo,
+    IN ULONG ByteCount,
+    OUT PVBO FirstDirtyVbo,
+    OUT PULONG DirtyByteCount
+    )
+
+/*++
+
+Routine Description:
+
+    This routine finds the span from the first to the last dirty sector of
+    the first fat in a range of the volume file.  Only the first fat is
+    written through the volume file; the others are written from it.
+
+Return Value:
+
+    BOOLEAN - TRUE if the range has a dirty sector.
+
+--*/
+
+{
+    VBO FatStart = FatReservedBytes( &Vcb->Bpb );
+    UCHAR Log = Vcb->AllocationSupport.LogOfBytesPerSector;
+    ULONG Bit;
+    ULONG EndBit;
+    ULONG First = MAXULONG;
+    ULONG Last = 0;
+
+    if (!FatDirtyFatBitRange( Vcb, StartingVbo, ByteCount, &Bit, &EndBit )) {
+
+        return FALSE;
+    }
+
+    while (Bit < EndBit) {
+
+        ULONG Word = *(ULONG volatile *)&Vcb->DirtyFatBits[Bit >> 5];
+
+        if ((Word >> (Bit & 31)) == 0) {
+
+            Bit = (Bit | 31) + 1;
+            continue;
+        }
+
+        if (Word & (1UL << (Bit & 31))) {
+
+            if (First == MAXULONG) {
+
+                First = Bit;
+            }
+
+            Last = Bit;
+        }
+
+        Bit += 1;
+    }
+
+    if (First == MAXULONG) {
+
+        return FALSE;
+    }
+
+    *FirstDirtyVbo = FatStart + (First << Log);
+    *DirtyByteCount = (Last - First + 1) << Log;
+
+    return TRUE;
+}
+
+
+LONG
+FatBeginDirtyFatWrite (
+    IN PVCB Vcb
+    )
+
+/*++
+
+Routine Description:
+
+    This routine counts a volume file write in the current generation,
+    before it finds its dirty sectors.  If a drain starts a new generation
+    meanwhile, the write counts itself in the new one instead, so that a
+    drain never misses a write that marks sectors clean after it started.
+
+Return Value:
+
+    LONG - The generation to pass to FatEndDirtyFatWrite.
+
+--*/
+
+{
+    LONG Generation;
+
+    for (;;) {
+
+        Generation = Vcb->DirtyFatWriteGeneration & 1;
+
+        InterlockedIncrement( &Vcb->DirtyFatWriteCount[Generation] );
+
+        if ((InterlockedCompareExchange( &Vcb->DirtyFatWriteGeneration, 0, 0 ) & 1) == Generation) {
+
+            return Generation;
+        }
+
+        FatEndDirtyFatWrite( Vcb, Generation );
+    }
+}
+
+
+VOID
+FatEndDirtyFatWrite (
+    IN PVCB Vcb,
+    IN LONG Generation
+    )
+
+/*++
+
+Routine Description:
+
+    This routine ends a write counted by FatBeginDirtyFatWrite, after its
+    sectors are on the disk or dirty again.
+
+--*/
+
+{
+    if (InterlockedDecrement( &Vcb->DirtyFatWriteCount[Generation] ) == 0) {
+
+        KeSetEvent( &Vcb->DirtyFatWriteDrained, 0, FALSE );
+    }
+}
+
+
+VOID
+FatWaitForDirtyFatWrites (
+    IN PVCB Vcb
+    )
+
+/*++
+
+Routine Description:
+
+    This routine waits until every volume file write that has already found
+    its dirty sectors has put them on the disk or marked them dirty again.
+    Writes that start while it waits are not waited for.
+
+--*/
+
+{
+    LONG Generation;
+
+    PAGED_CODE();
+
+    KeEnterCriticalRegion();
+    ExAcquireResourceExclusiveLite( &Vcb->DirtyFatDrainResource, TRUE );
+
+    Generation = (InterlockedIncrement( &Vcb->DirtyFatWriteGeneration ) & 1) ^ 1;
+
+    for (;;) {
+
+        //
+        //  The interlocked read orders the clear before it, so a write that
+        //  ends after the read sets the event again.
+        //
+
+        KeClearEvent( &Vcb->DirtyFatWriteDrained );
+
+        if (InterlockedCompareExchange( &Vcb->DirtyFatWriteCount[Generation], 0, 0 ) == 0) {
+
+            break;
+        }
+
+        KeWaitForSingleObject( &Vcb->DirtyFatWriteDrained, Executive, KernelMode, FALSE, NULL );
+    }
+
+    ExReleaseResourceLite( &Vcb->DirtyFatDrainResource );
+    KeLeaveCriticalRegion();
+}
+
+
+BOOLEAN
+FatIsFatDirty (
+    IN PVCB Vcb
+    )
+
+/*++
+
+Routine Description:
+
+    This routine waits for the volume file writes in progress and then
+    tells whether a sector of the first fat may still not be on the disk.
+    The volume must not be marked clean while one may be.  A write that
+    starts after the wait can take sectors the scan then sees clean and
+    fail later, so the fat is clean only if both write counts read zero
+    after the scan and the failure count did not change since before the
+    wait (a failure count that wraps all the way around during one check
+    is not detected); if writes keep running, the answer is dirty, which
+    is always safe.
+
+Return Value:
+
+    BOOLEAN - TRUE if a fat sector may be dirty.
+
+--*/
+
+{
+    VBO DirtyVbo;
+    ULONG DirtyByteCount;
+    LONG Failures;
+    ULONG Attempt;
+
+    PAGED_CODE();
+
+    for (Attempt = 0; Attempt < 3; Attempt++) {
+
+        Failures = InterlockedCompareExchange( &Vcb->DirtyFatWriteFailures, 0, 0 );
+
+        FatWaitForDirtyFatWrites( Vcb );
+
+        if (FatFindDirtyFat( Vcb,
+                             FatReservedBytes( &Vcb->Bpb ),
+                             FatBytesPerFat( &Vcb->Bpb ),
+                             &DirtyVbo,
+                             &DirtyByteCount )) {
+
+            return TRUE;
+        }
+
+        if ((InterlockedCompareExchange( &Vcb->DirtyFatWriteCount[0], 0, 0 ) == 0) &&
+            (InterlockedCompareExchange( &Vcb->DirtyFatWriteCount[1], 0, 0 ) == 0) &&
+            (InterlockedCompareExchange( &Vcb->DirtyFatWriteFailures, 0, 0 ) == Failures)) {
+
+            return FALSE;
+        }
+    }
+
+    return TRUE;
+}
+
+
+BOOLEAN
+FatPrepareCleanVolume (
+    IN PVCB Vcb,
+    IN BOOLEAN CheckCache
+    )
+
+/*++
+
+Routine Description:
+
+    This routine is called by a volume flush or open, with the Vcb held
+    exclusive, before it marks the volume clean.  It cancels the clean
+    timer before it checks the fat, and lets the next change arm the timer
+    again at once instead of after the one-second wait of FatSetDirtyBcb:
+    so a change made after the check always leaves a deferred clean that
+    checks the fat again.  If the fat (or, with CheckCache, the cache) is
+    dirty, it arms the timer again.
+
+Return Value:
+
+    BOOLEAN - TRUE if the volume can be marked clean.
+
+--*/
+
+{
+    KIRQL SavedIrql;
+    LARGE_INTEGER TwoSecondsFromNow;
+
+    PAGED_CODE();
+
+    (VOID)KeCancelTimer( &Vcb->CleanVolumeTimer );
+    (VOID)KeRemoveQueueDpc( &Vcb->CleanVolumeDpc );
+
+    KeAcquireSpinLock( &FatData.GeneralSpinLock, &SavedIrql );
+    Vcb->LastFatMarkVolumeDirtyCall.QuadPart = 0;
+    KeReleaseSpinLock( &FatData.GeneralSpinLock, SavedIrql );
+
+    if (!FatIsFatDirty( Vcb ) &&
+        !(CheckCache && CcIsThereDirtyData( Vcb->Vpb ))) {
+
+        return TRUE;
+    }
+
+    TwoSecondsFromNow.QuadPart = (LONG)-2*1000*1000*10;
+
+    KeSetTimer( &Vcb->CleanVolumeTimer,
+                TwoSecondsFromNow,
+                &Vcb->CleanVolumeDpc );
+
+    return FALSE;
+}
+
+
+VOID
+FatMarkFatDirty (
+    IN PVCB Vcb,
+    IN VBO Vbo,
+    IN ULONG ByteCount
+    )
+
+/*++
+
+Routine Description:
+
+    This routine marks fat sectors dirty again after their entries changed,
+    or after a write of them failed.  ReactOS Cc can write a pinned page
+    while its entries change, and that write marks its sectors clean before
+    the disk reads them (FatCommonWrite), so a change marks its sectors dirty
+    again afterwards; the caller then sets the page dirty in the cache, in
+    this order.
+
+--*/
+
+{
+    FatSetDirtyFatBits( Vcb, Vbo, ByteCount, TRUE );
+}
+#endif
+
 _Requires_lock_held_(_Global_critical_region_)
 VOID
 FatSetFatEntry (
@@ -4074,6 +4505,17 @@ Arguments:
 #endif // ALPHA
         }
 
+#ifdef __REACTOS__
+        {
+            VBO FirstSector = OffsetIntoVolumeFile & ~(SectorSize - 1);
+            VBO LastSector = (OffsetIntoVolumeFile + 1) & ~(SectorSize - 1);
+
+            FatMarkFatDirty( Vcb, FirstSector, LastSector - FirstSector + SectorSize );
+        }
+
+        CcSetDirtyPinnedData( Bcb, NULL );
+#endif
+
     } _SEH2_FINALLY {
 
         DebugUnwind( FatSetFatEntry );
@@ -4306,6 +4748,12 @@ Return Value:
             FatUnlockFreeClusterBitMap( Vcb );
             ReleaseMutex = FALSE;
 
+#ifdef __REACTOS__
+            FatMarkFatDirty( Vcb, (VBO) StartSectorLbo, (ULONG)(FinalSectorLbo - StartSectorLbo) + SectorSize );
+
+            CcSetDirtyPinnedData( SavedBcbs[0][0], NULL );
+#endif
+
         } else if (Vcb->AllocationSupport.FatIndexBitSize == 32) {
 
             //
@@ -4424,6 +4872,19 @@ Return Value:
                 FatUnlockFreeClusterBitMap( Vcb );
                 ReleaseMutex = FALSE;
 #endif // ALPHA
+
+#ifdef __REACTOS__
+                {
+                    ULONG i;
+
+                    FatMarkFatDirty( Vcb, (VBO) StartSectorLbo, (ULONG)(FinalSectorLbo - StartSectorLbo) + SectorSize );
+
+                    for (i = 0; (i < COUNTSAVEDBCBS) && (SavedBcbs[i][0] != NULL); i++) {
+
+                        CcSetDirtyPinnedData( SavedBcbs[i][0], NULL );
+                    }
+                }
+#endif
 
                 {
                     ULONG i;
@@ -4572,6 +5033,19 @@ Return Value:
             FatUnlockFreeClusterBitMap( Vcb );
             ReleaseMutex = FALSE;
 #endif // ALPHA
+
+#ifdef __REACTOS__
+            {
+                ULONG i;
+
+                FatMarkFatDirty( Vcb, (VBO) StartSectorLbo, (ULONG)(FinalSectorLbo - StartSectorLbo) + SectorSize );
+
+                for (i = 0; (i < COUNTSAVEDBCBS) && (SavedBcbs[i][0] != NULL); i++) {
+
+                    CcSetDirtyPinnedData( SavedBcbs[i][0], NULL );
+                }
+            }
+#endif
         }
 
     } _SEH2_FINALLY {

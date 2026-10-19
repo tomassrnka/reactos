@@ -524,6 +524,9 @@ Return Value:
     PVCB Vcb;
     IRP_CONTEXT IrpContext;
     BOOLEAN VcbExists = FALSE;
+#ifdef __REACTOS__
+    BOOLEAN MarkDirty = FALSE;
+#endif
 
     PAGED_CODE();
 
@@ -589,14 +592,60 @@ Return Value:
 
             if (!FlagOn(Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY)) {
 
+#ifdef __REACTOS__
+                //
+                //  A fat sector may not be on the disk (a write of it failed
+                //  or is still running): do not mark the volume clean, and
+                //  check again later, as the Dpc does for dirty cache data.
+                //  Write the dirty marks below: another worker that found
+                //  the fat clean earlier may have written the clean marks
+                //  meanwhile.  A fat flush or shutdown writes failed sectors
+                //  again.
+                //
+
+                if (FatIsFatDirty( Vcb )) {
+
+                    LARGE_INTEGER TwoSecondsFromNow;
+
+                    SetFlag( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY );
+                    MarkDirty = TRUE;
+
+                    TwoSecondsFromNow.QuadPart = (LONG)-2*1000*1000*10;
+
+                    KeSetTimer( &Vcb->CleanVolumeTimer,
+                                TwoSecondsFromNow,
+                                &Vcb->CleanVolumeDpc );
+
+                } else {
+
+                    FatMarkVolumeClean( &IrpContext, Vcb );
+
+                    //
+                    //  The volume may have been marked permanently dirty
+                    //  since the checks above: FatMarkVolumeClean wrote the
+                    //  dirty marks; take the dirty path below as well.
+                    //
+
+                    if (FlagOn(Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY)) {
+
+                        MarkDirty = TRUE;
+                    }
+                }
+#else
                 FatMarkVolume( &IrpContext, Vcb, VolumeClean );
+#endif
             }
 
             //
             //  Check for a pathological race condition, and fix it.
             //
 
+#ifdef __REACTOS__
+            //  MarkDirty: the Dpc may clear the dirty flag again meanwhile.
+            if (MarkDirty || FlagOn(Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY)) {
+#else
             if (FlagOn(Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY)) {
+#endif
 
                 FatMarkVolume( &IrpContext, Vcb, VolumeDirty );
 
@@ -1091,6 +1140,55 @@ Return Value:
 
     return;
 }
+
+#ifdef __REACTOS__
+_Requires_lock_held_(_Global_critical_region_)
+VOID
+FatMarkVolumeClean (
+    IN PIRP_CONTEXT IrpContext,
+    IN PVCB Vcb
+    )
+
+/*++
+
+Routine Description:
+
+    This routine marks the volume clean, for a caller that checked that it
+    may.  The volume may have been marked permanently dirty since, by a path
+    that holds none of the caller's locks (FSCTL_MARK_VOLUME_DIRTY): every
+    such path sets VCB_STATE_FLAG_MOUNTED_DIRTY before it writes the dirty
+    marks, so if the flag is set now, write the dirty marks again.  The clean
+    call can raise after it wrote the boot sector, so the dirty marks are
+    written in that case too and the original status is raised again.
+
+--*/
+
+{
+    NTSTATUS Status = STATUS_SUCCESS;
+    BOOLEAN Raised = FALSE;
+
+    _SEH2_TRY {
+
+        FatMarkVolume( IrpContext, Vcb, VolumeClean );
+
+    } _SEH2_EXCEPT( FsRtlIsNtstatusExpected( Status = _SEH2_GetExceptionCode() ) ?
+                    EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH ) {
+
+        Raised = TRUE;
+        FatResetExceptionState( IrpContext );
+    } _SEH2_END;
+
+    if (FlagOn(Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY)) {
+
+        FatMarkVolume( IrpContext, Vcb, VolumeDirty );
+    }
+
+    if (Raised) {
+
+        FatRaiseStatus( IrpContext, Status );
+    }
+}
+#endif
 
 
 VOID

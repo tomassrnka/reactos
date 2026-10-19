@@ -15,6 +15,7 @@
 #include <stdlib.h>
 
 #include <ndk/iofuncs.h>
+#include <ndk/kefuncs.h>
 #include <ndk/obfuncs.h>
 #include <ndk/rtlfuncs.h>
 #include <ndk/umtypes.h>
@@ -23,6 +24,10 @@
 
 
 /* OTHER MACROSES ************************************************************/
+
+#ifndef FSCTL_ALLOW_EXTENDED_DASD_IO
+#define FSCTL_ALLOW_EXTENDED_DASD_IO CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 32, METHOD_NEITHER, FILE_ANY_ACCESS)
+#endif
 
 #define KeQuerySystemTime(t)  NtfsGetSystemTimeAsFileTime((LPFILETIME)(t));
 
@@ -215,6 +220,7 @@ typedef struct _NTFS_LAYOUT
 
     CHAR       ClustersPerMftRecord;    // Signed, boot-sector encoding
     CHAR       ClustersPerIndexRecord;  // Signed, boot-sector encoding
+    BYTE       IndexRootBlocksPerIndexRecord;  // $INDEX_ROOT encoding: clusters, or 512-byte blocks below a cluster
 
     ULONGLONG  SerialNumber;
 
@@ -222,6 +228,7 @@ typedef struct _NTFS_LAYOUT
     ULONGLONG  BootLcn;        ULONG BootClusters;
     ULONGLONG  MftLcn;         ULONG MftClusters;   ULONG MftAllocRecords;
     ULONGLONG  MftMirrLcn;     ULONG MftMirrClusters;
+    ULONG      MftMirrRecords;  // four, or one cluster's worth when a cluster holds more
     ULONGLONG  LogFileLcn;     ULONG LogFileClusters;
     ULONGLONG  BitmapLcn;      ULONG BitmapClusters;
     ULONGLONG  UpCaseLcn;      ULONG UpCaseClusters;
@@ -492,9 +499,6 @@ typedef struct _INDEX_ENTRY_HEADER
 
 /* PROTOTYPES ****************************************************************/
 
-ULONG
-NTAPI NtGetTickCount(VOID); 
-
 // ntfslib.c
 
 VOID
@@ -508,6 +512,11 @@ BYTE GetSectorsPerCluster(VOID);
 // too small to hold the NTFS metadata.
 NTSTATUS
 ComputeLayout(IN ULONG ClusterSize);
+
+NTSTATUS
+WriteDisk(IN LONGLONG Offset,
+          IN PVOID    Buffer,
+          IN ULONG    Length);
 
 // bootsect.c
 

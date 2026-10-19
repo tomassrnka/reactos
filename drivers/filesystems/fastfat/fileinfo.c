@@ -99,6 +99,14 @@ FatQueryNetworkInfo (
     IN OUT PLONG Length
     );
 
+VOID
+FatQueryAttributeTagInfo (
+    IN PIRP_CONTEXT IrpContext,
+    IN PFCB Fcb,
+    IN OUT PFILE_ATTRIBUTE_TAG_INFORMATION Buffer,
+    IN OUT PLONG Length
+    );
+
 _Requires_lock_held_(_Global_critical_region_)
 NTSTATUS
 FatSetBasicInfo (
@@ -181,6 +189,7 @@ FatRenameEAs (
 #pragma alloc_text(PAGE, FatQueryInternalInfo)
 #pragma alloc_text(PAGE, FatQueryNameInfo)
 #pragma alloc_text(PAGE, FatQueryNetworkInfo)
+#pragma alloc_text(PAGE, FatQueryAttributeTagInfo)
 #pragma alloc_text(PAGE, FatQueryShortNameInfo)
 #pragma alloc_text(PAGE, FatQueryPositionInfo)
 #pragma alloc_text(PAGE, FatQueryStandardInfo)
@@ -598,6 +607,22 @@ Return Value:
             case FileNetworkOpenInformation:
 
                 FatQueryNetworkInfo( IrpContext, Fcb, FileObject, Buffer, &Length );
+                break;
+
+            case FileAttributeTagInformation:
+
+                //
+                //  Nothing is written to a short buffer, so report no bytes
+                //  (the overflow path below would report the whole buffer).
+                //
+
+                if (Length < (LONG)sizeof( FILE_ATTRIBUTE_TAG_INFORMATION )) {
+
+                    Status = STATUS_BUFFER_TOO_SMALL;
+                    break;
+                }
+
+                FatQueryAttributeTagInfo( IrpContext, Fcb, Buffer, &Length );
                 break;
 
             default:
@@ -1899,6 +1924,79 @@ Return Value:
     DebugTrace( 0, Dbg, "*Length = %08lx\n", *Length);
 
     DebugTrace(-1, Dbg, "FatQueryNetworkInfo -> VOID\n", 0);
+
+    return;
+}
+
+
+//
+//  Internal Support Routine
+//
+
+VOID
+FatQueryAttributeTagInfo (
+    IN PIRP_CONTEXT IrpContext,
+    IN PFCB Fcb,
+    IN OUT PFILE_ATTRIBUTE_TAG_INFORMATION Buffer,
+    IN OUT PLONG Length
+    )
+
+/*++
+ Description:
+
+    This routine performs the query attribute tag information function for fat.
+    FAT has no reparse points, so the tag is always zero.
+
+Arguments:
+
+    Fcb - Supplies the Fcb being queried, it has been verified
+
+    Buffer - Supplies a pointer to the buffer where the information is to
+        be returned
+
+    Length - Supplies the length of the buffer in bytes, and receives the
+        remaining bytes free in the buffer upon return.
+
+Return Value:
+
+    None
+
+--*/
+
+{
+    PAGED_CODE();
+
+    UNREFERENCED_PARAMETER( IrpContext );
+
+    DebugTrace(+1, Dbg, "FatQueryAttributeTagInfo...\n", 0);
+
+    //
+    //  The attributes are the ones FatQueryBasicInfo reports.
+    //
+
+    Buffer->FileAttributes = Fcb->DirentFatFlags;
+
+    if (FlagOn( Fcb->FcbState, FCB_STATE_TEMPORARY )) {
+
+        SetFlag( Buffer->FileAttributes, FILE_ATTRIBUTE_TEMPORARY );
+    }
+
+    if (Buffer->FileAttributes == 0) {
+
+        Buffer->FileAttributes = FILE_ATTRIBUTE_NORMAL;
+    }
+
+    Buffer->ReparseTag = 0;
+
+    //
+    //  Update the length and status output variables
+    //
+
+    *Length -= sizeof( FILE_ATTRIBUTE_TAG_INFORMATION );
+
+    DebugTrace( 0, Dbg, "*Length = %08lx\n", *Length);
+
+    DebugTrace(-1, Dbg, "FatQueryAttributeTagInfo -> VOID\n", 0);
 
     return;
 }

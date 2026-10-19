@@ -4932,7 +4932,7 @@ static NTSTATUS resize_device(device_extension* Vcb, void* data, ULONG len, PIRP
         }
 
         if (br->size == 0) {
-            br->size = gli.Length.QuadPart;
+            br->size = gli.Length.QuadPart & ~(uint64_t)(Vcb->superblock.sectorsize - 1);
 
             if (dev->devitem.total_bytes == br->size) {
                 TRACE("size unchanged, returning STATUS_SUCCESS\n");
@@ -4943,6 +4943,12 @@ static NTSTATUS resize_device(device_extension* Vcb, void* data, ULONG len, PIRP
             if (br->size == 0) {
                 ERR("IOCTL_DISK_GET_LENGTH_INFO returned 0 length\n");
                 Status = STATUS_INTERNAL_ERROR;
+                goto end;
+            }
+
+            if (br->size < dev->devitem.total_bytes) {
+                ERR("device is now %I64x bytes, smaller than the recorded %I64x\n", br->size, dev->devitem.total_bytes);
+                Status = STATUS_INVALID_PARAMETER;
                 goto end;
             }
         } else if ((uint64_t)gli.Length.QuadPart < br->size) {
