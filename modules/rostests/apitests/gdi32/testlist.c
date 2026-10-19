@@ -61,6 +61,7 @@ extern void func_GetTextExtentKerning(void);
 extern void func_GetTextExtentQuality(void);
 extern void func_GetTextFace(void);
 extern void func_GetTextMetrics(void);
+extern void func_GradientFill(void);
 extern void func_LPtoDP(void);
 extern void func_MaskBlt(void);
 extern void func_NtGdiAddFontResource(void);
@@ -151,6 +152,7 @@ const struct test winetest_testlist[] =
     { "GetTextExtentQuality", func_GetTextExtentQuality },
     { "GetTextMetrics", func_GetTextMetrics },
     { "GetTextFace", func_GetTextFace },
+    { "GradientFill", func_GradientFill },
     { "LPtoDP", func_LPtoDP },
     { "MaskBlt", func_MaskBlt },
     { "NtGdiAddFontResource", func_NtGdiAddFontResource},
