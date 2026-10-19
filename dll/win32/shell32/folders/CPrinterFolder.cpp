@@ -310,12 +310,13 @@ HRESULT WINAPI CPrinterFolder::GetAttributesOf(UINT cidl, PCUITEMID_CHILD_ARRAY 
 {
     static const DWORD dwPrintersAttributes =
         SFGAO_HASPROPSHEET | SFGAO_STORAGEANCESTOR | SFGAO_FILESYSANCESTOR | SFGAO_FOLDER | SFGAO_CANRENAME | SFGAO_CANDELETE;
+    static const DWORD dwPrinterItemAttributes = SFGAO_HASPROPSHEET | SFGAO_CANDELETE;
     HRESULT hr = S_OK;
 
-    FIXME ("(%p)->(cidl=%d apidl=%p mask=0x%08lx): stub\n",
-           this, cidl, apidl, *rgfInOut);
+    TRACE("(%p)->(cidl=%d apidl=%p mask=0x%08lx)\n",
+          this, cidl, apidl, *rgfInOut);
 
-    *rgfInOut &= dwPrintersAttributes;
+    *rgfInOut &= (cidl ? dwPrinterItemAttributes : dwPrintersAttributes);
 
     *rgfInOut &= ~SFGAO_VALIDATE;
 
@@ -336,6 +337,279 @@ HRESULT CPrinterFolder::_AssocCreate(REFIID riid, PVOID *ppvObj)
 
     pAssoc->Release();
     return hr;
+}
+
+/***********************************************************************
+ *     Context menu of a printer item
+ */
+
+enum
+{
+    PRINTER_CMD_OPEN = 0,
+    PRINTER_CMD_SETDEFAULT,
+    PRINTER_CMD_DELETE,
+    PRINTER_CMD_PROPERTIES,
+    PRINTER_CMD_COUNT
+};
+
+static const struct
+{
+    LPCSTR pszVerbA;
+    LPCWSTR pszVerbW;
+} PrinterVerbs[PRINTER_CMD_COUNT] =
+{
+    { "open", L"open" },
+    { "setdefault", L"setdefault" },
+    { "delete", L"delete" },
+    { "properties", L"properties" },
+};
+
+class CPrinterItemMenu :
+    public CComObjectRootEx<CComMultiThreadModelNoCS>,
+    public IContextMenu
+{
+    private:
+        CComHeapPtr<ITEMIDLIST> m_pidlItem;  /* absolute pidl of the printer */
+        WCHAR m_szPrinter[MAX_PATH];
+
+        BOOL IsDefaultPrinter();
+        void ShowError(HWND hwnd, DWORD dwError);
+        HRESULT RunPrintUI(HWND hwnd, LPCWSTR pszCommand);
+        HRESULT SetDefault(HWND hwnd);
+        HRESULT DeletePrinterItem(HWND hwnd);
+
+    public:
+        HRESULT WINAPI Initialize(PCIDLIST_ABSOLUTE pidlFolder, PCUITEMID_CHILD pidlChild, LPCWSTR pszPrinter);
+
+        // IContextMenu
+        STDMETHOD(QueryContextMenu)(HMENU hMenu, UINT indexMenu, UINT idCmdFirst, UINT idCmdLast, UINT uFlags) override;
+        STDMETHOD(InvokeCommand)(LPCMINVOKECOMMANDINFO lpcmi) override;
+        STDMETHOD(GetCommandString)(UINT_PTR idCommand, UINT uFlags, UINT *lpReserved, LPSTR lpszName, UINT uMaxNameLen) override;
+
+        BEGIN_COM_MAP(CPrinterItemMenu)
+        COM_INTERFACE_ENTRY_IID(IID_IContextMenu, IContextMenu)
+        END_COM_MAP()
+};
+
+HRESULT WINAPI CPrinterItemMenu::Initialize(PCIDLIST_ABSOLUTE pidlFolder, PCUITEMID_CHILD pidlChild, LPCWSTR pszPrinter)
+{
+    if (!pszPrinter || !*pszPrinter)
+        return E_INVALIDARG;
+    m_pidlItem.Attach(ILCombine(pidlFolder, pidlChild));
+    if (!m_pidlItem)
+        return E_OUTOFMEMORY;
+    return StringCchCopyW(m_szPrinter, _countof(m_szPrinter), pszPrinter);
+}
+
+BOOL CPrinterItemMenu::IsDefaultPrinter()
+{
+    WCHAR szDefault[MAX_PATH];
+    DWORD cch = _countof(szDefault);
+
+    return GetDefaultPrinterW(szDefault, &cch) && !_wcsicmp(szDefault, m_szPrinter);
+}
+
+void CPrinterItemMenu::ShowError(HWND hwnd, DWORD dwError)
+{
+    WCHAR szCaption[64], szFormat[128], szSystem[256], szText[512];
+
+    if (!LoadStringW(shell32_hInstance, IDS_PRINTERS, szCaption, _countof(szCaption)))
+        szCaption[0] = UNICODE_NULL;
+    if (!LoadStringW(shell32_hInstance, IDS_PRINTER_OP_FAILED, szFormat, _countof(szFormat)))
+        StringCchCopyW(szFormat, _countof(szFormat), L"%s");
+    if (!FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, dwError, 0,
+                        szSystem, _countof(szSystem), NULL))
+    {
+        StringCchPrintfW(szSystem, _countof(szSystem), L"0x%08lx", dwError);
+    }
+    StringCchPrintfW(szText, _countof(szText), szFormat, szSystem);
+    MessageBoxW(hwnd, szText, szCaption, MB_OK | MB_ICONERROR);
+}
+
+HRESULT CPrinterItemMenu::RunPrintUI(HWND hwnd, LPCWSTR pszCommand)
+{
+    WCHAR szRundll[MAX_PATH], szName[2 * MAX_PATH], szParams[2 * MAX_PATH + 64];
+    SHELLEXECUTEINFOW sei = { sizeof(sei) };
+    PCWSTR pszSrc;
+    PWSTR pszDst = szName;
+
+    // Quote the printer name for CommandLineToArgvW: a quote becomes \" (printer names contain no backslash).
+    for (pszSrc = m_szPrinter; *pszSrc; pszSrc++)
+    {
+        if (*pszSrc == L'"')
+            *pszDst++ = L'\\';
+        *pszDst++ = *pszSrc;
+    }
+    *pszDst = UNICODE_NULL;
+
+    if (!GetSystemDirectoryW(szRundll, _countof(szRundll)) ||
+        FAILED(StringCchCatW(szRundll, _countof(szRundll), L"\\rundll32.exe")) ||
+        FAILED(StringCchPrintfW(szParams, _countof(szParams), L"printui.dll,PrintUIEntry %s /n \"%s\"",
+                                pszCommand, szName)))
+    {
+        return E_FAIL;
+    }
+
+    sei.fMask = SEE_MASK_FLAG_NO_UI;
+    sei.hwnd = hwnd;
+    sei.lpFile = szRundll;
+    sei.lpParameters = szParams;
+    sei.nShow = SW_SHOWNORMAL;
+    if (!ShellExecuteExW(&sei))
+    {
+        DWORD dwError = GetLastError();
+        ShowError(hwnd, dwError);
+        return HRESULT_FROM_WIN32(dwError);
+    }
+    return S_OK;
+}
+
+HRESULT CPrinterItemMenu::SetDefault(HWND hwnd)
+{
+    if (!SetDefaultPrinterW(m_szPrinter))
+    {
+        DWORD dwError = GetLastError();
+        ShowError(hwnd, dwError);
+        return HRESULT_FROM_WIN32(dwError);
+    }
+
+    SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, (LPARAM)L"windows", SMTO_ABORTIFHUNG, 1000, NULL);
+    SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_IDLIST | SHCNF_FLUSHNOWAIT, m_pidlItem, NULL);
+    return S_OK;
+}
+
+HRESULT CPrinterItemMenu::DeletePrinterItem(HWND hwnd)
+{
+    WCHAR szCaption[64], szFormat[128], szText[MAX_PATH + 128];
+    PRINTER_DEFAULTSW Defaults = { NULL, NULL, PRINTER_ALL_ACCESS };
+    HANDLE hPrinter;
+    DWORD dwError = ERROR_SUCCESS;
+
+    if (!LoadStringW(shell32_hInstance, IDS_PRINTERS, szCaption, _countof(szCaption)) ||
+        !LoadStringW(shell32_hInstance, IDS_PRINTER_DELETE_TEXT, szFormat, _countof(szFormat)))
+    {
+        return E_FAIL;
+    }
+    StringCchPrintfW(szText, _countof(szText), szFormat, m_szPrinter);
+    if (MessageBoxW(hwnd, szText, szCaption, MB_YESNO | MB_ICONWARNING) != IDYES)
+        return S_FALSE;
+
+    if (!OpenPrinterW(m_szPrinter, &hPrinter, &Defaults))
+    {
+        dwError = GetLastError();
+    }
+    else
+    {
+        if (!DeletePrinter(hPrinter))
+            dwError = GetLastError();
+        ClosePrinter(hPrinter);
+    }
+
+    if (dwError != ERROR_SUCCESS)
+    {
+        ShowError(hwnd, dwError);
+        return HRESULT_FROM_WIN32(dwError);
+    }
+
+    SHChangeNotify(SHCNE_DELETE, SHCNF_IDLIST | SHCNF_FLUSHNOWAIT, m_pidlItem, NULL);
+    return S_OK;
+}
+
+HRESULT WINAPI CPrinterItemMenu::QueryContextMenu(HMENU hMenu, UINT indexMenu, UINT idCmdFirst, UINT idCmdLast, UINT uFlags)
+{
+    UINT idx = indexMenu;
+
+    if (idCmdFirst + PRINTER_CMD_COUNT - 1 > idCmdLast)
+        return E_INVALIDARG;
+
+    _InsertMenuItemW(hMenu, idx++, TRUE, idCmdFirst + PRINTER_CMD_OPEN, MFT_STRING,
+                     MAKEINTRESOURCEW(IDS_OPEN_VERB), (uFlags & CMF_NODEFAULT) ? MFS_ENABLED : MFS_DEFAULT);
+    if (uFlags & CMF_DEFAULTONLY)
+        return MAKE_HRESULT(SEVERITY_SUCCESS, 0, PRINTER_CMD_OPEN + 1);
+
+    if (!IsDefaultPrinter())
+    {
+        _InsertMenuItemW(hMenu, idx++, TRUE, 0, MFT_SEPARATOR, NULL, 0);
+        _InsertMenuItemW(hMenu, idx++, TRUE, idCmdFirst + PRINTER_CMD_SETDEFAULT, MFT_STRING,
+                         MAKEINTRESOURCEW(IDS_PRINTER_SETDEFAULT), MFS_ENABLED);
+    }
+    _InsertMenuItemW(hMenu, idx++, TRUE, 0, MFT_SEPARATOR, NULL, 0);
+    _InsertMenuItemW(hMenu, idx++, TRUE, idCmdFirst + PRINTER_CMD_DELETE, MFT_STRING,
+                     MAKEINTRESOURCEW(IDS_DELETE), MFS_ENABLED);
+    _InsertMenuItemW(hMenu, idx++, TRUE, 0, MFT_SEPARATOR, NULL, 0);
+    _InsertMenuItemW(hMenu, idx++, TRUE, idCmdFirst + PRINTER_CMD_PROPERTIES, MFT_STRING,
+                     MAKEINTRESOURCEW(IDS_PROPERTIES), MFS_ENABLED);
+
+    return MAKE_HRESULT(SEVERITY_SUCCESS, 0, PRINTER_CMD_COUNT);
+}
+
+HRESULT WINAPI CPrinterItemMenu::InvokeCommand(LPCMINVOKECOMMANDINFO lpcmi)
+{
+    LPCMINVOKECOMMANDINFOEX lpcmiex = (LPCMINVOKECOMMANDINFOEX)lpcmi;
+    UINT idCmd = PRINTER_CMD_COUNT;
+    UINT i;
+
+    if (!lpcmi)
+        return E_INVALIDARG;
+
+    if (lpcmi->cbSize >= sizeof(CMINVOKECOMMANDINFOEX) && (lpcmi->fMask & CMIC_MASK_UNICODE) && lpcmiex->lpVerbW)
+    {
+        if (IS_INTRESOURCE(lpcmiex->lpVerbW))
+        {
+            idCmd = LOWORD(lpcmiex->lpVerbW);
+        }
+        else
+        {
+            for (i = 0; i < PRINTER_CMD_COUNT; i++)
+            {
+                if (!_wcsicmp(lpcmiex->lpVerbW, PrinterVerbs[i].pszVerbW))
+                    idCmd = i;
+            }
+        }
+    }
+    else if (IS_INTRESOURCE(lpcmi->lpVerb))
+    {
+        idCmd = LOWORD(lpcmi->lpVerb);
+    }
+    else
+    {
+        for (i = 0; i < PRINTER_CMD_COUNT; i++)
+        {
+            if (!lstrcmpiA(lpcmi->lpVerb, PrinterVerbs[i].pszVerbA))
+                idCmd = i;
+        }
+    }
+
+    switch (idCmd)
+    {
+        case PRINTER_CMD_OPEN:
+            return RunPrintUI(lpcmi->hwnd, L"/o");
+        case PRINTER_CMD_SETDEFAULT:
+            return SetDefault(lpcmi->hwnd);
+        case PRINTER_CMD_DELETE:
+            return DeletePrinterItem(lpcmi->hwnd);
+        case PRINTER_CMD_PROPERTIES:
+            return RunPrintUI(lpcmi->hwnd, L"/p");
+    }
+    return E_INVALIDARG;
+}
+
+HRESULT WINAPI CPrinterItemMenu::GetCommandString(UINT_PTR idCommand, UINT uFlags, UINT *lpReserved, LPSTR lpszName, UINT uMaxNameLen)
+{
+    if (idCommand >= PRINTER_CMD_COUNT)
+        return E_INVALIDARG;
+
+    switch (uFlags)
+    {
+        case GCS_VERBA:
+            return StringCchCopyA(lpszName, uMaxNameLen, PrinterVerbs[idCommand].pszVerbA);
+        case GCS_VERBW:
+            return StringCchCopyW((LPWSTR)lpszName, uMaxNameLen, PrinterVerbs[idCommand].pszVerbW);
+        case GCS_VALIDATEA:
+        case GCS_VALIDATEW:
+            return S_OK;
+    }
+    return E_NOTIMPL;
 }
 
 /**************************************************************************
@@ -366,6 +640,14 @@ HRESULT WINAPI CPrinterFolder::GetUIObjectOf(HWND hwndOwner, UINT cidl, PCUITEMI
 
     if ((IsEqualIID (riid, IID_IExtractIconA) || IsEqualIID(riid, IID_IExtractIconW)) && cidl == 1)
         hr = CPrintersExtractIconW_CreateInstane(apidl[0], riid, &pObj);
+    else if (IsEqualIID(riid, IID_IContextMenu) && cidl == 1)
+    {
+        PIDLPrinterStruct *pPrinter = _ILGetPrinterStruct(apidl[0]);
+        if (pPrinter)
+            hr = ShellObjectCreatorInit<CPrinterItemMenu>(pidlRoot, apidl[0], pPrinter->szName, riid, &pObj);
+        else
+            hr = E_INVALIDARG;
+    }
     else if (IsEqualIID(riid, IID_IQueryAssociations))
         hr = _AssocCreate(riid, &pObj);
     else

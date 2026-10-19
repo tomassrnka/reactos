@@ -851,6 +851,9 @@ BEGIN
     IDS_COPYERRORSUBFOLDER "無法複製「%s」：目的資料夾是來源資料夾的子資料夾。"
     IDS_MOVEERROR "無法移動「%s」：%s"
     IDS_COPYERROR "無法複製「%s」：%s"
+    IDS_PRINTER_SETDEFAULT "Set as De&fault Printer"
+    IDS_PRINTER_DELETE_TEXT "Are you sure you want to delete the printer '%s'?"
+    IDS_PRINTER_OP_FAILED "Operation could not be completed.\n\n%s"
 
     IDS_CREATEFILE_DENIED "Could not create file %1"
     IDS_CREATEFILE_CAPTION "Error creating file"

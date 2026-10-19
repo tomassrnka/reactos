@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     ClosePrinter.c
+    DeletePrinter.c
     EnumPrinters.c
     EnumPrintProcessorDatatypes.c
     GetDefaultPrinter.c
@@ -9,6 +10,8 @@ list(APPEND SOURCE
     GetPrintProcessorDirectory.c
     IsValidDevmode.c
     OpenPrinter.c
+    PrintToFile.c
+    ScheduleJob.c
     StartDocPrinter.c
     testlist.c)
 

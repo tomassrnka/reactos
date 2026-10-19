@@ -853,6 +853,9 @@ BEGIN
     IDS_COPYERRORSUBFOLDER "Imposibil de copiat '%s': Folderul destinaţie este un subfolder al folderului sursă."
     IDS_MOVEERROR "Imposibil de mutat '%s': %s"
     IDS_COPYERROR "Imposibil de copiat '%s': %s"
+    IDS_PRINTER_SETDEFAULT "Set as De&fault Printer"
+    IDS_PRINTER_DELETE_TEXT "Are you sure you want to delete the printer '%s'?"
+    IDS_PRINTER_OP_FAILED "Operation could not be completed.\n\n%s"
 
     IDS_CREATEFILE_DENIED "Imposibil de creat fişierul %1"
     IDS_CREATEFILE_CAPTION "Imposibil de creat fişierul"

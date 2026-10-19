@@ -126,6 +126,7 @@ _HandleDeletePort(HANDLE hXcv, PBYTE pInputData, PDWORD pcbOutputNeeded, DWORD* 
             FIXME("LocalXcvDeletePort removed Port Entry\n");
             RemoveEntryList(&pPort->Entry);
 
+            DeleteCriticalSection(&pPort->PrintingSection);
             DllFreeSplMem(pPort);
         }
         FIXME("=> %u with %u\n", res, GetLastError() );

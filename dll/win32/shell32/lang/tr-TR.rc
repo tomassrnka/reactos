@@ -855,6 +855,9 @@ BEGIN
     IDS_COPYERRORSUBFOLDER "'%s' kopyalanamıyor: Hedef dizin, kaynak dizinin bir alt dizinidir."
     IDS_MOVEERROR "'%s' taşınamıyor: %s"
     IDS_COPYERROR "'%s' kopyalanamıyor: %s"
+    IDS_PRINTER_SETDEFAULT "Set as De&fault Printer"
+    IDS_PRINTER_DELETE_TEXT "Are you sure you want to delete the printer '%s'?"
+    IDS_PRINTER_OP_FAILED "Operation could not be completed.\n\n%s"
 
     IDS_CREATEFILE_DENIED "%1 dosyası oluşturulamadı"
     IDS_CREATEFILE_CAPTION "Dosya Oluşturma Hatası"
