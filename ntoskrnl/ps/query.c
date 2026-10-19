@@ -1561,8 +1561,9 @@ PspSetProcessTlsInformation(
     PVOID *Vector, *NewVector, NewTlsData, OldTlsData = NULL;
     ULONG_PTR OldLength, NewLength;
     ULONG Pass, Count, i;
-    BOOLEAN Wow64 = FALSE, Counted;
+    BOOLEAN Counted;
 #if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    BOOLEAN Wow64 = FALSE;
     SECTION_IMAGE_INFORMATION ImageInformation;
     ULONG64 GuestLimit = 0;
 #endif
