@@ -239,6 +239,52 @@ static BOOLEAN GuestSpan(ULONG Address, ULONG64 Size)
     return (ULONG64)Address + Size <= (ULONG64)Wow64HighestUserAddress + 1;
 }
 
+/* MemorySectionName: the guest's counted-string header is 8 bytes. Query the native form into a
+ * scratch buffer that holds any name, then apply the guest's buffer size as Windows WoW64 does
+ * (measured on Server 2008 R2 and Windows 10): an address above the guest's range is invalid; a
+ * buffer smaller than the header fails with STATUS_INFO_LENGTH_MISMATCH and one smaller than
+ * header, name and terminator with STATUS_BUFFER_OVERFLOW, both with only the required length
+ * stored; otherwise the header, the name and its terminator. The buffer need not be aligned. */
+static NTSTATUS SectionName32(HANDLE Process, ULONG Address, ULONG Buffer, ULONG Length,
+                              ULONG ReturnLength, WOW64_CLEANUP *Cleanup)
+{
+    /* The native MaximumLength is a USHORT: keep it even and below 64 KiB */
+    const ULONG NativeLength = sizeof(MEMORY_SECTION_NAME) + MAXUSHORT - 1;
+    MEMORY_SECTION_NAME *Native;
+    WOW64_STRING UNALIGNED *Guest = PTR32(Buffer);
+    SIZE_T Bytes = 0;
+    ULONG Needed;
+    NTSTATUS Status;
+
+    if (Address > Wow64HighestUserAddress) return STATUS_INVALID_PARAMETER;
+    if (ReturnLength)
+    {
+        if (!GuestSpan(ReturnLength, sizeof(ULONG))) return STATUS_ACCESS_VIOLATION;
+        ProbeOutput(ReturnLength, sizeof(ULONG));
+    }
+    Native = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, NativeLength);
+    if (!Native) return STATUS_NO_MEMORY;
+    Status = NtQueryVirtualMemory(Process, PTR32(Address), MemorySectionName, Native, NativeLength, &Bytes);
+    if (!NT_SUCCESS(Status)) return Status;
+    Needed = sizeof(WOW64_STRING) + Native->SectionFileName.Length + sizeof(WCHAR);
+    if (Length < Needed)
+    {
+        if (ReturnLength) *(ULONG UNALIGNED *)PTR32(ReturnLength) = Needed;
+        return Length < sizeof(WOW64_STRING) ? STATUS_INFO_LENGTH_MISMATCH : STATUS_BUFFER_OVERFLOW;
+    }
+    /* Writable before anything is stored, so a fault leaves no partial header */
+    if (!Buffer || !GuestSpan(Buffer, Needed)) return STATUS_ACCESS_VIOLATION;
+    ProbeOutput(Buffer, Needed);
+    Guest->Length = Native->SectionFileName.Length;
+    Guest->MaximumLength = Native->SectionFileName.Length + sizeof(WCHAR);
+    Guest->Buffer = Buffer + sizeof(WOW64_STRING);
+    RtlCopyMemory((PUCHAR)Guest + sizeof(WOW64_STRING), Native->SectionFileName.Buffer, Native->SectionFileName.Length);
+    *(WCHAR UNALIGNED *)((PUCHAR)Guest + Needed - sizeof(WCHAR)) = UNICODE_NULL;
+    /* Last, as the native service does, in case it lies inside the buffer */
+    if (ReturnLength) *(ULONG UNALIGNED *)PTR32(ReturnLength) = Needed;
+    return STATUS_SUCCESS;
+}
+
 /* TOKEN_GROUPS classes: the 32-bit layout has 4-byte SID pointers, so query the
  * native form into a scratch buffer and rebuild it in the guest buffer. Measured on
  * Windows WOW64: the token is checked before the buffer, the buffer need not be
@@ -611,6 +657,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
     {
         MEMORY_BASIC_INFORMATION Info;
         struct { ULONG Base, AllocationBase, AllocationProtect, Size, State, Protect, Type; } *Info32 = P(3);
+        if (a[2] == MemorySectionName) return SectionName32(H(0), a[1], a[3], a[4], a[5], Cleanup);
         if (a[2] != MemoryBasicInformation) UNSUPPORTED(CLASS, a[2]);
         if (a[4] < sizeof(*Info32)) return STATUS_INFO_LENGTH_MISMATCH;
         Status = NtQueryVirtualMemory(H(0), P(1), a[2], &Info, sizeof(Info), NULL);
