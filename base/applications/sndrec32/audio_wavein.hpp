@@ -72,9 +72,10 @@ class audio_wavein
         void free_buffers_mem_(void);
 
         void init_headers_(void);
-        void prep_headers_(void);
+        bool prep_headers_(void);
         void unprep_headers_(void);
-        void add_buffers_to_driver_(void);
+        bool add_buffers_to_driver_(void);
+        void abort_start_(void);
 
     public:
         /* Ctors */
@@ -103,7 +104,7 @@ class audio_wavein
         void open(void);
         void close(void);
 
-        void start_recording(void);
+        bool start_recording(void);
         void stop_recording(void);
 
         audio_wavein_status current_status (void) const

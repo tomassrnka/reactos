@@ -24,6 +24,9 @@
 #define BUTPLAY_ID 2
 #define BUTSTOP_ID 3
 #define BUTREC_ID 4
+
+#define WM_APP_NODEVICE (WM_APP + 1)
+#define WM_APP_PLAYDONE (WM_APP + 2)
 #define SLIDER_ID 5
 #define WAVEBAR_ID 6
 
