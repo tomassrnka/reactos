@@ -30,6 +30,7 @@
 #define WM_SEARCH_STOP          (WM_USER + 1)
 #define WM_SEARCH_ADD_RESULT    (WM_USER + 2)
 #define WM_SEARCH_UPDATE_STATUS (WM_USER + 3)
+#define WM_SEARCH_FINISHED      (WM_USER + 4) // Sent, never posted: no payload to free
 #define WM_SEARCH_STOPPED       (WM_USER + 9) // Must be ordered after any message with a payload
 
 typedef struct tagLOCATIONITEM

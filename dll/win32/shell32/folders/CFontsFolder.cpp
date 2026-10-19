@@ -111,6 +111,16 @@ HRESULT WINAPI CFontsFolder::GetDisplayNameOf(PCUITEMID_CHILD pidl, DWORD dwFlag
         if (pidl->mkid.cb)
             pidl = ILGetNext(pidl);
 
+        /* The font extension cannot name itself from an empty pidl */
+        if (_ILIsEmpty(pidl))
+        {
+            WCHAR szPath[MAX_PATH];
+            HRESULT hr = SHGetFolderPathW(NULL, CSIDL_FONTS, NULL, SHGFP_TYPE_CURRENT, szPath);
+            if (FAILED(hr))
+                return hr;
+            return SHSetStrRet(strRet, szPath);
+        }
+
         return m_pisfInner->GetDisplayNameOf(pidl, dwFlags, strRet);
     }
 
@@ -169,11 +179,74 @@ HRESULT WINAPI CFontsFolder::GetClassID(CLSID *lpClassId)
     return S_OK;
 }
 
+/* Bind the class named by the fonts directory's desktop.ini (the font shell
+ * extension) on the directory's own pidl, as CFSFolder::BindToObject does when
+ * the directory is reached by path, so that both routes show the same view. */
+HRESULT CFontsFolder::CreateDesktopIniFolder()
+{
+    WCHAR szPath[MAX_PATH];
+    HRESULT hr = SHGetFolderPathW(NULL, CSIDL_FONTS, NULL, SHGFP_TYPE_CURRENT, szPath);
+    if (FAILED(hr))
+        return hr;
+
+    DWORD dwAttributes = GetFileAttributesW(szPath);
+    if (dwAttributes == INVALID_FILE_ATTRIBUTES ||
+        !(dwAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
+        !(dwAttributes & (FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_READONLY)))
+    {
+        return E_FAIL;
+    }
+
+    CLSID clsidFolder;
+    hr = SHELL32_GetCLSIDForDirectory(szPath, L"CLSID", &clsidFolder);
+    if (FAILED(hr))
+        return hr;
+    if (IsEqualCLSID(clsidFolder, CLSID_FontsFolderShortcut))
+        return E_FAIL;
+
+    CComHeapPtr<ITEMIDLIST> pidlFonts;
+    hr = SHGetFolderLocation(NULL, CSIDL_FONTS, NULL, 0, &pidlFonts);
+    if (FAILED(hr))
+        return hr;
+
+    CComPtr<IShellFolder2> psf;
+    hr = SHCoCreateInstance(NULL, &clsidFolder, NULL, IID_PPV_ARG(IShellFolder2, &psf));
+    if (FAILED(hr))
+        return hr;
+
+    CComPtr<IPersistFolder3> ppf3;
+    CComPtr<IPersistFolder> ppf;
+    if (SUCCEEDED(psf->QueryInterface(IID_PPV_ARG(IPersistFolder3, &ppf3))))
+    {
+        PERSIST_FOLDER_TARGET_INFO pfti = { 0 };
+        pfti.dwAttributes = -1;
+        pfti.csidl = CSIDL_FONTS;
+        StringCchCopyW(pfti.szTargetParsingName, _countof(pfti.szTargetParsingName), szPath);
+        hr = ppf3->InitializeEx(NULL, pidlFonts, &pfti);
+    }
+    else if (SUCCEEDED(psf->QueryInterface(IID_PPV_ARG(IPersistFolder, &ppf))))
+    {
+        hr = ppf->Initialize(pidlFonts);
+    }
+    else
+    {
+        hr = E_NOINTERFACE;
+    }
+    if (FAILED(hr))
+        return hr;
+
+    m_pisfInner = psf;
+    return S_OK;
+}
+
 HRESULT WINAPI CFontsFolder::Initialize(PCIDLIST_ABSOLUTE pidl)
 {
     m_pidlInner = ILClone(pidl);
     if (!m_pidlInner)
         return E_OUTOFMEMORY;
+
+    if (SUCCEEDED(CreateDesktopIniFolder()))
+        return S_OK;
 
     return SHELL32_CoCreateInitSF(m_pidlInner,
                                   &CLSID_ShellFSFolder,

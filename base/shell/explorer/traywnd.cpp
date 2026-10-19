@@ -610,6 +610,10 @@ public:
             }
         }
 
+        /* The toolbar can also be shown or closed from its own menus */
+        if (m_TrayBandSite)
+            g_TaskbarSettings.bShowQuickLaunch = (m_TrayBandSite->IsQuickLaunchShown() == S_OK);
+
         HANDLE hThread = CreateThread(NULL, 0, s_TrayPropertiesThread, this, 0, NULL);
         if (hThread)
             CloseHandle(hThread);
@@ -3243,7 +3247,11 @@ HandleTrayContextMenu:
         {
             HWND hwnd = g_MinimizedAll[i].hwnd;
             if (::IsWindowVisible(hwnd) && ::IsIconic(hwnd))
-                ::SetWindowPlacement(hwnd, &g_MinimizedAll[i].wndpl);
+            {
+                /* The windows were only minimized, so only their show state needs restoring; the
+                   asynchronous form never waits for the window's thread */
+                ::ShowWindowAsync(hwnd, g_MinimizedAll[i].wndpl.showCmd);
+            }
         }
 
         g_MinimizedAll.RemoveAll();
@@ -3465,11 +3473,22 @@ HandleTrayContextMenu:
         /* Toggle OnTop state */
         UpdateAlwaysOnTop(newSettings->sr.AlwaysOnTop);
 
+        /* Show or hide the Quick Launch toolbar only when the check box was changed: the
+         * Toolbars menu may have changed the toolbar while the dialog was open */
+        HRESULT hrQuickLaunch = S_OK;
+        if (m_TrayBandSite)
+        {
+            if (!newSettings->bShowQuickLaunch != !g_TaskbarSettings.bShowQuickLaunch)
+                hrQuickLaunch = m_TrayBandSite->ShowQuickLaunch(newSettings->bShowQuickLaunch);
+            g_TaskbarSettings.bShowQuickLaunch = (m_TrayBandSite->IsQuickLaunchShown() == S_OK);
+        }
+
         /* Adjust taskbar size */
         CheckTrayWndPosition();
 
         g_TaskbarSettings.Save();
-        return 0;
+        /* The properties dialog reports a failed Quick Launch change */
+        return FAILED(hrQuickLaunch) ? (LRESULT)hrQuickLaunch : 0;
     }
 
     DECLARE_WND_CLASS_EX(L"Shell_TrayWnd", CS_DBLCLKS, COLOR_3DFACE)

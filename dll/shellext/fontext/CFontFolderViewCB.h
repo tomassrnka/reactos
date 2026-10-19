@@ -12,7 +12,7 @@ class CFontFolderViewCB
     , public IShellFolderViewCB
 {
     CFontExt* m_pFontExt = nullptr;
-    CComPtr<IShellView> m_pShellView;
+    IShellView* m_pShellView = nullptr; // Not owned: the view owns this callback
     HWND m_hwndView = nullptr;
     CComHeapPtr<ITEMIDLIST> m_pidlParent;
 

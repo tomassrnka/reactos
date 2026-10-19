@@ -14,6 +14,7 @@
 #include <winbase.h>
 #include <winreg.h>
 #include <shlobj.h>
+#include <ntquery.h> // For PID_STG_*
 #include <shlwapi.h>
 #include <tchar.h>
 #include <strsafe.h>
@@ -24,6 +25,7 @@
 #include <atlstr.h>
 #include <wine/debug.h>
 #include <shellutils.h>
+#include <shlobj_undoc.h> // For FCIDM_SHVIEW_REFRESH
 
 extern const GUID CLSID_CFontExt;
 extern LONG g_ModuleRefCnt;

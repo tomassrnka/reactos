@@ -1036,7 +1036,7 @@ static void test_SetSite(void)
     ok(cdbimpl->IncludeObject, "Got %d\n", cdbimpl->IncludeObject);
     ok(!cdbimpl->Notify, "Got %d\n", cdbimpl->Notify);
     ok(!cdbimpl->GetDefaultMenuText, "Got %d\n", cdbimpl->GetDefaultMenuText);
-    todo_wine ok(cdbimpl->GetViewFlags, "Got %d\n", cdbimpl->GetViewFlags);
+    ok(cdbimpl->GetViewFlags, "Got %d\n", cdbimpl->GetViewFlags);
     ok(!cdbimpl->OnColumnClicked, "Got %d\n", cdbimpl->OnColumnClicked);
     ok(!cdbimpl->GetCurrentFilter, "Got %d\n", cdbimpl->GetCurrentFilter);
     todo_wine ok(cdbimpl->OnPreviewCreated, "Got %d\n", cdbimpl->OnPreviewCreated);
@@ -1210,7 +1210,7 @@ static void test_basics(void)
     ok(hr == E_INVALIDARG, "got (0x%08x)\n", hr);
     fs.ViewMode = 0; fs.fFlags = 0;
     hr = IExplorerBrowser_SetFolderSettings(peb, &fs);
-    todo_wine ok(hr == E_INVALIDARG, "got (0x%08x)\n", hr);
+    ok(hr == E_INVALIDARG, "got (0x%08x)\n", hr);
 
     /* SetPropertyBag */
     hr = IExplorerBrowser_SetPropertyBag(peb, NULL);

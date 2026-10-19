@@ -31,6 +31,8 @@ class CFontsFolder :
     private:
         CComPtr<IShellFolder2> m_pisfInner;
         LPITEMIDLIST m_pidlInner;
+
+        HRESULT CreateDesktopIniFolder();
     public:
         CFontsFolder();
         ~CFontsFolder();

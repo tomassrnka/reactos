@@ -62,7 +62,8 @@ public:
     enum IDCMD
     {
         IDCMD_OPEN = 0,
-        IDCMD_OPENFILELOCATION
+        IDCMD_OPENFILELOCATION,
+        IDCMD_RUNAS
     };
 
 private:
@@ -86,6 +87,8 @@ private:
     BOOL          m_bDirty;
     LPDBLIST      m_pDBList; /* Optional data block list (in the extra data section) */
     BOOL          m_bInInit;    // in initialization or not
+    BOOL          m_bTargetChanged; // the user edited the target box
+    BOOL          m_bCommentChanged; // the user edited the comment box
     HICON         m_hIcon;
 
     /* Pointers to strings inside Logo3/Darwin info blocks, cached for debug info purposes only */
@@ -105,8 +108,9 @@ private:
     HRESULT SetTargetFromPIDLOrPath(LPCITEMIDLIST pidl, LPCWSTR pszFile);
     HICON CreateShortcutIcon(LPCWSTR wszIconPath, INT IconIndex);
 
-    HRESULT DoOpen(LPCMINVOKECOMMANDINFO lpici);
+    HRESULT DoOpen(LPCMINVOKECOMMANDINFO lpici, LPCWSTR pszVerb = NULL);
     HRESULT DoOpenFileLocation();
+    BOOL TargetHasRunAs(UINT uFlags, BOOL bForMenu);
 
 public:
     CShellLink();

@@ -6,6 +6,7 @@ extern void func_AddCommas(void);
 extern void func_AssocCreateElement(void);
 extern void func_Control_RunDLLW(void);
 extern void func_CFSFolder(void);
+extern void func_CFontsFolder(void);
 extern void func_CheckEscapes(void);
 extern void func_CIDLData(void);
 extern void func_CMyComputer(void);
@@ -15,13 +16,16 @@ extern void func_CShellDispatch(void);
 extern void func_CShellLink(void);
 extern void func_CUserNotification(void);
 extern void func_DragDrop(void);
+extern void func_DriveTools(void);
 extern void func_ExtractIconEx(void);
 extern void func_FindExecutable(void);
+extern void func_FormerStubs(void);
 extern void func_GetDisplayNameOf(void);
 extern void func_GUIDFromString(void);
 extern void func_ILCreateFromPath(void);
 extern void func_ILIsEqual(void);
 extern void func_Int64ToString(void);
+extern void func_IApplicationAssociationRegistration(void);
 extern void func_IQueryAssociations(void);
 extern void func_IShellFolderViewCB(void);
 extern void func_LockServer(void);
@@ -43,18 +47,25 @@ extern void func_SHCreateFileDataObject(void);
 extern void func_SHCreateFileExtractIconW(void);
 extern void func_SHDefExtractIcon(void);
 extern void func_SHEnumerateUnreadMailAccountsW(void);
+extern void func_SHEmptyRecycleBin(void);
 extern void func_SHEvaluateSystemCommandTemplate(void);
 extern void func_She(void);
 extern void func_ShellExec_RunDLL(void);
 extern void func_ShellExecCmdLine(void);
 extern void func_ShellExecuteEx(void);
+extern void func_ShellExecuteLinkDir(void);
 extern void func_ShellExecuteW(void);
 extern void func_ShellFolder(void);
 extern void func_ShellHook(void);
 extern void func_ShellState(void);
 extern void func_SHGetAttributesFromDataObject(void);
 extern void func_SHGetComputerDisplayNameW(void);
+extern void func_SHGetPropertyStoreForWindow(void);
 extern void func_SHGetFileInfo(void);
+extern void func_SHBindToFolderIDListParent(void);
+extern void func_SHGetKnownFolderPath(void);
+extern void func_SHGetPathFromIDListEx(void);
+extern void func_SHGetStockIconInfo(void);
 extern void func_SHGetNewLinkInfo(void);
 extern void func_SHGetUnreadMailCountW(void);
 extern void func_SHGetUserDisplayName(void);
@@ -66,6 +77,7 @@ extern void func_SHSimpleIDListFromPath(void);
 extern void func_SHRestricted(void);
 extern void func_SHSetUnreadMailCountW(void);
 extern void func_StrRStr(void);
+extern void func_TaskbarFullscreen(void);
 
 const struct test winetest_testlist[] =
 {
@@ -73,6 +85,7 @@ const struct test winetest_testlist[] =
     { "AssocCreateElement", func_AssocCreateElement },
     { "Control_RunDLLW", func_Control_RunDLLW },
     { "CFSFolder", func_CFSFolder },
+    { "CFontsFolder", func_CFontsFolder },
     { "CheckEscapes", func_CheckEscapes },
     { "CIDLData", func_CIDLData },
     { "CMyComputer", func_CMyComputer },
@@ -82,13 +95,16 @@ const struct test winetest_testlist[] =
     { "CShellLink", func_CShellLink },
     //{ "CUserNotification", func_CUserNotification }, // Test is broken on Win 2003
     { "DragDrop", func_DragDrop },
+    { "DriveTools", func_DriveTools },
     { "ExtractIconEx", func_ExtractIconEx },
     { "FindExecutable", func_FindExecutable },
+    { "FormerStubs", func_FormerStubs },
     { "GetDisplayNameOf", func_GetDisplayNameOf },
     { "GUIDFromString", func_GUIDFromString },
     { "ILCreateFromPath", func_ILCreateFromPath },
     { "ILIsEqual", func_ILIsEqual },
     { "Int64ToString", func_Int64ToString },
+    { "IApplicationAssociationRegistration", func_IApplicationAssociationRegistration },
     { "IQueryAssociations", func_IQueryAssociations },
     { "IShellFolderViewCB", func_IShellFolderViewCB },
     { "LockServer", func_LockServer },
@@ -110,18 +126,25 @@ const struct test winetest_testlist[] =
     { "SHCreateFileExtractIconW", func_SHCreateFileExtractIconW },
     { "SHDefExtractIcon", func_SHDefExtractIcon },
     { "SHEnumerateUnreadMailAccountsW", func_SHEnumerateUnreadMailAccountsW },
+    { "SHEmptyRecycleBin", func_SHEmptyRecycleBin },
     { "SHEvaluateSystemCommandTemplate", func_SHEvaluateSystemCommandTemplate },
     { "She", func_She },
     //{ "ShellExec_RunDLL", func_ShellExec_RunDLL }, Broke on Windows
     //{ "ShellExecCmdLine", func_ShellExecCmdLine }, Broke on Windows
     { "ShellExecuteEx", func_ShellExecuteEx }, // Mostly broken on Windows, only simple tests enabled
     //{ "ShellExecuteW", func_ShellExecuteW }, Broke on Windows
+    { "ShellExecuteLinkDir", func_ShellExecuteLinkDir },
     { "ShellFolder", func_ShellFolder },
     { "ShellHook", func_ShellHook },
     { "ShellState", func_ShellState },
     { "SHGetAttributesFromDataObject", func_SHGetAttributesFromDataObject },
     { "SHGetComputerDisplayNameW", func_SHGetComputerDisplayNameW },
+    { "SHGetPropertyStoreForWindow", func_SHGetPropertyStoreForWindow },
     { "SHGetFileInfo", func_SHGetFileInfo },
+    { "SHBindToFolderIDListParent", func_SHBindToFolderIDListParent },
+    { "SHGetKnownFolderPath", func_SHGetKnownFolderPath },
+    { "SHGetPathFromIDListEx", func_SHGetPathFromIDListEx },
+    { "SHGetStockIconInfo", func_SHGetStockIconInfo },
     { "SHGetNewLinkInfo", func_SHGetNewLinkInfo },
     { "SHGetUnreadMailCountW", func_SHGetUnreadMailCountW },
     { "SHGetUserDisplayName", func_SHGetUserDisplayName },
@@ -133,6 +156,7 @@ const struct test winetest_testlist[] =
     { "SHRestricted", func_SHRestricted },
     { "SHSetUnreadMailCountW", func_SHSetUnreadMailCountW },
     { "StrRStr", func_StrRStr },
+    { "TaskbarFullscreen", func_TaskbarFullscreen },
 
     { 0, 0 }
 };

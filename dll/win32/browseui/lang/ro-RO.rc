@@ -346,4 +346,6 @@ STRINGTABLE
 BEGIN
     IDS_PARSE_ADDR_ERR_TITLE "Navigatorul ReactOS"
     IDS_PARSE_ADDR_ERR_TEXT "Navigatorul ReactOS nu poate găsi '%1'. Verificați ortografia și încercați din nou."
+    IDS_INSERTDISK_TITLE "Insert disk"
+    IDS_INSERTDISK_TEXT "Please insert a disk into %s."
 END

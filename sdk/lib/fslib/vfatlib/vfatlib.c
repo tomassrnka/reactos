@@ -493,8 +493,10 @@ VfatChkdsk(
     // https://technet.microsoft.com/en-us/library/cc730714.aspx
     // https://support.microsoft.com/en-us/kb/265533
 
-    /* Close the volume */
-    Status = (fs_close(FsCheckFlags & FSCHECK_READ_WRITE) == 0 ? STATUS_SUCCESS : STATUS_DISK_CORRUPT_ERROR);
+    /* Close the volume. Changes that were written repaired it (a failed write ends the process);
+     * changes that were not written mean that it is still corrupt. */
+    Status = (fs_close(FsCheckFlags & FSCHECK_READ_WRITE) == 0 || (FsCheckFlags & FSCHECK_READ_WRITE)) ?
+             STATUS_SUCCESS : STATUS_DISK_CORRUPT_ERROR;
     *ExitStatus = (ULONG)Status;
     return (Status == STATUS_SUCCESS);
 }

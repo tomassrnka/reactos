@@ -930,19 +930,6 @@ SHChangeNotifyRegisterThread(INT status)
  */
 EXTERN_C HRESULT
 WINAPI
-SHCreateAssociationRegistration(REFIID riid, PVOID *ppv)
-{
-    FIXME("SHCreateAssociationRegistration(%s, %p) stub\n", debugstr_guid(&riid), ppv);
-    if (ppv)
-        *ppv = NULL;
-    return E_NOTIMPL;
-}
-
-/*
- * Unimplemented
- */
-EXTERN_C HRESULT
-WINAPI
 SHCreateDefaultPropertiesOp(IShellItem *psi, IFileOperation **ppFileOp)
 {
     FIXME("SHCreateDefaultPropertiesOp(%p, %p) stub\n", psi, ppFileOp);

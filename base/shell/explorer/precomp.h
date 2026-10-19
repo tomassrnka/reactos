@@ -225,6 +225,7 @@ struct TaskbarSettings
     BOOL bSmallIcons;
     TrayIconsMode eCompactTrayIcons;
     BOOL bShowDesktopButton;
+    BOOL bShowQuickLaunch; // runtime state only: the band site does not save its bands yet
     TW_STRUCKRECTS2 sr;
 
     BOOL Load();
@@ -311,6 +312,8 @@ DECLARE_INTERFACE_(ITrayBandSite, IUnknown)
     STDMETHOD_(HRESULT, ProcessMessage) (THIS_ HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, LRESULT *plResult) PURE;
     STDMETHOD_(HRESULT, AddContextMenus) (THIS_ HMENU hmenu, UINT indexMenu, UINT idCmdFirst, UINT idCmdLast, UINT uFlags, IContextMenu **ppcm) PURE;
     STDMETHOD_(HRESULT, Lock) (THIS_ BOOL bLock) PURE;
+    STDMETHOD_(HRESULT, IsQuickLaunchShown) (THIS) PURE;
+    STDMETHOD_(HRESULT, ShowQuickLaunch) (THIS_ BOOL bShow) PURE;
 };
 #undef INTERFACE
 
@@ -327,6 +330,8 @@ DECLARE_INTERFACE_(ITrayBandSite, IUnknown)
 #define ITrayBandSite_ProcessMessage(p,a,b,c,d,e)       (p)->lpVtbl->ProcessMessage(p,a,b,c,d,e)
 #define ITrayBandSite_AddContextMenus(p,a,b,c,d,e,f)    (p)->lpVtbl->AddContextMenus(p,a,b,c,d,e,f)
 #define ITrayBandSite_Lock(p,a)                         (p)->lpVtbl->Lock(p,a)
+#define ITrayBandSite_IsQuickLaunchShown(p)             (p)->lpVtbl->IsQuickLaunchShown(p)
+#define ITrayBandSite_ShowQuickLaunch(p,a)              (p)->lpVtbl->ShowQuickLaunch(p,a)
 #endif
 
 HRESULT CTrayBandSite_CreateInstance(IN ITrayWindow *tray, IN IDeskBand* pTaskBand, OUT ITrayBandSite** pBandSite);
@@ -396,6 +401,7 @@ HRESULT CSysPagerWnd_CreateInstance(HWND hwndParent, REFIID riid, void **ppv);
 
 #define TSWM_UPDATETASKBARPOS   (WM_USER + 2)
 #define TSWM_ACTIVATETASKINDEX  (WM_USER + 88)
+#define TSWM_ICONREPLY          (WM_USER + 89)
 
 HRESULT CTaskSwitchWnd_CreateInstance(IN HWND hWndParent, IN OUT ITrayWindow *Tray, REFIID riid, void **ppv);
 

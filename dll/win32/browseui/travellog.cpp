@@ -393,10 +393,15 @@ HRESULT STDMETHODCALLTYPE CTravelLog::Travel(IUnknown *punk, int iOffset)
     hResult = FindRelativeEntry(iOffset, &destinationEntry);
     if (FAILED_UNEXPECTEDLY(hResult))
         return hResult;
+    CTravelEntry *previousEntry = fCurrentEntry;
     fCurrentEntry = destinationEntry;
     hResult = destinationEntry->Invoke(punk);
     if (FAILED_UNEXPECTEDLY(hResult))
+    {
+        /* The browser stayed where it was */
+        fCurrentEntry = previousEntry;
         return hResult;
+    }
     return S_OK;
 }
 

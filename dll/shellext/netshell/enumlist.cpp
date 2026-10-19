@@ -106,6 +106,7 @@ HRESULT ILGetConnection(PCITEMID_CHILD pidl, INetConnection ** pItem)
 
     while (TRUE)
     {
+        INetCon.Release();
         hr = pEnumCon->Next(1, &INetCon, &Count);
         if (hr != S_OK)
             return E_FAIL;
