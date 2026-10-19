@@ -3,6 +3,7 @@ list(APPEND SOURCE
     DeleteProfile.c
     DeriveAppContainerSid.c
     GetProfileDirs.c
+    LegacyProfileJunctions.c
     LoadUserProfile.c
     testlist.c)
 
