@@ -467,7 +467,7 @@ static
 VOID
 test_LimitQuery(VOID)
 {
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION Set = { { { 0 } } }, Got;
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION Set, Got;
     JOBOBJECT_BASIC_LIMIT_INFORMATION Basic;
     HANDLE hJob = CreateJobObjectW(NULL, NULL);
     DWORD Length = 0;
@@ -475,6 +475,7 @@ test_LimitQuery(VOID)
     ok(hJob != NULL, "CreateJobObject failed: %lu\n", GetLastError());
     if (!hJob)
         return;
+    ZeroMemory(&Set, sizeof(Set));
     Set.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE |
                                            JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION | JOB_OBJECT_LIMIT_PROCESS_MEMORY;
     Set.BasicLimitInformation.ActiveProcessLimit = 1;
