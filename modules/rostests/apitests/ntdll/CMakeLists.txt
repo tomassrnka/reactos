@@ -150,6 +150,7 @@ list(APPEND SOURCE
     RtlxUnicodeStringToAnsiSize.c
     RtlxUnicodeStringToOemSize.c
     StackOverflow.c
+    SystemCallStubs.c
     SystemInfo.c
     UserModeException.c
     Timer.c

@@ -5542,7 +5542,13 @@ static HRESULT WINAPI winhttp_request_Send(
     request->proc_running = TRUE;
     if (!request->async)
     {
+#ifdef __REACTOS__
+        /* HRESULT_FROM_WIN32 repeats its argument, and a second wait never ends */
+        DWORD wait_err = request_wait( request, INFINITE );
+        hr = HRESULT_FROM_WIN32( wait_err );
+#else
         hr = HRESULT_FROM_WIN32( request_wait( request, INFINITE ) );
+#endif
     }
     LeaveCriticalSection( &request->cs );
     return hr;
