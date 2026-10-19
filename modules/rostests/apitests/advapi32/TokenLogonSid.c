@@ -211,6 +211,13 @@ START_TEST(TokenLogonSid)
     Restrict.Attributes = 0;
     if (CreateRestrictedToken(hToken, DISABLE_MAX_PRIVILEGE, 0, NULL, 0, NULL, 1, &Restrict, &hRestricted))
     {
+        PTOKEN_GROUPS Groups = QueryGroups(hRestricted, TokenGroups, NULL);
+        DWORD Count = 0;
+        if (Groups)
+        {
+            ok(FindLogonGroup(Groups, &Count) != NULL, "The restricted token lost the logon SID\n");
+            HeapFree(GetProcessHeap(), 0, Groups);
+        }
         TestLogonSid(hRestricted, "restricted");
         Restricted = QueryGroups(hRestricted, TokenRestrictedSids, &Length);
         ok(Restricted != NULL, "No TokenRestrictedSids\n");

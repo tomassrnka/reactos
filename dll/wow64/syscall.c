@@ -233,7 +233,14 @@ static PTOKEN_GROUPS GroupsFrom32(ULONG Guest, ULONG Count, PUCHAR *Next)
     Groups->GroupCount = Count;
     for (i = 0; i < Count; ++i)
     {
-        Groups->Groups[i].Sid = PTR32(Source[1 + 2 * i]);
+        ULONG Sid = Source[1 + 2 * i];
+        /* The SID must lie in the guest range too. The kernel reads it again; a count raised
+         * meanwhile reaches at most 60 bytes further, into the reserved page past the limit. */
+        if (Sid && (!GuestSpan(Sid, FIELD_OFFSET(SID, SubAuthority)) ||
+                    !GuestSpan(Sid, FIELD_OFFSET(SID, SubAuthority) +
+                               (ULONG64)((SID *)PTR32(Sid))->SubAuthorityCount * sizeof(ULONG))))
+            return (PTOKEN_GROUPS)-1;
+        Groups->Groups[i].Sid = PTR32(Sid);
         Groups->Groups[i].Attributes = Source[2 + 2 * i];
     }
     *Next += FIELD_OFFSET(TOKEN_GROUPS, Groups) + (SIZE_T)Count * sizeof(SID_AND_ATTRIBUTES);
@@ -275,7 +282,9 @@ static NTSTATUS FilterToken32(ULONG *a, WOW64_CLEANUP *Cleanup)
     Next = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, Bytes);
     if (!Next) return STATUS_NO_MEMORY;
     Disable = GroupsFrom32(a[2], DisableCount, &Next);
+    if (Disable == (PTOKEN_GROUPS)-1) return STATUS_ACCESS_VIOLATION;
     Restrict = GroupsFrom32(a[4], RestrictCount, &Next);
+    if (Restrict == (PTOKEN_GROUPS)-1) return STATUS_ACCESS_VIOLATION;
     Status = NtFilterToken(HANDLE32(a[0]), a[1], Disable, PTR32(a[3]), Restrict, &Cleanup->Handle);
     if (NT_SUCCESS(Status)) *(ULONG *)PTR32(a[5]) = HandleToUlong(Cleanup->Handle);
     Cleanup->Handle = NULL;
