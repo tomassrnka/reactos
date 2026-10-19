@@ -5,8 +5,8 @@
 #@ stub AccessCheckByTypeResultList
 #@ stub AccessCheckByTypeResultListAndAuditAlarmByHandleW
 #@ stub AccessCheckByTypeResultListAndAuditAlarmW
-#@ stdcall AcquireSRWLockExclusive(ptr) ntdll.RtlAcquireSRWLockExclusive
-#@ stdcall AcquireSRWLockShared(ptr) ntdll.RtlAcquireSRWLockShared
+@ stdcall -version=0x600+ AcquireSRWLockExclusive(ptr) kernel32.AcquireSRWLockExclusive
+@ stdcall -version=0x600+ AcquireSRWLockShared(ptr) kernel32.AcquireSRWLockShared
 # #@ stub AcquireStateLock
 #@ stdcall ActivateActCtx(ptr ptr)
 #@ stdcall AddAccessAllowedAce(ptr long long ptr)
@@ -108,7 +108,7 @@
 #@ stdcall CancelIoEx(long ptr)
 #@ stdcall CancelSynchronousIo(long)
 #@ stdcall CancelThreadpoolIo(ptr) ntdll.TpCancelAsyncIoOperation
-#@ stdcall CancelWaitableTimer(long)
+@ stdcall CancelWaitableTimer(long) kernel32.CancelWaitableTimer
 # #@ stub CeipIsOptedIn
 #@ stdcall ChangeTimerQueueTimer(ptr ptr long long)
 #@ stdcall CharLowerA(str)
@@ -182,10 +182,10 @@
 #@ stdcall CreateDirectoryExW(wstr wstr ptr)
 #@ stdcall CreateDirectoryW(wstr ptr)
 # #@ stub CreateEnclave
-#@ stdcall CreateEventA(ptr long long str)
-#@ stdcall CreateEventExA(ptr str long long)
-#@ stdcall CreateEventExW(ptr wstr long long)
-#@ stdcall CreateEventW(ptr long long wstr)
+@ stdcall CreateEventA(ptr long long str) kernel32.CreateEventA
+@ stdcall -version=0x600+ CreateEventExA(ptr str long long) kernel32.CreateEventExA
+@ stdcall -version=0x600+ CreateEventExW(ptr wstr long long) kernel32.CreateEventExW
+@ stdcall CreateEventW(ptr long long wstr) kernel32.CreateEventW
 #@ stdcall CreateFiber(long ptr ptr)
 #@ stdcall CreateFiberEx(long long long ptr ptr)
 #@ stdcall CreateFile2(wstr long long long ptr)
@@ -198,10 +198,10 @@
 #@ stdcall CreateHardLinkW(wstr wstr ptr)
 #@ stdcall CreateIoCompletionPort(long long long long)
 #@ stdcall CreateMemoryResourceNotification(long)
-#@ stdcall CreateMutexA(ptr long str)
-#@ stdcall CreateMutexExA(ptr str long long)
-#@ stdcall CreateMutexExW(ptr wstr long long)
-#@ stdcall CreateMutexW(ptr long wstr)
+@ stdcall CreateMutexA(ptr long str) kernel32.CreateMutexA
+@ stdcall -version=0x600+ CreateMutexExA(ptr str long long) kernel32.CreateMutexExA
+@ stdcall -version=0x600+ CreateMutexExW(ptr wstr long long) kernel32.CreateMutexExW
+@ stdcall CreateMutexW(ptr long wstr) kernel32.CreateMutexW
 #@ stdcall CreateNamedPipeW(wstr long long long long long long ptr)
 #@ stdcall CreatePipe(ptr ptr ptr long)
 # #@ stub CreatePrivateNamespaceW
@@ -218,8 +218,8 @@
 #@ stdcall CreateRemoteThread(long ptr long ptr long long ptr)
 #@ stdcall CreateRemoteThreadEx(long ptr long ptr ptr long ptr ptr)
 #@ stdcall CreateRestrictedToken(long long long ptr long ptr long ptr ptr)
-#@ stdcall CreateSemaphoreExW(ptr long long wstr long long)
-#@ stdcall CreateSemaphoreW(ptr long long wstr)
+@ stdcall -version=0x600+ CreateSemaphoreExW(ptr long long wstr long long) kernel32.CreateSemaphoreExW
+@ stdcall CreateSemaphoreW(ptr long long wstr) kernel32.CreateSemaphoreW
 # #@ stub CreateStateAtom
 # #@ stub CreateStateChangeNotification
 # #@ stub CreateStateContainer
@@ -235,8 +235,8 @@
 #@ stdcall CreateThreadpoolWork(ptr ptr ptr)
 #@ stdcall CreateTimerQueue()
 #@ stdcall CreateTimerQueueTimer(ptr long ptr ptr long long long)
-#@ stdcall CreateWaitableTimerExW(ptr wstr long long)
-#@ stdcall CreateWaitableTimerW(ptr long wstr)
+@ stdcall -version=0x600+ CreateWaitableTimerExW(ptr wstr long long) kernel32.CreateWaitableTimerExW
+@ stdcall CreateWaitableTimerW(ptr long wstr) kernel32.CreateWaitableTimerW
 #@ stdcall CreateWellKnownSid(long ptr ptr ptr)
 #@ stdcall CtrlRoutine(ptr)
 # #@ stub CveEventWrite
@@ -252,7 +252,7 @@
 # #@ stub DelayLoadFailureHookLookup
 #@ stdcall DeleteAce(ptr long)
 # #@ stub DeleteBoundaryDescriptor
-#@ stdcall DeleteCriticalSection(ptr) ntdll.RtlDeleteCriticalSection
+@ stdcall DeleteCriticalSection(ptr) kernel32.DeleteCriticalSection
 #@ stdcall DeleteFiber(ptr)
 #@ stdcall DeleteFileA(str)
 #@ stdcall DeleteFileW(wstr)
@@ -292,7 +292,7 @@
 # #@ stub EncodeRemotePointer
 #@ stdcall EncodeSystemPointer(ptr) ntdll.RtlEncodeSystemPointer
 # #@ stub EnterCriticalPolicySectionInternal
-#@ stdcall EnterCriticalSection(ptr) ntdll.RtlEnterCriticalSection
+@ stdcall EnterCriticalSection(ptr) kernel32.EnterCriticalSection
 # #@ stub EnterSynchronizationBarrier
 #@ stdcall EnumCalendarInfoExEx(ptr wstr long wstr long long)
 #@ stdcall EnumCalendarInfoExW(ptr long long long)
@@ -827,22 +827,22 @@
 #@ stdcall ImpersonateNamedPipeClient(long)
 #@ stdcall ImpersonateSelf(long)
 # #@ stub IncrementPackageStatusVersion
-#@ stdcall InitOnceBeginInitialize(ptr long ptr ptr)
-#@ stdcall InitOnceComplete(ptr long ptr)
-#@ stdcall InitOnceExecuteOnce(ptr ptr ptr ptr)
-#@ stdcall InitOnceInitialize(ptr) ntdll.RtlRunOnceInitialize
+@ stdcall -version=0x600+ InitOnceBeginInitialize(ptr long ptr ptr) kernel32.InitOnceBeginInitialize
+@ stdcall -version=0x600+ InitOnceComplete(ptr long ptr) kernel32.InitOnceComplete
+@ stdcall -version=0x600+ InitOnceExecuteOnce(ptr ptr ptr ptr) kernel32.InitOnceExecuteOnce
+@ stdcall -version=0x600+ InitOnceInitialize(ptr) kernel32.InitOnceInitialize
 #@ stdcall InitializeAcl(ptr long long)
-#@ stdcall InitializeConditionVariable(ptr) ntdll.RtlInitializeConditionVariable
+@ stdcall -version=0x600+ InitializeConditionVariable(ptr) kernel32.InitializeConditionVariable
 #@ stdcall InitializeContext(ptr long ptr ptr)
 #@ stdcall InitializeContext2(ptr long ptr ptr int64)
-#@ stdcall InitializeCriticalSection(ptr) ntdll.RtlInitializeCriticalSection
-#@ stdcall InitializeCriticalSectionAndSpinCount(ptr long)
-#@ stdcall InitializeCriticalSectionEx(ptr long long)
+@ stdcall InitializeCriticalSection(ptr) kernel32.InitializeCriticalSection
+@ stdcall InitializeCriticalSectionAndSpinCount(ptr long) kernel32.InitializeCriticalSectionAndSpinCount
+@ stdcall -version=0x600+ InitializeCriticalSectionEx(ptr long long) kernel32.InitializeCriticalSectionEx
 # #@ stub InitializeEnclave
 #@ stdcall InitializeProcThreadAttributeList(ptr long long ptr)
 #@ stdcall InitializeProcessForWsWatch(long)
 #@ stdcall InitializeSListHead(ptr) ntdll.RtlInitializeSListHead
-#@ stdcall InitializeSRWLock(ptr) ntdll.RtlInitializeSRWLock
+@ stdcall -version=0x600+ InitializeSRWLock(ptr) kernel32.InitializeSRWLock
 #@ stdcall InitializeSecurityDescriptor(ptr long)
 #@ stdcall InitializeSid(ptr ptr long)
 # #@ stub InitializeSynchronizationBarrier
@@ -954,7 +954,7 @@
 #@ stdcall LCMapStringEx(wstr long wstr long ptr long ptr ptr long)
 #@ stdcall LCMapStringW(long long wstr long ptr long)
 # #@ stub LeaveCriticalPolicySectionInternal
-#@ stdcall LeaveCriticalSection(ptr) ntdll.RtlLeaveCriticalSection
+@ stdcall LeaveCriticalSection(ptr) kernel32.LeaveCriticalSection
 #@ stdcall LeaveCriticalSectionWhenCallbackReturns(ptr ptr) ntdll.TpCallbackLeaveCriticalSectionOnCompletion
 #@ stdcall LoadAppInitDlls()
 # #@ stub LoadEnclaveData
@@ -1017,20 +1017,20 @@
 #@ stdcall ObjectOpenAuditAlarmW(wstr ptr wstr wstr ptr long long long ptr long long ptr)
 #@ stdcall ObjectPrivilegeAuditAlarmW(wstr ptr long long ptr long)
 # #@ stub OfferVirtualMemory
-#@ stdcall OpenEventA(long long str)
-#@ stdcall OpenEventW(long long wstr)
+@ stdcall OpenEventA(long long str) kernel32.OpenEventA
+@ stdcall OpenEventW(long long wstr) kernel32.OpenEventW
 #@ stdcall OpenFileById(long ptr long long ptr long)
 #@ stdcall OpenFileMappingFromApp(long long wstr)
 #@ stdcall OpenFileMappingW(long long wstr)
 # #@ stub OpenGlobalizationUserSettingsKey
-#@ stdcall OpenMutexW(long long wstr)
+@ stdcall OpenMutexW(long long wstr) kernel32.OpenMutexW
 # #@ stub OpenPackageInfoByFullName
 # #@ stub OpenPackageInfoByFullNameForUser
 # #@ stub OpenPrivateNamespaceW
 #@ stdcall OpenProcess(long long long)
 #@ stdcall OpenProcessToken(long long ptr)
 #@ stub OpenRegKey
-#@ stdcall OpenSemaphoreW(long long wstr)
+@ stdcall OpenSemaphoreW(long long wstr) kernel32.OpenSemaphoreW
 # #@ stub OpenState
 # #@ stub OpenStateAtom
 # #@ stub OpenStateExplicit
@@ -1038,7 +1038,7 @@
 # #@ stub OpenStateExplicitForUserSidString
 #@ stdcall OpenThread(long long long)
 #@ stdcall OpenThreadToken(long long long ptr)
-#@ stdcall OpenWaitableTimerW(long long wstr)
+@ stdcall OpenWaitableTimerW(long long wstr) kernel32.OpenWaitableTimerW
 #@ stdcall OutputDebugStringA(str)
 #@ stdcall OutputDebugStringW(wstr)
 # #@ stub OverrideRoamingDataModificationTimesInRange
@@ -1237,8 +1237,8 @@
 #@ stdcall QueryIoRingCapabilities(ptr)
 #@ stdcall QueryIdleProcessorCycleTime(ptr ptr)
 #@ stdcall QueryIdleProcessorCycleTimeEx(long ptr ptr)
-#@ stdcall QueryInterruptTime(ptr)
-#@ stdcall QueryInterruptTimePrecise(ptr)
+@ stdcall QueryInterruptTime(ptr)
+@ stdcall QueryInterruptTimePrecise(ptr)
 #@ stdcall QueryMemoryResourceNotification(ptr ptr)
 # #@ stub QueryOptionalDelayLoadedAPI
 #@ stdcall QueryPerformanceCounter(ptr) ntdll.RtlQueryPerformanceCounter
@@ -1252,8 +1252,8 @@
 # #@ stub QueryStateContainerItemInfo
 #@ stdcall QueryThreadCycleTime(long ptr)
 #@ stdcall QueryThreadpoolStackInformation(ptr ptr)
-#@ stdcall QueryUnbiasedInterruptTime(ptr) ntdll.RtlQueryUnbiasedInterruptTime
-#@ stdcall QueryUnbiasedInterruptTimePrecise(ptr)
+@ stdcall -version=0x601+ QueryUnbiasedInterruptTime(ptr) kernel32.QueryUnbiasedInterruptTime
+@ stdcall QueryUnbiasedInterruptTimePrecise(ptr)
 #@ stdcall QueryVirtualMemoryInformation(long ptr long ptr long ptr)
 #@ stdcall QueryWorkingSet(long ptr long)
 #@ stdcall QueryWorkingSetEx(long ptr long)
@@ -1361,11 +1361,11 @@
 #@ stdcall RegisterTraceGuidsW(ptr ptr ptr long ptr wstr wstr ptr) ntdll.EtwRegisterTraceGuidsW
 #@ stdcall RegisterWaitForSingleObjectEx(long ptr ptr long long)
 #@ stdcall ReleaseActCtx(ptr)
-#@ stdcall ReleaseMutex(long)
+@ stdcall ReleaseMutex(long) kernel32.ReleaseMutex
 #@ stdcall ReleaseMutexWhenCallbackReturns(ptr long) ntdll.TpCallbackReleaseMutexOnCompletion
-#@ stdcall ReleaseSRWLockExclusive(ptr) ntdll.RtlReleaseSRWLockExclusive
-#@ stdcall ReleaseSRWLockShared(ptr) ntdll.RtlReleaseSRWLockShared
-#@ stdcall ReleaseSemaphore(long long ptr)
+@ stdcall -version=0x600+ ReleaseSRWLockExclusive(ptr) kernel32.ReleaseSRWLockExclusive
+@ stdcall -version=0x600+ ReleaseSRWLockShared(ptr) kernel32.ReleaseSRWLockShared
+@ stdcall ReleaseSemaphore(long long ptr) kernel32.ReleaseSemaphore
 #@ stdcall ReleaseSemaphoreWhenCallbackReturns(ptr long long) ntdll.TpCallbackReleaseSemaphoreOnCompletion
 # #@ stub ReleaseStateLock
 #@ stdcall RemapPredefinedHandleInternal(long long)
@@ -1378,7 +1378,7 @@
 #@ stdcall RemoveVectoredExceptionHandler(ptr) ntdll.RtlRemoveVectoredExceptionHandler
 # #@ stub ReplaceFileExInternal
 #@ stdcall ReplaceFileW(wstr wstr wstr long ptr ptr)
-#@ stdcall ResetEvent(long)
+@ stdcall ResetEvent(long) kernel32.ResetEvent
 # #@ stub ResetState
 #@ stdcall ResetWriteWatch(ptr long)
 #@ stdcall ResizePseudoConsole(ptr long)
@@ -1457,7 +1457,7 @@
 #@ stdcall SetConsoleTitleA(str)
 #@ stdcall SetConsoleTitleW(wstr)
 #@ stdcall SetConsoleWindowInfo(long long ptr)
-#@ stdcall SetCriticalSectionSpinCount(ptr long) ntdll.RtlSetCriticalSectionSpinCount
+@ stdcall SetCriticalSectionSpinCount(ptr long) kernel32.SetCriticalSectionSpinCount
 #@ stdcall SetCurrentConsoleFontEx(long long ptr)
 #@ stdcall SetCurrentDirectoryA(str)
 #@ stdcall SetCurrentDirectoryW(wstr)
@@ -1469,7 +1469,7 @@
 #@ stdcall SetEnvironmentVariableA(str str)
 #@ stdcall SetEnvironmentVariableW(wstr wstr)
 #@ stdcall SetErrorMode(long)
-#@ stdcall SetEvent(long)
+@ stdcall SetEvent(long) kernel32.SetEvent
 #@ stdcall SetEventWhenCallbackReturns(ptr long) ntdll.TpCallbackSetEventOnCompletion
 #@ stdcall SetFileApisToANSI()
 #@ stdcall SetFileApisToOEM()
@@ -1547,17 +1547,17 @@
 #@ stdcall SetUnhandledExceptionFilter(ptr)
 #@ stdcall SetUserGeoID(long)
 #@ stdcall SetUserGeoName(wstr)
-#@ stdcall SetWaitableTimer(long ptr long ptr ptr long)
-#@ stdcall SetWaitableTimerEx(long ptr long ptr ptr ptr long)
+@ stdcall SetWaitableTimer(long ptr long ptr ptr long) kernel32.SetWaitableTimer
+@ stdcall -version=0x601+ SetWaitableTimerEx(long ptr long ptr ptr ptr long) kernel32.SetWaitableTimerEx
 #@ stdcall -arch=i386,x86_64 SetXStateFeaturesMask(ptr int64)
 #@ stdcall SetupComm(long long long)
 # #@ stub SharedLocalIsEnabled
-#@ stdcall SignalObjectAndWait(long long long long)
+@ stdcall SignalObjectAndWait(long long long long) kernel32.SignalObjectAndWait
 #@ stdcall SizeofResource(long long)
-#@ stdcall Sleep(long)
-#@ stdcall SleepConditionVariableCS(ptr ptr long)
-#@ stdcall SleepConditionVariableSRW(ptr ptr long long)
-#@ stdcall SleepEx(long long)
+@ stdcall Sleep(long) kernel32.Sleep
+@ stdcall -version=0x600+ SleepConditionVariableCS(ptr ptr long) kernel32.SleepConditionVariableCS
+@ stdcall -version=0x600+ SleepConditionVariableSRW(ptr ptr long long) kernel32.SleepConditionVariableSRW
+@ stdcall SleepEx(long long) kernel32.SleepEx
 #@ stub SpecialMBToWC
 #@ stdcall StartThreadpoolIo(ptr) ntdll.TpStartAsyncIoOperation
 # #@ stub StmAlignSize
@@ -1649,9 +1649,9 @@
 #@ stdcall TraceMessageVa(int64 long ptr long ptr) ntdll.EtwTraceMessageVa
 #@ stdcall TransactNamedPipe(long ptr long ptr long ptr ptr)
 #@ stdcall TransmitCommChar(long long)
-#@ stdcall TryAcquireSRWLockExclusive(ptr) ntdll.RtlTryAcquireSRWLockExclusive
-#@ stdcall TryAcquireSRWLockShared(ptr) ntdll.RtlTryAcquireSRWLockShared
-#@ stdcall TryEnterCriticalSection(ptr) ntdll.RtlTryEnterCriticalSection
+@ stdcall -version=0x601+ TryAcquireSRWLockExclusive(ptr) kernel32.TryAcquireSRWLockExclusive
+@ stdcall -version=0x601+ TryAcquireSRWLockShared(ptr) kernel32.TryAcquireSRWLockShared
+@ stdcall TryEnterCriticalSection(ptr) kernel32.TryEnterCriticalSection
 #@ stdcall TrySubmitThreadpoolCallback(ptr ptr ptr)
 #@ stdcall TzSpecificLocalTimeToSystemTime(ptr ptr ptr)
 #@ stub TzSpecificLocalTimeToSystemTimeEx
@@ -1733,21 +1733,21 @@
 #@ stdcall WaitForDebugEvent(ptr long)
 #@ stdcall WaitForDebugEventEx(ptr long)
 # #@ stub WaitForMachinePolicyForegroundProcessingInternal
-#@ stdcall WaitForMultipleObjects(long ptr long long)
-#@ stdcall WaitForMultipleObjectsEx(long ptr long long long)
-#@ stdcall WaitForSingleObject(long long)
-#@ stdcall WaitForSingleObjectEx(long long long)
+@ stdcall WaitForMultipleObjects(long ptr long long) kernel32.WaitForMultipleObjects
+@ stdcall WaitForMultipleObjectsEx(long ptr long long long) kernel32.WaitForMultipleObjectsEx
+@ stdcall WaitForSingleObject(long long) kernel32.WaitForSingleObject
+@ stdcall WaitForSingleObjectEx(long long long) kernel32.WaitForSingleObjectEx
 #@ stdcall WaitForThreadpoolIoCallbacks(ptr long) ntdll.TpWaitForIoCompletion
 #@ stdcall WaitForThreadpoolTimerCallbacks(ptr long) ntdll.TpWaitForTimer
 #@ stdcall WaitForThreadpoolWaitCallbacks(ptr long) ntdll.TpWaitForWait
 #@ stdcall WaitForThreadpoolWorkCallbacks(ptr long) ntdll.TpWaitForWork
 # #@ stub WaitForUserPolicyForegroundProcessingInternal
 #@ stdcall WaitNamedPipeW(wstr long)
-#@ stdcall WaitOnAddress(ptr ptr long long)
-#@ stdcall WakeAllConditionVariable(ptr) ntdll.RtlWakeAllConditionVariable
-#@ stdcall WakeByAddressAll(ptr) ntdll.RtlWakeAddressAll
-#@ stdcall WakeByAddressSingle(ptr) ntdll.RtlWakeAddressSingle
-#@ stdcall WakeConditionVariable(ptr) ntdll.RtlWakeConditionVariable
+@ stdcall WaitOnAddress(ptr ptr long long)
+@ stdcall -version=0x600+ WakeAllConditionVariable(ptr) kernel32.WakeAllConditionVariable
+@ stdcall WakeByAddressAll(ptr) ntdll.RtlWakeAddressAll
+@ stdcall WakeByAddressSingle(ptr) ntdll.RtlWakeAddressSingle
+@ stdcall -version=0x600+ WakeConditionVariable(ptr) kernel32.WakeConditionVariable
 #@ stdcall WerGetFlags(ptr ptr)
 #@ stdcall WerRegisterFile(wstr long long)
 #@ stdcall WerRegisterMemoryBlock(ptr long)
@@ -1820,3 +1820,6 @@
 #@ stdcall lstrlenW(wstr) KERNELBASE_lstrlenW
 # #@ stub time
 # #@ stub wprintf
+
+@ stdcall OpenMutexA(long long str) kernel32.OpenMutexA
+@ stdcall OpenWaitableTimerA(long long str) kernel32.OpenWaitableTimerA

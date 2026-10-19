@@ -315,7 +315,9 @@ static BOOL wined3d_dll_init(HINSTANCE hInstDLL)
         return FALSE;
     }
 
+#ifndef __REACTOS__ /* DLL_THREAD_DETACH clears the current GL context */
     DisableThreadLibraryCalls(hInstDLL);
+#endif
 
     /* @@ Wine registry key: HKCU\Software\Wine\Direct3D */
     if ( RegOpenKeyA( HKEY_CURRENT_USER, "Software\\Wine\\Direct3D", &hkey ) ) hkey = 0;

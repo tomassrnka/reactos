@@ -1,9 +1,11 @@
 
 add_subdirectory(redirptest)
+add_subdirectory(tlsdyn)
 
 add_message_headers(ANSI FormatMessage.mc)
 
 list(APPEND SOURCE
+    BindIoCompletionCallback.c
     CancelIoEx.c
     ConsoleCP.c
     CreateProcess.c
@@ -11,8 +13,10 @@ list(APPEND SOURCE
     ThreadImpersonationToken.c
     DebugTrapInterrupts.c
     DefaultActCtx.c
+    DeleteTimerQueueEx.c
     DeviceIoControl.c
     dosdev.c
+    DynamicTls.c
     EnumSystemCodePages.c
     ExitThread.c
     FindActCtxSectionStringW.c
@@ -33,6 +37,7 @@ list(APPEND SOURCE
     GetVolumeInformation.c
     IdleProcessor.c
     InitOnce.c
+    KernelBaseTime.c
     interlck.c
     IsDBCSLeadByteEx.c
     JapaneseCalendar.c
@@ -53,6 +58,7 @@ list(APPEND SOURCE
     QueueUserAPC.c
     RaiseFailFastException.c
     ReadFile.c
+    RegisterWait.c
     SetComputerNameExW.c
     SetConsoleWindowInfo.c
     SetCurrentDirectory.c
@@ -61,6 +67,7 @@ list(APPEND SOURCE
     SetUnhandledExceptionFilter.c
     SuspendThreadContext.c
     SystemFirmware.c
+    Toolhelp32.c
     TerminateProcess.c
     ThreadContextNpx.c
     ThreadContextObjects.c

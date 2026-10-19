@@ -72,6 +72,8 @@ static void Test_Buffersizes()
     Status = RtlDestroyQueryDebugBuffer(Buffer);
     ok_hex(Status, STATUS_SUCCESS);
 
+#ifndef _WIN64
+    /* A 64-bit process has the address space for 2 GB, on Windows as well */
     Buffer = RtlCreateQueryDebugBuffer(0x7fffffff, FALSE);
     ok(Buffer == NULL, "Got a valid thing?\n");
     if (Buffer)
@@ -79,6 +81,7 @@ static void Test_Buffersizes()
         Status = RtlDestroyQueryDebugBuffer(Buffer);
         ok_hex(Status, STATUS_SUCCESS);
     }
+#endif
 }
 
 
@@ -120,8 +123,50 @@ static void Test_ProcessModules(void)
 }
 
 
+static void Test_ProcessHeaps(void)
+{
+    PRTL_DEBUG_INFORMATION Buffer;
+    HANDLE Heaps[64];
+    ULONG Count, i;
+    NTSTATUS Status;
+
+    Buffer = RtlCreateQueryDebugBuffer(0, FALSE);
+    ok(Buffer != NULL, "Unable to create default buffer\n");
+    if (!Buffer)
+        return;
+
+    /* A private heap, so that the list is more than the process heap */
+    HeapCreate(0, 0, 0);
+
+    Count = RtlGetProcessHeaps(ARRAYSIZE(Heaps), Heaps);
+    ok(Count >= 2 && Count <= ARRAYSIZE(Heaps), "RtlGetProcessHeaps returned %lu\n", Count);
+
+    Status = RtlQueryProcessDebugInformation(GetCurrentProcessId(), RTL_DEBUG_QUERY_HEAPS, Buffer);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status) && Buffer->Heaps != NULL && Count <= ARRAYSIZE(Heaps))
+    {
+        ok_hex(Buffer->Flags, RTL_DEBUG_QUERY_HEAPS);
+        ok_int(Buffer->Heaps->NumberOfHeaps, Count);
+        for (i = 0; i < min(Count, Buffer->Heaps->NumberOfHeaps); i++)
+            ok(Buffer->Heaps->Heaps[i].BaseAddress == Heaps[i], "heap %lu: got %p, expected %p\n", i, Buffer->Heaps->Heaps[i].BaseAddress, Heaps[i]);
+    }
+    else
+    {
+        ok(Buffer->Heaps != NULL, "No heaps\n");
+    }
+
+    /* Process 0 is no process */
+    Status = RtlQueryProcessDebugInformation(0, RTL_DEBUG_QUERY_HEAPS, Buffer);
+    ok_hex(Status, STATUS_INVALID_HANDLE);
+
+    Status = RtlDestroyQueryDebugBuffer(Buffer);
+    ok_hex(Status, STATUS_SUCCESS);
+}
+
+
 START_TEST(RtlDebugInformation)
 {
     Test_Buffersizes();
     Test_ProcessModules();
+    Test_ProcessHeaps();
 }

@@ -1079,13 +1079,23 @@ typedef struct _RTL_HEAP_WALK_ENTRY
         } Block;
         struct
         {
-            ULONG_PTR CommittedSize;
-            ULONG_PTR UnCommittedSize;
+            ULONG CommittedSize;
+            ULONG UnCommittedSize;
             PVOID FirstEntry;
             PVOID LastEntry;
         } Segment;
     };
 } RTL_HEAP_WALK_ENTRY, *PRTL_HEAP_WALK_ENTRY;
+
+//
+// RTL_HEAP_WALK_ENTRY and RTL_HEAP_ENTRY flags, as Windows 7 reports them.
+// A block that is neither busy nor one of the others is a free block.
+//
+#define RTL_HEAP_WALK_BUSY                                  0x0001
+#define RTL_HEAP_WALK_REGION                                0x0002
+#define RTL_HEAP_WALK_BLOCK                                 0x0010
+#define RTL_HEAP_WALK_UNCOMMITTED                           0x0100
+#define RTL_HEAP_WALK_VIRTUAL                               0x0400
 
 typedef struct _RTL_HEAP_ENTRY
 {

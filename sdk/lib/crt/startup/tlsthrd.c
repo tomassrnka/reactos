@@ -21,12 +21,17 @@
 #include <winbase.h>
 
 WINBOOL __mingw_TLScallback (HANDLE hDllHandle, DWORD reason, LPVOID reserved);
+WINBOOL __mingw_TLScallback_dllentry (HANDLE hDllHandle, DWORD reason, LPVOID reserved);
 int ___w64_mingwthr_remove_key_dtor (DWORD key);
 int ___w64_mingwthr_add_key_dtor (DWORD key, void (*dtor)(void *));
 
 /* To protect the thread/key association data structure modifications. */
 static CRITICAL_SECTION __mingwthr_cs;
 static volatile int __mingwthr_cs_init = 0;
+/* Set when the loader calls this module's TLS callbacks (a module with a
+   TLS directory loaded at process start). The DLL entry point then leaves
+   the notifications to them.  */
+static int __mingwthr_tls_callbacks = 0;
 
 typedef struct __mingwthr_key __mingwthr_key_t;
 
@@ -120,10 +125,8 @@ __mingwthr_run_key_dtors (void)
   LeaveCriticalSection (&__mingwthr_cs);
 }
 
-WINBOOL
-__mingw_TLScallback (HANDLE __UNUSED_PARAM(hDllHandle),
-		     DWORD reason,
-		     LPVOID __UNUSED_PARAM(reserved))
+static void
+__mingwthr_notify (DWORD reason)
 {
   switch (reason)
     {
@@ -136,6 +139,15 @@ __mingw_TLScallback (HANDLE __UNUSED_PARAM(hDllHandle),
       __mingwthr_run_key_dtors();
       if (__mingwthr_cs_init == 1)
         {
+          __mingwthr_key_t volatile *keyp, *t;
+
+          /* A DLL loaded at run time can be unloaded and loaded again */
+          for (keyp = key_dtor_list; keyp; keyp = t)
+            {
+              t = keyp->next;
+              free ((void *) keyp);
+            }
+          key_dtor_list = NULL;
           __mingwthr_cs_init = 0;
           DeleteCriticalSection (&__mingwthr_cs);
         }
@@ -146,6 +158,29 @@ __mingw_TLScallback (HANDLE __UNUSED_PARAM(hDllHandle),
       __mingwthr_run_key_dtors();
       break;
     }
+}
+
+/* Called from the TLS callbacks (tlssup.c).  */
+WINBOOL
+__mingw_TLScallback (HANDLE __UNUSED_PARAM(hDllHandle),
+		     DWORD reason,
+		     LPVOID __UNUSED_PARAM(reserved))
+{
+  if (reason == DLL_PROCESS_ATTACH)
+    __mingwthr_tls_callbacks = 1;
+  __mingwthr_notify (reason);
+  return TRUE;
+}
+
+/* Called from DllMainCRTStartup, which receives the same notifications
+   when the module has no TLS directory or was loaded at run time.  */
+WINBOOL
+__mingw_TLScallback_dllentry (HANDLE __UNUSED_PARAM(hDllHandle),
+			      DWORD reason,
+			      LPVOID __UNUSED_PARAM(reserved))
+{
+  if (!__mingwthr_tls_callbacks)
+    __mingwthr_notify (reason);
   return TRUE;
 }
 

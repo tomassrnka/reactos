@@ -3,6 +3,7 @@
 #include <apitest.h>
 
 extern void func_ActCtxWithXmlNamespaces(void);
+extern void func_BindIoCompletionCallback(void);
 extern void func_CancelIoEx(void);
 extern void func_ConsoleCP(void);
 extern void func_CreateProcess(void);
@@ -10,8 +11,10 @@ extern void func_CreateWaitableTimerEx(void);
 extern void func_ThreadImpersonationToken(void);
 extern void func_DebugTrapInterrupts(void);
 extern void func_DefaultActCtx(void);
+extern void func_DeleteTimerQueueEx(void);
 extern void func_DeviceIoControl(void);
 extern void func_dosdev(void);
+extern void func_DynamicTls(void);
 extern void func_EnumSystemCodePages(void);
 extern void func_ExitThread(void);
 extern void func_FindActCtxSectionStringW(void);
@@ -32,6 +35,7 @@ extern void func_GetQueuedCompletionStatusEx(void);
 extern void func_GetVolumeInformation(void);
 extern void func_IdleProcessor(void);
 extern void func_InitOnce(void);
+extern void func_KernelBaseTime(void);
 extern void func_interlck(void);
 extern void func_IsDBCSLeadByteEx(void);
 extern void func_JapaneseCalendar(void);
@@ -51,6 +55,7 @@ extern void func_Pipes(void);
 extern void func_PrivMoveFileIdentityW(void);
 extern void func_QueueUserAPC(void);
 extern void func_RaiseFailFastException(void);
+extern void func_RegisterWait(void);
 extern void func_SetComputerNameExW(void);
 extern void func_SetConsoleWindowInfo(void);
 extern void func_SetCurrentDirectory(void);
@@ -58,6 +63,7 @@ extern void func_SetThreadStackGuarantee(void);
 extern void func_SetUnhandledExceptionFilter(void);
 extern void func_SuspendThreadContext(void);
 extern void func_SystemFirmware(void);
+extern void func_Toolhelp32(void);
 extern void func_TerminateProcess(void);
 extern void func_ThreadContextNpx(void);
 extern void func_ThreadContextObjects(void);
@@ -69,6 +75,7 @@ extern void func_WideCharToMultiByte(void);
 const struct test winetest_testlist[] =
 {
     { "ActCtxWithXmlNamespaces",     func_ActCtxWithXmlNamespaces },
+    { "BindIoCompletionCallback",    func_BindIoCompletionCallback },
     { "CancelIoEx",                  func_CancelIoEx },
     { "ConsoleCP",                   func_ConsoleCP },
     { "CreateProcess",               func_CreateProcess },
@@ -76,8 +83,10 @@ const struct test winetest_testlist[] =
     { "ThreadImpersonationToken",    func_ThreadImpersonationToken },
     { "DebugTrapInterrupts",         func_DebugTrapInterrupts },
     { "DefaultActCtx",               func_DefaultActCtx },
+    { "DeleteTimerQueueEx",          func_DeleteTimerQueueEx },
     { "DeviceIoControl",             func_DeviceIoControl },
     { "dosdev",                      func_dosdev },
+    { "DynamicTls",                  func_DynamicTls },
     { "EnumSystemCodePages",         func_EnumSystemCodePages },
     { "ExitThread",                  func_ExitThread },
     { "FindActCtxSectionStringW",    func_FindActCtxSectionStringW },
@@ -98,6 +107,7 @@ const struct test winetest_testlist[] =
     { "GetVolumeInformation",        func_GetVolumeInformation },
     { "IdleProcessor",               func_IdleProcessor },
     { "InitOnce",                    func_InitOnce },
+    { "KernelBaseTime",              func_KernelBaseTime },
     { "interlck",                    func_interlck },
     { "IsDBCSLeadByteEx",            func_IsDBCSLeadByteEx },
     { "JapaneseCalendar",            func_JapaneseCalendar },
@@ -117,6 +127,7 @@ const struct test winetest_testlist[] =
     { "PrivMoveFileIdentityW",       func_PrivMoveFileIdentityW },
     { "QueueUserAPC",                func_QueueUserAPC },
     { "RaiseFailFastException",      func_RaiseFailFastException },
+    { "RegisterWait",                func_RegisterWait },
     { "SetComputerNameExW",          func_SetComputerNameExW },
     { "SetConsoleWindowInfo",        func_SetConsoleWindowInfo },
     { "SetCurrentDirectory",         func_SetCurrentDirectory },
@@ -124,6 +135,7 @@ const struct test winetest_testlist[] =
     { "SetUnhandledExceptionFilter", func_SetUnhandledExceptionFilter },
     { "SuspendThreadContext",        func_SuspendThreadContext },
     { "SystemFirmware",              func_SystemFirmware },
+    { "Toolhelp32",                  func_Toolhelp32 },
     { "TerminateProcess",            func_TerminateProcess },
     { "ThreadContextNpx",            func_ThreadContextNpx },
     { "ThreadContextObjects",        func_ThreadContextObjects },

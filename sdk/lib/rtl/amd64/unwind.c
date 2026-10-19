@@ -84,24 +84,25 @@ RtlLookupFunctionTable(
     OUT PDWORD64 ImageBase,
     OUT PULONG Length)
 {
-    PVOID Table;
+    PVOID Table, Base;
     ULONG Size;
 
     /* Find corresponding file header from code address */
-    if (!RtlPcToFileHeader((PVOID)ControlPc, (PVOID*)ImageBase))
+    if (!RtlPcToFileHeader((PVOID)ControlPc, &Base))
     {
-        /* Nothing found */
+        /* Nothing found, leave ImageBase untouched */
         return NULL;
     }
+    *ImageBase = (DWORD64)Base;
 
     /* Locate the exception directory */
-    Table = RtlImageDirectoryEntryToData((PVOID)*ImageBase,
+    Table = RtlImageDirectoryEntryToData(Base,
                                          TRUE,
                                          IMAGE_DIRECTORY_ENTRY_EXCEPTION,
                                          &Size);
 
-    /* Return the number of entries */
-    *Length = Size / sizeof(RUNTIME_FUNCTION);
+    /* Return the size of the table in bytes, as Windows does */
+    *Length = Size;
 
     /* Return the address of the table */
     return Table;
@@ -138,6 +139,9 @@ RtlLookupFunctionEntry(
     {
         return RtlpLookupDynamicFunctionEntry(ControlPc, ImageBase, HistoryTable);
     }
+
+    /* The table size is in bytes */
+    TableLength /= sizeof(RUNTIME_FUNCTION);
 
     /* Use relative virtual address */
     ControlPc -= *ImageBase;
@@ -1010,13 +1014,6 @@ RtlpUnwindInternal(
         /* Check if we have an exception routine */
         if (ExceptionRoutine != NULL)
         {
-            /* Check if this is the target frame */
-            if (EstablisherFrame == (ULONG64)TargetFrame)
-            {
-                /* Set flag to inform the language handler */
-                ExceptionRecord->ExceptionFlags |= EXCEPTION_TARGET_UNWIND;
-            }
-
             /* Log the exception if it's enabled */
             RtlpCheckLogException(ExceptionRecord,
                                   &UnwindContext,
@@ -1036,6 +1033,15 @@ RtlpUnwindInternal(
              /* Loop all nested handlers */
             do
             {
+                /* Check if this is the target frame. This is also needed
+                   after a collided unwind, which continues in the frame
+                   of the previous unwind. */
+                if (EstablisherFrame == (ULONG64)TargetFrame)
+                {
+                    /* Set flag to inform the language handler */
+                    ExceptionRecord->ExceptionFlags |= EXCEPTION_TARGET_UNWIND;
+                }
+
                 /* Call the language specific handler */
                 Disposition = RtlpExecuteHandlerForUnwind(ExceptionRecord,
                                                           (PVOID)EstablisherFrame,
@@ -1089,8 +1095,11 @@ RtlpUnwindInternal(
                                      &EstablisherFrame,
                                      NULL);
 
-                    /* Restore the context pointer and establisher frame. */
-                    DispatcherContext.ContextRecord = &UnwindContext;
+                    /* Restore the context pointer, which the handler replaced
+                       with the one of the previous unwind, and the
+                       establisher frame. */
+                    DispatcherContext.ContextRecord =
+                        (HandlerType == UNW_FLAG_UHANDLER) ? ContextRecord : &UnwindContext;
                     EstablisherFrame = DispatcherContext.EstablisherFrame;
 
                     /* Set the exception flags to indicate that we collided

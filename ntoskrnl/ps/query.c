@@ -1420,6 +1420,189 @@ NtQueryInformationProcess(
 }
 
 /*
+ * ProcessTlsInformation: changes the TLS vectors of the threads of the current
+ * process for the loader, which holds its lock, so no thread of the process
+ * initializes or frees its TLS meanwhile. A thread without a TLS vector has
+ * not initialized it yet (it will see the new module then) or has freed it on
+ * its way out, and is left alone; so is a thread that is exiting. Rundown
+ * protection keeps the TEB of a thread mapped while it is changed.
+ *
+ * Every TLS vector is user memory with its number of entries in the pointer
+ * before it (ntdll allocates them so). Every vector and length is probed as
+ * user memory before it is used, and each request entry is read once per
+ * pass. Pass 0 checks all threads and writes nothing; pass 1 checks again and
+ * makes the change. A failure in pass 1 (the process changing its request or
+ * unmapping its own vectors meanwhile) stops the change, and the entries done
+ * so far are marked THREAD_TLS_INFORMATION_ASSIGNED; the entry is written
+ * once before a thread is changed, so a fault on the request cannot hide a
+ * change already made, short of the process unmapping it in that moment.
+ */
+static
+NTSTATUS
+PspSetProcessTlsInformation(
+    _In_ PEPROCESS Process,
+    _In_ PPROCESS_TLS_INFORMATION TlsInformation,
+    _In_ ULONG Length)
+{
+    PROCESS_TLS_INFORMATION Header;
+    PTHREAD_TLS_INFORMATION ThreadData;
+    PETHREAD Thread;
+    PTEB Teb;
+    PVOID *Vector, *NewVector, NewTlsData, OldTlsData = NULL;
+    ULONG_PTR OldLength, NewLength;
+    ULONG Pass, Count, i;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    if (Process != PsGetCurrentProcess())
+        return STATUS_INVALID_PARAMETER;
+    if (Length < FIELD_OFFSET(PROCESS_TLS_INFORMATION, ThreadData))
+        return STATUS_INFO_LENGTH_MISMATCH;
+
+    _SEH2_TRY
+    {
+        /* Entries are written back */
+        ProbeForWrite(TlsInformation, Length, sizeof(ULONG));
+        /* The header only: a request may have no entries */
+        RtlCopyMemory(&Header, TlsInformation, FIELD_OFFSET(PROCESS_TLS_INFORMATION, ThreadData));
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
+
+    if (Header.Flags ||
+        (Header.OperationType != PROCESS_TLS_REPLACE_VECTOR && Header.OperationType != PROCESS_TLS_REPLACE_INDEX) ||
+        Header.ThreadDataCount > (Length - FIELD_OFFSET(PROCESS_TLS_INFORMATION, ThreadData)) / sizeof(THREAD_TLS_INFORMATION) ||
+        Header.TlsIndex >= MAXLONG / sizeof(PVOID) - 1)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+    ThreadData = TlsInformation->ThreadData;
+
+    /* Pass 0 checks every thread and counts them; pass 1 makes the change */
+    for (Pass = 0; Pass < 2; Pass++)
+    {
+        Count = 0;
+        for (Thread = PsGetNextProcessThread(Process, NULL);
+             Thread != NULL;
+             Thread = PsGetNextProcessThread(Process, Thread))
+        {
+            if (!ExAcquireRundownProtection(&Thread->RundownProtect))
+                continue;
+
+            Vector = NULL;
+            Teb = Thread->Tcb.Teb;
+            _SEH2_TRY
+            {
+                if (Teb)
+                {
+                    ProbeForRead(&Teb->ThreadLocalStoragePointer, sizeof(PVOID), sizeof(PVOID));
+                    Vector = Teb->ThreadLocalStoragePointer;
+                }
+                if (Vector)
+                {
+                    /* The thread's vector and its length, as user memory */
+                    ProbeForWrite(Vector - 1, sizeof(PVOID), sizeof(PVOID));
+                    OldLength = ((PULONG_PTR)Vector)[-1];
+                    if (OldLength >= MAXLONG / sizeof(PVOID))
+                        ExRaiseStatus(STATUS_INVALID_PARAMETER);
+                    ProbeForWrite(Vector, OldLength * sizeof(PVOID), sizeof(PVOID));
+
+                    if (Count >= Header.ThreadDataCount)
+                    {
+                        /* Pass 0 counts beyond the entries given; pass 1 never sees more threads (the loader lock) */
+                        if (Pass == 1)
+                            Vector = NULL;
+                    }
+                    else
+                    {
+                        NewTlsData = ThreadData[Count].NewTlsData;
+
+                        if (Header.OperationType == PROCESS_TLS_REPLACE_VECTOR)
+                        {
+                            /* The new vector: at least one entry longer than the index */
+                            NewVector = NewTlsData;
+                            ProbeForWrite((PULONG_PTR)NewVector - 1, sizeof(PVOID), sizeof(PVOID));
+                            NewLength = ((PULONG_PTR)NewVector)[-1];
+                            if (NewLength <= Header.TlsIndex || NewLength >= MAXLONG / sizeof(PVOID))
+                                ExRaiseStatus(STATUS_INVALID_PARAMETER);
+                            ProbeForWrite(NewVector, NewLength * sizeof(PVOID), sizeof(PVOID));
+
+                            if (Pass == 1)
+                            {
+                                ThreadData[Count].Flags = 0;
+                                for (i = 0; i < Header.TlsIndex; i++)
+                                    NewVector[i] = (i < OldLength) ? Vector[i] : NULL;
+                                OldTlsData = InterlockedExchangePointer((PVOID*)&Teb->ThreadLocalStoragePointer, NewVector);
+                            }
+                        }
+                        else
+                        {
+                            if (Header.TlsIndex >= OldLength)
+                                ExRaiseStatus(STATUS_INVALID_PARAMETER);
+                            if (Pass == 1)
+                            {
+                                ThreadData[Count].Flags = 0;
+                                OldTlsData = InterlockedExchangePointer(&Vector[Header.TlsIndex], NewTlsData);
+                            }
+                        }
+
+                        if (Pass == 1)
+                        {
+                            ThreadData[Count].OldTlsData = OldTlsData;
+                            ThreadData[Count].ThreadId = Thread->Cid.UniqueThread;
+                            ThreadData[Count].Flags = THREAD_TLS_INFORMATION_ASSIGNED;
+                        }
+                    }
+                }
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+
+            ExReleaseRundownProtection(&Thread->RundownProtect);
+
+            if (!NT_SUCCESS(Status))
+            {
+                ObDereferenceObject(Thread);
+                goto Done;
+            }
+
+            if (Vector)
+                Count++;
+        }
+
+        if (Pass == 0 && Count > Header.ThreadDataCount)
+        {
+            /* Nothing changed: say how many entries it takes */
+            Status = STATUS_INFO_LENGTH_MISMATCH;
+            goto Done;
+        }
+    }
+
+Done:
+    _SEH2_TRY
+    {
+        /* Entries used (also when a fault stopped the change part way), or needed; nothing if the checks failed */
+        if (Pass >= 1 || Status == STATUS_INFO_LENGTH_MISMATCH)
+            TlsInformation->ThreadDataCount = Count;
+        else
+            TlsInformation->ThreadDataCount = 0;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        if (NT_SUCCESS(Status))
+            Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    return Status;
+}
+
+/*
  * @implemented
  */
 NTSTATUS
@@ -2283,6 +2466,10 @@ NtSetInformationProcess(
         case ProcessHandleTracing:
             DPRINT1("Handle tracing not implemented\n");
             Status = STATUS_NOT_IMPLEMENTED;
+            break;
+
+        case ProcessTlsInformation:
+            Status = PspSetProcessTlsInformation(Process, ProcessInformation, ProcessInformationLength);
             break;
 
         /* Anything else is invalid */

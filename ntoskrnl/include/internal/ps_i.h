@@ -305,7 +305,12 @@ static const INFORMATION_CLASS_INFO PsProcessInfoClass[] =
     ),
 
     /* ProcessTlsInformation */
-    IQS_NONE,
+    IQS_SAME
+    (
+        PROCESS_TLS_INFORMATION,
+        ULONG,
+        ICIF_SET | ICIF_SET_SIZE_VARIABLE
+    ),
 
     /* ProcessCookie */
     IQS_SAME

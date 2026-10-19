@@ -717,8 +717,10 @@ RtlpWorkerThreadProc(IN PVOID Parameter)
 
             _SEH2_TRY
             {
-                /* Call the APC routine */
-                ApcRoutine(NULL,
+                /* Call the APC routine. An I/O completion callback takes the
+                   Win32 error code of the I/O as its first argument; work
+                   items are queued with STATUS_SUCCESS and ignore it. */
+                ApcRoutine((PVOID)(ULONG_PTR)RtlNtStatusToDosErrorNoTeb(IoStatusBlock.Status),
                            (PVOID)IoStatusBlock.Information,
                            SystemArgument2);
             }
@@ -749,17 +751,20 @@ RtlpWorkerThreadProc(IN PVOID Parameter)
             else
                 Terminate = TRUE;
 
-            RtlLeaveCriticalSection(&ThreadPoolLock);
-
             if (Terminate)
             {
                 /* Prevent termination as long as IO is pending */
                 Terminate = !RtlpIsIoPending(NULL);
             }
 
+            /* Leave the pool under the lock that guards the check above */
+            if (Terminate)
+                InterlockedDecrement(&ThreadPoolWorkerThreads);
+
+            RtlLeaveCriticalSection(&ThreadPoolLock);
+
             if (Terminate)
             {
-                InterlockedDecrement(&ThreadPoolWorkerThreads);
                 Status = STATUS_SUCCESS;
                 break;
             }
@@ -925,6 +930,19 @@ RtlSetIoCompletionCallback(IN HANDLE FileHandle,
         if (!NT_SUCCESS(Status))
             return Status;
     }
+
+    /* The callbacks run in the non-I/O worker threads, make sure one exists */
+    Status = RtlEnterCriticalSection(&ThreadPoolLock);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if (ThreadPoolWorkerThreads == 0)
+        Status = RtlpStartWorkerThread(RtlpWorkerThreadProc);
+
+    RtlLeaveCriticalSection(&ThreadPoolLock);
+
+    if (!NT_SUCCESS(Status))
+        return Status;
 
     FileCompletionInfo.Port = ThreadPoolCompletionPort;
     FileCompletionInfo.Key = (PVOID)Callback;

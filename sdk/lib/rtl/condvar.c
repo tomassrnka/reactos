@@ -3,13 +3,31 @@
  * PROJECT:           ReactOS system libraries
  * PURPOSE:           Condition Variable Routines
  * PROGRAMMERS:       Thomas Weidenmueller <w3seek@reactos.com>
- *                    Stephan A. Rï¿½ger
+ *                    Stephan A. Rüger
+ *                    Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
-/* NOTE: This functionality can be optimized for releasing single
-   threads or for releasing all waiting threads at once. This
-   implementation is optimized for releasing a single thread at a time.
-   It wakes up sleeping threads in FIFO order. */
+/* NOTE: A sleeping thread puts a wait entry on its stack into a FIFO list that hangs off the
+   condition variable, and gives up the caller's lock only afterwards. It then sleeps on a keyed
+   event whose key is an address inside its own entry, so a wake-up is addressed to one thread.
+
+   A waker takes the entries it wants to wake off the list, under the list lock, and marks them as
+   claimed. Only then does it release the keyed event for each entry, with no timeout: the release
+   returns when that sleeper has arrived at the keyed event, which a sleeper that registered itself
+   under the caller's lock does within a few instructions. A wake-up is not lost when the sleeper
+   has not arrived yet, which is where the former release with a zero timeout dropped it.
+
+   A sleeper whose wait ended in a timeout cannot tell from the keyed event alone whether a waker
+   claimed it in the meantime: the kernel can report the timeout although a release already paired
+   with it. It therefore checks its entry under the list lock. An unclaimed entry is taken off the
+   list; a claimed one means that a waker has used a wake-up on this thread, which then reports
+   success. The waker's last access to an entry is a flag that it sets when its release has
+   returned, and a claimed sleeper does not return, and so does not free its entry, before that.
+
+   Wine's condition variables (a count of sleepers in the variable and one key for all of them) were
+   considered and not used: a broadcast then releases the key as often as there were sleepers, and
+   a thread that sleeps again at once can take a release that belongs to a sleeper that has not
+   arrived yet, which leaves that sleeper asleep. */
 
 /* INCLUDES ******************************************************************/
 
@@ -20,22 +38,21 @@
 
 /* INTERNAL TYPES ************************************************************/
 
-#define COND_VAR_UNUSED_FLAG         ((ULONG_PTR)1)
-#define COND_VAR_LOCKED_FLAG         ((ULONG_PTR)2)
-#define COND_VAR_FLAGS_MASK          ((ULONG_PTR)3)
-#define COND_VAR_ADDRESS_MASK        (~COND_VAR_FLAGS_MASK)
+#define COND_VAR_LOCKED_FLAG         ((ULONG_PTR)1)
+#define COND_VAR_ADDRESS_MASK        (~COND_VAR_LOCKED_FLAG)
 
 typedef struct _COND_VAR_WAIT_ENTRY
 {
-    /* ListEntry must have an alignment of at least 32-bits, since we
-       want COND_VAR_ADDRESS_MASK to cover all of the address. */
+    /* ListEntry must have an alignment of at least 16 bits, since the lock flag of the
+       condition variable lives in the lowest bit of the address of the first entry. */
     LIST_ENTRY ListEntry;
-    PVOID WaitKey;
-    BOOLEAN ListRemovalHandled;
+    /* Set under the list lock, by the waker that takes the entry off the list */
+    BOOLEAN Claimed;
+    /* The keyed event key of this sleeper */
+    LONG WaitKey;
+    /* Set by the waker as its last access, after its release of the keyed event has returned */
+    volatile LONG ReleaseDone;
 } COND_VAR_WAIT_ENTRY, * PCOND_VAR_WAIT_ENTRY;
-
-#define CONTAINING_COND_VAR_WAIT_ENTRY(address, field) \
-    CONTAINING_RECORD(address, COND_VAR_WAIT_ENTRY, field)
 
 /* GLOBALS *******************************************************************/
 
@@ -43,215 +60,82 @@ static HANDLE CondVarKeyedEventHandle = NULL;
 
 /* INTERNAL FUNCTIONS ********************************************************/
 
-FORCEINLINE
-ULONG_PTR
-InternalCmpXChgCondVarAcq(IN OUT PRTL_CONDITION_VARIABLE ConditionVariable,
-                          IN ULONG_PTR Exchange,
-                          IN ULONG_PTR Comperand)
-{
-    return (ULONG_PTR)InterlockedCompareExchangePointerAcquire(&ConditionVariable->Ptr,
-                                                               (PVOID)Exchange,
-                                                               (PVOID)Comperand);
-}
-
-FORCEINLINE
-ULONG_PTR
-InternalCmpXChgCondVarRel(IN OUT PRTL_CONDITION_VARIABLE ConditionVariable,
-                          IN ULONG_PTR Exchange,
-                          IN ULONG_PTR Comperand)
-{
-    return (ULONG_PTR)InterlockedCompareExchangePointerRelease(&ConditionVariable->Ptr,
-                                                               (PVOID)Exchange,
-                                                               (PVOID)Comperand);
-}
-
-FORCEINLINE
-BOOLEAN *
-InternalGetListRemovalHandledFlag(IN PCOND_VAR_WAIT_ENTRY Entry)
-{
-    return (BOOLEAN *)&Entry->ListRemovalHandled;
-}
-
 static
-PCOND_VAR_WAIT_ENTRY
-InternalLockCondVar(IN OUT PRTL_CONDITION_VARIABLE ConditionVariable,
-                    IN PCOND_VAR_WAIT_ENTRY InsertEntry OPTIONAL,
-                    IN BOOLEAN * AbortIfLocked OPTIONAL)
+VOID
+InternalSpinWait(IN OUT PULONG Spins)
 {
-    /* InsertEntry and AbortIfLocked may be NULL on entry. This routine
-       will return NULL if the lock was not acquired. Otherwise it has
-       successfully acquired the lock and the return value is a valid
-       reference to the list head associated with ConditionVariable.
-       The caller must in this case call InternalUnlockCondVar later
-       in order to unlock the condition variable.
+    LARGE_INTEGER Delay;
 
-       If InsertEntry is NULL and there are no entries on the list, this
-       routine will not acquire the lock and return NULL. If InsertEntry
-       is not NULL this routine ensures that InsertEntry will be on the
-       list when it returns successfully.
+    /* The holder of the list lock, or a waker that is about to set a flag, is running unless it
+       was preempted: spin, then give the processor away, then sleep so that it can finish. */
+    if (*Spins < 128)
+    {
+        (*Spins)++;
+        YieldProcessor();
+    }
+    else if (*Spins < 192)
+    {
+        (*Spins)++;
+        ZwYieldExecution();
+    }
+    else
+    {
+        Delay.QuadPart = -10 * 1000;
+        ZwDelayExecution(FALSE, &Delay);
+    }
+}
 
-       If the lock is owned by another thread and AbortIfLocked is NULL,
-       this routine will block until it acquires the lock. If AbortIfLocked
-       is not NULL and the lock is owned by another thread, this routine
-       will periodically check if *AbortIfLocked is nonzero and if so, will
-       return NULL instead of continuing the wait. */
-
-    ULONG_PTR OldVal = (ULONG_PTR)ConditionVariable->Ptr;
+/* Takes the list lock and returns the first (oldest) entry, or NULL if the list is empty. The
+   list is a ring of entries, linked through ListEntry; the condition variable holds the address
+   of the first entry and, in its lowest bit, the lock flag. */
+static
+PLIST_ENTRY
+InternalLockCondVar(IN OUT PRTL_CONDITION_VARIABLE ConditionVariable)
+{
+    ULONG_PTR OldVal;
+    ULONG Spins = 0;
 
     for (;;)
     {
-        ULONG_PTR NewVal, LockRes;
-        PLIST_ENTRY OldListHead;
+        OldVal = (ULONG_PTR)ConditionVariable->Ptr;
 
         if (OldVal & COND_VAR_LOCKED_FLAG)
         {
-            /* The locked flag is set, indicating someone else currently
-               holds the lock. We'll spin until this flag becomes
-               clear or we're asked to abort. */
-            YieldProcessor();
-
-            if ((AbortIfLocked != NULL) && *AbortIfLocked)
-            {
-                /* The caller wants us to abort in this case. */
-                return NULL;
-            }
-
-            /* Refresh OldVal and try again. */
-            OldVal = *(ULONG_PTR *)&ConditionVariable->Ptr;
+            InternalSpinWait(&Spins);
             continue;
         }
 
-        /* Retrieve the list head currently associated with the
-           condition variable. */
-        OldListHead = (PLIST_ENTRY)(OldVal & COND_VAR_ADDRESS_MASK);
-        if (InsertEntry == NULL)
+        if ((ULONG_PTR)InterlockedCompareExchangePointerAcquire(&ConditionVariable->Ptr,
+                                                                (PVOID)(OldVal | COND_VAR_LOCKED_FLAG),
+                                                                (PVOID)OldVal) == OldVal)
         {
-            /* The caller doesn't want to put any entry on the list. */
-            if (OldListHead == NULL)
-            {
-                /* The list is empty, so there is nothing to lock. */
-                return NULL;
-            }
-
-            /* The list isn't empty. In this case we need to preserve
-               all of OldVal. */
-            NewVal = OldVal;
+            return (PLIST_ENTRY)(OldVal & COND_VAR_ADDRESS_MASK);
         }
-        else
-        {
-            /* Let InsertEntry be the new list head. Preserve only the
-               bits inside the COND_VAR_FLAGS_MASK range. */
-            NewVal = ((OldVal & COND_VAR_FLAGS_MASK) |
-                      (ULONG_PTR)&InsertEntry->ListEntry);
-        }
-
-        /* Set the flag that indicates someone is holding the lock and
-           try to update the condition variable thread-safe. */
-        NewVal |= COND_VAR_LOCKED_FLAG;
-        LockRes = InternalCmpXChgCondVarAcq(ConditionVariable, NewVal, OldVal);
-        if (LockRes == OldVal)
-        {
-            /* We successfully updated ConditionVariable the way we
-               wanted and now hold the lock. */
-            if (InsertEntry == NULL)
-            {
-                /* We know that OldVal contains a valid address in
-                   this case. */
-                ASSERT(OldListHead != NULL);
-                return CONTAINING_COND_VAR_WAIT_ENTRY(OldListHead, ListEntry);
-            }
-
-            /* InsertEntry is not on the list yet, so add it. In any
-               case InsertEntry will be the new list head. */
-            if (OldListHead == NULL)
-            {
-                /* List was empty before. */
-                InitializeListHead(&InsertEntry->ListEntry);
-            }
-            else
-            {
-                /* Make InsertEntry the last entry of the old list.
-                   As InsertEntry will take the role as new list head,
-                   OldListHead will become the second entry (InsertEntry->Flink)
-                   on the new list. */
-                InsertTailList(OldListHead, &InsertEntry->ListEntry);
-            }
-
-            return InsertEntry;
-        }
-
-        /* We didn't manage to update ConditionVariable, so try again. */
-        OldVal = LockRes;
     }
 }
 
-static
+/* Drops the list lock; First is the first entry of the list afterwards, or NULL */
+FORCEINLINE
 VOID
 InternalUnlockCondVar(IN OUT PRTL_CONDITION_VARIABLE ConditionVariable,
-                      IN PCOND_VAR_WAIT_ENTRY RemoveEntry OPTIONAL)
+                      IN PLIST_ENTRY First OPTIONAL)
 {
-    /* This routine assumes that the lock is being held on entry.
-       RemoveEntry may be NULL. If it is not NULL, this routine
-       assumes that RemoveEntry is on the list and will remove it
-       before releasing the lock. */
-    ULONG_PTR OldVal = (ULONG_PTR)ConditionVariable->Ptr;
-    PLIST_ENTRY NewHeadEntry;
+    (void)InterlockedExchangePointer(&ConditionVariable->Ptr, First);
+}
 
-    ASSERT((OldVal & COND_VAR_LOCKED_FLAG) &&
-           (OldVal & COND_VAR_ADDRESS_MASK));
+/* Takes the first entry off the list (list lock held) and returns the new first entry or NULL */
+static
+PLIST_ENTRY
+InternalRemoveFirst(IN PLIST_ENTRY First)
+{
+    PLIST_ENTRY NewFirst;
 
-    NewHeadEntry = (PLIST_ENTRY)(OldVal & COND_VAR_ADDRESS_MASK);
-    if (RemoveEntry != NULL)
-    {
-        /* We have to drop RemoveEntry from the list. */
-        if (&RemoveEntry->ListEntry == NewHeadEntry)
-        {
-            /* RemoveEntry is the list head. */
-            if (!IsListEmpty(NewHeadEntry))
-            {
-                /* The second entry in the list will become the new
-                   list head. It's from the thread that arrived
-                   right before the owner of RemoveEntry. */
-                NewHeadEntry = NewHeadEntry->Flink;
-                RemoveEntryList(&RemoveEntry->ListEntry);
-            }
-            else
-            {
-                /* The list will be empty, so discard the list. */
-                NewHeadEntry = NULL;
-            }
-        }
-        else
-        {
-            /* RemoveEntry is not the list head. The current list head
-               will remain. */
-            RemoveEntryList(&RemoveEntry->ListEntry);
-        }
+    if (IsListEmpty(First))
+        return NULL;
 
-        /* Indicate to the owner of RemoveEntry that the entry
-           was removed from the list. RemoveEntry may not be touched
-           from here on. We don't use volatile semantics here since
-           the cache will anyway be flushed soon when we update
-           ConditionVariable. */
-        RemoveEntry->ListRemovalHandled = TRUE;
-    }
-
-    /* Now unlock thread-safe, while preserving any flags within the
-       COND_VAR_FLAGS_MASK range except for COND_VAR_LOCKED_FLAG. */
-    for (;;)
-    {
-        ULONG_PTR NewVal = ((OldVal & (COND_VAR_FLAGS_MASK ^ COND_VAR_LOCKED_FLAG)) |
-                            (ULONG_PTR)NewHeadEntry);
-        ULONG_PTR LockRes = InternalCmpXChgCondVarRel(ConditionVariable, NewVal, OldVal);
-        if (LockRes == OldVal)
-        {
-            /* We unlocked. */
-            break;
-        }
-
-        /* Try again. */
-        OldVal = LockRes;
-    }
+    NewFirst = First->Flink;
+    RemoveEntryList(First);
+    return NewFirst;
 }
 
 static
@@ -259,94 +143,66 @@ VOID
 InternalWake(IN OUT PRTL_CONDITION_VARIABLE ConditionVariable,
              IN BOOLEAN ReleaseAll)
 {
-    /* If ReleaseAll is zero on entry, one thread at most will be woken.
-       Otherwise all waiting threads are woken. Wakeups happen in FIFO
-       order. */
-    PCOND_VAR_WAIT_ENTRY CONST HeadEntry = InternalLockCondVar(ConditionVariable, NULL, NULL);
+    /* If ReleaseAll is zero on entry, one thread at most will be woken. Otherwise all waiting
+       threads are woken. Wakeups happen in FIFO order. */
+    PLIST_ENTRY First, Last, Cursor, Next;
     PCOND_VAR_WAIT_ENTRY Entry;
-    PCOND_VAR_WAIT_ENTRY NextEntry;
-    LARGE_INTEGER Timeout;
-    PCOND_VAR_WAIT_ENTRY RemoveOnUnlockEntry;
+    NTSTATUS Status;
 
     ASSERT(CondVarKeyedEventHandle != NULL);
 
-    if (HeadEntry == NULL)
+    /* There is noone there to wake up if the list is empty. In this case do nothing and
+       return immediately. We don't stockpile wake-ups. */
+    if (((ULONG_PTR)ConditionVariable->Ptr & COND_VAR_ADDRESS_MASK) == 0)
+        return;
+
+    First = InternalLockCondVar(ConditionVariable);
+    if (First == NULL)
     {
-        /* There is noone there to wake up. In this case do nothing
-           and return immediately. We don't stockpile releases. */
+        InternalUnlockCondVar(ConditionVariable, NULL);
         return;
     }
 
-    Timeout.QuadPart = 0;
-    RemoveOnUnlockEntry = NULL;
-
-    /* Release sleeping threads. We will iterate from the last entry on
-       the list to the first. Note that the loop condition is always
-       true for the initial test. */
-    for (Entry = CONTAINING_COND_VAR_WAIT_ENTRY(HeadEntry->ListEntry.Blink, ListEntry);
-         Entry != NULL;
-         Entry = NextEntry)
+    if (!ReleaseAll)
     {
-        NTSTATUS Status;
-
-        if (HeadEntry == Entry)
+        /* Take the oldest entry and keep the others */
+        CONTAINING_RECORD(First, COND_VAR_WAIT_ENTRY, ListEntry)->Claimed = TRUE;
+        Cursor = InternalRemoveFirst(First);
+        InternalUnlockCondVar(ConditionVariable, Cursor);
+        First->Flink = NULL;
+    }
+    else
+    {
+        /* Take the whole list and turn the ring into a chain, from the oldest entry to the newest */
+        Last = First->Blink;
+        for (Cursor = First; ; Cursor = Cursor->Flink)
         {
-            /* After the current entry we've iterated through the
-               entire list in backward direction. Then exit.*/
-            NextEntry = NULL;
+            CONTAINING_RECORD(Cursor, COND_VAR_WAIT_ENTRY, ListEntry)->Claimed = TRUE;
+            if (Cursor == Last)
+                break;
         }
-        else
-        {
-            /* Store away the next reference right now, since we may
-               not touch Entry anymore at the end of the block. */
-            NextEntry = CONTAINING_COND_VAR_WAIT_ENTRY(Entry->ListEntry.Blink, ListEntry);
-        }
+        Last->Flink = NULL;
+        InternalUnlockCondVar(ConditionVariable, NULL);
+    }
 
-        /* Wake the thread associated with this event. We will
-           immediately return if we failed (zero timeout). */
+    /* The entries are claimed, and belong to this thread until each of them has been released.
+       The list lock is not held while this waits for a sleeper to arrive. Entry is not used after
+       its release but for the flag, and Next is read before the release, since the entry's thread
+       may continue and free it as soon as the flag is set. */
+    for (Cursor = First; Cursor != NULL; Cursor = Next)
+    {
+        Next = Cursor->Flink;
+        Entry = CONTAINING_RECORD(Cursor, COND_VAR_WAIT_ENTRY, ListEntry);
+
         Status = NtReleaseKeyedEvent(CondVarKeyedEventHandle,
                                      &Entry->WaitKey,
                                      FALSE,
-                                     &Timeout);
+                                     NULL);
+        ASSERT(STATUS_INVALID_HANDLE != Status);
+        UNREFERENCED_PARAMETER(Status);
 
-        if (!NT_SUCCESS(Status))
-        {
-            /* We failed to wake a thread. We'll keep trying. */
-            ASSERT(STATUS_INVALID_HANDLE != Status);
-            continue;
-        }
-
-        /* We've woken a thread and will make sure this thread
-           is removed from the list. */
-        if (HeadEntry == Entry)
-        {
-            /* This is the list head. We can't remove it as easily as
-               other entries and will pass it to the unlock routine
-               later (we will exit the loop after this round anyway). */
-            RemoveOnUnlockEntry = HeadEntry;
-        }
-        else
-        {
-            /* We can remove the entry right away. */
-            RemoveEntryList(&Entry->ListEntry);
-
-            /* Now tell the woken thread that removal from the list was
-               already taken care of here so that this thread can resume
-               its normal operation more quickly. We may not touch
-               Entry after signaling this, since it may lie in invalid
-               memory from there on. */
-            *InternalGetListRemovalHandledFlag(Entry) = TRUE;
-        }
-
-        if (!ReleaseAll)
-        {
-            /* We've successfully woken one thread as the caller
-               demanded. */
-            break;
-        }
+        (void)InterlockedExchange(&Entry->ReleaseDone, 1);
     }
-
-    InternalUnlockCondVar(ConditionVariable, RemoveOnUnlockEntry);
 }
 
 VOID
@@ -375,16 +231,30 @@ InternalSleep(IN OUT PRTL_CONDITION_VARIABLE ConditionVariable,
        held again on return. */
 
     COND_VAR_WAIT_ENTRY OwnEntry;
+    PLIST_ENTRY First;
+    LARGE_INTEGER ZeroTimeout;
     NTSTATUS Status;
+    ULONG Spins;
+    BOOLEAN Claimed;
 
     ASSERT(CondVarKeyedEventHandle != NULL);
     ASSERT((CriticalSection == NULL) != (SRWLock == NULL));
 
     RtlZeroMemory(&OwnEntry, sizeof(OwnEntry));
 
-    /* Put OwnEntry on the list. */
-    InternalLockCondVar(ConditionVariable, &OwnEntry, NULL);
-    InternalUnlockCondVar(ConditionVariable, NULL);
+    /* Put OwnEntry at the end of the list, while the caller's lock is still held: a waker that
+       gets that lock after this thread has given it up finds the entry. */
+    First = InternalLockCondVar(ConditionVariable);
+    if (First == NULL)
+    {
+        InitializeListHead(&OwnEntry.ListEntry);
+        First = &OwnEntry.ListEntry;
+    }
+    else
+    {
+        InsertTailList(First, &OwnEntry.ListEntry);
+    }
+    InternalUnlockCondVar(ConditionVariable, First);
 
     /* We can now drop the caller provided lock as a preparation for
        going to sleep. */
@@ -412,21 +282,51 @@ InternalSleep(IN OUT PRTL_CONDITION_VARIABLE ConditionVariable,
 
     ASSERT(STATUS_INVALID_HANDLE != Status);
 
-    if (!*InternalGetListRemovalHandledFlag(&OwnEntry))
+    Claimed = TRUE;
+    if (Status != STATUS_SUCCESS)
     {
-        /* Remove OwnEntry from the list again, since it still seems to
-           be on the list. We will know for sure once we've acquired
-           the lock. */
-        if (InternalLockCondVar(ConditionVariable,
-                                NULL,
-                                InternalGetListRemovalHandledFlag(&OwnEntry)))
+        /* The wait timed out, or failed. If no waker has taken the entry yet, take it off the list. */
+        First = InternalLockCondVar(ConditionVariable);
+        Claimed = OwnEntry.Claimed;
+        if (!Claimed)
         {
-            /* Unlock and potentially remove OwnEntry. Self-removal is
-               usually only necessary when a timeout occurred. */
-            InternalUnlockCondVar(ConditionVariable,
-                                  !OwnEntry.ListRemovalHandled ?
-                                  &OwnEntry : NULL);
+            ASSERT(First != NULL);
+            if (First == &OwnEntry.ListEntry)
+                First = InternalRemoveFirst(First);
+            else
+                RemoveEntryList(&OwnEntry.ListEntry);
         }
+        InternalUnlockCondVar(ConditionVariable, First);
+
+        if (Claimed)
+        {
+            /* A waker has used a wake-up on this thread. Its release is either waiting for this
+               thread to arrive, or the kernel has paired it with the wait that just ended in the
+               timeout. Only a thread that has not been paired can be released again, so try, and
+               stop as soon as the waker reports that its release has returned. */
+            ZeroTimeout.QuadPart = 0;
+            Spins = 0;
+            while (!OwnEntry.ReleaseDone)
+            {
+                if (NtWaitForKeyedEvent(CondVarKeyedEventHandle,
+                                        &OwnEntry.WaitKey,
+                                        FALSE,
+                                        &ZeroTimeout) == STATUS_SUCCESS)
+                {
+                    break;
+                }
+                InternalSpinWait(&Spins);
+            }
+            Status = STATUS_SUCCESS;
+        }
+    }
+
+    if (Claimed)
+    {
+        /* The waker's last access to OwnEntry is the flag, so this entry stays valid until then */
+        Spins = 0;
+        while (!OwnEntry.ReleaseDone)
+            InternalSpinWait(&Spins);
     }
 
 #ifdef _DEBUG
@@ -451,7 +351,7 @@ InternalSleep(IN OUT PRTL_CONDITION_VARIABLE ConditionVariable,
         RtlEnterCriticalSection(CriticalSection);
     }
 
-    /* Return whatever NtWaitForKeyedEvent returned. */
+    /* Return whatever NtWaitForKeyedEvent returned, a wake-up that came with the timeout counted */
     return Status;
 }
 

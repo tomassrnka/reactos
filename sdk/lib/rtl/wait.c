@@ -16,10 +16,14 @@
 #define NDEBUG
 #include <debug.h>
 
+#define WAIT_IDLE         0
+#define WAIT_IN_CALLBACK  1
+#define WAIT_CANCELLED    2
+
 typedef struct _RTLP_WAIT
 {
     HANDLE Object;
-    BOOLEAN CallbackInProgress;
+    LONG CallbackState;
     HANDLE CancelEvent;
     LONG DeleteCount;
     HANDLE CompletionEvent;
@@ -77,9 +81,14 @@ Wait_thread_proc(LPVOID Arg)
     //                Wait->Context );
                 TimerOrWaitFired = TRUE;
             }
-            Wait->CallbackInProgress = TRUE;
+            /* Do not start a callback once RtlDeregisterWaitEx has cancelled the wait */
+            if (InterlockedCompareExchange( &Wait->CallbackState,
+                                            WAIT_IN_CALLBACK,
+                                            WAIT_IDLE ) != WAIT_IDLE)
+                break;
+
             Wait->Callback( Wait->Context, TimerOrWaitFired );
-            Wait->CallbackInProgress = FALSE;
+            InterlockedCompareExchange( &Wait->CallbackState, WAIT_IDLE, WAIT_IN_CALLBACK );
 
             if (Wait->Flags & WT_EXECUTEONLYONCE)
                 break;
@@ -88,11 +97,12 @@ Wait_thread_proc(LPVOID Arg)
             break;
     }
 
-    completion_event = Wait->CompletionEvent;
-    if (completion_event) NtSetEvent( completion_event, NULL );
-
+    /* Whichever of this thread and RtlDeregisterWaitEx comes last signals */
     if (InterlockedIncrement( &Wait->DeleteCount ) == 2 )
     {
+       completion_event = Wait->CompletionEvent;
+       if (completion_event) NtSetEvent( completion_event, NULL );
+
        NtClose( Wait->CancelEvent );
        RtlFreeHeap( RtlGetProcessHeap(), 0, Wait );
     }
@@ -150,7 +160,7 @@ RtlRegisterWait(PHANDLE NewWaitObject,
     Wait->Context = Context;
     Wait->Milliseconds = Milliseconds;
     Wait->Flags = Flags;
-    Wait->CallbackInProgress = FALSE;
+    Wait->CallbackState = WAIT_IDLE;
     Wait->DeleteCount = 0;
     Wait->CompletionEvent = NULL;
 
@@ -169,18 +179,21 @@ RtlRegisterWait(PHANDLE NewWaitObject,
     Flags = Flags & (WT_EXECUTEINIOTHREAD | WT_EXECUTEINPERSISTENTTHREAD |
                      WT_EXECUTELONGFUNCTION | WT_TRANSFER_IMPERSONATION);
 
+    /* The callback may run, and use the handle, before RtlQueueWorkItem returns */
+    *NewWaitObject = Wait;
+
     Status = RtlQueueWorkItem( Wait_thread_proc,
                                Wait,
                                Flags );
 
     if (Status != STATUS_SUCCESS)
     {
+        *NewWaitObject = NULL;
         NtClose( Wait->CancelEvent );
         RtlFreeHeap( RtlGetProcessHeap(), 0, Wait );
         return Status;
     }
 
-    *NewWaitObject = Wait;
     return Status;
 }
 
@@ -204,50 +217,58 @@ RtlDeregisterWaitEx(HANDLE WaitHandle,
 {
     PRTLP_WAIT Wait = (PRTLP_WAIT) WaitHandle;
     NTSTATUS Status = STATUS_SUCCESS;
+    HANDLE LocalEvent = NULL;
+    BOOLEAN CallbackInProgress;
 
     //TRACE( "(%p)\n", WaitHandle );
 
-    NtSetEvent( Wait->CancelEvent, NULL );
-    if (Wait->CallbackInProgress)
+    if (CompletionEvent == INVALID_HANDLE_VALUE)
     {
-        if (CompletionEvent != NULL)
-        {
-            if (CompletionEvent == INVALID_HANDLE_VALUE)
-            {
-                Status = NtCreateEvent( &CompletionEvent,
-                                         EVENT_ALL_ACCESS,
-                                         NULL,
-                                         NotificationEvent,
-                                         FALSE );
+        Status = NtCreateEvent( &LocalEvent,
+                                EVENT_ALL_ACCESS,
+                                NULL,
+                                NotificationEvent,
+                                FALSE );
 
-                if (Status != STATUS_SUCCESS)
-                    return Status;
+        if (Status != STATUS_SUCCESS)
+            return Status;
 
-                (void)InterlockedExchangePointer( &Wait->CompletionEvent, CompletionEvent );
-
-                if (Wait->CallbackInProgress)
-                    NtWaitForSingleObject( CompletionEvent, FALSE, NULL );
-
-                NtClose( CompletionEvent );
-            }
-            else
-            {
-                (void)InterlockedExchangePointer( &Wait->CompletionEvent, CompletionEvent );
-
-                if (Wait->CallbackInProgress)
-                    Status = STATUS_PENDING;
-            }
-        }
-        else
-            Status = STATUS_PENDING;
+        CompletionEvent = LocalEvent;
     }
+
+    CallbackInProgress = (InterlockedExchange( &Wait->CallbackState,
+                                               WAIT_CANCELLED ) == WAIT_IN_CALLBACK);
+    if (LocalEvent && !CallbackInProgress)
+    {
+        /* No callback can start any more, so do not wait for the wait thread */
+        NtClose( LocalEvent );
+        LocalEvent = NULL;
+        CompletionEvent = NULL;
+    }
+
+    /* Publish the event before the final DeleteCount transition can read it */
+    (void)InterlockedExchangePointer( &Wait->CompletionEvent, CompletionEvent );
+    NtSetEvent( Wait->CancelEvent, NULL );
 
     if (InterlockedIncrement( &Wait->DeleteCount ) == 2 )
     {
-        Status = STATUS_SUCCESS;
+        /* The wait thread has exited: no callback can run any more */
+        if (CompletionEvent) NtSetEvent( CompletionEvent, NULL );
+
         NtClose( Wait->CancelEvent );
         RtlFreeHeap( RtlGetProcessHeap(), 0, Wait );
     }
+    else if (LocalEvent)
+    {
+        /* The wait thread sets the event after its last callback returned */
+        NtWaitForSingleObject( LocalEvent, FALSE, NULL );
+    }
+    else if (CallbackInProgress)
+    {
+        Status = STATUS_PENDING;
+    }
+
+    if (LocalEvent) NtClose( LocalEvent );
 
     return Status;
 }

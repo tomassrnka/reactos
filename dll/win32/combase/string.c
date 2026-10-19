@@ -66,7 +66,14 @@ static inline struct hstring_private *impl_from_HSTRING_BUFFER(HSTRING_BUFFER bu
 static BOOL alloc_string(UINT32 len, HSTRING *out)
 {
     struct hstring_private *priv;
+#ifdef __REACTOS__
+    /* The header, len characters and the terminator must fit in a SIZE_T, and len + 1 in a UINT32 */
+    if (len >= (SIZE_MAX - offsetof(struct hstring_private, buffer)) / sizeof(WCHAR) - 1)
+        return FALSE;
+    priv = malloc(offsetof(struct hstring_private, buffer) + ((SIZE_T)len + 1) * sizeof(WCHAR));
+#else
     priv = malloc(offsetof(struct hstring_private, buffer[len+1]));
+#endif
     if (!priv)
         return FALSE;
 
@@ -197,6 +204,11 @@ HRESULT WINAPI WindowsPreallocateStringBuffer(UINT32 len, WCHAR **outptr,
         *out = NULL;
         return S_OK;
     }
+#ifdef __REACTOS__
+    /* Windows refuses a buffer whose size does not fit 32 bits (0xFFFFFFFF characters, or 0x80000000 on x86) */
+    if (offsetof(struct hstring_private, buffer) + ((ULONGLONG)len + 1) * sizeof(WCHAR) > 0xFFFFFFFF)
+        return MEM_E_INVALID_SIZE;
+#endif
 
     if (!alloc_string(len, &str))
         return E_OUTOFMEMORY;
@@ -372,6 +384,11 @@ HRESULT WINAPI WindowsConcatString(HSTRING str1, HSTRING str2, HSTRING *out)
         *out = NULL;
         return S_OK;
     }
+#ifdef __REACTOS__
+    /* The sum of the lengths must not wrap */
+    if (priv2->header.length > 0xFFFFFFFF - priv1->header.length)
+        return E_OUTOFMEMORY;
+#endif
     if (!alloc_string(priv1->header.length + priv2->header.length, out))
         return E_OUTOFMEMORY;
     priv = impl_from_HSTRING(*out);

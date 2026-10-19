@@ -2675,6 +2675,9 @@ BOOL WINAPI QueryMemoryResourceNotification(HANDLE,PBOOL);
 #endif
 BOOL WINAPI QueryPerformanceCounter(PLARGE_INTEGER);
 BOOL WINAPI QueryPerformanceFrequency(PLARGE_INTEGER);
+#if (_WIN32_WINNT >= _WIN32_WINNT_WIN7)
+BOOL WINAPI QueryUnbiasedInterruptTime(_Out_ PULONGLONG);
+#endif
 #if (_WIN32_WINNT >= 0x0600)
 VOID WINAPI QuerySecurityAccessMask(SECURITY_INFORMATION,LPDWORD);
 #endif
