@@ -271,6 +271,17 @@ CountDevices(HDEVINFO hDevInfo, PDWORD pdwPending)
     return dwCount;
 }
 
+/* A node whose instance ID is empty */
+static BOOL
+IsUnnamedDevNode(DEVINST devInst)
+{
+    WCHAR szId[MAX_DEVICE_ID_LEN];
+
+    szId[0] = UNICODE_NULL;
+    return CM_Get_Device_IDW(devInst, szId, ARRAYSIZE(szId), 0) == CR_SUCCESS &&
+           szId[0] == UNICODE_NULL;
+}
+
 /* Re-enumerating a node does not re-enumerate its started children: ask every started node */
 static BOOL
 ReenumerateChildren(DEVINST devParent, ULONG ulDepth)
@@ -293,10 +304,11 @@ ReenumerateChildren(DEVINST devParent, ULONG ulDepth)
         bLastAnswered = (crStatus == CR_SUCCESS);
         if (!bLastAnswered)
         {
-            /* A node that went away, or that the device tree cannot name (ReactOS can list
-               a child without an instance ID), has nothing to rescan: only a failed query
-               makes the walk incomplete */
-            if (!IsNoSuchDevNode(crStatus))
+            /* ReactOS can list a child without an instance ID: it has nothing to rescan,
+               and it has no siblings to miss. Any other node that does not answer went
+               away or could not be asked, and the siblings after it cannot be reached:
+               the walk is incomplete */
+            if (!IsNoSuchDevNode(crStatus) || !IsUnnamedDevNode(devChild))
                 bResult = FALSE;
             continue;
         }
