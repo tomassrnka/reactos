@@ -17,7 +17,6 @@ BEGIN
     LTEXT "歡迎使用新增硬體精靈", IDC_FINISHTITLE, 114, 8, 203, 24
     LTEXT "這個精靈將幫助您︰", -1, 114, 40, 182, 8
     LTEXT "1) 安裝軟體來支援新增到電腦的硬體。", -1, 121, 56, 184, 16
-    LTEXT "2) 解決您的硬體的問題。", -1, 121, 78, 185, 16
     ICON IDI_WARNINGICON, IDC_WARNINGICON, 124, 109, 20, 20
     LTEXT "如果硬體帶有安裝 CD，建議您按［取消］關閉這個精靈，然後使用製造商的 CD 來安裝這個硬體。", 503, 150, 106, 155, 50
     LTEXT "如要繼續，請按［下一步］。", -1, 114, 166, 193, 8
@@ -153,4 +152,11 @@ BEGIN
     IDS_ADDNEWDEVICE "新增新的硬體裝置"
     IDS_SELECTWAYTITLE "此精靈可以幫助您安裝其它硬體"
     IDS_HDTYPESTITLE "從以下清單中選擇要安裝的硬體類型"
+    IDS_NOTFOUNDTITLE "The wizard did not find any new hardware on your computer"
+    IDS_NOTFOUNDTEXT "If you know the specific hardware model you want to install, click Next to select it from a list."
+    IDS_FOUNDTITLE "The wizard found new hardware on your computer"
+    IDS_FOUNDTEXT "The wizard found the following new hardware. ReactOS installs it the same way as hardware that is plugged in."
+    IDS_SEARCHFAILEDTITLE "The wizard could not search for new hardware"
+    IDS_SEARCHFAILEDTEXT "The list of devices could not be scanned. If you know the specific hardware model you want to install, click Next to select it from a list."
+    IDS_HWTYPESNOTAVAIL "Installing hardware selected from this list is not available yet. Click Back, or click Cancel to close this wizard."
 END
