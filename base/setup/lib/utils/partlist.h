@@ -180,6 +180,13 @@ typedef struct _PARTLIST
     // structure in order to find these.
     PPARTENTRY SystemPartition;
 
+    /*
+     * The original active partition when it holds another system's boot
+     * loader and setup chose another system partition: FreeLoader gets an
+     * entry that boots its volume boot record.
+     */
+    PPARTENTRY ForeignBootPartition;
+
     LIST_ENTRY DiskListHead;
     LIST_ENTRY BiosDiskListHead;
 
@@ -364,6 +371,10 @@ DeletePartition(
     _In_ PPARTLIST List,
     _In_ PPARTENTRY PartEntry,
     _Out_opt_ PPARTENTRY* FreeRegion);
+
+BOOLEAN
+IsForeignNtfsBootPartition(
+    _In_ PPARTENTRY PartEntry);
 
 PPARTENTRY
 FindSupportedSystemPartition(

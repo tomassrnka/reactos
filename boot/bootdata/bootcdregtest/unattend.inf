@@ -38,9 +38,11 @@ FormatPartition=1
 ; 0 - disabled
 AutoPartition = 1
 
-; Choose default file system type.
+; Choose the file system of the installation volume (NTFS when this
+; setting is absent). A separate system partition is formatted FAT.
 ; 0 - FAT
 ; 1 - BtrFS
+; 2 - NTFS
 FsType = 0
 
 ; Set this option to automatically specify language in 2nd mode setup.

@@ -2253,6 +2253,17 @@ PrepareAndDoCopyThread(
                         (pSetupData->USetupData.BootLoaderLocation == 2)
                            ? 1 /* Install MBR and VBR */
                            : 0 /* Install VBR only */);
+            if (Status == STATUS_SUCCESS && pSetupData->PartitionList->ForeignBootPartition)
+            {
+                /* Keep the other system bootable from the FreeLoader menu */
+                PPARTENTRY Foreign = pSetupData->PartitionList->ForeignBootPartition;
+                NTSTATUS EntryStatus = AddPartitionBootEntry(&pSetupData->USetupData.SystemRootPath,
+                                                             Foreign->DiskEntry->DiskNumber,
+                                                             Foreign->PartitionNumber,
+                                                             L"Windows", L"\"Microsoft Windows\"");
+                if (!NT_SUCCESS(EntryStatus))
+                    DPRINT1("AddPartitionBootEntry() failed: Status 0x%lx\n", EntryStatus);
+            }
             if (Status == STATUS_SUCCESS)
                 break; /* Successful installation */
 

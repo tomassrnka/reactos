@@ -2426,9 +2426,14 @@ Restart:
 
     ASSERT(!FileSystemList);
 
-    if (IsUnattendedSetup)
+    if (IsUnattendedSetup && Volume != InstallVolume)
     {
-        /* In unattended mode, preselect the file system */
+        /* A separate system partition (the boot files) gets FAT, whatever FsType says */
+        DefaultFs = L"FAT";
+    }
+    else if (IsUnattendedSetup)
+    {
+        /* In unattended mode, preselect the file system of the installation volume */
         switch (USetupData.FsType)
         {
             /* 1 is for BtrFS */
@@ -2436,7 +2441,12 @@ Restart:
                 DefaultFs = L"BTRFS";
                 break;
 
-            /* If we don't understand input, default to FAT */
+            /* 2 is for NTFS */
+            case 2:
+                DefaultFs = L"NTFS";
+                break;
+
+            /* 0 is for FAT; if we don't understand input, default to FAT */
             default:
                 DefaultFs = L"FAT";
                 break;
@@ -2444,8 +2454,12 @@ Restart:
     }
     else
     {
-        /* By default select the "FAT" file system */
-        DefaultFs = L"FAT";
+        /*
+         * By default the volume ReactOS is installed on gets NTFS; any other
+         * volume (a separate system partition with the boot files) gets FAT.
+         * Every registered file system stays selectable.
+         */
+        DefaultFs = (Volume == InstallVolume) ? L"NTFS" : L"FAT";
     }
 
     /* Create the file system list */
@@ -3646,6 +3660,17 @@ BootLoaderHardDiskPage(PINPUT_RECORD Ir)
                 (USetupData.BootLoaderLocation == 2)
                    ? 1 /* Install MBR and VBR */
                    : 0 /* Install VBR only */);
+    if (Status == STATUS_SUCCESS && PartitionList->ForeignBootPartition)
+    {
+        /* Keep the other system bootable from the FreeLoader menu */
+        PPARTENTRY Foreign = PartitionList->ForeignBootPartition;
+        NTSTATUS EntryStatus = AddPartitionBootEntry(&USetupData.SystemRootPath,
+                                                     Foreign->DiskEntry->DiskNumber,
+                                                     Foreign->PartitionNumber,
+                                                     L"Windows", L"\"Microsoft Windows\"");
+        if (!NT_SUCCESS(EntryStatus))
+            DPRINT1("AddPartitionBootEntry() failed: Status 0x%lx\n", EntryStatus);
+    }
     if (Status == STATUS_SUCCESS)
         return TRUE; /* Successful installation */
 

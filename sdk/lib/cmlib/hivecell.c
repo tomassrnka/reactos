@@ -113,6 +113,7 @@ HvMarkCellDirty(
 {
     ULONG CellBlock;
     ULONG CellLastBlock;
+    LONG CellSize;
 
     ASSERT(RegistryHive->ReadOnly == FALSE);
 
@@ -122,11 +123,20 @@ HvMarkCellDirty(
     if (HvGetCellType(CellIndex) != Stable)
         return TRUE;
 
+    /* Mark every block the cell covers (allocated cells have a negative size) */
+    CellSize = HvpGetCellHeader(RegistryHive, CellIndex)->Size;
+    if (CellSize < 0)
+        CellSize = -CellSize;
+    if (CellSize < (LONG)sizeof(HCELL))
+        CellSize = sizeof(HCELL);
+
     CellBlock     = HvGetCellBlock(CellIndex);
-    CellLastBlock = HvGetCellBlock(CellIndex + HBLOCK_SIZE - 1);
+    CellLastBlock = HvGetCellBlock(CellIndex + CellSize - 1);
+    if (CellLastBlock >= RegistryHive->Storage[Stable].Length)
+        CellLastBlock = RegistryHive->Storage[Stable].Length - 1;
 
     RtlSetBits(&RegistryHive->DirtyVector,
-               CellBlock, CellLastBlock - CellBlock);
+               CellBlock, CellLastBlock - CellBlock + 1);
     RegistryHive->DirtyCount++;
 
     /*
