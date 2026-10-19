@@ -71,6 +71,12 @@ static const INFORMATION_CLASS_INFO SeTokenInformationClass[] = {
     IQS_NONE,
     /* TokenIntegrityLevel */
     IQS_SAME(TOKEN_MANDATORY_LABEL, ULONG, ICIF_QUERY | ICIF_SET | ICIF_SIZE_VARIABLE),
+    /* TokenUIAccess */
+    IQS_NONE,
+    /* TokenMandatoryPolicy */
+    IQS_NONE,
+    /* TokenLogonSid */
+    IQS_SAME(TOKEN_GROUPS, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
 };
 
 /* PUBLIC FUNCTIONS *****************************************************************/
@@ -1105,6 +1111,61 @@ NtQueryInformationToken(
                         Label->Label.Sid = LabelSid;
                         Label->Label.Attributes = SE_GROUP_INTEGRITY | SE_GROUP_INTEGRITY_ENABLED;
                         SepInitializeMandatoryLabelSid(LabelSid, Token->IntegrityLevel);
+                    }
+                    else
+                    {
+                        Status = STATUS_BUFFER_TOO_SMALL;
+                    }
+
+                    *ReturnLength = RequiredLength;
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    Status = _SEH2_GetExceptionCode();
+                }
+                _SEH2_END;
+
+                break;
+            }
+
+            case TokenLogonSid:
+            {
+                PTOKEN_GROUPS tg = (PTOKEN_GROUPS)TokenInformation;
+                PSID_AND_ATTRIBUTES LogonGroup = NULL;
+                ULONG i;
+
+                DPRINT("NtQueryInformationToken(TokenLogonSid)\n");
+
+                /* The first group marked as the logon SID; a token without one has nothing to report */
+                for (i = 1; i < Token->UserAndGroupCount; i++)
+                {
+                    if (Token->UserAndGroups[i].Attributes & SE_GROUP_LOGON_ID)
+                    {
+                        LogonGroup = &Token->UserAndGroups[i];
+                        break;
+                    }
+                }
+
+                if (!LogonGroup)
+                {
+                    Status = STATUS_NOT_FOUND;
+                    break;
+                }
+
+                RequiredLength = FIELD_OFFSET(TOKEN_GROUPS, Groups[1]) + RtlLengthSid(LogonGroup->Sid);
+
+                _SEH2_TRY
+                {
+                    if (TokenInformationLength >= RequiredLength)
+                    {
+                        tg->GroupCount = 1;
+                        Status = RtlCopySidAndAttributesArray(1,
+                                                              LogonGroup,
+                                                              RequiredLength - FIELD_OFFSET(TOKEN_GROUPS, Groups[1]),
+                                                              &tg->Groups[0],
+                                                              (PSID)&tg->Groups[1],
+                                                              &Unused.PSid,
+                                                              &Unused.Ulong);
                     }
                     else
                     {
