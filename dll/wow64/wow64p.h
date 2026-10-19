@@ -48,7 +48,8 @@ enum
     WOW64_UNSUPPORTED_CLASS,     /* information class */
     WOW64_UNSUPPORTED_IOCTL,     /* device I/O control code */
     WOW64_UNSUPPORTED_FSCTL,     /* file system control code */
-    WOW64_UNSUPPORTED_MODE,      /* 1: asynchronous request, 2: handle not opened for synchronous I/O */
+    WOW64_UNSUPPORTED_MODE,      /* 1: asynchronous request, 2: handle not opened for synchronous I/O,
+                                    3: request on another process */
     WOW64_UNSUPPORTED_ATTRIBUTE, /* process/thread attribute */
     WOW64_UNSUPPORTED_CSR_API,   /* (server << 16) | API number */
     WOW64_UNSUPPORTED_CSR_SERVER,/* server DLL index of a connection */

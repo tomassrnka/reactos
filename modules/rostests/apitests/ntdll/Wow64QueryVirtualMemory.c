@@ -71,6 +71,64 @@ static void TestLengths(PVOID Address, ULONG Needed)
        (ULONG)*(PSIZE_T)(Buffer + sizeof(UNICODE_STRING)), Needed);
 }
 
+/* Another process: the name must be that process's mapping or an error, never the caller's own
+ * mapping at that address (DataView exists only in this process) */
+static void TestOtherProcess(PVOID Image, PVOID DataView)
+{
+    WCHAR Path[MAX_PATH], *Exe;
+    UCHAR Buffer[1024];
+    PUNICODE_STRING Name = (PUNICODE_STRING)Buffer;
+    char Application[MAX_PATH], Command[] = "child-never-resumed";
+    STARTUPINFOA Startup = {sizeof(Startup)};
+    PROCESS_INFORMATION Child;
+    HANDLE Self;
+    SIZE_T Bytes;
+    NTSTATUS Status;
+
+    /* A real handle to this process works like the pseudo handle */
+    Self = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, GetCurrentProcessId());
+    ok(Self != NULL, "OpenProcess failed: %lu\n", GetLastError());
+    if (Self)
+    {
+        Status = NtQueryVirtualMemory(Self, DataView, MemorySectionName, Buffer, sizeof(Buffer), &Bytes);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+            ok(EndsWith(Name, L"\\w64gqvm.tmp"), "Own process by handle: %wZ\n", Name);
+        CloseHandle(Self);
+    }
+
+    GetModuleFileNameW(NULL, Path, ARRAYSIZE(Path));
+    Exe = wcsrchr(Path, L'\\');
+    if (!Exe) Exe = Path;
+    GetModuleFileNameA(NULL, Application, ARRAYSIZE(Application));
+    if (!CreateProcessA(Application, Command, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, NULL, &Startup, &Child))
+    {
+        ok(0, "CreateProcessA failed: %lu\n", GetLastError());
+        return;
+    }
+    memset(Buffer, 0x5a, sizeof(Buffer));
+    Status = NtQueryVirtualMemory(Child.hProcess, DataView, MemorySectionName, Buffer, sizeof(Buffer), &Bytes);
+    ok(!NT_SUCCESS(Status), "Other process at this process's data view: 0x%lx\n", Status);
+    /* ReactOS does not translate requests on another process (its kernel would answer from
+     * the caller's address space) */
+    if (is_reactos()) ok_ntstatus(Status, STATUS_NOT_SUPPORTED);
+    if (NT_SUCCESS(Status))
+        ok(!EndsWith(Name, L"\\w64gqvm.tmp"), "Got this process's mapping %wZ\n", Name);
+    /* Its executable image: the right name (Windows) or an error (ReactOS) */
+    memset(Buffer, 0x5a, sizeof(Buffer));
+    Status = NtQueryVirtualMemory(Child.hProcess, Image, MemorySectionName, Buffer, sizeof(Buffer), &Bytes);
+    if (is_reactos())
+        ok_ntstatus(Status, STATUS_NOT_SUPPORTED);
+    else
+    {
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status)) ok(EndsWith(Name, Exe), "Other process image %wZ\n", Name);
+    }
+    TerminateProcess(Child.hProcess, 0);
+    CloseHandle(Child.hThread);
+    CloseHandle(Child.hProcess);
+}
+
 START_TEST(Wow64QueryVirtualMemory)
 {
     SYSTEM_BASIC_INFORMATION Basic;
@@ -128,6 +186,7 @@ START_TEST(Wow64QueryVirtualMemory)
         {
             Needed = QueryName(View, L"\\w64gqvm.tmp", 0);
             if (Needed) TestLengths(View, Needed);
+            TestOtherProcess(Image, View);
             UnmapViewOfFile(View);
         }
         if (Map) CloseHandle(Map);
