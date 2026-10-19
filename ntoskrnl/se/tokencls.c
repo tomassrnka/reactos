@@ -1139,7 +1139,7 @@ NtQueryInformationToken(
                 /* The first group marked as the logon SID; a token without one has nothing to report */
                 for (i = 1; i < Token->UserAndGroupCount; i++)
                 {
-                    if (Token->UserAndGroups[i].Attributes & SE_GROUP_LOGON_ID)
+                    if ((Token->UserAndGroups[i].Attributes & SE_GROUP_LOGON_ID) == SE_GROUP_LOGON_ID)
                     {
                         LogonGroup = &Token->UserAndGroups[i];
                         break;

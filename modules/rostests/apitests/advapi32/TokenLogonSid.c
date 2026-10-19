@@ -64,7 +64,7 @@ static PSID_AND_ATTRIBUTES FindLogonGroup(PTOKEN_GROUPS Groups, PDWORD Count)
     *Count = 0;
     for (i = 0; i < Groups->GroupCount; i++)
     {
-        if (Groups->Groups[i].Attributes & SE_GROUP_LOGON_ID)
+        if ((Groups->Groups[i].Attributes & SE_GROUP_LOGON_ID) == SE_GROUP_LOGON_ID)
         {
             if (!Found)
                 Found = &Groups->Groups[i];
@@ -79,7 +79,7 @@ static void TestLogonSid(HANDLE hToken, const char *What)
     PTOKEN_GROUPS Groups, Logon;
     PSID_AND_ATTRIBUTES Expected;
     DWORD Count, Length = 0, Length2 = 0, GroupsLength;
-    BYTE Small[64];
+    DECLSPEC_ALIGN(8) BYTE Small[64];
     NTSTATUS Status;
     ULONG NtLength;
 
@@ -130,6 +130,21 @@ static void TestLogonSid(HANDLE hToken, const char *What)
         ok(Status == STATUS_BUFFER_TOO_SMALL, "%s: status 0x%lx\n", What, Status);
         ok(NtLength == Length, "%s: NT length %lu, expected %lu\n", What, NtLength, Length);
     }
+
+    /* The return length is written last: it may share storage with the result */
+    if (Length <= sizeof(Small))
+    {
+        Status = NtQueryInformationToken(hToken, LOGON_SID_CLASS, Small, sizeof(Small), (PULONG)Small);
+        ok(Status == STATUS_SUCCESS, "%s: aliased query status 0x%lx\n", What, Status);
+        ok(*(PULONG)Small == Length, "%s: aliased length %lu, expected %lu\n", What, *(PULONG)Small, Length);
+    }
+    /* A misaligned or inaccessible buffer is refused before the token is looked at */
+    Status = NtQueryInformationToken(hToken, LOGON_SID_CLASS, Small + 1, sizeof(Small) - 4, &NtLength);
+    ok(Status == STATUS_DATATYPE_MISALIGNMENT, "%s: misaligned status 0x%lx\n", What, Status);
+    Status = NtQueryInformationToken(NULL, LOGON_SID_CLASS, (PVOID)(ULONG_PTR)0x10, sizeof(Small), &NtLength);
+    ok(Status == STATUS_ACCESS_VIOLATION, "%s: bad buffer status 0x%lx\n", What, Status);
+    Status = NtQueryInformationToken(hToken, LOGON_SID_CLASS, Small, sizeof(Small), (PULONG)(ULONG_PTR)0x10);
+    ok(Status == STATUS_ACCESS_VIOLATION, "%s: bad length pointer status 0x%lx\n", What, Status);
 
     Logon = QueryGroups(hToken, LOGON_SID_CLASS, &Length2);
     ok(Logon != NULL, "%s: no TokenLogonSid\n", What);

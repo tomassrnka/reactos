@@ -173,8 +173,27 @@ static VOID ProbeOutput(ULONG Address, ULONG Size)
     for (i = 0; i < Size; ++i) Bytes[i] = Bytes[i];
 }
 
+/* Size bytes at a guest address lie below the guest's highest address */
+static BOOLEAN GuestSpan(ULONG Address, ULONG64 Size)
+{
+    return (ULONG64)Address + Size <= (ULONG64)Wow64HighestUserAddress + 1;
+}
+
+/* Touch every page of a guest output range, as the kernel's write probe does */
+static VOID ProbeOutputPages(ULONG Address, ULONG Size)
+{
+    ULONG64 Page, Last;
+    if (!Size) return;
+    Last = (ULONG64)Address + Size - 1;
+    ProbeOutput(Address, 1);
+    for (Page = ((ULONG64)Address | (PAGE_SIZE - 1)) + 1; Page <= Last; Page += PAGE_SIZE)
+        ProbeOutput((ULONG)Page, 1);
+    ProbeOutput((ULONG)Last, 1);
+}
+
 /* TOKEN_GROUPS classes: the 32-bit layout has 4-byte SID pointers, so query the
- * native form into a scratch buffer and rebuild it in the guest buffer. */
+ * native form into a scratch buffer and rebuild it in the guest buffer. The checks
+ * come in the native order: buffer alignment and range, then the return length. */
 static NTSTATUS TokenGroups32(HANDLE Token, TOKEN_INFORMATION_CLASS Class, ULONG Buffer,
                               ULONG Length, ULONG ReturnLength, WOW64_CLEANUP *Cleanup)
 {
@@ -183,9 +202,16 @@ static NTSTATUS TokenGroups32(HANDLE Token, TOKEN_INFORMATION_CLASS Class, ULONG
     ULONG *Guest;
     NTSTATUS Status;
 
-    /* The native service checks the buffer alignment and the return length first */
-    if (Buffer & (sizeof(ULONG) - 1)) return STATUS_DATATYPE_MISALIGNMENT;
+    if (Buffer)
+    {
+        if (Buffer & (sizeof(ULONG) - 1)) return STATUS_DATATYPE_MISALIGNMENT;
+        if (!GuestSpan(Buffer, Length)) return STATUS_ACCESS_VIOLATION;
+        ProbeOutputPages(Buffer, Length);
+    }
+    if (ReturnLength & (sizeof(ULONG) - 1)) return STATUS_DATATYPE_MISALIGNMENT;
+    if (!ReturnLength || !GuestSpan(ReturnLength, sizeof(ULONG))) return STATUS_ACCESS_VIOLATION;
     ProbeOutput(ReturnLength, sizeof(ULONG));
+
     Status = NtQueryInformationToken(Token, Class, NULL, 0, &Bytes);
     if (Status != STATUS_BUFFER_TOO_SMALL) return Status;
     if (Bytes < sizeof(TOKEN_GROUPS)) Bytes = sizeof(TOKEN_GROUPS);
@@ -193,12 +219,16 @@ static NTSTATUS TokenGroups32(HANDLE Token, TOKEN_INFORMATION_CLASS Class, ULONG
     if (!Native) return STATUS_NO_MEMORY;
     Status = NtQueryInformationToken(Token, Class, Native, Bytes, &Bytes);
     if (!NT_SUCCESS(Status)) return Status;
+    /* Bounded by the native result, which is far below 4 GiB */
     for (i = 0; i < Native->GroupCount; ++i)
         SidBytes += RtlLengthSid(Native->Groups[i].Sid);
     Needed = sizeof(ULONG) + Native->GroupCount * 2 * sizeof(ULONG) + SidBytes;
-    *(ULONG *)PTR32(ReturnLength) = Needed;
-    if (Length < Needed) return STATUS_BUFFER_TOO_SMALL;
-    ProbeOutput(Buffer, Needed);
+    if (!Buffer && Length >= Needed) return STATUS_ACCESS_VIOLATION;
+    if (!Buffer || Length < Needed)
+    {
+        *(ULONG *)PTR32(ReturnLength) = Needed;
+        return STATUS_BUFFER_TOO_SMALL;
+    }
     Guest = PTR32(Buffer);
     Guest[0] = Native->GroupCount;
     Offset = sizeof(ULONG) + Native->GroupCount * 2 * sizeof(ULONG);
@@ -210,11 +240,13 @@ static NTSTATUS TokenGroups32(HANDLE Token, TOKEN_INFORMATION_CLASS Class, ULONG
         RtlCopyMemory((UCHAR *)Guest + Offset, Native->Groups[i].Sid, Sid);
         Offset += Sid;
     }
+    /* Last, as the kernel does, in case the length aliases the buffer */
+    *(ULONG *)PTR32(ReturnLength) = Needed;
     return STATUS_SUCCESS;
 }
 
 /* A 32-bit TOKEN_GROUPS argument in the native layout. The SIDs stay in guest memory,
- * where the kernel captures them as caller data; Count was read once by the caller. */
+ * where the kernel captures them as caller data; Count was read and range-checked once. */
 static PTOKEN_GROUPS GroupsFrom32(ULONG Guest, ULONG Count, PUCHAR *Next)
 {
     ULONG *Source = PTR32(Guest), i;
@@ -232,27 +264,38 @@ static PTOKEN_GROUPS GroupsFrom32(ULONG Guest, ULONG Count, PUCHAR *Next)
     return Groups;
 }
 
+/* The element count of a guest group or privilege array, after checking that the
+ * whole array lies in the guest's range */
+static NTSTATUS GuestArrayCount(ULONG Address, ULONG ElementSize, PULONG Count)
+{
+    *Count = 0;
+    if (!Address) return STATUS_SUCCESS;
+    if (!GuestSpan(Address, sizeof(ULONG))) return STATUS_ACCESS_VIOLATION;
+    *Count = *(ULONG *)PTR32(Address);
+    if (!GuestSpan(Address, sizeof(ULONG) + (ULONG64)*Count * ElementSize)) return STATUS_ACCESS_VIOLATION;
+    return STATUS_SUCCESS;
+}
+
 /* NtFilterToken: SidsToDisable and RestrictedSids hold SID pointers; TOKEN_PRIVILEGES
- * has the same layout for both sizes. */
+ * has the same layout for both sizes and goes through as is. */
 static NTSTATUS FilterToken32(ULONG *a, WOW64_CLEANUP *Cleanup)
 {
-    ULONG DisableCount = 0, RestrictCount = 0;
+    ULONG DisableCount, RestrictCount, PrivilegeCount;
     SIZE_T Bytes = 1;
     PUCHAR Next;
     PTOKEN_GROUPS Disable, Restrict;
     NTSTATUS Status;
 
+    if (!a[5] || !GuestSpan(a[5], sizeof(ULONG))) return STATUS_ACCESS_VIOLATION;
     ProbeOutput(a[5], sizeof(ULONG));
-    if (a[2])
-    {
-        DisableCount = *(ULONG *)PTR32(a[2]);
-        Bytes += FIELD_OFFSET(TOKEN_GROUPS, Groups) + (SIZE_T)DisableCount * sizeof(SID_AND_ATTRIBUTES);
-    }
-    if (a[4])
-    {
-        RestrictCount = *(ULONG *)PTR32(a[4]);
-        Bytes += FIELD_OFFSET(TOKEN_GROUPS, Groups) + (SIZE_T)RestrictCount * sizeof(SID_AND_ATTRIBUTES);
-    }
+    Status = GuestArrayCount(a[2], 2 * sizeof(ULONG), &DisableCount);
+    if (!NT_SUCCESS(Status)) return Status;
+    Status = GuestArrayCount(a[3], sizeof(LUID_AND_ATTRIBUTES), &PrivilegeCount);
+    if (!NT_SUCCESS(Status)) return Status;
+    Status = GuestArrayCount(a[4], 2 * sizeof(ULONG), &RestrictCount);
+    if (!NT_SUCCESS(Status)) return Status;
+    if (a[2]) Bytes += FIELD_OFFSET(TOKEN_GROUPS, Groups) + (SIZE_T)DisableCount * sizeof(SID_AND_ATTRIBUTES);
+    if (a[4]) Bytes += FIELD_OFFSET(TOKEN_GROUPS, Groups) + (SIZE_T)RestrictCount * sizeof(SID_AND_ATTRIBUTES);
     Next = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, Bytes);
     if (!Next) return STATUS_NO_MEMORY;
     Disable = GroupsFrom32(a[2], DisableCount, &Next);
