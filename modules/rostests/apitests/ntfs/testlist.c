@@ -18,13 +18,18 @@ extern void func_NtfsHardLink(void);
 extern void func_NtfsInherit(void);
 extern void func_NtfsOpenById(void);
 extern void func_NtfsPagingFile(void);
+extern void func_NtfsRelativeOpen(void);
+extern void func_NtfsRelativeOpenJunctionAcl(void);
 extern void func_NtfsRename(void);
 extern void func_NtfsSharing(void);
 extern void func_NtfsSystemFiles(void);
 extern void func_NtfsTraverse(void);
+extern void func_NtfsVolumeAttributes(void);
+extern void func_NtfsVolumeData(void);
 extern void func_NtfsVolumeLabel(void);
 extern void func_NtfsVolumeLabelReboot(void);
 extern void func_NtfsVolumeLock(void);
+extern void func_NtfsVolumeOpen(void);
 
 const struct test winetest_testlist[] =
 {
@@ -38,12 +43,17 @@ const struct test winetest_testlist[] =
     { "NtfsInherit", func_NtfsInherit },
     { "NtfsOpenById", func_NtfsOpenById },
     { "NtfsPagingFile", func_NtfsPagingFile },
+    { "NtfsRelativeOpen", func_NtfsRelativeOpen },
+    { "NtfsRelativeOpenJunctionAcl", func_NtfsRelativeOpenJunctionAcl },
     { "NtfsRename", func_NtfsRename },
     { "NtfsSharing", func_NtfsSharing },
     { "NtfsSystemFiles", func_NtfsSystemFiles },
     { "NtfsTraverse", func_NtfsTraverse },
+    { "NtfsVolumeAttributes", func_NtfsVolumeAttributes },
+    { "NtfsVolumeData", func_NtfsVolumeData },
     { "NtfsVolumeLabel", func_NtfsVolumeLabel },
     { "NtfsVolumeLabelReboot", func_NtfsVolumeLabelReboot },
     { "NtfsVolumeLock", func_NtfsVolumeLock },
+    { "NtfsVolumeOpen", func_NtfsVolumeOpen },
     { 0, 0 }
 };

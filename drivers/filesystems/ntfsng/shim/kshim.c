@@ -594,6 +594,30 @@ static int kshim_dev_write_rmw(struct block_device *b, u64 off, const u8 *buf, s
 	kfree(mid);
 	return err;
 }
+/* The storage stack reads whole sectors into a word-aligned buffer: bounce a read that is not one. */
+static int kshim_dev_read_bounce(struct block_device *b, u64 off, u8 *buf, size_t len)
+{
+	unsigned int bs = b->logical_block_size;
+	size_t cap = min_t(size_t, KSHIM_RMW_CHUNK, ((off & (bs - 1)) + len + bs - 1) & ~(size_t)(bs - 1));
+	u8 *sec;
+	int err = 0;
+	if (!len)
+		return 0;
+	sec = kmalloc(cap, GFP_NOFS);
+	if (!sec)
+		return -ENOMEM;
+	while (len && !err) {
+		u64 base = off & ~(u64)(bs - 1);
+		size_t in = off - base, span = min_t(size_t, (in + len + bs - 1) & ~(size_t)(bs - 1), cap);
+		size_t n = min_t(size_t, span - in, len);
+		err = ngos_dev_read(b->osdev, base, sec, (unsigned int)span) ? -EIO : 0;
+		if (!err)
+			memcpy(buf, sec + in, n);
+		off += n; buf += n; len -= n;
+	}
+	kfree(sec);
+	return err;
+}
 static int kshim_dev_rw_do(struct block_device *b, int write, u64 off, void *buf, size_t len);
 int kshim_dev_rw(struct block_device *b, int write, u64 off, void *buf, size_t len)
 {
@@ -647,8 +671,13 @@ static int kshim_dev_rw_do(struct block_device *b, int write, u64 off, void *buf
 		memset((char *)buf + in, 0, len - in);
 		len = in;
 	}
-	if (ngos_dev_read(b->osdev, off, buf, (unsigned int)len))
+	if (((off | len) & (b->logical_block_size - 1)) || ((uintptr_t)buf & 3)) {
+		int err = kshim_dev_read_bounce(b, off, buf, len);
+		if (err)
+			return err;
+	} else if (ngos_dev_read(b->osdev, off, buf, (unsigned int)len)) {
 		return -EIO;
+	}
 	kshim_jnl_patch(b, 0, off, buf, len);
 	return 0;
 }

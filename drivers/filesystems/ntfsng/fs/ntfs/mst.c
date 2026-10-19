@@ -35,9 +35,10 @@ int post_read_mst_fixup(struct ntfs_record *b, const u32 size)
 	usa_ofs = le16_to_cpu(b->usa_ofs);
 	/* Decrement usa_count to get number of fixups. */
 	usa_count = le16_to_cpu(b->usa_count) - 1;
-	/* Size and alignment checks. */
-	if (size & (NTFS_BLOCK_SIZE - 1) || usa_ofs & 1	||
-	    usa_ofs + (usa_count * 2) > size ||
+	/* Size/alignment checks; the +1 counts the USN word so the whole USA stays in bounds. */
+	if (size & (NTFS_BLOCK_SIZE - 1) || usa_ofs & 1 ||
+	    usa_ofs < sizeof(struct ntfs_record) ||
+	    usa_ofs + (usa_count + 1) * 2 > size ||
 	    (size >> NTFS_BLOCK_SIZE_BITS) != usa_count)
 		return 0;
 	/* Position of usn in update sequence array. */
@@ -126,9 +127,10 @@ int pre_write_mst_fixup(struct ntfs_record *b, const u32 size)
 	usa_ofs = le16_to_cpu(b->usa_ofs);
 	/* Decrement usa_count to get number of fixups. */
 	usa_count = le16_to_cpu(b->usa_count) - 1;
-	/* Size and alignment checks. */
-	if (size & (NTFS_BLOCK_SIZE - 1) || usa_ofs & 1	||
-	    usa_ofs + (usa_count * 2) > size ||
+	/* Size/alignment checks; the +1 counts the USN word so the whole USA stays in bounds. */
+	if (size & (NTFS_BLOCK_SIZE - 1) || usa_ofs & 1 ||
+	    usa_ofs < sizeof(struct ntfs_record) ||
+	    usa_ofs + (usa_count + 1) * 2 > size ||
 	    (size >> NTFS_BLOCK_SIZE_BITS) != usa_count)
 		return -EINVAL;
 	/* Position of usn in update sequence array. */
@@ -167,12 +169,19 @@ int pre_write_mst_fixup(struct ntfs_record *b, const u32 size)
  * for any errors, because we assume we have just used pre_write_mst_fixup(),
  * thus the data will be fine or we would never have gotten here.
  */
-void post_write_mst_fixup(struct ntfs_record *b)
+void post_write_mst_fixup(struct ntfs_record *b, const u32 size)
 {
 	__le16 *usa_pos, *data_pos;
 
 	u16 usa_ofs = le16_to_cpu(b->usa_ofs);
 	u16 usa_count = le16_to_cpu(b->usa_count) - 1;
+
+	/* Re-validate the USA against size so a count changed since the fixup cannot write past the block. */
+	if (size & (NTFS_BLOCK_SIZE - 1) || usa_ofs & 1 ||
+	    usa_ofs < sizeof(struct ntfs_record) ||
+	    usa_ofs + (usa_count + 1) * 2 > size ||
+	    (size >> NTFS_BLOCK_SIZE_BITS) != usa_count)
+		return;
 
 	/* Position of usn in update sequence array. */
 	usa_pos = (__le16 *)b + usa_ofs/sizeof(__le16);

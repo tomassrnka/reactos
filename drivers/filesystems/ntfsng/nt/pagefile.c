@@ -166,6 +166,11 @@ static BOOLEAN NgPagingFileLookup(PNG_FCB Fcb, LONGLONG Offset, ULONG ClusterSiz
 NTSTATUS NgPagingFileIo(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, BOOLEAN Write, LONGLONG Offset, ULONG Length)
 {
     ULONG Done = 0;
+    /* UF-22: use the cluster size cached immutably at mount. ngc_volinfo() refills the shared
+     * Vcb->Info by zeroing it first, so a concurrent volume-info query exposes a transient
+     * cluster_size of 0 and the per-cluster divide below would bugcheck (STOP 0x7E) on this
+     * hot path, where a failed page-in cannot be retried. The mount-time value never changes. */
+    ULONG ClusterSize = Vcb->ClusterSize;
 
     if (!Irp->MdlAddress || Offset < 0 || Offset + Length > Fcb->Header.AllocationSize.QuadPart ||
         Length > MmGetMdlByteCount(Irp->MdlAddress))
@@ -175,7 +180,7 @@ NTSTATUS NgPagingFileIo(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, BOOLEAN Write, LONGL
         ULONGLONG Dev, Avail;
         NTSTATUS Status;
         ULONG N;
-        if (!NgPagingFileLookup(Fcb, Offset + Done, Vcb->Info.cluster_size, &Dev, &Avail))
+        if (!NgPagingFileLookup(Fcb, Offset + Done, ClusterSize, &Dev, &Avail))
         {
             DPRINT1("ntfsng: paging file %s at %I64d is outside the map\n", Write ? "write" : "read", Offset + Done);
             return STATUS_UNEXPECTED_IO_ERROR;

@@ -1500,20 +1500,33 @@ WriteMetafiles(VOID)
     }
 
     /* Cluster $Bitmap: metadata clusters [0, FirstFreeLcn) used, the rest free,
-     * and the bits past ClusterCount (up to the 8-byte-aligned end) set. */
+     * and the bits past ClusterCount (up to the 8-byte-aligned end) set.
+     * Written about 1 MB (whole clusters) at a time: a single write over the
+     * MDL limit (32 MB on amd64, a volume over 1 TB) fails after the old
+     * volume is gone. */
     {
-        ULONG     Size = LAYOUT.BitmapClusters * BYTES_PER_CLUSTER;
+        ULONGLONG Size = (ULONGLONG)LAYOUT.BitmapClusters * BYTES_PER_CLUSTER;
         ULONGLONG BitmapBytes = (((ClusterCount + 7) / 8) + 7) & ~7ULL;
         ULONGLONG BitmapBits = BitmapBytes * 8;
-        ULONGLONG c;
-        PBYTE     Buf = RtlAllocateHeap(RtlGetProcessHeap(), 0, Size);
+        ULONG     ChunkBytes = max(1024 * 1024 / BYTES_PER_CLUSTER, 1) * BYTES_PER_CLUSTER;
+        ULONGLONG Done, c;
+        PBYTE     Buf = RtlAllocateHeap(RtlGetProcessHeap(), 0, ChunkBytes);
         if (!Buf) { Status = STATUS_INSUFFICIENT_RESOURCES; goto done; }
-        RtlZeroMemory(Buf, Size);
-        for (c = 0; c < LAYOUT.FirstFreeLcn; c++)
-            Buf[c / 8] |= (1 << (c % 8));
-        for (c = ClusterCount; c < BitmapBits; c++)
-            Buf[c / 8] |= (1 << (c % 8));
-        Status = WriteAt(LAYOUT.BitmapLcn, Buf, Size);
+        for (Done = 0; Done < Size; Done += ChunkBytes)
+        {
+            ULONG     ThisBytes = (ULONG)min(Size - Done, (ULONGLONG)ChunkBytes);
+            ULONGLONG First = Done * 8;
+            ULONGLONG End = First + (ULONGLONG)ThisBytes * 8;
+
+            RtlZeroMemory(Buf, ThisBytes);
+            for (c = First; c < min(End, LAYOUT.FirstFreeLcn); c++)
+                Buf[(c - First) / 8] |= (1 << (c % 8));
+            for (c = max(First, ClusterCount); c < min(End, BitmapBits); c++)
+                Buf[(c - First) / 8] |= (1 << (c % 8));
+            Status = WriteAt(LAYOUT.BitmapLcn + Done / BYTES_PER_CLUSTER, Buf, ThisBytes);
+            if (!NT_SUCCESS(Status))
+                break;
+        }
         FREE(Buf);
         if (!NT_SUCCESS(Status)) { DPRINT1("ERROR: write $Bitmap (Status %lx)\n", Status); goto done; }
     }
