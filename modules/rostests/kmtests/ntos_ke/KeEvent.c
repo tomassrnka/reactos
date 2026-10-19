@@ -150,7 +150,7 @@ TestEventConcurrent(
     const INT ThreadCount = sizeof Threads / sizeof Threads[0];
     KPRIORITY Priority;
     LARGE_INTEGER LongTimeout, ShortTimeout;
-    INT i;
+    INT i, Tries;
     KWAIT_BLOCK WaitBlock[RTL_NUMBER_OF(Threads)];
     PVOID ThreadObjects[RTL_NUMBER_OF(Threads)];
     LONG State;
@@ -189,6 +189,18 @@ TestEventConcurrent(
                 ok_eq_hex(Status, STATUS_SUCCESS);
             }
         }
+        /* The thread sets Signal before it waits, and on another processor
+         * its wait block can still be missing from the event's list here.
+         * The kernel queues the wait block before it marks the thread Waiting. */
+        for (Tries = 0; *(volatile UCHAR *)&Threads[i].Thread->State != Waiting && Tries < 1000; ++Tries)
+        {
+            Status = KeDelayExecutionThread(KernelMode, FALSE, &ShortTimeout);
+            if (Status != STATUS_SUCCESS)
+            {
+                ok_eq_hex(Status, STATUS_SUCCESS);
+            }
+        }
+        ok(Threads[i].Thread->State == Waiting, "Thread %d state %u, expected Waiting\n", i, Threads[i].Thread->State);
         CheckEvent(Event, Type, 0L, FALSE, OriginalIrql, ThreadObjects, i + 1);
     }
 
@@ -239,6 +251,7 @@ typedef struct
     KEVENT WaitEvent;
     ULONG Counter;
     KPRIORITY PriorityIncrement;
+    BOOLEAN OneProcessor;
     ULONG CounterValues[NUM_SCHED_TESTS];
 } COUNT_THREAD_DATA, *PCOUNT_THREAD_DATA;
 
@@ -254,6 +267,9 @@ CountThread(
     ULONG *CounterValue = ThreadData->CounterValues;
     KPRIORITY Priority;
 
+    if (ThreadData->OneProcessor)
+        KeSetSystemAffinityThread(1);
+
     Priority = KeQueryPriorityThread(KeGetCurrentThread());
     ok_eq_long(Priority, 8L);
 
@@ -266,6 +282,9 @@ CountThread(
 
     Priority = KeQueryPriorityThread(KeGetCurrentThread());
     ok_eq_long(Priority, 8L + min(ThreadData->PriorityIncrement, 7));
+
+    if (ThreadData->OneProcessor)
+        KeRevertToUserAffinityThread();
 }
 
 static
@@ -282,20 +301,27 @@ TestEventScheduling(
     volatile ULONG *Counter;
     KPRIORITY PriorityIncrement;
     KPRIORITY Priority;
-
-    UNREFERENCED_PARAMETER(Context);
+    /* With both threads on one processor the boosted thread must preempt
+     * this one at once; on several processors it may run elsewhere while
+     * this thread goes on, and only the order of the values is checked */
+    BOOLEAN OneProcessor = (BOOLEAN)(ULONG_PTR)Context;
+    BOOLEAN Strict;
 
     ThreadData = ExAllocatePoolWithTag(PagedPool, sizeof(*ThreadData), 'CEmK');
     if (skip(ThreadData != NULL, "Out of memory\n"))
     {
         return;
     }
+    ThreadData->OneProcessor = OneProcessor;
+    if (OneProcessor)
+        KeSetSystemAffinityThread(1);
     KeInitializeEvent(&ThreadData->Event, SynchronizationEvent, FALSE);
     KeInitializeEvent(&ThreadData->WaitEvent, SynchronizationEvent, FALSE);
     Counter = &ThreadData->Counter;
 
     for (PriorityIncrement = 0; PriorityIncrement <= 8; PriorityIncrement++)
     {
+        Strict = (PriorityIncrement != 0) && OneProcessor;
         ThreadData->PriorityIncrement = PriorityIncrement;
         ThreadData->Counter = 0;
         RtlFillMemory(ThreadData->CounterValues,
@@ -316,7 +342,7 @@ TestEventScheduling(
         ok(Priority == 8, "[%lu] Priority = %lu\n", PriorityIncrement, Priority);
         KmtFinishThread(Thread, NULL);
 
-        if (PriorityIncrement == 0)
+        if (!Strict)
         {
             /* Both threads have the same priority, so either can win the race */
             ok(ThreadData->CounterValues[0] == 0 || ThreadData->CounterValues[0] == 1,
@@ -332,7 +358,7 @@ TestEventScheduling(
         }
         for (i = 1; i < NUM_SCHED_TESTS; i++)
         {
-            if (PriorityIncrement == 0)
+            if (!Strict)
             {
                 ok(ThreadData->CounterValues[i] == i ||
                    ThreadData->CounterValues[i] == i + 1,
@@ -350,6 +376,8 @@ TestEventScheduling(
         }
     }
 
+    if (OneProcessor)
+        KeRevertToUserAffinityThread();
     ExFreePoolWithTag(ThreadData, 'CEmK');
 }
 
@@ -397,6 +425,11 @@ START_TEST(KeEvent)
     ok_irql(PASSIVE_LEVEL);
     KmtSetIrql(PASSIVE_LEVEL);
 
-    Thread = KmtStartThread(TestEventScheduling, NULL);
+    Thread = KmtStartThread(TestEventScheduling, (PVOID)TRUE);
     KmtFinishThread(Thread, NULL);
+    if (KeNumberProcessors > 1)
+    {
+        Thread = KmtStartThread(TestEventScheduling, (PVOID)FALSE);
+        KmtFinishThread(Thread, NULL);
+    }
 }

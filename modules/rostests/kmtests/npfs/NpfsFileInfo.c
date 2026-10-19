@@ -86,12 +86,19 @@ TestFileInfo(
     ok_eq_wchar(FileAllInfo.NameInformation.FileName[6], 0xFFFF);
     ok_eq_ulong(IoStatusBlock.Information, (FIELD_OFFSET(FILE_ALL_INFORMATION, NameInformation.FileName) + 6 * sizeof(WCHAR)));
 
+    /* A checked kernel refuses a buffer shorter than FILE_ALL_INFORMATION from
+     * kernel callers too; a free one leaves the length to the file system */
     RtlFillMemory(&FileAllInfo, sizeof(FileAllInfo), 0xFF);
     Status = ZwQueryInformationFile(ServerHandle,
                                     &IoStatusBlock,
                                     &FileAllInfo,
                                     sizeof(FILE_ALL_INFORMATION) - 4,
                                     FileAllInformation);
+    if (KmtIsCheckedBuild && Status == STATUS_INFO_LENGTH_MISMATCH)
+    {
+        skip(FALSE, "Short FILE_ALL_INFORMATION buffer refused by the checked kernel\n");
+        return;
+    }
     ok_eq_hex(Status, STATUS_BUFFER_OVERFLOW);
     ok_eq_hex(IoStatusBlock.Status, STATUS_BUFFER_OVERFLOW);
     ok_eq_longlong(FileAllInfo.BasicInformation.CreationTime.QuadPart, 0);

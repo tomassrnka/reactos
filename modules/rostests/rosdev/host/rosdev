@@ -1,0 +1,854 @@
+#!/usr/bin/env python3
+"""rosdev: host side of the test-only guest agent (modules/rostests/rosdev).
+
+One `rosdev serve <vm>` process per test VM listens on 127.0.0.1:<port>; the guest agent reaches it
+as 10.0.2.2:<port> through QEMU user networking. The other subcommands talk to that process over
+a unix socket. Test VMs only; see rosdev.h for the guest-side guards. Python 3 standard library only.
+
+  rosdev up <vm> --arch amd64|i386 [--base DISK]   overlay + agent + VM through vmslot + serve
+  rosdev serve <vm> [--port N] [--daemon]          serve one VM (up starts this itself); stop-server ends it
+  rosdev wait-ready <vm> [--timeout S]             until the guest agent has connected
+  rosdev push <vm> <local> <guest-path> [--stage]  copy a file in (SHA-256 checked)
+  rosdev get <vm> <guest-path> <local>             copy a file out
+  rosdev run <vm> "<cmd>" [--timeout S] [--raw] [--detach] [--cwd DIR]
+  rosdev shot <vm> <out.png|out.bmp>               screenshot from inside the guest
+  rosdev qshot <vm> <out.png>                      screenshot through QEMU (works without the agent)
+  rosdev ps|modules|kill|reboot|shutdown|events|dumps|info|restart-agent <vm> ...
+  rosdev down <vm> [--purge]                       stop the VM and the server
+"""
+import argparse
+import base64
+import hashlib
+import hmac
+import json
+import os
+import queue
+import re
+import secrets
+import select
+import shlex
+import signal
+import socket
+import socketserver
+import struct
+import subprocess
+import sys
+import threading
+import time
+import urllib.parse
+import zlib
+
+AGENT_VERSION = "1"
+HOME = os.environ.get("ROSDEV_HOME") or os.path.join(os.path.expanduser("~"), ".rosdev")
+POLL_HOLD = 15.0        # seconds the server holds a POLL before answering NOP
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+TOKEN_RE = re.compile(r"^[A-Za-z0-9._-]{8,128}$")
+
+
+def vmdir(vm):
+    if not NAME_RE.match(vm or ""):
+        die("bad VM name %r (letters, digits, . _ - ; at most 64)" % vm)
+    return os.path.join(HOME, vm)
+
+
+def die(msg, code=1):
+    print("rosdev: " + msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def enc(v):
+    return urllib.parse.quote(str(v), safe="-._~")
+
+
+def dec(s):
+    return urllib.parse.unquote(s)
+
+
+def parse_line(line):
+    parts = line.decode("utf-8", "replace").rstrip("\r\n").split(" ")
+    kv = {}
+    for p in parts[1:]:
+        if "=" in p:
+            k, v = p.split("=", 1)
+            kv[k] = dec(v)
+    return parts[0], kv
+
+
+def mac(token, role, snonce, gnonce):
+    return hmac.new(token.encode(), role + snonce + gnonce, hashlib.sha256).digest()
+
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for blk in iter(lambda: f.read(1 << 20), b""):
+            h.update(blk)
+    return h.hexdigest()
+
+
+class Job:
+    def __init__(self, op, args, put_src=None, save=None, timeout=60.0):
+        self.op, self.args, self.put_src, self.save = op, args, put_src, save
+        self.timeout = timeout
+        self.done = threading.Event()
+        self.result = None
+        self.cancelled = False
+        self.started = False        # the JOB header write has begun: the job can no longer be handed to another session
+        self.id = 0
+
+
+class VmServer:
+    """Accepts the guest agent's outbound connections and feeds it one job at a time."""
+
+    def __init__(self, vm, port, token):
+        self.vm, self.port, self.token = vm, port, token
+        self.jobs = queue.Queue()
+        self.next_id = 1
+        self.lock = threading.Lock()
+        self.ready = threading.Event()
+        self.agent = {}
+        self.last_poll = 0.0
+        self.conn = None
+        self.log_lock = threading.Lock()
+
+    def log(self, msg):
+        with self.log_lock:
+            print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), msg, flush=True)
+
+    def serve_agents(self, ls):
+        while True:
+            s, _ = ls.accept()
+            threading.Thread(target=self.session, args=(s,), daemon=True).start()
+
+    def session(self, s):
+        s.settimeout(20)
+        f = s.makefile("rwb")
+        try:
+            sn = secrets.token_bytes(16)
+            f.write(b"CHALLENGE v=1 nonce=" + sn.hex().encode() + b"\n")
+            f.flush()
+            verb, kv = parse_line(f.readline(20000))
+            if verb != "HELLO":
+                s.close()
+                return
+            gn = bytes.fromhex(kv.get("gnonce", ""))
+            if len(gn) != 16 or not hmac.compare_digest(bytes.fromhex(kv.get("mac", "00")), mac(self.token, b"G", sn, gn)):
+                self.log("rejected an agent: bad token")
+                s.close()
+                return
+            f.write(b"WELCOME mac=" + mac(self.token, b"H", sn, gn).hex().encode() + b"\n")
+            f.flush()
+        except (OSError, ValueError):
+            s.close()
+            return
+        with self.lock:
+            old = self.conn
+            self.conn = s
+            self.agent = dict(kv)
+            self.agent["since"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        if old:
+            try:
+                old.shutdown(socket.SHUT_RDWR)      # wakes the old session's thread, which then ends
+            except OSError:
+                pass
+            try:
+                old.close()
+            except OSError:
+                pass
+        self.ready.set()
+        self.log("agent connected: %s os=%s arch=%s computer=%s" % (kv.get("agent"), kv.get("os"), kv.get("arch"), kv.get("computer")))
+        job = None
+        try:
+            while True:
+                s.settimeout(60)
+                line = f.readline(20000)
+                if not line:
+                    break
+                verb, _ = parse_line(line)
+                if verb != "POLL":
+                    break
+                self.last_poll = time.time()
+                if self.conn is s:
+                    self.ready.set()
+                job = self.take_job(s)
+                if job is not None and self.run_job(f, s, job):
+                    job = None
+                    continue
+                # no job, or one that was not sent (failed before sending, or handed back): answer the poll
+                job = None
+                if self.conn is not s:
+                    break               # superseded by a newer connection
+                f.write(b"NOP\n")
+                f.flush()
+        except (OSError, ValueError) as e:
+            self.log("session error: %s" % e)
+        finally:
+            if job is not None and not job.done.is_set():
+                if not job.started:
+                    if self.conn is not s:
+                        self.jobs.put(job)      # never sent: the replacement session takes it
+                    else:
+                        self.finish(job, {"status": "err", "msg": "agent disconnected before the job was sent", "disconnected": True})
+                elif job.op == "power":
+                    self.finish(job, {"status": "ok", "note": "connection dropped after the power request"})
+                else:
+                    self.finish(job, {"status": "err", "msg": "agent disconnected during the job", "disconnected": True})
+            with self.lock:
+                if self.conn is s:
+                    self.conn = None
+                    self.ready.clear()
+            try:
+                s.close()
+            except OSError:
+                pass
+            self.log("agent disconnected")
+
+    def take_job(self, s):
+        """Next live job for session s, or None after POLL_HOLD or when s has been superseded."""
+        end = time.time() + POLL_HOLD
+        while time.time() < end:
+            if self.conn is not s:
+                return None
+            try:
+                j = self.jobs.get(timeout=min(0.5, max(0.05, end - time.time())))
+            except queue.Empty:
+                continue
+            if j.cancelled:
+                continue
+            with self.lock:
+                if self.conn is not s:
+                    self.jobs.put(j)        # a newer session owns the queue now: give the job back
+                    return None
+            return j
+        return None
+
+    def run_job(self, f, s, job):
+        """Send one job and relay its result. True when the job was sent; False when it was not
+        (it then finished with an error, or went back to the queue because s was superseded)."""
+        args = dict(job.args)
+        src = None
+        if job.op == "put":
+            # one open file: size, hash and body all come from the same bytes, or the job fails
+            try:
+                src = open(job.put_src, "rb")
+                size = os.fstat(src.fileno()).st_size
+                h = hashlib.sha256()
+                left = size
+                while left:
+                    blk = src.read(min(1 << 20, left))
+                    if not blk:
+                        raise OSError("changed while it was being read")
+                    h.update(blk)
+                    left -= len(blk)
+                src.seek(0)
+            except OSError as e:
+                if src:
+                    src.close()
+                self.finish(job, {"status": "err", "msg": "cannot read %s: %s" % (job.put_src, e)})
+                return False
+            args["sha256"] = h.hexdigest()
+            args["len"] = size
+        with self.lock:
+            if self.conn is not s:
+                if src:
+                    src.close()
+                self.jobs.put(job)
+                return False
+            job.id = self.next_id
+            self.next_id += 1
+            line = "JOB id=%d op=%s %s\n" % (job.id, job.op, " ".join("%s=%s" % (k, enc(v)) for k, v in args.items()))
+            s.settimeout(120)
+            # the header goes out under the lock, so a replacement session cannot interleave; if the write
+            # fails on a connection that has been superseded, no complete JOB line reached the agent
+            try:
+                job.started = True
+                f.write(line.encode())
+                f.flush()
+            except OSError:
+                if self.conn is not s:
+                    job.started = False
+                    if src:
+                        src.close()
+                    self.jobs.put(job)
+                    return False
+                raise
+        if src is not None:
+            with src:
+                left = size
+                while left:
+                    blk = src.read(min(1 << 20, left))
+                    if not blk:
+                        self.finish(job, {"status": "err", "msg": "%s shrank while it was being sent; connection dropped" % job.put_src})
+                        raise OSError("source shrank during the upload")
+                    f.write(blk)
+                    left -= len(blk)
+        f.flush()
+        s.settimeout(job.timeout + 120)
+        line = f.readline(20000)
+        if not line:
+            raise OSError("the agent closed the connection")
+        verb, kv = parse_line(line)
+        if verb != "RESULT" or int(kv.get("id", -1)) != job.id:
+            raise OSError("unexpected reply %r" % verb)
+        n = int(kv.get("len", "0"))
+        s.settimeout(60)
+        data = b""
+        if n:
+            data = f.read(n)
+            if len(data) != n:
+                raise OSError("short body: %d of %d" % (len(data), n))
+        f.write(b"ACK\n")
+        f.flush()
+        res = dict(kv)
+        if job.op == "get" and res.get("status") == "ok":
+            if hashlib.sha256(data).hexdigest() != res.get("sha256", ""):
+                res = {"status": "err", "msg": "sha256 mismatch after the transfer"}
+            elif job.save:
+                with open(job.save, "wb") as o:
+                    o.write(data)
+                data = b""
+        elif job.op in ("shot",) and res.get("status") == "ok" and job.save:
+            with open(job.save, "wb") as o:
+                o.write(data)
+            data = b""
+        if data:
+            outlen = int(res.get("outlen", len(data))) if job.op == "run" else len(data)
+            if job.op == "run":
+                res["stdout"] = base64.b64encode(data[:outlen]).decode()
+                res["stderr"] = base64.b64encode(data[outlen:]).decode()
+            else:
+                res["text"] = data.decode("utf-8", "replace")
+        if job.op == "power" and res.get("status") == "ok":
+            self.ready.clear()      # the next POLL (if the power request failed) sets it again
+        self.finish(job, res)
+        return True
+
+    def finish(self, job, res):
+        job.result = res
+        job.done.set()
+
+    def submit(self, job, wait):
+        self.jobs.put(job)
+        if not job.done.wait(wait):
+            job.cancelled = True
+            return {"status": "err", "msg": "timed out waiting for the agent (is the VM up and the agent connected?)", "timedout_host": True}
+        return job.result
+
+    # ---- control socket (rosdev client commands) ----
+    def handle_ctl(self, req):
+        op = req["op"]
+        if op == "status":
+            return {"status": "ok", "ready": self.ready.is_set(), "agent": self.agent, "last_poll_age": round(time.time() - self.last_poll, 1) if self.last_poll else None}
+        if op == "wait_ready":
+            ok = self.ready.wait(req.get("timeout", 300))
+            return {"status": "ok" if ok else "err", "ready": ok, "agent": self.agent, "msg": "" if ok else "agent did not connect in time"}
+        if op == "job":
+            timeout = float(req.get("timeout", 60))
+            job = Job(req["jop"], req.get("args", {}), req.get("put_src"), req.get("save"), timeout)
+            wait = req.get("wait_ready", 30) + timeout + 180
+            if not self.ready.wait(req.get("wait_ready", 30)):
+                return {"status": "err", "msg": "no agent connected (VM down, still booting, or the agent is not injected)"}
+            return self.submit(job, wait)
+        if op == "shutdown":
+            sock = os.path.join(vmdir(self.vm), "ctl.sock")
+
+            def bye():
+                time.sleep(0.2)
+                try:
+                    os.unlink(sock)
+                except OSError:
+                    pass
+                os._exit(0)
+            threading.Thread(target=bye, daemon=True).start()
+            return {"status": "ok"}
+        return {"status": "err", "msg": "unknown control op"}
+
+
+class CtlHandler(socketserver.StreamRequestHandler):
+    def handle(self):
+        try:
+            req = json.loads(self.rfile.readline(1 << 20))
+            res = self.server.vmserver.handle_ctl(req)
+        except Exception as e:  # noqa: BLE001 - reported to the client
+            res = {"status": "err", "msg": "server error: %r" % (e,)}
+        self.wfile.write((json.dumps(res) + "\n").encode())
+
+
+class CtlServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+
+
+def load_cfg(vm):
+    p = os.path.join(vmdir(vm), "vm.json")
+    if not os.path.exists(p):
+        return None
+    with open(p) as f:
+        return json.load(f)
+
+
+def save_cfg(vm, cfg):
+    d = vmdir(vm)
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, "vm.json")
+    fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(cfg, f, indent=1)
+
+
+def free_port(vm):
+    os.makedirs(HOME, exist_ok=True)
+    base = 17000 + int(hashlib.sha256(vm.encode()).hexdigest(), 16) % 900
+    for i in range(900):
+        p = 17000 + (base - 17000 + i) % 900
+        s = socket.socket()
+        try:
+            s.bind(("127.0.0.1", p))
+            s.close()
+            if not any(os.path.exists(c) and json.load(open(c)).get("port") == p
+                       for c in (os.path.join(HOME, d, "vm.json") for d in os.listdir(HOME) if os.path.isdir(os.path.join(HOME, d)))):
+                return p
+        except OSError:
+            s.close()
+    die("no free port in 17000-17899")
+
+
+def cmd_serve(a):
+    cfg = load_cfg(a.vm) or {}
+    if a.port:
+        cfg["port"] = a.port
+    if not cfg.get("port"):
+        cfg["port"] = free_port(a.vm)
+    if a.token:
+        cfg["token"] = a.token
+    if not cfg.get("token"):
+        cfg["token"] = secrets.token_hex(16)
+    if not TOKEN_RE.match(cfg["token"]):
+        die("the token must be 8-128 characters of letters, digits, . _ -")
+    d = vmdir(a.vm)
+    os.makedirs(d, exist_ok=True)
+    sock = os.path.join(d, "ctl.sock")
+    if os.path.exists(sock):
+        try:
+            c = socket.socket(socket.AF_UNIX)
+            c.connect(sock)
+            die("a server for %s is already running" % a.vm)
+        except OSError:
+            os.unlink(sock)
+    # both listeners exist before anything is announced, and the settings are saved only after that
+    ls = socket.socket()
+    ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        ls.bind(("127.0.0.1", cfg["port"]))
+    except OSError as e:
+        die("cannot listen on 127.0.0.1:%d: %s" % (cfg["port"], e))
+    ls.listen(4)
+    rp = wp = None
+    if a.daemon:
+        rp, wp = os.pipe()
+        pid = os.fork()
+        if pid:
+            os.close(wp)
+            r, _, _ = select.select([rp], [], [], 15)
+            msg = os.read(rp, 4096) if r else b""
+            if msg.startswith(b"ok"):
+                print("serving %s on 127.0.0.1:%d (guest 10.0.2.2:%d)" % (a.vm, cfg["port"], cfg["port"]))
+                return
+            die("server did not start: %s (see %s/serve.log)" % (msg.decode("utf-8", "replace").strip() or "no answer", d))
+        os.close(rp)
+        os.setsid()
+        log = open(os.path.join(d, "serve.log"), "a", buffering=1)
+        os.dup2(log.fileno(), 1)
+        os.dup2(log.fileno(), 2)
+        os.close(0)
+    try:
+        old_umask = os.umask(0o077)
+        try:
+            ctl = CtlServer(sock, CtlHandler)
+        finally:
+            os.umask(old_umask)
+        save_cfg(a.vm, cfg)
+        with open(os.path.join(d, "serve.pid"), "w") as f:
+            f.write(str(os.getpid()))
+    except Exception as e:  # noqa: BLE001 - reported to the parent
+        try:
+            os.unlink(sock)
+        except OSError:
+            pass
+        if wp is not None:
+            os.write(wp, ("error: %r\n" % (e,)).encode())
+            os._exit(1)
+        die("cannot start the server: %r" % (e,))
+    vs = VmServer(a.vm, cfg["port"], cfg["token"])
+    threading.Thread(target=vs.serve_agents, args=(ls,), daemon=True).start()
+    ctl.vmserver = vs
+    vs.log("serving %s on 127.0.0.1:%d" % (a.vm, cfg["port"]))
+    if wp is not None:
+        os.write(wp, b"ok\n")
+        os.close(wp)
+    try:
+        ctl.serve_forever()
+    finally:
+        try:
+            os.unlink(sock)
+        except OSError:
+            pass
+
+
+def ctl(vm, req, timeout=None):
+    sock = os.path.join(vmdir(vm), "ctl.sock")
+    c = socket.socket(socket.AF_UNIX)
+    try:
+        c.connect(sock)
+    except OSError:
+        die("no server for %s (start it with `rosdev serve %s --daemon` or `rosdev up`)" % (vm, vm), 3)
+    c.settimeout(timeout)
+    c.sendall((json.dumps(req) + "\n").encode())
+    buf = b""
+    while not buf.endswith(b"\n"):
+        d = c.recv(1 << 20)
+        if not d:
+            break
+        buf += d
+    if not buf:
+        die("server closed the connection", 3)
+    return json.loads(buf)
+
+
+def job(a, jop, args=None, timeout=60, **extra):
+    t0 = time.time()
+    res = ctl(a.vm, dict(op="job", jop=jop, args=args or {}, timeout=timeout, wait_ready=getattr(a, "wait", 30), **extra))
+    res["_s"] = round(time.time() - t0, 2)
+    return res
+
+
+def need_ok(res):
+    if res.get("status") != "ok":
+        die("%s (code %s)" % (res.get("msg", "failed"), res.get("code", "-")), 2)
+
+
+def cmd_wait_ready(a):
+    t0 = time.time()
+    res = ctl(a.vm, {"op": "wait_ready", "timeout": a.timeout}, a.timeout + 30)
+    if res.get("status") != "ok":
+        die(res.get("msg", "not ready"), 1)
+    ag = res["agent"]
+    print("ready after %.1fs: os=%s arch=%s computer=%s agent=%s" % (time.time() - t0, ag.get("os"), ag.get("arch"), ag.get("computer"), ag.get("agent")))
+
+
+def cmd_push(a):
+    src = os.path.abspath(a.local)
+    if not os.path.isfile(src):
+        die("not a file: %s" % a.local)
+    dest = a.guest
+    if dest.endswith("\\") or dest.endswith("/"):
+        dest += os.path.basename(src)
+    args = {"path": dest}
+    if a.stage:
+        args["mode"] = "stage"
+    res = job(a, "put", args, timeout=120, put_src=src)
+    need_ok(res)
+    print("pushed %s -> %s: %s, %s bytes, sha256 %s (%.2fs)" % (a.local, dest, res.get("how"), res.get("size"), res.get("sha256", "")[:16], res["_s"]))
+
+
+def cmd_get(a):
+    out = os.path.abspath(a.local)
+    res = job(a, "get", {"path": a.guest}, timeout=120, save=out)
+    need_ok(res)
+    print("got %s -> %s: %s bytes, sha256 %s (%.2fs)" % (a.guest, a.local, res.get("size"), res.get("sha256", "")[:16], res["_s"]))
+
+
+def cmd_run(a):
+    args = {"cmd": a.cmd, "timeout": a.timeout}
+    if not a.raw and not a.detach:
+        args["shell"] = 1
+    if a.detach:
+        args["detach"] = 1
+    if a.cwd:
+        args["cwd"] = a.cwd
+    res = job(a, "run", args, timeout=a.timeout)
+    need_ok(res)
+    if a.detach:
+        print("started pid %s (%.2fs)" % (res.get("pid"), res["_s"]))
+        return
+    sys.stdout.buffer.write(base64.b64decode(res.get("stdout", "")))
+    sys.stdout.buffer.flush()
+    sys.stderr.buffer.write(base64.b64decode(res.get("stderr", "")))
+    sys.stderr.buffer.flush()
+    code = int(res.get("exit", 0))
+    note = " TIMED OUT, killed" if res.get("timedout") == "1" else ""
+    note += " (output truncated)" if res.get("truncated") == "1" else ""
+    print("rosdev: exit=%d (0x%X) in %sms%s" % (code, code, res.get("ms"), note), file=sys.stderr)
+    sys.exit(124 if res.get("timedout") == "1" else (code if 0 <= code <= 255 else 125))
+
+
+def png_from_bmp(bmp):
+    off = struct.unpack_from("<I", bmp, 10)[0]
+    w, h, planes, bpp = struct.unpack_from("<iiHH", bmp, 18)
+    if bpp != 24:
+        die("unexpected BMP depth %d" % bpp)
+    top_down = h < 0
+    h = abs(h)
+    stride = (w * 3 + 3) & ~3
+    rows = []
+    for y in range(h):
+        r = (y if top_down else h - 1 - y) * stride + off
+        row = bytearray(bmp[r:r + w * 3])
+        row[0::3], row[2::3] = row[2::3], row[0::3]
+        rows.append(b"\x00" + bytes(row))
+
+    def chunk(t, d):
+        c = struct.pack(">I", len(d)) + t + d
+        return c + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) +
+            chunk(b"IDAT", zlib.compress(b"".join(rows), 6)) + chunk(b"IEND", b""))
+
+
+def cmd_shot(a):
+    out = os.path.abspath(a.out)
+    raw = out if out.lower().endswith(".bmp") else out + ".bmp.tmp"
+    res = job(a, "shot", {}, timeout=60, save=raw)
+    need_ok(res)
+    if raw != out:
+        with open(raw, "rb") as f:
+            png = png_from_bmp(f.read())
+        os.unlink(raw)
+        with open(out, "wb") as f:
+            f.write(png)
+    print("screenshot %sx%s -> %s (%.2fs)" % (res.get("width"), res.get("height"), a.out, res["_s"]))
+
+
+def cmd_qshot(a):
+    d = vmdir(a.vm)
+    out = os.path.abspath(a.out)
+    c = socket.socket(socket.AF_UNIX)
+    c.settimeout(20)
+    try:
+        c.connect(os.path.join(d, "qmp.sock"))
+    except OSError:
+        die("no QMP socket for %s (VM not started by `rosdev up`?)" % a.vm, 3)
+    f = c.makefile("rwb")
+    json.loads(f.readline())            # greeting
+
+    def qmp(cmd):
+        f.write((json.dumps(cmd) + "\n").encode())
+        f.flush()
+        while True:                     # asynchronous events can arrive before the reply
+            line = f.readline()
+            if not line:
+                die("QMP closed the connection")
+            r = json.loads(line)
+            if "return" in r or "error" in r:
+                return r
+    qmp({"execute": "qmp_capabilities"})
+    r = qmp({"execute": "screendump", "arguments": {"filename": out, "format": "png"}})
+    if "error" in r:
+        die("screendump failed: %s" % r["error"].get("desc"))
+    print("screenshot -> %s" % a.out)
+
+
+def cmd_simple(a):
+    ops = {"ps": ("ps", {}), "info": ("info", {}), "restart-agent": ("restart", {}),
+           "reboot": ("power", {"mode": "reboot"}), "shutdown": ("power", {"mode": "shutdown"}),
+           "dumps": ("dumps", {"dir": getattr(a, "dir", "") or ""})}
+    if a.cmdname == "kill":
+        args = {"pid": a.target} if a.target.isdigit() else {"name": a.target}
+        if a.tree:
+            args["tree"] = 1
+        res = job(a, "kill", args)
+        need_ok(res)
+        print("killed %s, failed %s" % (res.get("killed"), res.get("failed")))
+        return
+    if a.cmdname == "modules":
+        res = job(a, "modules", {"pid": a.target} if a.target.isdigit() else {"name": a.target})
+        need_ok(res)
+        print(res.get("text", ""), end="")
+        return
+    if a.cmdname == "events":
+        res = job(a, "events", {"log": a.log, "count": a.count, "source": a.source or ""})
+        need_ok(res)
+        print(res.get("text", ""), end="")
+        return
+    jop, args = ops[a.cmdname]
+    res = job(a, jop, args)
+    need_ok(res)
+    if a.cmdname == "restart-agent":
+        print("agent restarting (%.2fs); wait-ready again" % res["_s"])
+        return
+    if a.cmdname in ("reboot", "shutdown"):
+        print("%s requested (%.2fs)" % (a.cmdname, res["_s"]))
+        return
+    print(res.get("text", ""), end="")
+
+
+def pid_of(path):
+    try:
+        return int(open(path).read().strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def proc_args(pid):
+    try:
+        with open("/proc/%d/cmdline" % pid, "rb") as f:
+            return f.read().split(b"\0")
+    except OSError:
+        return None
+
+
+def kill_pid(pid, seq, exe_suffix):
+    """SIGTERM then SIGKILL pid, but only while its command line still holds the argument sequence seq
+    (adjacent, in order) and one of its first three arguments ends in exe_suffix."""
+    want = [x.encode() for x in seq]
+
+    def mine():
+        args = proc_args(pid)
+        if args is None or not any(a.endswith(exe_suffix.encode()) for a in args[:3]):
+            return False
+        return any(args[i:i + len(want)] == want for i in range(len(args)))
+    if pid <= 0 or not mine():
+        return
+    os.kill(pid, signal.SIGTERM)
+    for _ in range(50):
+        if not os.path.exists("/proc/%d" % pid):
+            return
+        time.sleep(0.2)
+    if mine():
+        os.kill(pid, signal.SIGKILL)
+
+
+def cmd_up(a):
+    d = vmdir(a.vm)
+    arch = a.arch
+    owner = a.owner or a.vm.split("-")[0]
+    if not NAME_RE.match(owner):
+        die("bad owner %r" % owner)
+    if os.path.exists(os.path.join(d, "vm.json")) and not a.reuse:
+        die("%s already exists (use --reuse to boot its overlay again, or `rosdev down %s --purge`)" % (d, a.vm))
+    os.makedirs(d, exist_ok=True)
+    cfg = load_cfg(a.vm) or {}
+    cfg.setdefault("port", free_port(a.vm))
+    cfg.setdefault("token", secrets.token_hex(16))
+    cfg.update(arch=arch, owner=owner, smp=a.smp, mem=a.mem)
+    overlay = os.path.join(d, "sys.qcow2")
+    if not a.reuse:
+        base = a.base or os.environ.get("ROSDEV_BASE_" + arch.upper())
+        agent = a.agent or os.environ.get("ROSDEV_AGENT_" + arch.upper())
+        if not base or not agent:
+            die("need --base DISK and --agent rosdev.exe (or ROSDEV_BASE_%s / ROSDEV_AGENT_%s)" % (arch.upper(), arch.upper()))
+        subprocess.check_call(["qemu-img", "create", "-q", "-f", "qcow2", "-F", "raw", "-b", os.path.abspath(base), overlay])
+        subprocess.check_call([sys.executable, os.path.join(HERE, "rosdev-inject"), overlay, "--agent", agent,
+                               "--port", str(cfg["port"]), "--token", cfg["token"]])
+    save_cfg(a.vm, cfg)
+    q = "qemu-system-i386" if arch == "i386" else "qemu-system-x86_64"
+    start = os.path.join(d, "start.sh")
+    qs = shlex.quote
+    with open(start, "w") as f:
+        f.write("#!/bin/bash\nexport VMSLOT=1 VMSLOT_OWNER=%s\n" % qs(owner))
+        f.write('eval "$(/usr/local/bin/vmslot acquire %d %s %s --no-ip --pid $$)"\n' % (a.smp, qs(owner), qs(a.vm)))
+        f.write("exec %s -name %s -machine pc,accel=kvm -cpu host -smp %d -m %d -rtc base=utc \\\n" % (q, qs(a.vm), a.smp, a.mem))
+        f.write(" -drive file=%s,format=qcow2,if=ide,index=0 -netdev user,id=n0 -device e1000,netdev=n0 \\\n" % qs(overlay))
+        f.write(" -vga std -display none -usb -device usb-tablet \\\n")
+        f.write(" -qmp unix:%s,server,nowait -monitor unix:%s,server,nowait \\\n" % (qs(os.path.join(d, "qmp.sock")), qs(os.path.join(d, "mon.sock"))))
+        f.write(" -serial file:%s -pidfile %s\n" % (qs(os.path.join(d, "serial.log")), qs(os.path.join(d, "qemu.pid"))))
+    os.chmod(start, 0o755)
+    subprocess.run([sys.executable, os.path.abspath(__file__), "serve", a.vm, "--daemon"], check=True)
+    out = open(os.path.join(d, "start.out"), "w")
+    starter = subprocess.Popen([start], stdout=out, stderr=out, stdin=subprocess.DEVNULL, start_new_session=True)
+    with open(os.path.join(d, "starter.pid"), "w") as f:
+        f.write(str(starter.pid))
+    print("VM %s starting (vmslot may queue it); next: rosdev wait-ready %s --timeout 900" % (a.vm, a.vm))
+
+
+def cmd_stop_server(a):
+    ctl(a.vm, {"op": "shutdown"})
+    sock = os.path.join(vmdir(a.vm), "ctl.sock")
+    for _ in range(50):
+        if not os.path.exists(sock):
+            break
+        time.sleep(0.1)
+    print("server for %s stopped; the VM keeps running and the agent reconnects to the next `rosdev serve`" % a.vm)
+
+
+def cmd_down(a):
+    d = vmdir(a.vm)
+    if not os.path.isdir(d):
+        die("no such VM: %s" % a.vm)
+    # exact pids from this VM's own files; the command line must still be this VM's qemu or server
+    # a start still waiting in the slot broker: ending the script ends its vmslot request (--pid $$)
+    kill_pid(pid_of(os.path.join(d, "starter.pid")), [os.path.join(d, "start.sh")], "bash")
+    kill_pid(pid_of(os.path.join(d, "qemu.pid")), ["-name", a.vm], "qemu-system-x86_64" if load_cfg(a.vm) and load_cfg(a.vm).get("arch") != "i386" else "qemu-system-i386")
+    kill_pid(pid_of(os.path.join(d, "serve.pid")), ["serve", a.vm], "rosdev")
+    for n in ("qemu.pid", "serve.pid", "starter.pid"):
+        try:
+            os.unlink(os.path.join(d, n))
+        except OSError:
+            pass
+    if a.purge:
+        import shutil
+        shutil.rmtree(d)
+        print("removed %s" % d)
+    else:
+        print("stopped %s (overlay kept in %s)" % (a.vm, d))
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="rosdev", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmdname", required=True)
+
+    def vmarg(p, wait=True):
+        p.add_argument("vm")
+        if wait:
+            p.add_argument("--wait", type=float, default=30, help="seconds to wait for the agent to be connected")
+        return p
+
+    p = vmarg(sub.add_parser("up", help="overlay, inject the agent, start the VM through vmslot and the server"), False)
+    p.add_argument("--arch", choices=["amd64", "i386"], required=True)
+    p.add_argument("--base"); p.add_argument("--agent"); p.add_argument("--owner")
+    p.add_argument("--smp", type=int, default=2); p.add_argument("--mem", type=int, default=2048)
+    p.add_argument("--reuse", action="store_true")
+    p.set_defaults(fn=cmd_up)
+    p = vmarg(sub.add_parser("down"), False)
+    p.add_argument("--purge", action="store_true")
+    p.set_defaults(fn=cmd_down)
+    p = vmarg(sub.add_parser("serve"), False)
+    p.add_argument("--port", type=int); p.add_argument("--token"); p.add_argument("--daemon", action="store_true")
+    p.set_defaults(fn=cmd_serve)
+    vmarg(sub.add_parser("stop-server"), False).set_defaults(fn=cmd_stop_server)
+    p = vmarg(sub.add_parser("wait-ready"), False)
+    p.add_argument("--timeout", type=float, default=300)
+    p.set_defaults(fn=cmd_wait_ready)
+    p = vmarg(sub.add_parser("push"))
+    p.add_argument("local"); p.add_argument("guest"); p.add_argument("--stage", action="store_true", help="queue the replacement for the next reboot (file in use)")
+    p.set_defaults(fn=cmd_push)
+    p = vmarg(sub.add_parser("get"))
+    p.add_argument("guest"); p.add_argument("local")
+    p.set_defaults(fn=cmd_get)
+    p = vmarg(sub.add_parser("run"))
+    p.add_argument("cmd"); p.add_argument("--timeout", type=int, default=60)
+    p.add_argument("--raw", action="store_true", help="no cmd.exe /c wrapper")
+    p.add_argument("--detach", action="store_true", help="start it and return the pid (GUI programs)")
+    p.add_argument("--cwd")
+    p.set_defaults(fn=cmd_run)
+    p = vmarg(sub.add_parser("shot"))
+    p.add_argument("out")
+    p.set_defaults(fn=cmd_shot)
+    p = vmarg(sub.add_parser("qshot"), False)
+    p.add_argument("out")
+    p.set_defaults(fn=cmd_qshot)
+    for n in ("ps", "info", "reboot", "shutdown", "restart-agent"):
+        vmarg(sub.add_parser(n)).set_defaults(fn=cmd_simple)
+    p = vmarg(sub.add_parser("kill")); p.add_argument("target", help="pid or image name"); p.add_argument("--tree", action="store_true", help="also its child processes"); p.set_defaults(fn=cmd_simple)
+    p = vmarg(sub.add_parser("modules")); p.add_argument("target", help="pid or image name"); p.set_defaults(fn=cmd_simple)
+    p = vmarg(sub.add_parser("dumps")); p.add_argument("--dir"); p.set_defaults(fn=cmd_simple)
+    p = vmarg(sub.add_parser("events"))
+    p.add_argument("--log", default="Application"); p.add_argument("--count", type=int, default=20); p.add_argument("--source")
+    p.set_defaults(fn=cmd_simple)
+    a = ap.parse_args()
+    a.fn(a)
+
+
+if __name__ == "__main__":
+    main()
