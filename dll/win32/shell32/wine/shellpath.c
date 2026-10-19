@@ -4007,7 +4007,11 @@ HRESULT WINAPI SHGetFolderPathAndSubDirW(
 #ifdef __REACTOS__
     /* As on Windows: the folder gets the attributes of its definition (Downloads is read-only) */
     if (!ret && !pszSubPath && CSIDL_Data[folder].attributes)
-        SetFileAttributesW(szBuildPath, GetFileAttributesW(szBuildPath) | CSIDL_Data[folder].attributes);
+    {
+        DWORD dwFolderAttributes = GetFileAttributesW(szBuildPath);
+        if (dwFolderAttributes != INVALID_FILE_ATTRIBUTES)
+            SetFileAttributesW(szBuildPath, dwFolderAttributes | CSIDL_Data[folder].attributes);
+    }
 #endif
 
     TRACE("Created missing system directory %s\n", debugstr_w(szBuildPath));
@@ -4022,8 +4026,8 @@ end:
 
         /* make the directory a read-only folder */
         dwAttributes = GetFileAttributesW(szBuildPath);
-        dwAttributes |= FILE_ATTRIBUTE_READONLY;
-        SetFileAttributesW(szBuildPath, dwAttributes);
+        if (dwAttributes != INVALID_FILE_ATTRIBUTES)
+            SetFileAttributesW(szBuildPath, dwAttributes | FILE_ATTRIBUTE_READONLY);
 
         /* build the desktop.ini file path */
         PathAppendW(szBuildPath, L"desktop.ini");
@@ -4041,8 +4045,8 @@ end:
 
         /* make the desktop.ini a system and hidden file */
         dwAttributes = GetFileAttributesW(szBuildPath);
-        dwAttributes |= FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN;
-        SetFileAttributesW(szBuildPath, dwAttributes);
+        if (dwAttributes != INVALID_FILE_ATTRIBUTES)
+            SetFileAttributesW(szBuildPath, dwAttributes | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN);
     }
 #endif
     TRACE("returning 0x%08lx (final path is %s)\n", hr, debugstr_w(szBuildPath));
