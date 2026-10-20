@@ -5756,8 +5756,10 @@ MmZeroSegmentRange(
         /*
          * The page comes zeroed. The wait entry set above holds the page while we get one; MmRequestPageMemoryConsumer
          * does not itself wait, so wait for memory the same bounded way, or give up (the finalize below drops the wait
-         * entry and the failure returns). Read only the one page that straddles Start, to keep its bytes below Start;
-         * a genuine read error there is not memory pressure and is left to propagate.
+         * entry and the failure returns). A page the range only partly covers (the one that straddles Start, keeping
+         * its bytes below Start, and the one that straddles End, keeping its bytes above End) is read first so those
+         * bytes survive; only the covered span [ZeroStart, ZeroEnd) is then zeroed. A whole page inside [Start, End)
+         * is left as a zero page without a read. A genuine read error is not memory pressure and is left to propagate.
          */
         for (;;)
         {
@@ -5767,7 +5769,8 @@ MmZeroSegmentRange(
             if (!MiZeroSegmentWaitForMemory(&WaitState))
                 break;
         }
-        if (NT_SUCCESS(Status) && (Offset.QuadPart < Start))
+        if (NT_SUCCESS(Status) &&
+            (ZeroStart > Offset.QuadPart || ZeroEnd < Offset.QuadPart + PAGE_SIZE))
         {
             Status = MiReadSegmentPage(Segment, Offset.QuadPart, Page);
             if (NT_SUCCESS(Status) && (ZeroStart < ZeroEnd))

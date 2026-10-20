@@ -275,6 +275,21 @@ Test_CcZeroData(PFILE_OBJECT FileObject)
         Zeros = CountCached(FileObject, 0x40200, 0x1e00, 0);
         ok_eq_ulong(Zeros, 0x1e00);
     }
+
+    /*
+     * 8. The page that straddles End, below the valid data length, is a cold partial page at its tail. Zeroing only
+     * the head of such a page (here [0x48000, 0x48200) of the non-resident, fully valid page 0x48000) must keep the
+     * disk bytes above End, exactly as the page straddling Start keeps the bytes below Start. Regression: the final
+     * partial page was read only when Offset < Start, so a cold tail page was published fully zeroed and the bytes
+     * in [End, end of page) were destroyed.
+     */
+    Fcb->Header.ValidDataLength.QuadPart = TEST_FILE_SIZE;
+    CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->Header.AllocationSize);
+    ok_bool_true(ZeroData(FileObject, 0x48000, 0x48200), "CcZeroData");
+    Zeros = CountCached(FileObject, 0x48000, 0x200, 0);
+    ok_eq_ulong(Zeros, 0x200);
+    Disk = CountCached(FileObject, 0x48200, 0xe00, DISK_BYTE);
+    ok_eq_ulong(Disk, 0xe00);
 }
 
 static
