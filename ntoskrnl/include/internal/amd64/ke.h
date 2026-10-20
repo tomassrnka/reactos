@@ -5,6 +5,8 @@
 extern "C" {
 #endif
 
+extern ULONG KiMxCsrMask;
+
 #define X86_EFLAGS_TF           0x00000100 /* Trap flag */
 #define X86_EFLAGS_IF           0x00000200 /* Interrupt Enable flag */
 #define X86_EFLAGS_IOPL         0x00003000 /* I/O Privilege Level bits */

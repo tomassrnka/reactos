@@ -28,6 +28,8 @@ KSPIN_LOCK KiFreezeExecutionLock;
 /* The local APIC is in x2APIC mode: EOIs are MSR writes */
 BOOLEAN KiX2ApicMode;
 
+ULONG KiMxCsrMask;
+
 
 KIPCR KiInitialPcr;
 
@@ -168,6 +170,8 @@ KiInitializeCpu(PKIPCR Pcr)
 {
     ULONG64 Pat;
     ULONG64 FeatureBits;
+    ULONG MxCsrMask;
+    DECLSPEC_ALIGN(16) XMM_SAVE_AREA32 FxSaveArea;
 
     /* Initialize gs */
     KiInitializeSegments();
@@ -245,6 +249,17 @@ KiInitializeCpu(PKIPCR Pcr)
 
     /* Initialize MXCSR */
     _mm_setcsr(INITIAL_MXCSR);
+
+    /* Use only MXCSR bits supported by every processor */
+    FxSaveArea.MxCsr_Mask = 0;
+    _ReadWriteBarrier();
+    _fxsave(&FxSaveArea);
+    _ReadWriteBarrier();
+    MxCsrMask = FxSaveArea.MxCsr_Mask ? FxSaveArea.MxCsr_Mask : 0xFFBF;
+    if (Pcr->Prcb.Number == 0)
+        KiMxCsrMask = MxCsrMask;
+    else
+        InterlockedAnd((PLONG)&KiMxCsrMask, (LONG)MxCsrMask);
 
     KeSetCurrentIrql(PASSIVE_LEVEL);
 }
