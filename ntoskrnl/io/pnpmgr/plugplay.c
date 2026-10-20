@@ -162,8 +162,14 @@ IopQueueDevicePropertyChangeEvent(
     RtlCopyMemory(EventEntry->Event.TargetDevice.DeviceIds,
                   DeviceId->Buffer, DeviceId->Length);
 
-    InsertHeadList(&IopPnpEventQueueHead, &EventEntry->ListEntry);
-    KeSetEvent(&IopPnpNotifyEvent, 0, FALSE);
+    /*
+     * Publish through IopQueuePnpEvent so the insertion is serialized by
+     * IopPnpEventQueueLock. Inserting directly raced with the consumer in
+     * NtGetPlugPlayEvent/NtPlugPlayControl, which removes and frees entries
+     * under that lock -- an unlocked InsertHeadList could corrupt the list and
+     * write through freed links.
+     */
+    IopQueuePnpEvent(EventEntry);
 
     return STATUS_SUCCESS;
 }
