@@ -38,6 +38,7 @@ extern void func_LdrLoadDll(void);
 extern void func_LdrShutdownThread(void);
 extern void func_load_notifications(void);
 extern void func_LpcCallbackRequest(void);
+extern void func_MxCsrMask(void);
 extern void func_NtAcceptConnectPort(void);
 extern void func_NtAccessCheck(void);
 extern void func_NtAccessCheckByType(void);
@@ -229,6 +230,7 @@ const struct test winetest_testlist[] =
     { "LdrShutdownThread",              func_LdrShutdownThread },
     { "load_notifications",             func_load_notifications },
     { "LpcCallbackRequest",             func_LpcCallbackRequest },
+    { "MxCsrMask",                      func_MxCsrMask },
     { "NtAcceptConnectPort",            func_NtAcceptConnectPort },
     { "NtAccessCheck",                  func_NtAccessCheck },
     { "NtAccessCheckByType",            func_NtAccessCheckByType },

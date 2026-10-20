@@ -52,6 +52,7 @@ list(APPEND SOURCE
     load_notifications.c
     locale.c
     LpcCallbackRequest.c
+    MxCsrMask.c
     NtAcceptConnectPort.c
     NtAccessCheck.c
     NtAccessCheckByType.c
