@@ -295,6 +295,28 @@ static HRESULT WINAPI HTMLLinkElement_put_media(IHTMLLinkElement *iface, BSTR v)
 
     TRACE("(%p)->(%s)\n", This, debugstr_w(v));
 
+    /*
+     * Gecko re-evaluates the stylesheet when media is set, which fires the link's load event again. A handler
+     * like the common onload="this.media='all'" then sets media from inside that event, again and again, and the
+     * UI thread never gets back to its message loop. Browsers do nothing for an unchanged value, so do the same.
+     */
+    {
+        static const WCHAR empty[] = {0};
+        const PRUnichar *cur_str;
+        nsAString cur;
+        BOOL same = FALSE;
+
+        nsAString_Init(&cur, NULL);
+        nsres = nsIDOMHTMLLinkElement_GetMedia(This->nslink, &cur);
+        if(NS_SUCCEEDED(nsres)) {
+            nsAString_GetData(&cur, &cur_str);
+            same = !strcmpW(cur_str, v ? v : empty);
+        }
+        nsAString_Finish(&cur);
+        if(same)
+            return S_OK;
+    }
+
     nsAString_InitDepend(&str, v);
 
     nsres = nsIDOMHTMLLinkElement_SetMedia(This->nslink, &str);
