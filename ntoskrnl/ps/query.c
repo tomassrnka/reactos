@@ -3155,25 +3155,46 @@ NtSetInformationThread(
                         }
                         else
 #endif
-                        /* Check if we're in the expansion range */
-                        if (TlsIndex > TLS_MINIMUM_AVAILABLE - 1)
                         {
-                            if (TlsIndex < (TLS_MINIMUM_AVAILABLE +
-                                            TLS_EXPANSION_SLOTS) - 1)
+                            PVOID *ExpansionSlots;
+                            PVOID *Slot;
+
+                            /* The TEB is user memory and TlsExpansionSlots is
+                               user controlled: probe the selected slot and wrap
+                               the writes in SEH so a bad pointer cannot fault in
+                               the kernel or be used for a kernel write. */
+                            _SEH2_TRY
                             {
-                                /* Check if we have expansion slots */
-                                PVOID* ExpansionSlots = Teb->TlsExpansionSlots;
-                                if (ExpansionSlots)
+                                /* Check if we're in the expansion range */
+                                if (TlsIndex > TLS_MINIMUM_AVAILABLE - 1)
                                 {
-                                    /* Clear the index */
-                                    ExpansionSlots[TlsIndex - TLS_MINIMUM_AVAILABLE] = 0;
+                                    if (TlsIndex < (TLS_MINIMUM_AVAILABLE +
+                                                    TLS_EXPANSION_SLOTS) - 1)
+                                    {
+                                        /* Capture the expansion vector first */
+                                        ExpansionSlots = Teb->TlsExpansionSlots;
+                                        if (ExpansionSlots)
+                                        {
+                                            /* Probe and clear the index */
+                                            Slot = &ExpansionSlots[TlsIndex - TLS_MINIMUM_AVAILABLE];
+                                            ProbeForWrite(Slot, sizeof(PVOID), sizeof(PVOID));
+                                            *Slot = NULL;
+                                        }
+                                    }
+                                }
+                                else
+                                {
+                                    /* Probe and clear the index */
+                                    ProbeForWrite(&Teb->TlsSlots[TlsIndex],
+                                                  sizeof(PVOID), sizeof(PVOID));
+                                    Teb->TlsSlots[TlsIndex] = NULL;
                                 }
                             }
-                        }
-                        else
-                        {
-                            /* Clear the index */
-                            Teb->TlsSlots[TlsIndex] = NULL;
+                            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                            {
+                                Status = _SEH2_GetExceptionCode();
+                            }
+                            _SEH2_END;
                         }
                     }
 
