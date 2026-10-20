@@ -409,9 +409,28 @@ HvpCreateHiveFreeCellList(
         while (FreeOffset < Bin->Size)
         {
             FreeBlock = (PHCELL)((ULONG_PTR)Bin + FreeOffset);
+
+            /* The cell header itself must lie fully within the bin before we
+               can read and trust FreeBlock->Size. */
+            if (FreeOffset > Bin->Size - sizeof(HCELL))
+            {
+                DPRINT1("Cell header at offset 0x%lx runs past the bin end (bin size 0x%lx), the hive is corrupt\n",
+                        (ULONG)Bin->FileOffset + FreeOffset, Bin->Size);
+                return STATUS_REGISTRY_CORRUPT;
+            }
+
             CellSize = (FreeBlock->Size >= 0) ? (ULONG)FreeBlock->Size
                                               : 0 - (ULONG)FreeBlock->Size;
-            if (CellSize == 0 || CellSize > Bin->Size - FreeOffset)
+
+            /* A valid cell is at least large enough to hold its header plus the
+               free-list link that HvpAddFree writes, is a multiple of the 8-byte
+               cell granularity, and lies entirely within the remaining bin
+               space.  Rejecting undersized, unaligned or out-of-bounds cells
+               here stops HvpAddFree from writing its 4-byte link past the bin
+               (e.g. a size-4 free cell at the tail of a bin). */
+            if (CellSize < sizeof(HCELL) + sizeof(HCELL_INDEX) ||
+                (CellSize & (sizeof(HCELL) + sizeof(HCELL_INDEX) - 1)) != 0 ||
+                CellSize > Bin->Size - FreeOffset)
             {
                 /* Where this cell really ends is lost */
                 DPRINT1("Cell at offset 0x%lx has a bad size 0x%lx, the hive is corrupt\n",
