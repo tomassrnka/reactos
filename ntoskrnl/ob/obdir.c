@@ -366,6 +366,61 @@ ObpDeleteEntryDirectory(POBP_LOOKUP_CONTEXT Context)
     return TRUE;
 }
 
+/*++
+* @name ObpDeleteObjectDirectoryEntry
+*
+*     Unlinks a specific object from its directory bucket by identity.
+*
+* @param Context
+*        The lookup context recording the bucket the object was inserted into.
+*
+* @param Object
+*        The object whose directory entry is to be removed.
+*
+* @return TRUE if the entry was found and removed, FALSE otherwise.
+*
+* @remarks Unlike ObpDeleteEntryDirectory, which removes the bucket head and so
+*          relies on a preceding lookup to position the target there, this walks
+*          the chain for the matching object. ObInsertObject's failure cleanup
+*          needs it because a symbolic-link target lookup can move another entry
+*          to the head after the new object was inserted, so the head is not
+*          guaranteed to still be the new object.
+*
+*--*/
+BOOLEAN
+NTAPI
+ObpDeleteObjectDirectoryEntry(IN POBP_LOOKUP_CONTEXT Context,
+                             IN PVOID Object)
+{
+    POBJECT_DIRECTORY Directory;
+    POBJECT_DIRECTORY_ENTRY *AllocatedEntry;
+    POBJECT_DIRECTORY_ENTRY CurrentEntry;
+
+    /* Get the Directory */
+    Directory = Context->Directory;
+    if (!Directory) return FALSE;
+
+    /* Walk the bucket for the entry that owns this object */
+    AllocatedEntry = &Directory->HashBuckets[Context->HashIndex];
+    while ((CurrentEntry = *AllocatedEntry))
+    {
+        if (CurrentEntry->Object == Object)
+        {
+            /* Unlink and free this exact entry */
+            *AllocatedEntry = CurrentEntry->ChainLink;
+            CurrentEntry->ChainLink = NULL;
+            ExFreePoolWithTag(CurrentEntry, OB_DIR_TAG);
+            return TRUE;
+        }
+
+        /* Move to the next entry */
+        AllocatedEntry = &CurrentEntry->ChainLink;
+    }
+
+    /* The object was not in its directory */
+    return FALSE;
+}
+
 /* FUNCTIONS **************************************************************/
 
 /*++

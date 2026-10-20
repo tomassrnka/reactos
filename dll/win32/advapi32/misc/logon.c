@@ -580,6 +580,136 @@ InsertTokenToProcessCommon(
     return STATUS_SUCCESS;
 }
 
+/*
+ * The caller's descriptor decides; an owner, group or DACL it leaves out
+ * comes from the default descriptor, as creation would have defaulted it.
+ * Returns the descriptor to apply: the caller's own when it is complete.
+ */
+static PSECURITY_DESCRIPTOR
+MergeProcessSecurity(
+    _In_ PSECURITY_DESCRIPTOR Explicit,
+    _In_ PSECURITY_DESCRIPTOR Default,
+    _Out_ PSECURITY_DESCRIPTOR Merged)
+{
+    const SECURITY_DESCRIPTOR_CONTROL DaclBits = SE_DACL_AUTO_INHERIT_REQ |
+                                                 SE_DACL_AUTO_INHERITED |
+                                                 SE_DACL_PROTECTED;
+    PSECURITY_DESCRIPTOR DaclSource = Explicit;
+    SECURITY_DESCRIPTOR_CONTROL Control = 0;
+    PSID Owner = NULL, Group = NULL;
+    PACL Dacl = NULL;
+    BOOL Present = FALSE, Defaulted;
+    DWORD Revision;
+
+    if (!GetSecurityDescriptorOwner(Explicit, &Owner, &Defaulted)) Owner = NULL;
+    if (!GetSecurityDescriptorGroup(Explicit, &Group, &Defaulted)) Group = NULL;
+    if (!GetSecurityDescriptorDacl(Explicit, &Present, &Dacl, &Defaulted)) Present = FALSE;
+    if (Owner && Group && Present) return Explicit;
+
+    if (!Owner) GetSecurityDescriptorOwner(Default, &Owner, &Defaulted);
+    if (!Group) GetSecurityDescriptorGroup(Default, &Group, &Defaulted);
+    if (!Present)
+    {
+        DaclSource = Default;
+        GetSecurityDescriptorDacl(Default, &Present, &Dacl, &Defaulted);
+    }
+    InitializeSecurityDescriptor(Merged, SECURITY_DESCRIPTOR_REVISION);
+    SetSecurityDescriptorOwner(Merged, Owner, FALSE);
+    SetSecurityDescriptorGroup(Merged, Group, FALSE);
+    SetSecurityDescriptorDacl(Merged, Present, Dacl, FALSE);
+    if (GetSecurityDescriptorControl(DaclSource, &Control, &Revision))
+        SetSecurityDescriptorControl(Merged, DaclBits, Control & DaclBits);
+    return Merged;
+}
+
+/*
+ * The NT 5 creation path installs the primary token after creating both
+ * objects. Complete their NT 6 labels before releasing the suspended thread.
+ * Native ProcessAccessToken assignment alone does not relabel objects.
+ */
+static BOOL
+SetProcessTokenLabel(
+    HANDLE Object,
+    HANDLE Token,
+    PSECURITY_DESCRIPTOR ExplicitDescriptor)
+{
+    ULONG TokenBuffer[(sizeof(TOKEN_MANDATORY_LABEL) + SECURITY_MAX_SID_SIZE + sizeof(ULONG) - 1) / sizeof(ULONG)];
+    PTOKEN_MANDATORY_LABEL Label = (PVOID)TokenBuffer;
+    ULONG AclBuffer[16], Length, Index;
+    SECURITY_DESCRIPTOR Descriptor;
+    PSECURITY_DESCRIPTOR Existing = NULL;
+    PACE_HEADER Ace;
+    PACL Sacl = NULL;
+    BOOLEAN HasLabel = FALSE;
+    BOOL Present, Defaulted, Ret;
+    DWORD Error;
+    NTSTATUS Status;
+
+    if (!GetTokenInformation(Token, TokenIntegrityLevel, TokenBuffer, sizeof(TokenBuffer), &Length))
+        return FALSE;
+
+    if (ExplicitDescriptor &&
+        GetSecurityDescriptorSacl(ExplicitDescriptor, &Present, &Sacl, &Defaulted) &&
+        Present && Sacl)
+    {
+        for (Index = 0; Index < Sacl->AceCount; ++Index)
+        {
+            if (!GetAce(Sacl, Index, (PVOID *)&Ace)) return FALSE;
+            if (Ace->AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE) HasLabel = TRUE;
+        }
+    }
+
+    if (HasLabel)
+    {
+        /* Creation has already validated the explicit label and added its minimum policy. */
+        Error = GetSecurityInfo(Object, SE_KERNEL_OBJECT, LABEL_SECURITY_INFORMATION,
+                                NULL, NULL, NULL, &Sacl, &Existing);
+        if (Error != ERROR_SUCCESS)
+        {
+            SetLastError(Error);
+            return FALSE;
+        }
+    }
+    else
+    {
+        Sacl = (PACL)AclBuffer;
+        InitializeAcl(Sacl, sizeof(AclBuffer), ACL_REVISION);
+        Status = RtlAddMandatoryAce(Sacl, ACL_REVISION, 0, Label->Label.Sid,
+                                    SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+                                    SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | SYSTEM_MANDATORY_LABEL_NO_READ_UP);
+        if (!NT_SUCCESS(Status))
+        {
+            SetLastError(RtlNtStatusToDosError(Status));
+            return FALSE;
+        }
+    }
+
+    InitializeSecurityDescriptor(&Descriptor, SECURITY_DESCRIPTOR_REVISION);
+    SetSecurityDescriptorSacl(&Descriptor, TRUE, Sacl, FALSE);
+
+    /* Use the assigned token for the label ceiling, just as during NT 6 creation. */
+    Ret = ImpersonateLoggedOnUser(Token);
+    if (Ret)
+    {
+        Ret = SetKernelObjectSecurity(Object, LABEL_SECURITY_INFORMATION, &Descriptor);
+        Error = GetLastError();
+        if (!RevertToSelf())
+        {
+            Error = GetLastError();
+            Ret = FALSE;
+        }
+        /* Creation reports a missing relabel privilege, unlike a later label update. */
+        if (!Ret && Error == ERROR_INVALID_LABEL) Error = ERROR_PRIVILEGE_NOT_HELD;
+    }
+    else
+    {
+        Error = GetLastError();
+    }
+    if (Existing) LocalFree(Existing);
+    if (!Ret) SetLastError(Error);
+    return Ret;
+}
+
 /**
  * @brief
  * Internal function that serves as a helper for
@@ -644,11 +774,13 @@ CreateProcessAsUserCommon(
     _Inout_ LPPROCESS_INFORMATION lpProcessInformation)
 {
     NTSTATUS Status = STATUS_SUCCESS, StatusOnExit;
+    DWORD SecurityError = ERROR_SUCCESS;
     BOOL Success;
     TOKEN_TYPE Type;
     ULONG ReturnLength;
     OBJECT_ATTRIBUTES ObjectAttributes;
     PSECURITY_DESCRIPTOR DefaultSd = NULL, ProcessSd, ThreadSd;
+    SECURITY_DESCRIPTOR MergedProcessSd, MergedThreadSd;
     HANDLE hTokenDup = NULL;
     HANDLE OriginalImpersonationToken = NULL;
     HANDLE NullToken = NULL;
@@ -837,7 +969,8 @@ CreateProcessAsUserCommon(
          */
         if (lpProcessAttributes && lpProcessAttributes->lpSecurityDescriptor)
         {
-            ProcessSd = lpProcessAttributes->lpSecurityDescriptor;
+            ProcessSd = MergeProcessSecurity(lpProcessAttributes->lpSecurityDescriptor,
+                                             DefaultSd, &MergedProcessSd);
         }
         else
         {
@@ -846,11 +979,24 @@ CreateProcessAsUserCommon(
 
         if (lpThreadAttributes && lpThreadAttributes->lpSecurityDescriptor)
         {
-            ThreadSd = lpThreadAttributes->lpSecurityDescriptor;
+            ThreadSd = MergeProcessSecurity(lpThreadAttributes->lpSecurityDescriptor,
+                                            DefaultSd, &MergedThreadSd);
         }
         else
         {
             ThreadSd = DefaultSd;
+        }
+
+        if (!SetProcessTokenLabel(lpProcessInformation->hProcess, hTokenDup,
+                                   lpProcessAttributes ? lpProcessAttributes->lpSecurityDescriptor : NULL) ||
+            !SetProcessTokenLabel(lpProcessInformation->hThread, hTokenDup,
+                                   lpThreadAttributes ? lpThreadAttributes->lpSecurityDescriptor : NULL))
+        {
+            SecurityError = GetLastError();
+            Status = STATUS_UNSUCCESSFUL;
+            Success = FALSE;
+            NtClose(hTokenDup);
+            goto Quit;
         }
 
         /* Set new security info to the process and thread now */
@@ -860,6 +1006,8 @@ CreateProcessAsUserCommon(
                                          ThreadSd))
         {
             ERR("Failed to set new security information for process and thread\n");
+            SecurityError = GetLastError();
+            Status = STATUS_UNSUCCESSFUL;
             NtClose(hTokenDup);
             Success = FALSE;
             goto Quit;
@@ -911,11 +1059,17 @@ Quit:
     if (!NT_SUCCESS(Status))
     {
         TerminateProcess(lpProcessInformation->hProcess, Status);
-        SetLastError(RtlNtStatusToDosError(Status));
+        if (SecurityError != ERROR_SUCCESS)
+        {
+            CloseHandle(lpProcessInformation->hThread);
+            CloseHandle(lpProcessInformation->hProcess);
+            ZeroMemory(lpProcessInformation, sizeof(*lpProcessInformation));
+        }
+        SetLastError(SecurityError ? SecurityError : RtlNtStatusToDosError(Status));
     }
 
-    /* Resume the main thread */
-    if (!(dwCreationFlags & CREATE_SUSPENDED))
+    /* Resume the main thread only after completing its security. */
+    if (NT_SUCCESS(Status) && !(dwCreationFlags & CREATE_SUSPENDED))
     {
         ResumeThread(lpProcessInformation->hThread);
     }

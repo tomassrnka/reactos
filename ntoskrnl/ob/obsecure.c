@@ -570,7 +570,34 @@ ObAssignSecurity(IN PACCESS_STATE AccessState,
     /* A token object is labelled with the token's integrity level */
     if (Type == SeTokenObjectType)
     {
-        Status = SeAssignTokenObjectLabel(Object, &NewDescriptor, &Type->TypeInfo.GenericMapping);
+        Status = SeAssignObjectLabel(Object,
+                                     SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+                                     &NewDescriptor,
+                                     &Type->TypeInfo.GenericMapping);
+        if (!NT_SUCCESS(Status))
+        {
+            SeDeassignSecurity(&NewDescriptor);
+            return Status;
+        }
+    }
+
+    else if (Type == PsProcessType || Type == PsThreadType)
+    {
+        /*
+         * A process is labelled from its own token. A thread is labelled from
+         * the owning process's token and its creator's primary token, also
+         * when the creator impersonates.
+         */
+        PEPROCESS Process = (Type == PsProcessType) ?
+                            Object : ((PETHREAD)Object)->ThreadsProcess;
+        PACCESS_TOKEN Token = PsReferencePrimaryToken(Process);
+
+        Status = SeAssignProcessObjectLabel(Token,
+                                            (Type == PsProcessType) ? Token :
+                                            AccessState->SubjectSecurityContext.PrimaryToken,
+                                            &NewDescriptor,
+                                            &Type->TypeInfo.GenericMapping);
+        PsDereferencePrimaryToken(Token);
         if (!NT_SUCCESS(Status))
         {
             SeDeassignSecurity(&NewDescriptor);

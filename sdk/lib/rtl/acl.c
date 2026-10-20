@@ -954,8 +954,8 @@ RtlValidAcl(IN PACL Acl)
                     _SEH2_YIELD(return FALSE);
                 }
 
-                /* The ACE size should at least have enough for the header and SID */
-                if (Ace->AceSize < (sizeof(ACE_HEADER) + RtlLengthSid(Sid)))
+                /* The ACE size should at least have enough for the header, the mask and the SID */
+                if (Ace->AceSize < FIELD_OFFSET(KNOWN_ACE, SidStart) + RtlLengthSid(Sid))
                 {
                     DPRINT1("Invalid ACE size\n");
                     _SEH2_YIELD(return FALSE);

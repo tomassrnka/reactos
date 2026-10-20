@@ -19,6 +19,7 @@ extern void func_HKEY_CLASSES_ROOT(void);
 extern void func_IsTextUnicode(void);
 extern void func_LockServiceDatabase(void);
 extern void func_LogonUser(void);
+extern void func_ProcessThreadLabel(void);
 extern void func_QueryServiceConfig2(void);
 extern void func_RegConcurrentWrite(void);
 extern void func_RegCreateKeyEx(void);
@@ -88,6 +89,7 @@ const struct test winetest_testlist[] =
     { "IsTextUnicode" , func_IsTextUnicode },
     { "LockServiceDatabase" , func_LockServiceDatabase },
     { "LogonUser", func_LogonUser },
+    { "ProcessThreadLabel", func_ProcessThreadLabel },
     { "QueryServiceConfig2", func_QueryServiceConfig2 },
     { "RegConcurrentWrite", func_RegConcurrentWrite },
     { "RegCreateKeyEx", func_RegCreateKeyEx },

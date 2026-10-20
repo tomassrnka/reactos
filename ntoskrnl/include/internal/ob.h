@@ -193,6 +193,13 @@ ObpDeleteEntryDirectory(
 
 BOOLEAN
 NTAPI
+ObpDeleteObjectDirectoryEntry(
+    IN POBP_LOOKUP_CONTEXT Context,
+    IN PVOID Object
+);
+
+BOOLEAN
+NTAPI
 ObpInsertEntryDirectory(
     IN POBJECT_DIRECTORY Parent,
     IN POBP_LOOKUP_CONTEXT Context,

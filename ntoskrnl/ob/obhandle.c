@@ -485,16 +485,44 @@ ObpChargeQuotaForObject(IN POBJECT_HEADER ObjectHeader,
 
 NTSTATUS
 NTAPI
-ObpValidateAccessMask(IN PACCESS_STATE AccessState)
+ObpValidateAccessMask(IN PACCESS_STATE AccessState,
+                      IN BOOLEAN AllowLabelOnly)
 {
     PISECURITY_DESCRIPTOR SecurityDescriptor;
+    PACL Sacl;
+    PACE_HEADER Ace;
+    ULONG Index;
+    BOOLEAN LabelsOnly = FALSE;
+    NTSTATUS Status;
 
     /* We're only interested if the object for this access state has an SD */
     SecurityDescriptor = AccessState->SecurityDescriptor;
-    if (SecurityDescriptor)
+    if ((SecurityDescriptor) && (SecurityDescriptor->Control & SE_SACL_PRESENT))
     {
-        /* Check if the SD has a system ACL but hasn't been granted access to get/set it */
-        if ((SecurityDescriptor->Control & SE_SACL_PRESENT) &&
+        /*
+         * Every label of a process or thread SACL must be whole and valid
+         * before the SACL is copied, which happens before the privilege check.
+         */
+        Sacl = SepGetSaclFromDescriptor(SecurityDescriptor);
+        if ((AllowLabelOnly) && (Sacl))
+        {
+            LabelsOnly = (Sacl->AceCount != 0);
+            for (Index = 0; Index < Sacl->AceCount; ++Index)
+            {
+                if (!NT_SUCCESS(RtlGetAce(Sacl, Index, (PVOID *)&Ace)))
+                    return STATUS_INVALID_ACL;
+                if (Ace->AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE)
+                {
+                    LabelsOnly = FALSE;
+                    continue;
+                }
+                Status = SepValidateLabelAce(Ace, NULL);
+                if (!NT_SUCCESS(Status)) return Status;
+            }
+        }
+
+        /* A label alone is not a request to set auditing */
+        if (!(LabelsOnly) &&
             !(AccessState->PreviouslyGrantedAccess & ACCESS_SYSTEM_SECURITY))
         {
             /* We're gonna need access */
@@ -2707,7 +2735,7 @@ ObOpenObjectByName(IN POBJECT_ATTRIBUTES ObjectAttributes,
     }
 
     /* Validate the access mask */
-    Status = ObpValidateAccessMask(PassedAccessState);
+    Status = ObpValidateAccessMask(PassedAccessState, FALSE);
     if (!NT_SUCCESS(Status))
     {
         /* Cleanup after lookup */
@@ -3060,7 +3088,7 @@ ObInsertObject(IN PVOID Object,
     OB_OPEN_REASON OpenReason;
     KPROCESSOR_MODE PreviousMode;
     NTSTATUS Status = STATUS_SUCCESS, RealStatus;
-    BOOLEAN IsNewObject;
+    BOOLEAN IsNewObject, Inserted;
     PAGED_CODE();
 
     /* Get the Header */
@@ -3155,12 +3183,14 @@ ObInsertObject(IN PVOID Object,
     AccessState->SecurityDescriptor = ObjectCreateInfo->SecurityDescriptor;
 
     /* Validate the access mask */
-    Status = ObpValidateAccessMask(AccessState);
+    Status = ObpValidateAccessMask(AccessState,
+                                   ObjectType == PsProcessType || ObjectType == PsThreadType);
     if (!NT_SUCCESS(Status))
     {
         /* Fail */
         ObpDereferenceNameInfo(ObjectNameInfo);
         ObDereferenceObject(Object);
+        if (AccessState == &LocalAccessState) SeDeleteAccessState(AccessState);
         return Status;
     }
 
@@ -3296,16 +3326,36 @@ ObInsertObject(IN PVOID Object,
         /* Check if anything until now failed */
         if (!NT_SUCCESS(Status))
         {
-            /* Check if the directory was added */
-            if (Context.DirectoryLocked)
+            /*
+             * A new named object is already in its directory. Take it out
+             * before the directory is unlocked, so that nobody can open it
+             * without its security. It is removed by identity rather than from
+             * the bucket head, because a symbolic-link target lookup may have
+             * moved another colliding entry to the head after insertion.
+             */
+            Inserted = (ObjectName) && (Context.DirectoryLocked) &&
+                       (ObjectNameInfo) && (ObjectNameInfo->Directory);
+            if (Inserted)
             {
-                /* Weird case where we need to do a manual delete */
-                DPRINT1("Unhandled path\n");
-                ASSERT(FALSE);
+                ObpDeleteObjectDirectoryEntry(&Context, Object);
+                if (ObjectType == ObpSymbolicLinkObjectType)
+                    ObpDeleteSymbolicLinkName(Object);
+                if (ObjectNameInfo->QueryReferences & OB_FLAG_KERNEL_EXCLUSIVE)
+                {
+                    InterlockedExchangeAdd((PLONG)&ObjectNameInfo->QueryReferences,
+                                           -OB_FLAG_KERNEL_EXCLUSIVE);
+                }
             }
 
             /* Cleanup the lookup */
             ObpReleaseLookupContext(&Context);
+
+            /* Drop the directory's name and object references */
+            if (Inserted)
+            {
+                ObpDereferenceNameInfo(ObjectNameInfo);
+                ObDereferenceObject(Object);
+            }
 
             /* Remove query reference that we added */
             ObpDereferenceNameInfo(ObjectNameInfo);
@@ -3319,7 +3369,6 @@ ObInsertObject(IN PVOID Object,
             }
 
             /* Return failure code */
-            ASSERT(FALSE);
             return Status;
         }
     }

@@ -266,6 +266,28 @@ SeSetWorldSecurityDescriptor(
     return STATUS_SUCCESS;
 }
 
+/*
+ * Whether every ACE of a valid ACL keeps the next one ULONG aligned, as ACL
+ * propagation and descriptor layout assume. RtlValidAcl checks this only for
+ * the ACE types it knows; Windows 10 rejects such ACLs at capture as well.
+ */
+static
+BOOLEAN
+SepAclHasAlignedAces(
+    _In_ PACL Acl)
+{
+    PACE_HEADER Ace = (PACE_HEADER)(Acl + 1);
+    ULONG Index;
+
+    for (Index = 0; Index < Acl->AceCount; ++Index)
+    {
+        if (Ace->AceSize % sizeof(ULONG))
+            return FALSE;
+        Ace = (PACE_HEADER)((PUCHAR)Ace + Ace->AceSize);
+    }
+    return TRUE;
+}
+
 /* PUBLIC FUNCTIONS ***********************************************************/
 
 /**
@@ -627,7 +649,8 @@ SeCaptureSecurityDescriptor(
                           SaclSize);
             /* The caller may have changed it since it was sized: check the copy against the size taken */
             if (((PACL)((PUCHAR)NewDescriptor + Offset))->AclSize != SaclSize ||
-                !RtlValidAcl((PACL)((PUCHAR)NewDescriptor + Offset)))
+                !RtlValidAcl((PACL)((PUCHAR)NewDescriptor + Offset)) ||
+                !SepAclHasAlignedAces((PACL)((PUCHAR)NewDescriptor + Offset)))
             {
                 RtlRaiseStatus(STATUS_INVALID_ACL);
             }
@@ -643,7 +666,8 @@ SeCaptureSecurityDescriptor(
                           DaclSize);
             /* The caller may have changed it since it was sized: check the copy against the size taken */
             if (((PACL)((PUCHAR)NewDescriptor + Offset))->AclSize != DaclSize ||
-                !RtlValidAcl((PACL)((PUCHAR)NewDescriptor + Offset)))
+                !RtlValidAcl((PACL)((PUCHAR)NewDescriptor + Offset)) ||
+                !SepAclHasAlignedAces((PACL)((PUCHAR)NewDescriptor + Offset)))
             {
                 RtlRaiseStatus(STATUS_INVALID_ACL);
             }
@@ -723,11 +747,6 @@ SeQuerySecurityDescriptorInfo(
     ULONG SdLength;
 
     PAGED_CODE();
-
-    /* Mandatory integrity labels are not stored by the security subsystem.
-     * Do not report a successful label query with an empty descriptor. */
-    if (*SecurityInformation & LABEL_SECURITY_INFORMATION)
-        return STATUS_NOT_SUPPORTED;
 
     RelSD = (PISECURITY_DESCRIPTOR_RELATIVE)SecurityDescriptor;
 
