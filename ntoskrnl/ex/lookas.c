@@ -23,6 +23,12 @@ LIST_ENTRY ExPoolLookasideListHead;
 GENERAL_LOOKASIDE ExpSmallNPagedPoolLookasideLists[NUMBER_POOL_LOOKASIDE_LISTS];
 GENERAL_LOOKASIDE ExpSmallPagedPoolLookasideLists[NUMBER_POOL_LOOKASIDE_LISTS];
 
+/* True per-processor nonpaged small-block lists (see internal/ex.h). Static BSS:
+   the storage is inert (Depth 0 / empty SLIST) until ExpInitLookasideLists sets
+   it up, so binding to it before init in ExInitPoolLookasidePointers is safe. */
+GENERAL_LOOKASIDE
+ExpSmallNPagedPoolLookasideListsPerCpu[EX_PERCPU_LOOKASIDE_MAX_CPU][NUMBER_POOL_LOOKASIDE_LISTS];
+
 /* PRIVATE FUNCTIONS *********************************************************/
 
 CODE_SEG("INIT")
@@ -39,7 +45,10 @@ ExInitializeSystemLookasideList(IN PGENERAL_LOOKASIDE List,
     List->Tag = Tag;
     List->Type = Type;
     List->Size = Size;
-    InsertHeadList(ListHead, &List->ListEntry);
+    /* Per-processor lists pass ListHead == NULL: not linked into the global
+       ExPoolLookasideListHead (stats are folded into the shared lists and depth
+       is adjusted by index, not by list walk). */
+    if (ListHead != NULL) InsertHeadList(ListHead, &List->ListEntry);
     List->MaximumDepth = MaximumDepth;
     List->Depth = 2;
 
@@ -68,22 +77,31 @@ ExInitPoolLookasidePointers(VOID)
     ULONG i;
     PKPRCB Prcb = KeGetCurrentPrcb();
     PGENERAL_LOOKASIDE Entry;
+    ULONG Cpu = Prcb->Number;
+    BOOLEAN PerCpu = (Cpu < EX_PERCPU_LOOKASIDE_MAX_CPU);
 
     /* Loop for all pool lists */
     for (i = 0; i < NUMBER_POOL_LOOKASIDE_LISTS; i++)
     {
-        /* The lists are shared by all processors; only the boot processor initializes them */
+        /* Nonpaged: the shared list is the global ".L" backing/overflow list,
+           whose SLIST header is initialized once by the boot processor. */
         Entry = &ExpSmallNPagedPoolLookasideLists[i];
-        if (Prcb->Number == 0) InitializeSListHead(&Entry->ListHead);
-
-        /* Bind to PRCB */
-        Prcb->PPNPagedLookasideList[i].P = Entry;
+        if (Cpu == 0) InitializeSListHead(&Entry->ListHead);
         Prcb->PPNPagedLookasideList[i].L = Entry;
 
-        Entry = &ExpSmallPagedPoolLookasideLists[i];
-        if (Prcb->Number == 0) InitializeSListHead(&Entry->ListHead);
+        /* Give this processor its own private ".P" list when it is within the
+           per-CPU table; otherwise fall back to the shared list (P == L), which
+           is exactly the historical single-set behaviour and is safe.  The
+           per-CPU bodies are set up in ExpInitLookasideLists; the static storage
+           is inert until then (Depth 0 / empty SLIST). */
+        if (PerCpu)
+            Prcb->PPNPagedLookasideList[i].P = &ExpSmallNPagedPoolLookasideListsPerCpu[Cpu][i];
+        else
+            Prcb->PPNPagedLookasideList[i].P = Entry;
 
-        /* Bind to PRCB */
+        /* Paged pool stays on the shared set (P == L) for now -- see handoff. */
+        Entry = &ExpSmallPagedPoolLookasideLists[i];
+        if (Cpu == 0) InitializeSListHead(&Entry->ListHead);
         Prcb->PPPagedLookasideList[i].P = Entry;
         Prcb->PPPagedLookasideList[i].L = Entry;
     }
@@ -94,7 +112,7 @@ VOID
 NTAPI
 ExpInitLookasideLists(VOID)
 {
-    ULONG i;
+    ULONG i, j;
 
     /* Initialize locks and lists */
     InitializeListHead(&ExpNonPagedLookasideListHead);
@@ -122,6 +140,24 @@ ExpInitLookasideLists(VOID)
                                         'looP',
                                         256,
                                         &ExPoolLookasideListHead);
+    }
+
+    /* Initialize the true per-processor nonpaged small-block lists.  These are
+       NOT linked into ExPoolLookasideListHead (ListHead == NULL): their hit
+       counters are folded into the shared-list figures by ExQueryPoolUsage and
+       the SystemLookasideInformation query, and their depth is grown directly
+       by ExAdjustLookasideDepth. */
+    for (j = 0; j < EX_PERCPU_LOOKASIDE_MAX_CPU; j++)
+    {
+        for (i = 0; i < NUMBER_POOL_LOOKASIDE_LISTS; i++)
+        {
+            ExInitializeSystemLookasideList(&ExpSmallNPagedPoolLookasideListsPerCpu[j][i],
+                                            NonPagedPool,
+                                            (i + 1) * 8,
+                                            'looP',
+                                            256,
+                                            NULL);
+        }
     }
 }
 
@@ -191,6 +227,20 @@ ExAdjustLookasideDepth(VOID)
         ExpAdjustLookasideList(CONTAINING_RECORD(ListEntry, GENERAL_LOOKASIDE, ListEntry),
                                TRUE,
                                2);
+    }
+
+    /* Adjust each per-processor nonpaged list independently on its own traffic */
+    {
+        ULONG c, k;
+        for (c = 0; c < EX_PERCPU_LOOKASIDE_MAX_CPU; c++)
+        {
+            for (k = 0; k < NUMBER_POOL_LOOKASIDE_LISTS; k++)
+            {
+                ExpAdjustLookasideList(&ExpSmallNPagedPoolLookasideListsPerCpu[c][k],
+                                       TRUE,
+                                       2);
+            }
+        }
     }
 
     /* Driver lists come and go under their locks */

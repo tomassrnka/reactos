@@ -1850,6 +1850,22 @@ ExQueryPoolUsage(OUT PULONG PagedPoolPages,
             }
         }
     }
+
+    //
+    // Add the hits accumulated on the true per-processor nonpaged lists, which
+    // are not linked into ExPoolLookasideListHead.
+    //
+    {
+        ULONG c, k;
+        for (c = 0; c < EX_PERCPU_LOOKASIDE_MAX_CPU; c++)
+        {
+            for (k = 0; k < NUMBER_POOL_LOOKASIDE_LISTS; k++)
+            {
+                *NonPagedPoolLookasideHits +=
+                    ExpSmallNPagedPoolLookasideListsPerCpu[c][k].AllocateHits;
+            }
+        }
+    }
 }
 
 VOID

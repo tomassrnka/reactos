@@ -31,6 +31,16 @@ extern ULONG ExpAltTimeZoneBias;
 extern LIST_ENTRY ExSystemLookasideListHead;
 extern PCALLBACK_OBJECT PowerStateCallback;
 extern LIST_ENTRY ExPoolLookasideListHead;
+
+/*
+ * True per-processor NONPAGED small-block pool lookaside lists (ntoskrnl/ex/lookas.c).
+ * Capped at EX_PERCPU_LOOKASIDE_MAX_CPU processors; processors numbered at or
+ * above the cap fall back safely to the shared lists.
+ */
+#define EX_PERCPU_LOOKASIDE_MAX_CPU 32
+extern GENERAL_LOOKASIDE ExpSmallNPagedPoolLookasideLists[NUMBER_POOL_LOOKASIDE_LISTS];
+extern GENERAL_LOOKASIDE ExpSmallPagedPoolLookasideLists[NUMBER_POOL_LOOKASIDE_LISTS];
+extern GENERAL_LOOKASIDE ExpSmallNPagedPoolLookasideListsPerCpu[EX_PERCPU_LOOKASIDE_MAX_CPU][NUMBER_POOL_LOOKASIDE_LISTS];
 extern LIST_ENTRY ExpNonPagedLookasideListHead;
 extern LIST_ENTRY ExpPagedLookasideListHead;
 extern KSPIN_LOCK ExpNonPagedLookasideListLock;
