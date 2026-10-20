@@ -108,6 +108,7 @@ dll/win32/atl80               # Synced to Wine-10.0
 dll/win32/atl100              # Synced to Wine-10.0
 dll/win32/avifil32            # Synced to Wine-10.0
 dll/win32/avrt                # Synced to Wine-10.0
+dll/win32/bcp47langs          # Synced to Wine-10.0
 dll/win32/bcrypt              # Synced to Wine-11.19
 dll/win32/bcryptprimitives    # Synced to Wine-10.0
 dll/win32/bluetoothapis       # Synced to Wine-10.0
@@ -128,6 +129,7 @@ dll/win32/cryptui             # Synced to Wine-10.0
 dll/win32/dbgeng              # Synced to Wine-10.0
 dll/win32/dbghelp             # Synced to WineStaging-5.16
 dll/win32/dciman32            # Synced to Wine-10.1-dev (b00c7619f1b)
+dll/win32/dcomp               # Synced to Wine-10.0
 dll/win32/dwmapi              # Synced to Wine-8.14
 dll/win32/evr                 # Synced to Wine-11.19
 dll/win32/explorerframe        # Synced to Wine-11.19 (ebrowser.c is shell32/ebrowser.c of Wine; Wine's taskbarlist.c is not used, browseui provides it; the ReactOS changes are under __REACTOS__)
@@ -264,6 +266,7 @@ dll/win32/sti                 # Synced to Wine-10.0
 dll/win32/sxs                 # Synced to Wine-10.0
 dll/win32/t2embed             # Synced to Wine-10.0
 dll/win32/tapi32              # Synced to Wine-10.0
+dll/win32/tbs                 # Synced to Wine-10.0
 dll/win32/tdh                 # Synced to Wine-11.19 (the stubs are implemented)
 dll/win32/traffic             # Synced to Wine-10.0
 dll/win32/twain_32            # Synced to Wine-10.0
@@ -278,6 +281,7 @@ dll/win32/vcruntime140        # Synced to Wine-11.19
 dll/win32/vcruntime140_1      # Synced to Wine-10.0 (with dll/win32/msvcrt, compiles its handler4.c and except_x86_64.c)
 dll/win32/version             # Synced to WineStaging-4.18 (Requires kernelbase)
 dll/win32/vssapi              # Synced to WineStaging-4.18
+dll/win32/wevtapi             # Synced to Wine-10.0
 dll/win32/wbemdisp            # Synced to WineStaging-4.18
 dll/win32/wbemprox            # Synced to WineStaging-4.18
 dll/win32/windowscodecs       # Synced to Wine-10.0
