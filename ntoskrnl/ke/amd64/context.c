@@ -86,12 +86,13 @@ KeContextToTrapFrame(IN PCONTEXT Context,
             _ReadWriteBarrier();
             RtlCopyMemory(&Floating, &Context->FltSave,
                           FIELD_OFFSET(XMM_SAVE_AREA32, XmmRegisters));
-            Floating.MxCsr &= 0xffbf;
+            Floating.MxCsr &= KiMxCsrMask;
             _ReadWriteBarrier();
             _fxrstor(&Floating);
         }
 #endif
-        TrapFrame->MxCsr = Context->MxCsr;
+        /* Reserved MXCSR bits would fault on the return to user mode. */
+        TrapFrame->MxCsr = Context->MxCsr & KiMxCsrMask;
         TrapFrame->Xmm0 = Context->Xmm0;
         TrapFrame->Xmm1 = Context->Xmm1;
         TrapFrame->Xmm2 = Context->Xmm2;
