@@ -74,9 +74,9 @@ ULONGLONG MiLastPoolDumpTime;
  * number of kernel-mode attacks which depend on dangling list pointers and other
  * kinds of list-based attacks.
  *
- * For now, I will leave these checks on all the time, but later they are likely
- * to be DBG-only, at least until there are enough kernel-mode security attacks
- * against ReactOS to warrant the performance hit.
+ * The link check is O(1) and is pool-corruption hardening (safe unlink), so it
+ * stays on in all builds. The block check walks the whole page under the
+ * (single, global) nonpaged pool lock, so it is DBG-only here.
  *
  * For now, these are not made inline, so we can get good stack traces.
  */
@@ -371,6 +371,7 @@ ExpCheckPoolAllocation(
     }
 }
 
+#if DBG
 VOID
 NTAPI
 ExpCheckPoolBlocks(IN PVOID Block)
@@ -410,6 +411,10 @@ ExpCheckPoolBlocks(IN PVOID Block)
         KeBugCheckEx(BAD_POOL_HEADER, 10, (ULONG_PTR)Block, __LINE__, (ULONG_PTR)Entry);
     }
 }
+#else
+/* Release builds do not walk the whole page under the pool lock */
+#define ExpCheckPoolBlocks(Block) ((void)0)
+#endif
 
 FORCEINLINE
 VOID
@@ -2096,13 +2101,18 @@ ExAllocatePoolWithTag(IN POOL_TYPE PoolType,
         if (!Entry)
         {
             //
-            // We failed, try popping it from the global list
+            // We failed, try popping it from the global list (if that is a
+            // different list: until the lists are per-CPU, P and L are one)
             //
-            LookasideList = (PoolType == PagedPool) ?
+            PGENERAL_LOOKASIDE GlobalList = (PoolType == PagedPool) ?
                              Prcb->PPPagedLookasideList[i - 1].L :
                              Prcb->PPNPagedLookasideList[i - 1].L;
-            LookasideList->TotalAllocates++;
-            Entry = (PPOOL_HEADER)InterlockedPopEntrySList(&LookasideList->ListHead);
+            if (GlobalList != LookasideList)
+            {
+                LookasideList = GlobalList;
+                LookasideList->TotalAllocates++;
+                Entry = (PPOOL_HEADER)InterlockedPopEntrySList(&LookasideList->ListHead);
+            }
         }
 
         //
@@ -2502,7 +2512,7 @@ ExFreePoolWithTag(IN PVOID P,
     BOOLEAN Combined = FALSE;
     PFN_NUMBER PageCount, RealPageCount;
     PKPRCB Prcb = KeGetCurrentPrcb();
-    PGENERAL_LOOKASIDE LookasideList;
+    PGENERAL_LOOKASIDE LookasideList, GlobalList;
     PEPROCESS Process;
 
     //
@@ -2746,15 +2756,19 @@ ExFreePoolWithTag(IN PVOID P,
         //
         // We failed, try to push it into the global lookaside list
         //
-        LookasideList = (PoolType == PagedPool) ?
-                         Prcb->PPPagedLookasideList[BlockSize - 1].L :
-                         Prcb->PPNPagedLookasideList[BlockSize - 1].L;
-        LookasideList->TotalFrees++;
-        if (ExQueryDepthSList(&LookasideList->ListHead) < LookasideList->Depth)
+        GlobalList = (PoolType == PagedPool) ?
+                      Prcb->PPPagedLookasideList[BlockSize - 1].L :
+                      Prcb->PPNPagedLookasideList[BlockSize - 1].L;
+        if (GlobalList != LookasideList)
         {
-            LookasideList->FreeHits++;
-            InterlockedPushEntrySList(&LookasideList->ListHead, P);
-            return;
+            LookasideList = GlobalList;
+            LookasideList->TotalFrees++;
+            if (ExQueryDepthSList(&LookasideList->ListHead) < LookasideList->Depth)
+            {
+                LookasideList->FreeHits++;
+                InterlockedPushEntrySList(&LookasideList->ListHead, P);
+                return;
+            }
         }
     }
 

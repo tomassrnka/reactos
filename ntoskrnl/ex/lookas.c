@@ -125,7 +125,97 @@ ExpInitLookasideLists(VOID)
     }
 }
 
+/* Depth adjustment: called once a second by the balance set manager */
+static
+VOID
+ExpAdjustLookasideList(IN PGENERAL_LOOKASIDE List,
+                       IN BOOLEAN CountsHits,
+                       IN USHORT MinimumDepth)
+{
+    ULONG Allocates, Misses, Hits;
+    ULONG Depth, Delta;
+
+    /* Special pool lists (and lists with a pinned depth) are left alone */
+    if (List->MaximumDepth == 0) return;
+
+    /* Allocates and hits/misses since the last pass (the counters are approximate, so clamp) */
+    Allocates = List->TotalAllocates - List->LastTotalAllocates;
+    if (CountsHits)
+    {
+        /* System pool lists count hits */
+        Hits = List->AllocateHits - List->LastAllocateHits;
+        Misses = (Allocates > Hits) ? (Allocates - Hits) : 0;
+        List->LastAllocateHits = List->AllocateHits;
+    }
+    else
+    {
+        /* Driver lists count misses */
+        Misses = List->AllocateMisses - List->LastAllocateMisses;
+        List->LastAllocateMisses = List->AllocateMisses;
+    }
+    List->LastTotalAllocates = List->TotalAllocates;
+    if (Misses > Allocates) Misses = Allocates;
+
+    Depth = List->Depth;
+    if (Misses * 100 > Allocates && Misses != 0)
+    {
+        /* More than 1% of the allocates missed: grow, faster the deeper we already are */
+        Delta = Depth / 2;
+        if (Delta < 2) Delta = 2;
+        Depth += Delta;
+        if (Depth > List->MaximumDepth) Depth = List->MaximumDepth;
+    }
+    else if (Misses == 0 && Allocates < Depth / 2 && Depth > MinimumDepth)
+    {
+        /* The list is bigger than the allocate rate needs: shrink slowly */
+        Depth--;
+    }
+    if (Depth < MinimumDepth) Depth = min(MinimumDepth, List->MaximumDepth);
+    List->Depth = (USHORT)Depth;
+}
+
 /* PUBLIC FUNCTIONS **********************************************************/
+
+/* Not exported; declared without NTAPI in the SDK headers, so defined to match */
+VOID
+ExAdjustLookasideDepth(VOID)
+{
+    PLIST_ENTRY ListEntry;
+    KIRQL OldIrql;
+
+    /* The system pool lists are set up at boot and never removed */
+    for (ListEntry = ExPoolLookasideListHead.Flink;
+         ListEntry != &ExPoolLookasideListHead;
+         ListEntry = ListEntry->Flink)
+    {
+        ExpAdjustLookasideList(CONTAINING_RECORD(ListEntry, GENERAL_LOOKASIDE, ListEntry),
+                               TRUE,
+                               2);
+    }
+
+    /* Driver lists come and go under their locks */
+    KeAcquireSpinLock(&ExpNonPagedLookasideListLock, &OldIrql);
+    for (ListEntry = ExpNonPagedLookasideListHead.Flink;
+         ListEntry != &ExpNonPagedLookasideListHead;
+         ListEntry = ListEntry->Flink)
+    {
+        ExpAdjustLookasideList(CONTAINING_RECORD(ListEntry, GENERAL_LOOKASIDE, ListEntry),
+                               FALSE,
+                               4);
+    }
+    KeReleaseSpinLock(&ExpNonPagedLookasideListLock, OldIrql);
+
+    KeAcquireSpinLock(&ExpPagedLookasideListLock, &OldIrql);
+    for (ListEntry = ExpPagedLookasideListHead.Flink;
+         ListEntry != &ExpPagedLookasideListHead;
+         ListEntry = ListEntry->Flink)
+    {
+        ExpAdjustLookasideList(CONTAINING_RECORD(ListEntry, GENERAL_LOOKASIDE, ListEntry),
+                               FALSE,
+                               4);
+    }
+    KeReleaseSpinLock(&ExpPagedLookasideListLock, OldIrql);
+}
 
 /*
  * @implemented
