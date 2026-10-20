@@ -90,7 +90,11 @@ NtGdiExtEscape(
    LPVOID   SafeInData = NULL;
    LPVOID   SafeOutData = NULL;
    NTSTATUS Status = STATUS_SUCCESS;
-   INT      Result;
+   /* Initialize to 0 so the failure paths that goto Exit (input/output probe
+    * faults, temporary buffer allocation failures) never return uninitialized
+    * stack contents to the caller. 0 is the documented ExtEscape result for an
+    * escape that performed no work; the failed paths set a last error. */
+   INT      Result = 0;
    PPDEVOBJ ppdev;
    PSURFACE psurf;
 
