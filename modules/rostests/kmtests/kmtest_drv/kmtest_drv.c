@@ -353,15 +353,38 @@ DriverIoControl(
             break;
         }
         case IOCTL_KMTEST_RUN_TEST:
+        case IOCTL_KMTEST_RUN_TEST_WITH_DATA:
         {
             ANSI_STRING TestName;
             PCKMT_TEST TestEntry;
+            PVOID TestData = NULL;
+            SIZE_T TestDataLength = 0;
+            ULONG InputLength = IoStackLocation->Parameters.DeviceIoControl.InputBufferLength;
+            BOOLEAN WithData = IoStackLocation->Parameters.DeviceIoControl.IoControlCode == IOCTL_KMTEST_RUN_TEST_WITH_DATA;
 
             DPRINT("DriverIoControl. IOCTL_KMTEST_RUN_TEST, inlen=%lu, outlen=%lu\n",
                      IoStackLocation->Parameters.DeviceIoControl.InputBufferLength,
                      IoStackLocation->Parameters.DeviceIoControl.OutputBufferLength);
-            TestName.Length = TestName.MaximumLength = (USHORT)min(IoStackLocation->Parameters.DeviceIoControl.InputBufferLength, USHRT_MAX);
-            TestName.Buffer = Irp->AssociatedIrp.SystemBuffer;
+            if (WithData)
+            {
+                PKMT_TEST_REQUEST Request = Irp->AssociatedIrp.SystemBuffer;
+                if (InputLength < FIELD_OFFSET(KMT_TEST_REQUEST, Contents) ||
+                    Request->NameLength > USHRT_MAX ||
+                    Request->NameLength > InputLength - FIELD_OFFSET(KMT_TEST_REQUEST, Contents))
+                {
+                    Status = STATUS_INVALID_BUFFER_SIZE;
+                    break;
+                }
+                TestName.Length = TestName.MaximumLength = (USHORT)Request->NameLength;
+                TestName.Buffer = (PCHAR)Request->Contents;
+                TestData = Request->Contents + Request->NameLength;
+                TestDataLength = InputLength - FIELD_OFFSET(KMT_TEST_REQUEST, Contents) - Request->NameLength;
+            }
+            else
+            {
+                TestName.Length = TestName.MaximumLength = (USHORT)min(InputLength, USHRT_MAX);
+                TestName.Buffer = Irp->AssociatedIrp.SystemBuffer;
+            }
             DPRINT("DriverIoControl. Run test: %Z\n", &TestName);
 
             for (TestEntry = TestList; TestEntry->TestName; ++TestEntry)
@@ -375,7 +398,12 @@ DriverIoControl(
                 if (!RtlCompareString(&TestName, &EntryName, FALSE))
                 {
                     DPRINT1("DriverIoControl. Starting test %Z\n", &EntryName);
-                    TestEntry->TestFunction();
+                    if (WithData && TestEntry->TestFunctionWithData)
+                        TestEntry->TestFunctionWithData(TestData, TestDataLength);
+                    else if (!WithData && TestEntry->TestFunction)
+                        TestEntry->TestFunction();
+                    else
+                        Status = STATUS_INVALID_PARAMETER;
                     DPRINT1("DriverIoControl. Finished test %Z\n", &EntryName);
                     break;
                 }

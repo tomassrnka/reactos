@@ -104,7 +104,7 @@ NtCreateProfile(OUT PHANDLE ProfileHandle,
     NTSTATUS Status;
     ULONG Log2 = 0;
     ULONG_PTR Segment = 0;
-    ULONG BucketsRequired;
+    SIZE_T BucketsRequired;
     PAGED_CODE();
 
     /* Easy way out */
@@ -141,7 +141,7 @@ NtCreateProfile(OUT PHANDLE ProfileHandle,
 
     /* Make sure that the buckets can map the range */
     BucketsRequired = RangeSize >> BucketSize;
-    if (RangeSize & ((1 << BucketSize) - 1))
+    if (RangeSize & (((SIZE_T)1 << BucketSize) - 1))
     {
         BucketsRequired++;
     }

@@ -110,6 +110,44 @@ KmtRunKernelTest(
     return Error;
 }
 
+DWORD
+KmtRunKernelTestWithData(
+    IN PCSTR TestName,
+    IN PVOID Data,
+    IN DWORD DataLength)
+{
+    PKMT_TEST_REQUEST Request;
+    SIZE_T NameLength = strlen(TestName);
+    SIZE_T RequestSize;
+    HANDLE CallbackThread;
+    DWORD Error = ERROR_SUCCESS;
+    DWORD BytesRead;
+
+    if (NameLength > USHRT_MAX ||
+        DataLength > MAXDWORD - FIELD_OFFSET(KMT_TEST_REQUEST, Contents) - NameLength ||
+        (DataLength && !Data))
+        return ERROR_INVALID_PARAMETER;
+
+    RequestSize = FIELD_OFFSET(KMT_TEST_REQUEST, Contents) + NameLength + DataLength;
+    Request = HeapAlloc(GetProcessHeap(), 0, RequestSize);
+    if (!Request)
+        return ERROR_OUTOFMEMORY;
+
+    Request->NameLength = (ULONG)NameLength;
+    RtlCopyMemory(Request->Contents, TestName, NameLength);
+    if (DataLength)
+        RtlCopyMemory(Request->Contents + NameLength, Data, DataLength);
+
+    CallbackThread = CreateThread(NULL, 0, KmtUserCallbackThread, NULL, 0, NULL);
+    if (!DeviceIoControl(KmtestHandle, IOCTL_KMTEST_RUN_TEST_WITH_DATA,
+                         Request, (DWORD)RequestSize, NULL, 0, &BytesRead, NULL))
+        error(Error);
+    if (CallbackThread != NULL)
+        CloseHandle(CallbackThread);
+    HeapFree(GetProcessHeap(), 0, Request);
+    return Error;
+}
+
 static WCHAR TestServiceName[MAX_PATH];
 static SC_HANDLE TestServiceHandle;
 static HANDLE TestDeviceHandle;

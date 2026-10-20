@@ -108,6 +108,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ke/KeIrql.c
     ntos_ke/KeMutex.c
     ntos_ke/KePriority.c
+    ntos_ke/KeProfile.c
     ntos_ke/KeProcessor.c
     ntos_ke/KeQpc.c
     ntos_ke/KeSpinLock.c
@@ -203,6 +204,7 @@ list(APPEND KMTEST_SOURCE
     ntos_io/IoReadWrite_user.c
     ntos_kd/NtSystemDebugControl.c
     ntos_ke/KeSystemCall32_user.c
+    ntos_ke/KeProfile_user.c
     ntos_ke/KeTrapFrame/KeTrapFrame_user.c
     ntos_mm/MmMapLockedPagesSpecifyCache_user.c
     ntos_mm/MmSpecialPool_user.c

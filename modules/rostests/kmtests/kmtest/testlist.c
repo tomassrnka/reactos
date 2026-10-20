@@ -7,6 +7,7 @@
 #include <kmt_test.h>
 
 KMT_TESTFUNC Test_KeSystemCall32;
+KMT_TESTFUNC Test_KeProfile;
 KMT_TESTFUNC Test_KeTrapFrame;
 
 KMT_TESTFUNC Test_CcCopyRead;
@@ -73,6 +74,7 @@ const KMT_TEST TestList[] =
     { "IoDeviceObject",               Test_IoDeviceObject },
     { "IoReadWrite",                  Test_IoReadWrite },
     { "KeTrapFrame",                  Test_KeTrapFrame },
+    { "KeProfile",                    Test_KeProfile },
     { "KeSystemCall32",               Test_KeSystemCall32 },
     { "MmMapLockedPagesProcessExit",  Test_MmMapLockedPagesProcessExit },
     { "MmMapLockedPagesSpecifyCache", Test_MmMapLockedPagesSpecifyCache },
