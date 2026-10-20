@@ -346,6 +346,7 @@ KiParseProfileList(IN PKTRAP_FRAME TrapFrame,
     PKPROFILE Profile;
     PLIST_ENTRY NextEntry;
     ULONG_PTR ProgramCounter;
+    ULONG_PTR BucketOffset;
 
     /* Get the Program Counter */
     ProgramCounter = KeGetTrapFramePc(TrapFrame);
@@ -362,15 +363,22 @@ KiParseProfileList(IN PKTRAP_FRAME TrapFrame,
         if ((Profile->Source != Source) ||
             !(Profile->Affinity & KeGetCurrentPrcb()->SetMember) ||
             (ProgramCounter < (ULONG_PTR)Profile->RangeBase) ||
-            (ProgramCounter > (ULONG_PTR)Profile->RangeLimit))
+            (ProgramCounter >= (ULONG_PTR)Profile->RangeLimit))
+        {
+            continue;
+        }
+
+        BucketOffset = ((ProgramCounter - (ULONG_PTR)Profile->RangeBase)
+                        >> Profile->BucketShift) & ~((ULONG_PTR)sizeof(ULONG) - 1);
+        if (BucketOffset > ((((ULONG_PTR)Profile->RangeLimit - 1 -
+                              (ULONG_PTR)Profile->RangeBase) >> Profile->BucketShift) &
+                            ~((ULONG_PTR)sizeof(ULONG) - 1)))
         {
             continue;
         }
 
         /* Get the Pointer to the Bucket Value representing this Program Counter */
-        BucketValue = (PULONG)((ULONG_PTR)Profile->Buffer +
-                               (((ProgramCounter - (ULONG_PTR)Profile->RangeBase)
-                                >> Profile->BucketShift) &~ 0x3));
+        BucketValue = (PULONG)((ULONG_PTR)Profile->Buffer + BucketOffset);
 
         /* Increment the value; other processors may sample the same bucket */
         InterlockedIncrement((PLONG)BucketValue);

@@ -7,6 +7,8 @@
 #include <kmt_test.h>
 
 KMT_TESTFUNC Test_KeSystemCall32;
+KMT_TESTFUNC Test_KeProfile;
+KMT_TESTFUNC_WITH_DATA Test_KeProfileWithData;
 KMT_TESTFUNC Test_MmMapViewAligned;
 
 KMT_TESTFUNC Test_CcPurgeCacheSection;
@@ -184,6 +186,7 @@ const KMT_TEST TestList[] =
     { "KeIrql",                             Test_KeIrql },
     { "KeMutex",                            Test_KeMutex },
     { "KePriority",                         Test_KePriority },
+    { "KeProfile",                          Test_KeProfile, Test_KeProfileWithData },
     { "-KeProcessor",                       Test_KeProcessor },
     { "KeQpc",                              Test_KeQpc },
     { "KeSpinLock",                         Test_KeSpinLock },
