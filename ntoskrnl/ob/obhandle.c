@@ -3327,15 +3327,17 @@ ObInsertObject(IN PVOID Object,
         if (!NT_SUCCESS(Status))
         {
             /*
-             * A new named object is already in its directory, at the head of
-             * its bucket. Take it out before the directory is unlocked, so
-             * that nobody can open it without its security.
+             * A new named object is already in its directory. Take it out
+             * before the directory is unlocked, so that nobody can open it
+             * without its security. It is removed by identity rather than from
+             * the bucket head, because a symbolic-link target lookup may have
+             * moved another colliding entry to the head after insertion.
              */
             Inserted = (ObjectName) && (Context.DirectoryLocked) &&
                        (ObjectNameInfo) && (ObjectNameInfo->Directory);
             if (Inserted)
             {
-                ObpDeleteEntryDirectory(&Context);
+                ObpDeleteObjectDirectoryEntry(&Context, Object);
                 if (ObjectType == ObpSymbolicLinkObjectType)
                     ObpDeleteSymbolicLinkName(Object);
                 if (ObjectNameInfo->QueryReferences & OB_FLAG_KERNEL_EXCLUSIVE)
