@@ -183,6 +183,7 @@ extern void func_RtlxUnicodeStringToOemSize(void);
 extern void func_SectionFaultCost(void);
 extern void func_StackDeepRecursion(void);
 extern void func_BadSegmentFault(void);
+extern void func_ExceptionInfoLeak(void);
 extern void func_RaiseExceptionLeak(void);
 extern void func_StackOverflow(void);
 extern void func_StackOverflowThread(void);
@@ -373,6 +374,7 @@ const struct test winetest_testlist[] =
     { "SectionFaultCost",               func_SectionFaultCost },
     { "StackDeepRecursion",             func_StackDeepRecursion },
     { "BadSegmentFault",                func_BadSegmentFault },
+    { "ExceptionInfoLeak",              func_ExceptionInfoLeak },
     { "RaiseExceptionLeak",             func_RaiseExceptionLeak },
     { "StackOverflow",                  func_StackOverflow },
     { "StackOverflowThread",            func_StackOverflowThread },

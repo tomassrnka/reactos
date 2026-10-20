@@ -105,6 +105,7 @@ KiDispatchExceptionToUser(
     volatile BOOLEAN Retried = FALSE;
     ULONG64 UserRsp;
     PKUSER_EXCEPTION_STACK UserStack;
+    ULONG ParamCount, i;
 
     /* Make sure we have a valid SS */
     if (TrapFrame->SegSs != (KGDT64_R3_DATA | RPL_MASK))
@@ -138,9 +139,26 @@ DispatchToUser:
         ProbeForWrite(UserStack, sizeof(*UserStack), TYPE_ALIGNMENT(KUSER_EXCEPTION_STACK));
         RtlZeroMemory(UserStack, sizeof(*UserStack));
 
-        /* Copy Context and ExceptionFrame */
+        /* Copy Context */
         UserStack->Context = *Context;
-        UserStack->ExceptionRecord = *UserRecord;
+
+        /* Copy only the declared exception parameters. UserStack was zeroed
+           above, so the unused ExceptionInformation slots - including the one
+           trap.S fills from the volatile R11 register - stay zero instead of
+           leaking stale kernel register contents to user mode. */
+        UserStack->ExceptionRecord.ExceptionCode = UserRecord->ExceptionCode;
+        UserStack->ExceptionRecord.ExceptionFlags = UserRecord->ExceptionFlags;
+        UserStack->ExceptionRecord.ExceptionRecord = UserRecord->ExceptionRecord;
+        UserStack->ExceptionRecord.ExceptionAddress = UserRecord->ExceptionAddress;
+        ParamCount = UserRecord->NumberParameters;
+        if (ParamCount > EXCEPTION_MAXIMUM_PARAMETERS)
+            ParamCount = EXCEPTION_MAXIMUM_PARAMETERS;
+        UserStack->ExceptionRecord.NumberParameters = ParamCount;
+        for (i = 0; i < ParamCount; i++)
+        {
+            UserStack->ExceptionRecord.ExceptionInformation[i] =
+                UserRecord->ExceptionInformation[i];
+        }
 
         /* Setup the machine frame */
         UserStack->MachineFrame.Rip = Context->Rip;

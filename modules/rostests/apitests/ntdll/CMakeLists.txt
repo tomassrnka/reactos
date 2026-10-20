@@ -196,6 +196,7 @@ list(APPEND SOURCE
     RtlxUnicodeStringToOemSize.c
     BadSegmentFault.c
     RaiseExceptionLeak.c
+    ExceptionInfoLeak.c
     StackOverflow.c
     StackOverflowDispatch.c
     SystemCallStubs.c
