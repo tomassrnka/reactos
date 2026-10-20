@@ -178,10 +178,18 @@ SURFACE_AllocSurface(
         }
         else
         {
-            /* Do a dumb calculation. Windows doesn't validate this either and
-               some drivers (e.g. Radeon IGP 320M) explicitly pass bogus values.
-               See CORE-13036. */
-            cjBits = cjWidth * cy;
+            /* Windows doesn't validate the pixel dimensions here and some drivers
+               (e.g. Radeon IGP 320M) explicitly pass bogus values, so keep that
+               leniency (CORE-13036). A cjWidth * cy that overflows ULONG is a
+               different matter: it under-sizes the object while sizlBitmap keeps
+               the full dimensions, so a later CopyBits/blt writes past the
+               allocation. Reject only the arithmetic overflow. */
+            if (!NT_SUCCESS(RtlULongMult(cjWidth, cy, &cjBits)))
+            {
+                DPRINT1("Overflow calculating size: cjWidth %lu, cy %lu\n",
+                        cjWidth, cy);
+                return NULL;
+            }
         }
     }
     else

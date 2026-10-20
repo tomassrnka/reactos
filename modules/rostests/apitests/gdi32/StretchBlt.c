@@ -1029,6 +1029,48 @@ static void test_StretchBlt_NegativeHeight(void)
     DestroyWindow(hwnd);
 }
 
+/*
+ * A StretchBlt whose source rectangle is so large that the temporary copy
+ * bitmap's stride * height overflows the 32-bit object size must not corrupt
+ * kernel memory. Before the fix, SURFACE_AllocSurface computed cjWidth * cy
+ * with a plain multiply; the wrapped-around size under-allocated the surface
+ * and the subsequent CopyBits wrote past it. The fixed kernel rejects the
+ * overflowing allocation, so the temporary bitmap is never created and the
+ * call fails instead of blowing the heap. The test passes if the system
+ * survives (no bugcheck) and GDI is still usable afterwards.
+ */
+static void test_StretchBlt_SourceOverflow(void)
+{
+    HDC hdcScreen, hdcMem;
+    HBITMAP hbm, hbmOld;
+    BOOL ret;
+
+    hdcScreen = GetDC(NULL);
+    if (!hdcScreen)
+    {
+        skip("Could not get the screen DC\n");
+        return;
+    }
+
+    hdcMem = CreateCompatibleDC(hdcScreen);
+    hbm = CreateCompatibleBitmap(hdcScreen, 1, 1);
+    hbmOld = SelectObject(hdcMem, hbm);
+
+    /* 65536 * 16384 pixels at 32bpp overflow the 32-bit allocation size. */
+    ret = StretchBlt(hdcMem, 0, 0, 1, 1, hdcScreen, 0, 0, 65536, 16384, SRCCOPY);
+    trace("StretchBlt with overflowing source rect returned %d\n", ret);
+
+    /* Reaching this point means the kernel did not bugcheck. Confirm GDI is
+     * still alive with a follow-up operation. */
+    ok(GetDeviceCaps(hdcScreen, BITSPIXEL) != 0,
+       "GDI unusable after the overflowing StretchBlt\n");
+
+    SelectObject(hdcMem, hbmOld);
+    DeleteObject(hbm);
+    DeleteDC(hdcMem);
+    ReleaseDC(NULL, hdcScreen);
+}
+
 START_TEST(StretchBlt)
 {
     trace("\n\n## Start of generalized StretchBlt tests.\n\n");
@@ -1048,4 +1090,7 @@ START_TEST(StretchBlt)
 
     trace("\n\n## Start of source bottom-up and destination bottom-up tests.\n\n");
     test_StretchBlt_TopDownOptions(FALSE, FALSE);
+
+    trace("\n\n## Start of oversized source-rectangle allocation-overflow test.\n\n");
+    test_StretchBlt_SourceOverflow();
 }
