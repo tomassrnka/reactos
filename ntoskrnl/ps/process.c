@@ -2023,6 +2023,22 @@ NtGetNextThread(
         Thread = NULL;
     }
 
+    /*
+     * Reject a starting thread that does not belong to the queried process.
+     * PsGetNextProcessThread() resumes the walk from Thread->ThreadListEntry but
+     * terminates on Process->ThreadListHead; a thread from another process links
+     * into a foreign list, so the helper would eventually treat that process's
+     * list head as an ETHREAD (CONTAINING_RECORD type confusion) and reference a
+     * fabricated object header. Release both references on rejection.
+     */
+    if (Thread != NULL && Thread->ThreadsProcess != Process)
+    {
+        DPRINT1("Thread %p does not belong to process %p\n", Thread, Process);
+        ObDereferenceObject(Thread);
+        ObDereferenceObject(Process);
+        return STATUS_INVALID_PARAMETER;
+    }
+
     /* Get the next thread (this will dereference the previous thread) */
     NextThread = PsGetNextProcessThread(Process, Thread);
 

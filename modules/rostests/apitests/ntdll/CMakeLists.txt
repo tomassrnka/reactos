@@ -80,6 +80,7 @@ list(APPEND SOURCE
     NtFilterToken.c
     NtFreeVirtualMemory.c
     NtGetCurrentProcessorNumberEx.c
+    NtGetNextThread.c
     NtImpersonateAnonymousToken.c
     NtKeyedEvent.c
     NtLoadUnloadKey.c
