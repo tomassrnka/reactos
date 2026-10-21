@@ -464,7 +464,7 @@ PspReturnProcessQuotaSpecifiedPool(
         if (QuotaBlock->QuotaEntry[QuotaType].Return > ReturnThreshold)
         {
             MmReturnPoolQuota(QuotaType, QuotaBlock->QuotaEntry[QuotaType].Return);
-            InterlockedExchangeSizeT(QuotaBlock->QuotaEntry[QuotaType].Return, 0);
+            InterlockedExchangeSizeT(&QuotaBlock->QuotaEntry[QuotaType].Return, 0);
         }
 
         /* And try to trim the limit */
@@ -1232,7 +1232,8 @@ PspSetQuotaLimits(
             return STATUS_NO_MEMORY;
         }
 
-        /* Initialize the quota block */
+        /* Initialize the quota block (Usage and Return must start at zero) */
+        RtlZeroMemory(QuotaBlock, sizeof(*QuotaBlock));
         QuotaBlock->ReferenceCount = 1;
         QuotaBlock->ProcessCount = 1;
         QuotaBlock->QuotaEntry[PsNonPagedPool].Peak = Process->QuotaPeak[PsNonPagedPool];
