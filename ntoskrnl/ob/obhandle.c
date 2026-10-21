@@ -854,7 +854,6 @@ ObpIncrementHandleCount(IN PVOID Object,
     POBJECT_HEADER_CREATOR_INFO CreatorInfo;
     KIRQL CalloutIrql;
     KPROCESSOR_MODE ProbeMode;
-    ULONG Total;
     POBJECT_HEADER_NAME_INFO NameInfo;
     BOOLEAN ObjectLocked;
     PAGED_CODE();
@@ -1164,7 +1163,6 @@ ObpIncrementUnnamedHandleCount(IN PVOID Object,
     BOOLEAN Exclusive = FALSE, NewObject;
     POBJECT_HEADER_CREATOR_INFO CreatorInfo;
     KIRQL CalloutIrql;
-    ULONG Total;
     BOOLEAN ObjectLocked;
 
     /* Get the object header and type */
