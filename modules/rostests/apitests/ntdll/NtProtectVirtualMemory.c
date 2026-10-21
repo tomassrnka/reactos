@@ -953,6 +953,194 @@ TestSectionMaxProtection(void)
     NtClose(FileHandle);
 }
 
+/*
+ * The image-section counterpart of the check above. An image is mapped as one
+ * segment per PE section, each carrying the protection derived from its section
+ * header. The loader legitimately reprotects read-only / executable image pages
+ * to PAGE_READWRITE (copy-on-write) to snap the IAT and apply relocations, so
+ * that must stay allowed; but gaining EXECUTE on a subsection the image never
+ * marked executable (turning a data page into RX / RWX shellcode) is a W^X /
+ * privilege-escalation hole and must be rejected with STATUS_SECTION_PROTECTION.
+ */
+static
+void
+TestImageSectionMaxProtection(void)
+{
+    WCHAR ModulePath[MAX_PATH];
+    UNICODE_STRING NtPath;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatusBlock;
+    NTSTATUS Status;
+    HANDLE FileHandle, SectionHandle;
+    PVOID BaseAddress = NULL;
+    SIZE_T ViewSize;
+    ULONG OldProtect;
+    PIMAGE_DOS_HEADER DosHeader;
+    PIMAGE_NT_HEADERS NtHeaders;
+    PIMAGE_SECTION_HEADER SectionHeader;
+    ULONG i;
+    PVOID CodePage = NULL;  /* an executable subsection (e.g. .text) */
+    PVOID RoDataPage = NULL; /* a read-only, non-exec, non-write subsection (e.g. .rdata) */
+    PVOID Target;
+
+    if (GetModuleFileNameW(NULL, ModulePath, RTL_NUMBER_OF(ModulePath)) == 0)
+    {
+        ok(0, "GetModuleFileNameW failed: %lu\n", GetLastError());
+        return;
+    }
+
+    if (!RtlDosPathNameToNtPathName_U(ModulePath, &NtPath, NULL, NULL))
+    {
+        ok(0, "RtlDosPathNameToNtPathName_U failed\n");
+        return;
+    }
+
+    InitializeObjectAttributes(&ObjectAttributes, &NtPath, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenFile(&FileHandle,
+                        GENERIC_READ | GENERIC_EXECUTE | SYNCHRONIZE,
+                        &ObjectAttributes,
+                        &IoStatusBlock,
+                        FILE_SHARE_READ | FILE_SHARE_DELETE,
+                        FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE);
+    RtlFreeHeap(RtlGetProcessHeap(), 0, NtPath.Buffer);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+    {
+        skip("Failed to open backing file\n");
+        return;
+    }
+
+    /* Create an image (SEC_IMAGE) section over our own module */
+    Status = NtCreateSection(&SectionHandle,
+                             SECTION_MAP_READ | SECTION_MAP_WRITE | SECTION_MAP_EXECUTE,
+                             NULL,
+                             NULL,
+                             PAGE_EXECUTE_READ,
+                             SEC_IMAGE,
+                             FileHandle);
+    NtClose(FileHandle);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+    {
+        skip("Failed to create image section\n");
+        return;
+    }
+
+    ViewSize = 0;
+    Status = NtMapViewOfSection(SectionHandle,
+                                NtCurrentProcess(),
+                                &BaseAddress,
+                                0,
+                                0,
+                                NULL,
+                                &ViewSize,
+                                ViewShare,
+                                0,
+                                PAGE_EXECUTE_READ);
+    ok(NT_SUCCESS(Status), "NtMapViewOfSection failed with 0x%08lx\n", Status);
+    if (!NT_SUCCESS(Status))
+    {
+        skip("Failed to map image view\n");
+        NtClose(SectionHandle);
+        return;
+    }
+
+    /* Locate an executable and a read-only non-executable subsection in the view */
+    DosHeader = (PIMAGE_DOS_HEADER)BaseAddress;
+    if (DosHeader->e_magic != IMAGE_DOS_SIGNATURE)
+    {
+        ok(0, "Mapped image has no DOS signature\n");
+        goto Cleanup;
+    }
+    NtHeaders = (PIMAGE_NT_HEADERS)((PUCHAR)BaseAddress + DosHeader->e_lfanew);
+    if (NtHeaders->Signature != IMAGE_NT_SIGNATURE)
+    {
+        ok(0, "Mapped image has no NT signature\n");
+        goto Cleanup;
+    }
+
+    SectionHeader = IMAGE_FIRST_SECTION(NtHeaders);
+    for (i = 0; i < NtHeaders->FileHeader.NumberOfSections; i++)
+    {
+        PVOID SecBase = (PUCHAR)BaseAddress + SectionHeader[i].VirtualAddress;
+        ULONG Chars = SectionHeader[i].Characteristics;
+
+        if ((Chars & IMAGE_SCN_MEM_EXECUTE) && (CodePage == NULL))
+            CodePage = SecBase;
+
+        if ((Chars & IMAGE_SCN_MEM_READ) &&
+            !(Chars & IMAGE_SCN_MEM_EXECUTE) &&
+            !(Chars & IMAGE_SCN_MEM_WRITE) &&
+            (RoDataPage == NULL))
+        {
+            RoDataPage = SecBase;
+        }
+    }
+
+    /*
+     * Executable subsection: a loader-style copy-on-write RW fixup (IAT snap /
+     * relocation) must be permitted, and restoring it must succeed too.
+     */
+    if (CodePage != NULL)
+    {
+        Target = CodePage;
+        ViewSize = PAGE_SIZE;
+        OldProtect = 0;
+        Status = NtProtectVirtualMemory(NtCurrentProcess(), &Target, &ViewSize, PAGE_READWRITE, &OldProtect);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+
+        Target = CodePage;
+        ViewSize = PAGE_SIZE;
+        Status = NtProtectVirtualMemory(NtCurrentProcess(), &Target, &ViewSize, PAGE_EXECUTE_READ, &OldProtect);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+    }
+    else
+    {
+        skip("No executable subsection found in image\n");
+    }
+
+    /*
+     * Read-only, non-executable subsection (where the IAT typically lives):
+     * the loader-style RW fixup is copy-on-write and must be permitted, but
+     * escalating it to execute (RX / RWX) must be rejected.
+     */
+    if (RoDataPage != NULL)
+    {
+        /* Legitimate loader-style RW fixup (copy-on-write) - allowed */
+        Target = RoDataPage;
+        ViewSize = PAGE_SIZE;
+        OldProtect = 0;
+        Status = NtProtectVirtualMemory(NtCurrentProcess(), &Target, &ViewSize, PAGE_READWRITE, &OldProtect);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+
+        /* Restore to read-only - allowed */
+        Target = RoDataPage;
+        ViewSize = PAGE_SIZE;
+        Status = NtProtectVirtualMemory(NtCurrentProcess(), &Target, &ViewSize, PAGE_READONLY, &OldProtect);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+
+        /* Escalation to execute on a non-executable subsection - rejected */
+        Target = RoDataPage;
+        ViewSize = PAGE_SIZE;
+        Status = NtProtectVirtualMemory(NtCurrentProcess(), &Target, &ViewSize, PAGE_EXECUTE_READ, &OldProtect);
+        ok_ntstatus(Status, STATUS_SECTION_PROTECTION);
+
+        /* Escalation to RWX shellcode - rejected */
+        Target = RoDataPage;
+        ViewSize = PAGE_SIZE;
+        Status = NtProtectVirtualMemory(NtCurrentProcess(), &Target, &ViewSize, PAGE_EXECUTE_READWRITE, &OldProtect);
+        ok_ntstatus(Status, STATUS_SECTION_PROTECTION);
+    }
+    else
+    {
+        skip("No read-only non-executable subsection found in image\n");
+    }
+
+Cleanup:
+    NtUnmapViewOfSection(NtCurrentProcess(), BaseAddress);
+    NtClose(SectionHandle);
+}
+
 START_TEST(NtProtectVirtualMemory)
 {
     TestReadWrite();
@@ -967,4 +1155,5 @@ START_TEST(NtProtectVirtualMemory)
     TestCachingAfterNoAccess();
     TestNoCacheFreshPages();
     TestSectionMaxProtection();
+    TestImageSectionMaxProtection();
 }

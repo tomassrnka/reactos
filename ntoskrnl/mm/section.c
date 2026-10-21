@@ -2360,6 +2360,54 @@ MiIsProtectWithinMaximum(ULONG Protect, ULONG MaxProtect)
     return TRUE;
 }
 
+/*
+ * Per-subsection maximum-protection test for image-section views.
+ *
+ * Each PE section of an image is mapped as its own segment/view, so the
+ * MemoryArea passed here already refers to exactly one section: Segment->
+ * Protection is the natural protection derived from that section header's
+ * characteristics (see SectionCharacteristicsToProtect) and Segment->WriteCopy
+ * is set for every non-shared image segment.
+ *
+ * The ceiling must still allow the loader's legitimate fixups: the ntdll loader
+ * reprotects read-only / executable image pages to PAGE_READWRITE to snap the
+ * IAT and apply relocations, then restores the original protection. Those writes
+ * are copy-on-write - they create a private copy and never reach the file or any
+ * other view - so adding write to a copy-on-write segment is always safe and is
+ * therefore permitted even when the section header itself is read-only. What is
+ * rejected is gaining *execute* on a segment the image never marked executable
+ * (the remaining W^X / privilege-escalation hole: turning a data page into RWX
+ * shellcode), and writing through a genuinely shared (non-copy-on-write)
+ * read-only image segment (which would be visible to other mappers / the file).
+ */
+static
+BOOLEAN
+MiIsImageProtectWithinMaximum(ULONG Protect, PMM_SECTION_SEGMENT Segment)
+{
+    ULONG MaxProtect = Segment->Protection;
+
+    if (Segment->WriteCopy)
+    {
+        /*
+         * Copy-on-write segment: a write only ever produces a private page, so
+         * the view may be made writable regardless of the section header. Widen
+         * the ceiling to allow write, without granting execute where the header
+         * did not already allow it.
+         */
+        if (MaxProtect & (PAGE_EXECUTE | PAGE_EXECUTE_READ |
+                          PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))
+        {
+            MaxProtect = PAGE_EXECUTE_READWRITE;
+        }
+        else
+        {
+            MaxProtect = PAGE_READWRITE;
+        }
+    }
+
+    return MiIsProtectWithinMaximum(Protect, MaxProtect);
+}
+
 NTSTATUS
 NTAPI
 MmProtectSectionView(PMMSUPPORT AddressSpace,
@@ -2401,16 +2449,21 @@ MmProtectSectionView(PMMSUPPORT AddressSpace,
      * beyond the access the section was created with (a W^X / privilege-escalation
      * hole - e.g. gaining execute or write on a read-only data mapping).
      *
-     * Image sections are intentionally excluded here: their protection is held
-     * per-segment and is copy-on-write, and the loader legitimately reprotects
-     * image pages above their natural protection (unprotecting the IAT, applying
-     * relocations). A correct, copy-on-write-aware maximum for the image path is
-     * a separate change; see Segment->Protection, which for data-file sections is
-     * the section's page protection.
+     * Data/file sections use the single segment protection (which for a data-file
+     * section is the section's page protection). Image sections carry a per-
+     * subsection, copy-on-write protection and are checked with a dedicated
+     * ceiling that still permits the loader's IAT / relocation fixups while
+     * rejecting an execute escalation on a non-executable subsection.
      */
     Segment = MemoryArea->SectionData.Segment;
-    if ((MemoryArea->VadNode.u.VadFlags.VadType != VadImageMap) &&
-        !MiIsProtectWithinMaximum(Protect, Segment->Protection))
+    if (MemoryArea->VadNode.u.VadFlags.VadType == VadImageMap)
+    {
+        if (!MiIsImageProtectWithinMaximum(Protect, Segment))
+        {
+            return STATUS_SECTION_PROTECTION;
+        }
+    }
+    else if (!MiIsProtectWithinMaximum(Protect, Segment->Protection))
     {
         return STATUS_SECTION_PROTECTION;
     }

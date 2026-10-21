@@ -181,10 +181,18 @@ AVrfpSnapDllImports(IN PLDR_DATA_TABLE_ENTRY LdrEntry)
                             UnprotectedPtr = Ptr;
                             UnprotectedSize = Size;
 
+                            /*
+                             * The IAT thunks are only overwritten (data), never
+                             * executed from here, so write access is enough - the
+                             * normal loader snaps the IAT with PAGE_READWRITE too.
+                             * Requesting execute would be rejected by the image
+                             * section W^X ceiling when the IAT lives in a non-
+                             * executable subsection (e.g. .rdata).
+                             */
                             Status = NtProtectVirtualMemory(NtCurrentProcess(),
                                                             &Ptr,
                                                             &Size,
-                                                            PAGE_EXECUTE_READWRITE,
+                                                            PAGE_READWRITE,
                                                             &OldProtection);
 
                             if (!NT_SUCCESS(Status))
