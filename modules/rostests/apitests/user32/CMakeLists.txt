@@ -21,6 +21,7 @@ list(APPEND SOURCE
     DrawText.c
     EditInk.c
     desktop.c
+    ClipboardSynthBitmap.c
     EmptyClipboard.c
     EnumDisplayDevices.c
     EnumDisplaySettings.c
