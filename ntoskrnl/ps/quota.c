@@ -1115,6 +1115,8 @@ PspSetQuotaLimits(
 {
     QUOTA_LIMITS_EX CapturedQuotaLimits;
     PEPROCESS_QUOTA_BLOCK QuotaBlock, OldQuotaBlock;
+    PS_QUOTA_TYPE QuotaType;
+    SIZE_T MovedUsage[PsQuotaTypes];
     BOOLEAN IncreaseOkay;
     KAPC_STATE SavedApcState;
     NTSTATUS Status;
@@ -1249,10 +1251,22 @@ PspSetQuotaLimits(
             return STATUS_NO_MEMORY;
         }
 
-        /* Initialize the quota block (Usage and Return must start at zero) */
+        /* Initialize the quota block (Return must start at zero) */
         RtlZeroMemory(QuotaBlock, sizeof(*QuotaBlock));
         QuotaBlock->ReferenceCount = 1;
         QuotaBlock->ProcessCount = 1;
+
+        /*
+         * The process already holds quota charged against the default block
+         * (handle tables, VADs, ...). It returns that quota through its
+         * current block, which is this new one, so the block has to start
+         * with the usage of the process or the first such return underflows.
+         */
+        for (QuotaType = PsNonPagedPool; QuotaType < PsQuotaTypes; QuotaType++)
+        {
+            MovedUsage[QuotaType] = Process->QuotaUsage[QuotaType];
+            QuotaBlock->QuotaEntry[QuotaType].Usage = MovedUsage[QuotaType];
+        }
         QuotaBlock->QuotaEntry[PsNonPagedPool].Peak = Process->QuotaPeak[PsNonPagedPool];
         QuotaBlock->QuotaEntry[PsPagedPool].Peak = Process->QuotaPeak[PsPagedPool];
         QuotaBlock->QuotaEntry[PsPageFile].Peak = Process->QuotaPeak[PsPageFile];
@@ -1272,6 +1286,17 @@ PspSetQuotaLimits(
         {
             /* Success, insert the new quota block */
             PspInsertQuotaBlock(QuotaBlock);
+
+            /*
+             * That usage moved over to the new block, so the default block
+             * must no longer account for it. The default block never limits
+             * anything, this only keeps its usage counters truthful.
+             */
+            for (QuotaType = PsNonPagedPool; QuotaType < PsQuotaTypes; QuotaType++)
+            {
+                InterlockedExchangeAddSizeT(&PspDefaultQuotaBlock.QuotaEntry[QuotaType].Usage,
+                                            -(LONG_PTR)MovedUsage[QuotaType]);
+            }
         }
         else
         {
