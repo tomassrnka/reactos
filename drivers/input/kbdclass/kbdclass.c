@@ -775,6 +775,20 @@ HandleReadIrp(
 
     ASSERT(DeviceExtension->Common.IsClassDO);
 
+    /*
+     * Only one read may be pending at a time. A different IRP arriving while
+     * one is already pending must not overwrite PendingIrp (that would orphan
+     * the first IRP: never completed, and ClassCancelRoutine could no longer
+     * find it). Reject the newcomer and leave the first one pending.
+     */
+    if (DeviceExtension->PendingIrp != NULL && DeviceExtension->PendingIrp != Irp)
+    {
+        Irp->IoStatus.Status = STATUS_DEVICE_BUSY;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_DEVICE_BUSY;
+    }
+
     if (DeviceExtension->InputCount > 0)
     {
         SIZE_T NumberOfEntries;
@@ -809,14 +823,16 @@ HandleReadIrp(
 
         (VOID)IoSetCancelRoutine(Irp, NULL);
         IoCompleteRequest(Irp, IO_KEYBOARD_INCREMENT);
-        DeviceExtension->PendingIrp = NULL;
+        if (DeviceExtension->PendingIrp == Irp)
+            DeviceExtension->PendingIrp = NULL;
     }
     else
     {
         IoAcquireCancelSpinLock(&OldIrql);
         if (Irp->Cancel)
         {
-            DeviceExtension->PendingIrp = NULL;
+            if (DeviceExtension->PendingIrp == Irp)
+                DeviceExtension->PendingIrp = NULL;
             Status = STATUS_CANCELLED;
         }
         else
@@ -827,6 +843,14 @@ HandleReadIrp(
             Status = STATUS_PENDING;
         }
         IoReleaseCancelSpinLock(OldIrql);
+
+        if (Status == STATUS_CANCELLED)
+        {
+            /* The request was never queued, so it must be completed here */
+            Irp->IoStatus.Status = STATUS_CANCELLED;
+            Irp->IoStatus.Information = 0;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        }
     }
     return Status;
 }
