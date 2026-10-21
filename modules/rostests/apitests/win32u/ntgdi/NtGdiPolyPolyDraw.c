@@ -203,10 +203,97 @@ Test_Params(void)
 }
 
 
+/* Returns a buffer of cb bytes that ends exactly at an inaccessible page */
+static PBYTE
+AllocBeforeGuard(SIZE_T cb, PVOID *ppBase)
+{
+    DWORD dwOld;
+    BOOL bOk;
+    PBYTE pb = VirtualAlloc(NULL, 2 * 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+
+    ok(pb != NULL, "VirtualAlloc failed\n");
+    bOk = VirtualProtect(pb + 0x1000, 0x1000, PAGE_NOACCESS, &dwOld);
+    ok(bOk, "VirtualProtect failed\n");
+    *ppBase = pb;
+    return pb + 0x1000 - cb;
+}
+
+/*
+ * Size math / capture contract: sums of the counts that overflow, huge Count
+ * values and buffers shorter than the counts claim must be rejected cleanly,
+ * and valid calls keep working.
+ */
+static void
+Test_Overflow(void)
+{
+    PVOID pBasePts, pBaseCnt;
+    POINT *pts;
+    ULONG *cnt;
+    ULONG_PTR ret;
+    HDC hDC = CreateCompatibleDC(NULL);
+    ULONG i;
+
+    ok(hDC != NULL, "CreateCompatibleDC failed\n");
+
+    /* 4 points, buffer ends at the guard page */
+    pts = (POINT *)AllocBeforeGuard(4 * sizeof(POINT), &pBasePts);
+    for (i = 0; i < 4; i++) { pts[i].x = i * 3; pts[i].y = (i & 1) * 5; }
+    cnt = (ULONG *)AllocBeforeGuard(2 * sizeof(ULONG), &pBaseCnt);
+
+    /* Valid */
+    cnt[0] = 2; cnt[1] = 2;
+    ret = NtGdiPolyPolyDraw(hDC, pts, cnt, 2, GdiPolyPolyLine);
+    ok(ret != 0, "valid polyline failed\n");
+    ret = NtGdiPolyPolyDraw((HDC)1, pts, cnt, 2, GdiPolyPolyRgn);
+    ok(ret != 0, "valid region failed\n");
+    if (ret) DeleteObject((HRGN)ret);
+
+    /* Sum of counts wraps around 32 bit to a small value */
+    cnt[0] = 0x80000000; cnt[1] = 0x80000002;
+    ret = NtGdiPolyPolyDraw(hDC, pts, cnt, 2, GdiPolyPolygon);
+    ok(ret == 0, "wrapping sum (to 2) must fail\n");
+
+    /* Sum does not wrap, but sum * sizeof(POINT) does */
+    cnt[0] = 0x20000001; cnt[1] = 0x20000001;
+    ret = NtGdiPolyPolyDraw(hDC, pts, cnt, 2, GdiPolyPolygon);
+    ok(ret == 0, "size wrap (points) must fail\n");
+    ret = NtGdiPolyPolyDraw(hDC, pts, cnt, 2, GdiPolyPolyLine);
+    ok(ret == 0, "size wrap (points, polyline) must fail\n");
+    ret = NtGdiPolyPolyDraw((HDC)1, pts, cnt, 2, GdiPolyPolyRgn);
+    ok(ret == 0, "size wrap (points, region) must fail\n");
+    cnt[0] = 0x1FFFFFFF; cnt[1] = 0x20000003;
+    ret = NtGdiPolyPolyDraw(hDC, pts, cnt, 2, GdiPolyPolygon);
+    ok(ret == 0, "size wrap (points, 2) must fail\n");
+
+    /* Counts claim more points than the (probed) buffer holds */
+    cnt[0] = 3; cnt[1] = 3;
+    ret = NtGdiPolyPolyDraw(hDC, pts, cnt, 2, GdiPolyPolyLine);
+    ok(ret == 0, "more points than mapped must fail\n");
+    cnt[0] = 0x00100000; cnt[1] = 2;
+    ret = NtGdiPolyPolyDraw(hDC, pts, cnt, 2, GdiPolyPolyLine);
+    ok(ret == 0, "far more points than mapped must fail\n");
+
+    /* Count larger than the counts buffer / overflowing Count * sizeof(ULONG) */
+    cnt[0] = 2; cnt[1] = 2;
+    ret = NtGdiPolyPolyDraw(hDC, pts, cnt, 1000, GdiPolyPolyLine);
+    ok(ret == 0, "Count beyond the mapped counts must fail\n");
+    ret = NtGdiPolyPolyDraw(hDC, pts, cnt, 0x40000000, GdiPolyPolyLine);
+    ok(ret == 0, "Count * 4 wrap must fail\n");
+    ret = NtGdiPolyPolyDraw(hDC, pts, cnt, 0x20000000, GdiPolyPolyLine);
+    ok(ret == 0, "Count * 8 wrap must fail\n");
+    ret = NtGdiPolyPolyDraw(hDC, pts, cnt, 0xFFFFFFFF, GdiPolyPolyLine);
+    ok(ret == 0, "Count 0xFFFFFFFF must fail\n");
+
+    VirtualFree(pBasePts, 0, MEM_RELEASE);
+    VirtualFree(pBaseCnt, 0, MEM_RELEASE);
+    if (hDC) DeleteDC(hDC);
+}
+
 
 START_TEST(NtGdiPolyPolyDraw)
 {
     Test_Params();
+    Test_Overflow();
 
 }
 
