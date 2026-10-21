@@ -437,7 +437,7 @@ PspReturnProcessQuotaSpecifiedPool(
     }
 
     /* The return threshold can be non paged or paged */
-    ReturnThreshold = QuotaType ? PSP_NON_PAGED_POOL_QUOTA_THRESHOLD : PSP_PAGED_POOL_QUOTA_THRESHOLD;
+    ReturnThreshold = (QuotaType == PsPagedPool) ? PSP_PAGED_POOL_QUOTA_THRESHOLD : PSP_NON_PAGED_POOL_QUOTA_THRESHOLD;
 
     /*
      * We need to trim the quota limits based on the
