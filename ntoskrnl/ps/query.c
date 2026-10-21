@@ -242,8 +242,7 @@ NtQueryInformationProcess(
         return Status;
     }
 
-    if (((ProcessInformationClass == ProcessCookie) ||
-         (ProcessInformationClass == ProcessImageInformation)) &&
+    if ((ProcessInformationClass == ProcessCookie) &&
         (ProcessHandle != NtCurrentProcess()))
     {
         /*
@@ -1109,6 +1108,8 @@ NtQueryInformationProcess(
         }
 
         case ProcessImageInformation:
+        {
+            SECTION_IMAGE_INFORMATION ImageInformation;
 
             if (ProcessInformationLength != sizeof(SECTION_IMAGE_INFORMATION))
             {
@@ -1120,13 +1121,31 @@ NtQueryInformationProcess(
             /* Set the length required and validate it */
             Length = sizeof(SECTION_IMAGE_INFORMATION);
 
-            /* Indicate success */
-            Status = STATUS_SUCCESS;
+            /* Other processes can be queried too (NT6+); check for the current one */
+            if (ProcessHandle == NtCurrentProcess())
+            {
+                Process = PsGetCurrentProcess();
+                ObReferenceObject(Process);
+            }
+            else
+            {
+                Status = ObReferenceObjectByHandle(ProcessHandle,
+                                                   PROCESS_QUERY_INFORMATION,
+                                                   PsProcessType,
+                                                   PreviousMode,
+                                                   (PVOID*)&Process,
+                                                   NULL);
+                if (!NT_SUCCESS(Status)) break;
+            }
 
-            /* Enter SEH to protect write */
+            /* Get the image information into a local, then copy it out under SEH */
+            Status = MmGetProcessImageInformation(Process, &ImageInformation);
+            ObDereferenceObject(Process);
+            if (!NT_SUCCESS(Status)) break;
+
             _SEH2_TRY
             {
-                MmGetImageInformation((PSECTION_IMAGE_INFORMATION)ProcessInformation);
+                *(PSECTION_IMAGE_INFORMATION)ProcessInformation = ImageInformation;
             }
             _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
             {
@@ -1135,6 +1154,7 @@ NtQueryInformationProcess(
             }
             _SEH2_END;
             break;
+        }
 
         case ProcessCycleTime:
         {
@@ -3412,6 +3432,7 @@ NtQueryInformationThread(
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
     NTSTATUS Status;
     ULONG Length = 0;
+    BOOLEAN DescriptorFailed = FALSE;
 
     PAGED_CODE();
 
@@ -3768,6 +3789,10 @@ NtQueryInformationThread(
 
             /* Dereference the thread */
             ObDereferenceObject(Thread);
+
+            /* NT reports the size of the descriptor on success only */
+            if (NT_SUCCESS(Status)) Length = sizeof(LDT_ENTRY);
+            else DescriptorFailed = TRUE;
 #else
             /* Only implemented on x86 */
             Status = STATUS_NOT_IMPLEMENTED;
@@ -4005,8 +4030,8 @@ NtQueryInformationThread(
     /* Protect write with SEH */
     _SEH2_TRY
     {
-        /* Check if caller wanted return length */
-        if (ReturnLength) *ReturnLength = Length;
+        /* Check if caller wanted return length (ThreadDescriptorTableEntry leaves it alone on failure) */
+        if (ReturnLength && !DescriptorFailed) *ReturnLength = Length;
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {

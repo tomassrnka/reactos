@@ -1680,25 +1680,44 @@ MiGetFileObjectForVad(
     return FileObject;
 }
 
-VOID
+NTSTATUS
 NTAPI
-MmGetImageInformation (OUT PSECTION_IMAGE_INFORMATION ImageInformation)
+MmGetProcessImageInformation(IN PEPROCESS Process,
+                             OUT PSECTION_IMAGE_INFORMATION ImageInformation)
 {
     PSECTION SectionObject;
 
-    /* Get the section object of this process*/
-    SectionObject = PsGetCurrentProcess()->SectionObject;
-    ASSERT(SectionObject != NULL);
+    /* Get the section object of the process */
+    SectionObject = Process->SectionObject;
+    if (SectionObject == NULL)
+    {
+        /* System process, or the image section is already gone */
+        return STATUS_PROCESS_IS_TERMINATING;
+    }
     ASSERT(MiIsRosSectionObject(SectionObject) == TRUE);
 
     if (SectionObject->u.Flags.Image == 0)
     {
         RtlZeroMemory(ImageInformation, sizeof(*ImageInformation));
-        return;
+        return STATUS_SUCCESS;
     }
 
     /* Return the image information */
     *ImageInformation = ((PMM_IMAGE_SECTION_OBJECT)SectionObject->Segment)->ImageInformation;
+    return STATUS_SUCCESS;
+}
+
+VOID
+NTAPI
+MmGetImageInformation (OUT PSECTION_IMAGE_INFORMATION ImageInformation)
+{
+    NTSTATUS Status;
+
+    /* The current process always has its image section */
+    ASSERT(PsGetCurrentProcess()->SectionObject != NULL);
+    Status = MmGetProcessImageInformation(PsGetCurrentProcess(), ImageInformation);
+    ASSERT(NT_SUCCESS(Status));
+    UNREFERENCED_PARAMETER(Status);
 }
 
 static
