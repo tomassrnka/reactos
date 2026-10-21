@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     QueryDosVolumePaths.c
+    MalformedInput.c
     QueryPoints.c
     utils.c)
 

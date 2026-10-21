@@ -30,6 +30,21 @@
 #define NDEBUG
 #include <debug.h>
 
+/**
+ * @brief
+ * Checks that the [Offset, Offset + Length) range lies entirely within
+ * a buffer of BufferLength bytes, without risk of arithmetic overflow.
+ **/
+static
+BOOLEAN
+MountMgrIsRangeInBuffer(
+    _In_ ULONG Offset,
+    _In_ ULONG Length,
+    _In_ ULONG BufferLength)
+{
+    return (Offset <= BufferLength) && (Length <= BufferLength - Offset);
+}
+
 /*
  * @implemented
  */
@@ -822,7 +837,7 @@ MountMgrQueryDosVolumePath(IN PDEVICE_EXTENSION DeviceExtension,
     PMOUNTMGR_TARGET_NAME Target;
     PMOUNTMGR_VOLUME_PATHS Output;
     PWSTR DeviceString, OldBuffer;
-    USHORT DeviceLength, OldLength;
+    ULONG DeviceLength, OldLength;
     PDEVICE_INFORMATION DeviceInformation;
     PSYMLINK_INFORMATION SymlinkInformation;
     PASSOCIATED_DEVICE_ENTRY AssociatedDevice;
@@ -896,7 +911,15 @@ MountMgrQueryDosVolumePath(IN PDEVICE_EXTENSION DeviceExtension,
             goto TryWithVolumeName;
 
         /* Create a string with the information about the device */
-        AssociatedDevice = CONTAINING_RECORD(&(DeviceInformation->AssociatedDevicesHead), ASSOCIATED_DEVICE_ENTRY, AssociatedDevicesEntry);
+        AssociatedDevice = CONTAINING_RECORD(DeviceInformation->AssociatedDevicesHead.Flink, ASSOCIATED_DEVICE_ENTRY, AssociatedDevicesEntry);
+
+        /* The length must remain representable in the 16-bit UNICODE_STRING
+         * world we are bound to; otherwise, try another way */
+        if ((DeviceLength + AssociatedDevice->String.Length) > MAXUSHORT - 2 * sizeof(WCHAR))
+        {
+            goto TryWithVolumeName;
+        }
+
         OldLength = DeviceLength;
         OldBuffer = DeviceString;
         DeviceLength += AssociatedDevice->String.Length;
@@ -1258,7 +1281,7 @@ MountMgrQueryVolumePaths(IN PDEVICE_EXTENSION DeviceExtension,
          Entry != &DeviceInformation->AssociatedDevicesHead;
          Entry = Entry->Flink)
     {
-        USHORT InnerStrings;
+        ULONG InnerStrings;
         BOOLEAN Invalid = FALSE;
 
         AssociatedDeviceEntry = CONTAINING_RECORD(Entry, ASSOCIATED_DEVICE_ENTRY, AssociatedDevicesEntry);
@@ -1317,6 +1340,7 @@ MountMgrQueryVolumePaths(IN PDEVICE_EXTENSION DeviceExtension,
         }
 
         /* Count the number of strings we have in the multi string buffer */
+        ASSERT(ReturnedPaths < NumberOfPaths);
         InnerStrings = 0;
         if ((*CurrentPath)->MultiSzLength != sizeof(UNICODE_NULL))
         {
@@ -1332,12 +1356,14 @@ MountMgrQueryVolumePaths(IN PDEVICE_EXTENSION DeviceExtension,
             }
         }
 
+        /* Multiply String.Length by the number of found paths, we always add it after a path.
+         * This must be done before moving to the next array slot, since only the current
+         * one has been filled by the recursive call. */
+        OutputPathLength += (*CurrentPath)->MultiSzLength + InnerStrings * AssociatedDeviceEntry->String.Length - sizeof(UNICODE_NULL);
         /* We returned one more path (ie, one more allocated buffer) */
         ++ReturnedPaths;
         /* Move the next pointer to use in the array */
         ++CurrentPath;
-        /* Multiply String.Length by the number of found paths, we always add it after a path */
-        OutputPathLength += (*CurrentPath)->MultiSzLength + InnerStrings * AssociatedDeviceEntry->String.Length - sizeof(UNICODE_NULL);
     }
 
     /* Allocate the output buffer */
@@ -1726,9 +1752,16 @@ MountMgrQueryPoints(IN PDEVICE_EXTENSION DeviceExtension,
         return STATUS_INVALID_PARAMETER;
     }
 
-    /* We can't go beyond */
-    if (((ULONG)MountPoint->SymbolicLinkNameLength + MountPoint->UniqueIdLength +
-        MountPoint->DeviceNameLength) > Stack->Parameters.DeviceIoControl.InputBufferLength)
+    /* We can't go beyond: every string must lie within the input buffer */
+    if (!MountMgrIsRangeInBuffer(MountPoint->SymbolicLinkNameOffset,
+                                 MountPoint->SymbolicLinkNameLength,
+                                 Stack->Parameters.DeviceIoControl.InputBufferLength) ||
+        !MountMgrIsRangeInBuffer(MountPoint->UniqueIdOffset,
+                                 MountPoint->UniqueIdLength,
+                                 Stack->Parameters.DeviceIoControl.InputBufferLength) ||
+        !MountMgrIsRangeInBuffer(MountPoint->DeviceNameOffset,
+                                 MountPoint->DeviceNameLength,
+                                 Stack->Parameters.DeviceIoControl.InputBufferLength))
     {
         return STATUS_INVALID_PARAMETER;
     }
@@ -1851,6 +1884,16 @@ MountMgrDeletePoints(IN PDEVICE_EXTENSION DeviceExtension,
 
     /* For all the points matching the request */
     MountPoints = (PMOUNTMGR_MOUNT_POINTS)Irp->AssociatedIrp.SystemBuffer;
+
+    /* Make sure what the query returned is large enough for what it claims */
+    if (Irp->IoStatus.Information < sizeof(MOUNTMGR_MOUNT_POINTS) ||
+        MountPoints->NumberOfMountPoints >
+            (Irp->IoStatus.Information - FIELD_OFFSET(MOUNTMGR_MOUNT_POINTS, MountPoints)) /
+            sizeof(MOUNTMGR_MOUNT_POINT))
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
     for (Link = 0; Link < MountPoints->NumberOfMountPoints; Link++)
     {
         SymbolicName.Length = MountPoints->MountPoints[Link].SymbolicLinkNameLength;
@@ -1886,10 +1929,11 @@ MountMgrDeletePoints(IN PDEVICE_EXTENSION DeviceExtension,
         if (Link == 0 && !CreateNoDrive)
         {
             /* Then, delete everything */
-            UniqueId = AllocatePool(MountPoints->MountPoints[Link].UniqueIdLength);
+            UniqueId = AllocatePool(MountPoints->MountPoints[Link].UniqueIdLength + sizeof(MOUNTDEV_UNIQUE_ID));
             if (UniqueId)
             {
-                RtlCopyMemory(UniqueId,
+                UniqueId->UniqueIdLength = MountPoints->MountPoints[Link].UniqueIdLength;
+                RtlCopyMemory(UniqueId->UniqueId,
                               (PMOUNTDEV_UNIQUE_ID)((ULONG_PTR)MountPoints + MountPoints->MountPoints[Link].UniqueIdOffset),
                               MountPoints->MountPoints[Link].UniqueIdLength);
 
@@ -2020,8 +2064,17 @@ MountMgrVolumeMountPointChanged(IN PDEVICE_EXTENSION DeviceExtension,
 
     VolumeMountPoint = (PMOUNTMGR_VOLUME_MOUNT_POINT)Irp->AssociatedIrp.SystemBuffer;
 
-    if (((ULONG)VolumeMountPoint->SourceVolumeNameLength + VolumeMountPoint->TargetVolumeNameLength) <
-        Stack->Parameters.DeviceIoControl.InputBufferLength)
+    /* Strings are WCHAR-based, and must both lie within the input buffer */
+    if ((VolumeMountPoint->SourceVolumeNameOffset & 1) ||
+        (VolumeMountPoint->SourceVolumeNameLength & 1) ||
+        (VolumeMountPoint->TargetVolumeNameOffset & 1) ||
+        (VolumeMountPoint->TargetVolumeNameLength & 1) ||
+        !MountMgrIsRangeInBuffer(VolumeMountPoint->SourceVolumeNameOffset,
+                                 VolumeMountPoint->SourceVolumeNameLength,
+                                 Stack->Parameters.DeviceIoControl.InputBufferLength) ||
+        !MountMgrIsRangeInBuffer(VolumeMountPoint->TargetVolumeNameOffset,
+                                 VolumeMountPoint->TargetVolumeNameLength,
+                                 Stack->Parameters.DeviceIoControl.InputBufferLength))
     {
         return STATUS_INVALID_PARAMETER;
     }
