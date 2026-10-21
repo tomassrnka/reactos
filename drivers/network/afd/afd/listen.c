@@ -763,6 +763,15 @@ NTSTATUS AfdAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     if( !SocketAcquireStateLock( FCB ) ) return LostSocket( Irp );
 
+    /* IOCTL_AFD_ACCEPT is METHOD_BUFFERED: a zero-length input leaves
+     * SystemBuffer NULL and a short buffer would be a pool over-read, so
+     * reject anything that cannot hold an AFD_ACCEPT_DATA before we touch it. */
+    if( !AcceptData ||
+        IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(AFD_ACCEPT_DATA) )
+    {
+        return UnlockAndMaybeComplete( FCB, STATUS_INVALID_PARAMETER, Irp, 0 );
+    }
+
     FCB->EventSelectDisabled &= ~AFD_EVENT_ACCEPT;
 
     for( PendingConn = FCB->PendingConnections.Flink;
@@ -779,11 +788,17 @@ NTSTATUS AfdAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
             PFILE_OBJECT NewFileObject = NULL;
 
             /* A bad accept handle leaves the connection queued for a retry */
+            /* Reference with the requestor mode so the handle is resolved
+             * against the caller's own handle table and its granted access is
+             * checked (KernelMode skipped both, letting a caller pass a handle
+             * -- even a kernel handle -- it should not be able to). A socket is
+             * opened with GENERIC_READ|GENERIC_WRITE, so require only that much
+             * rather than FILE_ALL_ACCESS, which a valid socket handle lacks. */
             Status = ObReferenceObjectByHandle
                 ( AcceptData->ListenHandle,
-                  FILE_ALL_ACCESS,
+                  GENERIC_READ | GENERIC_WRITE,
                   *IoFileObjectType,
-                  KernelMode,
+                  Irp->RequestorMode,
                   (PVOID *)&NewFileObject,
                   NULL );
 
@@ -845,6 +860,11 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
         return UnlockAndMaybeComplete( Fcb, STATUS_NO_MEMORY, Irp,
                                        0 );
 
+    /* The locked METHOD_NEITHER input must be large enough to hold the
+     * request struct we are about to read, or it is a pool over-read. */
+    if( IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(AFD_SUPER_ACCEPT_INFO) )
+        return UnlockAndMaybeComplete( Fcb, STATUS_INVALID_PARAMETER, Irp, 0 );
+
     Fcb->EventSelectDisabled &= ~AFD_EVENT_ACCEPT;
 
     /* The output buffer holds the initial data, the local and the remote address area */
@@ -873,8 +893,11 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     _SEH2_END;
 
     /* Validate that accepting socket is valid, and has not been bound or connected */
+    /* User-supplied handle: resolve it in the caller's handle table under the
+     * requestor mode (KernelMode skipped that check). Require only the access a
+     * socket is actually opened with, not FILE_ALL_ACCESS. */
     Status = ObReferenceObjectByHandle(
-        AcceptRequest->AcceptHandle, FILE_ALL_ACCESS, *IoFileObjectType, KernelMode, (PVOID *)&NewFileObject, NULL);
+        AcceptRequest->AcceptHandle, GENERIC_READ | GENERIC_WRITE, *IoFileObjectType, Irp->RequestorMode, (PVOID *)&NewFileObject, NULL);
     if (!NT_SUCCESS(Status))
     {
         IoFreeMdl((PMDL)Irp->Tail.Overlay.DriverContext[3]);

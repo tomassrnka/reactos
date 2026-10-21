@@ -234,6 +234,17 @@ PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
         MapBuf = (PAFD_MAPBUF)(NewBuf + Count + Lock);
 
         _SEH2_TRY {
+            /* Buf and AddressLen are user-supplied pointers for user-mode
+             * requests. Probe them so a kernel-mode pointer is rejected rather
+             * than read outright: SEH traps faults but not a valid kernel read,
+             * which would otherwise be an information-disclosure oracle. Kernel
+             * callers (LockMode == KernelMode) pass legitimate kernel buffers. */
+            if( LockMode == UserMode ) {
+                if( Count )
+                    ProbeForRead( Buf, sizeof(AFD_WSABUF) * Count, 1 );
+                if( LockAddress && AddressBuf && AddressLen )
+                    ProbeForRead( AddressLen, sizeof(*AddressLen), 1 );
+            }
             RtlCopyMemory( NewBuf, Buf, sizeof(AFD_WSABUF) * Count );
             if( LockAddress ) {
                 if (AddressBuf && AddressLen) {
