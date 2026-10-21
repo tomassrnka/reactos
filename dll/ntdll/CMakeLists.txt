@@ -66,6 +66,10 @@ list(APPEND SOURCE
     rtl/strcpy_s.c
     rtl/utf8.c)
 
+if(DLL_EXPORT_VERSION GREATER_EQUAL 0x601)
+    list(APPEND SOURCE rtl/sysinfoex.c)
+endif()
+
 if(ARCH STREQUAL "i386")
     list(APPEND ASM_SOURCE dispatch/i386/dispatch.S)
 elseif(ARCH STREQUAL "amd64")

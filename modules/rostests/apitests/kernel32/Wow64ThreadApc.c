@@ -359,6 +359,7 @@ START_TEST(Wow64ThreadExitProcess)
 {
     HANDLE Threads[16];
     DWORD i, Start = GetTickCount();
+    LONG Failures;
     ExitWorkers = 0;
     for (i = 0; i < _countof(Threads); ++i)
     {
@@ -372,6 +373,13 @@ START_TEST(Wow64ThreadExitProcess)
     /* The external harness checks this marker and process exit code zero.
      * Returning would not exercise process shutdown with live guest threads. */
     printf("Wow64ThreadExitProcess: exiting with 16 live workers\n");
+    /* ExitProcess skips the framework's summary line, and without it rosautotest
+     * reports the test as crashed. Print the same line the framework would. */
+    Failures = winetest_failures + winetest_todo_failures;
+    printf("\nWow64ThreadExitProcess: %d tests executed (%d marked as todo, %d %s), %d skipped.\n",
+           (int)(winetest_successes + winetest_failures + winetest_todo_successes + winetest_todo_failures),
+           (int)winetest_todo_successes, (int)Failures, Failures != 1 ? "failures" : "failure",
+           (int)winetest_skipped);
     fflush(stdout);
-    ExitProcess(0);
+    ExitProcess(Failures < 255 ? Failures : 255);
 }
