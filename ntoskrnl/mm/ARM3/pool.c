@@ -1562,18 +1562,21 @@ MmReturnPoolQuota(
     {
         case NonPagedPool:
         {
-            /* This is a non paged pool type, decrease the non paged quota */
-            ASSERT(MmTotalNonPagedPoolQuota >= QuotaToReturn);
-            MmTotalNonPagedPoolQuota -= QuotaToReturn;
+            /*
+             * This is a non paged pool type, decrease the non paged quota.
+             * A quota block hands back its whole limit, including the part
+             * it was created with that Mm never granted through a raise, so
+             * never take away more than the total that is accounted for.
+             */
+            MmTotalNonPagedPoolQuota -= min(QuotaToReturn, MmTotalNonPagedPoolQuota);
             DPRINT("MmReturnPoolQuota(): Non paged pool quota returned (current size -- %lu)\n", MmTotalNonPagedPoolQuota);
             break;
         }
 
         case PagedPool:
         {
-            /* This is a paged pool type, decrease the paged quota */
-            ASSERT(MmTotalPagedPoolQuota >= QuotaToReturn);
-            MmTotalPagedPoolQuota -= QuotaToReturn;
+            /* This is a paged pool type, decrease the paged quota (see above) */
+            MmTotalPagedPoolQuota -= min(QuotaToReturn, MmTotalPagedPoolQuota);
             DPRINT("MmReturnPoolQuota(): Paged pool quota returned (current size -- %lu)\n", MmTotalPagedPoolQuota);
             break;
         }
