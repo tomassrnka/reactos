@@ -1756,21 +1756,29 @@ MmGetFileNameForSection(IN PVOID Section,
 
 NTSTATUS
 NTAPI
-MmGetFileNameForAddress(IN PVOID Address,
-                        OUT PUNICODE_STRING ModuleName)
+MmGetFileNameForAddressInProcess(IN PEPROCESS Process,
+                                 IN PVOID Address,
+                                 OUT PUNICODE_STRING ModuleName)
 {
     POBJECT_NAME_INFORMATION ModuleNameInformation;
-    PVOID AddressSpace;
+    PMMSUPPORT AddressSpace;
     NTSTATUS Status;
     PMMVAD Vad;
     PFILE_OBJECT FileObject = NULL;
 
-    /* Lock address space */
-    AddressSpace = MmGetCurrentAddressSpace();
+    /* Lock the address space of the TARGET process, not the caller's */
+    AddressSpace = &Process->Vm;
     MmLockAddressSpace(AddressSpace);
 
-    /* Get the VAD */
-    Vad = MiLocateAddress(Address);
+    /* A process whose address space is gone has no VADs to look at */
+    if (Process->VmDeleted)
+    {
+        MmUnlockAddressSpace(AddressSpace);
+        return STATUS_PROCESS_IS_TERMINATING;
+    }
+
+    /* Get the VAD from the target process' tree */
+    Vad = MiLocateVad(&Process->VadRoot, Address);
     if (Vad == NULL)
     {
         /* Fail, the address does not exist */
@@ -1819,6 +1827,55 @@ MmGetFileNameForAddress(IN PVOID Address,
 
 NTSTATUS
 NTAPI
+MmGetFileNameForAddress(IN PVOID Address,
+                        OUT PUNICODE_STRING ModuleName)
+{
+    /* Resolve against the address space the caller is currently running in
+       (this includes a process the caller has attached to) */
+    return MmGetFileNameForAddressInProcess(PsGetCurrentProcess(),
+                                            Address,
+                                            ModuleName);
+}
+
+/*
+ * Publish a kernel-side copy of the name into the caller's buffer.
+ * The UNICODE_STRING header is built entirely in kernel memory from the
+ * already captured buffer length and written out once. Nothing in the
+ * output buffer is ever read back. May raise on a bad user buffer.
+ */
+static
+VOID
+MiWriteMemorySectionName(
+    _Out_ PMEMORY_SECTION_NAME SectionName,
+    _In_ SIZE_T MemoryInformationLength,
+    _In_ PCUNICODE_STRING ModuleFileName,
+    _Out_opt_ PSIZE_T ReturnLength)
+{
+    UNICODE_STRING LocalName;
+    SIZE_T Available;
+    SIZE_T CopyLength;
+
+    /* Callers guarantee MemoryInformationLength >= sizeof(MEMORY_SECTION_NAME) */
+    Available = MemoryInformationLength - sizeof(MEMORY_SECTION_NAME);
+    if (Available > MAXUSHORT) Available = MAXUSHORT;
+    Available &= ~(SIZE_T)(sizeof(WCHAR) - 1);
+
+    CopyLength = min(ModuleFileName->Length, Available);
+
+    /* Build the header locally */
+    LocalName.Buffer = (PWSTR)(SectionName + 1);
+    LocalName.MaximumLength = (USHORT)Available;
+    LocalName.Length = (USHORT)CopyLength;
+
+    /* Write the characters, then the header, in one go each */
+    RtlCopyMemory(LocalName.Buffer, ModuleFileName->Buffer, CopyLength);
+    SectionName->SectionFileName = LocalName;
+
+    if (ReturnLength) *ReturnLength = ModuleFileName->Length + sizeof(MEMORY_SECTION_NAME);
+}
+
+NTSTATUS
+NTAPI
 MiQueryMemorySectionName(IN HANDLE ProcessHandle,
                          IN PVOID BaseAddress,
                          OUT PVOID MemoryInformation,
@@ -1828,8 +1885,10 @@ MiQueryMemorySectionName(IN HANDLE ProcessHandle,
     PEPROCESS Process;
     NTSTATUS Status;
     UNICODE_STRING ModuleFileName;
-    PMEMORY_SECTION_NAME SectionName = NULL;
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+
+    if (MemoryInformationLength < sizeof(MEMORY_SECTION_NAME))
+        return STATUS_INFO_LENGTH_MISMATCH;
 
     Status = ObReferenceObjectByHandle(ProcessHandle,
                                        PROCESS_QUERY_INFORMATION,
@@ -1844,22 +1903,19 @@ MiQueryMemorySectionName(IN HANDLE ProcessHandle,
         return Status;
     }
 
-    Status = MmGetFileNameForAddress(BaseAddress, &ModuleFileName);
+    /* Resolve the address in the TARGET process, not the calling one */
+    Status = MmGetFileNameForAddressInProcess(Process, BaseAddress, &ModuleFileName);
 
     if (NT_SUCCESS(Status))
     {
-        SectionName = MemoryInformation;
         if (PreviousMode != KernelMode)
         {
             _SEH2_TRY
             {
-                RtlInitEmptyUnicodeString(&SectionName->SectionFileName,
-                                          (PWSTR)(SectionName + 1),
-                                          MemoryInformationLength - sizeof(MEMORY_SECTION_NAME));
-                RtlCopyUnicodeString(&SectionName->SectionFileName, &ModuleFileName);
-
-                if (ReturnLength) *ReturnLength = ModuleFileName.Length + sizeof(MEMORY_SECTION_NAME);
-
+                MiWriteMemorySectionName(MemoryInformation,
+                                         MemoryInformationLength,
+                                         &ModuleFileName,
+                                         ReturnLength);
             }
             _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
             {
@@ -1869,13 +1925,10 @@ MiQueryMemorySectionName(IN HANDLE ProcessHandle,
         }
         else
         {
-            RtlInitEmptyUnicodeString(&SectionName->SectionFileName,
-                                      (PWSTR)(SectionName + 1),
-                                      MemoryInformationLength - sizeof(MEMORY_SECTION_NAME));
-            RtlCopyUnicodeString(&SectionName->SectionFileName, &ModuleFileName);
-
-            if (ReturnLength) *ReturnLength = ModuleFileName.Length + sizeof(MEMORY_SECTION_NAME);
-
+            MiWriteMemorySectionName(MemoryInformation,
+                                     MemoryInformationLength,
+                                     &ModuleFileName,
+                                     ReturnLength);
         }
 
         RtlFreeUnicodeString(&ModuleFileName);

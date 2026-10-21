@@ -1693,6 +1693,14 @@ MmGetFileNameForAddress(
 
 NTSTATUS
 NTAPI
+MmGetFileNameForAddressInProcess(
+    IN PEPROCESS Process,
+    IN PVOID Address,
+    OUT PUNICODE_STRING ModuleName
+);
+
+NTSTATUS
+NTAPI
 MmGetFileNameForSection(
     IN PVOID Section,
     OUT POBJECT_NAME_INFORMATION *ModuleName
