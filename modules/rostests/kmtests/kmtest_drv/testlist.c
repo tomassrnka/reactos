@@ -103,6 +103,10 @@ KMT_TESTFUNC Test_ObTypeNoClean;
 KMT_TESTFUNC Test_ObTypes;
 KMT_TESTFUNC Test_PsNotify;
 KMT_TESTFUNC Test_PsQuota;
+KMT_TESTFUNC Test_PsQuotaLimited;
+KMT_TESTFUNC Test_PsQuotaLimitedTrim;
+KMT_TESTFUNC Test_PsQuotaLimitedSetLimits;
+KMT_TESTFUNC Test_PsQuotaLimitedThreshold;
 KMT_TESTFUNC Test_SeAutoInherit;
 KMT_TESTFUNC Test_SeInheritance;
 KMT_TESTFUNC Test_SeLogonSession;
@@ -223,6 +227,10 @@ const KMT_TEST TestList[] =
     { "ObTypes",                            Test_ObTypes },
     { "PsNotify",                           Test_PsNotify },
     { "PsQuota",                            Test_PsQuota },
+    { "PsQuotaLimited",                     Test_PsQuotaLimited },
+    { "PsQuotaLimitedTrim",                 Test_PsQuotaLimitedTrim },
+    { "PsQuotaLimitedSetLimits",            Test_PsQuotaLimitedSetLimits },
+    { "PsQuotaLimitedThreshold",            Test_PsQuotaLimitedThreshold },
     { "RtlAvlTreeKM",                       Test_RtlAvlTree },
     { "RtlExceptionKM",                     Test_RtlException },
     { "RtlIntSafeKM",                       Test_RtlIntSafe },
