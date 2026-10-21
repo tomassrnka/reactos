@@ -177,6 +177,15 @@ typedef struct _HARDERROR_USER_PARAMETERS
 #define EX_HANDLE_CACHE_LINE        64
 #define EX_HANDLE_CACHE_CAPACITY    ((EX_HANDLE_CACHE_LINE / sizeof(ULONG)) - 1)
 
+//
+// How many free handles to move between the shared FirstFree list and a CPU's
+// private cache in one batch. Refill pulls this many on an empty-cache alloc;
+// flush pushes this many back on a full-cache free. Both must be <= CAPACITY and
+// leave room so a full-cache free (flush then push one) never overruns the line.
+//
+#define EX_HANDLE_CACHE_REFILL_BATCH    8
+#define EX_HANDLE_CACHE_FLUSH_BATCH     8
+
 typedef struct _EX_HANDLE_CPU_CACHE
 {
     ULONG Count;

@@ -17,6 +17,14 @@
 
 LIST_ENTRY HandleTableListHead;
 EX_PUSH_LOCK HandleTableListLock;
+
+/*
+ * SMP lever #1 kill-switch. When FALSE the per-CPU free-handle cache fast path is
+ * bypassed entirely and allocation/free fall back to the shared FirstFree list
+ * (identical to the pre-lever behaviour). Left writable for A/B measurement and as
+ * an emergency disable; the cache storage is still allocated either way.
+ */
+BOOLEAN ExpHandleCpuCacheEnabled = TRUE;
 #define SizeOfHandle(x) (sizeof(HANDLE) * (x))
 #define INDEX_TO_HANDLE_VALUE(x) ((x) << HANDLE_TAG_BITS)
 
@@ -325,25 +333,33 @@ ExpFreeHandleTable(IN PHANDLE_TABLE HandleTable)
     }
 }
 
+//
+// SMP lever #1 fast-path eligibility: the per-CPU cache is a LIFO, so it is only
+// used for non-StrictFIFO tables; it also honours the global kill-switch and only
+// engages once the cache storage exists.
+//
+FORCEINLINE
+BOOLEAN
+ExpHandleCacheEligible(IN PHANDLE_TABLE HandleTable)
+{
+    return (ExpHandleCpuCacheEnabled &&
+            !HandleTable->StrictFIFO &&
+            (HandleTable->PerCpuFreeCache != NULL));
+}
+
+//
+// Push a free handle onto the shared free list (FirstFree, or LastFree when the
+// matching bucket lock is held by a popper). This is the proven, ABA-safe divert
+// path; both the direct free path and the per-CPU cache flush funnel through it.
+//
+static
 VOID
-NTAPI
-ExpFreeHandleTableEntry(IN PHANDLE_TABLE HandleTable,
+ExpPushFreeHandleToList(IN PHANDLE_TABLE HandleTable,
                         IN EXHANDLE Handle,
                         IN PHANDLE_TABLE_ENTRY HandleTableEntry)
 {
     ULONG OldValue, *Free;
     ULONG LockIndex;
-    PAGED_CODE();
-
-    /* Sanity checks */
-    ASSERT(HandleTableEntry->Object == NULL);
-    ASSERT(HandleTableEntry == ExpLookupHandleTableEntry(HandleTable, Handle));
-
-    /* Decrement the handle count */
-    InterlockedDecrement(&HandleTable->HandleCount);
-
-    /* Mark the handle as free */
-    Handle.TagBits = 0;
 
     /* Check if we're FIFO */
     if (!HandleTable->StrictFIFO)
@@ -375,6 +391,113 @@ ExpFreeHandleTableEntry(IN PHANDLE_TABLE HandleTable,
             break;
         }
     }
+}
+
+//
+// Push a free handle onto the shared list given only its value (resolving the
+// entry first). Used when flushing values out of a per-CPU cache. Runs at PASSIVE
+// because the lookup walks pageable table levels.
+//
+static
+VOID
+ExpPushFreeHandleValue(IN PHANDLE_TABLE HandleTable,
+                       IN ULONG HandleValue)
+{
+    EXHANDLE Handle;
+    PHANDLE_TABLE_ENTRY Entry;
+
+    Handle.Value = HandleValue;
+    Handle.TagBits = 0;
+    Entry = ExpLookupHandleTableEntry(HandleTable, Handle);
+    ASSERT(Entry != NULL);
+    ExpPushFreeHandleToList(HandleTable, Handle, Entry);
+}
+
+//
+// Free fast path: stash the handle on the owning CPU's private LIFO cache under a
+// brief raise to DISPATCH_LEVEL (which pins the CPU and serialises against a same-
+// CPU DPC; the cache line is nonpaged, so no fault can occur in the window). The
+// pageable entry fix-up and any overflow flush happen at PASSIVE, outside the raise.
+//
+static
+VOID
+ExpFreeHandleToCpuCache(IN PHANDLE_TABLE HandleTable,
+                        IN EXHANDLE Handle,
+                        IN PHANDLE_TABLE_ENTRY HandleTableEntry)
+{
+    KIRQL OldIrql;
+    ULONG Cpu, i;
+    PEX_HANDLE_CPU_CACHE Slot;
+    ULONG Flushed[EX_HANDLE_CACHE_FLUSH_BATCH];
+    ULONG FlushCount = 0;
+
+    /* A cached free entry is off every list, so its link is never walked; still
+     * clear it so it can never read back as the -2 reserved marker. Done here at
+     * PASSIVE because the entry lives in pageable pool. */
+    HandleTableEntry->NextFreeTableEntry = 0;
+
+    OldIrql = KeRaiseIrqlToDpcLevel();
+    Cpu = KeGetCurrentProcessorNumber();
+    if (Cpu >= HandleTable->PerCpuFreeCacheCount)
+    {
+        /* Table predates this CPU coming online: use the shared list instead. */
+        KeLowerIrql(OldIrql);
+        ExpPushFreeHandleToList(HandleTable, Handle, HandleTableEntry);
+        return;
+    }
+
+    Slot = EX_HANDLE_CACHE_SLOT(HandleTable, Cpu);
+
+    if (Slot->Count >= EX_HANDLE_CACHE_CAPACITY)
+    {
+        /* Full: evict the oldest FLUSH_BATCH entries (bottom of the stack) to the
+         * shared list, keeping the recently-freed (hot) entries cached. */
+        FlushCount = EX_HANDLE_CACHE_FLUSH_BATCH;
+        for (i = 0; i < FlushCount; i++)
+            Flushed[i] = Slot->Handles[i];
+
+        Slot->Count -= FlushCount;
+        for (i = 0; i < Slot->Count; i++)
+            Slot->Handles[i] = Slot->Handles[i + FlushCount];
+    }
+
+    /* Push our freed handle on top of this CPU's private stack. */
+    Slot->Handles[Slot->Count++] = Handle.AsULONG;
+
+    KeLowerIrql(OldIrql);
+
+    /* Return the evicted batch to the shared list (lookups are pageable -> PASSIVE). */
+    for (i = 0; i < FlushCount; i++)
+        ExpPushFreeHandleValue(HandleTable, Flushed[i]);
+}
+
+VOID
+NTAPI
+ExpFreeHandleTableEntry(IN PHANDLE_TABLE HandleTable,
+                        IN EXHANDLE Handle,
+                        IN PHANDLE_TABLE_ENTRY HandleTableEntry)
+{
+    PAGED_CODE();
+
+    /* Sanity checks */
+    ASSERT(HandleTableEntry->Object == NULL);
+    ASSERT(HandleTableEntry == ExpLookupHandleTableEntry(HandleTable, Handle));
+
+    /* Decrement the handle count */
+    InterlockedDecrement(&HandleTable->HandleCount);
+
+    /* Mark the handle as free */
+    Handle.TagBits = 0;
+
+    /* Fast path: stash on this CPU's private cache when eligible */
+    if (ExpHandleCacheEligible(HandleTable))
+    {
+        ExpFreeHandleToCpuCache(HandleTable, Handle, HandleTableEntry);
+        return;
+    }
+
+    /* Slow path: push straight onto the shared free list */
+    ExpPushFreeHandleToList(HandleTable, Handle, HandleTableEntry);
 }
 
 PHANDLE_TABLE
@@ -779,6 +902,158 @@ ExpMoveFreeHandles(IN PHANDLE_TABLE HandleTable)
     return LastFree;
 }
 
+//
+// Pop one free handle value off the shared list using the proven, ABA-safe
+// protocol: take the bucket lock that matches the current head, re-check the head
+// under it (so a concurrent free of that very handle diverts to LastFree instead
+// of re-pushing it to FirstFree - the head therefore cannot ABA-cycle during the
+// pop window), then unlink it with a CAS. Returns 0 when the list is empty (the
+// caller must then grow the table). Runs at PASSIVE (lookup walks pageable levels).
+//
+static
+ULONG
+ExpPopFreeHandleValue(IN PHANDLE_TABLE HandleTable)
+{
+    ULONG OldValue, NewValue, NewValue1;
+    EXHANDLE OldHandle;
+    PHANDLE_TABLE_ENTRY Entry;
+    ULONG i;
+
+    for (;;)
+    {
+        /* Read the current head; an empty list means the caller must grow */
+        OldValue = *(volatile ULONG*)&HandleTable->FirstFree;
+        if (!OldValue) return 0;
+
+        /* Resolve the head entry */
+        OldHandle.Value = OldValue;
+        Entry = ExpLookupHandleTableEntry(HandleTable, OldHandle);
+
+        /* Take the bucket lock matching the head and re-check under it */
+        i = OldHandle.Index % 4;
+        KeEnterCriticalRegion();
+        ExAcquirePushLockShared(&HandleTable->HandleTableLock[i]);
+
+        if (OldValue != *(volatile ULONG*)&HandleTable->FirstFree)
+        {
+            ExReleasePushLockShared(&HandleTable->HandleTableLock[i]);
+            KeLeaveCriticalRegion();
+            continue;
+        }
+
+        /* Unlink the head */
+        NewValue = *(volatile ULONG*)&Entry->NextFreeTableEntry;
+        NewValue1 = InterlockedCompareExchange((PLONG)&HandleTable->FirstFree,
+                                               NewValue,
+                                               OldValue);
+
+        ExReleasePushLockShared(&HandleTable->HandleTableLock[i]);
+        KeLeaveCriticalRegion();
+
+        if (NewValue1 == OldValue)
+        {
+            ASSERT((OldValue & FREE_HANDLE_MASK) <
+                   HandleTable->NextHandleNeedingPool);
+            return OldValue;
+        }
+    }
+}
+
+//
+// Turn a free handle value into an allocated entry, exactly as the shared-list
+// path does: resolve it, bump the in-use count, and hand it back for the caller to
+// fill and unlock. Runs at PASSIVE (pageable lookup).
+//
+static
+PHANDLE_TABLE_ENTRY
+ExpMaterializeCachedHandle(IN PHANDLE_TABLE HandleTable,
+                          IN ULONG HandleValue,
+                          OUT PEXHANDLE NewHandle)
+{
+    EXHANDLE Handle;
+    PHANDLE_TABLE_ENTRY Entry;
+
+    Handle.Value = HandleValue;
+    Entry = ExpLookupHandleTableEntry(HandleTable, Handle);
+    ASSERT(Entry != NULL);
+
+    InterlockedIncrement(&HandleTable->HandleCount);
+    *NewHandle = Handle;
+    return Entry;
+}
+
+//
+// Allocation fast path: serve from the owning CPU's private LIFO cache. On a cache
+// miss, refill a batch off the shared free list and deposit the surplus into the
+// cache. Returns NULL only when both the cache and the shared list are empty, in
+// which case the caller falls through to the original growth path.
+//
+// IRQL handling: the per-CPU line is touched only while raised to DISPATCH_LEVEL
+// (pins the CPU, serialises against a same-CPU DPC, nonpaged -> no fault); the
+// batch refill and the pageable entry lookups all run at PASSIVE outside the raise.
+//
+static
+PHANDLE_TABLE_ENTRY
+ExpAllocateHandleFromCpuCache(IN PHANDLE_TABLE HandleTable,
+                             OUT PEXHANDLE NewHandle)
+{
+    KIRQL OldIrql;
+    ULONG Cpu, i;
+    PEX_HANDLE_CPU_CACHE Slot;
+    ULONG Value;
+    ULONG Batch[EX_HANDLE_CACHE_REFILL_BATCH];
+    ULONG Got;
+
+    /* Fast pop from this CPU's private cache */
+    OldIrql = KeRaiseIrqlToDpcLevel();
+    Cpu = KeGetCurrentProcessorNumber();
+    if (Cpu < HandleTable->PerCpuFreeCacheCount)
+    {
+        Slot = EX_HANDLE_CACHE_SLOT(HandleTable, Cpu);
+        if (Slot->Count > 0)
+        {
+            Value = Slot->Handles[--Slot->Count];
+            KeLowerIrql(OldIrql);
+            return ExpMaterializeCachedHandle(HandleTable, Value, NewHandle);
+        }
+    }
+    KeLowerIrql(OldIrql);
+
+    /* Cache empty: refill a batch off the shared free list (PASSIVE) */
+    Got = 0;
+    while (Got < EX_HANDLE_CACHE_REFILL_BATCH)
+    {
+        Value = ExpPopFreeHandleValue(HandleTable);
+        if (!Value) break;
+        Batch[Got++] = Value;
+    }
+
+    /* Nothing available anywhere: let the caller grow the table */
+    if (Got == 0) return NULL;
+
+    /* Keep the first for this allocation; deposit the rest into the current CPU's
+     * cache (re-read the CPU, as we may have migrated while at PASSIVE). */
+    Value = Batch[0];
+    i = 1;
+
+    OldIrql = KeRaiseIrqlToDpcLevel();
+    Cpu = KeGetCurrentProcessorNumber();
+    if (Cpu < HandleTable->PerCpuFreeCacheCount)
+    {
+        Slot = EX_HANDLE_CACHE_SLOT(HandleTable, Cpu);
+        while (i < Got && Slot->Count < EX_HANDLE_CACHE_CAPACITY)
+            Slot->Handles[Slot->Count++] = Batch[i++];
+    }
+    KeLowerIrql(OldIrql);
+
+    /* Any surplus we could not cache (racing same-CPU refill, or OOB CPU) goes
+     * back onto the shared list (PASSIVE). */
+    for (; i < Got; i++)
+        ExpPushFreeHandleValue(HandleTable, Batch[i]);
+
+    return ExpMaterializeCachedHandle(HandleTable, Value, NewHandle);
+}
+
 PHANDLE_TABLE_ENTRY
 NTAPI
 ExpAllocateHandleTableEntry(IN PHANDLE_TABLE HandleTable,
@@ -789,6 +1064,15 @@ ExpAllocateHandleTableEntry(IN PHANDLE_TABLE HandleTable,
     EXHANDLE Handle, OldHandle;
     BOOLEAN Result;
     ULONG i;
+
+    /* Fast path: serve from this CPU's private cache when eligible. A NULL result
+     * means both the cache and the shared free list are empty, so fall through to
+     * the original path, which grows the table. */
+    if (ExpHandleCacheEligible(HandleTable))
+    {
+        Entry = ExpAllocateHandleFromCpuCache(HandleTable, NewHandle);
+        if (Entry != NULL) return Entry;
+    }
 
     /* Start allocation loop */
     for (;;)
