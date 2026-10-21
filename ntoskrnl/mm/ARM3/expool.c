@@ -2190,6 +2190,17 @@ ExAllocatePoolWithTag(IN POOL_TYPE PoolType,
     }
 
     //
+    // T12: for nonpaged pool, steer this allocation to the current processor-local
+    // descriptor so each CPU carves from and frees to its own free lists and
+    // lock.  The block header records the owning descriptor (PoolIndex) so a
+    // cross-CPU free can return it to the right descriptor.
+    //
+    if (PoolType == NonPagedPool)
+    {
+        PoolDesc = ExpNonPagedPoolDescriptor[Prcb->Number % ExpNumberOfNonPagedPools];
+    }
+
+    //
     // Loop in the free lists looking for a block if this size. Start with the
     // list optimized for this kind of size lookup
     //
@@ -2323,6 +2334,7 @@ ExAllocatePoolWithTag(IN POOL_TYPE PoolType,
                 // was, and the actual size the caller needs/requested.
                 //
                 FragmentEntry->PoolType = 0;
+                FragmentEntry->PoolIndex = PoolDesc->PoolIndex;
                 BlockSize = FragmentEntry->BlockSize;
 
                 //
@@ -2347,6 +2359,7 @@ ExAllocatePoolWithTag(IN POOL_TYPE PoolType,
             // and release the lock since we're done
             //
             Entry->PoolType = OriginalType + 1;
+            Entry->PoolIndex = PoolDesc->PoolIndex;
             ExpCheckPoolBlocks(Entry);
             ExUnlockPool(PoolDesc, &LockHandle);
 
@@ -2446,6 +2459,7 @@ ExAllocatePoolWithTag(IN POOL_TYPE PoolType,
     Entry->Ulong1 = 0;
     Entry->BlockSize = i;
     Entry->PoolType = OriginalType + 1;
+    Entry->PoolIndex = PoolDesc->PoolIndex;
 
     //
     // This page will have two entries -- one for the allocation (which we just
@@ -2458,6 +2472,7 @@ ExAllocatePoolWithTag(IN POOL_TYPE PoolType,
     FragmentEntry->Ulong1 = 0;
     FragmentEntry->BlockSize = BlockSize;
     FragmentEntry->PreviousSize = i;
+    FragmentEntry->PoolIndex = PoolDesc->PoolIndex;
 
     //
     // Increment required counters
@@ -2728,7 +2743,19 @@ ExFreePoolWithTag(IN PVOID P,
     //
     BlockSize = Entry->BlockSize;
     PoolType = (Entry->PoolType - 1) & BASE_POOL_TYPE_MASK;
-    PoolDesc = PoolVector[PoolType];
+    //
+    // T12: route nonpaged frees to the descriptor that owns the block page
+    // (recorded in the header at carve time).  The modulo is a safety net; a
+    // correctly-tagged block always resolves to its real owner.
+    //
+    if (PoolType == NonPagedPool)
+    {
+        PoolDesc = ExpNonPagedPoolDescriptor[Entry->PoolIndex % ExpNumberOfNonPagedPools];
+    }
+    else
+    {
+        PoolDesc = PoolVector[PoolType];
+    }
 
     //
     // Make sure that the IRQL makes sense
