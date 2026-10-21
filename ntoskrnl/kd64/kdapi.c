@@ -2355,7 +2355,7 @@ KdSystemDebugControl(
                 Status = ExLockUserBuffer(Request.Buffer,
                                           Request.Request,
                                           PreviousMode,
-                                          Command == SysDbgReadVirtual ? IoWriteAccess : IoReadAccess,
+                                          Command == SysDbgReadPhysical ? IoWriteAccess : IoReadAccess,
                                           &LockedBuffer,
                                           &LockVariable);
                 if (NT_SUCCESS(Status))
@@ -2364,7 +2364,7 @@ KdSystemDebugControl(
                                                  Request.Buffer,
                                                  Request.Request,
                                                  0,
-                                                 MMDBG_COPY_PHYSICAL | (Command == SysDbgReadVirtual ? 0 : MMDBG_COPY_WRITE),
+                                                 MMDBG_COPY_PHYSICAL | (Command == SysDbgReadPhysical ? 0 : MMDBG_COPY_WRITE),
                                                  &Length);
                     ExUnlockUserBuffer(LockVariable);
                 }
@@ -2498,8 +2498,33 @@ KdSystemDebugControl(
             }
             else
             {
-                PSYSDBG_MSR Request = (PSYSDBG_MSR)InputBuffer;
-                Status = KdpSysReadMsr(Request->Address, &Request->Data);
+                /* Capture the request once; InputBuffer may be user memory */
+                SYSDBG_MSR Request;
+                _SEH2_TRY
+                {
+                    if (PreviousMode != KernelMode)
+                        ProbeForWrite(InputBuffer, sizeof(SYSDBG_MSR), sizeof(ULONG));
+                    Request = *(PSYSDBG_MSR)InputBuffer;
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    _SEH2_YIELD(return _SEH2_GetExceptionCode());
+                }
+                _SEH2_END;
+
+                Status = KdpSysReadMsr(Request.Address, &Request.Data);
+                if (NT_SUCCESS(Status))
+                {
+                    _SEH2_TRY
+                    {
+                        ((PSYSDBG_MSR)InputBuffer)->Data = Request.Data;
+                    }
+                    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                    {
+                        Status = _SEH2_GetExceptionCode();
+                    }
+                    _SEH2_END;
+                }
             }
             break;
 
@@ -2510,8 +2535,18 @@ KdSystemDebugControl(
             }
             else
             {
-                PSYSDBG_MSR Request = (PSYSDBG_MSR)InputBuffer;
-                Status = KdpSysWriteMsr(Request->Address, &Request->Data);
+                SYSDBG_MSR Request;
+                _SEH2_TRY
+                {
+                    Request = *(PSYSDBG_MSR)InputBuffer;
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    _SEH2_YIELD(return _SEH2_GetExceptionCode());
+                }
+                _SEH2_END;
+
+                Status = KdpSysWriteMsr(Request.Address, &Request.Data);
             }
             break;
 

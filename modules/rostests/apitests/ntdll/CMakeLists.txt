@@ -110,6 +110,7 @@ list(APPEND SOURCE
     NtReadFile.c
     NtSaveKey.c
     NtSetDefaultLocale.c
+    NtSetInformationDebugObject.c
     NtSetInformationFile.c
     NtSetInformationProcess.c
     NtSetInformationThread.c
