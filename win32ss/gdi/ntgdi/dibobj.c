@@ -39,6 +39,11 @@ static const RGBQUAD DefLogPaletteQuads[20] =   /* Copy of Default Logical Palet
 /* Largest BITMAPINFO we ever look at: a V5 header plus a full colour table */
 #define CJ_MAX_BITMAPINFO (sizeof(BITMAPV5HEADER) + 256 * sizeof(RGBQUAD))
 
+/* NtGdiCreateDIBSection accepts headers larger than a V5 header (the extra
+   bytes are ignored), so it needs a larger, but still fixed, upper bound */
+#define CJ_MAX_DIBSECTION_HEADER 4096
+#define CJ_MAX_DIBSECTION_INFO (CJ_MAX_DIBSECTION_HEADER + 256 * sizeof(RGBQUAD))
+
 /*
  * Creates a palette for a DIB.
  * cjInfo is the number of valid bytes at pbmi (header + colour table). All reads
@@ -2088,14 +2093,60 @@ NtGdiCreateDIBSection(
     DC *dc;
     BOOL bDesktopDC = FALSE;
     NTSTATUS Status = STATUS_SUCCESS;
+    LPBITMAPINFO pbmiSafe;
+    PVOID pvBitsSafe = NULL;
+    BOOLEAN bBadHeader = FALSE;
+    DWORD cjHdr, cjInfo, cjInfo2;
+    union
+    {
+        BITMAPCOREHEADER core;
+        BITMAPINFOHEADER info;
+    } hdr;
 
     if (!bmi) return hbitmap; // Make sure.
 
+    /* Capture the header once. All later decisions are made on the kernel
+       copy, never on the user mode memory, so it can neither fault outside
+       of SEH nor change between the size check and its use. */
+    pbmiSafe = ExAllocatePoolWithTag(PagedPool, CJ_MAX_DIBSECTION_INFO, 'imBG');
+    if (!pbmiSafe)
+    {
+        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return NULL;
+    }
+    RtlZeroMemory(pbmiSafe, CJ_MAX_DIBSECTION_INFO);
+
     _SEH2_TRY
     {
-        ProbeForRead(&bmi->bmiHeader.biSize, sizeof(DWORD), 1);
-        ProbeForRead(bmi, bmi->bmiHeader.biSize, 1);
-        ProbeForRead(bmi, DIB_BitmapInfoSize(bmi, (WORD)Usage), 1);
+        /* First fetch: biSize plus enough to size the header */
+        ProbeForRead(bmi, sizeof(BITMAPCOREHEADER), 1);
+        RtlCopyMemory(&hdr, bmi, sizeof(BITMAPCOREHEADER));
+        cjHdr = hdr.core.bcSize;
+
+        if (cjHdr != sizeof(BITMAPCOREHEADER))
+        {
+            if ((cjHdr < sizeof(BITMAPINFOHEADER)) || (cjHdr > CJ_MAX_DIBSECTION_HEADER))
+            {
+                bBadHeader = TRUE;
+                _SEH2_LEAVE;
+            }
+            ProbeForRead(bmi, sizeof(BITMAPINFOHEADER), 1);
+            RtlCopyMemory(&hdr, bmi, sizeof(BITMAPINFOHEADER));
+        }
+
+        /* Size the header + colour table from the kernel copy of the header */
+        RtlCopyMemory(pbmiSafe, &hdr, (cjHdr == sizeof(BITMAPCOREHEADER)) ?
+                                      sizeof(BITMAPCOREHEADER) : sizeof(BITMAPINFOHEADER));
+        cjInfo = (DWORD)DIB_BitmapInfoSize(pbmiSafe, (WORD)Usage);
+        if ((cjInfo < cjHdr) || (cjInfo > CJ_MAX_DIBSECTION_INFO))
+        {
+            bBadHeader = TRUE;
+            _SEH2_LEAVE;
+        }
+
+        /* Second fetch: the whole thing, bounded by cjInfo */
+        ProbeForRead(bmi, cjInfo, 1);
+        RtlCopyMemory(pbmiSafe, bmi, cjInfo);
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -2103,9 +2154,23 @@ NtGdiCreateDIBSection(
     }
     _SEH2_END;
 
-    if(!NT_SUCCESS(Status))
+    if (NT_SUCCESS(Status) && !bBadHeader)
     {
-        SetLastNtError(Status);
+        /* The user may have changed the header between the two fetches.
+           Everything must still agree with what we sized the copy for. */
+        if ((pbmiSafe->bmiHeader.biSize != cjHdr) ||
+            ((cjInfo2 = (DWORD)DIB_BitmapInfoSize(pbmiSafe, (WORD)Usage)) > cjInfo))
+        {
+            bBadHeader = TRUE;
+        }
+    }
+
+    if (!NT_SUCCESS(Status) || bBadHeader)
+    {
+        ExFreePoolWithTag(pbmiSafe, 'imBG');
+        /* A malformed header fails quietly, like before; only a faulting
+           user pointer reports an NT status */
+        if (!NT_SUCCESS(Status)) SetLastNtError(Status);
         return NULL;
     }
 
@@ -2119,13 +2184,35 @@ NtGdiCreateDIBSection(
     if ((dc = DC_LockDc(hDC)))
     {
         hbitmap = DIB_CreateDIBSection(dc,
-                                       bmi,
+                                       pbmiSafe,
                                        Usage,
-                                       Bits,
+                                       &pvBitsSafe,
                                        hSection,
                                        dwOffset,
                                        0);
         DC_UnlockDc(dc);
+
+        /* Hand the bits pointer back to user mode under SEH */
+        if (hbitmap && Bits)
+        {
+            _SEH2_TRY
+            {
+                ProbeForWrite(Bits, sizeof(PVOID), 1);
+                *Bits = pvBitsSafe;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+
+            if (!NT_SUCCESS(Status))
+            {
+                GreDeleteObject(hbitmap);
+                hbitmap = NULL;
+                SetLastNtError(Status);
+            }
+        }
     }
     else
     {
@@ -2135,6 +2222,7 @@ NtGdiCreateDIBSection(
     if (bDesktopDC)
         NtGdiDeleteObjectApp(hDC);
 
+    ExFreePoolWithTag(pbmiSafe, 'imBG');
     return hbitmap;
 }
 
