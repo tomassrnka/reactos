@@ -114,6 +114,7 @@ static void TestDevice(PCWSTR Name)
 
 START_TEST(KbdMouClassPendingIrp)
 {
+    setvbuf(stdout, NULL, _IONBF, 0);
     TestDevice(L"\\Device\\KeyboardClass0");
     TestDevice(L"\\Device\\PointerClass0");
 }
