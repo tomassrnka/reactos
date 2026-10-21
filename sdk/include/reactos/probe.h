@@ -170,6 +170,12 @@ ProbeAndCaptureUnicodeString(OUT PUNICODE_STRING Dest,
                                                    'RTSU');
                     if (Buffer == NULL)
                     {
+                        /* Do not leave the caller's (user-mode) pointer in
+                           Dest: ReleaseCapturedUnicodeString would hand it
+                           to ExFreePoolWithTag. Zero the destination. */
+                        Dest->Length = 0;
+                        Dest->MaximumLength = 0;
+                        Dest->Buffer = NULL;
                         Status = STATUS_INSUFFICIENT_RESOURCES;
                         _SEH2_LEAVE;
                     }
