@@ -1246,7 +1246,6 @@ PspSetQuotaLimits(
                                            TAG_QUOTA_BLOCK);
         if (QuotaBlock == NULL)
         {
-            ObDereferenceObject(Process);
             return STATUS_NO_MEMORY;
         }
 
