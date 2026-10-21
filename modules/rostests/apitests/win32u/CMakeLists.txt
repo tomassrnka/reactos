@@ -19,6 +19,7 @@ list(APPEND SOURCE
     ntgdi/NtGdiCreateCompatibleBitmap.c
     ntgdi/NtGdiCreateCompatibleDC.c
     ntgdi/NtGdiCreateDIBSection.c
+    ntgdi/NtGdiCreateDIBSectionCapture.c
     ntgdi/NtGdiCreateDIBitmapInternal.c
     ntgdi/NtGdiDeleteObjectApp.c
     ntgdi/NtGdiDoPalette.c

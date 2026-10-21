@@ -15,6 +15,10 @@ extern void func_NtGdiCreateBitmap(void);
 extern void func_NtGdiCreateCompatibleBitmap(void);
 extern void func_NtGdiCreateCompatibleDC(void);
 extern void func_NtGdiCreateDIBSection(void);
+extern void func_NtGdiCreateDIBSectionCaptureValid(void);
+extern void func_NtGdiCreateDIBSectionCaptureInvalid(void);
+extern void func_NtGdiCreateDIBSectionCaptureStraddle(void);
+extern void func_NtGdiCreateDIBSectionCaptureBitsPtr(void);
 extern void func_NtGdiCreateDIBitmapInternal(void);
 extern void func_NtGdiDeleteObjectApp(void);
 extern void func_NtGdiDoPalette(void);
@@ -94,6 +98,10 @@ const struct test winetest_testlist[] =
     { "NtGdiCreateCompatibleBitmap", func_NtGdiCreateCompatibleBitmap },
     { "NtGdiCreateCompatibleDC", func_NtGdiCreateCompatibleDC },
     { "NtGdiCreateDIBSection", func_NtGdiCreateDIBSection },
+    { "NtGdiCreateDIBSectionCaptureValid", func_NtGdiCreateDIBSectionCaptureValid },
+    { "NtGdiCreateDIBSectionCaptureInvalid", func_NtGdiCreateDIBSectionCaptureInvalid },
+    { "NtGdiCreateDIBSectionCaptureStraddle", func_NtGdiCreateDIBSectionCaptureStraddle },
+    { "NtGdiCreateDIBSectionCaptureBitsPtr", func_NtGdiCreateDIBSectionCaptureBitsPtr },
     { "NtGdiCreateDIBitmapInternal", func_NtGdiCreateDIBitmapInternal },
     { "NtGdiDeleteObjectApp", func_NtGdiDeleteObjectApp },
     { "NtGdiDoPalette", func_NtGdiDoPalette },
