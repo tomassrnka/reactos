@@ -104,6 +104,7 @@ KspMethodHandlerWithAllocator(
     IN  ULONG MethodItemSize OPTIONAL)
 {
     PKSMETHOD Method;
+    KSMETHOD MethodBuffer;
     PKSMETHOD_SET Set;
     PIO_STACK_LOCATION IoStack;
     NTSTATUS Status;
@@ -122,24 +123,82 @@ KspMethodHandlerWithAllocator(
         return STATUS_INVALID_BUFFER_SIZE;
     }
 
-    /* FIXME probe the input / output buffer if from user mode */
+    /* T54: probe and capture the method header from user mode. The
+     * Type3InputBuffer / UserBuffer were previously dereferenced raw (see the
+     * former FIXME): a faulting/unmapped buffer could bugcheck, and the
+     * dispatch decision could be taken against a value concurrently mutated by
+     * user mode (double-fetch). */
+    if (Irp->RequestorMode == UserMode)
+    {
+        _SEH2_TRY
+        {
+            /* probe the raw input buffer for read */
+            ProbeForRead(IoStack->Parameters.DeviceIoControl.Type3InputBuffer,
+                         IoStack->Parameters.DeviceIoControl.InputBufferLength,
+                         sizeof(UCHAR));
 
-    /* get input property request */
-    Method = (PKSMETHOD)IoStack->Parameters.DeviceIoControl.Type3InputBuffer;
+            /* probe the output buffer for write if one was supplied */
+            if (IoStack->Parameters.DeviceIoControl.OutputBufferLength)
+            {
+                ProbeForWrite(Irp->UserBuffer,
+                              IoStack->Parameters.DeviceIoControl.OutputBufferLength,
+                              sizeof(UCHAR));
+            }
+
+            /* capture the method header once into a kernel copy */
+            RtlMoveMemory(&MethodBuffer,
+                          IoStack->Parameters.DeviceIoControl.Type3InputBuffer,
+                          sizeof(KSMETHOD));
+            Status = STATUS_SUCCESS;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+
+        /* bail out on a bad user buffer */
+        if (!NT_SUCCESS(Status))
+            return Status;
+
+        /* dispatch against the captured kernel copy */
+        Method = &MethodBuffer;
+    }
+    else
+    {
+        /* kernel mode caller: buffer is trusted */
+        Method = (PKSMETHOD)IoStack->Parameters.DeviceIoControl.Type3InputBuffer;
+    }
 
 //    DPRINT("KspMethodHandlerWithAllocator Irp %p PropertySetsCount %u PropertySet %p Allocator %p PropertyItemSize %u ExpectedPropertyItemSize %u\n", Irp, PropertySetsCount, PropertySet, Allocator, PropertyItemSize, sizeof(KSPROPERTY_ITEM));
 
     /* sanity check */
     ASSERT(MethodItemSize == 0 || MethodItemSize == sizeof(KSMETHOD_ITEM));
 
-    /* find the method handler */
-    Status = FindMethodHandler(&Irp->IoStatus, MethodSet, MethodSetsCount, Method, IoStack->Parameters.DeviceIoControl.InputBufferLength, IoStack->Parameters.DeviceIoControl.OutputBufferLength, Irp->UserBuffer, &MethodHandler, &Set);
+    /* find the method handler (BASICSUPPORT writes go to the probed output buffer) */
+    _SEH2_TRY
+    {
+        Status = FindMethodHandler(&Irp->IoStatus, MethodSet, MethodSetsCount, Method, IoStack->Parameters.DeviceIoControl.InputBufferLength, IoStack->Parameters.DeviceIoControl.OutputBufferLength, Irp->UserBuffer, &MethodHandler, &Set);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
 
     if (NT_SUCCESS(Status) && MethodHandler)
     {
         /* call method handler */
         KSMETHOD_SET_IRP_STORAGE(Irp) = Set;
-        Status = MethodHandler(Irp, Method, Irp->UserBuffer);
+        _SEH2_TRY
+        {
+            Status = MethodHandler(Irp, Method, Irp->UserBuffer);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            _SEH2_YIELD(return _SEH2_GetExceptionCode());
+        }
+        _SEH2_END;
 
         if (Status == STATUS_BUFFER_TOO_SMALL)
         {
@@ -157,7 +216,15 @@ KspMethodHandlerWithAllocator(
                 }
 
                 /* re-call method handler */
-                Status = MethodHandler(Irp, Method, Irp->UserBuffer);
+                _SEH2_TRY
+                {
+                    Status = MethodHandler(Irp, Method, Irp->UserBuffer);
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    _SEH2_YIELD(return _SEH2_GetExceptionCode());
+                }
+                _SEH2_END;
             }
         }
     }
@@ -171,15 +238,24 @@ KspMethodHandlerWithAllocator(
             return STATUS_MORE_ENTRIES;
         }
 
-        // get output buffer
+        // get output buffer (already probed for write above)
         Guid = (LPGUID)Irp->UserBuffer;
 
-       // copy property guids from property sets
-       for(Index = 0; Index < MethodSetsCount; Index++)
-       {
-           RtlMoveMemory(&Guid[Index], MethodSet[Index].Set, sizeof(GUID));
-       }
-       return STATUS_SUCCESS;
+        // copy property guids from property sets
+        _SEH2_TRY
+        {
+            for(Index = 0; Index < MethodSetsCount; Index++)
+            {
+                RtlMoveMemory(&Guid[Index], MethodSet[Index].Set, sizeof(GUID));
+            }
+            Status = STATUS_SUCCESS;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            _SEH2_YIELD(return _SEH2_GetExceptionCode());
+        }
+        _SEH2_END;
+        return Status;
     }
 
     /* done */

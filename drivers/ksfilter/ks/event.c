@@ -99,6 +99,8 @@ KspEnableEvent(
     KSEVENT Event;
     PKSEVENT_ITEM EventItem, FoundEventItem;
     PKSEVENTDATA EventData;
+    KSEVENTDATA CapturedEventData;
+    PKSEVENTDATA SafeEventData;
     const KSEVENT_SET *FoundEventSet;
     PKSEVENT_ENTRY EventEntry;
     ULONG Index, SubIndex, Size;
@@ -229,12 +231,54 @@ KspEnableEvent(
     /* sanity check */
     ASSERT(EventData);
 
+    /* T54: for user mode, probe and capture the KSEVENTDATA into a kernel copy
+     * once. The old code dereferenced Irp->UserBuffer raw and re-read
+     * NotificationType several times (double-fetch): a concurrent user thread
+     * could pass the handle validation as EVENT/SEMAPHORE_HANDLE and then flip
+     * the type to e.g. KSEVENTF_DPC, which both wrote back through a read-only
+     * probed buffer (Dpc.ReferenceCount) and registered a user-controlled
+     * "DPC". All decisions below are now taken from SafeEventData. */
     if (Irp->RequestorMode == UserMode)
     {
-        if (EventData->NotificationType == KSEVENTF_SEMAPHORE_HANDLE)
+        ULONG CaptureLength;
+
+        /* zero so fields past the supplied length read as zero */
+        RtlZeroMemory(&CapturedEventData, sizeof(CapturedEventData));
+
+        CaptureLength = IoStack->Parameters.DeviceIoControl.OutputBufferLength;
+        if (CaptureLength > sizeof(CapturedEventData))
+            CaptureLength = sizeof(CapturedEventData);
+
+        _SEH2_TRY
+        {
+            ProbeForRead(EventData, CaptureLength, sizeof(UCHAR));
+            RtlCopyMemory(&CapturedEventData, EventData, CaptureLength);
+            Status = STATUS_SUCCESS;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+
+        if (!NT_SUCCESS(Status))
+            return Status;
+
+        /* all further decisions use the captured kernel copy */
+        SafeEventData = &CapturedEventData;
+    }
+    else
+    {
+        /* kernel mode caller: the buffer is trusted */
+        SafeEventData = EventData;
+    }
+
+    if (Irp->RequestorMode == UserMode)
+    {
+        if (SafeEventData->NotificationType == KSEVENTF_SEMAPHORE_HANDLE)
         {
             /* get semaphore object handle */
-            Status = ObReferenceObjectByHandle(EventData->SemaphoreHandle.Semaphore, SEMAPHORE_MODIFY_STATE, *ExSemaphoreObjectType, Irp->RequestorMode, &Object, NULL);
+            Status = ObReferenceObjectByHandle(SafeEventData->SemaphoreHandle.Semaphore, SEMAPHORE_MODIFY_STATE, *ExSemaphoreObjectType, Irp->RequestorMode, &Object, NULL);
 
             if (!NT_SUCCESS(Status))
             {
@@ -242,10 +286,10 @@ KspEnableEvent(
                 return STATUS_INVALID_PARAMETER;
             }
         }
-        else if (EventData->NotificationType == KSEVENTF_EVENT_HANDLE)
+        else if (SafeEventData->NotificationType == KSEVENTF_EVENT_HANDLE)
         {
             /* get event object handle */
-            Status = ObReferenceObjectByHandle(EventData->EventHandle.Event, EVENT_MODIFY_STATE, *ExEventObjectType, Irp->RequestorMode, &Object, NULL);
+            Status = ObReferenceObjectByHandle(SafeEventData->EventHandle.Event, EVENT_MODIFY_STATE, *ExEventObjectType, Irp->RequestorMode, &Object, NULL);
 
             if (!NT_SUCCESS(Status))
             {
@@ -261,11 +305,11 @@ KspEnableEvent(
     }
     else
     {
-        if (EventData->NotificationType != KSEVENTF_EVENT_OBJECT &&
-            EventData->NotificationType != KSEVENTF_SEMAPHORE_OBJECT &&
-            EventData->NotificationType != KSEVENTF_DPC &&
-            EventData->NotificationType != KSEVENTF_WORKITEM &&
-            EventData->NotificationType != KSEVENTF_KSWORKITEM)
+        if (SafeEventData->NotificationType != KSEVENTF_EVENT_OBJECT &&
+            SafeEventData->NotificationType != KSEVENTF_SEMAPHORE_OBJECT &&
+            SafeEventData->NotificationType != KSEVENTF_DPC &&
+            SafeEventData->NotificationType != KSEVENTF_WORKITEM &&
+            SafeEventData->NotificationType != KSEVENTF_KSWORKITEM)
         {
             /* invalid type requested */
             return STATUS_INVALID_PARAMETER;
@@ -307,9 +351,15 @@ KspEnableEvent(
     /* zero event entry */
     RtlZeroMemory(EventEntry, Size);
 
-    /* initialize event entry */
-    EventEntry->EventData = EventData;
-    EventEntry->NotificationType = EventData->NotificationType;
+    /* initialize event entry.
+     * T54: do not persist a user-mode EventData pointer - it becomes a stale
+     * user VA once the IRP completes and would be dereferenced later by
+     * KsGenerateEvent (DPC refcount). User mode may only register EVENT/
+     * SEMAPHORE handle types, which use EventEntry->Object (a referenced kernel
+     * object) and never touch EventData again. Kernel callers keep their
+     * trusted pointer. */
+    EventEntry->EventData = (Irp->RequestorMode == UserMode) ? NULL : EventData;
+    EventEntry->NotificationType = SafeEventData->NotificationType;
     EventEntry->EventItem = FoundEventItem;
     EventEntry->EventSet = FoundEventSet;
     EventEntry->FileObject = IoStack->FileObject;
@@ -322,29 +372,29 @@ KspEnableEvent(
             break;
         case KSEVENTF_SEMAPHORE_HANDLE:
             EventEntry->Object = Object;
-            EventEntry->SemaphoreAdjustment = EventData->SemaphoreHandle.Adjustment;
+            EventEntry->SemaphoreAdjustment = SafeEventData->SemaphoreHandle.Adjustment;
             EventEntry->Reserved = 0;
             break;
         case KSEVENTF_EVENT_OBJECT:
-            EventEntry->Object = EventData->EventObject.Event;
-            EventEntry->Reserved = EventData->EventObject.Increment;
+            EventEntry->Object = SafeEventData->EventObject.Event;
+            EventEntry->Reserved = SafeEventData->EventObject.Increment;
             break;
         case KSEVENTF_SEMAPHORE_OBJECT:
-            EventEntry->Object = EventData->SemaphoreObject.Semaphore;
-            EventEntry->SemaphoreAdjustment = EventData->SemaphoreObject.Adjustment;
-            EventEntry->Reserved = EventData->SemaphoreObject.Increment;
+            EventEntry->Object = SafeEventData->SemaphoreObject.Semaphore;
+            EventEntry->SemaphoreAdjustment = SafeEventData->SemaphoreObject.Adjustment;
+            EventEntry->Reserved = SafeEventData->SemaphoreObject.Increment;
             break;
         case KSEVENTF_DPC:
-            EventEntry->Object = EventData->Dpc.Dpc;
-            EventData->Dpc.ReferenceCount = 0;
+            EventEntry->Object = SafeEventData->Dpc.Dpc;
+            SafeEventData->Dpc.ReferenceCount = 0;
             break;
         case KSEVENTF_WORKITEM:
-            EventEntry->Object = EventData->WorkItem.WorkQueueItem;
-            EventEntry->BufferItem = (PKSBUFFER_ITEM)UlongToPtr(EventData->WorkItem.WorkQueueType);
+            EventEntry->Object = SafeEventData->WorkItem.WorkQueueItem;
+            EventEntry->BufferItem = (PKSBUFFER_ITEM)UlongToPtr(SafeEventData->WorkItem.WorkQueueType);
             break;
         case KSEVENTF_KSWORKITEM:
-            EventEntry->Object = EventData->KsWorkItem.KsWorkerObject;
-            EventEntry->DpcItem = (PKSDPC_ITEM)EventData->KsWorkItem.WorkQueueItem;
+            EventEntry->Object = SafeEventData->KsWorkItem.KsWorkerObject;
+            EventEntry->DpcItem = (PKSDPC_ITEM)SafeEventData->KsWorkItem.WorkQueueItem;
             break;
         default:
             /* should not happen */
@@ -354,7 +404,7 @@ KspEnableEvent(
     if (FoundEventItem->AddHandler)
     {
         /* now add the event */
-        Status = FoundEventItem->AddHandler(Irp, EventData, EventEntry);
+        Status = FoundEventItem->AddHandler(Irp, SafeEventData, EventEntry);
 
         if (!NT_SUCCESS(Status))
         {

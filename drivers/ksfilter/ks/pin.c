@@ -2027,9 +2027,19 @@ IKsPin_DispatchDeviceIoControl(
     ASSERT(IoStack->Parameters.DeviceIoControl.InputBufferLength >= sizeof(KSIDENTIFIER));
     ASSERT(This->Pin.Descriptor->AutomationTable);
 
-    RtlStringFromGUID(&Property->Set, &GuidString);
-    DPRINT("IKsPin_DispatchDeviceIoControl property Set |%S| Id %u Flags %x\n", GuidString.Buffer, Property->Id, Property->Flags);
-    RtlFreeUnicodeString(&GuidString);
+    /* T54: Property points at the raw user Type3InputBuffer; guard the debug
+     * formatting so a bad/unmapped buffer cannot bugcheck the dispatcher. */
+    _SEH2_TRY
+    {
+        RtlStringFromGUID(&Property->Set, &GuidString);
+        DPRINT("IKsPin_DispatchDeviceIoControl property Set |%S| Id %u Flags %x\n", GuidString.Buffer, Property->Id, Property->Flags);
+        RtlFreeUnicodeString(&GuidString);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        DPRINT1("IKsPin_DispatchDeviceIoControl: bad property buffer\n");
+    }
+    _SEH2_END;
 
 
     if (IoStack->Parameters.DeviceIoControl.IoControlCode == IOCTL_KS_METHOD)
@@ -2092,9 +2102,18 @@ IKsPin_DispatchDeviceIoControl(
         }
     }
 
-    RtlStringFromGUID(&Property->Set, &GuidString);
-    DPRINT("IKsPin_DispatchDeviceIoControl property Set |%S| Id %u Flags %x Status %lx ResultLength %lu\n", GuidString.Buffer, Property->Id, Property->Flags, Status, Irp->IoStatus.Information);
-    RtlFreeUnicodeString(&GuidString);
+    /* T54: guard the debug formatting against a bad/unmapped user buffer. */
+    _SEH2_TRY
+    {
+        RtlStringFromGUID(&Property->Set, &GuidString);
+        DPRINT("IKsPin_DispatchDeviceIoControl property Set |%S| Id %u Flags %x Status %lx ResultLength %lu\n", GuidString.Buffer, Property->Id, Property->Flags, Status, Irp->IoStatus.Information);
+        RtlFreeUnicodeString(&GuidString);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        DPRINT1("IKsPin_DispatchDeviceIoControl: bad property buffer\n");
+    }
+    _SEH2_END;
 
     if (Status != STATUS_PENDING)
     {
