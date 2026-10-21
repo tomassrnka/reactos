@@ -414,11 +414,13 @@ NtGdiPolyPolyDraw( IN HDC hDC,
 {
     DC *dc;
     PVOID pTemp;
+    PULONG pCounts;
     LPPOINT SafePoints;
     PULONG SafeCounts;
     NTSTATUS Status = STATUS_SUCCESS;
     BOOL Ret = TRUE;
     ULONG nPoints = 0, nMaxPoints = 0, nInvalid = 0, i;
+    ULONG cjCounts, cjPoints, cjTotal;
 
     if (!UnsafePoints || !UnsafeCounts ||
         Count == 0 || iFunc == 0 || iFunc > GdiPolyPolyRgn)
@@ -427,21 +429,24 @@ NtGdiPolyPolyDraw( IN HDC hDC,
         return FALSE;
     }
 
+    /* Capture the counts exactly once; everything below uses the kernel copy */
+    if (!NT_SUCCESS(RtlULongMult(Count, sizeof(ULONG), &cjCounts)))
+    {
+        /* Overflow, windows doesn't set last error */
+        return FALSE;
+    }
+
+    pCounts = ExAllocatePoolWithTag(PagedPool, cjCounts, TAG_SHAPE);
+    if (!pCounts)
+    {
+        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+
     _SEH2_TRY
     {
-        ProbeForRead(UnsafePoints, Count * sizeof(POINT), 1);
-        ProbeForRead(UnsafeCounts, Count * sizeof(ULONG), 1);
-
-        /* Count points and validate polygons */
-        for (i = 0; i < Count; i++)
-        {
-            if (UnsafeCounts[i] < 2)
-            {
-                nInvalid++;
-            }
-            nPoints += UnsafeCounts[i];
-            nMaxPoints = max(nMaxPoints, UnsafeCounts[i]);
-        }
+        ProbeForRead(UnsafeCounts, cjCounts, 1);
+        RtlCopyMemory(pCounts, UnsafeCounts, cjCounts);
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -452,41 +457,70 @@ NtGdiPolyPolyDraw( IN HDC hDC,
     if (!NT_SUCCESS(Status))
     {
         /* Windows doesn't set last error */
+        ExFreePoolWithTag(pCounts, TAG_SHAPE);
         return FALSE;
+    }
+
+    /* Count points (overflow safe) and validate polygons */
+    for (i = 0; i < Count; i++)
+    {
+        if (pCounts[i] < 2)
+        {
+            nInvalid++;
+        }
+
+        if (!NT_SUCCESS(RtlULongAdd(nPoints, pCounts[i], &nPoints)))
+        {
+            /* Overflow, return without setting a last error code. */
+            ExFreePoolWithTag(pCounts, TAG_SHAPE);
+            return FALSE;
+        }
+        nMaxPoints = max(nMaxPoints, pCounts[i]);
     }
 
     if (nPoints == 0 || nPoints < nMaxPoints)
     {
-        /* If all polygon counts are zero, or we have overflow,
-           return without setting a last error code. */
+        /* If all polygon counts are zero, return without setting a last
+           error code. */
+        ExFreePoolWithTag(pCounts, TAG_SHAPE);
         return FALSE;
     }
 
     if (nInvalid != 0)
     {
         /* If at least one poly count is 0 or 1, fail */
+        ExFreePoolWithTag(pCounts, TAG_SHAPE);
         EngSetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
 
+    /* Calculate the sizes (overflow safe) */
+    if (!NT_SUCCESS(RtlULongMult(nPoints, sizeof(POINT), &cjPoints)) ||
+        !NT_SUCCESS(RtlULongAdd(cjCounts, cjPoints, &cjTotal)))
+    {
+        ExFreePoolWithTag(pCounts, TAG_SHAPE);
+        return FALSE;
+    }
+
     /* Allocate one buffer for both counts and points */
-    pTemp = ExAllocatePoolWithTag(PagedPool,
-                                  Count * sizeof(ULONG) + nPoints * sizeof(POINT),
-                                  TAG_SHAPE);
+    pTemp = ExAllocatePoolWithTag(PagedPool, cjTotal, TAG_SHAPE);
     if (!pTemp)
     {
+        ExFreePoolWithTag(pCounts, TAG_SHAPE);
         EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
         return FALSE;
     }
 
     SafeCounts = pTemp;
     SafePoints = (PVOID)(SafeCounts + Count);
+    RtlCopyMemory(SafeCounts, pCounts, cjCounts);
+    ExFreePoolWithTag(pCounts, TAG_SHAPE);
 
     _SEH2_TRY
     {
-        /* Pointers already probed! */
-        RtlCopyMemory(SafeCounts, UnsafeCounts, Count * sizeof(ULONG));
-        RtlCopyMemory(SafePoints, UnsafePoints, nPoints * sizeof(POINT));
+        /* Probe the number of points we are actually going to read */
+        ProbeForRead(UnsafePoints, cjPoints, 1);
+        RtlCopyMemory(SafePoints, UnsafePoints, cjPoints);
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
