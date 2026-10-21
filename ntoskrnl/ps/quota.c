@@ -1222,6 +1222,24 @@ PspSetQuotaLimits(
             return STATUS_PRIVILEGE_NOT_HELD;
         }
 
+        /*
+         * Validate the requested pool limits. Zero and SIZE_T_MAX both mean
+         * "no limit". A finite limit below what the process already holds
+         * would leave it over quota from the start, so reject it.
+         */
+        if (CapturedQuotaLimits.NonPagedPoolLimit != 0 &&
+            CapturedQuotaLimits.NonPagedPoolLimit != SIZE_T_MAX &&
+            CapturedQuotaLimits.NonPagedPoolLimit < Process->QuotaUsage[PsNonPagedPool])
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+        if (CapturedQuotaLimits.PagedPoolLimit != 0 &&
+            CapturedQuotaLimits.PagedPoolLimit != SIZE_T_MAX &&
+            CapturedQuotaLimits.PagedPoolLimit < Process->QuotaUsage[PsPagedPool])
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+
         /* Allocate a new quota block */
         QuotaBlock = ExAllocatePoolWithTag(NonPagedPool,
                                            sizeof(EPROCESS_QUOTA_BLOCK),
@@ -1239,8 +1257,12 @@ PspSetQuotaLimits(
         QuotaBlock->QuotaEntry[PsNonPagedPool].Peak = Process->QuotaPeak[PsNonPagedPool];
         QuotaBlock->QuotaEntry[PsPagedPool].Peak = Process->QuotaPeak[PsPagedPool];
         QuotaBlock->QuotaEntry[PsPageFile].Peak = Process->QuotaPeak[PsPageFile];
-        QuotaBlock->QuotaEntry[PsNonPagedPool].Limit = PspDefaultQuotaBlock.QuotaEntry[PsNonPagedPool].Limit;
-        QuotaBlock->QuotaEntry[PsPagedPool].Limit = PspDefaultQuotaBlock.QuotaEntry[PsPagedPool].Limit;
+        QuotaBlock->QuotaEntry[PsNonPagedPool].Limit =
+            CapturedQuotaLimits.NonPagedPoolLimit ? CapturedQuotaLimits.NonPagedPoolLimit :
+            PspDefaultQuotaBlock.QuotaEntry[PsNonPagedPool].Limit;
+        QuotaBlock->QuotaEntry[PsPagedPool].Limit =
+            CapturedQuotaLimits.PagedPoolLimit ? CapturedQuotaLimits.PagedPoolLimit :
+            PspDefaultQuotaBlock.QuotaEntry[PsPagedPool].Limit;
         QuotaBlock->QuotaEntry[PsPageFile].Limit = PspDefaultQuotaBlock.QuotaEntry[PsPageFile].Limit;
 
         /* Try to exchange the quota block, if that failed, just drop it */
