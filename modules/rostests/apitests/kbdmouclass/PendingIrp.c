@@ -39,10 +39,12 @@ static HANDLE OpenDev(PCWSTR Name)
 
 static void StartRead(HANDLE h, RD *r)
 {
+    LARGE_INTEGER Off;
+    Off.QuadPart = 0;
     RtlZeroMemory(r, sizeof(*r));
     NtCreateEvent(&r->Event, EVENT_ALL_ACCESS, NULL, NotificationEvent, FALSE);
     r->Iosb.Status = 0x7FFFFFFF;
-    r->Status = NtReadFile(h, r->Event, NULL, NULL, &r->Iosb, r->Buffer, sizeof(r->Buffer), NULL, NULL);
+    r->Status = NtReadFile(h, r->Event, NULL, NULL, &r->Iosb, r->Buffer, sizeof(r->Buffer), &Off, NULL);
 }
 
 /* Returns TRUE if the request completed in time; Status is the final status */
