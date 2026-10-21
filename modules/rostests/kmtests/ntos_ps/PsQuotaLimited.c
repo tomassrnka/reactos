@@ -369,7 +369,8 @@ QlSwapToOwnBlockEx(
         {
             trace("QL fresh block type=%lu Usage=%Iu Return=%Iu Limit=%Iu Peak=%Iu\n", t,
                   N->QuotaEntry[t].Usage, N->QuotaEntry[t].Return, N->QuotaEntry[t].Limit, N->QuotaEntry[t].Peak);
-            ok_eq_size(N->QuotaEntry[t].Usage, 0);
+            /* A new private block is seeded with the process' own usage, not zero. */
+            ok_eq_size(N->QuotaEntry[t].Usage, Process->QuotaUsage[t]);
             ok_eq_size(N->QuotaEntry[t].Return, 0);
             N->QuotaEntry[t].Usage = 0;
             N->QuotaEntry[t].Return = 0;
@@ -415,6 +416,7 @@ START_TEST(PsQuotaLimitedTrim)
     PEPROCESS Process = PsGetCurrentProcess();
     PEPROCESS_QUOTA_BLOCK Old, Own;
     PVOID UserBuf;
+    NTSTATUS Status;
     ULONG i;
 
     Own = QlSwapToOwnBlock(Process, &Old, &UserBuf);
@@ -422,7 +424,10 @@ START_TEST(PsQuotaLimitedTrim)
         return;
 
     for (i = 0; i < 24; i++)
-        ok_eq_hex(PsChargeProcessPoolQuota(Process, PagedPool, 0x1000), STATUS_SUCCESS);
+    {
+        Status = PsChargeProcessPoolQuota(Process, PagedPool, 0x1000);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+    }
     trace("QLTRIM charged 0x18000 paged, returning in 0x1000 pieces\n");
     for (i = 0; i < 24; i++)
     {
