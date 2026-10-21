@@ -197,6 +197,54 @@ ExpFreeLowLevelTable(IN PEPROCESS Process,
     ExpFreeTablePagedPool(Process, TableEntry, PAGE_SIZE);
 }
 
+//
+// Per-CPU free-handle cache (SMP lever #1) - allocation / teardown helpers.
+//
+static
+BOOLEAN
+ExpAllocateHandleCpuCache(IN PHANDLE_TABLE HandleTable)
+{
+    ULONG Count = (ULONG)KeNumberProcessors;
+    SIZE_T Size;
+    PVOID Cache;
+    PAGED_CODE();
+
+    /*
+     * Size the cache for every currently-online CPU, one 64-byte line each, plus
+     * one extra line so the raw pool base can be aligned up to a cache line without
+     * overrunning the allocation. The fast path additionally bounds-checks the
+     * current processor index against PerCpuFreeCacheCount, so a table created
+     * before all CPUs are online (hence sized for fewer CPUs) stays correct:
+     * higher-numbered CPUs simply fall back to the shared FirstFree path.
+     */
+    if (Count == 0) Count = 1;
+    Size = (SIZE_T)(Count + 1) * EX_HANDLE_CACHE_LINE;
+
+    Cache = ExAllocatePoolWithTag(NonPagedPool, Size, TAG_HANDLE_CPU_CACHE);
+    if (Cache == NULL) return FALSE;
+
+    /* Zero it: Count fields start at 0 (empty caches) for every CPU line */
+    RtlZeroMemory(Cache, Size);
+    HandleTable->PerCpuFreeCache = Cache;
+    HandleTable->PerCpuFreeCacheCount = Count;
+    return TRUE;
+}
+
+static
+VOID
+ExpFreeHandleCpuCache(IN PHANDLE_TABLE HandleTable)
+{
+    PVOID Cache = HandleTable->PerCpuFreeCache;
+    PAGED_CODE();
+
+    if (Cache != NULL)
+    {
+        HandleTable->PerCpuFreeCache = NULL;
+        HandleTable->PerCpuFreeCacheCount = 0;
+        ExFreePoolWithTag(Cache, TAG_HANDLE_CPU_CACHE);
+    }
+}
+
 VOID
 NTAPI
 ExpFreeHandleTable(IN PHANDLE_TABLE HandleTable)
@@ -264,6 +312,9 @@ ExpFreeHandleTable(IN PHANDLE_TABLE HandleTable)
                               Level3,
                               SizeOfHandle(HIGH_LEVEL_ENTRIES));
     }
+
+    /* Free the per-CPU free-handle cache (SMP lever #1) */
+    ExpFreeHandleCpuCache(HandleTable);
 
     /* Free the actual table and check if we need to release quota */
     ExFreePoolWithTag(HandleTable, TAG_OBJECT_TABLE);
@@ -358,11 +409,27 @@ ExpAllocateHandleTable(IN PEPROCESS Process OPTIONAL,
     /* Clear the table */
     RtlZeroMemory(HandleTable, sizeof(HANDLE_TABLE));
 
+    /* Allocate the per-CPU free-handle cache (SMP lever #1) */
+    if (!ExpAllocateHandleCpuCache(HandleTable))
+    {
+        /* Failed, free the table */
+        ExFreePoolWithTag(HandleTable, TAG_OBJECT_TABLE);
+
+        /* Return the quota it was taking up */
+        if (Process)
+        {
+            PsReturnProcessPagedPoolQuota(Process, sizeof(HANDLE_TABLE));
+        }
+
+        return NULL;
+    }
+
     /* Now allocate the first level structures */
     HandleTableTable = ExpAllocateTablePagedPoolNoZero(Process, PAGE_SIZE);
     if (!HandleTableTable)
     {
-        /* Failed, free the table */
+        /* Failed, free the per-CPU cache and the table */
+        ExpFreeHandleCpuCache(HandleTable);
         ExFreePoolWithTag(HandleTable, TAG_OBJECT_TABLE);
 
         /* Return the quota it was taking up */

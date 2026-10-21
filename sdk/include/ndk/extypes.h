@@ -830,6 +830,16 @@ typedef struct _HANDLE_TABLE
         UCHAR StrictFIFO:1;
     };
 #endif
+    //
+    // ReactOS SMP (lever #1): per-CPU private free-handle cache. Appended at the
+    // end of the structure so the published layout above is preserved on every
+    // NTDDI target (drivers never allocate HANDLE_TABLE themselves). The pointer
+    // is the raw NonPagedPool base (cache-line-aligned slots are derived from it,
+    // see EX_HANDLE_CACHE_* in ntoskrnl/include/internal/ex.h); the count is the
+    // number of per-CPU slots the allocation covers (0 == cache disabled).
+    //
+    PVOID PerCpuFreeCache;
+    ULONG PerCpuFreeCacheCount;
 } HANDLE_TABLE, *PHANDLE_TABLE;
 
 #endif

@@ -160,6 +160,44 @@ typedef struct _HARDERROR_USER_PARAMETERS
 #define FREE_HANDLE_MASK                -1
 
 //
+// Per-CPU private free-handle cache (SMP lever #1)
+//
+// Each online CPU owns one 64-byte cache line holding a small LIFO stack of free
+// handle values (indices with the tag bits cleared, i.e. the same encoding used on
+// the FirstFree free list). The fast path pops/pushes the owning CPU's line under a
+// brief raise to DISPATCH_LEVEL (which pins the CPU and serialises against the only
+// other possible accessor on this CPU - a DPC/ISR), so the per-CPU line is a pure
+// single-accessor array with no CAS and therefore no ABA. Cross-CPU transfers only
+// happen through the proven FirstFree lock-divert refill/flush path.
+//
+// Layout note: Count + Handles[15] == 16 ULONGs == 64 bytes on both i386 and amd64
+// (ULONG is 32-bit on both), i.e. exactly one cache line, so distinct CPUs never
+// share a line (false-sharing elimination, the point of this lever).
+//
+#define EX_HANDLE_CACHE_LINE        64
+#define EX_HANDLE_CACHE_CAPACITY    ((EX_HANDLE_CACHE_LINE / sizeof(ULONG)) - 1)
+
+typedef struct _EX_HANDLE_CPU_CACHE
+{
+    ULONG Count;
+    ULONG Handles[EX_HANDLE_CACHE_CAPACITY];
+} EX_HANDLE_CPU_CACHE, *PEX_HANDLE_CPU_CACHE;
+
+C_ASSERT(sizeof(EX_HANDLE_CPU_CACHE) == EX_HANDLE_CACHE_LINE);
+
+//
+// Cache-line-aligned base of the per-CPU cache array. PerCpuFreeCache stores the
+// raw pool base (over-allocated by one line); aligning up by < EX_HANDLE_CACHE_LINE
+// always stays inside the allocation, so every per-CPU slot is 64-byte aligned.
+//
+#define EX_HANDLE_CACHE_BASE(ht)                                               \
+    ((PEX_HANDLE_CPU_CACHE)(((ULONG_PTR)(ht)->PerCpuFreeCache +                \
+                             (EX_HANDLE_CACHE_LINE - 1)) &                     \
+                            ~((ULONG_PTR)EX_HANDLE_CACHE_LINE - 1)))
+
+#define EX_HANDLE_CACHE_SLOT(ht, cpu)   (&EX_HANDLE_CACHE_BASE(ht)[(cpu)])
+
+//
 // Number of entries in each table level
 //
 #define LOW_LEVEL_ENTRIES   (PAGE_SIZE / sizeof(HANDLE_TABLE_ENTRY))
