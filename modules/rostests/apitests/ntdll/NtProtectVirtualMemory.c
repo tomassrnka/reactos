@@ -822,6 +822,137 @@ TestNoCacheFreshPages(void)
     FreeRegion(Control);
 }
 
+/*
+ * A view of a section must not be reprotectable beyond the section's maximum
+ * protection. Reprotecting a read-only data mapping to writable or executable
+ * is a W^X / privilege-escalation hole: MmProtectSectionView must reject it
+ * with STATUS_SECTION_PROTECTION, exactly as NtMapViewOfSection rejects an
+ * over-broad protection at map time.
+ */
+static
+void
+TestSectionMaxProtection(void)
+{
+    WCHAR ModulePath[MAX_PATH];
+    UNICODE_STRING NtPath;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatusBlock;
+    NTSTATUS Status;
+    HANDLE FileHandle, SectionHandle;
+    PVOID BaseAddress;
+    SIZE_T ViewSize;
+    ULONG OldProtect;
+
+    /* Use our own module file as the backing store for a read-only data section */
+    if (GetModuleFileNameW(NULL, ModulePath, RTL_NUMBER_OF(ModulePath)) == 0)
+    {
+        ok(0, "GetModuleFileNameW failed: %lu\n", GetLastError());
+        return;
+    }
+
+    if (!RtlDosPathNameToNtPathName_U(ModulePath, &NtPath, NULL, NULL))
+    {
+        ok(0, "RtlDosPathNameToNtPathName_U failed\n");
+        return;
+    }
+
+    InitializeObjectAttributes(&ObjectAttributes, &NtPath, 0, NULL, NULL);
+    Status = NtOpenFile(&FileHandle,
+                        GENERIC_READ | SYNCHRONIZE,
+                        &ObjectAttributes,
+                        &IoStatusBlock,
+                        FILE_SHARE_READ | FILE_SHARE_DELETE,
+                        FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE);
+    RtlFreeHeap(RtlGetProcessHeap(), 0, NtPath.Buffer);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+    {
+        skip("Failed to open backing file\n");
+        return;
+    }
+
+    /* Create a read-only *data* section (not SEC_IMAGE) over the file */
+    Status = NtCreateSection(&SectionHandle,
+                             SECTION_MAP_READ,
+                             NULL,
+                             NULL,
+                             PAGE_READONLY,
+                             SEC_COMMIT,
+                             FileHandle);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+    {
+        skip("Failed to create read-only data section\n");
+        NtClose(FileHandle);
+        return;
+    }
+
+    /* Map a read-only view - this is within the section's maximum protection */
+    BaseAddress = NULL;
+    ViewSize = PAGE_SIZE;
+    Status = NtMapViewOfSection(SectionHandle,
+                                NtCurrentProcess(),
+                                &BaseAddress,
+                                0,
+                                0,
+                                NULL,
+                                &ViewSize,
+                                ViewShare,
+                                0,
+                                PAGE_READONLY);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+    {
+        skip("Failed to map read-only view\n");
+        NtClose(SectionHandle);
+        NtClose(FileHandle);
+        return;
+    }
+
+    /* Positive control: re-stating PAGE_READONLY stays within the maximum */
+    OldProtect = 0;
+    Status = NtProtectVirtualMemory(NtCurrentProcess(),
+                                    &BaseAddress,
+                                    &ViewSize,
+                                    PAGE_READONLY,
+                                    &OldProtect);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+
+    /* Escalation to writable must be rejected (section is read-only) */
+    BaseAddress = (PVOID)PAGE_ROUND_DOWN(BaseAddress);
+    ViewSize = PAGE_SIZE;
+    Status = NtProtectVirtualMemory(NtCurrentProcess(),
+                                    &BaseAddress,
+                                    &ViewSize,
+                                    PAGE_READWRITE,
+                                    &OldProtect);
+    ok_ntstatus(Status, STATUS_SECTION_PROTECTION);
+
+    /* Escalation to executable must be rejected (section is read-only) */
+    BaseAddress = (PVOID)PAGE_ROUND_DOWN(BaseAddress);
+    ViewSize = PAGE_SIZE;
+    Status = NtProtectVirtualMemory(NtCurrentProcess(),
+                                    &BaseAddress,
+                                    &ViewSize,
+                                    PAGE_EXECUTE_READ,
+                                    &OldProtect);
+    ok_ntstatus(Status, STATUS_SECTION_PROTECTION);
+
+    /* Escalation to RWX must be rejected (section is read-only) */
+    BaseAddress = (PVOID)PAGE_ROUND_DOWN(BaseAddress);
+    ViewSize = PAGE_SIZE;
+    Status = NtProtectVirtualMemory(NtCurrentProcess(),
+                                    &BaseAddress,
+                                    &ViewSize,
+                                    PAGE_EXECUTE_READWRITE,
+                                    &OldProtect);
+    ok_ntstatus(Status, STATUS_SECTION_PROTECTION);
+
+    NtUnmapViewOfSection(NtCurrentProcess(), BaseAddress);
+    NtClose(SectionHandle);
+    NtClose(FileHandle);
+}
+
 START_TEST(NtProtectVirtualMemory)
 {
     TestReadWrite();
@@ -835,4 +966,5 @@ START_TEST(NtProtectVirtualMemory)
     TestCachingTypeKept();
     TestCachingAfterNoAccess();
     TestNoCacheFreshPages();
+    TestSectionMaxProtection();
 }

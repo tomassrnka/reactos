@@ -2325,6 +2325,41 @@ MmAccessFaultSectionView(PMMSUPPORT AddressSpace,
     return Status;
 }
 
+/*
+ * Returns TRUE if the page protection Protect requests no more access
+ * (read / write / execute) than the section's maximum protection MaxProtect
+ * allows. This is the same three-axis test MmMapViewOfSection applies at map
+ * time, so a view can only ever be reprotected to a protection it could have
+ * been mapped with in the first place.
+ */
+static
+BOOLEAN
+MiIsProtectWithinMaximum(ULONG Protect, ULONG MaxProtect)
+{
+    /* Requested write access must be granted by the section */
+    if ((Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)) &&
+        !(MaxProtect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)))
+    {
+        return FALSE;
+    }
+
+    /* Requested read / copy-on-write access must be granted by the section */
+    if ((Protect & (PAGE_READONLY | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_WRITECOPY)) &&
+        !(MaxProtect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)))
+    {
+        return FALSE;
+    }
+
+    /* Requested execute access must be granted by the section */
+    if ((Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) &&
+        !(MaxProtect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)))
+    {
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
 NTSTATUS
 NTAPI
 MmProtectSectionView(PMMSUPPORT AddressSpace,
@@ -2335,6 +2370,7 @@ MmProtectSectionView(PMMSUPPORT AddressSpace,
                      PULONG OldProtect)
 {
     PMM_REGION Region;
+    PMM_SECTION_SEGMENT Segment;
     NTSTATUS Status;
     ULONG_PTR MaxLength;
 
@@ -2358,6 +2394,25 @@ MmProtectSectionView(PMMSUPPORT AddressSpace,
             Region->Protect != Protect)
     {
         return STATUS_INVALID_PAGE_PROTECTION;
+    }
+
+    /*
+     * Enforce the section's maximum protection: a view must not be reprotected
+     * beyond the access the section was created with (a W^X / privilege-escalation
+     * hole - e.g. gaining execute or write on a read-only data mapping).
+     *
+     * Image sections are intentionally excluded here: their protection is held
+     * per-segment and is copy-on-write, and the loader legitimately reprotects
+     * image pages above their natural protection (unprotecting the IAT, applying
+     * relocations). A correct, copy-on-write-aware maximum for the image path is
+     * a separate change; see Segment->Protection, which for data-file sections is
+     * the section's page protection.
+     */
+    Segment = MemoryArea->SectionData.Segment;
+    if ((MemoryArea->VadNode.u.VadFlags.VadType != VadImageMap) &&
+        !MiIsProtectWithinMaximum(Protect, Segment->Protection))
+    {
+        return STATUS_SECTION_PROTECTION;
     }
 
     if (OldProtect != NULL)
