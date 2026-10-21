@@ -78,6 +78,7 @@ KMT_TESTFUNC Test_KeTimer;
 KMT_TESTFUNC Test_KeClockTime;
 KMT_TESTFUNC Test_KernelType;
 KMT_TESTFUNC Test_MmMdl;
+KMT_TESTFUNC Test_MmOomRetry;
 KMT_TESTFUNC Test_MmSection;
 KMT_TESTFUNC Test_MmSpecialPool;
 KMT_TESTFUNC Test_MmSpecialPoolOverrun;
@@ -202,6 +203,7 @@ const KMT_TEST TestList[] =
     { "KeClockTime",                        Test_KeClockTime },
     { "-KernelType",                        Test_KernelType },
     { "MmMdl",                              Test_MmMdl },
+    { "MmOomRetry",                         Test_MmOomRetry },
     { "MmSection",                          Test_MmSection },
     { "MmSpecialPool",                      Test_MmSpecialPool },
     { "-MmSpecialPoolOverrun",              Test_MmSpecialPoolOverrun },

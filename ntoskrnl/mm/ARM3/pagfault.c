@@ -15,7 +15,7 @@
 #define MODULE_INVOLVED_IN_ARM3
 #include <mm/ARM3/miarm.h>
 
-VOID
+BOOLEAN
 NTAPI
 MmRebalanceMemoryConsumersAndWait(VOID);
 

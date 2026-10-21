@@ -770,6 +770,7 @@
 @ stdcall MmCanFileBeTruncated(ptr ptr)
 @ stdcall MmCommitSessionMappedView(ptr ptr)
 @ stdcall MmCreateMdl(ptr ptr long)
+@ stdcall MmDbgTestOomRetryBound(long long)
 @ stdcall MmCreateMirror()
 @ stdcall MmCreateSection(ptr long ptr ptr long long ptr ptr)
 @ stdcall MmDisableModifiedWriteOfSection(long)
