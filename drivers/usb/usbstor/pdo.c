@@ -630,6 +630,18 @@ USBSTOR_PdoHandlePnp(
            break;
        }
        case IRP_MN_QUERY_REMOVE_DEVICE:
+       {
+           /*
+            * The PDO sits at the bottom of the device stack, so the class
+            * driver that claimed the LUN (and every driver above it) has
+            * already agreed to the removal by the time we see this request.
+            * A claimed LUN is the normal state of a mounted disk, vetoing here
+            * would make every USB disk impossible to eject. The PDO itself is
+            * deleted by IRP_MN_REMOVE_DEVICE, so the claim does not outlive it.
+            */
+           Status = STATUS_SUCCESS;
+           break;
+       }
        case IRP_MN_QUERY_STOP_DEVICE:
        {
            if (DeviceExtension->Claimed)
@@ -639,6 +651,12 @@ USBSTOR_PdoHandlePnp(
            }
            else
                Status = STATUS_SUCCESS;
+           break;
+       }
+       case IRP_MN_CANCEL_REMOVE_DEVICE:
+       case IRP_MN_CANCEL_STOP_DEVICE:
+       {
+           Status = STATUS_SUCCESS;
            break;
        }
        case IRP_MN_START_DEVICE:
