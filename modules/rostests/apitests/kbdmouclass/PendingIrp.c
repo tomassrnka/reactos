@@ -12,6 +12,7 @@
 #include <ndk/ntndk.h>
 
 #define WAIT_MS 5000
+#define LOG(...) do { DbgPrint("KMC: " __VA_ARGS__); trace(__VA_ARGS__); } while (0)
 
 typedef struct _RD
 {
@@ -84,11 +85,12 @@ static void TestDevice(PCWSTR Name)
     /* two reads back to back, with no input available */
     StartRead(h, &a);
     StartRead(h, &b);
-    trace("%ls: read A -> %lx, read B -> %lx\n", Name, a.Status, b.Status);
+    LOG("%ls: read A -> %lx, read B -> %lx\n", Name, a.Status, b.Status);
     ok(a.Status == STATUS_PENDING || a.Status == STATUS_DEVICE_BUSY || NT_SUCCESS(a.Status), "A: 0x%lx\n", a.Status);
     /* the second read must be rejected rather than displace the first */
     ok(b.Status == STATUS_DEVICE_BUSY || NT_SUCCESS(b.Status), "%ls: second read not rejected: 0x%lx\n", Name, b.Status);
 
+    LOG("cancelling\n");
     NtCancelIoFile(h, &Iosb);
     DoneA = Finish(&a, &Fa);
     DoneB = Finish(&b, &Fb);
@@ -96,13 +98,14 @@ static void TestDevice(PCWSTR Name)
     ok(DoneB, "%ls: second read never completed after cancel (IRP leaked)\n", Name);
     if (DoneA && a.Status == STATUS_PENDING)
         ok(Fa == STATUS_CANCELLED || NT_SUCCESS(Fa), "%ls: A final 0x%lx\n", Name, Fa);
-    trace("%ls: A done=%d 0x%lx, B done=%d 0x%lx\n", Name, DoneA, Fa, DoneB, Fb);
+    LOG("%ls: A done=%d 0x%lx, B done=%d 0x%lx\n", Name, DoneA, Fa, DoneB, Fb);
     fflush(stdout);
 
     /* single reader: a new read can pend again after the cancel, and cancels cleanly */
     StartRead(h, &c);
-    trace("%ls: read C -> %lx\n", Name, c.Status);
+    LOG("%ls: read C -> %lx\n", Name, c.Status);
     ok(c.Status == STATUS_PENDING || c.Status == STATUS_DEVICE_BUSY || NT_SUCCESS(c.Status), "C: 0x%lx\n", c.Status);
+    LOG("cancelling\n");
     NtCancelIoFile(h, &Iosb);
     DoneC = Finish(&c, &Fc);
     ok(DoneC, "%ls: read after cancel never completed\n", Name);
