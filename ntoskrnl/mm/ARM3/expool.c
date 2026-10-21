@@ -50,7 +50,7 @@ POOL_DESCRIPTOR NonPagedPoolDescriptor;
 // single-descriptor behaviour until per-CPU selection is activated.
 //
 #define EXP_MAXIMUM_NONPAGED_POOLS 16
-ULONG ExpNumberOfNonPagedPools = 1;
+ULONG ExpNumberOfNonPagedPools = EXP_MAXIMUM_NONPAGED_POOLS;
 PPOOL_DESCRIPTOR ExpNonPagedPoolDescriptor[EXP_MAXIMUM_NONPAGED_POOLS];
 KSPIN_LOCK ExpNonPagedPoolLock[EXP_MAXIMUM_NONPAGED_POOLS];
 POOL_DESCRIPTOR ExpNonPagedPoolDescriptorStorage[EXP_MAXIMUM_NONPAGED_POOLS - 1];
@@ -1841,21 +1841,16 @@ ExQueryPoolUsage(OUT PULONG PagedPoolPages,
     *NonPagedPoolFrees = PoolDesc->RunningDeAllocs;
 
     //
-    // If the system has more than one non-paged pool, copy the other descriptor
-    // totals as well
+    // T12: add the remaining per-processor non-paged descriptors (index 0 is the
+    // NonPagedPoolDescriptor already accounted for above).
     //
-#if 0
-    if (ExpNumberOfNonPagedPools > 1)
+    for (i = 1; i < ExpNumberOfNonPagedPools; i++)
     {
-        for (i = 0; i < ExpNumberOfNonPagedPools; i++)
-        {
-            PoolDesc = ExpNonPagedPoolDescriptor[i];
-            *NonPagedPoolPages += PoolDesc->TotalPages + PoolDesc->TotalBigPages;
-            *NonPagedPoolAllocs += PoolDesc->RunningAllocs;
-            *NonPagedPoolFrees += PoolDesc->RunningDeAllocs;
-        }
+        PoolDesc = ExpNonPagedPoolDescriptor[i];
+        *NonPagedPoolPages += PoolDesc->TotalPages + PoolDesc->TotalBigPages;
+        *NonPagedPoolAllocs += PoolDesc->RunningAllocs;
+        *NonPagedPoolFrees += PoolDesc->RunningDeAllocs;
     }
-#endif
 
     //
     // Get the amount of hits in the system lookaside lists
