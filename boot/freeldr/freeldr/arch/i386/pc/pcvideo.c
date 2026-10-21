@@ -408,12 +408,22 @@ PcVideoGetDisplayMode(VOID)
          * http://www.techhelpmanual.com/93-rom_bios_variables.html
          */
         UCHAR BiosMode = (*(PUCHAR)0x449) & 0x7F; /* Current video mode */
-        ASSERT(BiosMode == Mode);
+        /* On real or passed-through video BIOSes the BIOS data area (0x449/
+         * 0x44A) is not always kept in sync with INT 10h AH=0Fh. The AH=0Fh
+         * results (Mode, WidthInChars) are authoritative, so warn on a mismatch
+         * instead of asserting and fall back to them; otherwise DBG builds halt
+         * here under GPU passthrough. */
+        if (BiosMode != (Mode & 0x7F))
+            WARN("BDA video mode 0x%x disagrees with INT 10h AH=0Fh mode 0x%x; using the latter\n", BiosMode, Mode & 0x7F);
         BiosVideoMode = Mode;
         TRACE("BIOS mode detected\n");
 
         ScreenWidth = *(PUSHORT)0x44A; /* Number of screen columns */
-        ASSERT(ScreenWidth == WidthInChars);
+        if (ScreenWidth != WidthInChars)
+        {
+            WARN("BDA columns %u disagrees with INT 10h %u; using the latter\n", ScreenWidth, WidthInChars);
+            ScreenWidth = WidthInChars;
+        }
         ScreenHeight = 1 + *(PUCHAR)0x484; /* 1 + "Rows on the screen (less 1, EGA+)" */
         BytesPerScanLine = (ScreenWidth * 2); /* Text mode: one byte for character, one byte for attribute */
         DisplayMode = VideoTextMode;
