@@ -301,7 +301,7 @@ MmRebalanceMemoryConsumers(VOID)
     }
 }
 
-VOID
+BOOLEAN
 NTAPI
 MmRebalanceMemoryConsumersAndWait(VOID)
 {
@@ -327,12 +327,19 @@ MmRebalanceMemoryConsumersAndWait(VOID)
         Delay.QuadPart = -10 * 10000;
         MmRebalanceMemoryConsumers();
         KeDelayExecutionThread(KernelMode, FALSE, &Delay);
-        return;
+        /* We could only spin: a lock this thread holds may be the very one the
+         * balancer needs, so this makes no guaranteed progress. Report it so the
+         * caller can bound the retries instead of livelocking forever behind that
+         * lock (T16). */
+        return FALSE;
     }
 
     KeResetEvent(&MiBalancerDoneEvent);
     MmRebalanceMemoryConsumers();
     KeWaitForSingleObject(&MiBalancerDoneEvent, Executive, KernelMode, FALSE, NULL);
+
+    /* A real balancer pass ran: progress is possible, the caller may retry. */
+    return TRUE;
 }
 
 NTSTATUS
