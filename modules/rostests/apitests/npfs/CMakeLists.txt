@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
-    GetConnectionAttributes.c)
+    GetConnectionAttributes.c
+    QueryClientProcess.c)
 
 add_executable(npfs_apitest ${SOURCE})
 set_module_type(npfs_apitest win32cui)
