@@ -1340,10 +1340,48 @@ PiControlQueryRemoveDevice(
         return STATUS_NO_SUCH_DEVICE;
     }
 
-    UNIMPLEMENTED;
-    Status = STATUS_NOT_IMPLEMENTED;
+    PIP_QUERY_REMOVE_CONTEXT VetoContext;
+    RtlZeroMemory(&VetoContext, sizeof(VetoContext));
+    // TODO: honor CM_REMOVE_* bits in ControlData->Flags (e.g. forced removal).
+    VetoContext.Force = FALSE;
+
+    Status = PiPerformSyncQueryRemoveDevice(DeviceObject, &VetoContext);
 
     ObDereferenceObject(DeviceObject);
+
+    // On veto, report the offending device and reason back to user mode. The
+    // control buffer was already probed for write by NtPlugPlayControl, but
+    // VetoName points at a separate user-mode buffer, so guard every access.
+    if (Status == STATUS_PLUGPLAY_QUERY_VETOED)
+    {
+        _SEH2_TRY
+        {
+            ControlData->VetoType = VetoContext.VetoType;
+
+            if (ControlData->VetoName != NULL && ControlData->NameLength > 0)
+            {
+                SIZE_T VetoNameChars = wcslen(VetoContext.VetoName) + 1;
+
+                if (VetoNameChars > ControlData->NameLength)
+                    VetoNameChars = ControlData->NameLength;
+
+                ProbeForWrite(ControlData->VetoName,
+                              VetoNameChars * sizeof(WCHAR),
+                              sizeof(WCHAR));
+
+                RtlCopyMemory(ControlData->VetoName,
+                              VetoContext.VetoName,
+                              VetoNameChars * sizeof(WCHAR));
+
+                ControlData->VetoName[VetoNameChars - 1] = UNICODE_NULL;
+            }
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            // Preserve the veto status even if the name can't be written back.
+        }
+        _SEH2_END;
+    }
 
     return Status;
 }

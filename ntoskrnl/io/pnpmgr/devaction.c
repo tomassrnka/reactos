@@ -59,6 +59,7 @@ typedef struct _DEVICE_ACTION_REQUEST
     PKEVENT CompletionEvent;
     NTSTATUS *CompletionStatus;
     DEVICE_ACTION Action;
+    PVOID Context;
 } DEVICE_ACTION_REQUEST, *PDEVICE_ACTION_REQUEST;
 
 typedef enum _ADD_DEV_DRIVER_TYPE
@@ -109,7 +110,17 @@ IopCancelPrepareDeviceForRemoval(PDEVICE_OBJECT DeviceObject);
 
 static
 NTSTATUS
-IopPrepareDeviceForRemoval(PDEVICE_OBJECT DeviceObject, BOOLEAN Force);
+IopPrepareDeviceForRemoval(
+    PDEVICE_OBJECT DeviceObject,
+    BOOLEAN Force,
+    PPIP_QUERY_REMOVE_CONTEXT VetoContext);
+
+static
+VOID
+IopCaptureVeto(
+    _Inout_opt_ PPIP_QUERY_REMOVE_CONTEXT VetoContext,
+    _In_ PDEVICE_NODE DeviceNode,
+    _In_ PNP_VETO_TYPE VetoType);
 
 static
 NTSTATUS
@@ -1879,10 +1890,47 @@ IopCancelPrepareDeviceForRemoval(PDEVICE_OBJECT DeviceObject)
         IopCancelRemoveDeviceRelations(DeviceRelations);
 }
 
+/**
+ * @brief   Records the first veto encountered during a query-remove operation.
+ *
+ * Only the first veto is kept (that is the one Windows surfaces to the user).
+ * The vetoing device's instance path is copied into the caller-supplied buffer
+ * so the calling thread can report it back through the user-mode out-parameters.
+ */
+static
+VOID
+IopCaptureVeto(
+    _Inout_opt_ PPIP_QUERY_REMOVE_CONTEXT VetoContext,
+    _In_ PDEVICE_NODE DeviceNode,
+    _In_ PNP_VETO_TYPE VetoType)
+{
+    ULONG Chars;
+
+    if (VetoContext == NULL || VetoContext->Vetoed)
+        return;
+
+    VetoContext->Vetoed = TRUE;
+    VetoContext->VetoType = VetoType;
+
+    Chars = DeviceNode->InstancePath.Length / sizeof(WCHAR);
+    if (Chars > PNP_VETO_NAME_LENGTH - 1)
+        Chars = PNP_VETO_NAME_LENGTH - 1;
+
+    if (Chars != 0 && DeviceNode->InstancePath.Buffer != NULL)
+    {
+        RtlCopyMemory(VetoContext->VetoName,
+                      DeviceNode->InstancePath.Buffer,
+                      Chars * sizeof(WCHAR));
+    }
+    VetoContext->VetoName[Chars] = UNICODE_NULL;
+}
+
 static
 NTSTATUS
 NTAPI
-IopQueryRemoveDevice(IN PDEVICE_OBJECT DeviceObject)
+IopQueryRemoveDevice(
+    IN PDEVICE_OBJECT DeviceObject,
+    PPIP_QUERY_REMOVE_CONTEXT VetoContext)
 {
     PDEVICE_NODE DeviceNode = IopGetDeviceNode(DeviceObject);
     NTSTATUS Status;
@@ -1901,6 +1949,11 @@ IopQueryRemoveDevice(IN PDEVICE_OBJECT DeviceObject)
         DPRINT1("Removal vetoed by %wZ\n", &DeviceNode->InstancePath);
         IopQueueTargetDeviceEvent(&GUID_DEVICE_REMOVAL_VETOED,
                                   &DeviceNode->InstancePath);
+
+        /* Remember which device vetoed the removal so the request initiator can
+         * report it back to user mode. A driver failing IRP_MN_QUERY_REMOVE_DEVICE
+         * usually means there are still outstanding opens on the device. */
+        IopCaptureVeto(VetoContext, DeviceNode, PNP_VetoDevice);
     }
 
     return Status;
@@ -1908,7 +1961,10 @@ IopQueryRemoveDevice(IN PDEVICE_OBJECT DeviceObject)
 
 static
 NTSTATUS
-IopQueryRemoveChildDevices(PDEVICE_NODE ParentDeviceNode, BOOLEAN Force)
+IopQueryRemoveChildDevices(
+    PDEVICE_NODE ParentDeviceNode,
+    BOOLEAN Force,
+    PPIP_QUERY_REMOVE_CONTEXT VetoContext)
 {
     PDEVICE_NODE ChildDeviceNode, NextDeviceNode, FailedRemoveDevice;
     NTSTATUS Status;
@@ -1922,7 +1978,7 @@ IopQueryRemoveChildDevices(PDEVICE_NODE ParentDeviceNode, BOOLEAN Force)
         KeReleaseSpinLock(&IopDeviceTreeLock, OldIrql);
         PiSetDevNodeState(ChildDeviceNode, DeviceNodeAwaitingQueuedRemoval);
 
-        Status = IopPrepareDeviceForRemoval(ChildDeviceNode->PhysicalDeviceObject, Force);
+        Status = IopPrepareDeviceForRemoval(ChildDeviceNode->PhysicalDeviceObject, Force, VetoContext);
         if (!NT_SUCCESS(Status))
         {
             FailedRemoveDevice = ChildDeviceNode;
@@ -1944,6 +2000,12 @@ cleanup:
         NextDeviceNode = ChildDeviceNode->Sibling;
         KeReleaseSpinLock(&IopDeviceTreeLock, OldIrql);
 
+        /* Undo the forward-pass state transition: the removal was cancelled, so a
+         * child we moved to DeviceNodeAwaitingQueuedRemoval must go back to started,
+         * otherwise a later enumeration pass would silently remove it. */
+        if (ChildDeviceNode->State == DeviceNodeAwaitingQueuedRemoval)
+            PiSetDevNodeState(ChildDeviceNode, DeviceNodeStarted);
+
         IopCancelPrepareDeviceForRemoval(ChildDeviceNode->PhysicalDeviceObject);
 
         /* IRP_MN_CANCEL_REMOVE_DEVICE is also sent to the device
@@ -1962,7 +2024,10 @@ cleanup:
 
 static
 NTSTATUS
-IopQueryRemoveDeviceRelations(PDEVICE_RELATIONS DeviceRelations, BOOLEAN Force)
+IopQueryRemoveDeviceRelations(
+    PDEVICE_RELATIONS DeviceRelations,
+    BOOLEAN Force,
+    PPIP_QUERY_REMOVE_CONTEXT VetoContext)
 {
     /* This function DOES NOT dereference the device objects on SUCCESS
      * but it DOES dereference device objects on FAILURE */
@@ -1972,7 +2037,7 @@ IopQueryRemoveDeviceRelations(PDEVICE_RELATIONS DeviceRelations, BOOLEAN Force)
 
     for (i = 0; i < DeviceRelations->Count; i++)
     {
-        Status = IopPrepareDeviceForRemoval(DeviceRelations->Objects[i], Force);
+        Status = IopPrepareDeviceForRemoval(DeviceRelations->Objects[i], Force, VetoContext);
         if (!NT_SUCCESS(Status))
         {
             j = i;
@@ -2003,7 +2068,10 @@ cleanup:
 
 static
 NTSTATUS
-IopPrepareDeviceForRemoval(IN PDEVICE_OBJECT DeviceObject, BOOLEAN Force)
+IopPrepareDeviceForRemoval(
+    IN PDEVICE_OBJECT DeviceObject,
+    BOOLEAN Force,
+    PPIP_QUERY_REMOVE_CONTEXT VetoContext)
 {
     PDEVICE_NODE DeviceNode = IopGetDeviceNode(DeviceObject);
     IO_STACK_LOCATION Stack;
@@ -2014,10 +2082,11 @@ IopPrepareDeviceForRemoval(IN PDEVICE_OBJECT DeviceObject, BOOLEAN Force)
     if ((DeviceNode->UserFlags & DNUF_NOT_DISABLEABLE) && !Force)
     {
         DPRINT1("Removal not allowed for %wZ\n", &DeviceNode->InstancePath);
+        IopCaptureVeto(VetoContext, DeviceNode, PNP_VetoNonDisableable);
         return STATUS_UNSUCCESSFUL;
     }
 
-    if (!Force && IopQueryRemoveDevice(DeviceObject) != STATUS_SUCCESS)
+    if (!Force && IopQueryRemoveDevice(DeviceObject, VetoContext) != STATUS_SUCCESS)
     {
         DPRINT1("Removal vetoed by failing the query remove request\n");
 
@@ -2044,16 +2113,25 @@ IopPrepareDeviceForRemoval(IN PDEVICE_OBJECT DeviceObject, BOOLEAN Force)
 
     if (DeviceRelations)
     {
-        Status = IopQueryRemoveDeviceRelations(DeviceRelations, Force);
+        Status = IopQueryRemoveDeviceRelations(DeviceRelations, Force, VetoContext);
         if (!NT_SUCCESS(Status))
+        {
+            /* The target itself already passed IRP_MN_QUERY_REMOVE_DEVICE above;
+             * undo that so its drivers don't stay stuck in the remove-pending state.
+             * (Only meaningful when we actually queried it, i.e. !Force.) */
+            if (!Force)
+                IopCancelRemoveDevice(DeviceObject);
             return Status;
+        }
     }
 
-    Status = IopQueryRemoveChildDevices(DeviceNode, Force);
+    Status = IopQueryRemoveChildDevices(DeviceNode, Force, VetoContext);
     if (!NT_SUCCESS(Status))
     {
         if (DeviceRelations)
             IopCancelRemoveDeviceRelations(DeviceRelations);
+        if (!Force)
+            IopCancelRemoveDevice(DeviceObject);
         return Status;
     }
 
@@ -2079,7 +2157,7 @@ IopRemoveDevice(PDEVICE_NODE DeviceNode)
 
     BOOLEAN surpriseRemoval = (_Bool)(DeviceNode->Flags & DNF_DEVICE_GONE);
 
-    Status = IopPrepareDeviceForRemoval(DeviceNode->PhysicalDeviceObject, surpriseRemoval);
+    Status = IopPrepareDeviceForRemoval(DeviceNode->PhysicalDeviceObject, surpriseRemoval, NULL);
 
     if (surpriseRemoval)
     {
@@ -2098,6 +2176,83 @@ IopRemoveDevice(PDEVICE_NODE DeviceNode)
     }
 
     return Status;
+}
+
+/**
+ * @brief   Handles a user-initiated query-remove -> remove of a device subtree.
+ *
+ * This backs the PlugPlayControlQueryAndRemoveDevice control code, which is used
+ * by "Safely Remove Hardware" (PNP_RequestDeviceEject), Device Manager "Disable"
+ * (DisableDeviceInstance) and device uninstall (PNP_QueryRemove).
+ *
+ * The device stack (and its removal/ejection relations and child devices) is first
+ * asked to release the device via IRP_MN_QUERY_REMOVE_DEVICE. If any device vetoes
+ * the request, the whole operation is cancelled (IRP_MN_CANCEL_REMOVE_DEVICE), the
+ * target device keeps working, and STATUS_PLUGPLAY_QUERY_VETOED is returned along
+ * with the vetoing device / reason in @p VetoContext. On success, the subtree is
+ * torn down with IRP_MN_REMOVE_DEVICE.
+ *
+ * Must run on the device action worker thread (serialized against enumeration).
+ */
+static
+NTSTATUS
+IopQueryAndRemoveDevice(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _Inout_ PPIP_QUERY_REMOVE_CONTEXT VetoContext)
+{
+    PDEVICE_NODE DeviceNode = IopGetDeviceNode(DeviceObject);
+    PNP_DEVNODE_STATE PreviousState;
+    NTSTATUS Status;
+
+    ASSERT(DeviceNode);
+    ASSERT(VetoContext);
+
+    /* A device that is already gone needs no teardown: report success so that
+     * repeated disable/uninstall requests remain idempotent. */
+    if (DeviceNode->State == DeviceNodeRemoved ||
+        DeviceNode->State == DeviceNodeDeleted)
+    {
+        return STATUS_SUCCESS;
+    }
+
+    /* Only a started device can be torn down on request. For anything else we
+     * conservatively refuse rather than risk corrupting an in-flight transition. */
+    if (DeviceNode->State != DeviceNodeStarted)
+    {
+        DPRINT1("QueryAndRemove: device %wZ is not started (state 0x%x)\n",
+                &DeviceNode->InstancePath, DeviceNode->State);
+        IopCaptureVeto(VetoContext, DeviceNode, PNP_VetoIllegalDeviceRequest);
+        return STATUS_PLUGPLAY_QUERY_VETOED;
+    }
+
+    /* IopSendRemoveDevice expects the target node to be in this state (same as the
+     * surprise-removal path driven from PiDevNodeStateMachine). */
+    PreviousState = DeviceNode->State;
+    PiSetDevNodeState(DeviceNode, DeviceNodeAwaitingQueuedRemoval);
+
+    /* Query (and, on success, remove) the removal/ejection relations and children,
+     * plus the target device's own stack. */
+    Status = IopPrepareDeviceForRemoval(DeviceObject, VetoContext->Force, VetoContext);
+    if (!NT_SUCCESS(Status))
+    {
+        /* Vetoed: IopPrepareDeviceForRemoval already sent IRP_MN_CANCEL_REMOVE_DEVICE
+         * to everything it touched, so the device keeps working. Restore our node's
+         * state and report the veto. */
+        PiSetDevNodeState(DeviceNode, PreviousState);
+
+        /* A lower helper normally records the specific veto; make sure we always
+         * return something meaningful. */
+        if (!VetoContext->Vetoed)
+            IopCaptureVeto(VetoContext, DeviceNode, PNP_VetoDevice);
+
+        return STATUS_PLUGPLAY_QUERY_VETOED;
+    }
+
+    /* The subtree released the device: finish by removing the target itself.
+     * Note: this dereferences the PDO, so DeviceNode must not be touched afterwards. */
+    IopSendRemoveDevice(DeviceObject);
+
+    return STATUS_SUCCESS;
 }
 
 static
@@ -2244,12 +2399,12 @@ IoRequestDeviceEject(IN PDEVICE_OBJECT PhysicalDeviceObject)
 
     if (DeviceRelations)
     {
-        Status = IopQueryRemoveDeviceRelations(DeviceRelations, FALSE);
+        Status = IopQueryRemoveDeviceRelations(DeviceRelations, FALSE, NULL);
         if (!NT_SUCCESS(Status))
             goto cleanup;
     }
 
-    Status = IopQueryRemoveChildDevices(DeviceNode, FALSE);
+    Status = IopQueryRemoveChildDevices(DeviceNode, FALSE, NULL);
     if (!NT_SUCCESS(Status))
     {
         if (DeviceRelations)
@@ -2257,7 +2412,7 @@ IoRequestDeviceEject(IN PDEVICE_OBJECT PhysicalDeviceObject)
         goto cleanup;
     }
 
-    if (IopPrepareDeviceForRemoval(PhysicalDeviceObject, FALSE) != STATUS_SUCCESS)
+    if (IopPrepareDeviceForRemoval(PhysicalDeviceObject, FALSE, NULL) != STATUS_SUCCESS)
     {
         if (DeviceRelations)
             IopCancelRemoveDeviceRelations(DeviceRelations);
@@ -2534,6 +2689,8 @@ ActionToStr(
             return "PiActionStartDevice";
         case PiActionQueryState:
             return "PiActionQueryState";
+        case PiActionQueryRemoveDevice:
+            return "PiActionQueryRemoveDevice";
         default:
             return "(request unknown)";
     }
@@ -2629,6 +2786,15 @@ PipDeviceActionWorker(
                 status = STATUS_SUCCESS;
                 break;
 
+            case PiActionQueryRemoveDevice:
+                // User-initiated query-remove -> remove (Safely Remove Hardware,
+                // Device Manager disable, device uninstall). The veto context is
+                // carried in Request->Context.
+                ASSERT(Request->Context);
+                status = IopQueryAndRemoveDevice(Request->DeviceObject,
+                                                 (PPIP_QUERY_REMOVE_CONTEXT)Request->Context);
+                break;
+
             default:
                 DPRINT1("Unimplemented device action %u\n", Request->Action);
                 status = STATUS_NOT_IMPLEMENTED;
@@ -2664,12 +2830,14 @@ PipDeviceActionWorker(
  * @param[out] CompletionStatus  Status returned be the action will be written here
  */
 
+static
 VOID
-PiQueueDeviceAction(
+PiQueueDeviceActionEx(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ DEVICE_ACTION Action,
     _In_opt_ PKEVENT CompletionEvent,
-    _Out_opt_ NTSTATUS *CompletionStatus)
+    _Out_opt_ NTSTATUS *CompletionStatus,
+    _In_opt_ PVOID Context)
 {
     PDEVICE_ACTION_REQUEST Request;
     KIRQL OldIrql;
@@ -2685,6 +2853,7 @@ PiQueueDeviceAction(
     Request->Action = Action;
     Request->CompletionEvent = CompletionEvent;
     Request->CompletionStatus = CompletionStatus;
+    Request->Context = Context;
 
     KeAcquireSpinLock(&IopDeviceActionLock, &OldIrql);
     InsertTailList(&IopDeviceActionRequestList, &Request->RequestListEntry);
@@ -2714,6 +2883,16 @@ PiQueueDeviceAction(
     ExQueueWorkItem(&IopDeviceActionWorkItem, DelayedWorkQueue);
 }
 
+VOID
+PiQueueDeviceAction(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ DEVICE_ACTION Action,
+    _In_opt_ PKEVENT CompletionEvent,
+    _Out_opt_ NTSTATUS *CompletionStatus)
+{
+    PiQueueDeviceActionEx(DeviceObject, Action, CompletionEvent, CompletionStatus, NULL);
+}
+
 /**
  * @brief      Perfom a device operation synchronously via PiQueueDeviceAction
  *
@@ -2733,6 +2912,36 @@ PiPerformSyncDeviceAction(
 
     KeInitializeEvent(&opFinished, SynchronizationEvent, FALSE);
     PiQueueDeviceAction(DeviceObject, Action, &opFinished, &status);
+    KeWaitForSingleObject(&opFinished, Executive, KernelMode, FALSE, NULL);
+
+    return status;
+}
+
+/**
+ * @brief      Perform a user-initiated query-remove -> remove synchronously.
+ *
+ * @param[in]     DeviceObject  The target device object (a PDO)
+ * @param[in,out] Context       Carries force/veto information to and from the
+ *                              device action worker thread
+ *
+ * @return     STATUS_SUCCESS on removal, STATUS_PLUGPLAY_QUERY_VETOED on veto,
+ *             or another error status
+ */
+
+NTSTATUS
+PiPerformSyncQueryRemoveDevice(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _Inout_ PPIP_QUERY_REMOVE_CONTEXT Context)
+{
+    KEVENT opFinished;
+    NTSTATUS status;
+
+    KeInitializeEvent(&opFinished, SynchronizationEvent, FALSE);
+    PiQueueDeviceActionEx(DeviceObject,
+                          PiActionQueryRemoveDevice,
+                          &opFinished,
+                          &status,
+                          Context);
     KeWaitForSingleObject(&opFinished, Executive, KernelMode, FALSE, NULL);
 
     return status;

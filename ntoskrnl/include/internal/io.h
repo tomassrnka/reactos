@@ -539,7 +539,27 @@ typedef enum _DEVICE_ACTION
     PiActionAddBootDevices,
     PiActionStartDevice,
     PiActionQueryState,
+    PiActionQueryRemoveDevice,
 } DEVICE_ACTION;
+
+//
+// Context for a user-initiated query-remove operation (PiActionQueryRemoveDevice).
+//
+// The actual query-remove -> remove sequence runs on the device action worker
+// thread, while the user-mode VetoName/VetoType out-parameters can only be touched
+// from the calling thread. This structure carries the veto result (type and the
+// instance path of the vetoing device) back to the caller so it can be reported
+// through PLUGPLAY_CONTROL_QUERY_REMOVE_DATA.
+//
+#define PNP_VETO_NAME_LENGTH 256
+
+typedef struct _PIP_QUERY_REMOVE_CONTEXT
+{
+    BOOLEAN Force;                         // skip the query phase (forced removal)
+    BOOLEAN Vetoed;                        // a device vetoed the query-remove
+    PNP_VETO_TYPE VetoType;                // reason reported by/for the vetoing device
+    WCHAR VetoName[PNP_VETO_NAME_LENGTH];  // instance path of the vetoing device
+} PIP_QUERY_REMOVE_CONTEXT, *PPIP_QUERY_REMOVE_CONTEXT;
 
 //
 // Resource code
@@ -1381,6 +1401,11 @@ NTSTATUS
 PiPerformSyncDeviceAction(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ DEVICE_ACTION Action);
+
+NTSTATUS
+PiPerformSyncQueryRemoveDevice(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _Inout_ PPIP_QUERY_REMOVE_CONTEXT Context);
 
 //
 // PnP notifications
