@@ -107,7 +107,14 @@ AfdBindSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         ExFreePoolWithTag(FCB->LocalAddress, TAG_AFD_TRANSPORT_ADDRESS);
     }
 
-    FCB->LocalAddress = TaCopyTransportAddress( &BindReq->Address );
+    /* BindReq is the captured user IOCTL buffer; bound the copy to the bytes
+     * actually supplied so a lying Address[0].AddressLength cannot over-read
+     * adjacent pool into LocalAddress (which getsockname later returns). */
+    FCB->LocalAddress =
+        (IrpSp->Parameters.DeviceIoControl.InputBufferLength >= FIELD_OFFSET(AFD_BIND_DATA, Address))
+            ? TaCopyTransportAddressBounded( &BindReq->Address,
+                  IrpSp->Parameters.DeviceIoControl.InputBufferLength - FIELD_OFFSET(AFD_BIND_DATA, Address))
+            : NULL;
 
     if( FCB->LocalAddress )
         Status = TdiBuildConnectionInfo( &FCB->AddressFrom,

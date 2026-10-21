@@ -6,7 +6,8 @@ list(APPEND SOURCE
     AfdHelpers.c
     select.c
     send.c
-    windowsize.c)
+    windowsize.c
+    defensive.c)
 
 list(APPEND PCH_SKIP_SOURCE
     testlist.c)

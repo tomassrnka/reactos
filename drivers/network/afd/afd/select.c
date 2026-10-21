@@ -508,6 +508,24 @@ AfdEnumEvents( PDEVICE_OBJECT DeviceObject, PIRP Irp,
             Irp, 0);
     }
 #endif
+    /* Native (non-WoW64) path: the output below writes PollEvents and the whole
+     * EventStatus array into the captured buffer, whose size equals the user's
+     * InputBufferLength (lock.c). Reject input too small to hold the structure,
+     * otherwise those writes overrun the NonPagedPool copy. The 32-bit guest
+     * path above validates against the 32-bit layout. */
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (!Guest)
+#endif
+    {
+        if (!IrpSp->Parameters.DeviceIoControl.Type3InputBuffer ||
+            IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(AFD_ENUM_NETWORK_EVENTS_INFO))
+        {
+            if (!SocketAcquireStateLock(FCB)) return LostSocket(Irp);
+            return UnlockAndMaybeComplete(FCB,
+                IrpSp->Parameters.DeviceIoControl.Type3InputBuffer ? STATUS_BUFFER_TOO_SMALL : STATUS_INVALID_PARAMETER,
+                Irp, 0);
+        }
+    }
     EnumReq = LockRequest(Irp, IrpSp, TRUE, NULL);
     if( !SocketAcquireStateLock( FCB ) ) {
         return LostSocket( Irp );

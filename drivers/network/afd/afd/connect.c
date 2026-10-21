@@ -639,6 +639,13 @@ AfdStreamSocketConnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY, Irp,
                                        0 );
 
+    /* ConnectReq is the captured user IOCTL buffer. Validate that the declared
+     * RemoteAddress header is within the supplied input before we read its
+     * AddressType/AddressLength or copy it, so nothing runs off the pool copy. */
+    if (IrpSp->Parameters.DeviceIoControl.InputBufferLength <
+            FIELD_OFFSET(AFD_CONNECT_INFO, RemoteAddress) + sizeof(ULONG) + 2 * sizeof(USHORT))
+        return UnlockAndMaybeComplete( FCB, STATUS_INVALID_PARAMETER, Irp, 0 );
+
     AFD_DbgPrint(MID_TRACE,("Connect request:\n"));
 #if 0
     OskitDumpBuffer
@@ -654,7 +661,8 @@ AfdStreamSocketConnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         }
 
         FCB->RemoteAddress =
-            TaCopyTransportAddress( &ConnectReq->RemoteAddress );
+            TaCopyTransportAddressBounded( &ConnectReq->RemoteAddress,
+                IrpSp->Parameters.DeviceIoControl.InputBufferLength - FIELD_OFFSET(AFD_CONNECT_INFO, RemoteAddress) );
 
         if( !FCB->RemoteAddress )
             Status = STATUS_NO_MEMORY;
@@ -708,7 +716,8 @@ AfdStreamSocketConnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         }
 
         FCB->RemoteAddress =
-            TaCopyTransportAddress( &ConnectReq->RemoteAddress );
+            TaCopyTransportAddressBounded( &ConnectReq->RemoteAddress,
+                IrpSp->Parameters.DeviceIoControl.InputBufferLength - FIELD_OFFSET(AFD_CONNECT_INFO, RemoteAddress) );
 
         if( !FCB->RemoteAddress ) {
             Status = STATUS_NO_MEMORY;
@@ -806,6 +815,12 @@ AfdStreamSocketSuperConnect(
                     IrpSp->Parameters.DeviceIoControl.InputBufferLength);
 #endif
 
+    /* Validate that the declared RemoteAddress header fits in the captured user
+     * input before we read or copy it (bounds the address copies below). */
+    if (IrpSp->Parameters.DeviceIoControl.InputBufferLength <
+            FIELD_OFFSET(AFD_SUPER_CONNECT_INFO, RemoteAddress) + sizeof(ULONG) + 2 * sizeof(USHORT))
+        return UnlockAndMaybeComplete(FCB, STATUS_INVALID_PARAMETER, Irp, 0);
+
     if (FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS)
     {
         AFD_DbgPrint(MIN_TRACE,("Cannot call IOCTL_CONNECTEX on connectionless socket\n",
@@ -816,7 +831,8 @@ AfdStreamSocketSuperConnect(
          }
 
          FCB->RemoteAddress =
-             TaCopyTransportAddress(&ConnectReq->RemoteAddress);
+             TaCopyTransportAddressBounded(&ConnectReq->RemoteAddress,
+                IrpSp->Parameters.DeviceIoControl.InputBufferLength - FIELD_OFFSET(AFD_SUPER_CONNECT_INFO, RemoteAddress));
 
          if(!FCB->RemoteAddress)
              Status = STATUS_NO_MEMORY;
@@ -878,7 +894,8 @@ AfdStreamSocketSuperConnect(
         }
 
         FCB->RemoteAddress =
-            TaCopyTransportAddress(&ConnectReq->RemoteAddress);
+            TaCopyTransportAddressBounded(&ConnectReq->RemoteAddress,
+                IrpSp->Parameters.DeviceIoControl.InputBufferLength - FIELD_OFFSET(AFD_SUPER_CONNECT_INFO, RemoteAddress));
         if (!FCB->RemoteAddress)
         {
             Status = STATUS_NO_MEMORY;

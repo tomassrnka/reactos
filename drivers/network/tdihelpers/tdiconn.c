@@ -105,6 +105,40 @@ PTRANSPORT_ADDRESS TaCopyTransportAddress( PTRANSPORT_ADDRESS OtherAddress ) {
     return A;
 }
 
+/*
+ * As TaCopyTransportAddress, but for a source whose backing buffer is only
+ * AvailableLength bytes (e.g. a TRANSPORT_ADDRESS embedded in a user-supplied
+ * IOCTL buffer). The self-described Address[0].AddressLength is attacker
+ * controlled, so copying TaLengthOfTransportAddress() bytes blindly would read
+ * past the source and splice adjacent pool into the copy (info leak). Validate
+ * that the whole declared address fits in AvailableLength first, and that
+ * AvailableLength is large enough to even hold the header we read the length
+ * from. Returns NULL (handled by callers as a failure) on violation.
+ */
+PTRANSPORT_ADDRESS TaCopyTransportAddressBounded( PTRANSPORT_ADDRESS OtherAddress,
+                                                  UINT AvailableLength ) {
+    UINT AddrLen;
+    PTRANSPORT_ADDRESS A;
+
+    /* Must at least cover TAAddressCount + AddressLength/AddressType before we
+     * trust Address[0].AddressLength computed by TaLengthOfTransportAddress. */
+    if (AvailableLength < sizeof(ULONG) + 2 * sizeof(USHORT))
+        return NULL;
+
+    AddrLen = TaLengthOfTransportAddress( OtherAddress );
+    if (!AddrLen || AddrLen > AvailableLength)
+        return NULL;
+
+    A = ExAllocatePoolWithTag(NonPagedPool,
+                              AddrLen,
+                              TAG_AFD_TRANSPORT_ADDRESS);
+
+    if( A )
+        TaCopyTransportAddressInPlace( A, OtherAddress );
+
+    return A;
+}
+
 NTSTATUS TdiBuildNullTransportAddressInPlace(PTRANSPORT_ADDRESS A, UINT AddressType)
 {
     A->TAAddressCount = 1;
