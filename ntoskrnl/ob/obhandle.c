@@ -673,8 +673,9 @@ ObpDecrementHandleCount(IN PVOID ObjectBody,
     /* Check if we should delete the object */
     ObpDeleteNameCheck(ObjectBody);
 
-    /* Decrease the total number of handles for this type */
-    InterlockedDecrement((PLONG)&ObjectType->TotalNumberOfHandles);
+    /* Decrease the total number of handles for this type (T32: per-processor) */
+    ObpBumpTypeCount(ObjectType->PerProcessorHandles,
+                     &ObjectType->TotalNumberOfHandles, -1);
     OBTRACE(OB_HANDLE_DEBUG,
             "%s - Decremented count for: %p. HC PC %lx %lx\n",
             __FUNCTION__,
@@ -1097,13 +1098,9 @@ ObpIncrementHandleCount(IN PVOID Object,
         }
     }
 
-    /* Increase total number of handles */
-    Total = InterlockedIncrement((PLONG)&ObjectType->TotalNumberOfHandles);
-    if (Total > ObjectType->HighWaterNumberOfHandles)
-    {
-        /* Fixup count */
-        ObjectType->HighWaterNumberOfHandles = Total;
-    }
+    /* Increase total number of handles (T32: per-processor; HighWater lazy) */
+    ObpBumpTypeCount(ObjectType->PerProcessorHandles,
+                     &ObjectType->TotalNumberOfHandles, 1);
 
     /* Trace call and return */
     OBTRACE(OB_HANDLE_DEBUG,
@@ -1377,13 +1374,9 @@ ObpIncrementUnnamedHandleCount(IN PVOID Object,
         ObpLeaveObjectTypeMutex(ObjectType);
     }
 
-    /* Increase total number of handles */
-    Total = InterlockedIncrement((PLONG)&ObjectType->TotalNumberOfHandles);
-    if (Total > ObjectType->HighWaterNumberOfHandles)
-    {
-        /* Fixup count */
-        ObjectType->HighWaterNumberOfHandles = Total;
-    }
+    /* Increase total number of handles (T32: per-processor; HighWater lazy) */
+    ObpBumpTypeCount(ObjectType->PerProcessorHandles,
+                     &ObjectType->TotalNumberOfHandles, 1);
 
     /* Trace call and return */
     OBTRACE(OB_HANDLE_DEBUG,

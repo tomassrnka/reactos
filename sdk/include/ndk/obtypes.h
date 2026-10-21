@@ -420,6 +420,13 @@ typedef struct _OBJECT_TYPE
     OBJECT_TYPE_INITIALIZER TypeInfo;
     ULONG Key;
     ERESOURCE ObjectLocks[4];
+    /* T32: per-processor object/handle counters.  The create/close hot path
+       bumps only the current processor slot, eliminating the global-counter
+       cache-line bounce; TotalNumberOf* stay as a bootstrap/fallback base and
+       the reported totals are base + sum(per-processor).  NULL until allocated
+       (early boot falls back to the base counters). */
+    PVOID PerProcessorObjects;
+    PVOID PerProcessorHandles;
 } OBJECT_TYPE;
 
 //
