@@ -5,6 +5,7 @@ extern void func_select(void);
 extern void func_send(void);
 extern void func_windowsize(void);
 extern void func_defensive(void);
+extern void func_tcpnonadmin(void);
 
 const struct test winetest_testlist[] =
 {
@@ -12,5 +13,6 @@ const struct test winetest_testlist[] =
     { "send", func_send },
     { "windowsize", func_windowsize },
     { "defensive", func_defensive },
+    { "tcpnonadmin", func_tcpnonadmin },
     { 0, 0 }
 };
