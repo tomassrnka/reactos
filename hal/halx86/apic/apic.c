@@ -718,6 +718,7 @@ HalpInitializePICs(
     HalpVectorToIndex[APIC_CLOCK_VECTOR] = APIC_CLOCK_INDEX;
     HalpGsivToVector[APIC_CLOCK_INDEX] = APIC_CLOCK_VECTOR;
     HalpVectorToIndex[CLOCK_IPI_VECTOR] = APIC_RESERVED_VECTOR;
+    HalpVectorToIndex[APIC_IPI_VECTOR] = APIC_RESERVED_VECTOR;
     HalpVectorToIndex[APIC_SPURIOUS_VECTOR] = APIC_RESERVED_VECTOR;
 
     /* Local APIC sources, all above the device vector range */

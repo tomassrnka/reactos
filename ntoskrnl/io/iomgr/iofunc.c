@@ -647,6 +647,26 @@ IopDeviceFsIoControl(IN HANDLE DeviceHandle,
                                         IopOtherTransfer);
 }
 
+/* The completion APC may run after the caller returned, so callers with local events complete here */
+static
+VOID
+IopCompleteDeferredIrp(IN PIRP Irp,
+                       IN PFILE_OBJECT FileObject)
+{
+    PKNORMAL_ROUTINE NormalRoutine = NULL;
+    PVOID NormalContext = NULL;
+    KIRQL OldIrql;
+
+    ASSERT(!Irp->PendingReturned);
+    KeRaiseIrql(APC_LEVEL, &OldIrql);
+    IopCompleteRequest(&Irp->Tail.Apc,
+                       &NormalRoutine,
+                       &NormalContext,
+                       (PVOID*)&FileObject,
+                       &NormalContext);
+    KeLowerIrql(OldIrql);
+}
+
 NTSTATUS
 NTAPI
 IopQueryDeviceInformation(IN PFILE_OBJECT FileObject,
@@ -700,7 +720,7 @@ IopQueryDeviceInformation(IN PFILE_OBJECT FileObject,
     Irp->UserIosb = &IoStatusBlock;
     Irp->UserEvent = (LocalEvent) ? &Event : NULL;
     Irp->Flags = (LocalEvent) ? IRP_SYNCHRONOUS_API : 0;
-    Irp->Flags |= IRP_BUFFERED_IO;
+    Irp->Flags |= IRP_BUFFERED_IO | IRP_DEFER_IO_COMPLETION;
     Irp->AssociatedIrp.SystemBuffer = Information;
     Irp->Tail.Overlay.Thread = PsGetCurrentThread();
 
@@ -729,6 +749,8 @@ IopQueryDeviceInformation(IN PFILE_OBJECT FileObject,
 
     /* Call the Driver */
     Status = IoCallDriver(DeviceObject, Irp);
+    if (Status != STATUS_PENDING)
+        IopCompleteDeferredIrp(Irp, FileObject);
 
     /* Check if this was synch I/O */
     if (!LocalEvent)
@@ -808,7 +830,7 @@ IopGetFileInformation(IN PFILE_OBJECT FileObject,
     Irp->Overlay.AsynchronousParameters.UserApcRoutine = NULL;
     Irp->RequestorMode = KernelMode;
     Irp->AssociatedIrp.SystemBuffer = Buffer;
-    Irp->Flags = IRP_SYNCHRONOUS_API | IRP_BUFFERED_IO | IRP_OB_QUERY_NAME;
+    Irp->Flags = IRP_SYNCHRONOUS_API | IRP_BUFFERED_IO | IRP_OB_QUERY_NAME | IRP_DEFER_IO_COMPLETION;
     Irp->Tail.Overlay.OriginalFileObject = FileObject;
     Irp->Tail.Overlay.Thread = PsGetCurrentThread();
 
@@ -828,6 +850,10 @@ IopGetFileInformation(IN PFILE_OBJECT FileObject,
     {
         KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
         Status = IoStatusBlock.Status;
+    }
+    else
+    {
+        IopCompleteDeferredIrp(Irp, FileObject);
     }
 
     *ReturnedLength = IoStatusBlock.Information;
@@ -1589,11 +1615,13 @@ NtFlushBuffersFile(IN HANDLE FileHandle,
     StackPtr->MajorFunction = IRP_MJ_FLUSH_BUFFERS;
     StackPtr->FileObject = FileObject;
 
+    Irp->Flags |= IRP_DEFER_IO_COMPLETION;
+
     /* Call the Driver */
     Status = IopPerformSynchronousRequest(DeviceObject,
                                           Irp,
                                           FileObject,
-                                          FALSE,
+                                          TRUE,
                                           PreviousMode,
                                           !LocalEvent,
                                           IopOtherTransfer);
@@ -3730,11 +3758,13 @@ NtUnlockFile(IN HANDLE FileHandle,
     StackPtr->Parameters.LockControl.ByteOffset = CapturedByteOffset;
     StackPtr->Parameters.LockControl.Key = Key;
 
+    Irp->Flags |= IRP_DEFER_IO_COMPLETION;
+
     /* Call the Driver */
     Status = IopPerformSynchronousRequest(DeviceObject,
                                           Irp,
                                           FileObject,
-                                          FALSE,
+                                          TRUE,
                                           PreviousMode,
                                           !LocalEvent,
                                           IopOtherTransfer);
@@ -4587,11 +4617,13 @@ NtSetVolumeInformationFile(IN HANDLE FileHandle,
     StackPtr->Parameters.SetVolume.Length = Length;
     StackPtr->Parameters.SetVolume.FsInformationClass = FsInformationClass;
 
+    Irp->Flags |= IRP_DEFER_IO_COMPLETION;
+
     /* Call the Driver */
     Status = IopPerformSynchronousRequest(DeviceObject,
                                           Irp,
                                           FileObject,
-                                          FALSE,
+                                          TRUE,
                                           PreviousMode,
                                           !LocalEvent,
                                           IopOtherTransfer);

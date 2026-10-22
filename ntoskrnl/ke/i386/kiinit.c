@@ -497,6 +497,9 @@ KiInitializeKernel(IN PKPROCESS InitProcess,
     Prcb->ParentNode = KeNodeBlock[0];
     Prcb->ParentNode->ProcessorMask |= Prcb->SetMember;
 
+    /* Every processor initializes below SYNCH_LEVEL, its idle thread takes locks */
+    KeLowerIrql(APC_LEVEL);
+
     /* Check if this is the Boot CPU */
     if (!Number)
     {
@@ -511,9 +514,6 @@ KiInitializeKernel(IN PKPROCESS InitProcess,
 
         /* Set the current MP Master KPRCB to the Boot PRCB */
         Prcb->MultiThreadSetMaster = Prcb;
-
-        /* Lower to APC_LEVEL */
-        KeLowerIrql(APC_LEVEL);
 
         /* Initialize some spinlocks */
         KeInitializeSpinLock(&KiFreezeExecutionLock);
@@ -533,11 +533,6 @@ KiInitializeKernel(IN PKPROCESS InitProcess,
                             FALSE);
         InitProcess->QuantumReset = MAXCHAR;
     }
-    else
-    {
-        /* FIXME */
-        DPRINT1("Starting CPU#%u - you are brave\n", Number);
-    }
 
     /* Setup the Idle Thread */
     KeInitializeThread(InitProcess,
@@ -553,7 +548,7 @@ KiInitializeKernel(IN PKPROCESS InitProcess,
     InitThread->State = Running;
     InitThread->Affinity = 1 << Number;
     InitThread->WaitIrql = DISPATCH_LEVEL;
-    InitProcess->ActiveProcessors |= 1 << Number;
+    InterlockedOr((PLONG)&InitProcess->ActiveProcessors, 1 << Number);
 
     /* HACK for MmUpdatePageDir */
     ((PETHREAD)InitThread)->ThreadsProcess = (PEPROCESS)InitProcess;
@@ -825,18 +820,6 @@ KiSystemStartup(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
     RtlCopyMemory(&Idt[8], &DoubleFaultEntry, sizeof(KIDTENTRY));
 
 AppCpuInit:
-    //TODO: We don't setup IPIs yet so freeze other processors here.
-    if (Cpu)
-    {
-        KeMemoryBarrier();
-        LoaderBlock->Prcb = 0;
-
-        for (;;)
-        {
-            YieldProcessor();
-        }
-    }
-
     /* Loop until we can release the freeze lock */
     do
     {
@@ -850,14 +833,26 @@ AppCpuInit:
     __writefsdword(KPCR_SET_MEMBER_COPY, 1 << Cpu);
     __writefsdword(KPCR_PRCB_SET_MEMBER, 1 << Cpu);
 
-    KiVerifyCpuFeatures(Pcr->Prcb);
+    /* Pcr is only set up on the boot processor path above */
+    KiVerifyCpuFeatures(KeGetCurrentPrcb());
+
+    /* The boot processor sets these in KiInitMachineDependent; without
+       write protection kernel writes would bypass copy-on-write */
+    if (Cpu) KiSetCR0Bits();
 
     /* Initialize the Processor with HAL */
     HalInitializeProcessor(Cpu, KeLoaderBlock);
 
+    /* The NMI task returns through the main TSS, see KiSetCr3 */
+    KeGetPcr()->TSS->CR3 = __readcr3();
+    KeGetPcr()->TSS->LDT = 0;
+
     /* Set active processors */
     KeActiveProcessors |= __readfsdword(KPCR_SET_MEMBER);
     KeNumberProcessors++;
+
+    /* Let the next processor start */
+    InterlockedAnd((PLONG)&KiFreezeExecutionLock, 0);
 
     /* Check if this is the boot CPU */
     if (!Cpu)

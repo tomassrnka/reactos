@@ -65,17 +65,16 @@ ExInitPoolLookasidePointers(VOID)
     /* Loop for all pool lists */
     for (i = 0; i < NUMBER_POOL_LOOKASIDE_LISTS; i++)
     {
-        /* Initialize the non-paged list */
+        /* The lists are shared by all processors; only the boot processor initializes them */
         Entry = &ExpSmallNPagedPoolLookasideLists[i];
-        InitializeSListHead(&Entry->ListHead);
+        if (Prcb->Number == 0) InitializeSListHead(&Entry->ListHead);
 
         /* Bind to PRCB */
         Prcb->PPNPagedLookasideList[i].P = Entry;
         Prcb->PPNPagedLookasideList[i].L = Entry;
 
-        /* Initialize the paged list */
         Entry = &ExpSmallPagedPoolLookasideLists[i];
-        InitializeSListHead(&Entry->ListHead);
+        if (Prcb->Number == 0) InitializeSListHead(&Entry->ListHead);
 
         /* Bind to PRCB */
         Prcb->PPPagedLookasideList[i].P = Entry;

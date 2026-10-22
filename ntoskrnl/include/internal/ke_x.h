@@ -11,6 +11,14 @@ extern "C"
 {
 #endif
 
+FORCEINLINE
+PKPROCESS
+KeGetCurrentProcess(VOID)
+{
+    /* Get the current process */
+    return KeGetCurrentThread()->ApcState.Process;
+}
+
 #ifndef _M_ARM
 FORCEINLINE
 KPROCESSOR_MODE
@@ -257,10 +265,10 @@ KiReleaseThreadLock(IN PKTHREAD Thread)
 //
 FORCEINLINE
 BOOLEAN
-KiTryToAcquireThreadLock(IN PKTHREAD Thread)
+KiTryThreadLock(IN PKTHREAD Thread)
 {
     UNREFERENCED_PARAMETER(Thread);
-    return TRUE;
+    return FALSE;
 }
 
 FORCEINLINE
@@ -491,7 +499,18 @@ KiAcquireThreadLock(IN PKTHREAD Thread)
     ASSERT(KeGetCurrentIrql() >= DISPATCH_LEVEL);
 
     /* Start acquire loop */
-    KxAcquireSpinLock(&Thread->ThreadLock);
+    for (;;)
+    {
+        /* Acquire the lock and break out if we acquired it first */
+        if (!InterlockedExchange((PLONG)&Thread->ThreadLock, 1)) break;
+
+        /* Loop until the other CPU releases it */
+        do
+        {
+            /* Let the CPU know that this is a loop */
+            YieldProcessor();
+        } while (Thread->ThreadLock);
+    }
 }
 
 //
@@ -509,14 +528,23 @@ KiReleaseThreadLock(IN PKTHREAD Thread)
     ASSERT(KeGetCurrentIrql() >= DISPATCH_LEVEL);
 
     /* Release it */
-    KxReleaseSpinLock(&Thread->ThreadLock);
+    InterlockedAnd((PLONG)&Thread->ThreadLock, 0);
 }
 
+//
+// This routine tries once to acquire the thread lock, without spinning.
+// It returns FALSE when the caller now owns the lock, and TRUE when
+// another processor holds it.
+//
 FORCEINLINE
 BOOLEAN
-KiTryToAcquireThreadLock(IN PKTHREAD Thread)
+KiTryThreadLock(IN PKTHREAD Thread)
 {
-    return KeTryToAcquireSpinLockAtDpcLevel(&Thread->ThreadLock);
+    /* Skip the exchange when another processor visibly holds the lock */
+    if (Thread->ThreadLock) return TRUE;
+
+    /* Try to acquire it; it is ours if it was free */
+    return (InterlockedExchange((PLONG)&Thread->ThreadLock, 1) != 0);
 }
 
 FORCEINLINE

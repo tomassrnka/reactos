@@ -191,6 +191,13 @@ KiInsertQueueApc(IN PKAPC Apc,
                 /* Kernel-mode APC, set us pending */
                 Thread->ApcState.KernelApcPending = TRUE;
 
+                /*
+                 * A thread becomes Running under its processor's PRCB lock,
+                 * not the dispatcher lock, and then checks the flag. Order
+                 * the flag before the state check, or both may miss.
+                 */
+                KeMemoryBarrier();
+
                 /* Are we currently running? */
                 if (Thread->State == Running)
                 {
@@ -322,6 +329,13 @@ KiDeliverApc(IN KPROCESSOR_MODE DeliveryMode,
 
     /* Clear Kernel APC Pending */
     Thread->ApcState.KernelApcPending = FALSE;
+
+    /*
+     * The list check below must not pass the clear: an APC that another
+     * processor queues meanwhile sets the flag again after linking itself,
+     * and a clear that landed after that would hide it.
+     */
+    KeMemoryBarrier();
 
     /* Check if Special APCs are disabled */
     if (Thread->SpecialApcDisable) goto Quickie;

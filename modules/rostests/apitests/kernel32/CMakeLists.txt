@@ -48,8 +48,11 @@ list(APPEND SOURCE
     SetCurrentDirectory.c
     SetSearchPathMode.c
     SetUnhandledExceptionFilter.c
+    SuspendThreadContext.c
     SystemFirmware.c
     TerminateProcess.c
+    ThreadContextNpx.c
+    ThreadContextObjects.c
     TunnelCache.c
     UEFIFirmware.c
     WerFlags.c

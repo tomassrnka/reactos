@@ -31,6 +31,9 @@ typedef struct _AP_SETUP_STACK
     PVOID KxLoaderBlock;
 } AP_SETUP_STACK, *PAP_SETUP_STACK; // Note: expected layout only for 32-bit x86
 
+extern UCHAR KiDoubleFaultTSS[KTSS_IO_MAPS];
+extern UCHAR KiNMITSS[KTSS_IO_MAPS];
+
 /* FUNCTIONS *****************************************************************/
 
 CODE_SEG("INIT")
@@ -38,8 +41,8 @@ VOID
 NTAPI
 KeStartAllProcessors(VOID)
 {
-    PVOID KernelStack, DPCStack;
-    PAPINFO APInfo;
+    PVOID KernelStack = NULL, DPCStack = NULL;
+    PAPINFO APInfo = NULL;
     ULONG ProcessorCount;
     ULONG MaximumProcessors;
 
@@ -87,6 +90,11 @@ KeStartAllProcessors(VOID)
                         (PKTHREAD)&APInfo->Thread,
                         DPCStack);
 
+        /* Ring 0 entries from user mode load SS0 and ESP0 from this TSS,
+           so initialize it like the boot processor's */
+        KiInitializeTSS2(&APInfo->Tss, NULL);
+        KiInitializeTSS(&APInfo->Tss);
+
         // Prepare descriptor tables
         KDESCRIPTOR bspGdt, bspIdt;
         __sgdt(&bspGdt.Limit);
@@ -102,11 +110,16 @@ KeStartAllProcessors(VOID)
         // Clear TSS Busy flag (aka set the type to "TSS (Available)")
         KiGetGdtEntry(&APInfo->Gdt, KGDT_TSS)->HighWord.Bits.Type = I386_TSS;
 
-        APInfo->TssDoubleFault.Esp0 = (ULONG_PTR)&APInfo->NMIStackData;
-        APInfo->TssDoubleFault.Esp = (ULONG_PTR)&APInfo->NMIStackData;
+        /* Double faults and NMIs switch to these tasks: start them like the
+           boot processor's, but on the top of this processor's own stack */
+        RtlCopyMemory(&APInfo->TssDoubleFault, KiDoubleFaultTSS, KTSS_IO_MAPS);
+        RtlCopyMemory(&APInfo->TssNMI, KiNMITSS, KTSS_IO_MAPS);
 
-        APInfo->TssNMI.Esp0 = (ULONG_PTR)&APInfo->NMIStackData;
-        APInfo->TssNMI.Esp = (ULONG_PTR)&APInfo->NMIStackData;
+        APInfo->TssDoubleFault.Esp0 = (ULONG_PTR)&APInfo->NMIStackData[DOUBLE_FAULT_STACK_SIZE];
+        APInfo->TssDoubleFault.Esp = (ULONG_PTR)&APInfo->NMIStackData[DOUBLE_FAULT_STACK_SIZE];
+
+        APInfo->TssNMI.Esp0 = (ULONG_PTR)&APInfo->NMIStackData[DOUBLE_FAULT_STACK_SIZE];
+        APInfo->TssNMI.Esp = (ULONG_PTR)&APInfo->NMIStackData[DOUBLE_FAULT_STACK_SIZE];
 
         // Fill the processor state
         PKPROCESSOR_STATE ProcessorState = &APInfo->Pcr.Prcb->ProcessorState;
@@ -140,8 +153,8 @@ KeStartAllProcessors(VOID)
 
         // Update the LOADER_PARAMETER_BLOCK structure for the new processor
         KeLoaderBlock->KernelStack = (ULONG_PTR)KernelStack;
-        KeLoaderBlock->Prcb = (ULONG_PTR)&APInfo->Pcr.Prcb;
-        KeLoaderBlock->Thread = (ULONG_PTR)&APInfo->Pcr.Prcb->IdleThread;
+        KeLoaderBlock->Prcb = (ULONG_PTR)APInfo->Pcr.Prcb;
+        KeLoaderBlock->Thread = (ULONG_PTR)&APInfo->Thread;
 
         // Start the CPU
         DPRINT("Attempting to Start a CPU with number: %lu\n", ProcessorCount);
@@ -157,11 +170,18 @@ KeStartAllProcessors(VOID)
             KeMemoryBarrier();
             YieldProcessor();
         }
+
+        /* These now belong to the running processor */
+        APInfo = NULL;
+        KernelStack = NULL;
+        DPCStack = NULL;
     }
 
-    // The last CPU didn't start - clean the data
     ProcessorCount--;
 
+    // Free what was prepared for a processor that did not start
+    if (DPCStack)
+        KiProcessorBlock[ProcessorCount + 1] = NULL;
     if (APInfo)
         ExFreePoolWithTag(APInfo, TAG_KERNEL);
     if (KernelStack)

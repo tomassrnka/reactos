@@ -192,7 +192,8 @@ NtRaiseException(
 
     /* Set exception list */
 #ifdef _M_IX86
-    KeGetPcr()->NtTib.ExceptionList = TrapFrame->ExceptionList;
+    __writefsdword(FIELD_OFFSET(KPCR, NtTib.ExceptionList),
+                   (ULONG_PTR)TrapFrame->ExceptionList);
 #endif
 
     /* Raise the exception */
