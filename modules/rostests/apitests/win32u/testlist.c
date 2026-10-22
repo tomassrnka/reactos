@@ -66,6 +66,9 @@ extern void func_NtUserCreateWindowEx(void);
 extern void func_NtUserEnumDisplaySettings(void);
 extern void func_NtUserFindExistingCursorIcon(void);
 extern void func_NtUserGetAsyncKeyState(void);
+extern void func_NtUserGetAtomNameValid(void);
+extern void func_NtUserGetAtomNameInvalid(void);
+extern void func_NtUserGetAtomNameConcurrent(void);
 extern void func_NtUserGetClassInfo(void);
 extern void func_NtUserGetCursorInfo(void);
 //extern void func_NtUserGetIconInfo(void);
@@ -151,6 +154,9 @@ const struct test winetest_testlist[] =
     { "NtUserEnumDisplaySettings", func_NtUserEnumDisplaySettings },
     { "NtUserFindExistingCursorIcon", func_NtUserFindExistingCursorIcon },
     { "NtUserGetAsyncKeyState", func_NtUserGetAsyncKeyState },
+    { "NtUserGetAtomNameValid", func_NtUserGetAtomNameValid },
+    { "NtUserGetAtomNameInvalid", func_NtUserGetAtomNameInvalid },
+    { "NtUserGetAtomNameConcurrent", func_NtUserGetAtomNameConcurrent },
     { "NtUserGetClassInfo", func_NtUserGetClassInfo },
     { "NtUserGetCursorInfo", func_NtUserGetCursorInfo },
     //{ "NtUserGetIconInfo", func_NtUserGetIconInfo },

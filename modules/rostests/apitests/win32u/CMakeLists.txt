@@ -68,6 +68,7 @@ list(APPEND SOURCE
     ntuser/NtUserEnumDisplaySettings.c
     ntuser/NtUserFindExistingCursorIcon.c
     ntuser/NtUserGetAsyncKeyState.c
+    ntuser/NtUserGetAtomName.c
     ntuser/NtUserGetClassInfo.c
     ntuser/NtUserGetCursorInfo.c
 #    ntuser/NtUserGetIconInfo.c
