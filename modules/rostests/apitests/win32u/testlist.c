@@ -69,6 +69,7 @@ extern void func_NtUserGetAsyncKeyState(void);
 extern void func_NtUserGetClassInfo(void);
 extern void func_NtUserGetCursorInfo(void);
 //extern void func_NtUserGetIconInfo(void);
+extern void func_NtUserGetIconInfoProbe(void);
 extern void func_NtUserGetKeyboardLayoutName(void);
 extern void func_NtUserGetThreadState(void);
 extern void func_NtUserGetTitleBarInfo(void);
@@ -154,6 +155,7 @@ const struct test winetest_testlist[] =
     { "NtUserGetClassInfo", func_NtUserGetClassInfo },
     { "NtUserGetCursorInfo", func_NtUserGetCursorInfo },
     //{ "NtUserGetIconInfo", func_NtUserGetIconInfo },
+    { "NtUserGetIconInfoProbe", func_NtUserGetIconInfoProbe },
     { "NtUserGetKeyboardLayoutName", func_NtUserGetKeyboardLayoutName },
     { "NtUserGetThreadState", func_NtUserGetThreadState },
     { "NtUserGetTitleBarInfo", func_NtUserGetTitleBarInfo },

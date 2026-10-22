@@ -71,6 +71,7 @@ list(APPEND SOURCE
     ntuser/NtUserGetClassInfo.c
     ntuser/NtUserGetCursorInfo.c
 #    ntuser/NtUserGetIconInfo.c
+    ntuser/NtUserGetIconInfoProbe.c
     ntuser/NtUserGetKeyboardLayoutName.c
     ntuser/NtUserGetThreadState.c
     ntuser/NtUserGetTitleBarInfo.c
