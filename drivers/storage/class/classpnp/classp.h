@@ -1958,6 +1958,20 @@ ClasspValidateOffloadSupported(
     _In_ PIRP Irp
     );
 
+BOOLEAN
+ClasspDsmRequiredLengthFits(
+    _In_ ULONG InputBufferLength,
+    _In_ ULONG ParameterBlockLength,
+    _In_ ULONG DataSetRangesLength
+    );
+
+BOOLEAN
+ClasspDsmBlockWithinInput(
+    _In_ ULONG InputBufferLength,
+    _In_ ULONG BlockOffset,
+    _In_ ULONG BlockLength
+    );
+
 _IRQL_requires_max_(APC_LEVEL)
 _IRQL_requires_min_(PASSIVE_LEVEL)
 _IRQL_requires_same_

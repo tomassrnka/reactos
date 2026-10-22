@@ -3657,6 +3657,15 @@ NTSTATUS ClasspDeviceTrimProcess(
                     // The caller wants to UNMAP the entire disk so we need to build a single
                     // dataset range that represents the entire disk.
                     //
+                    // The (device-reported) alignment must leave room inside the
+                    // partition, otherwise the subtraction below underflows into a
+                    // huge length.
+                    //
+                    if (granularityAlignmentInBytes >= (ULONGLONG)fdoExtension->CommonExtension.PartitionLength.QuadPart) {
+                        status = STATUS_INVALID_PARAMETER;
+                        goto Exit;
+                    }
+
                     entireDataSetRange.StartingOffset = granularityAlignmentInBytes;
                     entireDataSetRange.LengthInBytes = (ULONGLONG)fdoExtension->CommonExtension.PartitionLength.QuadPart - (ULONGLONG)entireDataSetRange.StartingOffset;
 
@@ -3666,8 +3675,23 @@ NTSTATUS ClasspDeviceTrimProcess(
                 else
                 {
 
+                    //
+                    // The ranges block must lie inside the caller's input buffer.
+                    //
+                    if (!ClasspDsmBlockWithinInput(IoGetCurrentIrpStackLocation(Irp)->Parameters.DeviceIoControl.InputBufferLength,
+                                                   dsmAttributes->DataSetRangesOffset,
+                                                   dsmAttributes->DataSetRangesLength)) {
+                        status = STATUS_INVALID_PARAMETER;
+                        goto Exit;
+                    }
+
                     dataSetRanges = (PDEVICE_DATA_SET_RANGE)((PUCHAR)dsmAttributes + dsmAttributes->DataSetRangesOffset);
                     dataSetRangesCount = dsmAttributes->DataSetRangesLength / sizeof(DEVICE_DATA_SET_RANGE);
+
+                    if (dataSetRangesCount == 0) {
+                        status = STATUS_INVALID_PARAMETER;
+                        goto Exit;
+                    }
 
                     //
                     // Validate the data ranges.  Make sure the range is block-aligned,
@@ -3679,7 +3703,8 @@ NTSTATUS ClasspDeviceTrimProcess(
                             (dataSetRanges[i].LengthInBytes % fdoExtension->DiskGeometry.BytesPerSector != 0) ||
                             (dataSetRanges[i].StartingOffset < (LONGLONG)granularityAlignmentInBytes) ||
                             (dataSetRanges[i].LengthInBytes == 0) ||
-                            ((ULONGLONG)dataSetRanges[i].StartingOffset + dataSetRanges[i].LengthInBytes > (ULONGLONG)fdoExtension->CommonExtension.PartitionLength.QuadPart))
+                            (dataSetRanges[i].LengthInBytes > (ULONGLONG)fdoExtension->CommonExtension.PartitionLength.QuadPart) ||
+                            ((ULONGLONG)dataSetRanges[i].StartingOffset > (ULONGLONG)fdoExtension->CommonExtension.PartitionLength.QuadPart - dataSetRanges[i].LengthInBytes))
                         {
                             TracePrint((TRACE_LEVEL_ERROR,
                                         TRACE_FLAG_IOCTL,
@@ -3949,10 +3974,25 @@ Return Value:
             unmapGranularityAlignment = fdoExtension->FunctionSupportInfo->BlockLimitsData.UnmapGranularityAlignment;
         }
         startingOffset = unmapGranularityAlignment;
+        if ((ULONGLONG)startingOffset >= (ULONGLONG)fdoExtension->CommonExtension.PartitionLength.QuadPart) {
+            finalStatus = STATUS_INVALID_PARAMETER;
+            goto Exit;
+        }
         lengthInBytes = (ULONGLONG)fdoExtension->CommonExtension.PartitionLength.QuadPart - (ULONGLONG)startingOffset;
     } else {
         if (dsmAttributes->DataSetRangesOffset == 0 ||
             dsmAttributes->DataSetRangesLength == 0) {
+            finalStatus = STATUS_INVALID_PARAMETER;
+            goto Exit;
+        }
+
+        //
+        // The first range must lie entirely inside the caller's input buffer.
+        //
+        if (dsmAttributes->DataSetRangesLength < sizeof(DEVICE_DATA_SET_RANGE) ||
+            !ClasspDsmBlockWithinInput(irpStack->Parameters.DeviceIoControl.InputBufferLength,
+                                       dsmAttributes->DataSetRangesOffset,
+                                       dsmAttributes->DataSetRangesLength)) {
             finalStatus = STATUS_INVALID_PARAMETER;
             goto Exit;
         }
@@ -3973,7 +4013,10 @@ Return Value:
     outputVersion = DEVICE_DATA_SET_LB_PROVISIONING_STATE_VERSION_V1;
 #if (NTDDI_VERSION >= NTDDI_WINBLUE)
     if ((dsmAttributes->ParameterBlockOffset >= sizeof(DEVICE_MANAGE_DATA_SET_ATTRIBUTES)) &&
-        (dsmAttributes->ParameterBlockLength >= sizeof(DEVICE_DATA_SET_LBP_STATE_PARAMETERS))) {
+        (dsmAttributes->ParameterBlockLength >= sizeof(DEVICE_DATA_SET_LBP_STATE_PARAMETERS)) &&
+        ClasspDsmBlockWithinInput(irpStack->Parameters.DeviceIoControl.InputBufferLength,
+                                  dsmAttributes->ParameterBlockOffset,
+                                  dsmAttributes->ParameterBlockLength)) {
         PDEVICE_DATA_SET_LBP_STATE_PARAMETERS parameters = Add2Ptr(dsmAttributes, dsmAttributes->ParameterBlockOffset);
         if ((parameters->Version == DEVICE_DATA_SET_LBP_STATE_PARAMETERS_VERSION_V1) &&
             (parameters->Size >= sizeof(DEVICE_DATA_SET_LBP_STATE_PARAMETERS))) {
@@ -4225,7 +4268,8 @@ Return Value:
     //
     if (LengthInBytes == 0 ||
         StartingOffset < alignmentInBytes ||
-        StartingOffset + LengthInBytes > (ULONGLONG)fdoExtension->CommonExtension.PartitionLength.QuadPart)
+        LengthInBytes > (ULONGLONG)fdoExtension->CommonExtension.PartitionLength.QuadPart ||
+        StartingOffset > (ULONGLONG)fdoExtension->CommonExtension.PartitionLength.QuadPart - LengthInBytes)
     {
         TracePrint((TRACE_LEVEL_ERROR,
                     TRACE_FLAG_IOCTL,
@@ -7179,6 +7223,72 @@ __ClasspValidateOffloadSupported_Exit:
     return status;
 }
 
+BOOLEAN
+ClasspDsmRequiredLengthFits(
+    _In_ ULONG InputBufferLength,
+    _In_ ULONG ParameterBlockLength,
+    _In_ ULONG DataSetRangesLength
+    )
+/*++
+
+Routine Description:
+
+    Overflow-safe check that sizeof(DEVICE_MANAGE_DATA_SET_ATTRIBUTES) +
+    ParameterBlockLength + DataSetRangesLength fits in InputBufferLength.
+    The two lengths are caller-controlled ULONGs, so a plain sum can wrap.
+
+Return Value:
+
+    TRUE if the input buffer is large enough and no arithmetic overflowed.
+
+--*/
+{
+    ULONG required;
+
+    if (!NT_SUCCESS(RtlULongAdd((ULONG)sizeof(DEVICE_MANAGE_DATA_SET_ATTRIBUTES),
+                                ParameterBlockLength,
+                                &required)) ||
+        !NT_SUCCESS(RtlULongAdd(required, DataSetRangesLength, &required))) {
+        return FALSE;
+    }
+
+    return (BOOLEAN)(InputBufferLength >= required);
+}
+
+BOOLEAN
+ClasspDsmBlockWithinInput(
+    _In_ ULONG InputBufferLength,
+    _In_ ULONG BlockOffset,
+    _In_ ULONG BlockLength
+    )
+/*++
+
+Routine Description:
+
+    Verifies that a caller-described block (DataSetRanges or ParameterBlock)
+    at [BlockOffset, BlockOffset + BlockLength) lies after the
+    DEVICE_MANAGE_DATA_SET_ATTRIBUTES header and entirely inside the input
+    buffer.  An empty block is always acceptable since it is never touched.
+
+--*/
+{
+    ULONG end;
+
+    if (BlockLength == 0) {
+        return TRUE;
+    }
+
+    if (BlockOffset < sizeof(DEVICE_MANAGE_DATA_SET_ATTRIBUTES)) {
+        return FALSE;
+    }
+
+    if (!NT_SUCCESS(RtlULongAdd(BlockOffset, BlockLength, &end))) {
+        return FALSE;
+    }
+
+    return (BOOLEAN)(end <= InputBufferLength);
+}
+
 
 _IRQL_requires_max_(APC_LEVEL)
 _IRQL_requires_min_(PASSIVE_LEVEL)
@@ -7215,6 +7325,7 @@ Return Value:
     PDEVICE_DATA_SET_RANGE dataSetRanges;
     ULONG dataSetRangesCount;
     ULONG i;
+    ULONGLONG rangeEnd;
     NTSTATUS status;
 
     PAGED_CODE();
@@ -7242,8 +7353,15 @@ Return Value:
     }
 
     if ((irpStack->Parameters.DeviceIoControl.InputBufferLength < sizeof(DEVICE_MANAGE_DATA_SET_ATTRIBUTES)) ||
-        (irpStack->Parameters.DeviceIoControl.InputBufferLength <
-        (sizeof(DEVICE_MANAGE_DATA_SET_ATTRIBUTES) + dsmAttributes->ParameterBlockLength + dsmAttributes->DataSetRangesLength))) {
+        !ClasspDsmRequiredLengthFits(irpStack->Parameters.DeviceIoControl.InputBufferLength,
+                                     dsmAttributes->ParameterBlockLength,
+                                     dsmAttributes->DataSetRangesLength) ||
+        !ClasspDsmBlockWithinInput(irpStack->Parameters.DeviceIoControl.InputBufferLength,
+                                   dsmAttributes->ParameterBlockOffset,
+                                   dsmAttributes->ParameterBlockLength) ||
+        !ClasspDsmBlockWithinInput(irpStack->Parameters.DeviceIoControl.InputBufferLength,
+                                   dsmAttributes->DataSetRangesOffset,
+                                   dsmAttributes->DataSetRangesLength)) {
 
         TracePrint((TRACE_LEVEL_ERROR,
                     TRACE_FLAG_IOCTL,
@@ -7323,7 +7441,9 @@ Return Value:
             goto __ClasspValidateOffloadInputParameters_Exit;
         }
 
-        if ((ULONGLONG)dataSetRanges[i].StartingOffset + dataSetRanges[i].LengthInBytes > (ULONGLONG)fdoExtension->CommonExtension.PartitionLength.QuadPart) {
+        if (dataSetRanges[i].StartingOffset < 0 ||
+            !NT_SUCCESS(RtlULongLongAdd((ULONGLONG)dataSetRanges[i].StartingOffset, dataSetRanges[i].LengthInBytes, &rangeEnd)) ||
+            rangeEnd > (ULONGLONG)fdoExtension->CommonExtension.PartitionLength.QuadPart) {
 
             TracePrint((TRACE_LEVEL_ERROR,
                         TRACE_FLAG_IOCTL,

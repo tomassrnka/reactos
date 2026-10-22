@@ -6825,6 +6825,14 @@ ClassFindModePage(
             blockDescriptorLength = modeParam10->BlockDescriptorLength[1];
         }
 
+        //
+        // The header and block descriptors must lie entirely inside the
+        // buffer, otherwise the page walk below would start past the limit.
+        //
+        if (blockDescriptorLength > Length - parameterHeaderLength) {
+            return NULL;
+        }
+
         ModeSenseBuffer += parameterHeaderLength + blockDescriptorLength;
 
         //
@@ -6842,7 +6850,13 @@ ClassFindModePage(
                  * before returning the pointer to caller
                  */
 
-                if (ModeSenseBuffer + ((PMODE_DISCONNECT_PAGE)ModeSenseBuffer)->PageLength > (PCHAR)limit) {
+                //
+                // PageLength does not count the page code/length header bytes,
+                // so the bound must include them.
+                //
+                if (ModeSenseBuffer +
+                    ((PMODE_DISCONNECT_PAGE)ModeSenseBuffer)->PageLength +
+                    RTL_SIZEOF_THROUGH_FIELD(MODE_DISCONNECT_PAGE, PageLength) > (PCHAR)limit) {
                     /*
                      *  Return NULL since the page is not safe to access in full
                      */
@@ -8584,8 +8598,9 @@ ClassDeviceControl(
                 break;
             }
 
-            if (irpStack->Parameters.DeviceIoControl.InputBufferLength <
-                (sizeof(DEVICE_MANAGE_DATA_SET_ATTRIBUTES) + dsmAttributes->ParameterBlockLength + dsmAttributes->DataSetRangesLength)) {
+            if (!ClasspDsmRequiredLengthFits(irpStack->Parameters.DeviceIoControl.InputBufferLength,
+                                             dsmAttributes->ParameterBlockLength,
+                                             dsmAttributes->DataSetRangesLength)) {
 
                 status = STATUS_INVALID_PARAMETER;
                 Irp->IoStatus.Status = status;
