@@ -391,8 +391,123 @@ test_SandboxPolicies(void)
     CloseHandle(hJob);
 }
 
+/* A completion port associated with a job reports a process that is assigned to it,
+ * its exit and the end of the last process, with the key given at association. */
+static
+VOID
+test_CompletionPort(VOID)
+{
+    JOBOBJECT_ASSOCIATE_COMPLETION_PORT Port;
+    STARTUPINFOW Startup = { sizeof(Startup) };
+    PROCESS_INFORMATION Child = { 0 };
+    WCHAR Command[MAX_PATH + 32];
+    HANDLE hJob, hPort;
+    DWORD Message, i;
+    ULONG_PTR Key;
+    LPOVERLAPPED Overlapped;
+    BOOL SeenNew = FALSE, SeenExit = FALSE, SeenZero = FALSE;
+
+    hJob = CreateJobObjectW(NULL, NULL);
+    hPort = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 1);
+    ok(hJob != NULL && hPort != NULL, "CreateJobObject/CreateIoCompletionPort failed: %lu\n", GetLastError());
+    if (!hJob || !hPort)
+        goto Cleanup;
+
+    Port.CompletionKey = (PVOID)(ULONG_PTR)0x1234;
+    Port.CompletionPort = hPort;
+    ok(SetInformationJobObject(hJob, JobObjectAssociateCompletionPortInformation, &Port, sizeof(Port)),
+       "Associating the port failed: %lu\n", GetLastError());
+    SetLastError(0xdeadbeef);
+    ok(!SetInformationJobObject(hJob, JobObjectAssociateCompletionPortInformation, &Port, sizeof(Port) - 1),
+       "A short association succeeded\n");
+    ok(GetLastError() == ERROR_BAD_LENGTH, "Error %lu\n", GetLastError());
+
+    GetSystemDirectoryW(Command, MAX_PATH);
+    StringCchCatW(Command, RTL_NUMBER_OF(Command), L"\\cmd.exe /c exit 3");
+    if (!CreateProcessW(NULL, Command, NULL, NULL, FALSE, CREATE_SUSPENDED | CREATE_NO_WINDOW, NULL, NULL, &Startup, &Child))
+    {
+        skip("CreateProcess failed: %lu\n", GetLastError());
+        goto Cleanup;
+    }
+    ok(AssignProcessToJobObject(hJob, Child.hProcess), "AssignProcessToJobObject failed: %lu\n", GetLastError());
+    ResumeThread(Child.hThread);
+    WaitForSingleObject(Child.hProcess, 30000);
+
+    for (i = 0; i < 16 && !SeenZero; i++)
+    {
+        if (!GetQueuedCompletionStatus(hPort, &Message, &Key, &Overlapped, 5000))
+            break;
+        ok(Key == 0x1234, "Message %lu with key 0x%Ix\n", Message, Key);
+        /* Windows 10 also reports the console host the child starts in the job */
+        if (Message == JOB_OBJECT_MSG_NEW_PROCESS && (ULONG_PTR)Overlapped == Child.dwProcessId)
+            SeenNew = TRUE;
+        else if ((Message == JOB_OBJECT_MSG_EXIT_PROCESS || Message == JOB_OBJECT_MSG_ABNORMAL_EXIT_PROCESS) &&
+                 (ULONG_PTR)Overlapped == Child.dwProcessId)
+            SeenExit = TRUE;
+        else if (Message == JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO)
+        {
+            SeenZero = TRUE;
+        }
+    }
+    ok(SeenNew, "No JOB_OBJECT_MSG_NEW_PROCESS for the child\n");
+    ok(SeenExit, "No exit message for the child\n");
+    ok(SeenZero, "No JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO\n");
+    CloseHandle(Child.hThread);
+    CloseHandle(Child.hProcess);
+
+Cleanup:
+    if (hJob)
+        CloseHandle(hJob);
+    if (hPort)
+        CloseHandle(hPort);
+}
+
+/* The limits a job was given come back from a query, in the caller's layout */
+static
+VOID
+test_LimitQuery(VOID)
+{
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION Set, Got;
+    JOBOBJECT_BASIC_LIMIT_INFORMATION Basic;
+    HANDLE hJob = CreateJobObjectW(NULL, NULL);
+    DWORD Length = 0;
+
+    ok(hJob != NULL, "CreateJobObject failed: %lu\n", GetLastError());
+    if (!hJob)
+        return;
+    ZeroMemory(&Set, sizeof(Set));
+    Set.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE |
+                                           JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION | JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+    Set.BasicLimitInformation.ActiveProcessLimit = 1;
+    Set.ProcessMemoryLimit = 0x10000000;
+    ok(SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, &Set, sizeof(Set)),
+       "SetInformationJobObject failed: %lu\n", GetLastError());
+    memset(&Got, 0xcc, sizeof(Got));
+    ok(QueryInformationJobObject(hJob, JobObjectExtendedLimitInformation, &Got, sizeof(Got), &Length),
+       "QueryInformationJobObject failed: %lu\n", GetLastError());
+    ok(Length == sizeof(Got), "Length %lu\n", Length);
+    ok(Got.BasicLimitInformation.LimitFlags == Set.BasicLimitInformation.LimitFlags, "Flags 0x%lx\n",
+       Got.BasicLimitInformation.LimitFlags);
+    ok(Got.BasicLimitInformation.ActiveProcessLimit == 1, "Active process limit %lu\n",
+       Got.BasicLimitInformation.ActiveProcessLimit);
+    ok(Got.ProcessMemoryLimit == 0x10000000, "Process memory limit 0x%Ix\n", Got.ProcessMemoryLimit);
+    memset(&Basic, 0xcc, sizeof(Basic));
+    Length = 0;
+    ok(QueryInformationJobObject(hJob, JobObjectBasicLimitInformation, &Basic, sizeof(Basic), &Length),
+       "QueryInformationJobObject(basic) failed: %lu\n", GetLastError());
+    ok(Length == sizeof(Basic), "Length %lu\n", Length);
+    ok(Basic.LimitFlags == Set.BasicLimitInformation.LimitFlags, "Basic flags 0x%lx\n", Basic.LimitFlags);
+    SetLastError(0xdeadbeef);
+    ok(!QueryInformationJobObject(hJob, JobObjectExtendedLimitInformation, &Got, sizeof(Got) - 1, &Length),
+       "A short query succeeded\n");
+    ok(GetLastError() == ERROR_BAD_LENGTH, "Error %lu\n", GetLastError());
+    CloseHandle(hJob);
+}
+
 START_TEST(JobObject)
 {
+    test_LimitQuery();
+    test_CompletionPort();
     test_RoundTrip();
     test_InvalidParameters();
     test_Access();

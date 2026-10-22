@@ -242,8 +242,7 @@ NtQueryInformationProcess(
         return Status;
     }
 
-    if (((ProcessInformationClass == ProcessCookie) ||
-         (ProcessInformationClass == ProcessImageInformation)) &&
+    if ((ProcessInformationClass == ProcessCookie) &&
         (ProcessHandle != NtCurrentProcess()))
     {
         /*
@@ -273,7 +272,7 @@ NtQueryInformationProcess(
 
             /* Reference the process */
             Status = ObReferenceObjectByHandle(ProcessHandle,
-                                               PROCESS_QUERY_INFORMATION,
+                                               PROCESS_QUERY_LIMITED_INFORMATION,
                                                PsProcessType,
                                                PreviousMode,
                                                (PVOID*)&Process,
@@ -325,7 +324,7 @@ NtQueryInformationProcess(
 
             /* Reference the process */
             Status = ObReferenceObjectByHandle(ProcessHandle,
-                                               PROCESS_QUERY_INFORMATION,
+                                               PROCESS_QUERY_LIMITED_INFORMATION,
                                                PsProcessType,
                                                PreviousMode,
                                                (PVOID*)&Process,
@@ -410,7 +409,7 @@ NtQueryInformationProcess(
 
             /* Reference the process */
             Status = ObReferenceObjectByHandle(ProcessHandle,
-                                               PROCESS_QUERY_INFORMATION,
+                                               PROCESS_QUERY_LIMITED_INFORMATION,
                                                PsProcessType,
                                                PreviousMode,
                                                (PVOID*)&Process,
@@ -455,7 +454,7 @@ NtQueryInformationProcess(
 
             /* Reference the process */
             Status = ObReferenceObjectByHandle(ProcessHandle,
-                                               PROCESS_QUERY_INFORMATION,
+                                               PROCESS_QUERY_LIMITED_INFORMATION,
                                                PsProcessType,
                                                PreviousMode,
                                                (PVOID*)&Process,
@@ -538,7 +537,7 @@ NtQueryInformationProcess(
 
             /* Reference the process */
             Status = ObReferenceObjectByHandle(ProcessHandle,
-                                               PROCESS_QUERY_INFORMATION,
+                                               PROCESS_QUERY_LIMITED_INFORMATION,
                                                PsProcessType,
                                                PreviousMode,
                                                (PVOID*)&Process,
@@ -582,7 +581,7 @@ NtQueryInformationProcess(
 
             /* Reference the process */
             Status = ObReferenceObjectByHandle(ProcessHandle,
-                                               PROCESS_QUERY_INFORMATION,
+                                               PROCESS_QUERY_LIMITED_INFORMATION,
                                                PsProcessType,
                                                PreviousMode,
                                                (PVOID*)&Process,
@@ -623,7 +622,7 @@ NtQueryInformationProcess(
 
             /* Reference the process */
             Status = ObReferenceObjectByHandle(ProcessHandle,
-                                               PROCESS_QUERY_INFORMATION,
+                                               PROCESS_QUERY_LIMITED_INFORMATION,
                                                PsProcessType,
                                                PreviousMode,
                                                (PVOID*)&Process,
@@ -681,7 +680,7 @@ NtQueryInformationProcess(
 
             /* Reference the process */
             Status = ObReferenceObjectByHandle(ProcessHandle,
-                                               PROCESS_QUERY_INFORMATION,
+                                               PROCESS_QUERY_LIMITED_INFORMATION,
                                                PsProcessType,
                                                PreviousMode,
                                                (PVOID*)&Process,
@@ -720,7 +719,7 @@ NtQueryInformationProcess(
 
             /* Reference the process */
             Status = ObReferenceObjectByHandle(ProcessHandle,
-                                               PROCESS_QUERY_INFORMATION,
+                                               PROCESS_QUERY_LIMITED_INFORMATION,
                                                PsProcessType,
                                                PreviousMode,
                                                (PVOID*)&Process,
@@ -826,7 +825,7 @@ NtQueryInformationProcess(
 
             /* Reference the process */
             Status = ObReferenceObjectByHandle(ProcessHandle,
-                                               PROCESS_QUERY_INFORMATION,
+                                               PROCESS_QUERY_LIMITED_INFORMATION,
                                                PsProcessType,
                                                PreviousMode,
                                                (PVOID*)&Process,
@@ -858,7 +857,7 @@ NtQueryInformationProcess(
 
             /* Reference the process */
             Status = ObReferenceObjectByHandle(ProcessHandle,
-                                               PROCESS_QUERY_INFORMATION,
+                                               PROCESS_QUERY_LIMITED_INFORMATION,
                                                PsProcessType,
                                                PreviousMode,
                                                (PVOID*)&Process,
@@ -917,8 +916,7 @@ NtQueryInformationProcess(
 
             /* Reference the process */
             Status = ObReferenceObjectByHandle(ProcessHandle,
-            // FIXME: Use PROCESS_QUERY_LIMITED_INFORMATION when implemented
-                                               PROCESS_QUERY_INFORMATION,
+                                               PROCESS_QUERY_LIMITED_INFORMATION,
                                                PsProcessType,
                                                PreviousMode,
                                                (PVOID*)&Process,
@@ -1110,6 +1108,8 @@ NtQueryInformationProcess(
         }
 
         case ProcessImageInformation:
+        {
+            SECTION_IMAGE_INFORMATION ImageInformation;
 
             if (ProcessInformationLength != sizeof(SECTION_IMAGE_INFORMATION))
             {
@@ -1121,13 +1121,31 @@ NtQueryInformationProcess(
             /* Set the length required and validate it */
             Length = sizeof(SECTION_IMAGE_INFORMATION);
 
-            /* Indicate success */
-            Status = STATUS_SUCCESS;
+            /* Other processes can be queried too (NT6+); check for the current one */
+            if (ProcessHandle == NtCurrentProcess())
+            {
+                Process = PsGetCurrentProcess();
+                ObReferenceObject(Process);
+            }
+            else
+            {
+                Status = ObReferenceObjectByHandle(ProcessHandle,
+                                                   PROCESS_QUERY_INFORMATION,
+                                                   PsProcessType,
+                                                   PreviousMode,
+                                                   (PVOID*)&Process,
+                                                   NULL);
+                if (!NT_SUCCESS(Status)) break;
+            }
 
-            /* Enter SEH to protect write */
+            /* Get the image information into a local, then copy it out under SEH */
+            Status = MmGetProcessImageInformation(Process, &ImageInformation);
+            ObDereferenceObject(Process);
+            if (!NT_SUCCESS(Status)) break;
+
             _SEH2_TRY
             {
-                MmGetImageInformation((PSECTION_IMAGE_INFORMATION)ProcessInformation);
+                *(PSECTION_IMAGE_INFORMATION)ProcessInformation = ImageInformation;
             }
             _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
             {
@@ -1136,6 +1154,7 @@ NtQueryInformationProcess(
             }
             _SEH2_END;
             break;
+        }
 
         case ProcessCycleTime:
         {
@@ -1152,9 +1171,8 @@ NtQueryInformationProcess(
             Length = sizeof(PROCESS_CYCLE_TIME_INFORMATION);
 
             /* Reference the process */
-            // FIXME: Use PROCESS_QUERY_LIMITED_INFORMATION when implemented
             Status = ObReferenceObjectByHandle(ProcessHandle,
-                                               PROCESS_QUERY_INFORMATION,
+                                               PROCESS_QUERY_LIMITED_INFORMATION,
                                                PsProcessType,
                                                PreviousMode,
                                                (PVOID*)&Process,
@@ -1313,7 +1331,7 @@ NtQueryInformationProcess(
 
             /* Reference the process */
             Status = ObReferenceObjectByHandle(ProcessHandle,
-                                               PROCESS_QUERY_INFORMATION,
+                                               PROCESS_QUERY_LIMITED_INFORMATION,
                                                PsProcessType,
                                                PreviousMode,
                                                (PVOID*)&Process,
@@ -1433,6 +1451,102 @@ NtQueryInformationProcess(
     return Status;
 }
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+/*
+ * ProcessTlsInformation with PROCESS_TLS_WOW64, for one thread: the same
+ * change on the 32-bit TLS vector in the thread's TEB32, whose entries and
+ * length (the ULONG before it) are ULONGs; the new data must be 32-bit
+ * addresses. Entry is the request entry for the thread, or NULL past the
+ * entries given. Raises on bad memory or a bad request; returns whether the
+ * thread counts (it has a vector, and in pass 1 an entry).
+ */
+static
+BOOLEAN
+PspSetThreadTls32(
+    _In_ PTEB Teb,
+    _In_ PPROCESS_TLS_INFORMATION Header,
+    _Inout_opt_ PTHREAD_TLS_INFORMATION Entry,
+    _In_ ULONG Pass,
+    _In_ HANDLE ThreadId,
+    _In_ ULONG64 GuestLimit)
+{
+    PTEB32 Guest;
+    PULONG Vector, NewVector;
+    ULONG OldLength, NewLength, Old = 0, i;
+    ULONG_PTR NewTlsData;
+
+    /* A 32-bit vector, its length word before it included, stays in the guest's address space */
+#define TLS32_IN_GUEST(v, n) ((ULONG_PTR)(v) >= sizeof(ULONG) && \
+                              (ULONG64)(ULONG_PTR)(v) + (ULONG64)(n) * sizeof(ULONG) <= GuestLimit)
+
+    if (!Teb)
+        return FALSE;
+    Guest = PS_GET_TEB32_FROM_TEB(Teb);
+    ProbeForRead(&Guest->ThreadLocalStoragePointer, sizeof(ULONG), sizeof(ULONG));
+    Vector = (PULONG)UlongToPtr(Guest->ThreadLocalStoragePointer);
+    if (!Vector)
+        return FALSE;
+
+    /* The thread's vector and its length, as user memory; a pointer outside the guest is not touched */
+    if (!TLS32_IN_GUEST(Vector, 0))
+        ExRaiseStatus(STATUS_INVALID_PARAMETER);
+    ProbeForWrite(Vector - 1, sizeof(ULONG), sizeof(ULONG));
+    OldLength = Vector[-1];
+    if (OldLength >= MAXLONG / sizeof(ULONG) || !TLS32_IN_GUEST(Vector, OldLength))
+        ExRaiseStatus(STATUS_INVALID_PARAMETER);
+    ProbeForWrite(Vector, OldLength * sizeof(ULONG), sizeof(ULONG));
+
+    /* Pass 0 counts beyond the entries given; pass 1 never sees more threads (the loader lock) */
+    if (!Entry)
+        return (Pass == 0);
+
+    NewTlsData = (ULONG_PTR)Entry->NewTlsData;
+    if (NewTlsData > MAXULONG)
+        ExRaiseStatus(STATUS_INVALID_PARAMETER);
+
+    if (Header->OperationType == PROCESS_TLS_REPLACE_VECTOR)
+    {
+        /* The new vector: at least one entry longer than the index */
+        NewVector = (PULONG)NewTlsData;
+        if (!TLS32_IN_GUEST(NewVector, 0))
+            ExRaiseStatus(STATUS_INVALID_PARAMETER);
+        ProbeForWrite(NewVector - 1, sizeof(ULONG), sizeof(ULONG));
+        NewLength = NewVector[-1];
+        if (NewLength <= Header->TlsIndex || NewLength >= MAXLONG / sizeof(ULONG) ||
+            !TLS32_IN_GUEST(NewVector, NewLength))
+            ExRaiseStatus(STATUS_INVALID_PARAMETER);
+        ProbeForWrite(NewVector, NewLength * sizeof(ULONG), sizeof(ULONG));
+
+        if (Pass == 1)
+        {
+            Entry->Flags = 0;
+            for (i = 0; i < Header->TlsIndex; i++)
+                NewVector[i] = (i < OldLength) ? Vector[i] : 0;
+            Old = (ULONG)InterlockedExchange((PLONG)&Guest->ThreadLocalStoragePointer, (LONG)NewTlsData);
+        }
+    }
+    else
+    {
+        if (Header->TlsIndex >= OldLength)
+            ExRaiseStatus(STATUS_INVALID_PARAMETER);
+        if (Pass == 1)
+        {
+            Entry->Flags = 0;
+            Old = (ULONG)InterlockedExchange((PLONG)&Vector[Header->TlsIndex], (LONG)NewTlsData);
+        }
+    }
+
+    if (Pass == 1)
+    {
+        Entry->OldTlsData = UlongToPtr(Old);
+        Entry->ThreadId = ThreadId;
+        Entry->Flags = THREAD_TLS_INFORMATION_ASSIGNED;
+    }
+    return TRUE;
+#undef TLS32_IN_GUEST
+}
+#endif
+
 /*
  * ProcessTlsInformation: changes the TLS vectors of the threads of the current
  * process for the loader, which holds its lock, so no thread of the process
@@ -1450,6 +1564,8 @@ NtQueryInformationProcess(
  * so far are marked THREAD_TLS_INFORMATION_ASSIGNED; the entry is written
  * once before a thread is changed, so a fault on the request cannot hide a
  * change already made, short of the process unmapping it in that moment.
+ * With PROCESS_TLS_WOW64 (the WoW64 layer, for the 32-bit loader of a WoW64
+ * process) the vectors changed are the 32-bit ones in the TEB32s.
  */
 static
 NTSTATUS
@@ -1465,6 +1581,12 @@ PspSetProcessTlsInformation(
     PVOID *Vector, *NewVector, NewTlsData, OldTlsData = NULL;
     ULONG_PTR OldLength, NewLength;
     ULONG Pass, Count, i;
+    BOOLEAN Counted;
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    BOOLEAN Wow64 = FALSE;
+    SECTION_IMAGE_INFORMATION ImageInformation;
+    ULONG64 GuestLimit = 0;
+#endif
     NTSTATUS Status = STATUS_SUCCESS;
 
     if (Process != PsGetCurrentProcess())
@@ -1485,6 +1607,20 @@ PspSetProcessTlsInformation(
     }
     _SEH2_END;
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (Header.Flags & PROCESS_TLS_WOW64)
+    {
+        if (!Process->Wow64Process)
+            return STATUS_INVALID_PARAMETER;
+        Header.Flags &= ~PROCESS_TLS_WOW64;
+        Wow64 = TRUE;
+        /* The guest's address space ends at 2 GiB, or near 4 GiB for a large-address-aware
+           image (as the WoW64 layer reserves it: MM_HIGHEST_USER_ADDRESS_WOW64 or 0xFFFEFFFF) */
+        MmGetImageInformation(&ImageInformation);
+        GuestLimit = (ImageInformation.ImageCharacteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE) ?
+                     0xFFFF0000ULL : (ULONG64)MM_HIGHEST_USER_ADDRESS_WOW64 + 1;
+    }
+#endif
     if (Header.Flags ||
         (Header.OperationType != PROCESS_TLS_REPLACE_VECTOR && Header.OperationType != PROCESS_TLS_REPLACE_INDEX) ||
         Header.ThreadDataCount > (Length - FIELD_OFFSET(PROCESS_TLS_INFORMATION, ThreadData)) / sizeof(THREAD_TLS_INFORMATION) ||
@@ -1506,9 +1642,20 @@ PspSetProcessTlsInformation(
                 continue;
 
             Vector = NULL;
+            Counted = FALSE;
             Teb = Thread->Tcb.Teb;
             _SEH2_TRY
             {
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+                if (Wow64)
+                {
+                    Counted = PspSetThreadTls32(Teb, &Header,
+                                                (Count < Header.ThreadDataCount) ? &ThreadData[Count] : NULL,
+                                                Pass, Thread->Cid.UniqueThread, GuestLimit);
+                }
+                else
+#endif
+                {
                 if (Teb)
                 {
                     ProbeForRead(&Teb->ThreadLocalStoragePointer, sizeof(PVOID), sizeof(PVOID));
@@ -1570,6 +1717,8 @@ PspSetProcessTlsInformation(
                         }
                     }
                 }
+                Counted = (Vector != NULL);
+                }
             }
             _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
             {
@@ -1585,7 +1734,7 @@ PspSetProcessTlsInformation(
                 goto Done;
             }
 
-            if (Vector)
+            if (Counted)
                 Count++;
         }
 
@@ -3026,25 +3175,46 @@ NtSetInformationThread(
                         }
                         else
 #endif
-                        /* Check if we're in the expansion range */
-                        if (TlsIndex > TLS_MINIMUM_AVAILABLE - 1)
                         {
-                            if (TlsIndex < (TLS_MINIMUM_AVAILABLE +
-                                            TLS_EXPANSION_SLOTS) - 1)
+                            PVOID *ExpansionSlots;
+                            PVOID *Slot;
+
+                            /* The TEB is user memory and TlsExpansionSlots is
+                               user controlled: probe the selected slot and wrap
+                               the writes in SEH so a bad pointer cannot fault in
+                               the kernel or be used for a kernel write. */
+                            _SEH2_TRY
                             {
-                                /* Check if we have expansion slots */
-                                PVOID* ExpansionSlots = Teb->TlsExpansionSlots;
-                                if (ExpansionSlots)
+                                /* Check if we're in the expansion range */
+                                if (TlsIndex > TLS_MINIMUM_AVAILABLE - 1)
                                 {
-                                    /* Clear the index */
-                                    ExpansionSlots[TlsIndex - TLS_MINIMUM_AVAILABLE] = 0;
+                                    if (TlsIndex < (TLS_MINIMUM_AVAILABLE +
+                                                    TLS_EXPANSION_SLOTS) - 1)
+                                    {
+                                        /* Capture the expansion vector first */
+                                        ExpansionSlots = Teb->TlsExpansionSlots;
+                                        if (ExpansionSlots)
+                                        {
+                                            /* Probe and clear the index */
+                                            Slot = &ExpansionSlots[TlsIndex - TLS_MINIMUM_AVAILABLE];
+                                            ProbeForWrite(Slot, sizeof(PVOID), sizeof(PVOID));
+                                            *Slot = NULL;
+                                        }
+                                    }
+                                }
+                                else
+                                {
+                                    /* Probe and clear the index */
+                                    ProbeForWrite(&Teb->TlsSlots[TlsIndex],
+                                                  sizeof(PVOID), sizeof(PVOID));
+                                    Teb->TlsSlots[TlsIndex] = NULL;
                                 }
                             }
-                        }
-                        else
-                        {
-                            /* Clear the index */
-                            Teb->TlsSlots[TlsIndex] = NULL;
+                            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                            {
+                                Status = _SEH2_GetExceptionCode();
+                            }
+                            _SEH2_END;
                         }
                     }
 
@@ -3262,6 +3432,7 @@ NtQueryInformationThread(
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
     NTSTATUS Status;
     ULONG Length = 0;
+    BOOLEAN DescriptorFailed = FALSE;
 
     PAGED_CODE();
 
@@ -3411,9 +3582,8 @@ NtQueryInformationThread(
             }
 
             /* Reference the thread */
-            // FIXME: Use THREAD_QUERY_LIMITED_INFORMATION when implemented
             Status = ObReferenceObjectByHandle(ThreadHandle,
-                                               Access,
+                                               THREAD_QUERY_LIMITED_INFORMATION,
                                                PsThreadType,
                                                PreviousMode,
                                                (PVOID*)&Thread,
@@ -3619,6 +3789,10 @@ NtQueryInformationThread(
 
             /* Dereference the thread */
             ObDereferenceObject(Thread);
+
+            /* NT reports the size of the descriptor on success only */
+            if (NT_SUCCESS(Status)) Length = sizeof(LDT_ENTRY);
+            else DescriptorFailed = TRUE;
 #else
             /* Only implemented on x86 */
             Status = STATUS_NOT_IMPLEMENTED;
@@ -3856,8 +4030,8 @@ NtQueryInformationThread(
     /* Protect write with SEH */
     _SEH2_TRY
     {
-        /* Check if caller wanted return length */
-        if (ReturnLength) *ReturnLength = Length;
+        /* Check if caller wanted return length (ThreadDescriptorTableEntry leaves it alone on failure) */
+        if (ReturnLength && !DescriptorFailed) *ReturnLength = Length;
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {

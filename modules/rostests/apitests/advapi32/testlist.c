@@ -19,6 +19,7 @@ extern void func_HKEY_CLASSES_ROOT(void);
 extern void func_IsTextUnicode(void);
 extern void func_LockServiceDatabase(void);
 extern void func_LogonUser(void);
+extern void func_ProcessThreadLabel(void);
 extern void func_QueryServiceConfig2(void);
 extern void func_RegConcurrentWrite(void);
 extern void func_RegCreateKeyEx(void);
@@ -35,8 +36,10 @@ extern void func_RegOpenKeyExW(void);
 extern void func_RegQueryInfoKey(void);
 extern void func_RegQueryValueExW(void);
 extern void func_RegGetValue(void);
+extern void func_RestrictedSidsCopy(void);
 extern void func_RtlEncryptMemory(void);
 extern void func_SaferIdentifyLevel(void);
+extern void func_TokenDefaultDacl(void);
 extern void func_TokenIntegrity(void);
 extern void func_TokenLogonSid(void);
 extern void func_ServiceArgs(void);
@@ -56,6 +59,7 @@ extern void func_RegWow64SharedLongName(void);
 extern void func_RegWow64Volatile(void);
 extern void func_RegWow64SharedCreate(void);
 extern void func_RegWow64Aliases(void);
+extern void func_ServiceProcess(void);
 
 const struct test winetest_testlist[] =
 {
@@ -85,6 +89,7 @@ const struct test winetest_testlist[] =
     { "IsTextUnicode" , func_IsTextUnicode },
     { "LockServiceDatabase" , func_LockServiceDatabase },
     { "LogonUser", func_LogonUser },
+    { "ProcessThreadLabel", func_ProcessThreadLabel },
     { "QueryServiceConfig2", func_QueryServiceConfig2 },
     { "RegConcurrentWrite", func_RegConcurrentWrite },
     { "RegCreateKeyEx", func_RegCreateKeyEx },
@@ -101,8 +106,10 @@ const struct test winetest_testlist[] =
     { "RegOpenKeyExW", func_RegOpenKeyExW },
     { "RegQueryValueExW", func_RegQueryValueExW },
     { "RegGetValue", func_RegGetValue },
+    { "RestrictedSidsCopy", func_RestrictedSidsCopy },
     { "RtlEncryptMemory", func_RtlEncryptMemory },
     { "SaferIdentifyLevel", func_SaferIdentifyLevel },
+    { "TokenDefaultDacl", func_TokenDefaultDacl },
     { "TokenIntegrity", func_TokenIntegrity },
     { "TokenLogonSid", func_TokenLogonSid },
     { "ServiceArgs", func_ServiceArgs },
@@ -112,6 +119,7 @@ const struct test winetest_testlist[] =
     { "SetEntriesInAclOld", func_SetEntriesInAclOld },
     { "SetNamedSecurityInfoInherit", func_SetNamedSecurityInfoInherit },
     { "SddlRights", func_SddlRights },
+    { "ServiceProcess", func_ServiceProcess },
     { 0, 0 }
 };
 

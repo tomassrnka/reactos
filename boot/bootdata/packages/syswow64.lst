@@ -9,6 +9,20 @@ SysWOW64/ntmarta.dll
 SysWOW64/apphelp.dll
 SysWOW64/aclayers.dll
 
+# The Visual C++ runtime with the C runtime that it forwards to.
+# A line "@0x600 <file>" is only part of the list at that export level and later.
+SysWOW64/ucrtbase.dll
+SysWOW64/vcruntime140.dll
+SysWOW64/msvcp140_2.dll
+SysWOW64/ntdll_vista.dll
+@0x600 SysWOW64/msvcp140.dll
+@0x600 SysWOW64/msvcp140_1.dll
+@0x600 SysWOW64/concrt140.dll
+
+# kernelbase.dll forwards to kernelbase_ros.dll; the MSYS2 and Cygwin runtimes load it by that name.
+SysWOW64/kernelbase_ros.dll
+SysWOW64/kernelbase.dll
+
 # These DLLs use W32K_WIDE in the nested guest build, including their layout pins.
 # Window creation still needs the win32k syscall and callback translation.
 SysWOW64/user32.dll
@@ -17,6 +31,12 @@ SysWOW64/imm32.dll
 
 # GUI applications and the common-dialog/common-control dependency closure.
 SysWOW64/bcrypt.dll
+SysWOW64/bcryptprimitives.dll
+SysWOW64/cryptbase.dll
+SysWOW64/ncrypt.dll
+# DirectWrite and its user32 forwarder (Firefox renders text with it)
+SysWOW64/dwrite.dll
+SysWOW64/user32_vista.dll
 SysWOW64/atl100.dll
 SysWOW64/combase.dll
 SysWOW64/comctl32.dll

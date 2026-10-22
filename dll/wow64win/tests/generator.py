@@ -17,6 +17,14 @@ with tempfile.TemporaryDirectory(prefix='thunk-test-',dir=os.environ['TMPDIR']) 
     clip=next(l for l in generated.splitlines() if l.startswith('case W64_NtUserCreateLocalMemHandle:'))
     assert '(LONG_PTR)(LONG)a[0]' in clip
     assert 'case W64_NtUserBuildHwndList:' in (copy/'dll/wow64win/failure.inc').read_text()
+    # Checked-build-only services keep their thunks, under the header's own #if DBG.
+    lines=generated.splitlines()
+    for n in ['NtUserDbgWin32HeapFail','NtUserDbgWin32HeapStat']:
+        i=next(i for i,l in enumerate(lines) if l.startswith(f'case W64_{n}:'))
+        assert lines[i-1]=='#if DBG' and lines[i+1]=='#endif',n
+        assert rows[n]['implementation']=='generated' and 'DBG' in rows[n]['detail'],n
+    assert 'no i386 service entry' not in rows['NtUserSetRipFlags']['detail']
+    assert generated.count('#if DBG')==generated.count('#endif')==2
     assert 'WM_COPYDATA' in (copy/'dll/wow64win/messages-unsupported.inc').read_text()
     blocked=(copy/'dll/wow64win/messages-unsupported.inc').read_text()
     assert all(int(v,16)<0x400 for v in re.findall(r'case 0x([0-9a-f]+):',blocked))
@@ -37,4 +45,4 @@ with tempfile.TemporaryDirectory(prefix='thunk-test-',dir=os.environ['TMPDIR']) 
     names=[n for n,r in cov.items() if 'measured RECT.left differs'==r['detail']]
     assert names, 'layout drift was not rejected'
     assert all(rows[n]['implementation']=='generated' for n in names)
-    print('PASS deterministic generation; authoritative HKL policy; measured layout drift rejected; unsupported return and message metadata')
+    print('PASS deterministic generation; DBG-only services guarded; authoritative HKL policy; measured layout drift rejected; unsupported return and message metadata')

@@ -344,7 +344,12 @@ PspCreateThread(OUT PHANDLE ThreadHandle,
         _SEH2_TRY
         {
             Thread->StartAddress = (PVOID)KeGetContextPc(ThreadContext);
+#ifdef _M_AMD64
+            /* On x64 the Win32 start address is passed in Rcx (see BasepInitializeContext) */
+            Thread->Win32StartAddress = (PVOID)ThreadContext->Rcx;
+#else
             Thread->Win32StartAddress = (PVOID)KeGetContextReturnRegister(ThreadContext);
+#endif
         }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
         {

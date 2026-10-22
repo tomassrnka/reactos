@@ -3184,7 +3184,12 @@ RealMsgWaitForMultipleObjectsEx(
    DWORD dwWakeMask,
    DWORD dwFlags)
 {
-   MSGWAITINFO Info;
+   /* In the WoW64 guest build the handles are 64 bits wide and the kernel reads them at that alignment (the
+      timeout is not alignment-checked). A 32-bit caller keeps the stack only 4-byte aligned and the compiler
+      assumes 8, so the structure is aligned here; otherwise the wait fails with STATUS_DATATYPE_MISALIGNMENT
+      and message loops spin. */
+   UCHAR InfoBuffer[sizeof(MSGWAITINFO) + TYPE_ALIGNMENT(MSGWAITINFO) - 1];
+   PMSGWAITINFO Info = ALIGN_UP_POINTER_BY(InfoBuffer, TYPE_ALIGNMENT(MSGWAITINFO));
    RTL_CALLER_ALLOCATED_ACTIVATION_CONTEXT_STACK_FRAME ActCtx;
    HANDLE Handle;
    NTSTATUS Status;
@@ -3230,18 +3235,18 @@ RealMsgWaitForMultipleObjectsEx(
          if (IsConsoleHandle(Handle) && VerifyConsoleIoHandle(Handle))
             Handle = GetConsoleInputWaitHandle();
 #ifdef W32K_WIDE_ACTIVE
-         Info.Handles[i].v64 = (ULONG64)(LONG64)(LONG_PTR)Handle;
+         Info->Handles[i].v64 = (ULONG64)(LONG64)(LONG_PTR)Handle;
 #else
-         Info.Handles[i] = Handle;
+         Info->Handles[i] = Handle;
 #endif
       }
    }
 
-   Info.nCount = nCount;
-   Info.dwWakeMask = dwWakeMask;
-   Info.dwFlags = dwFlags;
-   Info.bTimeout = (dwMilliseconds != INFINITE);
-   Info.Timeout.QuadPart = dwMilliseconds * -10000LL;
+   Info->nCount = nCount;
+   Info->dwWakeMask = dwWakeMask;
+   Info->dwFlags = dwFlags;
+   Info->bTimeout = (dwMilliseconds != INFINITE);
+   Info->Timeout.QuadPart = dwMilliseconds * -10000LL;
 
    if (dwFlags & MWMO_ALERTABLE)
    {
@@ -3252,7 +3257,7 @@ RealMsgWaitForMultipleObjectsEx(
    }
 
    /* win32k waits, so that the thread counts as waiting for input exactly while it does */
-   Status = NtUserxMsgWait(&Info);
+   Status = NtUserxMsgWait(Info);
 
    if (dwFlags & MWMO_ALERTABLE)
       RtlDeactivateActivationContextUnsafeFast(&ActCtx);

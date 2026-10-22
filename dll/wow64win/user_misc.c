@@ -162,6 +162,37 @@ static NTSTATUS SetInformationThread(ULONG *a)
     return NtUserSetInformationThread(H(0), a[1], P(2), a[3]);
 }
 
+/* Diagnostics: one debug line per process for each untranslated service or
+ * callback message. When the table is full, one line says so and later items
+ * are not printed. */
+static const char *ServiceNames[] =
+{
+#define SVC_(name, count) "Nt" #name,
+#undef _WIN64
+#include <w32ksvc32.h>
+#define _WIN64 1
+#undef SVC_
+};
+static volatile LONG64 ReportedKeys[256];
+static volatile LONG ReportedFull;
+
+BOOLEAN Wow64WinFirstReport(ULONG Kind, ULONG Value)
+{
+    LONG64 Key = (LONG64)(0x8000000000000000ULL | ((ULONG64)Kind << 32) | Value);
+    ULONG i;
+    for (i = 0; i < RTL_NUMBER_OF(ReportedKeys); ++i)
+    {
+        LONG64 Old = ReportedKeys[i];
+        if (!Old) Old = InterlockedCompareExchange64(&ReportedKeys[i], Key, 0);
+        if (!Old) return TRUE;
+        if (Old == Key) return FALSE;
+    }
+    if (!InterlockedExchange(&ReportedFull, 1))
+        DbgPrint("WoW64win: more than %lu unsupported items, no further ones are reported, pid %lx\n",
+                 (ULONG)RTL_NUMBER_OF(ReportedKeys), HandleToUlong(NtCurrentTeb()->ClientId.UniqueProcess));
+    return FALSE;
+}
+
 ULONG_PTR Wow64WinUserMiscService(ULONG Number, ULONG *a)
 {
     switch (Number)
@@ -198,7 +229,10 @@ ULONG_PTR Wow64WinUserMiscService(ULONG Number, ULONG *a)
         _SEH2_TRY
         {
             Ret = NtUserRealInternalGetMessage(&Msg, H(1), a[2], a[3], a[4], a[5]);
-            if (Ret && Ret != -1) { ProbeOutput(a[0], sizeof(MSG32)); MsgNativeTo32(P(0), &Msg); }
+            /* bGMSG selects GetMessage semantics, where FALSE with WM_QUIT is a retrieved message. The
+             * in-tree service is a stub that returns FALSE and writes nothing, which the zeroed MSG tells. */
+            if ((Ret && Ret != -1) || (!Ret && a[5] && Msg.message == WM_QUIT))
+            { ProbeOutput(a[0], sizeof(MSG32)); MsgNativeTo32(P(0), &Msg); }
         }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
         {
@@ -234,7 +268,10 @@ ULONG_PTR Wow64WinUserMiscService(ULONG Number, ULONG *a)
             return (WORD)NtUserSetWindowLongPtr(H(0), (INT)a[1], (WORD)a[2], TRUE);
         return NtUserSetWindowWord(H(0), (INT)a[1], (WORD)a[2]);
     default:
-        DbgPrint("WoW64win: unsupported service %lx\n", Number);
+        if (Wow64WinFirstReport(0, Number))
+            DbgPrint("WoW64win: unsupported service %lx (%s), pid %lx\n", Number,
+                     Number - 0x1000 < RTL_NUMBER_OF(ServiceNames) ? ServiceNames[Number - 0x1000] : "unknown",
+                     HandleToUlong(NtCurrentTeb()->ClientId.UniqueProcess));
         RtlSetLastWin32Error(ERROR_CALL_NOT_IMPLEMENTED);
         return Wow64WinFailure(Number, STATUS_NOT_IMPLEMENTED);
     }

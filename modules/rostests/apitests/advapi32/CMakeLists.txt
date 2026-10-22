@@ -4,6 +4,7 @@ list(APPEND SOURCE
     ConvertStringSidToSid.c
     RegWow64.c
     RegWow64Review.c
+    RestrictedSidsCopy.c
     CreateService.c
     CloseTrace.c
     DuplicateTokenEx.c
@@ -18,6 +19,7 @@ list(APPEND SOURCE
     IsTextUnicode.c
     LockServiceDatabase.c
     LogonUser.c
+    ProcessThreadLabel.c
     QueryServiceConfig2.c
     RegConcurrentWrite.c
     RegCreateKeyEx.c
@@ -33,6 +35,7 @@ list(APPEND SOURCE
     RegGetValue.c
     RtlEncryptMemory.c
     SaferIdentifyLevel.c
+    TokenDefaultDacl.c
     TokenIntegrity.c
     TokenLogonSid.c
     ServiceArgs.c

@@ -529,11 +529,165 @@ START_TEST(SystemCallStubs)
     }
 }
 
+#elif defined(_M_IX86)
+
+/*
+ * i386 stubs. Hooks pick the form they accept by OS version (the Chromium sandbox:
+ * WOW64 below 6.2 takes XP64/WIN7W, 6.2 and 6.3 W8W, 10 W10W; native i386 takes NATIVE):
+ *
+ * XP64:   B8 id  33 C9  8D 54 24 04  64 FF 15 C0 00 00 00  C2 nn nn   (NT 5.x x64 WOW64)
+ * WIN7W:  as XP64 with 83 C4 04 (add esp, 4) before C2 nn nn          (Windows 7 WOW64)
+ * W8W:    B8 id  64 FF 15 C0 00 00 00  C2 nn nn
+ * W10W:   B8 id  BA xx xx xx xx  FF D2  C2 nn nn
+ * NATIVE: B8 id  BA xx xx xx xx  FF 12 (or FF D2)  C2 nn nn / C3
+ */
+typedef enum _STUB_FORM32
+{
+    FORM32_NONE, FORM32_XP64, FORM32_WIN7W, FORM32_W8W, FORM32_W10W, FORM32_NATIVE
+} STUB_FORM32;
+
+static const char *Form32Name[] = { "none", "xp64", "win7w", "w8w", "w10w", "native" };
+static const UCHAR XorLeaCallFs[] = { 0x33, 0xC9, 0x8D, 0x54, 0x24, 0x04, 0x64, 0xFF, 0x15, 0xC0, 0x00, 0x00, 0x00 };
+static const UCHAR CallFs[] = { 0x64, 0xFF, 0x15, 0xC0, 0x00, 0x00, 0x00 };
+
+/* The form, the service ID, the stack bytes of the final ret and the code size */
+static STUB_FORM32 GetStubForm32(const UCHAR *Code, PULONG Id, PUSHORT Pop, PSIZE_T Size)
+{
+    *Id = 0; *Pop = 0; *Size = 0;
+    if (Code[0] != 0xB8)
+        return FORM32_NONE;
+    *Id = *(const ULONG UNALIGNED *)(Code + 1);
+    if (!memcmp(Code + 5, XorLeaCallFs, sizeof(XorLeaCallFs)))
+    {
+        if (Code[18] == 0xC2)
+        {
+            *Pop = *(const USHORT UNALIGNED *)(Code + 19); *Size = 21;
+            return FORM32_XP64;
+        }
+        if (Code[18] == 0x83 && Code[19] == 0xC4 && Code[20] == 0x04 && Code[21] == 0xC2)
+        {
+            *Pop = *(const USHORT UNALIGNED *)(Code + 22); *Size = 24;
+            return FORM32_WIN7W;
+        }
+        return FORM32_NONE;
+    }
+    if (!memcmp(Code + 5, CallFs, sizeof(CallFs)) && Code[12] == 0xC2)
+    {
+        *Pop = *(const USHORT UNALIGNED *)(Code + 13); *Size = 15;
+        return FORM32_W8W;
+    }
+    if (Code[5] == 0xBA && Code[10] == 0xFF && (Code[11] == 0xD2 || Code[11] == 0x12))
+    {
+        if (Code[12] == 0xC2)
+        {
+            *Pop = *(const USHORT UNALIGNED *)(Code + 13); *Size = 15;
+        }
+        else if (Code[12] == 0xC3)
+        {
+            *Size = 13;
+        }
+        else
+        {
+            return FORM32_NONE;
+        }
+        return (Code[11] == 0xD2 && *Size == 15) ? FORM32_W10W : FORM32_NATIVE;
+    }
+    return FORM32_NONE;
+}
+
+static BOOL IsWow64Process32(void)
+{
+    BOOL Wow64 = FALSE;
+    return IsWow64Process(GetCurrentProcess(), &Wow64) && Wow64;
+}
+
+static BOOLEAN IsForm32Expected(STUB_FORM32 Form, BOOL Wow64)
+{
+    ULONG Version = GetNTVersion();
+
+    if (!Wow64)
+        return Form == FORM32_NATIVE || (Version >= _WIN32_WINNT_WIN10 && Form == FORM32_W10W);
+    if (Version < _WIN32_WINNT_WIN7)
+        return Form == FORM32_XP64;
+    if (Version < _WIN32_WINNT_WIN8)
+        return Form == FORM32_WIN7W;
+    if (Version < _WIN32_WINNT_WIN10)
+        return Form == FORM32_W8W;
+    return Form == FORM32_W10W;
+}
+
+/* The services the Chromium sandbox intercepts in ntdll, with their stack bytes */
+static const struct { const char *Name; USHORT Pop; } Hooked32[] =
+{
+    { "NtCreateFile", 44 }, { "NtOpenFile", 24 }, { "NtQueryAttributesFile", 8 },
+    { "NtQueryFullAttributesFile", 8 }, { "NtSetInformationFile", 20 }, { "NtOpenThread", 16 },
+    { "NtOpenProcess", 16 }, { "NtOpenProcessToken", 12 }, { "NtOpenProcessTokenEx", 16 },
+    { "NtOpenThreadToken", 16 }, { "NtOpenThreadTokenEx", 20 }, { "NtCreateEvent", 20 },
+    { "NtOpenEvent", 12 }, { "NtCreateKey", 28 }, { "NtOpenKey", 12 }, { "NtCreateSection", 28 },
+    { "NtMapViewOfSection", 40 }, { "NtUnmapViewOfSection", 8 }, { "NtSetInformationThread", 16 },
+    { "NtClose", 4 },
+};
+
+typedef NTSTATUS (NTAPI *PNTCLOSE)(HANDLE);
+
+START_TEST(SystemCallStubs)
+{
+    HMODULE Ntdll = GetModuleHandleW(L"ntdll.dll");
+    BOOL Wow64 = IsWow64Process32();
+    ULONG i, Id, ZwId;
+    USHORT Pop;
+    SIZE_T Size, ZwSize;
+    STUB_FORM32 Form;
+    UCHAR *Copy;
+
+    trace("NT version 0x%lx, WOW64 %d\n", GetNTVersion(), Wow64);
+    for (i = 0; i < RTL_NUMBER_OF(Hooked32); i++)
+    {
+        const UCHAR *Code = (const UCHAR *)GetProcAddress(Ntdll, Hooked32[i].Name);
+        char ZwName[64];
+        const UCHAR *ZwCode;
+
+        ok(Code != NULL, "%s is not exported\n", Hooked32[i].Name);
+        if (!Code)
+            continue;
+        Form = GetStubForm32(Code, &Id, &Pop, &Size);
+        ok(IsForm32Expected(Form, Wow64), "%s: form %s\n", Hooked32[i].Name, Form32Name[Form]);
+        if (Form == FORM32_NONE)
+            continue;
+        ok(Pop == Hooked32[i].Pop, "%s: ret %u, expected %u\n", Hooked32[i].Name, Pop, Hooked32[i].Pop);
+        /* Zw and Nt are the same stub */
+        StringCchPrintfA(ZwName, sizeof(ZwName), "Zw%s", Hooked32[i].Name + 2);
+        ZwCode = (const UCHAR *)GetProcAddress(Ntdll, ZwName);
+        if (ZwCode)
+        {
+            ok(GetStubForm32(ZwCode, &ZwId, &Pop, &ZwSize) == Form && ZwId == Id,
+               "%s: not the stub of %s\n", ZwName, Hooked32[i].Name);
+        }
+    }
+
+    /* A hook runs its saved copy of the original stub from another address */
+    Form = GetStubForm32((const UCHAR *)GetProcAddress(Ntdll, "NtClose"), &Id, &Pop, &Size);
+    if (Form == FORM32_NONE)
+    {
+        skip("NtClose has no known form\n");
+        return;
+    }
+    Copy = VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    ok(Copy != NULL, "VirtualAlloc failed: %lu\n", GetLastError());
+    if (Copy)
+    {
+        memcpy(Copy, GetProcAddress(Ntdll, "NtClose"), Size);
+        ok(((PNTCLOSE)Copy)((HANDLE)(ULONG_PTR)0x12345678) == STATUS_INVALID_HANDLE,
+           "The relocated NtClose did not reach the service\n");
+        VirtualFree(Copy, 0, MEM_RELEASE);
+    }
+}
+
 #else
 
 START_TEST(SystemCallStubs)
 {
-    skip("amd64 only\n");
+    skip("amd64 and i386 only\n");
 }
 
 #endif

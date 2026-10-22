@@ -70,6 +70,13 @@ static LONG PayloadSize(UINT Msg, WPARAM Wparam, LONG Size)
     case WM_STYLECHANGING: case WM_STYLECHANGED: case WM_SIZING: case WM_MOVING:
     case WM_ERASEBKGND: case WM_PAINT: case WM_NCPAINT:
         return Size;
+    case WM_MEASUREITEM:
+        return Size == sizeof(MEASUREITEMSTRUCT) ? sizeof(MEASUREITEM32) : -2;
+    case WM_DRAWITEM:
+        return Size == sizeof(DRAWITEMSTRUCT) ? sizeof(DRAWITEM32) : -2;
+    case WM_COPYDATA:
+        /* The record is followed by its cbData bytes */
+        return Size >= sizeof(COPYDATASTRUCT) ? Size - sizeof(COPYDATASTRUCT) + sizeof(COPYDATA32) : -2;
     default: return -2;
     }
 }
@@ -97,6 +104,42 @@ static VOID PackPayload(PVOID To, const PVOID From, UINT Msg, WPARAM Wparam, ULO
     }
     case WM_WINDOWPOSCHANGING: case WM_WINDOWPOSCHANGED:
         WindowPosNativeTo32(To, From); break;
+    case WM_MEASUREITEM:
+    {
+        /* win32k's menu code measures owner-drawn items this way; the item
+         * data of a guest's menu item is a guest value. */
+        const MEASUREITEMSTRUCT *Native = From;
+        MEASUREITEM32 *Guest = To;
+        Guest->CtlType = Native->CtlType; Guest->CtlID = Native->CtlID; Guest->itemID = Native->itemID;
+        Guest->itemWidth = Native->itemWidth; Guest->itemHeight = Native->itemHeight;
+        Guest->itemData = (ULONG)Native->itemData;
+        break;
+    }
+    case WM_DRAWITEM:
+    {
+        /* hwndItem is the HMENU for ODT_MENU */
+        const DRAWITEMSTRUCT *Native = From;
+        DRAWITEM32 *Guest = To;
+        Guest->CtlType = Native->CtlType; Guest->CtlID = Native->CtlID; Guest->itemID = Native->itemID;
+        Guest->itemAction = Native->itemAction; Guest->itemState = Native->itemState;
+        Guest->hwndItem = HandleToUlong(Native->hwndItem); Guest->hDC = HandleToUlong(Native->hDC);
+        Guest->rcItem = Native->rcItem; Guest->itemData = (ULONG)Native->itemData;
+        break;
+    }
+    case WM_COPYDATA:
+    {
+        const COPYDATASTRUCT *Native = From;
+        COPYDATA32 *Guest = To;
+        ULONG Tail = Size - sizeof(*Native);
+        /* Read-only for the receiver: nothing is copied back. A sender's
+         * pointer-sized dwData keeps its low 32 bits. */
+        if (Native->cbData != Tail) RtlRaiseStatus(STATUS_INVALID_PARAMETER);
+        Guest->dwData = (ULONG)Native->dwData;
+        Guest->cbData = Tail;
+        Guest->lpData = PtrToUlong(Guest + 1);
+        RtlCopyMemory(Guest + 1, Native + 1, Tail);
+        break;
+    }
     case WM_NCCALCSIZE:
         if (Wparam)
         {
@@ -133,6 +176,18 @@ static VOID UnpackPayload(PVOID To, const PVOID From, UINT Msg, WPARAM Wparam, U
         }
         else RtlCopyMemory(To, From, sizeof(RECT));
         break;
+    case WM_MEASUREITEM:
+    {
+        /* The whole record is the reply, as win32k copies it back. A
+         * native itemData keeps its high bits unless the guest changed it. */
+        MEASUREITEMSTRUCT *Native = To;
+        const MEASUREITEM32 *Guest = From;
+        Native->CtlType = Guest->CtlType; Native->CtlID = Guest->CtlID; Native->itemID = Guest->itemID;
+        Native->itemWidth = Guest->itemWidth;
+        Native->itemHeight = Guest->itemHeight;
+        if (Guest->itemData != (ULONG)Native->itemData) Native->itemData = Guest->itemData;
+        break;
+    }
     case WM_GETMINMAXINFO: case WM_GETTEXT: case WM_STYLECHANGING: case WM_SIZING: case WM_MOVING:
         RtlCopyMemory(To, From, Size); break;
     }
@@ -141,17 +196,29 @@ static VOID UnpackPayload(PVOID To, const PVOID From, UINT Msg, WPARAM Wparam, U
 /* CALLWND hooks receive a CWP structure followed by the message buffer.
  * Unlike WINDOWPROC's CREATE packet, these are ordinary CREATESTRUCT fields,
  * not offsets. Other pointer messages use the same kernel packing rules. */
+/* A message whose payload has no translation (size -2): one debug line per process and message */
+static VOID ReportMessage(UINT Message, LONG Size)
+{
+    if (Wow64WinFirstReport(1, Message))
+        DbgPrint("WoW64win: unsupported callback message %x size %ld, pid %lx\n", Message, Size,
+                 HandleToUlong(NtCurrentTeb()->ClientId.UniqueProcess));
+}
+
 static LONG HookPayloadSize(const HOOKPROC_CALLBACK_ARGUMENTS *Header)
 {
     const CWPSTRUCT *Cwp;
+    LONG Size;
     if (Header->HookId == WH_CALLWNDPROC)
         Cwp = &((const CWP_Struct *)Header)->cwps;
     else
         Cwp = (const CWPSTRUCT *)&((const CWPR_Struct *)Header)->cwprs.lParam;
     if (!Header->lParamSize) return 0;
     if (Cwp->message == WM_CREATE || Cwp->message == WM_NCCREATE)
-        return Header->lParamSize == sizeof(CREATESTRUCTW) ? sizeof(CREATE32) : -2;
-    return PayloadSize(Cwp->message, Cwp->wParam, Header->lParamSize);
+        Size = Header->lParamSize == sizeof(CREATESTRUCTW) ? sizeof(CREATE32) : -2;
+    else
+        Size = PayloadSize(Cwp->message, Cwp->wParam, Header->lParamSize);
+    if (Size == -2) ReportMessage(Cwp->message, Header->lParamSize);
+    return Size;
 }
 
 static VOID PackHook(HOOK32 *To, const HOOKPROC_CALLBACK_ARGUMENTS *From, LONG Size)
@@ -249,7 +316,7 @@ static NTSTATUS Callback(ULONG Id, PVOID Buffer, ULONG Length)
             if (Length < sizeof(*Native) || Native->lParamBufferSize < -1) break;
             if (Length != sizeof(*Native) + max(Native->lParamBufferSize, 0)) break;
             Payload = PayloadSize(Native->Msg, Native->wParam, Native->lParamBufferSize);
-            if (Payload == -2) { DbgPrint("WoW64win: unsupported callback message %x size %d\n",Native->Msg,Native->lParamBufferSize); break; }
+            if (Payload == -2) { ReportMessage(Native->Msg, Native->lParamBufferSize); break; }
             GuestLength = sizeof(WINDOWPROC32) + max(Payload,0); Status = STATUS_SUCCESS; break;
         }
         case USER32_CALLBACK_SENDASYNCPROC:
@@ -378,7 +445,8 @@ static NTSTATUS Callback(ULONG Id, PVOID Buffer, ULONG Length)
         Status = _SEH2_GetExceptionCode();
     }
     _SEH2_END;
-    DbgPrint("WoW64win: callback %lu failed %lx\n",Id,Status);
+    /* An unsupported message was already reported by name */
+    if (Payload != -2) DbgPrint("WoW64win: callback %lu failed %lx\n",Id,Status);
     return NtCallbackReturn(NULL,0,Status);
 }
 
@@ -402,14 +470,22 @@ NTSTATUS NTAPI Wow64WinCallbackReturn(PVOID Buffer, ULONG Length, NTSTATUS Statu
          * syscall. Move that continuation to the surviving simulation frame;
          * the next guest syscall uses its original native stack. Each nested
          * callback is popped separately as i386 RtlUnwind walks the SEH chain.
-         * Leave ExceptionList alone: RtlUnwind owns its removal here. */
+         * Leave ExceptionList alone: RtlUnwind owns its removal here.
+         * The nested frame is inside this service, so its guard is clear,
+         * and Wow64SystemService closes the transition only on that stale
+         * frame. Close it before the copy, so the frame the guest resumes on
+         * keeps the guard and no context request sees a partial copy. */
+        InterlockedExchange(&Cpu->InTransition, 1);
         *Previous = *Cpu;
         Previous->NativeStack = NativeStack;
         Previous->ApcFrame = ApcFrame;
         Previous->CallbackFrame = CallbackFrame;
         NtCurrentTeb()->TlsSlots[WOW64_TLS_CPU] = Previous;
         NtCurrentTeb()->LastErrorValue = WOW64_TEB32(NtCurrentTeb())->LastErrorValue;
-        return NtCallbackReturn(NULL, 0, Status);
+        /* Likewise the service result belongs to the surviving frame. */
+        Status = NtCallbackReturn(NULL, 0, Status);
+        if (!Previous->ContextEaxChanged) Previous->Eax = Status;
+        return Status;
     }
     _SEH2_TRY
     {

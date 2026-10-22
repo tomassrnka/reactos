@@ -13,6 +13,7 @@ list(APPEND SOURCE
     BindIoCompletionCallback.c
     CancelIoEx.c
     ApplicationRestart.c
+    AppModel.c
     ConsoleCP.c
     CopyFile2.c
     CopyFile2Identity.c
@@ -26,6 +27,7 @@ list(APPEND SOURCE
     CopyFile2.c
     CopyFile2Identity.c
     CreateEventMutexEx.c
+    CreateFile2.c
     CreateRemoteThreadEx.c
     CreateProcess.c
     CreateProcessRace.c
@@ -33,6 +35,7 @@ list(APPEND SOURCE
     ThreadImpersonationToken.c
     DebugTrapInterrupts.c
     DefaultActCtx.c
+    DiscardVirtualMemory.c
     DeleteTimerQueueEx.c
     DeviceIoControl.c
     dosdev.c
@@ -44,24 +47,32 @@ list(APPEND SOURCE
     ExitThread.c
     FindActCtxSectionStringW.c
     FindFiles.c
+    FindFirstFileEx.c
+    FindStringOrdinal.c
     FLS.c
     ForcedRelocation.c
     FormatMessage.c
     FormatMessageInsert.c
     GetBinaryType.c
     GetComputerNameEx.c
+    GetCurrentThreadStackLimits.c
     GetCPInfo.c
     GetCurrentDirectory.c
     GetDriveType.c
     GetEnvironmentVariable.c
     GetFileType.c
     GetFinalPathNameByHandle.c
+    GetUserDefaultGeoName.c
     GetLocaleInfo.c
     GetLogicalProcessorInformationEx.c
     GetModuleFileName.c
+    GetNumaProcessorNodeEx.c
+    GetOverlappedResultEx.c
     GetQueuedCompletionStatusEx.c
+    GetSystemTimePrecise.c
     GetVolumeInformation.c
     HandleList.c
+    HeapWalk.c
     IdleProcessor.c
     InitOnce.c
     KernelBaseTime.c
@@ -71,6 +82,7 @@ list(APPEND SOURCE
     JapaneseCalendar.c
     JobObject.c
     LCMapString.c
+    LoadString.c
     LoadLibraryErrorMode.c
     LoadLibraryExW.c
     LoadLibraryMachine.c
@@ -82,12 +94,22 @@ list(APPEND SOURCE
     lstrlen.c
     Mailslot.c
     MappedFileGrowth.c
+    MappedViewEvict.c
     MultiByteToWideChar.c
     PerformanceCounter.c
     Pipes.c
     PipeSqos.c
+    PreferredUILanguages.c
+    PowerRequest.c
+    PrefetchVirtualMemory.c
     PrivMoveFileIdentityW.c
+    ProcessAffinity.c
+    ProcessMitigationPolicy.c
+    ProcThreadMitigation.c
     QueryCycleTime.c
+    QueryUnbiasedInterruptTime.c
+    ProcessToken.c
+    ProcessorGroups.c
     QueueUserAPC.c
     RaiseFailFastException.c
     ReadFile.c
@@ -100,20 +122,25 @@ list(APPEND SOURCE
     SetThreadStackGuarantee.c
     SetUnhandledExceptionFilter.c
     SuspendThreadContext.c
+    SetWaitableTimerEx.c
     SystemFirmware.c
     Toolhelp32.c
     TerminateProcess.c
     ThreadContextNpx.c
     ThreadContextObjects.c
+    ThreadInformation.c
     TunnelCache.c
     VolumeMountPoint.c
     TzSetPrivilege.c
     UEFIFirmware.c
+    UnmapViewOfFileEx.c
+    WaitOnAddress.c
     WerFlags.c
     WerRuntimeExceptionModule.c
     WideCharToMultiByte.c
     Wow64Process.c
     Wow64Run.c
+    Wow64SystemDlls.c
     WriteFile.c
     SetFileInformationByHandle.c
 )

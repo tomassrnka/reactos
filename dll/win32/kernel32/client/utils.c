@@ -678,6 +678,11 @@ BaseInitializeContext(IN PCONTEXT Context,
     }
     else if (ContextType == 2) /* For Fibers */
     {
+        /* SwitchToFiber resumes a fiber by returning to the address at the
+           top of its saved stack: make BaseFiberStartup that address. The
+           stack is 16 byte aligned again once it has been popped. */
+        Context->Rsp -= sizeof(PVOID);
+        *((PVOID*)Context->Rsp) = BaseFiberStartup;
         Context->Rip = (ULONG_PTR)BaseFiberStartup;
     }
     else                       /* For first thread in a Process */

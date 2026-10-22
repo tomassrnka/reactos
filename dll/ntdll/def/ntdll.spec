@@ -465,7 +465,7 @@
 @ stdcall NtQuerySystemEnvironmentValue(ptr ptr long ptr)
 @ stdcall NtQuerySystemEnvironmentValueEx(ptr ptr ptr ptr ptr)
 @ stdcall NtQuerySystemInformation(long long long long)
-@ stdcall -stub -version=0x601+ NtQuerySystemInformationEx(long ptr long ptr long ptr)
+@ stdcall -version=0x601+ NtQuerySystemInformationEx(long ptr long ptr long ptr)
 @ stdcall NtQuerySystemTime(ptr)
 @ stdcall NtQueryTimer(ptr long ptr long ptr)
 @ stdcall NtQueryTimerResolution(long long long)
@@ -636,6 +636,7 @@
 @ stdcall RtlAddAuditAccessObjectAce(ptr long long long ptr ptr ptr long long)
 @ stdcall -stub RtlAddCompoundAce(ptr long long long ptr ptr)
 @ stdcall -arch=x86_64 RtlAddFunctionTable(ptr long long)
+@ stdcall -arch=x86_64 RtlAddGrowableFunctionTable(ptr ptr long long int64 int64)
 @ stdcall -version=0x600+ RtlAddMandatoryAce(ptr long long ptr long long) ; not present in Win11
 @ stdcall RtlAddRefActivationContext(ptr)
 @ stdcall RtlAddRefMemoryStream(ptr)
@@ -769,6 +770,7 @@
 @ stdcall RtlDeleteElementGenericTable(ptr ptr)
 @ stdcall RtlDeleteElementGenericTableAvl(ptr ptr)
 @ cdecl -arch=x86_64 RtlDeleteFunctionTable(ptr)
+@ stdcall -arch=x86_64 RtlDeleteGrowableFunctionTable(ptr)
 @ stdcall RtlDeleteNoSplay(ptr ptr)
 @ stdcall RtlDeleteRegistryValue(long ptr ptr)
 @ stdcall RtlDeleteResource(ptr)
@@ -897,6 +899,7 @@
 @ stdcall RtlGetFullPathName_U(wstr long ptr ptr)
 @ stdcall RtlGetFullPathName_UstrEx(ptr ptr ptr ptr ptr ptr ptr ptr)
 @ stdcall -arch=x86_64 RtlGetFunctionTableListHead()
+@ stdcall -arch=x86_64 RtlGrowFunctionTable(ptr long)
 @ stdcall RtlGetGroupSecurityDescriptor(ptr ptr ptr)
 @ stub -version=0x600+ RtlGetIntegerAtom
 @ stdcall RtlGetLastNtStatus()

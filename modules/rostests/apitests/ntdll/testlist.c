@@ -38,6 +38,7 @@ extern void func_LdrLoadDll(void);
 extern void func_LdrShutdownThread(void);
 extern void func_load_notifications(void);
 extern void func_LpcCallbackRequest(void);
+extern void func_MxCsrMask(void);
 extern void func_NtAcceptConnectPort(void);
 extern void func_NtAccessCheck(void);
 extern void func_NtAccessCheckByType(void);
@@ -181,7 +182,13 @@ extern void func_RtlWaitOnAddress(void);
 extern void func_RtlVirtualUnwind(void);
 extern void func_RtlxUnicodeStringToAnsiSize(void);
 extern void func_RtlxUnicodeStringToOemSize(void);
+extern void func_SectionFaultCost(void);
+extern void func_StackDeepRecursion(void);
+extern void func_BadSegmentFault(void);
+extern void func_ExceptionInfoLeak(void);
+extern void func_RaiseExceptionLeak(void);
 extern void func_StackOverflow(void);
+extern void func_StackOverflowThread(void);
 extern void func_SystemCallStubs(void);
 extern void func_strcpy_s(void);
 extern void func_SystemDllTls(void);
@@ -227,6 +234,7 @@ const struct test winetest_testlist[] =
     { "LdrShutdownThread",              func_LdrShutdownThread },
     { "load_notifications",             func_load_notifications },
     { "LpcCallbackRequest",             func_LpcCallbackRequest },
+    { "MxCsrMask",                      func_MxCsrMask },
     { "NtAcceptConnectPort",            func_NtAcceptConnectPort },
     { "NtAccessCheck",                  func_NtAccessCheck },
     { "NtAccessCheckByType",            func_NtAccessCheckByType },
@@ -367,7 +375,13 @@ const struct test winetest_testlist[] =
     { "RtlUpcaseUnicodeStringToCountedOemString", func_RtlUpcaseUnicodeStringToCountedOemString },
     { "RtlValidateUnicodeString",       func_RtlValidateUnicodeString },
     { "RtlWaitOnAddress",               func_RtlWaitOnAddress },
+    { "SectionFaultCost",               func_SectionFaultCost },
+    { "StackDeepRecursion",             func_StackDeepRecursion },
+    { "BadSegmentFault",                func_BadSegmentFault },
+    { "ExceptionInfoLeak",              func_ExceptionInfoLeak },
+    { "RaiseExceptionLeak",             func_RaiseExceptionLeak },
     { "StackOverflow",                  func_StackOverflow },
+    { "StackOverflowThread",            func_StackOverflowThread },
     { "SystemCallStubs",                func_SystemCallStubs },
     { "strcpy_s",                       func_strcpy_s },
     { "SystemDllTls",                   func_SystemDllTls },

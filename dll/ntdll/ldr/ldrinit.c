@@ -3213,7 +3213,13 @@ LdrpInitializeProcess(IN PCONTEXT Context,
 
     /* Initialize TLS */
 #ifdef BUILD_WOW64_ENABLED
-    if (IsWow64) Status = STATUS_SUCCESS;
+    if (IsWow64)
+    {
+        /* The i386 loader owns the PE32 image's TLS. The native list stays
+         * empty, but every later thread walks it and gets an (empty) vector */
+        InitializeListHead(&LdrpTlsList);
+        Status = LdrpAllocateTls();
+    }
     else
 #endif
     Status = LdrpInitializeTls();
@@ -3538,15 +3544,44 @@ LdrpInit(PCONTEXT Context,
 /* Entered only by the native WoW64 loader, with an initialized PEB32/TEB32. */
 VOID NTAPI LdrInitializeWow64(PVOID NtdllBase, PCONTEXT StartContext)
 {
+    static ANSI_STRING FilterName = RTL_CONSTANT_STRING("UnhandledExceptionFilter");
+    static ANSI_STRING ExitThreadName = RTL_CONSTANT_STRING("ExitThread");
+    static ANSI_STRING ExitProcessName = RTL_CONSTANT_STRING("ExitProcess");
+    LONG (WINAPI *Filter)(PEXCEPTION_POINTERS) = NULL;
+    VOID (WINAPI *ExitThreadRoutine)(ULONG) = NULL;
+    VOID (WINAPI *ExitProcessRoutine)(ULONG) = NULL;
+    ULONG (NTAPI *Entry)(VOID);
     PIMAGE_NT_HEADERS Header;
+    PVOID Kernel32;
     CONTEXT Context;
     if (StartContext) Context = *StartContext;
     else RtlCaptureContext(&Context);
     LdrpInit(&Context, NtdllBase, NULL);
     if (StartContext) NtContinue(&Context, TRUE);
     Header = RtlImageNtHeader(NtCurrentPeb()->ImageBaseAddress);
-    ((VOID (NTAPI *)(VOID))((ULONG_PTR)NtCurrentPeb()->ImageBaseAddress +
-                            Header->OptionalHeader.AddressOfEntryPoint))();
-    NtTerminateProcess(NtCurrentProcess(), STATUS_SUCCESS);
+    Entry = (PVOID)((ULONG_PTR)NtCurrentPeb()->ImageBaseAddress +
+                    Header->OptionalHeader.AddressOfEntryPoint);
+
+    /* Start the main thread as kernel32's BaseProcessStartup does on i386.
+     * An exception that no frame of the image handles must reach
+     * UnhandledExceptionFilter, which reports it, instead of a second-chance
+     * dispatch that ends the process silently. The entry's return value ends
+     * the thread. An image that does not use kernel32 keeps the plain call. */
+    if (NT_SUCCESS(LdrGetDllHandle(NULL, NULL, &Kernel32String, &Kernel32)) &&
+        NT_SUCCESS(LdrGetProcedureAddress(Kernel32, &FilterName, 0, (PVOID *)&Filter)) &&
+        NT_SUCCESS(LdrGetProcedureAddress(Kernel32, &ExitThreadName, 0, (PVOID *)&ExitThreadRoutine)) &&
+        NT_SUCCESS(LdrGetProcedureAddress(Kernel32, &ExitProcessName, 0, (PVOID *)&ExitProcessRoutine)))
+    {
+        _SEH2_TRY
+        {
+            ExitThreadRoutine(Entry());
+        }
+        _SEH2_EXCEPT(Filter(_SEH2_GetExceptionInformation()))
+        {
+            ExitProcessRoutine(_SEH2_GetExceptionCode());
+        }
+        _SEH2_END;
+    }
+    NtTerminateProcess(NtCurrentProcess(), Entry());
 }
 #endif

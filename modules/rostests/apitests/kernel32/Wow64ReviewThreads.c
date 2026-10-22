@@ -8,6 +8,7 @@
 #include <ndk/kefuncs.h>
 #include <ndk/exfuncs.h>
 #include <reactos/wow64.h>
+#include <winuser.h>
 
 static HANDLE Finish;
 static LONG Allocations;
@@ -75,6 +76,173 @@ static VOID CheckRoundTrip(PROCESS_INFORMATION *Child)
     ok(SetThreadContext(Child->hThread, &Context), "restore blocked context\n");
 #endif
     ok(ResumeThread(Child->hThread) == 1, "resume blocked child\n");
+}
+
+/* Shared with the controller: [0] guest unwound past the popped callback,
+ * [1] controller finished inspecting it. */
+#define POP_SECTION "wow64-r1-callbackpop-%lx"
+static volatile LONG *PopShared;
+static volatile BOOL PopArmed;
+static LRESULT (WINAPI *pDefWindowProcW)(HWND, UINT, WPARAM, LPARAM);
+
+static LRESULT CALLBACK PopWindowProc(HWND Window, UINT Message, WPARAM Wparam, LPARAM Lparam)
+{
+    if (Message == WM_WINDOWPOSCHANGING && PopArmed)
+    {
+        PopArmed = FALSE;
+        RaiseException(0xe042643c, 0, 0, NULL);
+    }
+    return pDefWindowProcW(Window, Message, Wparam, Lparam);
+}
+
+/* The finally block needs its own registration frame. RtlUnwind calls it
+ * right after the popped callback frame's handler, while the frame of the
+ * catching function only runs its scopes after RtlUnwind's NtContinue. */
+static DECLSPEC_NOINLINE BOOL
+PopSetWindowPos(BOOL (WINAPI *pSetWindowPos)(HWND, HWND, int, int, int, int, UINT),
+                HWND Window, volatile BOOL *Unwound)
+{
+    volatile BOOL Returned = FALSE;
+    ULONG Spin;
+    _SEH2_TRY
+    {
+        pSetWindowPos(Window, NULL, 40, 40, 160, 160, SWP_NOZORDER | SWP_NOACTIVATE);
+        Returned = TRUE;
+    }
+    _SEH2_FINALLY
+    {
+        if (!Returned)
+        {
+            /* No service call between here and the popped frame. */
+            *Unwound = TRUE;
+            InterlockedExchange(&PopShared[0], 1);
+            for (Spin = 0; !PopShared[1] && Spin < 0x40000000; ++Spin) YieldProcessor();
+        }
+    }
+    _SEH2_END;
+    return Returned;
+}
+
+/* Unwind a guest exception through a win32k callback, which pops the nested
+ * callback frame with STATUS_CALLBACK_POP_STACK. The finally block runs in
+ * the middle of that unwind, before the guest makes any further service call,
+ * and waits there in pure guest code while the controller inspects the CPU
+ * state the guest now runs on. */
+static VOID ChildCallbackPop(void)
+{
+    HMODULE User32 = LoadLibraryW(L"user32.dll");
+    ATOM (WINAPI *pRegisterClassW)(const WNDCLASSW *);
+    HWND (WINAPI *pCreateWindowExW)(DWORD, LPCWSTR, LPCWSTR, DWORD, int, int, int, int, HWND, HMENU, HINSTANCE, PVOID);
+    BOOL (WINAPI *pSetWindowPos)(HWND, HWND, int, int, int, int, UINT);
+    BOOL (WINAPI *pDestroyWindow)(HWND);
+    WNDCLASSW Class = {0};
+    char Name[64];
+    HANDLE Map;
+    HWND Window = NULL;
+    volatile BOOL Returned = FALSE, Unwound = FALSE;
+    DWORD Code = 0;
+
+    ok(User32 != NULL, "load user32: %lu\n", GetLastError());
+    if (!User32) return;
+    pRegisterClassW = (PVOID)GetProcAddress(User32, "RegisterClassW");
+    pCreateWindowExW = (PVOID)GetProcAddress(User32, "CreateWindowExW");
+    pSetWindowPos = (PVOID)GetProcAddress(User32, "SetWindowPos");
+    pDestroyWindow = (PVOID)GetProcAddress(User32, "DestroyWindow");
+    pDefWindowProcW = (PVOID)GetProcAddress(User32, "DefWindowProcW");
+    sprintf(Name, POP_SECTION, GetCurrentProcessId());
+    Map = OpenFileMappingA(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, Name);
+    ok(Map != NULL, "open controller section: %lu\n", GetLastError());
+    if (!Map) return;
+    PopShared = MapViewOfFile(Map, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, 0);
+    ok(PopShared != NULL, "map controller section: %lu\n", GetLastError());
+    Class.lpfnWndProc = PopWindowProc;
+    Class.hInstance = GetModuleHandleW(NULL);
+    Class.lpszClassName = L"Wow64ReviewCallbackPop";
+    if (PopShared && pRegisterClassW(&Class))
+        Window = pCreateWindowExW(0, Class.lpszClassName, L"pop", WS_OVERLAPPEDWINDOW,
+                                  10, 10, 150, 150, NULL, NULL, Class.hInstance, NULL);
+    ok(Window != NULL, "create window: %lu\n", GetLastError());
+    if (Window)
+    {
+        PopArmed = TRUE;
+        _SEH2_TRY
+        {
+            Returned = PopSetWindowPos(pSetWindowPos, Window, &Unwound);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Code = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+        ok(!PopArmed, "window procedure not entered\n");
+        ok(!Returned && Unwound, "callback not unwound: returned %d unwound %d\n", Returned, Unwound);
+        ok(Code == 0xe042643c, "outer exception code %lx\n", Code);
+        ok(PopShared[1], "controller did not inspect the popped frame\n");
+        /* Reenter win32k after the unwind. */
+        ok(pSetWindowPos(Window, NULL, 50, 50, 180, 180, SWP_NOZORDER | SWP_NOACTIVATE), "set position after unwind\n");
+        ok(pDestroyWindow(Window), "destroy window\n");
+    }
+    if (PopShared) UnmapViewOfFile((PVOID)PopShared);
+    CloseHandle(Map);
+}
+
+static VOID CheckCallbackPop(PROCESS_INFORMATION *Child)
+{
+#ifdef _WIN64
+    THREAD_BASIC_INFORMATION Basic;
+    WOW64_CPU_STATE State;
+    WOW64_CONTEXT Context;
+    PVOID Cpu = NULL;
+#endif
+    volatile LONG *Shared = NULL;
+    char Name[64];
+    HANDLE Map;
+    DWORD Error;
+    ULONG i;
+#ifdef _WIN64
+    ok_ntstatus(NtQueryInformationThread(Child->hThread, ThreadBasicInformation,
+                                        &Basic, sizeof(Basic), NULL), STATUS_SUCCESS);
+#endif
+    /* Named after the suspended child, so only this run uses it. */
+    sprintf(Name, POP_SECTION, Child->dwProcessId);
+    Map = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, 4096, Name);
+    Error = GetLastError();
+    ok(Map != NULL && Error != ERROR_ALREADY_EXISTS, "create section: %lu\n", Error);
+    if (Map && Error == ERROR_ALREADY_EXISTS) { CloseHandle(Map); Map = NULL; }
+    if (Map) Shared = MapViewOfFile(Map, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, 0);
+    ok(Shared != NULL, "map section: %lu\n", GetLastError());
+    ResumeThread(Child->hThread);
+    if (!Shared) { if (Map) CloseHandle(Map); return; }
+    ok(!Shared[0] && !Shared[1], "fresh section is not zero\n");
+    for (i = 0; i < 3000 && !Shared[0]; ++i)
+    {
+        if (WaitForSingleObject(Child->hProcess, 10) == WAIT_OBJECT_0) break;
+    }
+    ok(Shared[0], "guest did not unwind through the callback\n");
+#ifdef _WIN64
+    if (Shared[0])
+    {
+        ok(SuspendThread(Child->hThread) == 0, "suspend unwinding child\n");
+        ok(ReadProcessMemory(Child->hProcess, &((PTEB)Basic.TebBaseAddress)->TlsSlots[WOW64_TLS_CPU],
+                             &Cpu, sizeof(Cpu), NULL) && Cpu, "CPU state unavailable\n");
+        memset(&State, 0, sizeof(State));
+        if (Cpu)
+            ok(ReadProcessMemory(Child->hProcess, Cpu, &State, sizeof(State), NULL), "read CPU state\n");
+        /* The guest runs on the surviving frame. Its guard must stay set
+         * until its next service entry has saved the complete context. */
+        ok(State.InTransition == 1, "guest runs with InTransition %ld after a popped callback\n",
+           State.InTransition);
+        ok(State.CallbackFrame == NULL, "surviving frame still has a callback frame %p\n", State.CallbackFrame);
+        memset(&Context, 0, sizeof(Context));
+        Context.ContextFlags = WOW64_CONTEXT_FULL;
+        ok_ntstatus(NtQueryInformationThread(Child->hThread, ThreadWow64Context,
+                                            &Context, sizeof(Context), NULL), STATUS_SUCCESS);
+        ok(ResumeThread(Child->hThread) == 1, "resume unwinding child\n");
+    }
+#endif
+    InterlockedExchange(&Shared[1], 1);
+    UnmapViewOfFile((PVOID)Shared);
+    CloseHandle(Map);
 }
 
 static DWORD WINAPI AllocateWorker(PVOID Parameter)
@@ -218,6 +386,15 @@ START_TEST(Wow64ReviewThreads)
         CloseHandle(Ready); CloseHandle(Finish);
         return;
     }
+    if (Argc >= 3 && !strcmp(Argv[2], "childpop"))
+    {
+        ChildCallbackPop();
+        SetEvent(Ready);
+        Exit = WaitForSingleObject(Finish, 60000);
+        ok(Exit == WAIT_OBJECT_0, "finish wait: %lx\n", Exit);
+        CloseHandle(Ready); CloseHandle(Finish);
+        return;
+    }
     if (Argc >= 3 && !strcmp(Argv[2], "child"))
     {
         HANDLE Workers[2];
@@ -238,7 +415,7 @@ START_TEST(Wow64ReviewThreads)
     IsWow64Process(GetCurrentProcess(), &Guest);
     if (Guest || Argc < 4)
     {
-        skip("Native controller requires PE32 fixture path and exit/startup/transition/apc/apccontext/roundtrip mode\n");
+        skip("Native controller requires PE32 fixture path and exit/startup/transition/apc/apccontext/roundtrip/callbackpop mode\n");
         goto Done;
     }
     if (!strcmp(Argv[3], "startup"))
@@ -248,7 +425,8 @@ START_TEST(Wow64ReviewThreads)
     }
     _snprintf(Command, sizeof(Command), "\"%s\" Wow64ReviewThreads %s", Argv[2],
               !strcmp(Argv[3], "apccontext") ? "childapc" :
-              !strcmp(Argv[3], "roundtrip") ? "childwait" : "child");
+              !strcmp(Argv[3], "roundtrip") ? "childwait" :
+              !strcmp(Argv[3], "callbackpop") ? "childpop" : "child");
     if (!CreateProcessA(Argv[2], Command, NULL, NULL, FALSE, CREATE_SUSPENDED,
                         NULL, NULL, &Startup, &Child))
     { ok(FALSE, "PE32 child: %lu\n", GetLastError()); goto Done; }
@@ -257,6 +435,9 @@ START_TEST(Wow64ReviewThreads)
         CheckTransition(&Child, !strcmp(Argv[3], "apccontext"));
     else
 #endif
+    if (!strcmp(Argv[3], "callbackpop"))
+        CheckCallbackPop(&Child);
+    else
     {
         ResumeThread(Child.hThread);
         if (Entered)
