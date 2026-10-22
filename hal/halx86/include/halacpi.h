@@ -31,6 +31,12 @@ HalpSetupAcpiPhase0(
     IN PLOADER_PARAMETER_BLOCK LoaderBlock
 );
 
+ULONG
+NTAPI
+HalpGetAcpiTimerPort(
+    _Out_ PULONG Mask
+);
+
 PVOID
 NTAPI
 HalAcpiGetTable(

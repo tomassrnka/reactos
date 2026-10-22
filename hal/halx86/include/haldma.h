@@ -367,7 +367,7 @@ typedef struct _GROW_WORK_ITEM {
 #define MAP_BASE_SW_SG 1
 
 PADAPTER_OBJECT NTAPI
-HalpDmaAllocateMasterAdapter(VOID);
+HalpDmaAllocateMasterAdapter(IN BOOLEAN ScatterGather);
 
 PDMA_ADAPTER NTAPI
 HalpGetDmaAdapter(

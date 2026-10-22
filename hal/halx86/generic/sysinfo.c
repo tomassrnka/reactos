@@ -10,6 +10,7 @@
 /* INCLUDES *******************************************************************/
 
 #include <hal.h>
+#include <reactos/rosclock.h>
 typedef unsigned int UINT;
 #include <x86x64/Cpuid.h>
 
@@ -48,8 +49,15 @@ HaliHandlePCIConfigSpaceAccess(_In_ BOOLEAN IsRead,
                                _In_ ULONG Length,
                                _Inout_ PULONG Buffer)
 {
+    /* The interpreter calls this for the ports of its list entry only; refuse
+     * others without touching the buffer, as Windows does */
+    if ((Port < 0x0CF8) || (Port > 0x0CFF) ||
+        (Length == 0) || (Length > 4) || (Port + Length > 0x0D00))
+    {
+        return STATUS_UNSUCCESSFUL;
+    }
+
     DPRINT1("HaliHandlePCIConfigSpaceAccess: IsRead %X, Port 0x%X, Length %u, Buffer %p\n", IsRead, Port, Length, Buffer);
-    //ASSERT(FALSE);
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -94,6 +102,9 @@ HaliQueryProcessorBrandString(
     return STATUS_SUCCESS;
 }
 
+/* Set by the clock code when its interrupt counts lost periods */
+BOOLEAN HalpClockCountsLostInterrupts;
+
 NTSTATUS
 NTAPI
 HaliQuerySystemInformation(IN HAL_QUERY_INFORMATION_CLASS InformationClass,
@@ -101,6 +112,15 @@ HaliQuerySystemInformation(IN HAL_QUERY_INFORMATION_CLASS InformationClass,
                            IN OUT PVOID Buffer,
                            OUT PULONG ReturnedLength)
 {
+    if (InformationClass == HalReactOSClockInformation)
+    {
+        *ReturnedLength = sizeof(ULONG);
+        if (BufferSize < sizeof(ULONG))
+            return STATUS_INFO_LENGTH_MISMATCH;
+        *(PULONG)Buffer = HalpClockCountsLostInterrupts ? HAL_ROS_CLOCK_COUNTS_LOST_INTERRUPTS : 0;
+        return STATUS_SUCCESS;
+    }
+
 #define REPORT_THIS_CASE(X) case X: DPRINT1("Unhandled case: %s\n", #X); break
     switch (InformationClass)
     {

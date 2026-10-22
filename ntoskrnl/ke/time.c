@@ -25,20 +25,22 @@ VOID
 KiCheckForTimerExpiration(
     PKPRCB Prcb,
     PKTRAP_FRAME TrapFrame,
-    LARGE_INTEGER InterruptTime)
+    LARGE_INTEGER InterruptTime,
+    ULONG TickCount)
 {
     ULONG Hand;
 
     /* Check for timer expiration */
-    Hand = KeTickCount.LowPart & (TIMER_TABLE_SIZE - 1);
+    Hand = TickCount & (TIMER_TABLE_SIZE - 1);
     if (KiTimerTableListHead[Hand].Time.QuadPart <= (ULONG64)InterruptTime.QuadPart)
     {
         /* Check if we are already doing expiration */
         if (!Prcb->TimerRequest)
         {
-            /* Request a DPC to handle this */
+            /* Request a DPC to handle this; the full tick count, so that the
+               expiration scan knows how far the tick count moved meanwhile */
             Prcb->TimerRequest = (ULONG_PTR)TrapFrame;
-            Prcb->TimerHand = Hand;
+            Prcb->TimerHand = TickCount;
             HalRequestSoftwareInterrupt(DISPATCH_LEVEL);
         }
     }
@@ -52,7 +54,9 @@ KeUpdateSystemTime(IN PKTRAP_FRAME TrapFrame,
 {
     PKPRCB Prcb = KeGetCurrentPrcb();
     LARGE_INTEGER CurrentTime, InterruptTime;
-    LONG OldTickOffset;
+    ULARGE_INTEGER TickCount;
+    LONG OldTickOffset, NewTickOffset;
+    ULONG Ticks, i;
 
     /* Check if this tick is being skipped */
     if (Prcb->SkipTick)
@@ -77,7 +81,7 @@ KeUpdateSystemTime(IN PKTRAP_FRAME TrapFrame,
     KiWriteSystemTime(&SharedUserData->InterruptTime, InterruptTime);
 
     /* Check for timer expiration */
-    KiCheckForTimerExpiration(Prcb, TrapFrame, InterruptTime);
+    KiCheckForTimerExpiration(Prcb, TrapFrame, InterruptTime, KeTickCount.LowPart);
 
     /* Update the tick offset */
     OldTickOffset = InterlockedExchangeAdd(&KiTickOffset, -(LONG)Increment);
@@ -92,23 +96,44 @@ KeUpdateSystemTime(IN PKTRAP_FRAME TrapFrame,
     /* Check for full tick */
     if (OldTickOffset <= (LONG)Increment)
     {
+        /* One tick, or several when the HAL reports clock interrupts that
+           could not be delivered: every tick the increment covers is counted */
+        NewTickOffset = OldTickOffset - (LONG)Increment;
+        Ticks = 1 + (ULONG)(-NewTickOffset) / KeMaximumIncrement;
+
         /* Update the system time */
         CurrentTime.QuadPart = *(ULONGLONG*)&SharedUserData->SystemTime;
-        CurrentTime.QuadPart += KeTimeAdjustment;
+        CurrentTime.QuadPart += (ULONGLONG)KeTimeAdjustment * Ticks;
         KiWriteSystemTime(&SharedUserData->SystemTime, CurrentTime);
 
         /* Update the tick count */
-        CurrentTime.QuadPart = (*(ULONGLONG*)&KeTickCount) + 1;
+        TickCount.QuadPart = *(ULONGLONG*)&KeTickCount;
+        CurrentTime.QuadPart = TickCount.QuadPart + Ticks;
         KiWriteSystemTime(&KeTickCount, CurrentTime);
 
         /* Update it in the shared user data */
         KiWriteSystemTime(&SharedUserData->TickCount, CurrentTime);
 
-        /* Check for expiration with the new tick count as well */
-        KiCheckForTimerExpiration(Prcb, TrapFrame, InterruptTime);
+        /* Check for expiration with each new tick count as well, in the order
+           they were passed */
+        if (Ticks < TIMER_TABLE_SIZE)
+        {
+            for (i = 1; i <= Ticks; i++)
+            {
+                KiCheckForTimerExpiration(Prcb, TrapFrame, InterruptTime, TickCount.LowPart + i);
+            }
+        }
+        else
+        {
+            /* Every hand was passed: request a scan of the whole table, with
+               a tick count one revolution back */
+            Prcb->TimerRequest = (ULONG_PTR)TrapFrame;
+            Prcb->TimerHand = CurrentTime.LowPart - TIMER_TABLE_SIZE;
+            HalRequestSoftwareInterrupt(DISPATCH_LEVEL);
+        }
 
         /* Reset the tick offset */
-        KiTickOffset += KeMaximumIncrement;
+        KiTickOffset += (LONG)(KeMaximumIncrement * Ticks);
 
         /* Update processor/thread runtime */
         KeUpdateRunTime(TrapFrame, Irql);

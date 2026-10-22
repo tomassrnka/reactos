@@ -110,6 +110,9 @@ NtCreateProfile(OUT PHANDLE ProfileHandle,
     /* Easy way out */
     if(!BufferSize) return STATUS_INVALID_PARAMETER_7;
 
+    /* A profile must run on at least one processor */
+    if (!Affinity) return STATUS_INVALID_PARAMETER;
+
     /* Check if this is a low-memory profile */
     if ((!BucketSize) && (RangeBase < (PVOID)(0x10000)))
     {

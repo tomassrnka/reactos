@@ -9,6 +9,7 @@
 
 void __cdecl TscCalibrationISR(void);
 extern LARGE_INTEGER HalpCpuClockFrequency;
+extern BOOLEAN HalpTscCalibrated;
 VOID NTAPI HalpInitializeTsc(void);
 
 #ifdef _M_AMD64

@@ -50,6 +50,8 @@ list(APPEND KMTEST_DRV_SOURCE
 
     example/Example.c
     example/KernelType.c
+    hal/HalDma.c
+    hal/HalDmaBounce.c
     hal/HalSystemInfo.c
     npfs/NpfsConnect.c
     npfs/NpfsCreate.c
@@ -94,7 +96,9 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_io/IoVolume.c
     ntos_kd/KdSystemDebugControl.c
     ntos_ke/KeApc.c
+    ntos_ke/KeApcDelivery.c
     ntos_ke/KeDevQueue.c
+    ntos_ke/KeClockTime.c
     ntos_ke/KeDpc.c
     ntos_ke/KeEvent.c
     ntos_ke/KeFastFail.c
@@ -143,6 +147,7 @@ if(ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64")
         kmtest_drv/vm_detect.S)
     list(APPEND KMTEST_DRV_SOURCE
         ${KMTEST_DRV_ASM}
+        hal/HalIoApic.c
         hal/HalPortIo.c)
 endif()
 
