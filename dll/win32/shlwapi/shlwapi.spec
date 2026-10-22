@@ -783,7 +783,7 @@
 @ stdcall StrChrA(str long) kernelbase_ros.StrChrA
 @ stdcall StrChrIA(str long) kernelbase_ros.StrChrIA
 @ stdcall StrChrIW(wstr long) kernelbase_ros.StrChrIW
-@ stub StrChrNIW
+@ stdcall StrChrNIW(wstr long long)
 @ stdcall StrChrNW(wstr long long) kernelbase_ros.StrChrNW
 @ stdcall StrChrW(wstr long) kernelbase_ros.StrChrW
 @ stdcall StrCmpIW(wstr wstr) kernelbase_ros.StrCmpIW

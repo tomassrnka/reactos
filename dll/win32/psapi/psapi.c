@@ -560,6 +560,299 @@ EnumProcessModules(HANDLE hProcess,
 }
 
 
+#ifdef _WIN64
+/*
+ * The 32-bit loader list of a WOW64 process, in load order: the executable first, then the 32-bit libraries.
+ * The structures are the ones of a 32-bit PEB: the loader data is at 0x0C in the PEB, the load order list at
+ * 0x0C in the loader data, and the image base at 0x18 in an entry. With no array the modules are only counted.
+ */
+static BOOL
+ReadModuleList32(HANDLE hProcess, ULONG_PTR Peb32, HMODULE *Modules, ULONG Max, PULONG Count)
+{
+    ULONG LoaderData, Head, Entry, DllBase, Seen = 0;
+
+    *Count = 0;
+    if (!ReadProcessMemory(hProcess, (PUCHAR)Peb32 + 0x0C, &LoaderData, sizeof(LoaderData), NULL) ||
+        !ReadProcessMemory(hProcess, (PUCHAR)(ULONG_PTR)LoaderData + 0x0C, &Entry, sizeof(Entry), NULL))
+    {
+        return FALSE;
+    }
+    Head = LoaderData + 0x0C;
+
+    while (Entry != Head)
+    {
+        if (++Seen > MAX_MODULES)
+        {
+            SetLastError(ERROR_INVALID_HANDLE);
+            return FALSE;
+        }
+        if (!ReadProcessMemory(hProcess, (PUCHAR)(ULONG_PTR)Entry + 0x18, &DllBase, sizeof(DllBase), NULL) ||
+            !ReadProcessMemory(hProcess, (PUCHAR)(ULONG_PTR)Entry, &Entry, sizeof(Entry), NULL))
+        {
+            return FALSE;
+        }
+        if (Modules)
+        {
+            if (*Count >= Max)
+            {
+                /* the list grew since it was counted */
+                SetLastError(ERROR_PARTIAL_COPY);
+                return FALSE;
+            }
+            Modules[*Count] = (HMODULE)(ULONG_PTR)DllBase;
+        }
+        (*Count)++;
+    }
+
+    return TRUE;
+}
+
+/*
+ * The lists of another process change while they are read: a list that grew between the call that counts and the call
+ * that fills is read again with room for what it now has, a few times.
+ */
+#define LIST_RETRIES 8
+
+/* the test of the retry compiles this file with a list that changes under it */
+#ifndef PSAPI_ENUM_NATIVE
+#define PSAPI_ENUM_NATIVE EnumProcessModules
+#endif
+
+static BOOL
+ReadNativeModuleList(HANDLE hProcess, HMODULE **List, ULONG *Count)
+{
+    DWORD Needed = 0, Size, Tries;
+    HMODULE *Buffer;
+
+    *List = NULL;
+    *Count = 0;
+    if (!PSAPI_ENUM_NATIVE(hProcess, NULL, 0, &Needed))
+        return FALSE;
+
+    for (Tries = 0; Tries < LIST_RETRIES; Tries++)
+    {
+        Size = Needed + 16 * sizeof(HMODULE);
+        Buffer = LocalAlloc(LMEM_FIXED, Size);
+        if (!Buffer)
+        {
+            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return FALSE;
+        }
+        if (!PSAPI_ENUM_NATIVE(hProcess, Buffer, Size, &Needed))
+        {
+            LocalFree(Buffer);
+            return FALSE;
+        }
+        if (Needed <= Size)
+        {
+            *List = Buffer;
+            *Count = Needed / sizeof(HMODULE);
+            return TRUE;
+        }
+        LocalFree(Buffer);
+    }
+
+    SetLastError(ERROR_PARTIAL_COPY);
+    return FALSE;
+}
+
+static BOOL
+ReadWow64ModuleList(HANDLE hProcess, ULONG_PTR Peb32, HMODULE **List, ULONG *Count)
+{
+    DWORD Tries;
+    ULONG Counted;
+    HMODULE *Buffer;
+
+    *List = NULL;
+    *Count = 0;
+    for (Tries = 0; Tries < LIST_RETRIES; Tries++)
+    {
+        if (!ReadModuleList32(hProcess, Peb32, NULL, 0, &Counted))
+            return FALSE;
+        Buffer = LocalAlloc(LMEM_FIXED, (Counted + 16) * sizeof(HMODULE));
+        if (!Buffer)
+        {
+            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return FALSE;
+        }
+        if (ReadModuleList32(hProcess, Peb32, Buffer, Counted + 16, Count))
+        {
+            *List = Buffer;
+            return TRUE;
+        }
+        LocalFree(Buffer);
+        /* only a list that grew is read again */
+        if (GetLastError() != ERROR_PARTIAL_COPY)
+            return FALSE;
+    }
+
+    SetLastError(ERROR_PARTIAL_COPY);
+    return FALSE;
+}
+
+/*
+ * The list of a WOW64 target for a 64-bit caller (measured on Windows 10): the 32-bit filter gives the 32-bit
+ * loader list, the 64-bit filter the native one without the executable (it is a 32-bit image), both of them give
+ * the 32-bit list followed by the native one, and the default is the native list with the executable.
+ */
+static BOOL
+EnumWow64Modules(HANDLE hProcess,
+                 ULONG_PTR Peb32,
+                 HMODULE *lphModule,
+                 DWORD cb,
+                 LPDWORD lpcbNeeded,
+                 DWORD dwFilterFlag)
+{
+    HMODULE *Native = NULL, *List32 = NULL, *Result;
+    DWORD Capacity = cb / sizeof(HMODULE), i;
+    ULONG NativeCount = 0, Count32 = 0, Total = 0, Skip = 0;
+    BOOL Ok = FALSE;
+
+    /* the native list is needed for every filter but the 32-bit one */
+    if ((dwFilterFlag & LIST_MODULES_ALL) != LIST_MODULES_32BIT)
+    {
+        if (!ReadNativeModuleList(hProcess, &Native, &NativeCount))
+            goto done;
+    }
+
+    if (dwFilterFlag & LIST_MODULES_32BIT)
+    {
+        if (!ReadWow64ModuleList(hProcess, Peb32, &List32, &Count32))
+            goto done;
+    }
+
+    /* the native list of a WOW64 process starts with its executable, a 32-bit image */
+    Skip = ((dwFilterFlag & LIST_MODULES_ALL) != 0 && NativeCount) ? 1 : 0;
+
+    switch (dwFilterFlag & LIST_MODULES_ALL)
+    {
+        case 0:
+            Result = Native;
+            Total = NativeCount;
+            break;
+
+        case LIST_MODULES_32BIT:
+            Result = List32;
+            Total = Count32;
+            break;
+
+        case LIST_MODULES_64BIT:
+            Result = Native + Skip;
+            Total = NativeCount - Skip;
+            break;
+
+        default:
+        {
+            HMODULE *Combined = LocalAlloc(LMEM_FIXED, (Count32 + NativeCount + 1) * sizeof(HMODULE));
+
+            if (!Combined)
+            {
+                SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+                goto done;
+            }
+            /* the 32-bit list is the first part of the answer, and the native one without its executable follows */
+            RtlCopyMemory(Combined, List32, Count32 * sizeof(HMODULE));
+            RtlCopyMemory(Combined + Count32, Native + Skip, (NativeCount - Skip) * sizeof(HMODULE));
+            LocalFree(List32);
+            List32 = Combined;
+            Result = Combined;
+            Total = Count32 + NativeCount - Skip;
+            break;
+        }
+    }
+
+    _SEH2_TRY
+    {
+        for (i = 0; i < Total && i < Capacity; i++)
+            lphModule[i] = Result[i];
+        *lpcbNeeded = Total * sizeof(HMODULE);
+        Ok = TRUE;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        SetLastError(RtlNtStatusToDosError(_SEH2_GetExceptionCode()));
+    }
+    _SEH2_END;
+
+done:
+    if (Native)
+        LocalFree(Native);
+    if (List32)
+        LocalFree(List32);
+    return Ok;
+}
+#endif
+
+/*
+ * @implemented
+ *
+ * Measured on Windows Server 2008 R2 and Windows 10. A 64-bit caller has no 32-bit modules in its own process,
+ * and asking for them is not an error but sets ERROR_PARTIAL_COPY; its filter needs one of the two low bits
+ * or none at all. A 32-bit caller (under WOW64, which is how the 32-bit programs were measured) gets its
+ * module list for every filter. A 64-bit caller reads a WOW64 target through both of its loader lists.
+ */
+BOOL
+WINAPI
+EnumProcessModulesEx(HANDLE hProcess,
+                     HMODULE *lphModule,
+                     DWORD cb,
+                     LPDWORD lpcbNeeded,
+                     DWORD dwFilterFlag)
+{
+#ifdef _WIN64
+    BOOL Result;
+
+    if (dwFilterFlag != LIST_MODULES_DEFAULT && !(dwFilterFlag & LIST_MODULES_ALL))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    /* A WOW64 target has a 32-bit loader list of its own */
+    {
+        ULONG_PTR Peb32 = 0;
+        NTSTATUS Status = NtQueryInformationProcess(hProcess, ProcessWow64Information, &Peb32, sizeof(Peb32), NULL);
+
+        if (NT_SUCCESS(Status) && Peb32)
+            return EnumWow64Modules(hProcess, Peb32, lphModule, cb, lpcbNeeded, dwFilterFlag);
+    }
+
+    if ((dwFilterFlag & LIST_MODULES_ALL) == LIST_MODULES_32BIT)
+    {
+        PROCESS_BASIC_INFORMATION ProcInfo;
+        NTSTATUS Status;
+
+        Status = NtQueryInformationProcess(hProcess, ProcessBasicInformation, &ProcInfo, sizeof(ProcInfo), NULL);
+        if (!NT_SUCCESS(Status))
+        {
+            SetLastError(RtlNtStatusToDosError(Status));
+            return FALSE;
+        }
+
+        _SEH2_TRY
+        {
+            *lpcbNeeded = 0;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            SetLastError(RtlNtStatusToDosError(_SEH2_GetExceptionCode()));
+            _SEH2_YIELD(return FALSE);
+        }
+        _SEH2_END;
+
+        SetLastError(ERROR_PARTIAL_COPY);
+        return TRUE;
+    }
+
+    Result = EnumProcessModules(hProcess, lphModule, cb, lpcbNeeded);
+    if (Result && (dwFilterFlag & LIST_MODULES_32BIT))
+        SetLastError(ERROR_PARTIAL_COPY);
+    return Result;
+#else
+    return EnumProcessModules(hProcess, lphModule, cb, lpcbNeeded);
+#endif
+}
+
 /*
  * @implemented
  */

@@ -26,6 +26,7 @@ extern void func_SHInvokeCommandsOnContextMenu(void);
 extern void func_SHLoadIndirectString(void);
 extern void func_SHLoadRegUIString(void);
 extern void func_SHPropertyBag(void);
+extern void func_StrChrNIW(void);
 extern void func_StrDup(void);
 extern void func_StrFormatByteSizeW(void);
 extern void func_StrToInt(void);
@@ -57,6 +58,7 @@ const struct test winetest_testlist[] =
     { "SHLoadIndirectString", func_SHLoadIndirectString },
     { "SHLoadRegUIString", func_SHLoadRegUIString },
     { "SHPropertyBag", func_SHPropertyBag },
+    { "StrChrNIW", func_StrChrNIW },
     { "StrDup", func_StrDup },
     { "StrFormatByteSizeW", func_StrFormatByteSizeW },
     { "StrToInt", func_StrToInt },

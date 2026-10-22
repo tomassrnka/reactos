@@ -322,3 +322,36 @@ NetpNtStatusToApiStatus(
 }
 
 /* EOF */
+
+/*
+ * @implemented
+ *
+ * No ReactOS machine is joined to Azure Active Directory. A Windows 10 machine that is not joined answers
+ * S_FALSE with no information, and sets the last error to CRYPT_E_NOT_FOUND (measured). The pointer to the
+ * information is the only argument that is checked.
+ */
+HRESULT
+WINAPI
+NetGetAadJoinInformation(
+    _In_opt_ LPCWSTR pcszTenantId,
+    _Outptr_result_maybenull_ PVOID *ppJoinInfo)
+{
+    if (!ppJoinInfo)
+        return E_INVALIDARG;
+
+    *ppJoinInfo = NULL;
+    SetLastError(CRYPT_E_NOT_FOUND);
+    return S_FALSE;
+}
+
+/*
+ * @implemented
+ */
+VOID
+WINAPI
+NetFreeAadJoinInformation(
+    _In_opt_ PVOID pJoinInfo)
+{
+    /* Nothing hands out join information, so there is nothing to free */
+    UNREFERENCED_PARAMETER(pJoinInfo);
+}

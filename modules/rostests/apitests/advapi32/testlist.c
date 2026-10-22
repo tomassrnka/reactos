@@ -7,10 +7,13 @@ extern void func_ConvertStringSidToSid(void);
 extern void func_CreateService(void);
 extern void func_CloseTrace(void);
 extern void func_DuplicateTokenEx(void);
+extern void func_EnableTraceEx2(void);
 extern void func_EncryptFile(void);
 extern void func_eventlog_supp(void);
 extern void func_EventRegister(void);
 extern void func_EventProvider(void);
+extern void func_EventSetInformation(void);
+extern void func_EventSetInformationFault(void);
 extern void func_Hash(void);
 extern void func_HKEY_CLASSES_ROOT(void);
 extern void func_IsTextUnicode(void);
@@ -51,10 +54,13 @@ const struct test winetest_testlist[] =
     { "CreateService", func_CreateService },
     { "CloseTrace", func_CloseTrace },
     { "DuplicateTokenEx", func_DuplicateTokenEx },
+    { "EnableTraceEx2", func_EnableTraceEx2 },
     { "EncryptFile", func_EncryptFile },
     { "eventlog_supp", func_eventlog_supp },
     { "EventRegister", func_EventRegister },
     { "EventProvider", func_EventProvider },
+    { "EventSetInformation", func_EventSetInformation },
+    { "EventSetInformationFault", func_EventSetInformationFault },
     { "Hash", func_Hash },
     { "HKEY_CLASSES_ROOT", func_HKEY_CLASSES_ROOT },
     { "IsTextUnicode" , func_IsTextUnicode },

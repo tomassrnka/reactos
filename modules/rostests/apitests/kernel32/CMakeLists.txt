@@ -52,6 +52,7 @@ list(APPEND SOURCE
     InitOnce.c
     KernelBaseTime.c
     interlck.c
+    IsApiSetImplemented.c
     IsDBCSLeadByteEx.c
     JapaneseCalendar.c
     JobObject.c

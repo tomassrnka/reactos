@@ -26,3 +26,9 @@
 LCID
 BasepSpecialNeutralLcidToSpecific(
     _In_ LCID Lcid);
+
+#define MAX_PROCESS_UI_LANGUAGES 5
+
+ULONG
+BasepGetProcessUILanguageIds(
+    _Out_writes_(MAX_PROCESS_UI_LANGUAGES) LANGID *Ids);

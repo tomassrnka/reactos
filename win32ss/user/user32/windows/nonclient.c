@@ -49,8 +49,15 @@ UserHasWindowEdge(DWORD Style, DWORD ExStyle)
    return FALSE;
 }
 
-VOID
-UserGetWindowBorders(DWORD Style, DWORD ExStyle, SIZE *Size, BOOL WithClient)
+/* A metric at the given DPI, or at the DPI of the system for 0 */
+static int
+UserGetMetric(int Index, UINT Dpi)
+{
+   return Dpi ? GetSystemMetricsForDpi(Index, Dpi) : GetSystemMetrics(Index);
+}
+
+static VOID
+UserGetWindowBordersForDpi(DWORD Style, DWORD ExStyle, SIZE *Size, BOOL WithClient, UINT Dpi)
 {
    DWORD Border = 0;
 
@@ -65,11 +72,17 @@ UserGetWindowBorders(DWORD Style, DWORD ExStyle, SIZE *Size, BOOL WithClient)
    Size->cx = Size->cy = Border;
    if ((Style & WS_THICKFRAME) && !(Style & WS_MINIMIZE))
    {
-      Size->cx += GetSystemMetrics(SM_CXFRAME) - GetSystemMetrics(SM_CXDLGFRAME);
-      Size->cy += GetSystemMetrics(SM_CYFRAME) - GetSystemMetrics(SM_CYDLGFRAME);
+      Size->cx += UserGetMetric(SM_CXFRAME, Dpi) - UserGetMetric(SM_CXDLGFRAME, Dpi);
+      Size->cy += UserGetMetric(SM_CYFRAME, Dpi) - UserGetMetric(SM_CYDLGFRAME, Dpi);
    }
-   Size->cx *= GetSystemMetrics(SM_CXBORDER);
-   Size->cy *= GetSystemMetrics(SM_CYBORDER);
+   Size->cx *= UserGetMetric(SM_CXBORDER, Dpi);
+   Size->cy *= UserGetMetric(SM_CYBORDER, Dpi);
+}
+
+VOID
+UserGetWindowBorders(DWORD Style, DWORD ExStyle, SIZE *Size, BOOL WithClient)
+{
+   UserGetWindowBordersForDpi(Style, ExStyle, Size, WithClient, 0);
 }
 
 /*
@@ -86,32 +99,42 @@ RealUserDrawCaption(HWND hWnd, HDC hDC, LPCRECT lpRc, UINT uFlags)
 
 /* PUBLIC FUNCTIONS ***********************************************************/
 
-BOOL WINAPI
-RealAdjustWindowRectEx(LPRECT lpRect,
-                       DWORD dwStyle,
-                       BOOL bMenu,
-                       DWORD dwExStyle)
+static BOOL
+UserAdjustWindowRectForDpi(LPRECT lpRect,
+                           DWORD dwStyle,
+                           BOOL bMenu,
+                           DWORD dwExStyle,
+                           UINT Dpi)
 {
    SIZE BorderSize;
 
    if (bMenu)
    {
-      lpRect->top -= GetSystemMetrics(SM_CYMENU);
+      lpRect->top -= UserGetMetric(SM_CYMENU, Dpi);
    }
    if ((dwStyle & WS_CAPTION) == WS_CAPTION)
    {
       if (dwExStyle & WS_EX_TOOLWINDOW)
-         lpRect->top -= GetSystemMetrics(SM_CYSMCAPTION);
+         lpRect->top -= UserGetMetric(SM_CYSMCAPTION, Dpi);
       else
-         lpRect->top -= GetSystemMetrics(SM_CYCAPTION);
+         lpRect->top -= UserGetMetric(SM_CYCAPTION, Dpi);
    }
-   UserGetWindowBorders(dwStyle, dwExStyle, &BorderSize, TRUE);
+   UserGetWindowBordersForDpi(dwStyle, dwExStyle, &BorderSize, TRUE, Dpi);
    InflateRect(
       lpRect,
       BorderSize.cx,
       BorderSize.cy);
 
    return TRUE;
+}
+
+BOOL WINAPI
+RealAdjustWindowRectEx(LPRECT lpRect,
+                       DWORD dwStyle,
+                       BOOL bMenu,
+                       DWORD dwExStyle)
+{
+   return UserAdjustWindowRectForDpi(lpRect, dwStyle, bMenu, dwExStyle, 0);
 }
 
 /*
@@ -244,4 +267,33 @@ DrawCaptionTempA(
     HeapFree(GetProcessHeap(), 0, strW);
   }
   return ret;
+}
+
+BOOL
+WINAPI
+AdjustWindowRectExForDpi(LPRECT lpRect,
+                         DWORD dwStyle,
+                         BOOL bMenu,
+                         DWORD dwExStyle,
+                         UINT dpi)
+{
+   DWORD Error = GetLastError();
+   BOOL Ret;
+
+   if (!lpRect || !dpi)
+   {
+      SetLastError(ERROR_INVALID_PARAMETER);
+      return FALSE;
+   }
+
+   /* At the DPI of the system the classic metrics are the ones that the theme hook, if any, adjusts */
+   if (dpi == GetDpiForSystem())
+      Ret = AdjustWindowRectEx(lpRect, dwStyle, bMenu, dwExStyle);
+   else
+      Ret = UserAdjustWindowRectForDpi(lpRect, dwStyle, bMenu, dwExStyle, dpi);
+
+   /* A call that succeeds leaves the last error as it was */
+   if (Ret)
+      SetLastError(Error);
+   return Ret;
 }

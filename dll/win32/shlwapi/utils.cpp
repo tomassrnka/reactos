@@ -1258,3 +1258,24 @@ EXTERN_C ULONG WINAPI GetProcessOsVersion(void)
     PPEB Peb = NtCurrentTeb()->Peb;
     return (Peb->OSMajorVersion << 8) | Peb->OSMinorVersion;
 }
+
+/*************************************************************************
+ * StrChrNIW [SHLWAPI.@]
+ *
+ * Like StrChrNW, without regard to case: the search stops at the terminator or after cchMax characters.
+ */
+EXTERN_C PWSTR WINAPI
+StrChrNIW(_In_ PCWSTR pszStart, _In_ WCHAR wMatch, _In_ UINT cchMax)
+{
+    TRACE("(%p, %#x, %u)\n", pszStart, wMatch, cchMax);
+
+    if (!pszStart)
+        return NULL;
+
+    for (; cchMax && *pszStart; --cchMax, ++pszStart)
+    {
+        if (!ChrCmpIW(*pszStart, wMatch))
+            return const_cast<PWSTR>(pszStart);
+    }
+    return NULL;
+}
