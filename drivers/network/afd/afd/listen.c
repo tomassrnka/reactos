@@ -792,11 +792,14 @@ NTSTATUS AfdAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
              * against the caller's own handle table and its granted access is
              * checked (KernelMode skipped both, letting a caller pass a handle
              * -- even a kernel handle -- it should not be able to). A socket is
-             * opened with GENERIC_READ|GENERIC_WRITE, so require only that much
-             * rather than FILE_ALL_ACCESS, which a valid socket handle lacks. */
+             * opened with GENERIC_READ|GENERIC_WRITE, which the I/O manager has
+             * already mapped to specific rights in the handle table. The check
+             * compares raw granted bits, so a GENERIC_* mask can never be
+             * satisfied (accept() failed with STATUS_ACCESS_DENIED, WSAEACCES):
+             * require the specific data rights instead of FILE_ALL_ACCESS. */
             Status = ObReferenceObjectByHandle
                 ( AcceptData->ListenHandle,
-                  GENERIC_READ | GENERIC_WRITE,
+                  FILE_READ_DATA | FILE_WRITE_DATA,
                   *IoFileObjectType,
                   Irp->RequestorMode,
                   (PVOID *)&NewFileObject,
@@ -895,9 +898,10 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     /* Validate that accepting socket is valid, and has not been bound or connected */
     /* User-supplied handle: resolve it in the caller's handle table under the
      * requestor mode (KernelMode skipped that check). Require only the access a
-     * socket is actually opened with, not FILE_ALL_ACCESS. */
+     * socket is actually opened with (specific rights; GENERIC_* is never
+     * granted), not FILE_ALL_ACCESS. */
     Status = ObReferenceObjectByHandle(
-        AcceptRequest->AcceptHandle, GENERIC_READ | GENERIC_WRITE, *IoFileObjectType, Irp->RequestorMode, (PVOID *)&NewFileObject, NULL);
+        AcceptRequest->AcceptHandle, FILE_READ_DATA | FILE_WRITE_DATA, *IoFileObjectType, Irp->RequestorMode, (PVOID *)&NewFileObject, NULL);
     if (!NT_SUCCESS(Status))
     {
         IoFreeMdl((PMDL)Irp->Tail.Overlay.DriverContext[3]);

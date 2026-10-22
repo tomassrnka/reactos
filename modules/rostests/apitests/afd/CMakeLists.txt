@@ -8,7 +8,8 @@ list(APPEND SOURCE
     send.c
     windowsize.c
     defensive.c
-    tcpnonadmin.c)
+    tcpnonadmin.c
+    tcpaccept.c)
 
 list(APPEND PCH_SKIP_SOURCE
     testlist.c)
