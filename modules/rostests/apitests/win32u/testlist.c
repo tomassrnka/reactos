@@ -72,6 +72,7 @@ extern void func_NtUserGetAtomNameConcurrent(void);
 extern void func_NtUserGetClassInfo(void);
 extern void func_NtUserGetCursorInfo(void);
 //extern void func_NtUserGetIconInfo(void);
+extern void func_NtUserGetIconInfoProbe(void);
 extern void func_NtUserGetKeyboardLayoutName(void);
 extern void func_NtUserGetThreadState(void);
 extern void func_NtUserGetTitleBarInfo(void);
@@ -81,6 +82,7 @@ extern void func_NtUserSBGetParms(void);
 extern void func_NtUserScrollDC(void);
 extern void func_NtUserSelectPalette(void);
 extern void func_NtUserSetTimer(void);
+extern void func_NtUserSetWindowsHookExModule(void);
 extern void func_NtUserSystemParametersInfo(void);
 extern void func_NtUserToUnicodeEx(void);
 extern void func_NtUserUpdatePerUserSystemParameters(void);
@@ -160,6 +162,7 @@ const struct test winetest_testlist[] =
     { "NtUserGetClassInfo", func_NtUserGetClassInfo },
     { "NtUserGetCursorInfo", func_NtUserGetCursorInfo },
     //{ "NtUserGetIconInfo", func_NtUserGetIconInfo },
+    { "NtUserGetIconInfoProbe", func_NtUserGetIconInfoProbe },
     { "NtUserGetKeyboardLayoutName", func_NtUserGetKeyboardLayoutName },
     { "NtUserGetThreadState", func_NtUserGetThreadState },
     { "NtUserGetTitleBarInfo", func_NtUserGetTitleBarInfo },
@@ -169,6 +172,7 @@ const struct test winetest_testlist[] =
     { "NtUserScrollDC", func_NtUserScrollDC },
     { "NtUserSelectPalette", func_NtUserSelectPalette },
     { "NtUserSetTimer", func_NtUserSetTimer },
+    { "NtUserSetWindowsHookExModule", func_NtUserSetWindowsHookExModule },
     { "NtUserSystemParametersInfo", func_NtUserSystemParametersInfo },
     { "NtUserToUnicodeEx", func_NtUserToUnicodeEx },
     { "NtUserUpdatePerUserSystemParameters", func_NtUserUpdatePerUserSystemParameters },

@@ -72,6 +72,7 @@ list(APPEND SOURCE
     ntuser/NtUserGetClassInfo.c
     ntuser/NtUserGetCursorInfo.c
 #    ntuser/NtUserGetIconInfo.c
+    ntuser/NtUserGetIconInfoProbe.c
     ntuser/NtUserGetKeyboardLayoutName.c
     ntuser/NtUserGetThreadState.c
     ntuser/NtUserGetTitleBarInfo.c
@@ -81,6 +82,7 @@ list(APPEND SOURCE
     ntuser/NtUserScrollDC.c
     ntuser/NtUserSelectPalette.c
     ntuser/NtUserSetTimer.c
+    ntuser/NtUserSetWindowsHookExModule.c
     ntuser/NtUserSystemParametersInfo.c
     ntuser/NtUserToUnicodeEx.c
     ntuser/NtUserUpdatePerUserSystemParameters.c

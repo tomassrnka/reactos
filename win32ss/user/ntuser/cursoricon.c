@@ -481,6 +481,13 @@ NtUserGetIconInfo(
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
         {
             Status = _SEH2_GetExceptionCode();
+
+            /* The caller never received the bitmap handles, so the owned GDI
+             * objects copied above would leak on this fault path. Release them. */
+            if (ii.hbmMask)
+                NT_VERIFY(GreDeleteObject(ii.hbmMask) == TRUE);
+            if (ii.hbmColor)
+                NT_VERIFY(GreDeleteObject(ii.hbmColor) == TRUE);
         }
         _SEH2_END
 
@@ -503,6 +510,13 @@ NtUserGetIconInfo(
         /* Get the module name from the atom table */
         _SEH2_TRY
         {
+            /* Probe the descriptor itself before reading/writing its fields.
+             * Only ->Buffer was probed below, which left the UNICODE_STRING
+             * descriptor (read of MaximumLength/Buffer, write of Length/
+             * MaximumLength) unvalidated and allowed a caller-supplied kernel
+             * pointer to be written. The sibling lpResName path probes the
+             * descriptor first; match it here. */
+            ProbeForWrite(lpModule, sizeof(UNICODE_STRING), 1);
             BufLen += sizeof(WCHAR);
             if (BufLen > (lpModule->MaximumLength))
             {

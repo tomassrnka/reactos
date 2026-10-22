@@ -1681,6 +1681,18 @@ NtUserSetWindowsHookEx( HINSTANCE Mod,
           goto Cleanup; // Return NULL
        }
 
+       /* The captured counted string is fully caller-controlled. We allocate
+        * and copy exactly MaximumLength bytes below, so a Length greater than
+        * MaximumLength would make Hook->ModuleName.Length exceed its backing
+        * buffer and cause later counted-string uses to over-read kernel pool
+        * (up to ~64KB). Reject such a descriptor. */
+       if (ModuleName.Length > ModuleName.MaximumLength)
+       {
+          IntRemoveHook(Hook);
+          EngSetLastError(ERROR_INVALID_PARAMETER);
+          goto Cleanup; // Return NULL
+       }
+
        Hook->ModuleName.Buffer = ExAllocatePoolWithTag( PagedPool,
                                                         ModuleName.MaximumLength,
                                                         TAG_HOOK);
