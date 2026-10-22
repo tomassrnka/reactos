@@ -868,6 +868,44 @@ CLIPPING_UpdateGCRegion(PDC pDC)
 
     REGION_bOffsetRgn(pDC->prgnRao, pDC->ptlDCOrig.x, pDC->ptlDCOrig.y);
 
+    /* Nothing can be drawn outside the surface of a direct DC. Its visible
+     * region can reach past it after a mode change to a smaller mode, until
+     * USER sets the new one, and the engine calls that only clip to the clip
+     * object (AlphaBlend, TransparentBlt, ...) would then draw past the end
+     * of the surface. */
+    if (pDC->dctype == DCTYPE_DIRECT && pDC->dclevel.pSurface)
+    {
+        const SIZEL *psizl = &pDC->dclevel.pSurface->SurfObj.sizlBitmap;
+        const RECTL *prclBound = &pDC->prgnRao->rdh.rcBound;
+
+        if (prclBound->left < 0 || prclBound->top < 0 ||
+            prclBound->right > psizl->cx || prclBound->bottom > psizl->cy)
+        {
+            PREGION prgnSurface = IntSysCreateRectpRgn(0, 0, psizl->cx, psizl->cy);
+            PREGION prgnClipped = IntSysCreateRectpRgn(0, 0, 0, 0);
+
+            /* Into a new region, the old one stays whole if this fails */
+            if (prgnSurface && prgnClipped &&
+                REGION_bIntersectRegion(prgnClipped, pDC->prgnRao, prgnSurface))
+            {
+                REGION_Delete(pDC->prgnRao);
+                pDC->prgnRao = prgnClipped;
+                prgnClipped = NULL;
+            }
+            else
+            {
+                /* Better nothing drawn than drawn outside the surface */
+                ERR("Failed to clip the RAO region to the surface\n");
+                REGION_SetRectRgn(pDC->prgnRao, 0, 0, 0, 0);
+            }
+
+            if (prgnClipped)
+                REGION_Delete(prgnClipped);
+            if (prgnSurface)
+                REGION_Delete(prgnSurface);
+        }
+    }
+
     RtlCopyMemory(&pDC->erclClip,
                   &pDC->prgnRao->rdh.rcBound,
                   sizeof(RECTL));

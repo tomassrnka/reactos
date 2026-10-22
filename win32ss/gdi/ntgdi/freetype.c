@@ -21,6 +21,8 @@
 #include FT_SYNTHESIS_H
 #include FT_TRUETYPE_IDS_H
 #include FT_MODULE_H
+#include FT_LCD_FILTER_H
+#include FT_GASP_H
 #include <freetype/internal/ftcalc.h> // INT_TO_FIXED
 
 #include <gdi/eng/floatobj.h>
@@ -198,6 +200,9 @@ FontLink_Chain_IsPopulated(const FONTLINK_CHAIN *pChain)
 
 extern const MATRIX gmxWorldToDeviceDefault;
 extern const MATRIX gmxWorldToPageDefault;
+
+static LONG g_FontInstanceIdCounter = 0;
+static LONG g_FontLoadIdCounter = 0;
 static const FT_Matrix identityMat = {(1 << 16), 0, 0, (1 << 16)};
 
 /* HACK!! Fix XFORMOBJ then use 1:16 / 16:1 */
@@ -345,6 +350,9 @@ FindBestFontFromList(FONTOBJ **FontObj, ULONG *MatchPenalty,
 static BOOL
 MatchFontName(PSHARED_FACE SharedFace, PUNICODE_STRING Name1, FT_UShort NameID, FT_UShort LangID);
 
+static void
+SharedFace_AddRef(PSHARED_FACE Ptr);
+
 static BOOL
 FontLink_PrepareFontInfo(
     _Inout_ PFONTLINK pFontLink)
@@ -383,6 +391,9 @@ FontLink_PrepareFontInfo(
 
     pFontGDI = ObjToGDI(pFontObj, FONT);
     pFontLink->SharedFace = pFontGDI->SharedFace;
+    /* Text output drops the FreeType lock while the chain is in use, and a removal
+     * of the linked font can run then; FontLink_Chain_Finish() releases this */
+    SharedFace_AddRef(pFontLink->SharedFace);
 
     // FontLink uses family name
     RtlInitUnicodeString(&FaceName, pFontLink->LogFont.lfFaceName);
@@ -424,6 +435,7 @@ SharedFace_Create(FT_Face Face, PSHARED_MEM Memory)
     {
         Ptr->Face = Face;
         Ptr->RefCount = 1;
+        Ptr->bCreatorRef = TRUE;
         Ptr->Memory = Memory;
         SharedFaceCache_Init(&Ptr->EnglishUS);
         SharedFaceCache_Init(&Ptr->UserLanguage);
@@ -549,14 +561,58 @@ SharedFace_Release(PSHARED_FACE Ptr, BOOL bDoLock)
 }
 
 
-static VOID FASTCALL
-CleanupFontEntryEx(PFONT_ENTRY FontEntry, PFONTGDI FontGDI)
+/* Free the links of a chain and their face references; the caller holds the FreeType lock */
+static VOID
+FontLink_Chain_Finish(_Inout_ PFONTLINK_CHAIN pChain)
 {
-    // PFONTGDI FontGDI = FontEntry->Font;
+    PLIST_ENTRY Entry;
+    PFONTLINK pLink;
+
+    ASSERT_FREETYPE_LOCK_HELD();
+
+    if (!pChain->FontLinkList.Flink)
+        return; /* Not populated */
+
+    while (!IsListEmpty(&pChain->FontLinkList))
+    {
+        Entry = RemoveHeadList(&pChain->FontLinkList);
+        pLink = CONTAINING_RECORD(Entry, FONTLINK, ListEntry);
+        if (pLink->SharedFace)
+            SharedFace_Release(pLink->SharedFace, FALSE);
+        FontLink_Destroy(pLink);
+    }
+}
+
+/* Drop one reference of a FONTGDI; the caller holds the FreeType lock. The last one
+ * frees it together with its reference of the shared face. */
+static VOID
+FontGDI_Release(PFONTGDI FontGDI)
+{
     PSHARED_FACE SharedFace = FontGDI->SharedFace;
+
+    ASSERT_FREETYPE_LOCK_HELD();
+    ASSERT(FontGDI->RefCount > 0);
+
+    if (FontGDI->RefCount <= 0 || --FontGDI->RefCount > 0)
+        return;
 
     if (FontGDI->Filename)
         ExFreePoolWithTag(FontGDI->Filename, GDITAG_PFF);
+
+    EngFreeMem(FontGDI);
+    SharedFace_Release(SharedFace, FALSE);
+}
+
+/* Clean up a font entry that has been unlinked from its list: the font is removed.
+ * Besides the entry reference, drop the reference SharedFace_Create() took, once per
+ * face (the entries of the other charsets of a face share it). A logical font that
+ * is realized to the removed font keeps its FONTGDI, and so the face, until it is
+ * deleted, as on Windows where a removed font stays loaded while it is in use. */
+static VOID FASTCALL
+CleanupFontEntryEx(PFONT_ENTRY FontEntry, PFONTGDI FontGDI)
+{
+    PSHARED_FACE SharedFace = FontGDI->SharedFace;
+    BOOL DropCreatorRef;
 
     if (FontEntry->StyleName.Buffer)
         RtlFreeUnicodeString(&FontEntry->StyleName);
@@ -564,15 +620,47 @@ CleanupFontEntryEx(PFONT_ENTRY FontEntry, PFONTGDI FontGDI)
     if (FontEntry->FaceName.Buffer)
         RtlFreeUnicodeString(&FontEntry->FaceName);
 
-    EngFreeMem(FontGDI);
-    SharedFace_Release(SharedFace, TRUE);
     ExFreePoolWithTag(FontEntry, TAG_FONT);
+
+    IntLockFreeType();
+    DropCreatorRef = SharedFace->bCreatorRef;
+    SharedFace->bCreatorRef = FALSE;
+    /* With DropCreatorRef the creator reference keeps the face alive here */
+    FontGDI_Release(FontGDI);
+    if (DropCreatorRef)
+        SharedFace_Release(SharedFace, FALSE);
+    IntUnLockFreeType();
 }
 
 static __inline VOID FASTCALL
 CleanupFontEntry(PFONT_ENTRY FontEntry)
 {
     CleanupFontEntryEx(FontEntry, FontEntry->Font);
+}
+
+/* GDI cleanup of a logical font: drop the reference of the font it was realized to.
+ * The last reference of a GDI object can go away while its holder owns the FreeType
+ * lock, so take the lock only if this thread does not own it already. */
+VOID
+NTAPI
+LFONT_vCleanup(PVOID ObjectBody)
+{
+    PLFONT plfnt = (PLFONT)ObjectBody;
+    PFONTGDI FontGDI;
+    BOOL bLocked;
+
+    if (!plfnt->Font)
+        return;
+
+    FontGDI = ObjToGDI(plfnt->Font, FONT);
+    plfnt->Font = NULL;
+
+    bLocked = (g_FreeTypeLock->Owner == KeGetCurrentThread());
+    if (!bLocked)
+        IntLockFreeType();
+    FontGDI_Release(FontGDI);
+    if (!bLocked)
+        IntUnLockFreeType();
 }
 
 static __inline void FTVectorToPOINTFX(FT_Vector *vec, POINTFX *pt)
@@ -964,6 +1052,9 @@ InitFontSupport(VOID)
         DPRINT1("FT_Init_FreeType failed with error code 0x%x\n", ulError);
         return FALSE;
     }
+
+    /* Subpixel (LCD) rendering needs the filter to avoid colour fringes; failure leaves the unfiltered default */
+    FT_Library_SetLcdFilter(g_FreeTypeLibrary, FT_LCD_FILTER_LIGHT);
 
     if (!IntLoadFontsInRegistry())
     {
@@ -1704,6 +1795,8 @@ IntGdiLoadFontsFromMemory(PGDI_LOAD_FONT pLoadFont,
 
     /* set face */
     FontGDI->SharedFace = SharedFace;
+    FontGDI->RefCount = 1; /* The font entry */
+    FontGDI->InstanceId = (ULONG)InterlockedIncrement(&g_FontInstanceIdCounter);
     FontGDI->CharSet = ANSI_CHARSET;
     FontGDI->OriginalItalic = FALSE;
     FontGDI->RequestItalic = FALSE;
@@ -1827,29 +1920,8 @@ IntGdiLoadFontsFromMemory(PGDI_LOAD_FONT pLoadFont,
     DPRINT("Num glyphs: %d\n", Face->num_glyphs);
     DPRINT("CharSet: %d\n", FontGDI->CharSet);
 
-    /* Add this font resource to the font table */
-    Entry->Font = FontGDI;
-    Entry->NotEnum = (Characteristics & FR_NOT_ENUM);
-
-    IntLockFreeType();
-    if (Characteristics & FR_PRIVATE)
-    {
-        /* private font */
-        PPROCESSINFO Win32Process = PsGetCurrentProcessWin32Process();
-        IntLockProcessPrivateFonts(Win32Process);
-        InsertTailList(&Win32Process->PrivateFontListHead, &Entry->ListEntry);
-        IntUnLockProcessPrivateFonts(Win32Process);
-    }
-    else
-    {
-        /* global font */
-        InsertTailList(&g_FontListHead, &Entry->ListEntry);
-    }
-    IntUnLockFreeType();
-
     if (CharSetIndex == -1)
     {
-        INT i;
         USHORT NameLength = Entry->FaceName.Length;
 
         if (Entry->StyleName.Length)
@@ -1888,6 +1960,32 @@ IntGdiLoadFontsFromMemory(PGDI_LOAD_FONT pLoadFont,
             RtlAppendUnicodeToString(pValueName, L" ");
             RtlAppendUnicodeStringToString(pValueName, &Entry->StyleName);
         }
+    }
+
+    /* Publish the entry last: from here on a removal can free it */
+    Entry->Font = FontGDI;
+    Entry->NotEnum = (Characteristics & FR_NOT_ENUM);
+    Entry->LoadId = pLoadFont->LoadId;
+
+    IntLockFreeType();
+    if (Characteristics & FR_PRIVATE)
+    {
+        /* private font */
+        PPROCESSINFO Win32Process = PsGetCurrentProcessWin32Process();
+        IntLockProcessPrivateFonts(Win32Process);
+        InsertTailList(&Win32Process->PrivateFontListHead, &Entry->ListEntry);
+        IntUnLockProcessPrivateFonts(Win32Process);
+    }
+    else
+    {
+        /* global font */
+        InsertTailList(&g_FontListHead, &Entry->ListEntry);
+    }
+    IntUnLockFreeType();
+
+    if (CharSetIndex == -1)
+    {
+        INT i;
 
         for (i = 1; i < CharSetCount; ++i)
         {
@@ -1925,7 +2023,7 @@ IntGdiLoadFontByIndexFromMemory(PGDI_LOAD_FONT pLoadFont, FT_Long FontIndex)
     FT_Face Face;
     FT_Long iFace, num_faces;
     PSHARED_FACE SharedFace;
-    INT FaceCount = 0;
+    INT FaceCount = 0, FacesLoaded;
 
     IntLockFreeType();
 
@@ -1969,6 +2067,10 @@ IntGdiLoadFontByIndexFromMemory(PGDI_LOAD_FONT pLoadFont, FT_Long FontIndex)
     pLoadFont->IsTrueType = FT_IS_SFNT(Face);
     num_faces = Face->num_faces;
     SharedFace = SharedFace_Create(Face, pLoadFont->Memory);
+    /* The loader's own reference: once an entry is published, a removal can drop
+     * the entry and the creator references while the charset entries are added */
+    if (SharedFace)
+        SharedFace_AddRef(SharedFace);
 
     IntUnLockFreeType();
 
@@ -1988,7 +2090,16 @@ IntGdiLoadFontByIndexFromMemory(PGDI_LOAD_FONT pLoadFont, FT_Long FontIndex)
         FontIndex = 0;
     }
 
-    FaceCount += IntGdiLoadFontsFromMemory(pLoadFont, SharedFace, FontIndex, -1);
+    FacesLoaded = IntGdiLoadFontsFromMemory(pLoadFont, SharedFace, FontIndex, -1);
+    FaceCount += FacesLoaded;
+
+    /* If no entry adopted this face it is orphaned (no list entry for a removal
+     * cleanup to find), so release the creator reference now to free the face and
+     * its buffer/view. This is a failure path only; nothing can be using it. */
+    if (FacesLoaded == 0)
+        SharedFace_Release(SharedFace, TRUE);
+    SharedFace_Release(SharedFace, TRUE);
+
     return FaceCount;
 }
 
@@ -2092,6 +2203,7 @@ IntGdiAddFontResourceSingle(
     LoadFont.pFileName          = &PathName;
     LoadFont.Memory             = SharedMem_Create(Buffer, ViewSize, TRUE);
     LoadFont.Characteristics    = Characteristics;
+    LoadFont.LoadId             = (ULONG)InterlockedIncrement(&g_FontLoadIdCounter);
     RtlInitUnicodeString(&LoadFont.RegValueName, NULL);
     LoadFont.CharSet            = DEFAULT_CHARSET;
     FontCount = IntGdiLoadFontByIndexFromMemory(&LoadFont, -1);
@@ -2275,9 +2387,12 @@ IntGdiRemoveFontResourceSingle(
 {
     BOOL ret = FALSE;
     UNICODE_STRING PathName;
-    PLIST_ENTRY CurrentEntry, NextEntry;
+    PLIST_ENTRY CurrentEntry, NextEntry, Head;
+    LIST_ENTRY RemovedHead;
     PFONT_ENTRY FontEntry;
     PFONTGDI FontGDI;
+    PPROCESSINFO Win32Process = NULL;
+    ULONG LoadId = 0;
     PWSTR pszBuffer, pszFileTitle;
     SIZE_T Length;
     NTSTATUS Status;
@@ -2311,27 +2426,59 @@ IntGdiRemoveFontResourceSingle(
         return FALSE; /* Failure */
     }
 
-    /* Delete font entries that matches PathName */
+    /* Unlink the font entries of the file. A private font is removed only with
+     * FR_PRIVATE and a public one only without it (the flags of AddFontResourceEx).
+     * Memory fonts, which have no file name, are never found here. */
+    InitializeListHead(&RemovedHead);
     IntLockFreeType();
-    for (CurrentEntry = g_FontListHead.Flink;
-         CurrentEntry != &g_FontListHead;
-         CurrentEntry = NextEntry)
+    if (dwFlags & FR_PRIVATE)
+    {
+        Win32Process = PsGetCurrentProcessWin32Process();
+        if (!Win32Process)
+        {
+            IntUnLockFreeType();
+            RtlFreeUnicodeString(&PathName);
+            return FALSE;
+        }
+        Head = &Win32Process->PrivateFontListHead;
+        IntLockProcessPrivateFonts(Win32Process);
+    }
+    else
+    {
+        Head = &g_FontListHead;
+    }
+    for (CurrentEntry = Head->Flink; CurrentEntry != Head; CurrentEntry = NextEntry)
     {
         FontEntry = CONTAINING_RECORD(CurrentEntry, FONT_ENTRY, ListEntry);
         NextEntry = CurrentEntry->Flink;
 
         FontGDI = FontEntry->Font;
         ASSERT(FontGDI);
-        if (FontGDI->Filename && _wcsicmp(FontGDI->Filename, pszFileTitle) == 0)
+        /* The loader keeps the path it opened, which is what the caller passes here.
+         * Like Windows, which counts the loads of a file, undo one load per call:
+         * the entries (faces and charsets) the first matching load created. */
+        if (FontGDI->Filename && !FontEntry->NotEnum == !(dwFlags & FR_NOT_ENUM) &&
+            (LoadId == 0 || FontEntry->LoadId == LoadId) &&
+            _wcsicmp(FontGDI->Filename, PathName.Buffer) == 0)
         {
+            LoadId = FontEntry->LoadId;
             RemoveEntryList(&FontEntry->ListEntry);
-            CleanupFontEntry(FontEntry);
-            if (dwFlags & AFRX_WRITE_REGISTRY)
-                IntDeleteRegFontEntries(pszFileTitle, dwFlags);
-            ret = TRUE;
+            InsertTailList(&RemovedHead, &FontEntry->ListEntry);
         }
     }
+    if (Win32Process)
+        IntUnLockProcessPrivateFonts(Win32Process);
     IntUnLockFreeType();
+
+    /* CleanupFontEntry() takes the FreeType lock itself */
+    while (!IsListEmpty(&RemovedHead))
+    {
+        CurrentEntry = RemoveHeadList(&RemovedHead);
+        CleanupFontEntry(CONTAINING_RECORD(CurrentEntry, FONT_ENTRY, ListEntry));
+        ret = TRUE;
+    }
+    if (ret && (dwFlags & AFRX_WRITE_REGISTRY))
+        IntDeleteRegFontEntries(pszFileTitle, dwFlags);
 
     RtlFreeUnicodeString(&PathName);
     return ret;
@@ -2714,20 +2861,21 @@ IntGetFontRenderMode(LOGFONTW *logfont)
 {
     switch (logfont->lfQuality)
     {
-    case ANTIALIASED_QUALITY:
-        break;
     case NONANTIALIASED_QUALITY:
         return FT_RENDER_MODE_MONO;
-    case DRAFT_QUALITY:
-        return FT_RENDER_MODE_LIGHT;
+    case ANTIALIASED_QUALITY:
+        return FT_RENDER_MODE_NORMAL;
     case CLEARTYPE_QUALITY:
-        if (!gspv.bFontSmoothing)
-            break;
-        if (!gspv.uiFontSmoothingType)
-            break;
+        /* Asked for explicitly, so it does not depend on the system-wide setting */
         return FT_RENDER_MODE_LCD;
+    default:
+        /* DEFAULT_QUALITY and the rest follow the user's font smoothing settings */
+        if (!gspv.bFontSmoothing)
+            return FT_RENDER_MODE_MONO;
+        if (gspv.uiFontSmoothingType == FE_FONTSMOOTHINGCLEARTYPE)
+            return FT_RENDER_MODE_LCD;
+        return FT_RENDER_MODE_NORMAL;
     }
-    return FT_RENDER_MODE_NORMAL;
 }
 
 NTSTATUS FASTCALL
@@ -3814,10 +3962,33 @@ IntFindGlyphCache(IN const FONT_CACHE_ENTRY *pCache)
     return FontEntry->BitmapGlyph;
 }
 
+/* Windows 7 grayscale smoothing draws visibly lighter than a straight coverage blend: the ink of its glyphs
+ * matches coverage ^ 2.15 (fitted over 20 font and size rows, mean deviation 1.2 percent). */
+static const BYTE g_GrayCoverageLut[256] =
+{
+      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   1,
+      1,   1,   1,   1,   1,   1,   1,   1,   2,   2,   2,   2,   2,   2,   3,   3,
+      3,   3,   3,   4,   4,   4,   4,   5,   5,   5,   5,   6,   6,   6,   6,   7,
+      7,   7,   8,   8,   8,   9,   9,   9,  10,  10,  11,  11,  11,  12,  12,  13,
+     13,  13,  14,  14,  15,  15,  16,  16,  17,  17,  18,  18,  19,  19,  20,  21,
+     21,  22,  22,  23,  23,  24,  25,  25,  26,  27,  27,  28,  28,  29,  30,  31,
+     31,  32,  33,  33,  34,  35,  36,  36,  37,  38,  39,  39,  40,  41,  42,  43,
+     43,  44,  45,  46,  47,  48,  49,  50,  50,  51,  52,  53,  54,  55,  56,  57,
+     58,  59,  60,  61,  62,  63,  64,  65,  66,  67,  68,  69,  70,  71,  72,  74,
+     75,  76,  77,  78,  79,  80,  81,  83,  84,  85,  86,  87,  89,  90,  91,  92,
+     94,  95,  96,  97,  99, 100, 101, 103, 104, 105, 107, 108, 109, 111, 112, 114,
+    115, 116, 118, 119, 121, 122, 123, 125, 126, 128, 129, 131, 132, 134, 135, 137,
+    139, 140, 142, 143, 145, 146, 148, 150, 151, 153, 155, 156, 158, 159, 161, 163,
+    165, 166, 168, 170, 171, 173, 175, 177, 178, 180, 182, 184, 186, 187, 189, 191,
+    193, 195, 197, 199, 200, 202, 204, 206, 208, 210, 212, 214, 216, 218, 220, 222,
+    224, 226, 228, 230, 232, 234, 236, 238, 240, 242, 244, 246, 249, 251, 253, 255,
+};
+
 static FT_BitmapGlyph
 IntGetBitmapGlyphWithCache(
     IN OUT PFONT_CACHE_ENTRY Cache,
-    IN FT_GlyphSlot GlyphSlot)
+    IN FT_GlyphSlot GlyphSlot,
+    IN FT_Render_Mode RenderMode)
 {
     FT_Glyph GlyphCopy;
     INT error;
@@ -3834,7 +4005,7 @@ IntGetBitmapGlyphWithCache(
         return NULL;
     };
 
-    error = FT_Glyph_To_Bitmap(&GlyphCopy, Cache->Hashed.Aspect.RenderMode, 0, 1);
+    error = FT_Glyph_To_Bitmap(&GlyphCopy, RenderMode, 0, 1);
     if (error)
     {
         FT_Done_Glyph(GlyphCopy);
@@ -3851,19 +4022,35 @@ IntGetBitmapGlyphWithCache(
     }
 
     BitmapGlyph = (FT_BitmapGlyph)GlyphCopy;
-    FT_Bitmap_New(&AlignedBitmap);
-    if (FT_Bitmap_Convert_ReactOS_Hack(GlyphSlot->library, &BitmapGlyph->bitmap,
-                                       &AlignedBitmap, 4, TRUE))
-    {
-        DPRINT1("Conversion failed\n");
-        ExFreePoolWithTag(NewEntry, TAG_FONT);
-        FT_Bitmap_Done(GlyphSlot->library, &AlignedBitmap);
-        FT_Done_Glyph((FT_Glyph)BitmapGlyph);
-        return NULL;
-    }
 
-    FT_Bitmap_Done(GlyphSlot->library, &BitmapGlyph->bitmap);
-    BitmapGlyph->bitmap = AlignedBitmap;
+    /* An LCD bitmap is already one byte per colour channel, three per pixel; the blitter takes it as is */
+    if (BitmapGlyph->bitmap.pixel_mode != FT_PIXEL_MODE_LCD)
+    {
+        FT_Bitmap_New(&AlignedBitmap);
+        if (FT_Bitmap_Convert_ReactOS_Hack(GlyphSlot->library, &BitmapGlyph->bitmap,
+                                           &AlignedBitmap, 4, TRUE))
+        {
+            DPRINT1("Conversion failed\n");
+            ExFreePoolWithTag(NewEntry, TAG_FONT);
+            FT_Bitmap_Done(GlyphSlot->library, &AlignedBitmap);
+            FT_Done_Glyph((FT_Glyph)BitmapGlyph);
+            return NULL;
+        }
+
+        FT_Bitmap_Done(GlyphSlot->library, &BitmapGlyph->bitmap);
+        BitmapGlyph->bitmap = AlignedBitmap;
+
+        if (RenderMode == FT_RENDER_MODE_NORMAL || RenderMode == FT_RENDER_MODE_LIGHT)
+        {
+            UINT Row, Col;
+            for (Row = 0; Row < BitmapGlyph->bitmap.rows; Row++)
+            {
+                PBYTE Pixels = BitmapGlyph->bitmap.buffer + Row * BitmapGlyph->bitmap.pitch;
+                for (Col = 0; Col < BitmapGlyph->bitmap.width; Col++)
+                    Pixels[Col] = g_GrayCoverageLut[Pixels[Col]];
+            }
+        }
+    }
 
     NewEntry->BitmapGlyph = BitmapGlyph;
     NewEntry->dwHash = Cache->dwHash;
@@ -4925,6 +5112,80 @@ ftGdiGetGlyphOutline(
     return needed;
 }
 
+/* Windows draws grayscale text bilevel at sizes where the font's gasp table does not ask for smoothing */
+static BOOL
+IntFaceWantsGrayAt(FT_Face Face)
+{
+    FT_UInt ppem;
+    FT_Int Flags;
+
+    if (!FT_IS_SCALABLE(Face) || !Face->size)
+        return TRUE;
+
+    ppem = Face->size->metrics.y_ppem;
+    Flags = FT_Get_Gasp(Face, ppem);
+    if (Flags == FT_GASP_NO_TABLE)
+        return TRUE;
+
+    return (Flags & FT_GASP_DO_GRAY) != 0;
+}
+
+/* The final advance of a glyph, read from a hinted load alone: layout must not depend on a bitmap being built.
+   Simulated bold is included, as FreeType widens a strike by whole pixels and an outline by a fraction. */
+static FT_Error
+IntLoadGlyphAdvance(
+    IN PFONT_CACHE_ENTRY Cache,
+    OUT FT_Pos *pAdvanceX,
+    OUT FT_Pos *pAdvanceY)
+{
+    FT_Face Face = Cache->Hashed.Face;
+    FT_Error error;
+
+    ASSERT_FREETYPE_LOCK_HELD();
+
+    error = FT_Load_Glyph(Face, Cache->Hashed.GlyphIndex, FT_LOAD_DEFAULT);
+    if (error)
+        return error;
+
+    if (Cache->Hashed.Aspect.Emu.Bold)
+        FT_GlyphSlot_Embolden(Face->glyph);
+
+    *pAdvanceX = Face->glyph->advance.x;
+    *pAdvanceY = Face->glyph->advance.y;
+    return FT_Err_Ok;
+}
+
+/* A glyph's advance for measuring: the cached bitmap's when it exists, else a load. Never builds a bitmap. */
+static FT_Error
+IntGetGlyphAdvance(
+    IN OUT PFONT_CACHE_ENTRY Cache,
+    OUT FT_Pos *pAdvanceX,
+    OUT FT_Pos *pAdvanceY)
+{
+    FT_BitmapGlyph realglyph;
+
+    ASSERT_FREETYPE_LOCK_HELD();
+
+    Cache->dwHash = IntGetHash(&Cache->Hashed, sizeof(Cache->Hashed) / sizeof(DWORD));
+
+    realglyph = IntFindGlyphCache(Cache);
+    if (realglyph)
+    {
+        *pAdvanceX = realglyph->root.advance.x >> 10;
+        *pAdvanceY = realglyph->root.advance.y >> 10;
+        return FT_Err_Ok;
+    }
+
+    return IntLoadGlyphAdvance(Cache, pAdvanceX, pAdvanceY);
+}
+
+/* A failed measurement sets the error the caller reads: memory for a pool failure, a general failure otherwise */
+static VOID
+IntSetAdvanceError(IN FT_Error error)
+{
+    EngSetLastError(error == FT_Err_Out_Of_Memory ? ERROR_NOT_ENOUGH_MEMORY : ERROR_GEN_FAILURE);
+}
+
 static FT_BitmapGlyph
 IntGetRealGlyph(
     IN OUT PFONT_CACHE_ENTRY Cache)
@@ -4932,6 +5193,10 @@ IntGetRealGlyph(
     INT error;
     FT_GlyphSlot glyph;
     FT_BitmapGlyph realglyph;
+    FT_Render_Mode RenderMode = (FT_Render_Mode)Cache->Hashed.Aspect.RenderMode;
+    FT_Int32 LoadFlags = FT_LOAD_DEFAULT;
+    FT_Pos AdvanceX = 0, AdvanceY = 0;
+    BOOL bKeepAdvance = FALSE;
 
     ASSERT_FREETYPE_LOCK_HELD();
 
@@ -4941,7 +5206,37 @@ IntGetRealGlyph(
     if (realglyph)
         return realglyph;
 
-    error = FT_Load_Glyph(Cache->Hashed.Face, Cache->Hashed.GlyphIndex, FT_LOAD_DEFAULT);
+    if (RenderMode == FT_RENDER_MODE_NORMAL || RenderMode == FT_RENDER_MODE_LIGHT)
+    {
+        if (!IntFaceWantsGrayAt(Cache->Hashed.Face))
+            RenderMode = FT_RENDER_MODE_MONO;
+    }
+
+    if (!FT_IS_SCALABLE(Cache->Hashed.Face))
+    {
+        NOTHING; /* bitmap fonts keep their strikes */
+    }
+    else if (RenderMode != FT_RENDER_MODE_MONO)
+    {
+        /* Layout must not depend on how the glyph is drawn: take the advance from the regular hinted load, which
+           for a font with embedded strikes can differ from the outline's */
+        bKeepAdvance = (IntLoadGlyphAdvance(Cache, &AdvanceX, &AdvanceY) == FT_Err_Ok);
+
+        /* Embedded bitmaps are bilevel; smoothed text uses the outlines */
+        if (RenderMode == FT_RENDER_MODE_LCD)
+            LoadFlags = FT_LOAD_TARGET_LCD | FT_LOAD_NO_BITMAP;
+        else
+            LoadFlags = FT_LOAD_DEFAULT | FT_LOAD_NO_BITMAP;
+    }
+
+    error = FT_Load_Glyph(Cache->Hashed.Face, Cache->Hashed.GlyphIndex, LoadFlags);
+    if (error && (LoadFlags & FT_LOAD_NO_BITMAP))
+    {
+        /* Bitmap-only face: fall back to its strikes, drawn as bilevel */
+        RenderMode = FT_RENDER_MODE_MONO;
+        bKeepAdvance = FALSE;
+        error = FT_Load_Glyph(Cache->Hashed.Face, Cache->Hashed.GlyphIndex, FT_LOAD_DEFAULT);
+    }
     if (error)
     {
         DPRINT1("WARNING: Failed to load and render glyph! [index: %d]\n", Cache->Hashed.GlyphIndex);
@@ -4956,7 +5251,14 @@ IntGetRealGlyph(
     if (Cache->Hashed.Aspect.Emu.Italic)
         FT_GlyphSlot_Oblique(glyph); /* Emulate Italic */
 
-    realglyph = IntGetBitmapGlyphWithCache(Cache, glyph);
+    /* The simulation changed the advance of this glyph; layout keeps the one of the regular load */
+    if (bKeepAdvance)
+    {
+        glyph->advance.x = AdvanceX;
+        glyph->advance.y = AdvanceY;
+    }
+
+    realglyph = IntGetBitmapGlyphWithCache(Cache, glyph, RenderMode);
 
     if (!realglyph)
         DPRINT1("Failed to render glyph! [index: %d]\n", Cache->Hashed.GlyphIndex);
@@ -4978,14 +5280,17 @@ TextIntGetTextExtentPoint(
     _In_ FLONG fl)
 {
     PFONTGDI FontGDI;
-    FT_BitmapGlyph realglyph;
-    INT glyph_index, i, previous, nTenthsOfDegrees;
+    FT_Pos AdvanceX = 0, AdvanceY = 0;
+    FT_Error error;
+    INT glyph_index, i, iUnit, cUnits, nTenthsOfDegrees;
+    FT_UInt previous = 0;
+    FT_Face PreviousFace = NULL;
     ULONGLONG TotalWidth64 = 0;
     LOGFONTW *plf;
-    BOOL use_kerning, bVerticalWriting;
+    BOOL bVerticalWriting;
     LONG ascender, descender;
     FONT_CACHE_ENTRY Cache;
-    DWORD ch0, ch1;
+    DWORD ch0;
     FONTLINK_CHAIN Chain;
 
     FontGDI = ObjToGDI(TextObj->Font, FONT);
@@ -5023,55 +5328,65 @@ TextIntGetTextExtentPoint(
 
     FontLink_Chain_Init(&Chain, TextObj, Cache.Hashed.Face);
 
-    use_kerning = FT_HAS_KERNING(Cache.Hashed.Face);
-    previous = 0;
-
-    for (i = 0; i < Count; i++)
+    for (i = 0; i < Count; i += cUnits)
     {
-        ch0 = *String++;
-        if (IS_HIGH_SURROGATE(ch0))
+        /* A surrogate pair is one glyph; a lone surrogate stays a code unit of its own, as it does on Windows */
+        ch0 = String[i];
+        cUnits = 1;
+        if (IS_HIGH_SURROGATE(ch0) && i + 1 < Count && IS_LOW_SURROGATE(String[i + 1]) && !(fl & GTEF_INDICES))
         {
-            ++i;
-            if (i >= Count)
-                break;
-
-            ch1 = *String++;
-            if (IS_LOW_SURROGATE(ch1))
-                ch0 = Utf32FromSurrogatePair(ch0, ch1);
+            ch0 = Utf32FromSurrogatePair(ch0, String[i + 1]);
+            cUnits = 2;
         }
 
         glyph_index = FontLink_Chain_FindGlyph(&Chain, &Cache, &Cache.Hashed.Face, ch0,
                                                (fl & GTEF_INDICES));
         Cache.Hashed.GlyphIndex = glyph_index;
 
-        realglyph = IntGetRealGlyph(&Cache);
-        if (!realglyph)
-            break;
-
-        /* Retrieve kerning distance */
-        if (use_kerning && previous && glyph_index)
+        /* A glyph without an advance fails the call; a partial total would pass for the width */
+        error = IntGetGlyphAdvance(&Cache, &AdvanceX, &AdvanceY);
+        if (error != FT_Err_Ok)
         {
-            FT_Vector delta;
-            FT_Get_Kerning(Cache.Hashed.Face, previous, glyph_index, 0, &delta);
-            TotalWidth64 += delta.x;
+            FontLink_Chain_Finish(&Chain);
+            IntUnLockFreeType();
+            IntSetAdvanceError(error);
+            return FALSE;
         }
 
-        TotalWidth64 += realglyph->root.advance.x >> 10;
+        /* Only GetCharacterPlacement kerns, and only between two glyphs of the same face */
+        if ((fl & GTEF_KERNPAIRS) && previous && glyph_index && PreviousFace == Cache.Hashed.Face &&
+            FT_HAS_KERNING(Cache.Hashed.Face))
+        {
+            FT_Vector delta;
+            if (FT_Get_Kerning(Cache.Hashed.Face, previous, glyph_index, FT_KERNING_DEFAULT, &delta) == FT_Err_Ok)
+            {
+                /* The total is unsigned: a kerning that would go back past the start stops there */
+                if (delta.x < 0 && (ULONGLONG)-delta.x > TotalWidth64)
+                    TotalWidth64 = 0;
+                else
+                    TotalWidth64 += delta.x;
+            }
+        }
+        previous = glyph_index;
+        PreviousFace = Cache.Hashed.Face;
+
+        TotalWidth64 += AdvanceX;
 
         if (((TotalWidth64 + 32) >> 6) <= MaxExtent && NULL != Fit)
         {
-            *Fit = i + 1;
+            *Fit = i + cUnits;
         }
+        /* Every code unit gets an entry: both halves of a pair carry the width after the glyph */
         if (NULL != Dx)
         {
-            Dx[i] = (TotalWidth64 + 32) >> 6;
+            for (iUnit = 0; iUnit < cUnits; iUnit++)
+                Dx[i + iUnit] = (TotalWidth64 + 32) >> 6;
         }
-
-        previous = glyph_index;
     }
     ASSERT(FontGDI->Magic == FONTGDI_MAGIC);
     ascender = FontGDI->tmAscent; /* Units above baseline */
     descender = FontGDI->tmDescent; /* Units below baseline */
+    FontLink_Chain_Finish(&Chain);
     IntUnLockFreeType();
 
     if (bVerticalWriting)
@@ -6027,12 +6342,17 @@ TextIntRealizeFont(HFONT FontHandle, PTEXTOBJ pTextObj)
            SubstitutedLogFont.lfFaceName, SubstitutedLogFont.lfCharSet);
 
     MatchPenalty = 0xFFFFFFFF;
-    TextObj->Font = NULL;
 
     Win32Process = PsGetCurrentProcessWin32Process();
 
     /* Search private fonts */
     IntLockFreeType();
+    if (TextObj->Font)
+    {
+        /* Not expected: the font is realized once */
+        FontGDI_Release(ObjToGDI(TextObj->Font, FONT));
+        TextObj->Font = NULL;
+    }
     IntLockProcessPrivateFonts(Win32Process);
     FindBestFontFromList(&TextObj->Font, &MatchPenalty, &SubstitutedLogFont,
                          &Win32Process->PrivateFontListHead);
@@ -6041,6 +6361,11 @@ TextIntRealizeFont(HFONT FontHandle, PTEXTOBJ pTextObj)
     /* Search system fonts */
     FindBestFontFromList(&TextObj->Font, &MatchPenalty, &SubstitutedLogFont,
                          &g_FontListHead);
+
+    /* The logical font keeps the font it is realized to until LFONT_vCleanup(),
+     * even if the font is removed meanwhile */
+    if (TextObj->Font)
+        ++(ObjToGDI(TextObj->Font, FONT))->RefCount;
     IntUnLockFreeType();
 
     if (NULL == TextObj->Font)
@@ -6371,17 +6696,358 @@ BOOL
 FASTCALL
 ftGdiRealizationInfo(PFONTGDI Font, PREALIZATION_INFO Info)
 {
-    if (FT_HAS_FIXED_SIZES(Font->SharedFace->Face))
+    FT_Face Face = Font->SharedFace->Face;
+
+    /* A face with outlines is scalable even when it also carries strikes */
+    if (FT_IS_SCALABLE(Face))
+        Info->iTechnology = RI_TECH_SCALABLE;
+    else if (FT_HAS_FIXED_SIZES(Face))
         Info->iTechnology = RI_TECH_BITMAP;
     else
-    {
-        if (FT_IS_SCALABLE(Font->SharedFace->Face))
-            Info->iTechnology = RI_TECH_SCALABLE;
-        else
-            Info->iTechnology = RI_TECH_FIXED;
-    }
+        Info->iTechnology = RI_TECH_FIXED;
     Info->iUniq = Font->FontObj.iUniq;
-    Info->dwUnknown = -1;
+    Info->dwUnknown = Font->InstanceId;
+    return TRUE;
+}
+
+/* The caller holds the FreeType lock */
+static PFONTGDI
+IntFindFontByInstanceIdInList(_In_ PLIST_ENTRY ListHead, _In_ ULONG InstanceId)
+{
+    PLIST_ENTRY Entry;
+
+    for (Entry = ListHead->Flink; Entry != ListHead; Entry = Entry->Flink)
+    {
+        PFONT_ENTRY FontEntry = CONTAINING_RECORD(Entry, FONT_ENTRY, ListEntry);
+        if (FontEntry->Font && FontEntry->Font->InstanceId == InstanceId)
+            return FontEntry->Font;
+    }
+    return NULL;
+}
+
+/* The caller holds the FreeType lock; private fonts of the calling process come first */
+static PFONTGDI
+IntFindFontByInstanceId(_In_ ULONG InstanceId)
+{
+    PPROCESSINFO Win32Process = PsGetCurrentProcessWin32Process();
+    PFONTGDI FontGDI = NULL;
+
+    ASSERT_FREETYPE_LOCK_HELD();
+
+    if (InstanceId == 0)
+        return NULL;
+
+    if (Win32Process)
+    {
+        IntLockProcessPrivateFonts(Win32Process);
+        FontGDI = IntFindFontByInstanceIdInList(&Win32Process->PrivateFontListHead, InstanceId);
+        IntUnLockProcessPrivateFonts(Win32Process);
+    }
+    if (!FontGDI)
+        FontGDI = IntFindFontByInstanceIdInList(&g_FontListHead, InstanceId);
+    return FontGDI;
+}
+
+/* The caller holds the FreeType lock. Removing a font unlinks it under that lock before freeing it. */
+static BOOLEAN
+IntIsFontLinked(_In_ PFONTGDI FontGDI)
+{
+    PPROCESSINFO Win32Process = PsGetCurrentProcessWin32Process();
+    PLIST_ENTRY Entry;
+    BOOLEAN Found = FALSE;
+
+    ASSERT_FREETYPE_LOCK_HELD();
+
+    for (Entry = g_FontListHead.Flink; Entry != &g_FontListHead && !Found; Entry = Entry->Flink)
+        Found = (CONTAINING_RECORD(Entry, FONT_ENTRY, ListEntry)->Font == FontGDI);
+
+    if (!Found && Win32Process)
+    {
+        IntLockProcessPrivateFonts(Win32Process);
+        for (Entry = Win32Process->PrivateFontListHead.Flink;
+             Entry != &Win32Process->PrivateFontListHead && !Found;
+             Entry = Entry->Flink)
+        {
+            Found = (CONTAINING_RECORD(Entry, FONT_ENTRY, ListEntry)->Font == FontGDI);
+        }
+        IntUnLockProcessPrivateFonts(Win32Process);
+    }
+    return Found;
+}
+
+static const WCHAR g_SystemRootPrefix[] = L"\\SystemRoot\\";
+static const WCHAR g_DosDevicePrefix[] = L"\\??\\";
+static const WCHAR g_DosDeviceUncPrefix[] = L"\\??\\UNC\\";
+
+static BOOLEAN
+IntHasFontPathPrefix(_In_ PCWSTR Path, _In_ PCWSTR Prefix)
+{
+    SIZE_T Length = wcslen(Prefix);
+    return _wcsnicmp(Path, Prefix, Length) == 0;
+}
+
+/* The loader keeps NT names; user mode needs a Win32 path it can open */
+static PWSTR
+IntDuplicateFontFileNameAsWin32(_In_ PCWSTR NtName)
+{
+    UNICODE_STRING Root, Rest;
+    SIZE_T Chars, UncChars = 0;
+    PWSTR Result, Cursor;
+
+    RtlInitUnicodeString(&Root, NULL);
+    if (IntHasFontPathPrefix(NtName, g_DosDeviceUncPrefix))
+    {
+        RtlInitUnicodeString(&Rest, NtName + _countof(g_DosDeviceUncPrefix) - 1);
+        UncChars = 2;
+    }
+    else if (IntHasFontPathPrefix(NtName, g_DosDevicePrefix))
+    {
+        RtlInitUnicodeString(&Rest, NtName + _countof(g_DosDevicePrefix) - 1);
+    }
+    else if (IntHasFontPathPrefix(NtName, g_SystemRootPrefix))
+    {
+        RtlInitUnicodeString(&Root, SharedUserData->NtSystemRoot);
+        RtlInitUnicodeString(&Rest, NtName + _countof(g_SystemRootPrefix) - 2);
+    }
+    else
+    {
+        RtlInitUnicodeString(&Rest, NtName);
+    }
+
+    Chars = UncChars + Root.Length / sizeof(WCHAR) + Rest.Length / sizeof(WCHAR);
+    Result = ExAllocatePoolWithTag(PagedPool, (Chars + 1) * sizeof(WCHAR), TAG_USTR);
+    if (!Result)
+        return NULL;
+
+    Cursor = Result;
+    if (UncChars)
+    {
+        *Cursor++ = L'\\';
+        *Cursor++ = L'\\';
+    }
+    RtlCopyMemory(Cursor, Root.Buffer, Root.Length);
+    Cursor += Root.Length / sizeof(WCHAR);
+    RtlCopyMemory(Cursor, Rest.Buffer, Rest.Length);
+    Cursor += Rest.Length / sizeof(WCHAR);
+    *Cursor = UNICODE_NULL;
+    return Result;
+}
+
+static VOID
+IntQueryFontFileWriteTime(_In_ PCWSTR NtName, _Out_ PFILETIME WriteTime)
+{
+    UNICODE_STRING Name;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK Iosb;
+    FILE_BASIC_INFORMATION BasicInfo;
+    HANDLE FileHandle;
+    NTSTATUS Status;
+
+    WriteTime->dwLowDateTime = 0;
+    WriteTime->dwHighDateTime = 0;
+
+    RtlInitUnicodeString(&Name, NtName);
+    InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = ZwOpenFile(&FileHandle, FILE_READ_ATTRIBUTES | SYNCHRONIZE, &ObjectAttributes, &Iosb,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        FILE_SYNCHRONOUS_IO_NONALERT);
+    if (!NT_SUCCESS(Status))
+        return;
+
+    Status = ZwQueryInformationFile(FileHandle, &Iosb, &BasicInfo, sizeof(BasicInfo), FileBasicInformation);
+    if (NT_SUCCESS(Status))
+    {
+        WriteTime->dwLowDateTime = BasicInfo.LastWriteTime.LowPart;
+        WriteTime->dwHighDateTime = BasicInfo.LastWriteTime.HighPart;
+    }
+    ZwClose(FileHandle);
+}
+
+/*
+ * Describes the file of a font instance for NtGdiGetFontFileInfo. A font that was loaded from memory has an
+ * empty path. On success the caller owns *ppInfo (TAG_FONT pool) and *pcbInfo is its size in bytes.
+ */
+BOOL
+FASTCALL
+ftGdiGetFontFileInfo(
+    _In_ ULONG InstanceId,
+    _In_ ULONG FileIndex,
+    _Outptr_ PFONT_FILE_INFO *ppInfo,
+    _Out_ PSIZE_T pcbInfo)
+{
+    PFONTGDI FontGDI;
+    PWSTR NtName = NULL, Win32Name;
+    PFONT_FILE_INFO Info;
+    ULONG FileSize;
+    SIZE_T Length, cbInfo;
+    BOOLEAN FromFile;
+
+    *ppInfo = NULL;
+    *pcbInfo = 0;
+
+    IntLockFreeType();
+    FontGDI = IntFindFontByInstanceId(InstanceId);
+    if (!FontGDI || FileIndex != 0)
+    {
+        IntUnLockFreeType();
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    FileSize = FontGDI->SharedFace->Memory->BufferSize;
+    FromFile = (FontGDI->Filename != NULL);
+    if (FromFile)
+    {
+        Length = (wcslen(FontGDI->Filename) + 1) * sizeof(WCHAR);
+        NtName = ExAllocatePoolWithTag(PagedPool, Length, TAG_USTR);
+        if (NtName)
+            RtlCopyMemory(NtName, FontGDI->Filename, Length);
+    }
+    IntUnLockFreeType();
+
+    if (FromFile && !NtName)
+    {
+        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+
+    if (NtName)
+    {
+        Win32Name = IntDuplicateFontFileNameAsWin32(NtName);
+        if (!Win32Name)
+        {
+            ExFreePoolWithTag(NtName, TAG_USTR);
+            EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return FALSE;
+        }
+    }
+    else
+    {
+        Win32Name = NULL;
+    }
+
+    Length = Win32Name ? wcslen(Win32Name) : 0;
+    cbInfo = FIELD_OFFSET(FONT_FILE_INFO, path) + (Length + 1) * sizeof(WCHAR);
+    Info = ExAllocatePoolWithTag(PagedPool, cbInfo, TAG_FONT);
+    if (!Info)
+    {
+        if (NtName)
+            ExFreePoolWithTag(NtName, TAG_USTR);
+        if (Win32Name)
+            ExFreePoolWithTag(Win32Name, TAG_USTR);
+        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+
+    RtlZeroMemory(Info, cbInfo);
+    Info->size.QuadPart = FileSize;
+    if (NtName)
+    {
+        IntQueryFontFileWriteTime(NtName, &Info->writetime);
+        RtlCopyMemory(Info->path, Win32Name, Length * sizeof(WCHAR));
+        ExFreePoolWithTag(NtName, TAG_USTR);
+        ExFreePoolWithTag(Win32Name, TAG_USTR);
+    }
+
+    *ppInfo = Info;
+    *pcbInfo = cbInfo;
+    return TRUE;
+}
+
+/* Copies bytes of the font file of an instance into a user mode buffer that the caller has probed */
+BOOL
+FASTCALL
+ftGdiGetFontFileData(
+    _In_ ULONG InstanceId,
+    _In_ ULONG FileIndex,
+    _In_ ULONGLONG Offset,
+    _Out_writes_bytes_(cjBuf) PVOID pvBuf,
+    _In_ SIZE_T cjBuf)
+{
+    PFONTGDI FontGDI;
+    PSHARED_FACE SharedFace;
+    NTSTATUS Status = STATUS_SUCCESS;
+    ULONG Size;
+
+    IntLockFreeType();
+    FontGDI = IntFindFontByInstanceId(InstanceId);
+    if (!FontGDI || FileIndex != 0)
+    {
+        IntUnLockFreeType();
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    SharedFace = FontGDI->SharedFace;
+    Size = SharedFace->Memory->BufferSize;
+    if (cjBuf > Size || Offset > Size - cjBuf)
+    {
+        IntUnLockFreeType();
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (cjBuf == 0)
+    {
+        IntUnLockFreeType();
+        EngSetLastError(ERROR_NOACCESS);
+        return FALSE;
+    }
+
+    /* The reference keeps the data mapped while the lock is not held */
+    SharedFace_AddRef(SharedFace);
+    IntUnLockFreeType();
+
+    _SEH2_TRY
+    {
+        RtlCopyMemory(pvBuf, (PUCHAR)SharedFace->Memory->Buffer + (SIZE_T)Offset, cjBuf);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    SharedFace_Release(SharedFace, TRUE);
+
+    if (!NT_SUCCESS(Status))
+    {
+        SetLastNtError(Status);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/* Tells how a font instance differs from the face it was made from, for NtGdiGetFontRealizationInfo */
+BOOL
+FASTCALL
+ftGdiGetFontRealization(
+    _In_ PFONTGDI FontGDI,
+    _In_ const LOGFONTW *LogFont,
+    _Out_ PFONT_REALIZATION_INFO Info)
+{
+    REALIZATION_INFO ri;
+
+    /* A realized font keeps a bare pointer; a font that was removed since is gone, so check under the lock */
+    IntLockFreeType();
+    if (!FontGDI || !IntIsFontLinked(FontGDI))
+    {
+        IntUnLockFreeType();
+        EngSetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+
+    ftGdiRealizationInfo(FontGDI, &ri);
+    Info->flags = ri.iTechnology;
+    Info->cache_num = ri.iUniq;
+    Info->instance_id = FontGDI->InstanceId;
+    Info->file_count = 1;
+    Info->face_index = (WORD)(FontGDI->SharedFace->Face->face_index & 0xFFFF);
+    Info->simulations = 0;
+    if (EMUBOLD_NEEDED(FontGDI->OriginalWeight, LogFont->lfWeight))
+        Info->simulations |= 0x1;
+    if (LogFont->lfItalic && !FontGDI->OriginalItalic)
+        Info->simulations |= 0x2;
+    IntUnLockFreeType();
     return TRUE;
 }
 
@@ -6593,54 +7259,51 @@ IntGetTextDisposition(
 {
     LONGLONG X64 = 0, Y64 = 0;
     INT i, glyph_index;
-    FT_BitmapGlyph realglyph;
+    FT_Pos AdvanceX = 0, AdvanceY = 0;
     FT_Face face = Cache->Hashed.Face;
-    BOOL use_kerning = FT_HAS_KERNING(face);
-    ULONG previous = 0;
-    FT_Vector delta, vec;
-    DWORD ch0, ch1;
+    FT_Vector vec;
+    DWORD ch0;
+    INT cUnits, iDx;
 
     ASSERT_FREETYPE_LOCK_HELD();
 
-    for (i = 0; i < Count; ++i)
+    for (i = 0; i < Count; i += cUnits)
     {
-        ch0 = *String++;
-        if (IS_HIGH_SURROGATE(ch0))
+        /* As in TextIntGetTextExtentPoint: a lone surrogate is a code unit of its own */
+        ch0 = String[i];
+        cUnits = 1;
+        if (IS_HIGH_SURROGATE(ch0) && i + 1 < Count && IS_LOW_SURROGATE(String[i + 1]) &&
+            !(fuOptions & ETO_GLYPH_INDEX))
         {
-            ++i;
-            if (i >= Count)
-                return TRUE;
-
-            ch1 = *String++;
-            if (IS_LOW_SURROGATE(ch1))
-                ch0 = Utf32FromSurrogatePair(ch0, ch1);
+            ch0 = Utf32FromSurrogatePair(ch0, String[i + 1]);
+            cUnits = 2;
         }
+        iDx = i + cUnits - 1;
 
         glyph_index = FontLink_Chain_FindGlyph(pChain, Cache, &face, ch0,
                                                (fuOptions & ETO_GLYPH_INDEX));
         Cache->Hashed.GlyphIndex = glyph_index;
 
-        realglyph = IntGetRealGlyph(Cache);
-        if (!realglyph)
-            return FALSE;
-
-        /* Retrieve kerning distance */
-        if (use_kerning && previous && glyph_index)
+        /* Only a width taken from the glyphs needs their advances */
+        if (NULL == Dx)
         {
-            FT_Get_Kerning(face, previous, glyph_index, 0, &delta);
-            X64 += delta.x;
-            Y64 -= delta.y;
+            FT_Error error = IntGetGlyphAdvance(Cache, &AdvanceX, &AdvanceY);
+            if (error != FT_Err_Ok)
+            {
+                IntSetAdvanceError(error);
+                return FALSE;
+            }
         }
 
         if (NULL == Dx)
         {
-            X64 += realglyph->root.advance.x >> 10;
-            Y64 -= realglyph->root.advance.y >> 10;
+            X64 += AdvanceX;
+            Y64 -= AdvanceY;
         }
         else if (fuOptions & ETO_PDY)
         {
-            vec.x = (Dx[2 * i + 0] << 6);
-            vec.y = (Dx[2 * i + 1] << 6);
+            vec.x = (Dx[2 * iDx + 0] << 6);
+            vec.y = (Dx[2 * iDx + 1] << 6);
             if (!bNoTransform)
                 FT_Vector_Transform(&vec, &Cache->Hashed.matTransform);
             X64 += vec.x;
@@ -6648,15 +7311,13 @@ IntGetTextDisposition(
         }
         else
         {
-            vec.x = (Dx[i] << 6);
+            vec.x = (Dx[iDx] << 6);
             vec.y = 0;
             if (!bNoTransform)
                 FT_Vector_Transform(&vec, &Cache->Hashed.matTransform);
             X64 += vec.x;
             Y64 -= vec.y;
         }
-
-        previous = glyph_index;
     }
 
     *pX64 = X64;
@@ -6686,11 +7347,10 @@ IntExtTextOutW(
     PDC_ATTR pdcattr;
     SURFOBJ *psoDest, *psoGlyph;
     SURFACE *psurf;
-    INT glyph_index, i;
+    INT glyph_index, i, cUnits, iDx;
     FT_Face face;
     FT_BitmapGlyph realglyph;
     LONGLONG X64, Y64, RealXStart64, RealYStart64, DeltaX64, DeltaY64;
-    ULONG previous;
     RECTL DestRect, MaskRect;
     HBITMAP hbmGlyph;
     SIZEL glyphSize;
@@ -6700,13 +7360,13 @@ IntExtTextOutW(
     EXLATEOBJ exloRGB2Dst, exloDst2RGB;
     POINT Start;
     PMATRIX pmxWorldToDevice;
-    FT_Vector delta, vecAscent64, vecDescent64, vec;
+    FT_Vector vecAscent64, vecDescent64, vec;
     LOGFONTW *plf;
-    BOOL use_kerning, bResult, DoBreak;
+    BOOL bResult, DoBreak, bLcdGlyph;
     FONT_CACHE_ENTRY Cache;
     FT_Matrix mat;
     BOOL bNoTransform;
-    DWORD ch0, ch1;
+    DWORD ch0;
     const DWORD del = 0x7f, nbsp = 0xa0; // DEL is ASCII DELETE and nbsp is a non-breaking space
     FONTLINK_CHAIN Chain;
     SIZE spaceWidth;
@@ -6842,6 +7502,14 @@ IntExtTextOutW(
     bNoTransform = ((mat.xy == 0) && (mat.yx == 0) &&
                     (mat.xx == (1 << 16)) && (mat.yy == (1 << 16)));
 
+    /* Colour stripes only line up with an upright glyph; Windows smooths rotated or scaled text in gray */
+    if (Cache.Hashed.Aspect.RenderMode == FT_RENDER_MODE_LCD &&
+        !(Cache.Hashed.matTransform.xy == 0 && Cache.Hashed.matTransform.yx == 0 &&
+          Cache.Hashed.matTransform.xx == (1 << 16) && Cache.Hashed.matTransform.yy == (1 << 16)))
+    {
+        Cache.Hashed.Aspect.RenderMode = FT_RENDER_MODE_NORMAL;
+    }
+
     /* Calculate the ascent point and the descent point */
     vecAscent64.x = 0;
     vecAscent64.y = (FontGDI->tmAscent << 6);
@@ -6868,14 +7536,13 @@ IntExtTextOutW(
     }
 #undef VALIGN_MASK
 
-    use_kerning = FT_HAS_KERNING(face);
-
     /* Calculate the text width if necessary */
     if ((fuOptions & ETO_OPAQUE) || (pdcattr->flTextAlign & (TA_CENTER | TA_RIGHT)))
     {
         if (!IntGetTextDisposition(&DeltaX64, &DeltaY64, String, Count, Dx, &Cache,
                                    fuOptions, bNoTransform, &Chain))
         {
+            FontLink_Chain_Finish(&Chain);
             IntUnLockFreeType();
             bResult = FALSE;
             goto Cleanup;
@@ -6932,22 +7599,20 @@ IntExtTextOutW(
      */
     X64 = RealXStart64;
     Y64 = RealYStart64;
-    previous = 0;
     DoBreak = FALSE;
     bResult = TRUE; /* Assume success */
-    for (i = 0; i < Count; ++i)
+    for (i = 0; i < Count; i += cUnits)
     {
-        ch0 = *String++;
-        if (IS_HIGH_SURROGATE(ch0))
+        /* The same walk as the measuring and the width code: a lone surrogate is a code unit of its own */
+        ch0 = String[i];
+        cUnits = 1;
+        if (IS_HIGH_SURROGATE(ch0) && i + 1 < Count && IS_LOW_SURROGATE(String[i + 1]) &&
+            !(fuOptions & ETO_GLYPH_INDEX))
         {
-            ++i;
-            if (i >= Count)
-                break;
-
-            ch1 = *String++;
-            if (IS_LOW_SURROGATE(ch1))
-                ch0 = Utf32FromSurrogatePair(ch0, ch1);
+            ch0 = Utf32FromSurrogatePair(ch0, String[i + 1]);
+            cUnits = 2;
         }
+        iDx = i + cUnits - 1;
 
         glyph_index = FontLink_Chain_FindGlyph(&Chain, &Cache, &face, ch0,
                                                (fuOptions & ETO_GLYPH_INDEX));
@@ -6960,18 +7625,12 @@ IntExtTextOutW(
             break;
         }
 
-        /* retrieve kerning distance and move pen position */
-        if (use_kerning && previous && glyph_index && NULL == Dx)
-        {
-            FT_Get_Kerning(face, previous, glyph_index, 0, &delta);
-            X64 += delta.x;
-            Y64 -= delta.y;
-        }
-
         DPRINT("X64, Y64: %I64d, %I64d\n", X64, Y64);
         DPRINT("Advance: %d, %d\n", realglyph->root.advance.x, realglyph->root.advance.y);
 
-        glyphSize.cx = realglyph->bitmap.width;
+        bLcdGlyph = (realglyph->bitmap.pixel_mode == FT_PIXEL_MODE_LCD);
+        /* An LCD bitmap carries three colour samples per pixel */
+        glyphSize.cx = bLcdGlyph ? realglyph->bitmap.width / 3 : realglyph->bitmap.width;
         glyphSize.cy = realglyph->bitmap.rows;
 
         /* Do chars > space & not DEL & not nbsp have a glyphSize.cx of zero? */
@@ -6994,7 +7653,7 @@ IntExtTextOutW(
             realglyph->left = 0;
         }
 
-        MaskRect.right = realglyph->bitmap.width;
+        MaskRect.right = glyphSize.cx;
         MaskRect.bottom = realglyph->bitmap.rows;
 
         DestRect.left   = ((X64 + 32) >> 6) + realglyph->left;
@@ -7011,7 +7670,7 @@ IntExtTextOutW(
              * limit the work of the transbitblt.
              */
             hbmGlyph = EngCreateBitmap(glyphSize, realglyph->bitmap.pitch,
-                                       BMF_8BPP, BMF_TOPDOWN,
+                                       bLcdGlyph ? BMF_24BPP : BMF_8BPP, BMF_TOPDOWN,
                                        realglyph->bitmap.buffer);
             if (!hbmGlyph)
             {
@@ -7077,8 +7736,8 @@ IntExtTextOutW(
         }
         else if (fuOptions & ETO_PDY)
         {
-            vec.x = (Dx[2 * i + 0] << 6);
-            vec.y = (Dx[2 * i + 1] << 6);
+            vec.x = (Dx[2 * iDx + 0] << 6);
+            vec.y = (Dx[2 * iDx + 1] << 6);
             if (!bNoTransform)
                 FT_Vector_Transform(&vec, &Cache.Hashed.matTransform);
             X64 += vec.x;
@@ -7086,7 +7745,7 @@ IntExtTextOutW(
         }
         else
         {
-            vec.x = (Dx[i] << 6);
+            vec.x = (Dx[iDx] << 6);
             vec.y = 0;
             if (!bNoTransform)
                 FT_Vector_Transform(&vec, &Cache.Hashed.matTransform);
@@ -7095,8 +7754,6 @@ IntExtTextOutW(
         }
 
         DPRINT("New X64, New Y64: %I64d, %I64d\n", X64, Y64);
-
-        previous = glyph_index;
     }
     /* Don't update position if String == NULL. Fixes CORE-19721. */
     if ((pdcattr->flTextAlign & TA_UPDATECP) && String)
@@ -7195,6 +7852,7 @@ IntExtTextOutW(
         }
     }
 
+    FontLink_Chain_Finish(&Chain);
     IntUnLockFreeType();
 
     EXLATEOBJ_vCleanup(&exloRGB2Dst);

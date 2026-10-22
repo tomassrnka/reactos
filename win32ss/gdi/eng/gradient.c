@@ -56,7 +56,7 @@ IntEngGradientFillRect(
 {
     SURFOBJ *psoOutput;
     TRIVERTEX *v1, *v2;
-    RECTL rcGradient, rcSG;
+    RECTL rcGradient, rcSG, rcDraw;
     RECT_ENUM RectEnum;
     BOOL EnumMore;
     ULONG i;
@@ -82,7 +82,23 @@ IntEngGradientFillRect(
         dy = abs(rcGradient.bottom - rcGradient.top);
     }
 
-    if(!IntEngEnter(&EnterLeave, psoDest, &rcSG, FALSE, &Translate, &psoOutput))
+    /* Only what is in the clip and on the surface can be drawn: copy only
+     * that (a hidden window has an empty clip), and draw nothing outside it */
+    rcDraw.left = 0;
+    rcDraw.top = 0;
+    rcDraw.right = psoDest->sizlBitmap.cx;
+    rcDraw.bottom = psoDest->sizlBitmap.cy;
+    if (pco->iDComplexity != DC_TRIVIAL &&
+        !RECTL_bIntersectRect(&rcDraw, &rcDraw, &pco->rclBounds))
+    {
+        return TRUE;
+    }
+    if (!RECTL_bIntersectRect(&rcDraw, &rcDraw, &rcSG))
+    {
+        return TRUE;
+    }
+
+    if(!IntEngEnter(&EnterLeave, psoDest, &rcDraw, FALSE, &Translate, &psoOutput))
     {
         return FALSE;
     }
@@ -100,7 +116,7 @@ IntEngGradientFillRect(
                 EnumMore = CLIPOBJ_bEnum(pco, (ULONG) sizeof(RectEnum), (PVOID) &RectEnum);
                 for (i = 0; i < RectEnum.c && RectEnum.arcl[i].top <= rcSG.bottom; i++)
                 {
-                    if (RECTL_bIntersectRect(&FillRect, &RectEnum.arcl[i], &rcSG))
+                    if (RECTL_bIntersectRect(&FillRect, &RectEnum.arcl[i], &rcDraw))
                     {
                         HVINITCOL(Red, 0);
                         HVINITCOL(Green, 1);
@@ -128,7 +144,7 @@ IntEngGradientFillRect(
             EnumMore = CLIPOBJ_bEnum(pco, (ULONG) sizeof(RectEnum), (PVOID) &RectEnum);
             for (i = 0; i < RectEnum.c && RectEnum.arcl[i].top <= rcSG.bottom; i++)
             {
-                if (RECTL_bIntersectRect(&FillRect, &RectEnum.arcl[i], &rcSG))
+                if (RECTL_bIntersectRect(&FillRect, &RectEnum.arcl[i], &rcDraw))
                 {
                     HVINITCOL(Red, 0);
                     HVINITCOL(Green, 1);
@@ -168,7 +184,7 @@ IntEngGradientFillRect(
         EnumMore = CLIPOBJ_bEnum(pco, (ULONG) sizeof(RectEnum), (PVOID) &RectEnum);
         for (i = 0; i < RectEnum.c && RectEnum.arcl[i].top <= rcSG.bottom; i++)
         {
-            if (RECTL_bIntersectRect(&FillRect, &RectEnum.arcl[i], &rcSG))
+            if (RECTL_bIntersectRect(&FillRect, &RectEnum.arcl[i], &rcDraw))
             {
                 for (; FillRect.top < FillRect.bottom; FillRect.top++)
                 {
@@ -186,12 +202,17 @@ IntEngGradientFillRect(
     return IntEngLeave(&EnterLeave);
 }
 
-/* Fill triangle with solid color */
+/* Fill triangle with solid color, only the part of the row in the clip
+ * rectangle (the rows below it are not reached, see bt). The line functions
+ * of some formats take x2 < x1 for a huge line: skip an empty one. */
 #define S_FILLLINE(linefrom,lineto) \
-  if(sx[lineto] < sx[linefrom]) \
-    DibFunctionsForBitmapFormat[psoOutput->iBitmapFormat].DIB_HLine(psoOutput, max(sx[lineto], FillRect.left), min(sx[linefrom], FillRect.right), sy, Color); \
-  else \
-    DibFunctionsForBitmapFormat[psoOutput->iBitmapFormat].DIB_HLine(psoOutput, max(sx[linefrom], FillRect.left), min(sx[lineto], FillRect.right), sy, Color);
+  if (sy >= FillRect.top) \
+  { \
+    LONG xl = max(min(sx[linefrom], sx[lineto]), FillRect.left); \
+    LONG xr = min(max(sx[linefrom], sx[lineto]), FillRect.right); \
+    if (xl < xr) \
+      DibFunctionsForBitmapFormat[psoOutput->iBitmapFormat].DIB_HLine(psoOutput, xl, xr, sy, Color); \
+  }
 
 #define S_DOLINE(a,b,line) \
   ex[line] += dx[line]; \

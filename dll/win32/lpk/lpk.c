@@ -233,6 +233,175 @@ LpkDllInitialize(
 
 
 /*
+ * TRUE if the selected font may have no glyph for a character of the string.
+ * GetGlyphIndicesW sees UTF-16 units, so it cannot say whether the font has a supplementary
+ * character: a surrogate pair always counts as possibly missing, which sends the string down the
+ * character path where win32k font linking can supply the glyph. Zero-width format characters
+ * are skipped, no font needs to carry them.
+ */
+static BOOL LPK_FontLacksChars(HDC hdc, LPCWSTR str, UINT count)
+{
+    WORD stackBuf[64], *indices = stackBuf;
+    UINT i;
+    BOOL lacks = FALSE;
+
+    if (count > _countof(stackBuf))
+    {
+        indices = HeapAlloc(GetProcessHeap(), 0, count * sizeof(WORD));
+        if (!indices)
+            return FALSE;
+    }
+
+    if (GetGlyphIndicesW(hdc, str, count, indices, GGI_MARK_NONEXISTING_GLYPHS) != GDI_ERROR)
+    {
+        for (i = 0; i < count; i++)
+        {
+            WCHAR ch = str[i];
+
+            if (ch >= 0xD800 && ch <= 0xDFFF)
+            {
+                lacks = TRUE;
+                break;
+            }
+            if (ch < L' ' || (ch >= 0x200B && ch <= 0x200F) || (ch >= 0x202A && ch <= 0x202E) ||
+                (ch >= 0x2066 && ch <= 0x2069) || ch == 0xFEFF)
+                continue;
+            if (indices[i] == 0xFFFF)
+            {
+                lacks = TRUE;
+                break;
+            }
+        }
+    }
+
+    if (indices != stackBuf)
+        HeapFree(GetProcessHeap(), 0, indices);
+    return lacks;
+}
+
+/* Runs can be placed one after the other only for plain left-aligned, unrotated, left-to-right text */
+static BOOL LPK_CanDrawByRuns(HDC hdc, UINT fuOptions, const INT *lpDx)
+{
+    LOGFONTW lf;
+
+    if (lpDx || (fuOptions & (ETO_RTLREADING | ETO_GLYPH_INDEX | ETO_PDY)))
+        return FALSE;
+    if (GetTextAlign(hdc) & (TA_UPDATECP | TA_CENTER))
+        return FALSE;
+    if (GetObjectW(GetCurrentObject(hdc, OBJ_FONT), sizeof(lf), &lf) != sizeof(lf))
+        return FALSE;
+    return lf.lfEscapement == 0 && lf.lfOrientation == 0;
+}
+
+/*
+ * Draw the string one script item at a time in visual order. An item the selected font fully
+ * covers keeps its shaped glyphs; an item that lacks a character is drawn as characters so that
+ * the font linking in win32k can supply the missing glyphs. Returns FALSE, having drawn
+ * nothing, if the items cannot be built.
+ */
+static BOOL LPK_DrawByRuns(HDC hdc, int x, int y, UINT fuOptions, const RECT *lprc,
+                           LPCWSTR str, UINT count, BOOL *pResult)
+{
+    SCRIPT_CONTROL control;
+    SCRIPT_STATE state;
+    SCRIPT_ITEM *items;
+    BYTE *levels = NULL;
+    int *visual = NULL;
+    int maxItems = 8, nItems, j;
+    HRESULT hr;
+    UINT runOptions = (fuOptions & ~ETO_OPAQUE) | ETO_IGNORELANGUAGE;
+
+    memset(&control, 0, sizeof(control));
+    memset(&state, 0, sizeof(state));
+
+    items = HeapAlloc(GetProcessHeap(), 0, (maxItems + 1) * sizeof(*items));
+    if (!items)
+        return FALSE;
+
+    hr = ScriptItemize(str, count, maxItems, &control, &state, items, &nItems);
+    while (hr == E_OUTOFMEMORY)
+    {
+        SCRIPT_ITEM *grown;
+
+        maxItems *= 2;
+        grown = HeapReAlloc(GetProcessHeap(), 0, items, (maxItems + 1) * sizeof(*items));
+        if (!grown)
+        {
+            HeapFree(GetProcessHeap(), 0, items);
+            return FALSE;
+        }
+        items = grown;
+        hr = ScriptItemize(str, count, maxItems, &control, &state, items, &nItems);
+    }
+
+    levels = HeapAlloc(GetProcessHeap(), 0, nItems * sizeof(*levels));
+    visual = HeapAlloc(GetProcessHeap(), 0, nItems * sizeof(*visual));
+    if (FAILED(hr) || nItems < 1 || !levels || !visual)
+        goto Fail;
+
+    for (j = 0; j < nItems; j++)
+        levels[j] = items[j].a.s.uBidiLevel;
+    if (FAILED(ScriptLayout(nItems, levels, visual, NULL)))
+        goto Fail;
+
+    *pResult = TRUE;
+    if ((fuOptions & ETO_OPAQUE) && lprc)
+        *pResult = ExtTextOutW(hdc, x, y, ETO_OPAQUE | ETO_IGNORELANGUAGE, lprc, NULL, 0, NULL);
+
+    for (j = 0; j < nItems; j++)
+    {
+        const SCRIPT_ITEM *item = &items[visual[j]];
+        LPCWSTR seg = str + item->iCharPos;
+        INT len = items[visual[j] + 1].iCharPos - item->iCharPos;
+        LPWSTR out = HeapAlloc(GetProcessHeap(), 0, len * sizeof(WCHAR));
+        WORD *glyphs = NULL;
+        INT cGlyphs = 0;
+        SIZE size;
+        BOOL reordered;
+
+        if (!out)
+        {
+            *pResult = FALSE;
+            break;
+        }
+
+        reordered = BIDI_Reorder(hdc, seg, len, GCP_REORDER,
+                                 (item->a.s.uBidiLevel & 1) ? WINE_GCPW_FORCE_RTL : WINE_GCPW_FORCE_LTR,
+                                 out, len, NULL, &glyphs, &cGlyphs);
+        if (!reordered)
+            memcpy(out, seg, len * sizeof(WCHAR));
+
+        if (glyphs && reordered && !LPK_FontLacksChars(hdc, seg, len))
+        {
+            *pResult &= ExtTextOutW(hdc, x, y, runOptions | ETO_GLYPH_INDEX, lprc, (LPWSTR)glyphs, cGlyphs, NULL);
+            if (!GetTextExtentExPointI(hdc, glyphs, cGlyphs, 0, NULL, NULL, &size))
+                size.cx = 0;
+        }
+        else
+        {
+            *pResult &= ExtTextOutW(hdc, x, y, runOptions, lprc, out, len, NULL);
+            if (!GetTextExtentExPointWPri(hdc, out, len, 0, NULL, NULL, &size))
+                size.cx = 0;
+        }
+
+        x += size.cx;
+        HeapFree(GetProcessHeap(), 0, glyphs);
+        HeapFree(GetProcessHeap(), 0, out);
+    }
+
+    HeapFree(GetProcessHeap(), 0, visual);
+    HeapFree(GetProcessHeap(), 0, levels);
+    HeapFree(GetProcessHeap(), 0, items);
+    return TRUE;
+
+Fail:
+    HeapFree(GetProcessHeap(), 0, visual);
+    HeapFree(GetProcessHeap(), 0, levels);
+    HeapFree(GetProcessHeap(), 0, items);
+    return FALSE;
+}
+
+/*
  * @implemented
  */
 BOOL
@@ -276,6 +445,23 @@ LpkExtTextOut(
         bReorder = BIDI_Reorder(hdc, lpString, uCount, GCP_REORDER,
                                 (fuOptions & ETO_RTLREADING) ? WINE_GCPW_FORCE_RTL : WINE_GCPW_FORCE_LTR,
                                 reordered_str, uCount, NULL, &glyphs, &cGlyphs);
+
+        /* The glyph array only knows the selected font. If it lacks a character, draw the items that
+           lack one as plain characters so that the font linking in win32k can supply the glyphs. */
+        if (glyphs && bReorder && LPK_FontLacksChars(hdc, lpString, uCount))
+        {
+            if (LPK_CanDrawByRuns(hdc, fuOptions, lpDx) &&
+                LPK_DrawByRuns(hdc, x, y, fuOptions, lprc, lpString, uCount, &bResult))
+            {
+                HeapFree(GetProcessHeap(), 0, glyphs);
+                HeapFree(GetProcessHeap(), 0, reordered_str);
+                return bResult;
+            }
+
+            /* Runs cannot be placed: draw the reordered string, which loses shaping */
+            HeapFree(GetProcessHeap(), 0, glyphs);
+            glyphs = NULL;
+        }
 
         /* Now display the reordered text if any of the arrays is valid and if BIDI_Reorder() succeeded */
         if ((glyphs || reordered_str) && bReorder)

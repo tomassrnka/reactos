@@ -197,8 +197,26 @@ VOID FASTCALL DC_vUpdateViewportExt(PDC pdc);
 VOID FASTCALL DC_vCopyState(PDC pdcSrc, PDC pdcDst, BOOL To);
 VOID FASTCALL DC_vFinishBlit(PDC pdc1, PDC pdc2);
 VOID FASTCALL DC_vPrepareDCsForBlit(PDC pdcDest, const RECT* rcDest, PDC pdcSrc, const RECT* rcSrc);
+/* DC_vPrepareDCsForBlitEx flags: the caller removes the pointer itself around the part of the blit that reaches it;
+ * the destination only reaches what lies inside the DC clip object (it draws through pdc->co), as the engine call in
+ * question treats the clip object (CLIPLIM_*, see DC_vGetClipLimit) */
+#define DCPREP_SPLIT_DEST      0x01
+#define DCPREP_CLIP_BITBLT     0x02
+#define DCPREP_CLIP_ALPHA      0x04
+#define DCPREP_CLIP_NOTRIVIAL  0x08
+#define DCPREP_CLIP_MASK       0x0E
+VOID FASTCALL DC_vPrepareDCsForBlitEx(PDC pdcDest, const RECT* rcDest, PDC pdcSrc, const RECT* rcSrc, FLONG fl);
+typedef enum _CLIPLIMIT
+{
+    CLIPLIM_BITBLT,    /* IntEngBitBlt: always clips to the bounds */
+    CLIPLIM_ALPHA,     /* IntEngAlphaBlend: empty bounds draw nothing, a DC_TRIVIAL clip with other bounds is not clipped */
+    CLIPLIM_NOTRIVIAL  /* IntEngTransparentBlt, IntEngStretchBlt: the bounds of a DC_TRIVIAL clip are ignored */
+} CLIPLIMIT;
+VOID FASTCALL DC_vGetClipLimit(PDC pdc, CLIPLIMIT kind, RECTL *prcl);
 
 VOID NTAPI DC_vRestoreDC(IN PDC pdc, INT iSaveLevel);
+BOOL FASTCALL DC_bSurfaceInSavedState(_In_ PDC pdc, _In_ PSURFACE psurf);
+VOID FASTCALL DC_vReleaseSurface(_In_ PDC pdc, _In_opt_ PSURFACE psurf);
 
 VOID NTAPI DC_vFreeDcAttr(PDC pdc);
 VOID NTAPI DC_vInitDc(PDC pdc, DCTYPE dctype, PPDEVOBJ ppdev);
@@ -270,11 +288,9 @@ VOID
 DC_vSelectSurface(PDC pdc, PSURFACE psurfNew)
 {
     PSURFACE psurfOld = pdc->dclevel.pSurface;
+    /* The mark of the surface (hdc) is not touched here, see DC_vReleaseSurface */
     if (psurfOld)
-    {
-        psurfOld->hdc = NULL;
         SURFACE_ShareUnlockSurface(psurfOld);
-    }
     if (psurfNew)
         GDIOBJ_vReferenceObjectByPointer((POBJ)psurfNew);
     pdc->dclevel.pSurface = psurfNew;

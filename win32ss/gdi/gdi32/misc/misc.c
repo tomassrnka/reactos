@@ -297,9 +297,9 @@ enum SIZINGTYPE {
  *
  * Pseudo TransparentBlt/StretchBlt
  */
-static inline BOOL UXTHEME_StretchBlt(HDC hdcDst, int nXOriginDst, int nYOriginDst, int nWidthDst, int nHeightDst,
-                                      HDC hdcSrc, int nXOriginSrc, int nYOriginSrc, int nWidthSrc, int nHeightSrc,
-                                      INT transparent, COLORREF transcolor)
+static BOOL UXTHEME_DoBlt(HDC hdcDst, int nXOriginDst, int nYOriginDst, int nWidthDst, int nHeightDst,
+                          HDC hdcSrc, int nXOriginSrc, int nYOriginSrc, int nWidthSrc, int nHeightSrc,
+                          INT transparent, COLORREF transcolor)
 {
     static const BLENDFUNCTION blendFunc =
     {
@@ -335,6 +335,236 @@ static inline BOOL UXTHEME_StretchBlt(HDC hdcDst, int nXOriginDst, int nYOriginD
     SetStretchBltMode(hdcDst, old_stretch_mode);
 
     return ret;
+}
+
+/* The source pixel Windows' theme drawing takes for destination pixel d when s pixels become n:
+   the one under the centre of d, on a tie the right one across and the upper one down */
+static inline int UXTHEME_SourceColumn(int d, int s, int n)
+{
+    return (int)(((2LL * d + 1) * s) / (2LL * n));
+}
+
+static inline int UXTHEME_SourceRow(int d, int s, int n)
+{
+    return (int)(((2LL * d + 1) * s - 1) / (2LL * n));
+}
+
+/* The colour key as a pixel of the source's format reads once expanded to 32 bpp; a monochrome source
+   takes the text and background colours of hdcColors, as the image itself does */
+static COLORREF UXTHEME_ExpandedKey(HDC hdcSrc, HDC hdcColors, COLORREF transcolor)
+{
+    BITMAPINFO bmi;
+    HDC hdcKey = CreateCompatibleDC(hdcSrc), hdc32 = CreateCompatibleDC(hdcSrc);
+    HBITMAP hbmKey = CreateCompatibleBitmap(hdcSrc, 1, 1), hbm32;
+    HGDIOBJ hbmOldKey = NULL, hbmOld32 = NULL;
+    PDWORD pdw;
+    COLORREF ret = transcolor;
+
+    ZeroMemory(&bmi, sizeof(bmi));
+    bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
+    bmi.bmiHeader.biWidth = 1;
+    bmi.bmiHeader.biHeight = 1;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    hbm32 = CreateDIBSection(hdcSrc, &bmi, DIB_RGB_COLORS, (PVOID *)&pdw, NULL, 0);
+    if (hdcKey && hdc32 && hbmKey && hbm32)
+    {
+        hbmOldKey = SelectObject(hdcKey, hbmKey);
+        hbmOld32 = SelectObject(hdc32, hbm32);
+        SetTextColor(hdc32, GetTextColor(hdcColors));
+        SetBkColor(hdc32, GetBkColor(hdcColors));
+        SetPixelV(hdcKey, 0, 0, transcolor);
+        if (BitBlt(hdc32, 0, 0, 1, 1, hdcKey, 0, 0, SRCCOPY))
+        {
+            GdiFlush();
+            ret = RGB((*pdw >> 16) & 0xFF, (*pdw >> 8) & 0xFF, *pdw & 0xFF);
+        }
+    }
+    if (hbmOldKey) SelectObject(hdcKey, hbmOldKey);
+    if (hbmOld32) SelectObject(hdc32, hbmOld32);
+    if (hbmKey) DeleteObject(hbmKey);
+    if (hbm32) DeleteObject(hbm32);
+    if (hdcKey) DeleteDC(hdcKey);
+    if (hdc32) DeleteDC(hdc32);
+    return ret;
+}
+
+/* The device rectangle of a destination; FALSE when it is not drawn in device pixels: rotated, mirrored or
+   right-to-left DCs, and extents that do not fit an int */
+static BOOL UXTHEME_DeviceRect(HDC hdc, int x, int y, int cx, int cy, RECT *prcDev)
+{
+    XFORM xf;
+    POINT pt[2];
+
+    if ((LONGLONG)x + cx > MAXLONG || (LONGLONG)y + cy > MAXLONG)
+        return FALSE;
+    if (GetLayout(hdc) & LAYOUT_RTL)
+        return FALSE;
+    /* GM_COMPATIBLE keeps a world transform that was set before, and LPtoDP applies it */
+    if (!GetWorldTransform(hdc, &xf) || xf.eM12 != 0.0f || xf.eM21 != 0.0f)
+        return FALSE;
+    pt[0].x = x;
+    pt[0].y = y;
+    pt[1].x = x + cx;
+    pt[1].y = y + cy;
+    if (!LPtoDP(hdc, pt, 2) || pt[1].x <= pt[0].x || pt[1].y <= pt[0].y ||
+        (LONGLONG)pt[1].x - pt[0].x > MAXLONG || (LONGLONG)pt[1].y - pt[0].y > MAXLONG)
+    {
+        return FALSE;
+    }
+    SetRect(prcDev, pt[0].x, pt[0].y, pt[1].x, pt[1].y);
+    return TRUE;
+}
+
+/* Maps the DC one to one onto device pixels; returns the SaveDC level to restore, 0 on failure */
+static int UXTHEME_SetDeviceMapping(HDC hdc)
+{
+    int iSaved = SaveDC(hdc);
+
+    if (!iSaved)
+        return 0;
+    /* The world transform can only be reset in GM_ADVANCED, and GM_COMPATIBLE may still carry one */
+    SetGraphicsMode(hdc, GM_ADVANCED);
+    ModifyWorldTransform(hdc, NULL, MWT_IDENTITY);
+    SetGraphicsMode(hdc, GM_COMPATIBLE);
+    SetMapMode(hdc, MM_TEXT);
+    SetViewportOrgEx(hdc, 0, 0, NULL);
+    SetWindowOrgEx(hdc, 0, 0, NULL);
+    return iSaved;
+}
+
+static BOOL UXTHEME_ResizeBlt(HDC hdcDst, int nXOriginDst, int nYOriginDst, int nWidthDst, int nHeightDst,
+                              HDC hdcSrc, int nXOriginSrc, int nYOriginSrc, int nWidthSrc, int nHeightSrc,
+                              INT transparent, COLORREF transcolor)
+{
+    BITMAPINFO bmi;
+    RECT rcDev, rcClip, rcVis;
+    HDC hdcIn = NULL, hdcOut = NULL;
+    HBITMAP hbmIn = NULL, hbmOut = NULL;
+    HGDIOBJ hbmOldIn = NULL, hbmOldOut = NULL;
+    PDWORD pdwIn, pdwOut, pdwRow;
+    PINT pnColumn = NULL;
+    BOOL ret = FALSE;
+    int x, y, cxDev, cyDev, cxVis, cyVis, xIn, yIn, cxIn, cyIn, iSaved;
+
+    /* Windows resizes to device pixels; other DCs are left to GDI's stretch */
+    if (!UXTHEME_DeviceRect(hdcDst, nXOriginDst, nYOriginDst, nWidthDst, nHeightDst, &rcDev))
+        goto stretch;
+    cxDev = rcDev.right - rcDev.left;
+    cyDev = rcDev.bottom - rcDev.top;
+
+    iSaved = UXTHEME_SetDeviceMapping(hdcDst);
+    if (!iSaved)
+        goto stretch;
+
+    /* Only the visible part is resized; the pixel rule keeps the full destination */
+    rcVis = rcDev;
+    switch (GetClipBox(hdcDst, &rcClip))
+    {
+        case NULLREGION:
+            ret = TRUE;
+            goto done;
+        case ERROR:
+            break;
+        default:
+            if (!IntersectRect(&rcVis, &rcDev, &rcClip))
+            {
+                ret = TRUE;
+                goto done;
+            }
+            break;
+    }
+    cxVis = rcVis.right - rcVis.left;
+    cyVis = rcVis.bottom - rcVis.top;
+    xIn = UXTHEME_SourceColumn(rcVis.left - rcDev.left, nWidthSrc, cxDev);
+    cxIn = UXTHEME_SourceColumn(rcVis.right - 1 - rcDev.left, nWidthSrc, cxDev) + 1 - xIn;
+    yIn = UXTHEME_SourceRow(rcVis.top - rcDev.top, nHeightSrc, cyDev);
+    cyIn = UXTHEME_SourceRow(rcVis.bottom - 1 - rcDev.top, nHeightSrc, cyDev) + 1 - yIn;
+
+    /* Larger copies are left to GDI's stretch */
+    if (cxVis > 0x4000 || cyVis > 0x4000 || cxIn > 0x4000 || cyIn > 0x4000 ||
+        (ULONGLONG)cxVis * cyVis > 0x1000000 || (ULONGLONG)cxIn * cyIn > 0x1000000)
+    {
+        RestoreDC(hdcDst, iSaved);
+        goto stretch;
+    }
+
+    hdcIn = CreateCompatibleDC(hdcSrc);
+    hdcOut = CreateCompatibleDC(hdcSrc);
+    pnColumn = HeapAlloc(GetProcessHeap(), 0, cxVis * sizeof(INT));
+    if (!hdcIn || !hdcOut || !pnColumn)
+        goto done;
+    /* A monochrome source takes the destination's colours */
+    SetTextColor(hdcIn, GetTextColor(hdcDst));
+    SetBkColor(hdcIn, GetBkColor(hdcDst));
+
+    ZeroMemory(&bmi, sizeof(bmi));
+    bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    bmi.bmiHeader.biWidth = cxIn;
+    bmi.bmiHeader.biHeight = -cyIn;
+    hbmIn = CreateDIBSection(hdcSrc, &bmi, DIB_RGB_COLORS, (PVOID *)&pdwIn, NULL, 0);
+    bmi.bmiHeader.biWidth = cxVis;
+    bmi.bmiHeader.biHeight = -cyVis;
+    hbmOut = CreateDIBSection(hdcSrc, &bmi, DIB_RGB_COLORS, (PVOID *)&pdwOut, NULL, 0);
+    if (!hbmIn || !hbmOut)
+        goto done;
+    hbmOldIn = SelectObject(hdcIn, hbmIn);
+    hbmOldOut = SelectObject(hdcOut, hbmOut);
+
+    if (!BitBlt(hdcIn, 0, 0, cxIn, cyIn, hdcSrc, nXOriginSrc + xIn, nYOriginSrc + yIn, SRCCOPY))
+        goto done;
+    GdiFlush();
+
+    for (x = 0; x < cxVis; x++)
+        pnColumn[x] = UXTHEME_SourceColumn(rcVis.left - rcDev.left + x, nWidthSrc, cxDev) - xIn;
+    for (y = 0; y < cyVis; y++)
+    {
+        pdwRow = pdwIn + (UXTHEME_SourceRow(rcVis.top - rcDev.top + y, nHeightSrc, cyDev) - yIn) * cxIn;
+        for (x = 0; x < cxVis; x++)
+            pdwOut[y * cxVis + x] = pdwRow[pnColumn[x]];
+    }
+
+    if (transparent == ALPHABLEND_BINARY)
+        transcolor = UXTHEME_ExpandedKey(hdcSrc, hdcIn, transcolor);
+    ret = UXTHEME_DoBlt(hdcDst, rcVis.left, rcVis.top, cxVis, cyVis,
+                        hdcOut, 0, 0, cxVis, cyVis, transparent, transcolor);
+
+done:
+    RestoreDC(hdcDst, iSaved);
+    if (hbmOldIn) SelectObject(hdcIn, hbmOldIn);
+    if (hbmOldOut) SelectObject(hdcOut, hbmOldOut);
+    if (hbmIn) DeleteObject(hbmIn);
+    if (hbmOut) DeleteObject(hbmOut);
+    if (hdcIn) DeleteDC(hdcIn);
+    if (hdcOut) DeleteDC(hdcOut);
+    if (pnColumn) HeapFree(GetProcessHeap(), 0, pnColumn);
+    return ret;
+
+stretch:
+    return UXTHEME_DoBlt(hdcDst, nXOriginDst, nYOriginDst, nWidthDst, nHeightDst,
+                         hdcSrc, nXOriginSrc, nYOriginSrc, nWidthSrc, nHeightSrc,
+                         transparent, transcolor);
+}
+
+static BOOL UXTHEME_StretchBlt(HDC hdcDst, int nXOriginDst, int nYOriginDst, int nWidthDst, int nHeightDst,
+                               HDC hdcSrc, int nXOriginSrc, int nYOriginSrc, int nWidthSrc, int nHeightSrc,
+                               INT transparent, COLORREF transcolor)
+{
+    if ((nWidthDst != nWidthSrc || nHeightDst != nHeightSrc) &&
+        nWidthDst > 0 && nHeightDst > 0 && nWidthSrc > 0 && nHeightSrc > 0)
+    {
+        return UXTHEME_ResizeBlt(hdcDst, nXOriginDst, nYOriginDst, nWidthDst, nHeightDst,
+                                 hdcSrc, nXOriginSrc, nYOriginSrc, nWidthSrc, nHeightSrc,
+                                 transparent, transcolor);
+    }
+
+    return UXTHEME_DoBlt(hdcDst, nXOriginDst, nYOriginDst, nWidthDst, nHeightDst,
+                         hdcSrc, nXOriginSrc, nYOriginSrc, nWidthSrc, nHeightSrc,
+                         transparent, transcolor);
 }
 
 /***********************************************************************
@@ -396,9 +626,32 @@ static inline BOOL UXTHEME_SizedBlt (HDC hdcDst, int nXOriginDst, int nYOriginDs
             int growSize;
 
             /* Calculate temp dimensions of integer multiples of source dimensions */
+#ifdef __REACTOS__
+            /* Neither the temporary size may overflow nor the default bitmap be drawn when creation fails */
+            {
+                LONGLONG llWidthTemp = ((LONGLONG)nWidthDst + nWidthSrc - 1) / nWidthSrc * nWidthSrc;
+                LONGLONG llHeightTemp = ((LONGLONG)nHeightDst + nHeightSrc - 1) / nHeightSrc * nHeightSrc;
+
+                if (llWidthTemp > MAXLONG || llHeightTemp > MAXLONG)
+                {
+                    DeleteDC(hdcTemp);
+                    return FALSE;
+                }
+                nWidthTemp = (int)llWidthTemp;
+                nHeightTemp = (int)llHeightTemp;
+            }
+#else
             nWidthTemp = ((nWidthDst + nWidthSrc - 1) / nWidthSrc) * nWidthSrc;
             nHeightTemp = ((nHeightDst + nHeightSrc - 1) / nHeightSrc) * nHeightSrc;
+#endif
             bitmapTemp = CreateCompatibleBitmap(hdcSrc, nWidthTemp, nHeightTemp);
+#ifdef __REACTOS__
+            if (!bitmapTemp)
+            {
+                DeleteDC(hdcTemp);
+                return FALSE;
+            }
+#endif
             bitmapOrig = SelectObject(hdcTemp, bitmapTemp);
 
             /* Initial copy of bitmap */
@@ -449,6 +702,81 @@ static inline BOOL UXTHEME_SizedBlt (HDC hdcDst, int nXOriginDst, int nYOriginDs
     }
 }
 
+/* An edge across a compressed margin is resized along the margin and tiled along the edge */
+static BOOL UXTHEME_ResizeTileBlt(HDC hdcDst, int nXOriginDst, int nYOriginDst, int nWidthDst, int nHeightDst,
+                                  HDC hdcSrc, int nXOriginSrc, int nYOriginSrc, int nWidthSrc, int nHeightSrc,
+                                  BOOL bAcross, INT transparent, COLORREF transcolor)
+{
+    BITMAPINFO bmi;
+    PVOID pvBits;
+    HDC hdcTmp;
+    HBITMAP hbmTmp = NULL;
+    HGDIOBJ hbmOld = NULL;
+    int cxTmp = bAcross ? nWidthDst : nWidthSrc;
+    int cyTmp = bAcross ? nHeightSrc : nHeightDst;
+    BOOL ret = FALSE;
+
+    hdcTmp = CreateCompatibleDC(hdcSrc);
+    if (!hdcTmp)
+        return FALSE;
+    ZeroMemory(&bmi, sizeof(bmi));
+    bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
+    bmi.bmiHeader.biWidth = cxTmp;
+    bmi.bmiHeader.biHeight = -cyTmp;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    hbmTmp = CreateDIBSection(hdcSrc, &bmi, DIB_RGB_COLORS, &pvBits, NULL, 0);
+    if (hbmTmp)
+    {
+        hbmOld = SelectObject(hdcTmp, hbmTmp);
+        SetTextColor(hdcTmp, GetTextColor(hdcDst));
+        SetBkColor(hdcTmp, GetBkColor(hdcDst));
+        if (UXTHEME_ResizeBlt(hdcTmp, 0, 0, cxTmp, cyTmp, hdcSrc, nXOriginSrc, nYOriginSrc,
+                              nWidthSrc, nHeightSrc, ALPHABLEND_NONE, 0))
+        {
+            if (transparent == ALPHABLEND_BINARY)
+                transcolor = UXTHEME_ExpandedKey(hdcSrc, hdcTmp, transcolor);
+            ret = UXTHEME_SizedBlt(hdcDst, nXOriginDst, nYOriginDst, nWidthDst, nHeightDst,
+                                   hdcTmp, 0, 0, cxTmp, cyTmp, ST_TILE, transparent, transcolor);
+        }
+        SelectObject(hdcTmp, hbmOld);
+        DeleteObject(hbmTmp);
+    }
+    DeleteDC(hdcTmp);
+    return ret;
+}
+
+/* Copy of an image that is selected into a DC GdiDrawStream does not own */
+static HBITMAP UXTHEME_CopyImage(HDC hdc, HBITMAP hbm)
+{
+    BITMAP bm;
+    BITMAPINFO bmi;
+    PVOID pvBits;
+    HBITMAP hbmCopy;
+
+    if (!GetObjectW(hbm, sizeof(bm), &bm))
+        return NULL;
+
+    ZeroMemory(&bmi, sizeof(bmi));
+    bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
+    bmi.bmiHeader.biWidth = bm.bmWidth;
+    bmi.bmiHeader.biHeight = bm.bmHeight;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    hbmCopy = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &pvBits, NULL, 0);
+    if (!hbmCopy)
+        return NULL;
+
+    if (GetDIBits(hdc, hbm, 0, bm.bmHeight, pvBits, &bmi, DIB_RGB_COLORS) != bm.bmHeight)
+    {
+        DeleteObject(hbmCopy);
+        return NULL;
+    }
+    return hbmCopy;
+}
+
 /***********************************************************************
  *      UXTHEME_DrawImageBackground
  *
@@ -458,9 +786,9 @@ static HRESULT UXTHEME_DrawImageBackground(HDC hdc, HBITMAP bmpSrc, RECT *prcSrc
                                     COLORREF transparentcolor, BOOL borderonly, int sizingtype, MARGINS *psm, RECT *pRect)
 {
     HRESULT hr = S_OK;
-    HBITMAP bmpSrcResized = NULL;
+    HBITMAP bmpCopy = NULL;
     HGDIOBJ oldSrc;
-    HDC hdcSrc, hdcOrigSrc = NULL;
+    HDC hdcSrc;
     RECT rcDst;
     POINT dstSize;
     POINT srcSize;
@@ -477,6 +805,20 @@ static HRESULT UXTHEME_DrawImageBackground(HDC hdc, HBITMAP bmpSrc, RECT *prcSrc
         return hr;
     }
     oldSrc = SelectObject(hdcSrc, bmpSrc);
+    if (!oldSrc)
+    {
+        /* A bitmap is selected into one DC at a time; the caller holds this one */
+        bmpCopy = UXTHEME_CopyImage(hdcSrc, bmpSrc);
+        if (bmpCopy)
+            oldSrc = SelectObject(hdcSrc, bmpCopy);
+        if (!oldSrc)
+        {
+            if (bmpCopy)
+                DeleteObject(bmpCopy);
+            DeleteDC(hdcSrc);
+            return E_FAIL;
+        }
+    }
 
     dstSize.x = rcDst.right-rcDst.left;
     dstSize.y = rcDst.bottom-rcDst.top;
@@ -491,147 +833,105 @@ static HRESULT UXTHEME_DrawImageBackground(HDC hdc, HBITMAP bmpSrc, RECT *prcSrc
     }
     else {
         HDC hdcDst = NULL;
-        POINT org;
+        POINT org, ptOrigin = { rcDst.left, rcDst.top };
+        RECT rcDev;
+        int srcX[4], srcY[4], dstX[4], dstY[4], i, j, iSaved = 0;
+        BOOL bOk;
 
         dstSize.x = abs(dstSize.x);
         dstSize.y = abs(dstSize.y);
 
-        /* Resize source image if destination smaller than margins */
-#ifndef __REACTOS__
-        /* Revert Wine Commit 2b650fa as it breaks themed Explorer Toolbar Separators
-           FIXME: Revisit this when the bug is fixed. CORE-9636 and Wine Bug #38538 */
-        if (sm.cyTopHeight + sm.cyBottomHeight > dstSize.y || sm.cxLeftWidth + sm.cxRightWidth > dstSize.x) {
-            if (sm.cyTopHeight + sm.cyBottomHeight > dstSize.y) {
-                sm.cyTopHeight = MulDiv(sm.cyTopHeight, dstSize.y, srcSize.y);
-                sm.cyBottomHeight = dstSize.y - sm.cyTopHeight;
-                srcSize.y = dstSize.y;
-            }
-
-            if (sm.cxLeftWidth + sm.cxRightWidth > dstSize.x) {
-                sm.cxLeftWidth = MulDiv(sm.cxLeftWidth, dstSize.x, srcSize.x);
-                sm.cxRightWidth = dstSize.x - sm.cxLeftWidth;
-                srcSize.x = dstSize.x;
-            }
-
-            hdcOrigSrc = hdcSrc;
-            hdcSrc = CreateCompatibleDC(NULL);
-            bmpSrcResized = CreateBitmap(srcSize.x, srcSize.y, 1, 32, NULL);
-            SelectObject(hdcSrc, bmpSrcResized);
-
-            UXTHEME_StretchBlt(hdcSrc, 0, 0, srcSize.x, srcSize.y, hdcOrigSrc, rcSrc.left, rcSrc.top,
-                               rcSrc.right - rcSrc.left, rcSrc.bottom - rcSrc.top, transparent, transparentcolor);
-
-            rcSrc.left = 0;
-            rcSrc.top = 0;
-            rcSrc.right = srcSize.x;
-            rcSrc.bottom = srcSize.y;
+        /* Windows lays the parts out in device pixels: on a scaled DC the margins stay device pixels and no
+           part is scaled again. Rotated, mirrored and right-to-left DCs, and destinations over 16384 device
+           pixels, keep the logical layout */
+        if (UXTHEME_DeviceRect(hdc, rcDst.left, rcDst.top, dstSize.x, dstSize.y, &rcDev) &&
+            rcDev.right - rcDev.left <= 0x4000 && rcDev.bottom - rcDev.top <= 0x4000 &&
+            (iSaved = UXTHEME_SetDeviceMapping(hdc)) != 0)
+        {
+            ptOrigin.x = rcDev.left;
+            ptOrigin.y = rcDev.top;
+            dstSize.x = rcDev.right - rcDev.left;
+            dstSize.y = rcDev.bottom - rcDev.top;
         }
-#endif /* __REACTOS__ */
+
+        /* Margins outside the image are cut to it */
+        sm.cxLeftWidth = max(0, min(sm.cxLeftWidth, srcSize.x));
+        sm.cxRightWidth = max(0, min(sm.cxRightWidth, srcSize.x - sm.cxLeftWidth));
+        sm.cyTopHeight = max(0, min(sm.cyTopHeight, srcSize.y));
+        sm.cyBottomHeight = max(0, min(sm.cyBottomHeight, srcSize.y - sm.cyTopHeight));
+
+        /* A destination smaller than both margins gets them in proportion, as on Windows */
+        srcX[0] = 0;
+        srcX[1] = sm.cxLeftWidth;
+        srcX[2] = srcSize.x - sm.cxRightWidth;
+        srcX[3] = srcSize.x;
+        srcY[0] = 0;
+        srcY[1] = sm.cyTopHeight;
+        srcY[2] = srcSize.y - sm.cyBottomHeight;
+        srcY[3] = srcSize.y;
+        dstX[0] = 0;
+        dstX[3] = dstSize.x;
+        dstY[0] = 0;
+        dstY[3] = dstSize.y;
+        if (sm.cxLeftWidth + sm.cxRightWidth > dstSize.x)
+        {
+            dstX[1] = dstX[2] = (int)((LONGLONG)sm.cxLeftWidth * dstSize.x / (sm.cxLeftWidth + sm.cxRightWidth));
+        }
+        else
+        {
+            dstX[1] = sm.cxLeftWidth;
+            dstX[2] = dstSize.x - sm.cxRightWidth;
+        }
+        if (sm.cyTopHeight + sm.cyBottomHeight > dstSize.y)
+        {
+            dstY[1] = dstY[2] = (int)((LONGLONG)sm.cyTopHeight * dstSize.y / (sm.cyTopHeight + sm.cyBottomHeight));
+        }
+        else
+        {
+            dstY[1] = sm.cyTopHeight;
+            dstY[2] = dstSize.y - sm.cyBottomHeight;
+        }
 
         hdcDst = hdc;
-        OffsetViewportOrgEx(hdcDst, rcDst.left, rcDst.top, &org);
+        OffsetViewportOrgEx(hdcDst, ptOrigin.x, ptOrigin.y, &org);
 
-        /* Upper left corner */
-        if(!UXTHEME_Blt(hdcDst, 0, 0, sm.cxLeftWidth, sm.cyTopHeight,
-                        hdcSrc, rcSrc.left, rcSrc.top,
-                        transparent, transparentcolor)) {
-            hr = HRESULT_FROM_WIN32(GetLastError());
-            goto draw_error;
-        }
-        /* Upper right corner */
-        if(!UXTHEME_Blt (hdcDst, dstSize.x-sm.cxRightWidth, 0,
-                         sm.cxRightWidth, sm.cyTopHeight,
-                         hdcSrc, rcSrc.right-sm.cxRightWidth, rcSrc.top,
-                         transparent, transparentcolor)) {
-            hr = HRESULT_FROM_WIN32(GetLastError());
-            goto draw_error;
-        }
-        /* Lower left corner */
-        if(!UXTHEME_Blt (hdcDst, 0, dstSize.y-sm.cyBottomHeight,
-                         sm.cxLeftWidth, sm.cyBottomHeight,
-                         hdcSrc, rcSrc.left, rcSrc.bottom-sm.cyBottomHeight,
-                         transparent, transparentcolor)) {
-            hr = HRESULT_FROM_WIN32(GetLastError());
-            goto draw_error;
-        }
-        /* Lower right corner */
-        if(!UXTHEME_Blt (hdcDst, dstSize.x-sm.cxRightWidth, dstSize.y-sm.cyBottomHeight,
-                         sm.cxRightWidth, sm.cyBottomHeight,
-                         hdcSrc, rcSrc.right-sm.cxRightWidth, rcSrc.bottom-sm.cyBottomHeight,
-                         transparent, transparentcolor)) {
-            hr = HRESULT_FROM_WIN32(GetLastError());
-            goto draw_error;
-        }
+        /* Corners are resized, edges and the centre stretched or tiled; edges across a compressed margin are resized along it */
+        for (j = 0; j < 3; j++)
+        {
+            for (i = 0; i < 3; i++)
+            {
+                int dw = dstX[i + 1] - dstX[i], dh = dstY[j + 1] - dstY[j];
+                int sw = srcX[i + 1] - srcX[i], sh = srcY[j + 1] - srcY[j];
 
-        if ((sizingtype == ST_STRETCH) || (sizingtype == ST_TILE)) {
-            int destCenterWidth  = dstSize.x - (sm.cxLeftWidth + sm.cxRightWidth);
-            int srcCenterWidth   = srcSize.x - (sm.cxLeftWidth + sm.cxRightWidth);
-            int destCenterHeight = dstSize.y - (sm.cyTopHeight + sm.cyBottomHeight);
-            int srcCenterHeight  = srcSize.y - (sm.cyTopHeight + sm.cyBottomHeight);
-
-            if(destCenterWidth > 0) {
-                /* Center top */
-                if(!UXTHEME_SizedBlt (hdcDst, sm.cxLeftWidth, 0,
-                                      destCenterWidth, sm.cyTopHeight,
-                                      hdcSrc, rcSrc.left+sm.cxLeftWidth, rcSrc.top,
-                                      srcCenterWidth, sm.cyTopHeight,
-                                      sizingtype, transparent, transparentcolor)) {
+                if (dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0)
+                    continue;
+                if (i == 1 && j == 1 && borderonly)
+                    continue;
+                if (sizingtype == ST_TILE && (i == 1) != (j == 1) && ((i != 1 && dw != sw) || (j != 1 && dh != sh)))
+                    bOk = UXTHEME_ResizeTileBlt(hdcDst, dstX[i], dstY[j], dw, dh,
+                                                hdcSrc, rcSrc.left + srcX[i], rcSrc.top + srcY[j], sw, sh,
+                                                i != 1, transparent, transparentcolor);
+                else
+                    bOk = UXTHEME_SizedBlt(hdcDst, dstX[i], dstY[j], dw, dh,
+                                           hdcSrc, rcSrc.left + srcX[i], rcSrc.top + srcY[j], sw, sh,
+                                           (i == 1 || j == 1) ? sizingtype : ST_STRETCH,
+                                           transparent, transparentcolor);
+                if (!bOk)
+                {
                     hr = HRESULT_FROM_WIN32(GetLastError());
                     goto draw_error;
-                }
-                /* Center bottom */
-                if(!UXTHEME_SizedBlt (hdcDst, sm.cxLeftWidth, dstSize.y-sm.cyBottomHeight,
-                                      destCenterWidth, sm.cyBottomHeight,
-                                      hdcSrc, rcSrc.left+sm.cxLeftWidth, rcSrc.bottom-sm.cyBottomHeight,
-                                      srcCenterWidth, sm.cyBottomHeight,
-                                      sizingtype, transparent, transparentcolor)) {
-                    hr = HRESULT_FROM_WIN32(GetLastError());
-                    goto draw_error;
-                }
-            }
-            if(destCenterHeight > 0) {
-                /* Left center */
-                if(!UXTHEME_SizedBlt (hdcDst, 0, sm.cyTopHeight,
-                                      sm.cxLeftWidth, destCenterHeight,
-                                      hdcSrc, rcSrc.left, rcSrc.top+sm.cyTopHeight,
-                                      sm.cxLeftWidth, srcCenterHeight,
-                                      sizingtype,
-                                      transparent, transparentcolor)) {
-                    hr = HRESULT_FROM_WIN32(GetLastError());
-                    goto draw_error;
-                }
-                /* Right center */
-                if(!UXTHEME_SizedBlt (hdcDst, dstSize.x-sm.cxRightWidth, sm.cyTopHeight,
-                                      sm.cxRightWidth, destCenterHeight,
-                                      hdcSrc, rcSrc.right-sm.cxRightWidth, rcSrc.top+sm.cyTopHeight,
-                                      sm.cxRightWidth, srcCenterHeight,
-                                      sizingtype, transparent, transparentcolor)) {
-                    hr = HRESULT_FROM_WIN32(GetLastError());
-                    goto draw_error;
-                }
-            }
-            if(destCenterHeight > 0 && destCenterWidth > 0) {
-                if(!borderonly) {
-                    /* Center */
-                    if(!UXTHEME_SizedBlt (hdcDst, sm.cxLeftWidth, sm.cyTopHeight,
-                                          destCenterWidth, destCenterHeight,
-                                          hdcSrc, rcSrc.left+sm.cxLeftWidth, rcSrc.top+sm.cyTopHeight,
-                                          srcCenterWidth, srcCenterHeight,
-                                          sizingtype, transparent, transparentcolor)) {
-                        hr = HRESULT_FROM_WIN32(GetLastError());
-                        goto draw_error;
-                    }
                 }
             }
         }
 
 draw_error:
         SetViewportOrgEx (hdcDst, org.x, org.y, NULL);
+        if (iSaved)
+            RestoreDC(hdc, iSaved);
     }
     SelectObject(hdcSrc, oldSrc);
     DeleteDC(hdcSrc);
-    if (bmpSrcResized) DeleteObject(bmpSrcResized);
-    if (hdcOrigSrc) DeleteDC(hdcOrigSrc);
+    if (bmpCopy) DeleteObject(bmpCopy);
     *pRect = rcDst;
     return hr;
 }
@@ -680,16 +980,8 @@ GdiDrawStream(HDC dc, ULONG l, PGDI_DRAW_STREAM pDS)
         if (pDS->rcDest.right < pDS->rcDest.left || pDS->rcDest.bottom < pDS->rcDest.top)
             return 0;
 
-        if (sm.cxLeftWidth + sm.cxRightWidth > pDS->rcDest.right - pDS->rcDest.left)
-        {
-            sm.cxLeftWidth = sm.cxRightWidth = 0;
-        }
-
-        if (sm.cyTopHeight + sm.cyBottomHeight > pDS->rcDest.bottom - pDS->rcDest.top)
-        {
-            sm.cyTopHeight = sm.cyBottomHeight = 0;
-        }
-
+        /* Threads drawing the same theme image take turns selecting it */
+        EnterCriticalSection(&gcsDrawStream);
         UXTHEME_DrawImageBackground(pDS->hDC,
                                     pDS->hImage,
                                     &pDS->rcSrc,
@@ -699,6 +991,7 @@ GdiDrawStream(HDC dc, ULONG l, PGDI_DRAW_STREAM pDS)
                                     sizingtype,
                                     &sm,
                                     &pDS->rcDest);
+        LeaveCriticalSection(&gcsDrawStream);
     }
     return 0;
 }

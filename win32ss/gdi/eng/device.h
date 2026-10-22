@@ -21,6 +21,14 @@ NTAPI
 EngpUpdateMonitorDevices(
     _In_ PGRAPHICS_DEVICE pGraphicsDevice);
 
+BOOLEAN
+NTAPI
+EngpGetMonitorDevice(
+    _In_ PGRAPHICS_DEVICE pGraphicsDevice,
+    _In_ ULONG iMonitor,
+    _Out_ PDEVICE_OBJECT *ppdo,
+    _Out_ PULONG pulFlags);
+
 PGRAPHICS_DEVICE
 NTAPI
 EngpFindGraphicsDevice(

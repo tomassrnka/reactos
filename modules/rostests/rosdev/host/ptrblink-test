@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""ptrblink-test: does the mouse pointer stay on the screen while programs repaint a window under it?
+
+Guest side: ptrblink.exe (modules/rostests/rosdev/ptrblink.c) runs a schedule of drawing calls in a topmost window at
+(100,100). Host side (this script): while the schedule runs it parks the pointer in the middle of the window and takes
+QEMU screendumps through QMP as fast as QEMU gives them (about 100 a second), the way a viewer sees the screen, and counts
+the frames in which the pointer is hidden or only partly drawn. A read of the screen inside the guest cannot do this:
+every GDI read takes the pointer off the screen first.
+
+  guest:  ptrblink.exe 780 560 40 idle:6 full:12 capture:12 stretch11:12 alpha:12 transparent:12 stretch2x:12
+  host:   ptrblink-test --qmp vm/qmp.sock --window 780 560 --idle 6 --phase 12 \\
+              --clean full capture stretch11 alpha transparent --control stretch2x
+
+The phases must be started in the guest right when the green window shows (this script waits for it and keeps time from
+there). Exit status 0 only when the pointer template was found and every --clean mode has at most --max-bad percent bad
+frames; --control modes are only reported (they show the effect is there to be seen). Python 3 standard library only.
+"""
+import argparse, json, os, socket, sys, time
+
+
+class Qmp:
+    def __init__(self, path):
+        s = socket.socket(socket.AF_UNIX)
+        s.connect(path)
+        self.f = s.makefile("rw")
+        self.f.readline()
+        self.cmd("qmp_capabilities")
+
+    def cmd(self, name, **args):
+        self.f.write(json.dumps({"execute": name, "arguments": args}) + "\n")
+        self.f.flush()
+        while True:
+            r = json.loads(self.f.readline())
+            if "return" in r or "error" in r:
+                return r
+
+    def move(self, x, y, w, h):
+        self.cmd("input-send-event", events=[
+            {"type": "abs", "data": {"axis": "x", "value": int(x * 32767 / w)}},
+            {"type": "abs", "data": {"axis": "y", "value": int(y * 32767 / h)}}])
+
+    def shot(self, path):
+        self.cmd("screendump", filename=path, format="ppm")
+
+
+def read_ppm(path):
+    with open(path, "rb") as f:
+        data = f.read()
+    parts = data.split(b"\n", 3)
+    w, h = map(int, parts[1].split())
+    return w, h, parts[3]
+
+
+def px(img, x, y):
+    w, _, raw = img
+    o = (y * w + x) * 3
+    return raw[o], raw[o + 1], raw[o + 2]
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--qmp", required=True)
+    ap.add_argument("--window", nargs=2, type=int, default=[780, 560], metavar=("W", "H"))
+    ap.add_argument("--idle", type=float, default=6, help="seconds of the idle phase (template is learned in it)")
+    ap.add_argument("--phase", type=float, default=12, help="seconds of every other phase")
+    ap.add_argument("--clean", nargs="*", default=[], help="modes that must not blink")
+    ap.add_argument("--control", nargs="*", default=[], help="modes that are measured but not judged")
+    ap.add_argument("--max-bad", type=float, default=0.5, help="allowed bad frames in percent")
+    ap.add_argument("--margin", type=float, default=1.5, help="seconds cut off both ends of a phase")
+    ap.add_argument("--tmp", default="/dev/shm" if os.path.isdir("/dev/shm") else "/tmp")
+    a = ap.parse_args()
+
+    q = Qmp(a.qmp)
+    tmp = os.path.join(a.tmp, "ptrblink-%d.ppm" % os.getpid())
+    wx, wy = 100, 100
+    px0, py0 = wx + a.window[0] // 2, wy + a.window[1] // 2
+
+    # wait for the green window
+    t0 = time.time()
+    while True:
+        q.shot(tmp)
+        img = read_ppm(tmp)
+        w, h = img[0], img[1]
+        green = sum(1 for y in range(wy + 20, wy + 60, 4) for x in range(wx + 20, wx + 300, 4) if px(img, x, y) == (0, 128, 0))
+        if green > 400:
+            break
+        if time.time() - t0 > 900:
+            print("TIMEOUT: no ptrblink window"); return 2
+        time.sleep(1)
+    start = time.time()
+
+    # learn the pointer: a screen with it at P and a screen with it far away
+    q.move(w - 5, h - 5, w, h); time.sleep(0.6)
+    q.move(px0 + 150, py0 + 100, w, h); time.sleep(0.6)
+    q.shot(tmp); away = read_ppm(tmp)
+    q.move(px0, py0, w, h); time.sleep(0.6)
+    q.shot(tmp); here = read_ppm(tmp)
+    tpl = []
+    for y in range(py0 - 2, py0 + 40):
+        for x in range(px0 - 2, px0 + 30):
+            if px(here, x, y) != px(away, x, y):
+                tpl.append((x - px0, y - py0, px(here, x, y)))
+    print("pointer template: %d pixels" % len(tpl))
+    if len(tpl) < 40:
+        print("FAIL: the detector found no pointer (is it showing? does the window cover %d,%d?)" % (px0, py0)); return 2
+
+    def classify(img):
+        best = 0
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                m = sum(1 for (x, y, c) in tpl if px(img, px0 + x + dx, py0 + y + dy) == c)
+                if m > best:
+                    best = m
+                if best == len(tpl):
+                    break
+        f = best / len(tpl)
+        return "ok" if f >= 0.95 else ("hidden" if f < 0.5 else "partial")
+
+    def sample(lo, hi):
+        counts = {"ok": 0, "partial": 0, "hidden": 0}
+        while time.time() - start < hi:
+            if time.time() - start < lo:
+                time.sleep(0.05); continue
+            q.shot(tmp)
+            counts[classify(read_ppm(tmp))] += 1
+        return counts
+
+    results = {}
+    t = a.idle
+    order = [("idle", a.idle)] + [(m, a.phase) for m in a.clean + a.control]
+    # the idle phase is already running: judge only its tail
+    t = 0.0
+    for mode, secs in order:
+        lo, hi = t + a.margin, t + secs - a.margin
+        if mode == "idle":
+            lo = max(lo, time.time() - start)
+        results[mode] = sample(lo, hi)
+        t += secs
+    os.unlink(tmp)
+
+    bad_run = False
+    print("%-12s %7s %6s %8s %7s  %s" % ("mode", "frames", "ok", "partial", "hidden", "bad"))
+    for mode, c in results.items():
+        n = sum(c.values()) or 1
+        bad = 100.0 * (c["partial"] + c["hidden"]) / n
+        judged = mode == "idle" or mode in a.clean
+        verdict = ""
+        if judged and bad > a.max_bad:
+            verdict = "  FAIL"; bad_run = True
+        elif not judged:
+            verdict = "  (control)"
+        print("%-12s %7d %6d %8d %7d  %.2f%%%s" % (mode, n, c["ok"], c["partial"], c["hidden"], bad, verdict))
+    print("RESULT: %s" % ("FAIL, the pointer blinks" if bad_run else "PASS"))
+    return 1 if bad_run else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

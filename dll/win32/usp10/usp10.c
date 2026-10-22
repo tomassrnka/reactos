@@ -2074,6 +2074,10 @@ HRESULT WINAPI ScriptStringAnalyse(HDC hdc, const void *pString, int cString,
                 LOGFONTW lf;
                 GetObjectW(GetCurrentObject(hdc, OBJ_FONT), sizeof(lf), & lf);
                 lf.lfCharSet = scriptInformation[analysis->pItem[i].a.eScript].props.bCharSet;
+#ifdef __REACTOS__
+                /* win32k prefers a matching pitch over the face name, so a fixed-pitch base font hides the fallback face */
+                lf.lfPitchAndFamily = DEFAULT_PITCH | FF_DONTCARE;
+#endif
                 lf.lfFaceName[0] = 0;
                 find_fallback_font(analysis->pItem[i].a.eScript, lf.lfFaceName);
                 if (lf.lfFaceName[0])
@@ -2126,6 +2130,14 @@ HRESULT WINAPI ScriptStringAnalyse(HDC hdc, const void *pString, int cString,
                     multiplier *= 2;
                     continue;
                 }
+#ifdef __REACTOS__
+                /* a font without OpenType tables for the script cannot be shaped; draw its characters unshaped like LpkExtTextOut */
+                if (hr == USP_E_SCRIPT_NOT_IN_FONT && !analysis->pItem[i].a.fNoGlyphIndex)
+                {
+                    analysis->pItem[i].a.fNoGlyphIndex = TRUE;
+                    continue;
+                }
+#endif
 
                 hr = ScriptPlace(hdc, sc, glyphs, numGlyphsReturned, psva, &analysis->pItem[i].a,
                                  piAdvance, pGoffset, &analysis->glyphs[i].abc);

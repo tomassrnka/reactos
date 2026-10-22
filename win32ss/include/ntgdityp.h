@@ -211,6 +211,7 @@ typedef DWORD LFTYPE;
 
 // NtGdiGetTextExtent* flags (reactos own)
 #define GTEF_INDICES 0x1
+#define GTEF_KERNPAIRS 0x2 /* apply pair kerning, for GetCharacterPlacement; a plain extent has none */
 
 /* CAPS1 support */
 #define CAPS1             94

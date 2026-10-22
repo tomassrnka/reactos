@@ -369,6 +369,11 @@ DC_vCleanup(PVOID ObjectBody)
     DC_vRestoreDC(pdc, 1);
 
     /* Deselect dc objects */
+    if (pdc->dclevel.pSurface)
+    {
+        /* A saved state is not the DC that the bitmap is marked with, so this leaves its bitmap alone */
+        InterlockedCompareExchangePointer((PVOID*)&pdc->dclevel.pSurface->hdc, NULL, pdc->BaseObject.hHmgr);
+    }
     DC_vSelectSurface(pdc, NULL);
     DC_vSelectFillBrush(pdc, NULL);
     DC_vSelectLineBrush(pdc, NULL);
@@ -487,6 +492,9 @@ DC_vUpdateDC(PDC pdc)
     pdc->dclevel.pSurface = PDEVOBJ_pSurface(ppdev);
 
     PDEVOBJ_sizl(pdc->ppdev, &pdc->dclevel.sizl);
+
+    /* The clip region is limited to the surface, which may now be smaller */
+    pdc->fs |= DC_DIRTY_RAO;
 #if 0
     VisRgn = IntSysCreateRectpRgn(0, 0, pdc->dclevel.sizl.cx, pdc->dclevel.sizl.cy);
     ASSERT(VisRgn);
@@ -501,6 +509,78 @@ DC_vUpdateDC(PDC pdc)
     pdc->pdcattr->ulDirty_ |= DIRTY_DEFAULT ;
 }
 
+/* The part of the surface a draw through pdc->co can reach, as the engine call of the given kind clips it. The bounds are
+ * what the clip object holds, also when its last update failed and it is an old one; an empty clip is DC_TRIVIAL with empty
+ * bounds. Calls that ignore the bounds of a DC_TRIVIAL clip draw everywhere then. */
+VOID
+FASTCALL
+DC_vGetClipLimit(
+    PDC pdc,
+    CLIPLIMIT kind,
+    RECTL *prcl)
+{
+    BOOL bWhole = FALSE;
+
+    *prcl = pdc->co.rclBounds;
+
+    if (pdc->co.iDComplexity == DC_TRIVIAL)
+    {
+        if (kind == CLIPLIM_NOTRIVIAL)
+            bWhole = TRUE;
+        else if (kind == CLIPLIM_ALPHA && prcl->left < prcl->right && prcl->top < prcl->bottom)
+            bWhole = TRUE;
+    }
+
+    if (bWhole)
+    {
+        prcl->left = prcl->top = LONG_MIN;
+        prcl->right = prcl->bottom = LONG_MAX;
+    }
+}
+
+/* Take the pointer out of the way of a blit on a direct DC. With bCount only,
+ * the pointer stays and the caller removes it around the part of the blit
+ * that reaches it. With a clip kind the destination only reaches the clip limit. */
+static
+VOID
+DC_vMouseSafetyStart(
+    PDC pdc,
+    const RECT *prc,
+    BOOL bCount,
+    FLONG flClip)
+{
+    RECTL rcHazard, rcLimit;
+
+    if (!bCount && flClip && prc)
+    {
+        rcHazard = *prc;
+        RECTL_vMakeWellOrdered(&rcHazard);
+        DC_vGetClipLimit(pdc,
+                         (flClip & DCPREP_CLIP_NOTRIVIAL) ? CLIPLIM_NOTRIVIAL :
+                         (flClip & DCPREP_CLIP_ALPHA) ? CLIPLIM_ALPHA : CLIPLIM_BITBLT,
+                         &rcLimit);
+        if (RECTL_bIntersectRect(&rcHazard, &rcHazard, &rcLimit))
+        {
+            prc = &rcHazard;
+        }
+        else
+        {
+            bCount = TRUE;
+        }
+    }
+
+    if (bCount)
+    {
+        MouseSafetyOnDrawEnter(pdc->ppdev);
+        return;
+    }
+
+    if (!prc)
+        prc = &pdc->erclClip;
+
+    MouseSafetyOnDrawStart(pdc->ppdev, prc->left, prc->top, prc->right, prc->bottom);
+}
+
 /* Prepare a blit for up to 2 DCs */
 /* rc1 and rc2 are the rectangles where we want to draw or
  * from where we take pixels. */
@@ -512,8 +592,24 @@ DC_vPrepareDCsForBlit(
     PDC pdcSrc,
     const RECT* rcSrc)
 {
+    DC_vPrepareDCsForBlitEx(pdcDest, rcDest, pdcSrc, rcSrc, 0);
+}
+
+/* fl: DCPREP_SPLIT_DEST, the caller draws the destination in pieces and removes the
+ * pointer only around the piece under it (see IntEngBitBltAvoidPointer);
+ * DCPREP_CLIP_*, the destination is drawn through the DC clip object. */
+VOID
+FASTCALL
+DC_vPrepareDCsForBlitEx(
+    PDC pdcDest,
+    const RECT* rcDest,
+    PDC pdcSrc,
+    const RECT* rcSrc,
+    FLONG fl)
+{
     PDC pdcFirst, pdcSecond;
     const RECT *prcFirst, *prcSecond;
+    BOOL bFirstIsDest = TRUE;
 
     /* Update brushes */
     if (pdcDest->pdcattr->ulDirty_ & (DIRTY_FILL | DC_BRUSH_DIRTY))
@@ -540,6 +636,7 @@ DC_vPrepareDCsForBlit(
             prcFirst = rcSrc;
             pdcSecond = pdcDest;
             prcSecond = rcDest;
+            bFirstIsDest = FALSE;
         }
     }
     else
@@ -562,19 +659,14 @@ DC_vPrepareDCsForBlit(
         if (pdcFirst->ppdev->pSurface != pdcFirst->dclevel.pSurface)
         {
             DC_vUpdateDC(pdcFirst);
+            if (bFirstIsDest)
+                CLIPPING_UpdateGCRegion(pdcFirst);
         }
     }
 
     if (pdcFirst->dctype == DCTYPE_DIRECT)
     {
-        if (!prcFirst)
-            prcFirst = &pdcFirst->erclClip;
-
-        MouseSafetyOnDrawStart(pdcFirst->ppdev,
-                               prcFirst->left,
-                               prcFirst->top,
-                               prcFirst->right,
-                               prcFirst->bottom) ;
+        DC_vMouseSafetyStart(pdcFirst, prcFirst, (fl & DCPREP_SPLIT_DEST) && bFirstIsDest, (fl & DCPREP_CLIP_MASK) && bFirstIsDest ? (fl & DCPREP_CLIP_MASK) : 0);
     }
 
 #if DBG
@@ -593,18 +685,14 @@ DC_vPrepareDCsForBlit(
         if (pdcSecond->ppdev->pSurface != pdcSecond->dclevel.pSurface)
         {
             DC_vUpdateDC(pdcSecond);
+            if (!bFirstIsDest)
+                CLIPPING_UpdateGCRegion(pdcSecond);
         }
     }
 
     if (pdcSecond->dctype == DCTYPE_DIRECT)
     {
-        if (!prcSecond)
-            prcSecond = &pdcSecond->erclClip;
-        MouseSafetyOnDrawStart(pdcSecond->ppdev,
-                               prcSecond->left,
-                               prcSecond->top,
-                               prcSecond->right,
-                               prcSecond->bottom) ;
+        DC_vMouseSafetyStart(pdcSecond, prcSecond, (fl & DCPREP_SPLIT_DEST) && !bFirstIsDest, (fl & DCPREP_CLIP_MASK) && !bFirstIsDest ? (fl & DCPREP_CLIP_MASK) : 0);
     }
 
 #if DBG

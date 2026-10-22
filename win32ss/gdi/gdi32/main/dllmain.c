@@ -12,6 +12,7 @@ PGDIHANDLECACHE GdiHandleCache = NULL;
 BOOL gbLpk = FALSE;
 RTL_CRITICAL_SECTION semLocal;
 extern CRITICAL_SECTION gcsClientObjLinks;
+CRITICAL_SECTION gcsDrawStream;
 
 /*
  * GDI32.DLL does have an entry point for DisableThreadLibraryCalls().
@@ -58,6 +59,7 @@ GdiProcessSetup(VOID)
         GdiHandleCache = (PGDIHANDLECACHE)NtCurrentTeb()->ProcessEnvironmentBlock->GdiHandleBuffer;
         RtlInitializeCriticalSection(&semLocal);
         InitializeCriticalSection(&gcsClientObjLinks);
+        InitializeCriticalSection(&gcsDrawStream);
         GdiInitializeLanguagePack(0);
     }
 }
@@ -66,6 +68,7 @@ VOID
 WINAPI
 GdiProcessShutdown(VOID)
 {
+    DeleteCriticalSection(&gcsDrawStream);
     DeleteCriticalSection(&gcsClientObjLinks);
     RtlDeleteCriticalSection(&semLocal);
 }

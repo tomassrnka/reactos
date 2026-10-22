@@ -200,6 +200,28 @@ Used Version: 1.10
 License: Apache-2.0 (https://spdx.org/licenses/Apache-2.0.html)
 URL: http://www.google.com/fonts/specimen/Open+Sans
 
+Title: Selawik, Carlito and Caladea Fonts
+Path: media/fonts/selawk*.ttf
+Path: media/fonts/Carlito-*.ttf
+Path: media/fonts/Caladea-*.ttf
+Used Version: Selawik 1.01, Carlito 1.104, Caladea 1.001
+License: OFL-1.1 (https://spdx.org/licenses/OFL-1.1.html)
+URL: https://github.com/microsoft/Selawik, https://github.com/googlefonts/carlito, https://github.com/huertatipografica/Caladea
+
+Title: Noto Sans CJK (SC and KR subset OTF)
+Path: media/fonts/NotoSansSC-Regular.otf
+Path: media/fonts/NotoSansKR-Regular.otf
+Used Version: 2.004
+License: OFL-1.1 (https://spdx.org/licenses/OFL-1.1.html)
+URL: https://github.com/notofonts/noto-cjk/releases/tag/Sans2.004
+
+Title: Noto Sans Symbols 2 and Noto Emoji Fonts
+Path: media/fonts/NotoSansSymbols2-Regular.ttf
+Path: media/fonts/NotoEmoji-Regular.ttf
+Used Version: Noto Sans Symbols 2 2.008, Noto Emoji 1.05 (monochrome, tag v2.034)
+License: OFL-1.1 (https://spdx.org/licenses/OFL-1.1.html)
+URL: https://github.com/notofonts/symbols, https://github.com/googlefonts/noto-emoji
+
 Title: GNU FreeFont
 Path: media/fonts
 Used Version: 2012-05-03

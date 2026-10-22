@@ -48,6 +48,7 @@ BOOLEAN DIB_XXBPP_StretchBlt(SURFOBJ *DestSurf, SURFOBJ *SourceSurf, SURFOBJ *Ma
 
   BOOL UsesSource = ROP4_USES_SOURCE(ROP);
   BOOL UsesPattern = ROP4_USES_PATTERN(ROP);
+  BOOL UsesDest = ROP4_USES_DEST(ROP);
   BOOLEAN bTopToBottom, bLeftToRight;
 
   ASSERT(IS_VALID_ROP4(ROP));
@@ -212,7 +213,8 @@ BOOLEAN DIB_XXBPP_StretchBlt(SURFOBJ *DestSurf, SURFOBJ *SourceSurf, SURFOBJ *Ma
           PatternX %= PatternSurface->sizlBitmap.cx;
         }
 
-        Dest = fnDest_GetPixel(DestSurf, DesX, DesY);
+        /* Reading video memory is slow; SRCCOPY and other ROPs without a destination term skip it */
+        Dest = UsesDest ? fnDest_GetPixel(DestSurf, DesX, DesY) : 0;
         Color = DIB_DoRop(ROP, Dest, Source, Pattern) & xxBPPMask;
 
         fnDest_PutPixel(DestSurf, DesX, DesY, Color);

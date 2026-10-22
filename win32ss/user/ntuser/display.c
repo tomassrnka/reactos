@@ -196,6 +196,10 @@ UserRefreshDisplay(IN PPDEVOBJ ppdev)
     ulResult = PDEVOBJ_bSwitchMode(ppdev, ppdev->pdmwDev);
     ASSERT(ulResult);
 
+    /* Make the pointer again for the new framebuffer; this needs the user lock, which this caller may not hold */
+    if (ulResult)
+        GreRemakePointerAfterModeSwitch(ppdev);
+
     /* Restore mouse pointer, no hooks called */
     // pvOldCursor = UserSetCursor(pvOldCursor, TRUE);
     // ASSERT(pvOldCursor == NULL);
@@ -221,9 +225,9 @@ UserEnumDisplayDevices(
     DWORD dwFlags)
 {
     PGRAPHICS_DEVICE pGraphicsDevice;
-    PDEVICE_OBJECT pdo;
+    PDEVICE_OBJECT pdo, pdoMonitor = NULL;
     PWCHAR pHardwareId;
-    ULONG cbSize, dwLength;
+    ULONG cbSize, dwLength, ulMonitorFlags = 0;
     HKEY hkey;
     NTSTATUS Status;
 
@@ -252,12 +256,12 @@ UserEnumDisplayDevices(
     else
     {
         EngpUpdateMonitorDevices(pGraphicsDevice);
-        if (iDevNum >= pGraphicsDevice->dwMonCnt)
+        if (!EngpGetMonitorDevice(pGraphicsDevice, iDevNum, &pdoMonitor, &ulMonitorFlags))
         {
             TRACE("No monitor #%u for '%wZ'\n", iDevNum + 1, pustrDevice);
             return STATUS_UNSUCCESSFUL;
         }
-        pdo = pGraphicsDevice->pvMonDev[iDevNum].pdo;
+        pdo = pdoMonitor;
     }
 
 
@@ -267,7 +271,8 @@ UserEnumDisplayDevices(
     {
         /* No device found */
         ERR("Could not open reg key\n");
-        return STATUS_UNSUCCESSFUL;
+        Status = STATUS_UNSUCCESSFUL;
+        goto Cleanup;
     }
 
     /* Query the registry path */
@@ -301,7 +306,7 @@ UserEnumDisplayDevices(
             if (!NT_SUCCESS(Status))
                 pdispdev->DeviceString[0] = UNICODE_NULL;
         }
-        pdispdev->StateFlags = pGraphicsDevice->pvMonDev[iDevNum].flag;
+        pdispdev->StateFlags = ulMonitorFlags;
     }
     pdispdev->DeviceID[0] = UNICODE_NULL;
 
@@ -322,7 +327,8 @@ UserEnumDisplayDevices(
             if (!pHardwareId)
             {
                 EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
-                return STATUS_INSUFFICIENT_RESOURCES;
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                goto Cleanup;
             }
 
             Status = IoGetDeviceProperty(pdo,
@@ -368,7 +374,12 @@ UserEnumDisplayDevices(
         }
     }
 
-    return STATUS_SUCCESS;
+    Status = STATUS_SUCCESS;
+
+Cleanup:
+    if (pdoMonitor)
+        ObDereferenceObject(pdoMonitor);
+    return Status;
 }
 
 //NTSTATUS
@@ -842,6 +853,10 @@ UserChangeDisplaySettings(
         /* Restore mouse pointer, no hooks called */
         pvOldCursor = UserSetCursor(pvOldCursor, TRUE);
         ASSERT(pvOldCursor == NULL);
+
+        /* A queue that does not own the window under the pointer set no shape; make the pointer again for the new mode */
+        if (ulResult)
+            GreRemakePointerAfterModeSwitch(ppdev);
 
         /* Check for success or failure */
         if (!ulResult)
