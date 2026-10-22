@@ -1123,10 +1123,20 @@ IKsFilter_DispatchDeviceIoControl(
         }
     }
 
-    RtlStringFromGUID(&Property->Set, &GuidString);
-    DPRINT("IKsFilter_DispatchDeviceIoControl property PinCount %x\n", FilterInstance->Descriptor->PinDescriptorsCount);
-    DPRINT("IKsFilter_DispatchDeviceIoControl property Set |%S| Id %u Flags %x Status %lx ResultLength %lu\n", GuidString.Buffer, Property->Id, Property->Flags, Status, Irp->IoStatus.Information);
-    RtlFreeUnicodeString(&GuidString);
+    /* T54: Property points at the raw user Type3InputBuffer; guard the debug
+     * formatting so a bad/unmapped buffer cannot bugcheck the dispatcher. */
+    _SEH2_TRY
+    {
+        RtlStringFromGUID(&Property->Set, &GuidString);
+        DPRINT("IKsFilter_DispatchDeviceIoControl property PinCount %x\n", FilterInstance->Descriptor->PinDescriptorsCount);
+        DPRINT("IKsFilter_DispatchDeviceIoControl property Set |%S| Id %u Flags %x Status %lx ResultLength %lu\n", GuidString.Buffer, Property->Id, Property->Flags, Status, Irp->IoStatus.Information);
+        RtlFreeUnicodeString(&GuidString);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        DPRINT1("IKsFilter_DispatchDeviceIoControl: bad property buffer\n");
+    }
+    _SEH2_END;
 
     /* release filter */
     Filter->lpVtbl->Release(Filter);

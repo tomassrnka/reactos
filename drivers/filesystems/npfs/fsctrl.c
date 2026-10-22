@@ -74,7 +74,11 @@ NpQueryClientProcess(IN PDEVICE_OBJECT DeviceObject,
 
     /* Get the length of the query buffer */
     Length = IoStackLocation->Parameters.QueryFile.Length;
-    if (Length < 8)
+
+    /* The first two (pointer-sized) fields are always written, so the minimum
+       length must be derived from the real structure layout and not be a
+       hardcoded 32-bit constant (it is 16 bytes on 64-bit). */
+    if (Length < FIELD_OFFSET(NP_CLIENT_PROCESS, DataLength))
     {
         return STATUS_INVALID_PARAMETER;
     }
@@ -94,9 +98,11 @@ NpQueryClientProcess(IN PDEVICE_OBJECT DeviceObject,
     }
     else
     {
-        /* Copy the process from the CCB */
+        /* Return the process ID of the creator, never the kernel PEPROCESS
+           pointer, which must not be disclosed to user mode */
         QueryBuffer->Unknown = NULL;
-        QueryBuffer->Process = Ccb->Process;
+        QueryBuffer->Process = (Ccb->Process != NULL) ?
+                               (PVOID)PsGetProcessId(Ccb->Process) : NULL;
     }
 
     /* Does the caller provide a large enough buffer for the full data? */

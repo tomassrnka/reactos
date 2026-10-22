@@ -19,35 +19,31 @@
 
 /* FUNCTIONS ****************************************************************/
 
-BOOLEAN
-NTAPI
-FsRecGetDeviceSectors(IN PDEVICE_OBJECT DeviceObject,
-                      IN ULONG SectorSize,
-                      OUT PLARGE_INTEGER SectorCount)
+static
+NTSTATUS
+FsRecSendDeviceIoControl(IN PDEVICE_OBJECT DeviceObject,
+                         IN ULONG ControlCode,
+                         OUT PVOID OutputBuffer,
+                         IN ULONG OutputBufferLength)
 {
-    PARTITION_INFORMATION PartitionInfo;
     IO_STATUS_BLOCK IoStatusBlock;
     KEVENT Event;
     PIRP Irp;
     NTSTATUS Status;
-    ULONG Remainder;
     PAGED_CODE();
-
-    /* Only needed for disks */
-    if (DeviceObject->DeviceType != FILE_DEVICE_DISK) return FALSE;
 
     /* Build the information IRP */
     KeInitializeEvent(&Event, SynchronizationEvent, FALSE);
-    Irp = IoBuildDeviceIoControlRequest(IOCTL_DISK_GET_PARTITION_INFO,
+    Irp = IoBuildDeviceIoControlRequest(ControlCode,
                                         DeviceObject,
                                         NULL,
                                         0,
-                                        &PartitionInfo,
-                                        sizeof(PARTITION_INFORMATION),
+                                        OutputBuffer,
+                                        OutputBufferLength,
                                         FALSE,
                                         &Event,
                                         &IoStatusBlock);
-    if (!Irp) return FALSE;
+    if (!Irp) return STATUS_INSUFFICIENT_RESOURCES;
 
     /* Override verification */
     IoGetNextIrpStackLocation(Irp)->Flags |= SL_OVERRIDE_VERIFY_VOLUME;
@@ -65,11 +61,47 @@ FsRecGetDeviceSectors(IN PDEVICE_OBJECT DeviceObject,
         Status = IoStatusBlock.Status;
     }
 
-    /* Fail if we couldn't get the data */
-    if (!NT_SUCCESS(Status)) return FALSE;
+    return Status;
+}
 
-    /* Otherwise, return the number of sectors */
-    *SectorCount = RtlExtendedLargeIntegerDivide(PartitionInfo.PartitionLength,
+BOOLEAN
+NTAPI
+FsRecGetDeviceSectors(IN PDEVICE_OBJECT DeviceObject,
+                      IN ULONG SectorSize,
+                      OUT PLARGE_INTEGER SectorCount)
+{
+    GET_LENGTH_INFORMATION LengthInfo;
+    PARTITION_INFORMATION PartitionInfo;
+    LARGE_INTEGER Length;
+    NTSTATUS Status;
+    ULONG Remainder;
+    PAGED_CODE();
+
+    /* Only needed for disks */
+    if (DeviceObject->DeviceType != FILE_DEVICE_DISK) return FALSE;
+
+    /* The length works for every partition style; GET_PARTITION_INFO is MBR only */
+    Status = FsRecSendDeviceIoControl(DeviceObject,
+                                      IOCTL_DISK_GET_LENGTH_INFO,
+                                      &LengthInfo,
+                                      sizeof(LengthInfo));
+    if (NT_SUCCESS(Status))
+    {
+        Length = LengthInfo.Length;
+    }
+    else
+    {
+        /* Fall back for drivers without IOCTL_DISK_GET_LENGTH_INFO */
+        Status = FsRecSendDeviceIoControl(DeviceObject,
+                                          IOCTL_DISK_GET_PARTITION_INFO,
+                                          &PartitionInfo,
+                                          sizeof(PartitionInfo));
+        if (!NT_SUCCESS(Status)) return FALSE;
+        Length = PartitionInfo.PartitionLength;
+    }
+
+    /* Return the number of sectors */
+    *SectorCount = RtlExtendedLargeIntegerDivide(Length,
                                                  SectorSize,
                                                  &Remainder);
     return TRUE;

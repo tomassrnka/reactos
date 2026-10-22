@@ -194,6 +194,28 @@ PdoQueryCapabilities(
     return STATUS_SUCCESS;
 }
 
+/* Read the 16-bit PCI COMMAND register. Returns FALSE on a short transfer. */
+static BOOLEAN
+PdoReadPciCommand(PPDO_DEVICE_EXTENSION DeviceExtension, PUSHORT Command)
+{
+    return HalGetBusDataByOffset(PCIConfiguration,
+                                 DeviceExtension->PciDevice->BusNumber,
+                                 DeviceExtension->PciDevice->SlotNumber.u.AsULONG,
+                                 Command, FIELD_OFFSET(PCI_COMMON_CONFIG, Command),
+                                 sizeof(*Command)) == sizeof(*Command);
+}
+
+/* Write the 16-bit PCI COMMAND register. Returns FALSE on a short transfer. */
+static BOOLEAN
+PdoWritePciCommand(PPDO_DEVICE_EXTENSION DeviceExtension, USHORT Command)
+{
+    return HalSetBusDataByOffset(PCIConfiguration,
+                                 DeviceExtension->PciDevice->BusNumber,
+                                 DeviceExtension->PciDevice->SlotNumber.u.AsULONG,
+                                 &Command, FIELD_OFFSET(PCI_COMMON_CONFIG, Command),
+                                 sizeof(Command)) == sizeof(Command);
+}
+
 static BOOLEAN
 PdoReadPciBar(PPDO_DEVICE_EXTENSION DeviceExtension,
               ULONG Offset,
@@ -227,6 +249,13 @@ PdoReadPciBar(PPDO_DEVICE_EXTENSION DeviceExtension,
     if (Size != sizeof(ULONG))
     {
         DPRINT1("Wrong size %lu\n", Size);
+        /* The sentinel write may have partially landed; put the BAR back. */
+        HalSetBusDataByOffset(PCIConfiguration,
+                              DeviceExtension->PciDevice->BusNumber,
+                              DeviceExtension->PciDevice->SlotNumber.u.AsULONG,
+                              OriginalValue,
+                              Offset,
+                              sizeof(ULONG));
         return FALSE;
     }
 
@@ -240,6 +269,14 @@ PdoReadPciBar(PPDO_DEVICE_EXTENSION DeviceExtension,
     if (Size != sizeof(ULONG))
     {
         DPRINT1("Wrong size %lu\n", Size);
+        /* Never leave the BAR at the all-ones sentinel: device start re-enables
+         * decode from the cached COMMAND and would make that base live. */
+        HalSetBusDataByOffset(PCIConfiguration,
+                              DeviceExtension->PciDevice->BusNumber,
+                              DeviceExtension->PciDevice->SlotNumber.u.AsULONG,
+                              OriginalValue,
+                              Offset,
+                              sizeof(ULONG));
         return FALSE;
     }
 
@@ -284,6 +321,8 @@ PdoGetRangeLength(PPDO_DEVICE_EXTENSION DeviceExtension,
     } NewValue;
     ULONG Offset;
     ULONGLONG Size;
+    USHORT SavedCommand = 0, Command;
+    BOOLEAN DecodeDisabled = FALSE;
 
     /* Compute the offset of this BAR in PCI config space */
     Offset = 0x10 + Bar * 4;
@@ -295,6 +334,44 @@ PdoGetRangeLength(PPDO_DEVICE_EXTENSION DeviceExtension,
     OriginalValue.Bar = 0ULL;
     NewValue.Bar = 0ULL;
 
+    /* The all-ones size probe transiently drives the BAR base to 0xFFFFFFFF..; with
+     * decode left enabled, a 64-bit BAR high-dword probe aliases an address above RAM
+     * and faults the host aperture mapping (a QEMU/KVM abort on any 64-bit BAR). Clear
+     * memory/I/O decode around the probe, as the PCI spec and Windows do. Endpoints
+     * (header type 0) only: a PCI-to-PCI bridge must keep decode on, it forwards to
+     * live devices behind it. Only act when decode is on. */
+    if (PCI_CONFIGURATION_TYPE(&DeviceExtension->PciDevice->PciConfig) == PCI_DEVICE_TYPE)
+    {
+        USHORT Check;
+
+        /* Endpoint: size with decode off. A COMMAND we cannot read means we cannot
+         * guarantee decode is off for the probe, so refuse to size (fail closed)
+         * rather than drive a live all-ones base. */
+        if (!PdoReadPciCommand(DeviceExtension, &SavedCommand))
+        {
+            DPRINT1("Cannot read COMMAND; refusing to size BAR\n");
+            return FALSE;
+        }
+
+        if (SavedCommand & (PCI_ENABLE_MEMORY_SPACE | PCI_ENABLE_IO_SPACE))
+        {
+            /* Clear decode, then read COMMAND back and confirm it took: a successful
+             * config-write count does not prove the bits landed, and sizing with
+             * decode still on is exactly the host abort we are preventing. */
+            if (!PdoWritePciCommand(DeviceExtension,
+                                    SavedCommand & ~(PCI_ENABLE_MEMORY_SPACE | PCI_ENABLE_IO_SPACE)) ||
+                !PdoReadPciCommand(DeviceExtension, &Check) ||
+                (Check & (PCI_ENABLE_MEMORY_SPACE | PCI_ENABLE_IO_SPACE)))
+            {
+                DPRINT1("Failed to disable BAR decode before sizing; refusing to size BAR\n");
+                return FALSE;
+            }
+            DecodeDisabled = TRUE;
+        }
+    }
+
+    /* On a sizing failure below, PdoReadPciBar restores the BAR and we return with
+     * decode still off; it is reasserted from the cached COMMAND at device start. */
     /* Read the first BAR */
     if (!PdoReadPciBar(DeviceExtension, Offset,
                        &OriginalValue.Bars.Bar0,
@@ -347,6 +424,20 @@ PdoGetRangeLength(PPDO_DEVICE_EXTENSION DeviceExtension,
         }
     }
 
+    /* Restore decode: OR back only the enables we cleared, preserving any other
+     * COMMAND bits a concurrent writer may have changed. */
+    if (DecodeDisabled)
+    {
+        if (!PdoReadPciCommand(DeviceExtension, &Command) ||
+            !PdoWritePciCommand(DeviceExtension,
+                                Command | (SavedCommand & (PCI_ENABLE_MEMORY_SPACE | PCI_ENABLE_IO_SPACE))))
+        {
+            /* Decode is reasserted from cached COMMAND at device start, but this
+             * must not pass silently. */
+            DPRINT1("Failed to restore BAR decode after sizing\n");
+        }
+    }
+
     if (NewValue.Bar == 0)
     {
         DPRINT("Unused address register\n");
@@ -368,6 +459,49 @@ PdoGetRangeLength(PPDO_DEVICE_EXTENSION DeviceExtension,
     *Flags = (NewValue.Bar & PCI_ADDRESS_IO_SPACE)
              ? (NewValue.Bar & ~PCI_ADDRESS_IO_ADDRESS_MASK_64)
              : (NewValue.Bar & ~PCI_ADDRESS_MEMORY_ADDRESS_MASK_64);
+
+    return TRUE;
+}
+
+typedef struct _PCI_BAR_DESCRIPTOR
+{
+    ULONGLONG Base;
+    ULONGLONG Length;
+    ULONGLONG MaximumAddress;
+    ULONG Flags;
+} PCI_BAR_DESCRIPTOR, *PPCI_BAR_DESCRIPTOR;
+
+/* Size every BAR of a device exactly once into Bars[] (only the nonzero ones), so a
+ * resource query's count pass and fill pass emit from identical data and can never
+ * diverge - neither on a probe failure nor on a probe that reads back differently the
+ * second time. Returns FALSE on any sizing failure (the caller fails the whole query). */
+static BOOLEAN
+PdoGetBarResources(
+    IN PPDO_DEVICE_EXTENSION DeviceExtension,
+    IN UCHAR MaxBar,
+    OUT PCI_BAR_DESCRIPTOR *Bars,
+    OUT PULONG Count)
+{
+    UCHAR Bar, NextBar;
+    ULONGLONG Base, Length, MaximumAddress;
+    ULONG Flags;
+
+    *Count = 0;
+    for (Bar = 0; Bar < MaxBar; Bar = NextBar)
+    {
+        if (!PdoGetRangeLength(DeviceExtension, Bar, &Base, &Length, &Flags,
+                               &NextBar, &MaximumAddress))
+            return FALSE;
+
+        if (Length != 0)
+        {
+            Bars[*Count].Base = Base;
+            Bars[*Count].Length = Length;
+            Bars[*Count].Flags = Flags;
+            Bars[*Count].MaximumAddress = MaximumAddress;
+            (*Count)++;
+        }
+    }
 
     return TRUE;
 }
@@ -679,7 +813,10 @@ PdoQueryResourceRequirements(
     ULONG Size;
     ULONG ResCount = 0;
     ULONG ListSize;
-    UCHAR Bar;
+    ULONG BarIndex;
+    ULONG BarCount = 0;
+    UCHAR MaxBar = 0;
+    PCI_BAR_DESCRIPTOR Bars[PCI_TYPE0_ADDRESSES];
     ULONGLONG Base;
     ULONGLONG Length;
     ULONG Flags;
@@ -710,22 +847,22 @@ PdoQueryResourceRequirements(
 
     /* Count required resource descriptors */
     ResCount = 0;
+
+    /* Size every BAR exactly once and reuse it for both the count and fill passes,
+     * so the two can never disagree on how many descriptors exist. */
+    if (PCI_CONFIGURATION_TYPE(&PciConfig) == PCI_DEVICE_TYPE)
+        MaxBar = PCI_TYPE0_ADDRESSES;
+    else if (PCI_CONFIGURATION_TYPE(&PciConfig) == PCI_BRIDGE_TYPE)
+        MaxBar = PCI_TYPE1_ADDRESSES;
+
+    if (MaxBar != 0 && !PdoGetBarResources(DeviceExtension, MaxBar, Bars, &BarCount))
+    {
+        Irp->IoStatus.Information = 0;
+        return STATUS_UNSUCCESSFUL;
+    }
     if (PCI_CONFIGURATION_TYPE(&PciConfig) == PCI_DEVICE_TYPE)
     {
-        for (Bar = 0; Bar < PCI_TYPE0_ADDRESSES;)
-        {
-            if (!PdoGetRangeLength(DeviceExtension,
-                                   Bar,
-                                   &Base,
-                                   &Length,
-                                   &Flags,
-                                   &Bar,
-                                   NULL))
-                break;
-
-            if (Length != 0)
-                ResCount += 2;
-        }
+        ResCount += BarCount * 2;
 
         /* FIXME: Check ROM address */
 
@@ -736,20 +873,7 @@ PdoQueryResourceRequirements(
     }
     else if (PCI_CONFIGURATION_TYPE(&PciConfig) == PCI_BRIDGE_TYPE)
     {
-        for (Bar = 0; Bar < PCI_TYPE1_ADDRESSES;)
-        {
-            if (!PdoGetRangeLength(DeviceExtension,
-                                   Bar,
-                                   &Base,
-                                   &Length,
-                                   &Flags,
-                                   &Bar,
-                                   NULL))
-                break;
-
-            if (Length != 0)
-                ResCount += 2;
-        }
+        ResCount += BarCount * 2;
 
         if (DeviceExtension->PciDevice->PciConfig.BaseClass == PCI_CLASS_BRIDGE_DEV)
             ResCount++;
@@ -799,25 +923,12 @@ PdoQueryResourceRequirements(
     Descriptor = &ResourceList->List[0].Descriptors[0];
     if (PCI_CONFIGURATION_TYPE(&PciConfig) == PCI_DEVICE_TYPE)
     {
-        for (Bar = 0; Bar < PCI_TYPE0_ADDRESSES;)
+        for (BarIndex = 0; BarIndex < BarCount; BarIndex++)
         {
-            if (!PdoGetRangeLength(DeviceExtension,
-                                   Bar,
-                                   &Base,
-                                   &Length,
-                                   &Flags,
-                                   &Bar,
-                                   &MaximumAddress))
-            {
-                DPRINT1("PdoGetRangeLength() failed\n");
-                break;
-            }
-
-            if (Length == 0)
-            {
-                DPRINT("Unused address register\n");
-                continue;
-            }
+            Base = Bars[BarIndex].Base;
+            Length = Bars[BarIndex].Length;
+            Flags = Bars[BarIndex].Flags;
+            MaximumAddress = Bars[BarIndex].MaximumAddress;
 
             /* Set preferred descriptor */
             Descriptor->Option = IO_RESOURCE_PREFERRED;
@@ -916,25 +1027,12 @@ PdoQueryResourceRequirements(
     }
     else if (PCI_CONFIGURATION_TYPE(&PciConfig) == PCI_BRIDGE_TYPE)
     {
-        for (Bar = 0; Bar < PCI_TYPE1_ADDRESSES;)
+        for (BarIndex = 0; BarIndex < BarCount; BarIndex++)
         {
-            if (!PdoGetRangeLength(DeviceExtension,
-                                   Bar,
-                                   &Base,
-                                   &Length,
-                                   &Flags,
-                                   &Bar,
-                                   &MaximumAddress))
-            {
-                DPRINT1("PdoGetRangeLength() failed\n");
-                break;
-            }
-
-            if (Length == 0)
-            {
-                DPRINT("Unused address register\n");
-                continue;
-            }
+            Base = Bars[BarIndex].Base;
+            Length = Bars[BarIndex].Length;
+            Flags = Bars[BarIndex].Flags;
+            MaximumAddress = Bars[BarIndex].MaximumAddress;
 
             /* Set preferred descriptor */
             Descriptor->Option = IO_RESOURCE_PREFERRED;
@@ -1033,7 +1131,10 @@ PdoQueryResources(
     ULONG Size;
     ULONG ResCount = 0;
     ULONG ListSize;
-    UCHAR Bar;
+    ULONG BarIndex;
+    ULONG BarCount = 0;
+    UCHAR MaxBar = 0;
+    PCI_BAR_DESCRIPTOR Bars[PCI_TYPE0_ADDRESSES];
     ULONGLONG Base;
     ULONGLONG Length;
     ULONG Flags;
@@ -1064,22 +1165,22 @@ PdoQueryResources(
 
     /* Count required resource descriptors */
     ResCount = 0;
+
+    /* Size every BAR exactly once and reuse it for both the count and fill passes,
+     * so the two can never disagree on how many descriptors exist. */
+    if (PCI_CONFIGURATION_TYPE(&PciConfig) == PCI_DEVICE_TYPE)
+        MaxBar = PCI_TYPE0_ADDRESSES;
+    else if (PCI_CONFIGURATION_TYPE(&PciConfig) == PCI_BRIDGE_TYPE)
+        MaxBar = PCI_TYPE1_ADDRESSES;
+
+    if (MaxBar != 0 && !PdoGetBarResources(DeviceExtension, MaxBar, Bars, &BarCount))
+    {
+        Irp->IoStatus.Information = 0;
+        return STATUS_UNSUCCESSFUL;
+    }
     if (PCI_CONFIGURATION_TYPE(&PciConfig) == PCI_DEVICE_TYPE)
     {
-        for (Bar = 0; Bar < PCI_TYPE0_ADDRESSES;)
-        {
-            if (!PdoGetRangeLength(DeviceExtension,
-                                   Bar,
-                                   &Base,
-                                   &Length,
-                                   &Flags,
-                                   &Bar,
-                                   NULL))
-                break;
-
-            if (Length)
-                ResCount++;
-        }
+        ResCount += BarCount;
 
         if ((PciConfig.u.type0.InterruptPin != 0) &&
             !MessageInterrupt &&
@@ -1089,20 +1190,7 @@ PdoQueryResources(
     }
     else if (PCI_CONFIGURATION_TYPE(&PciConfig) == PCI_BRIDGE_TYPE)
     {
-        for (Bar = 0; Bar < PCI_TYPE1_ADDRESSES;)
-        {
-            if (!PdoGetRangeLength(DeviceExtension,
-                                   Bar,
-                                   &Base,
-                                   &Length,
-                                   &Flags,
-                                   &Bar,
-                                   NULL))
-                break;
-
-            if (Length != 0)
-                ResCount++;
-        }
+        ResCount += BarCount;
 
         if (DeviceExtension->PciDevice->PciConfig.BaseClass == PCI_CLASS_BRIDGE_DEV)
             ResCount++;
@@ -1146,22 +1234,11 @@ PdoQueryResources(
     Descriptor = &PartialList->PartialDescriptors[0];
     if (PCI_CONFIGURATION_TYPE(&PciConfig) == PCI_DEVICE_TYPE)
     {
-        for (Bar = 0; Bar < PCI_TYPE0_ADDRESSES;)
+        for (BarIndex = 0; BarIndex < BarCount; BarIndex++)
         {
-            if (!PdoGetRangeLength(DeviceExtension,
-                                   Bar,
-                                   &Base,
-                                   &Length,
-                                   &Flags,
-                                   &Bar,
-                                   NULL))
-                break;
-
-            if (Length == 0)
-            {
-                DPRINT("Unused address register\n");
-                continue;
-            }
+            Base = Bars[BarIndex].Base;
+            Length = Bars[BarIndex].Length;
+            Flags = Bars[BarIndex].Flags;
 
             if (Flags & PCI_ADDRESS_IO_SPACE)
             {
@@ -1211,22 +1288,11 @@ PdoQueryResources(
     }
     else if (PCI_CONFIGURATION_TYPE(&PciConfig) == PCI_BRIDGE_TYPE)
     {
-        for (Bar = 0; Bar < PCI_TYPE1_ADDRESSES;)
+        for (BarIndex = 0; BarIndex < BarCount; BarIndex++)
         {
-            if (!PdoGetRangeLength(DeviceExtension,
-                                   Bar,
-                                   &Base,
-                                   &Length,
-                                   &Flags,
-                                   &Bar,
-                                   NULL))
-                break;
-
-            if (Length == 0)
-            {
-                DPRINT("Unused address register\n");
-                continue;
-            }
+            Base = Bars[BarIndex].Base;
+            Length = Bars[BarIndex].Length;
+            Flags = Bars[BarIndex].Flags;
 
             if (Flags & PCI_ADDRESS_IO_SPACE)
             {

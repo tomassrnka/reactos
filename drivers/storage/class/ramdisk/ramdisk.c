@@ -25,6 +25,7 @@
 #include <reactos/drivers/ntddrdsk.h>
 #include "../../../filesystems/fs_rec/fs_rec.h"
 #include <stdio.h>
+#include "ramdisk_range.h"
 #define NDEBUG
 #include <debug.h>
 
@@ -947,8 +948,11 @@ RamdiskReadWriteReal(IN PIRP Irp,
     PVOID Source, Destination;
     NTSTATUS Status;
 
-    /* Get the MDL and check if it's mapped */
+    /* Get the MDL; a direct I/O request with no data has none */
     Mdl = Irp->MdlAddress;
+    if (!Mdl) return STATUS_INVALID_PARAMETER;
+
+    /* Check if it's mapped */
     if (Mdl->MdlFlags & (MDL_MAPPED_TO_SYSTEM_VA | MDL_SOURCE_IS_NONPAGED_POOL))
     {
         /* Use the mapped address */
@@ -1048,8 +1052,8 @@ RamdiskReadWrite(IN PDEVICE_OBJECT DeviceObject,
                  IN PIRP Irp)
 {
     PRAMDISK_DRIVE_EXTENSION DeviceExtension;
-    // ULONG Length;
-    // LARGE_INTEGER ByteOffset;
+    ULONG Length;
+    LARGE_INTEGER ByteOffset;
     PIO_STACK_LOCATION IoStackLocation;
     NTSTATUS Status, ReturnStatus;
 
@@ -1064,10 +1068,20 @@ RamdiskReadWrite(IN PDEVICE_OBJECT DeviceObject,
 
     /* Capture parameters */
     IoStackLocation = IoGetCurrentIrpStackLocation(Irp);
-    // Length = IoStackLocation->Parameters.Read.Length;
-    // ByteOffset = IoStackLocation->Parameters.Read.ByteOffset;
+    Length = IoStackLocation->Parameters.Read.Length;
+    ByteOffset = IoStackLocation->Parameters.Read.ByteOffset;
 
-    /* FIXME: Validate offset */
+    /* Validate offset and length against the disk size. The mapping code
+     * trusts them blindly and would otherwise touch physical memory outside
+     * of the ramdisk. Written to be safe against overflow. */
+    if (!RamdiskIsIoRangeValid(DeviceExtension->DiskLength.QuadPart,
+                               ByteOffset.QuadPart,
+                               Length))
+    {
+        /* Out of range */
+        Status = STATUS_INVALID_PARAMETER;
+        goto Complete;
+    }
 
     /* FIXME: Validate sector */
 
@@ -1480,16 +1494,18 @@ RamdiskQueryDeviceRelations(IN DEVICE_RELATION_TYPE Type,
                       Count * sizeof(PDEVICE_OBJECT));
     }
 
-    /* Save the count */
-    OurDeviceRelations->Count = FinalCount;
+    /* Don't leave any slot uninitialized, whatever happens below */
+    RtlZeroMemory(&OurDeviceRelations->Objects[Count],
+                  DiskCount * sizeof(PDEVICE_OBJECT));
+
+    /* Go to the end of the list */
+    DriveDeviceObject = &OurDeviceRelations->Objects[Count];
 
     /* Now loop our drives again */
     ListHead = &DeviceExtension->DiskList;
     NextEntry = ListHead->Flink;
     while (NextEntry != ListHead)
     {
-        /* Go to the end of the list */
-        DriveDeviceObject = &OurDeviceRelations->Objects[Count];
 
         /* Get the drive state */
         DriveExtension = CONTAINING_RECORD(NextEntry,
@@ -1510,17 +1526,19 @@ RamdiskQueryDeviceRelations(IN DEVICE_RELATION_TYPE Type,
         else
         {
             /* First time it's enumerated, reference the device object */
-            ObReferenceObject(DriveExtension->DeviceObject);
+            ObReferenceObject(DriveExtension->PhysicalDeviceObject);
 
             /* Save the object pointer and move on */
             *DriveDeviceObject++ = DriveExtension->PhysicalDeviceObject;
         }
 
-        if (DriveExtension->State < RamdiskStateBusRemoved) DiskCount++;
-
         /* Move to the next one */
         NextEntry = NextEntry->Flink;
     }
+
+    /* Report exactly what we filled in */
+    OurDeviceRelations->Count = Count + (ULONG)(DriveDeviceObject -
+                                                &OurDeviceRelations->Objects[Count]);
 
     /* Release the lock */
     ExReleaseFastMutex(&DeviceExtension->DiskListLock);
@@ -1573,13 +1591,20 @@ RamdiskRemoveBusDevice(IN PDEVICE_OBJECT DeviceObject,
                                            RAMDISK_DRIVE_EXTENSION,
                                            DiskList);
 
+        /* Unlink it while we hold the list lock */
+        RemoveEntryList(&DriveExtension->DiskList);
+
+        /* Don't hold the (non-recursive) list lock across the deletion */
+        ExReleaseFastMutex(&DeviceExtension->DiskListLock);
+        KeLeaveCriticalRegion();
+
         /* Delete the disk */
-        IoAcquireRemoveLock(&DriveExtension->RemoveLock, NULL);
         RamdiskDeleteDiskDevice(DriveExtension->PhysicalDeviceObject, NULL);
 
-        /* RamdiskDeleteDiskDevice releases list lock, so reacquire it */
+        /* Reacquire the lock to look at the next one */
         KeEnterCriticalRegion();
         ExAcquireFastMutex(&DeviceExtension->DiskListLock);
+        NextEntry = ListHead->Flink;
     }
 
     /* Release disks list lock */
@@ -1886,6 +1911,7 @@ RamdiskPnp(IN PDEVICE_OBJECT DeviceObject,
     NTSTATUS Status;
     UCHAR Minor;
     KEVENT Event;
+    BOOLEAN Completed = FALSE;
 
     /* Get the device extension and stack location */
     DeviceExtension = DeviceObject->DeviceExtension;
@@ -2054,6 +2080,7 @@ RamdiskPnp(IN PDEVICE_OBJECT DeviceObject,
             if (DeviceExtension->Type == RamdiskDrive)
             {
                 Status = RamdiskQueryId((PRAMDISK_DRIVE_EXTENSION)DeviceExtension, Irp);
+                Completed = TRUE; /* It completes the IRP itself */
             }
             break;
         }
@@ -2064,6 +2091,7 @@ RamdiskPnp(IN PDEVICE_OBJECT DeviceObject,
             if (DeviceExtension->Type == RamdiskDrive)
             {
                 Status = RamdiskQueryBusInformation(DeviceObject, Irp);
+                Completed = TRUE; /* It completes the IRP itself */
             }
             break;
         }
@@ -2078,6 +2106,7 @@ RamdiskPnp(IN PDEVICE_OBJECT DeviceObject,
             if (DeviceExtension->Type == RamdiskDrive)
             {
                 Status = RamdiskQueryDeviceText((PRAMDISK_DRIVE_EXTENSION)DeviceExtension, Irp);
+                Completed = TRUE; /* It completes the IRP itself */
             }
             break;
         }
@@ -2099,6 +2128,7 @@ RamdiskPnp(IN PDEVICE_OBJECT DeviceObject,
             if (DeviceExtension->Type == RamdiskDrive)
             {
                 Status = RamdiskQueryCapabilities(DeviceObject, Irp);
+                Completed = TRUE; /* It completes the IRP itself */
             }
             break;
         }
@@ -2126,6 +2156,13 @@ RamdiskPnp(IN PDEVICE_OBJECT DeviceObject,
             IoSkipCurrentIrpStackLocation(Irp);
             Status = IoCallDriver(DeviceExtension->AttachedDevice, Irp);
         }
+    }
+    else if (!Completed)
+    {
+        /* We are a PDO, nobody below us will ever complete this IRP, so do it
+         * here, with whatever status was set (or the default) */
+        Status = Irp->IoStatus.Status;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
     }
 
     /* Release the lock and return status */
@@ -2485,7 +2522,7 @@ DriverEntry(IN PDRIVER_OBJECT DriverObject,
     }
 
     /* Installing from Ramdisk isn't supported yet */
-    if (KeLoaderBlock->SetupLdrBlock)
+    if (KeLoaderBlock && KeLoaderBlock->SetupLdrBlock)
         DPRINT1("FIXME: Installing from RamDisk is UNSUPPORTED!\n");
     // ASSERT(!KeLoaderBlock->SetupLdrBlock);
 

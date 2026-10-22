@@ -299,6 +299,22 @@ NpCreateFcb(IN PNP_DCB Dcb,
     return STATUS_SUCCESS;
 }
 
+/* FileInternalInformation: a number that is never 0 and differs between the pipe instances that exist */
+static
+LONGLONG
+NpNextIndexNumber(VOID)
+{
+    static volatile LONG NextIndex;
+    LONG Index;
+
+    do
+    {
+        Index = InterlockedIncrement(&NextIndex);
+    } while (Index == 0);
+
+    return (ULONG)Index;
+}
+
 NTSTATUS
 NTAPI
 NpCreateCcb(IN PNP_FCB Fcb,
@@ -331,6 +347,7 @@ NpCreateCcb(IN PNP_FCB Fcb,
     RtlZeroMemory(Ccb, sizeof(*Ccb));
     Ccb->NodeType = NPFS_NTC_CCB;
     Ccb->NonPagedCcb = CcbNonPaged;
+    Ccb->IndexNumber = NpNextIndexNumber();
     Ccb->FileObject[FILE_PIPE_SERVER_END] = FileObject;
     Ccb->Fcb = Fcb;
     Ccb->NamedPipeState = State;

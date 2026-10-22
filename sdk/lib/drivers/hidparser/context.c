@@ -10,6 +10,8 @@
 
 #include "parser.h"
 
+#include <ntintsafe.h>
+
 #define NDEBUG
 #include <debug.h>
 
@@ -22,11 +24,32 @@ typedef struct
     };
 }HID_COLLECTION_CONTEXT, *PHID_COLLECTION_CONTEXT;
 
+//
+// Every term that feeds the context allocation is derived from untrusted
+// descriptor fields, so the running size is accumulated with overflow-checked
+// arithmetic. On any overflow the whole computation returns 0, which the
+// callers treat as a failure (a real context is always larger than 0).
+//
+static
+NTSTATUS
+HidParser_AddToSize(
+    IN OUT PULONG Size,
+    IN ULONG Count,
+    IN ULONG ElementSize)
+{
+    ULONG Product;
+
+    if (!NT_SUCCESS(RtlULongMult(Count, ElementSize, &Product)))
+        return STATUS_INTEGER_OVERFLOW;
+
+    return RtlULongAdd(*Size, Product, Size);
+}
+
 ULONG
 HidParser_CalculateCollectionSize(
     IN PHID_COLLECTION Collection)
 {
-    ULONG Size = 0, Index;
+    ULONG Size = 0, Index, SubSize;
 
     Size = sizeof(HID_COLLECTION);
 
@@ -36,10 +59,12 @@ HidParser_CalculateCollectionSize(
     for(Index = 0; Index < Collection->ReportCount; Index++)
     {
         //
-        // get report size
+        // get report size (sizeof(HID_REPORT) + ItemCount * item), checked
         //
-        ASSERT(Collection->Reports[Index]->ItemCount);
-        Size += sizeof(HID_REPORT) + Collection->Reports[Index]->ItemCount * sizeof(HID_REPORT_ITEM);
+        if (!NT_SUCCESS(RtlULongAdd(Size, sizeof(HID_REPORT), &Size)))
+            return 0;
+        if (!NT_SUCCESS(HidParser_AddToSize(&Size, Collection->Reports[Index]->ItemCount, sizeof(HID_REPORT_ITEM))))
+            return 0;
     }
 
     //
@@ -47,13 +72,21 @@ HidParser_CalculateCollectionSize(
     //
     for(Index = 0; Index < Collection->NodeCount; Index++)
     {
-        Size += HidParser_CalculateCollectionSize(Collection->Nodes[Index]);
+        SubSize = HidParser_CalculateCollectionSize(Collection->Nodes[Index]);
+        if (SubSize == 0)
+            return 0;
+        if (!NT_SUCCESS(RtlULongAdd(Size, SubSize, &Size)))
+            return 0;
     }
 
     //
-    // append size for the offset
+    // append size for the offset array (one ULONG per report and per node)
     //
-    Size += (Collection->ReportCount + Collection->NodeCount) * sizeof(ULONG);
+    if (!NT_SUCCESS(HidParser_AddToSize(&Size, Collection->ReportCount, sizeof(ULONG))) ||
+        !NT_SUCCESS(HidParser_AddToSize(&Size, Collection->NodeCount, sizeof(ULONG))))
+    {
+        return 0;
+    }
 
     //
     // done
@@ -71,11 +104,15 @@ HidParser_CalculateContextSize(
     // minimum size is the size of the collection
     //
     Size = HidParser_CalculateCollectionSize(Collection);
+    if (Size == 0)
+        return 0;
 
     //
     // append collection context size
     //
-    Size += sizeof(HID_COLLECTION_CONTEXT);
+    if (!NT_SUCCESS(RtlULongAdd(Size, sizeof(HID_COLLECTION_CONTEXT), &Size)))
+        return 0;
+
     return Size;
 }
 

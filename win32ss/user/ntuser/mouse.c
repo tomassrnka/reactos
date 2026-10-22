@@ -116,8 +116,8 @@ UserProcessMouseInput(PINPUT_DEVICE_INFO pDeviceInfo, PMOUSE_INPUT_DATA mid)
     if (RawInputEnabled == TRUE)
         UserRawInputMouseProcess(pDeviceInfo, mid);
 
-    /* Mouse position */
-    if (mi.dx != 0 || mi.dy != 0)
+    /* Mouse position; an absolute report always carries a position, (0, 0) included */
+    if (mi.dx != 0 || mi.dy != 0 || (mid->Flags & MOUSE_MOVE_ABSOLUTE))
         mi.dwFlags |= MOUSEEVENTF_MOVE;
 
     /* Flags for absolute move */

@@ -9,6 +9,7 @@
 KMT_TESTFUNC Test_CcPurgeCacheSection;
 KMT_TESTFUNC Test_CmSecurity;
 KMT_TESTFUNC Test_Example;
+KMT_TESTFUNC Test_KsCapture;
 KMT_TESTFUNC Test_ExCallback;
 KMT_TESTFUNC Test_ExDoubleList;
 KMT_TESTFUNC Test_ExFastMutex;
@@ -140,6 +141,7 @@ const KMT_TEST TestList[] =
     { "-ExTimer",                           Test_ExTimer },
     { "ExTimerResolution",                  Test_ExTimerResolution },
     { "ExUuid",                             Test_ExUuid },
+    { "KsCapture",                          Test_KsCapture },
     { "Example",                            Test_Example },
     { "FsRtlDissect",                       Test_FsRtlDissect },
     { "FsRtlExpression",                    Test_FsRtlExpression },

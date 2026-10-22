@@ -45,6 +45,7 @@ NTSTATUS
 NtfsHasFileSystem(PDEVICE_OBJECT DeviceToMount)
 {
     PARTITION_INFORMATION PartitionInfo;
+    PARTITION_INFORMATION_EX PartitionInfoEx;
     DISK_GEOMETRY DiskGeometry;
     ULONG ClusterSize, Size, k;
     PBOOT_SECTOR BootSector;
@@ -68,25 +69,46 @@ NtfsHasFileSystem(PDEVICE_OBJECT DeviceToMount)
 
     if (DiskGeometry.MediaType == FixedMedia)
     {
-        /* We have found a hard disk */
-        Size = sizeof(PARTITION_INFORMATION);
+        /* We have found a hard disk: the extended request knows GPT partitions too */
+        Size = sizeof(PARTITION_INFORMATION_EX);
         Status = NtfsDeviceIoControl(DeviceToMount,
-                                     IOCTL_DISK_GET_PARTITION_INFO,
+                                     IOCTL_DISK_GET_PARTITION_INFO_EX,
                                      NULL,
                                      0,
-                                     &PartitionInfo,
+                                     &PartitionInfoEx,
                                      &Size,
                                      TRUE);
-        if (!NT_SUCCESS(Status))
+        if (NT_SUCCESS(Status))
         {
-            DPRINT1("NtfsDeviceIoControl() failed (Status %lx)\n", Status);
-            return Status;
+            /* A GPT partition type says nothing about the file system */
+            if (PartitionInfoEx.PartitionStyle == PARTITION_STYLE_MBR &&
+                PartitionInfoEx.Mbr.PartitionType != PARTITION_IFS)
+            {
+                DPRINT1("Invalid partition type\n");
+                return STATUS_UNRECOGNIZED_VOLUME;
+            }
         }
-
-        if (PartitionInfo.PartitionType != PARTITION_IFS)
+        else
         {
-            DPRINT1("Invalid partition type\n");
-            return STATUS_UNRECOGNIZED_VOLUME;
+            Size = sizeof(PARTITION_INFORMATION);
+            Status = NtfsDeviceIoControl(DeviceToMount,
+                                         IOCTL_DISK_GET_PARTITION_INFO,
+                                         NULL,
+                                         0,
+                                         &PartitionInfo,
+                                         &Size,
+                                         TRUE);
+            if (!NT_SUCCESS(Status))
+            {
+                DPRINT1("NtfsDeviceIoControl() failed (Status %lx)\n", Status);
+                return Status;
+            }
+
+            if (PartitionInfo.PartitionType != PARTITION_IFS)
+            {
+                DPRINT1("Invalid partition type\n");
+                return STATUS_UNRECOGNIZED_VOLUME;
+            }
         }
     }
 

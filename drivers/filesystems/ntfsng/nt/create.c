@@ -1501,8 +1501,9 @@ NTSTATUS NgCleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     if (Fcb->IsVolume)
         NgEndLock(Vcb, FileObject, TRUE);
     ExAcquireResourceSharedLite(&Vcb->CreateGate, TRUE);
-    /* A dismount that ran while this cleanup waited for the gate left no core behind. */
-    Status = Vcb->Dismounted ? NgCleanupDismounted(Vcb, Irp) : NgCleanupGated(DeviceObject, Irp);
+    /* A dismount that ran while this cleanup waited for the gate left no core behind; a volume cut off
+     * from its device (a replaced medium, a removal) may write nothing: only the handle's state goes. */
+    Status = (Vcb->Dismounted || Vcb->WrongMedia) ? NgCleanupDismounted(Vcb, Irp) : NgCleanupGated(DeviceObject, Irp);
     ExReleaseResourceLite(&Vcb->CreateGate);
     return Status;
 }
@@ -1529,6 +1530,8 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     ExAcquireResourceSharedLite(&Vcb->CreateGate, TRUE);
     if (Vcb->Dismounted)
         Status = STATUS_VOLUME_DISMOUNTED;
+    else if (Vcb->RemovePending)
+        Status = STATUS_ACCESS_DENIED;
     else
         Status = NgCreateLocked(DeviceObject, Irp);
     ExReleaseResourceLite(&Vcb->CreateGate);
