@@ -59,6 +59,7 @@ typedef struct _SOCKET_INFORMATION {
 	CRITICAL_SECTION Lock;
 	PVOID SanData;
 	BOOL TrySAN;
+	BOOLEAN ConnectExPending;
 	WSAPROTOCOL_INFOW ProtocolInfo;
 	struct _SOCKET_INFORMATION *NextSocket;
 } SOCKET_INFORMATION, *PSOCKET_INFORMATION;
@@ -536,8 +537,51 @@ MsafdReturnWithErrno(
     }
 }
 
+FORCEINLINE
+SOCKET
+MsafdReturnInvalidSocket(
+    _In_ NTSTATUS Status,
+    _Out_opt_ LPINT Errno)
+{
+    if (Errno)
+        *Errno = TranslateNtStatusError(Status);
+
+    return INVALID_SOCKET;
+}
+
 VOID
 MsafdWaitForAlert(
     _In_ HANDLE hObject);
+
+VOID
+MsafdWaitForRequest(
+    _In_ HANDLE hSocket,
+    _In_ HANDLE hEvent,
+    _In_ PIO_STATUS_BLOCK IoStatusBlock,
+    _In_ ULONG Timeout);
+
+/*
+ * The blocking calls of a socket created without WSA_FLAG_OVERLAPPED do not time out (as on Windows), and neither do
+ * those of a datagram socket, because AFD does not release the buffers of a cancelled datagram receive. Below 0x600
+ * none does: ntdll has no per-request cancel there, and NtCancelIoFile would cancel the thread's other requests too.
+ */
+FORCEINLINE
+ULONG
+MsafdSocketTimeout(
+    _In_ PSOCKET_INFORMATION Socket,
+    _In_ ULONG Timeout)
+{
+#if DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA
+    if (!(Socket->SharedData->CreateFlags & WSA_FLAG_OVERLAPPED))
+        return 0;
+    if (Socket->SharedData->ServiceFlags1 & XP1_CONNECTIONLESS)
+        return 0;
+    return Timeout;
+#else
+    UNREFERENCED_PARAMETER(Socket);
+    UNREFERENCED_PARAMETER(Timeout);
+    return 0;
+#endif
+}
 
 #endif /* __MSAFD_H */

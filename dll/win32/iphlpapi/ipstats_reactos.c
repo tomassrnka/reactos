@@ -705,6 +705,31 @@ PMIB_IPNETTABLE getArpTable(void)
     return IpArpTable;
 }
 
+static BOOL isTransportEntity(HANDLE tcpFile, TDIEntityID *ent, DWORD wantedType)
+{
+    TCP_REQUEST_QUERY_INFORMATION_EX req = TCP_REQUEST_QUERY_INFORMATION_INIT;
+    DWORD type = 0, returnSize;
+
+    req.ID.toi_class = INFO_CLASS_GENERIC;
+    req.ID.toi_type = INFO_TYPE_PROVIDER;
+    req.ID.toi_id = ENTITY_TYPE_ID;
+    req.ID.toi_entity = *ent;
+
+    if (!DeviceIoControl(tcpFile,
+                         IOCTL_TCP_QUERY_INFORMATION_EX,
+                         &req,
+                         sizeof(req),
+                         &type,
+                         sizeof(type),
+                         &returnSize,
+                         NULL))
+    {
+        return FALSE;
+    }
+
+    return type == wantedType;
+}
+
 struct _TABLE_CALL
 {
     DWORD TOIID;
@@ -722,7 +747,7 @@ struct _TABLE_CALL
 
 DWORD getNumUdpEntries(void)
 {
-    DWORD numEntities;
+    DWORD numEntities = 0;
     TDIEntityID *entitySet = NULL;
     HANDLE tcpFile;
     int i, totalNumber = 0;
@@ -742,7 +767,8 @@ DWORD getNumUdpEntries(void)
     status = tdiGetEntityIDSet(tcpFile, &entitySet, &numEntities);
 
     for (i = 0; i < numEntities; i++) {
-        if (entitySet[i].tei_entity == CL_TL_ENTITY && hasArp(tcpFile, &entitySet[i]))
+        if (entitySet[i].tei_entity == CL_TL_ENTITY &&
+            isTransportEntity(tcpFile, &entitySet[i], CL_TL_UDP))
         {
             status = tdiGetSetOfThings(tcpFile,
                 INFO_CLASS_PROTOCOL,
@@ -770,8 +796,8 @@ DWORD getNumUdpEntries(void)
 
 PVOID getUdpTable(CLASS_TABLE Class)
 {
-    DWORD numEntities, returnSize;
-    TDIEntityID *entitySet;
+    DWORD numEntities = 0, returnSize;
+    TDIEntityID *entitySet = NULL;
     HANDLE tcpFile;
     int i, totalNumber, TmpIdx, CurrIdx = 0;
     NTSTATUS status;
@@ -799,7 +825,8 @@ PVOID getUdpTable(CLASS_TABLE Class)
     status = tdiGetEntityIDSet(tcpFile, &entitySet, &numEntities);
 
     for (i = 0; i < numEntities; i++) {
-        if (entitySet[i].tei_entity == CL_TL_ENTITY && hasArp(tcpFile, &entitySet[i]))
+        if (entitySet[i].tei_entity == CL_TL_ENTITY &&
+            isTransportEntity(tcpFile, &entitySet[i], CL_TL_UDP))
         {
             status = tdiGetSetOfThings(tcpFile,
                 INFO_CLASS_PROTOCOL,
@@ -813,7 +840,7 @@ PVOID getUdpTable(CLASS_TABLE Class)
                 &returnSize);
 
             if (status == STATUS_SUCCESS) {
-                for (TmpIdx = 0; TmpIdx < returnSize; TmpIdx++, CurrIdx++)
+                for (TmpIdx = 0; TmpIdx < returnSize && CurrIdx < totalNumber; TmpIdx++, CurrIdx++)
                     CopyMemory(Add2Ptr(IpUdpTable, UdpTcpTableCall[Class].UdpOffset + UdpTcpTableCall[Class].UdpSize * CurrIdx),
                                Add2Ptr(AdapterUdpTable, UdpTcpTableCall[Class].UdpSize * TmpIdx),
                                UdpTcpTableCall[Class].UdpSize);
@@ -823,14 +850,14 @@ PVOID getUdpTable(CLASS_TABLE Class)
     }
 
     closeTcpFile(tcpFile);
-    tdiFreeThingSet(entitySet);
+    if (entitySet) tdiFreeThingSet(entitySet);
     IpUdpTable->dwNumEntries = CurrIdx;
     return IpUdpTable;
 }
 
 DWORD getNumTcpEntries(void)
 {
-    DWORD numEntities;
+    DWORD numEntities = 0;
     TDIEntityID *entitySet = NULL;
     HANDLE tcpFile;
     int i, totalNumber = 0;
@@ -850,7 +877,8 @@ DWORD getNumTcpEntries(void)
     status = tdiGetEntityIDSet(tcpFile, &entitySet, &numEntities);
 
     for (i = 0; i < numEntities; i++) {
-        if (entitySet[i].tei_entity == CO_TL_ENTITY && hasArp(tcpFile, &entitySet[i]))
+        if (entitySet[i].tei_entity == CO_TL_ENTITY &&
+            isTransportEntity(tcpFile, &entitySet[i], CO_TL_TCP))
         {
             status = tdiGetSetOfThings(tcpFile,
                 INFO_CLASS_PROTOCOL,
@@ -878,8 +906,8 @@ DWORD getNumTcpEntries(void)
 
 PVOID getTcpTable(CLASS_TABLE Class)
 {
-    DWORD numEntities, returnSize;
-    TDIEntityID *entitySet;
+    DWORD numEntities = 0, returnSize;
+    TDIEntityID *entitySet = NULL;
     HANDLE tcpFile;
     int i, totalNumber, TmpIdx, CurrIdx = 0;
     NTSTATUS status;
@@ -907,7 +935,8 @@ PVOID getTcpTable(CLASS_TABLE Class)
     status = tdiGetEntityIDSet(tcpFile, &entitySet, &numEntities);
 
     for (i = 0; i < numEntities; i++) {
-        if (entitySet[i].tei_entity == CO_TL_ENTITY && hasArp(tcpFile, &entitySet[i]))
+        if (entitySet[i].tei_entity == CO_TL_ENTITY &&
+            isTransportEntity(tcpFile, &entitySet[i], CO_TL_TCP))
         {
             status = tdiGetSetOfThings(tcpFile,
                 INFO_CLASS_PROTOCOL,
@@ -921,7 +950,7 @@ PVOID getTcpTable(CLASS_TABLE Class)
                 &returnSize);
 
             if (status == STATUS_SUCCESS) {
-                for (TmpIdx = 0; TmpIdx < returnSize; TmpIdx++, CurrIdx++)
+                for (TmpIdx = 0; TmpIdx < returnSize && CurrIdx < totalNumber; TmpIdx++, CurrIdx++)
                     CopyMemory(Add2Ptr(IpTcpTable, UdpTcpTableCall[Class].TcpOffset + UdpTcpTableCall[Class].TcpSize * CurrIdx),
                                Add2Ptr(AdapterTcpTable, UdpTcpTableCall[Class].TcpSize * TmpIdx),
                                UdpTcpTableCall[Class].TcpSize);
@@ -931,7 +960,7 @@ PVOID getTcpTable(CLASS_TABLE Class)
     }
 
     closeTcpFile(tcpFile);
-    tdiFreeThingSet(entitySet);
+    if (entitySet) tdiFreeThingSet(entitySet);
     IpTcpTable->dwNumEntries = CurrIdx;
     return IpTcpTable;
 }

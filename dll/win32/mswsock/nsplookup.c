@@ -445,21 +445,28 @@ NSP_GetHostNameHeapAllocW(_Out_ WCHAR** hostname)
     WCHAR* name;
     HANDLE hHeap = GetProcessHeap();
     DWORD bufCharLen = MAX_COMPUTERNAME_LENGTH + 1;
-    DWORD bufByteLen = bufCharLen * sizeof(WCHAR);
+    DWORD tries;
 
-    name = HeapAlloc(hHeap, 0, bufByteLen);
-
-    if (!GetComputerNameExW(ComputerNameDnsHostname,
-                            name,
-                            &bufCharLen))
+    /* A DNS host name can be longer than a computer name: retry with the size asked for.
+     * The caller takes the result as a Winsock error code. */
+    for (tries = 0; tries < 2; tries++)
     {
+        name = HeapAlloc(hHeap, 0, (bufCharLen + 1) * sizeof(WCHAR));
+        if (!name)
+            return WSA_NOT_ENOUGH_MEMORY;
+
+        if (GetComputerNameExW(ComputerNameDnsHostname, name, &bufCharLen))
+        {
+            *hostname = name;
+            return ERROR_SUCCESS;
+        }
+
         HeapFree(hHeap, 0, name);
-        WSASetLastError(WSAEFAULT);
-        return SOCKET_ERROR;
+        if (GetLastError() != ERROR_MORE_DATA)
+            break;
     }
 
-    *hostname = name;
-    return ERROR_SUCCESS;
+    return WSAEFAULT;
 }
 
 INT

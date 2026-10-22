@@ -48,6 +48,20 @@ WINE_DEFAULT_DEBUG_CHANNEL(schannel);
 #include <mbedtls/md_internal.h>
 #include <mbedtls/ssl_internal.h>
 
+/* Chain errors that make a server certificate unusable and that the SSL policy of crypt32 does not report */
+#define SCHAN_FATAL_CHAIN_ERRORS (CERT_TRUST_IS_NOT_SIGNATURE_VALID | CERT_TRUST_IS_UNTRUSTED_ROOT | \
+                                  CERT_TRUST_IS_CYCLIC | CERT_TRUST_IS_PARTIAL_CHAIN | \
+                                  CERT_TRUST_INVALID_BASIC_CONSTRAINTS | CERT_TRUST_INVALID_NAME_CONSTRAINTS | \
+                                  CERT_TRUST_HAS_NOT_SUPPORTED_NAME_CONSTRAINT | \
+                                  CERT_TRUST_HAS_NOT_DEFINED_NAME_CONSTRAINT | \
+                                  CERT_TRUST_HAS_NOT_PERMITTED_NAME_CONSTRAINT | \
+                                  CERT_TRUST_HAS_EXCLUDED_NAME_CONSTRAINT | CERT_TRUST_INVALID_POLICY_CONSTRAINTS | \
+                                  CERT_TRUST_IS_EXPLICIT_DISTRUST)
+
+/* wininet.h values of the chain policy checks */
+#define SECURITY_FLAG_IGNORE_REVOCATION      0x00000080
+#define SECURITY_FLAG_IGNORE_CERT_CN_INVALID 0x00001000
+
 #define ROS_SCHAN_IS_BLOCKING(read_len)          ((read_len & 0xFFF00000) == 0xCCC00000)
 #define ROS_SCHAN_IS_BLOCKING_MARSHALL(read_len) ((read_len & 0x000FFFFF) |  0xCCC00000)
 #define ROS_SCHAN_IS_BLOCKING_RETRIEVE(read_len)  (read_len & 0x000FFFFF)
@@ -75,6 +89,10 @@ typedef struct
     mbedtls_entropy_context  entropy;
     mbedtls_ctr_drbg_context ctr_drbg;
     struct schan_transport  *transport;
+    WCHAR                   *target;
+    DWORD                    cred_flags;
+    BOOL                     manual_validation;
+    BOOL                     cert_checked;
 } MBEDTLS_SESSION, *PMBEDTLS_SESSION;
 
 /* custom `net_recv` callback adapter, mbedTLS uses it in mbedtls_ssl_read for
@@ -243,6 +261,7 @@ void schan_imp_dispose_session(schan_imp_session session)
     /* tell the other peer (a server) that we are going away */
     //ssl_close_notify(&s->ssl);
 
+    HeapFree(GetProcessHeap(), 0, s->target);
     mbedtls_ssl_free(&s->ssl);
     mbedtls_ctr_drbg_free(&s->ctr_drbg);
     mbedtls_entropy_free(&s->entropy);
@@ -275,11 +294,196 @@ void schan_imp_set_session_target(schan_imp_session session, const char *target)
     mbedtls_ssl_set_hostname(&s->ssl, target);
 }
 
-SECURITY_STATUS schan_imp_handshake(schan_imp_session session)
+void schan_imp_set_session_validation(schan_imp_session session, const WCHAR *target, DWORD flags, BOOL manual)
 {
     MBEDTLS_SESSION *s = (MBEDTLS_SESSION *)session;
 
-    int err = mbedtls_ssl_handshake(&s->ssl);
+    s->cred_flags = flags;
+    s->manual_validation = manual || (flags & SCH_CRED_MANUAL_CRED_VALIDATION);
+
+    if (target)
+    {
+        SIZE_T size = (lstrlenW(target) + 1) * sizeof(WCHAR);
+
+        s->target = HeapAlloc(GetProcessHeap(), 0, size);
+        if (s->target)
+            memcpy(s->target, target, size);
+    }
+}
+
+static SECURITY_STATUS schan_add_peer_chain(const mbedtls_x509_crt *peer_cert, HCERTSTORE store,
+                                            PCCERT_CONTEXT *ret);
+
+static SECURITY_STATUS schan_status_from_chain_error(DWORD error)
+{
+    switch (error)
+    {
+        case CERT_E_EXPIRED:
+            return SEC_E_CERT_EXPIRED;
+
+        case CERT_E_CN_NO_MATCH:
+            return SEC_E_WRONG_PRINCIPAL;
+
+        case CERT_E_UNTRUSTEDROOT:
+        case CERT_E_UNTRUSTEDTESTROOT:
+        case CERT_E_CHAINING:
+        case TRUST_E_CERT_SIGNATURE:
+            return SEC_E_UNTRUSTED_ROOT;
+
+        default:
+            return SEC_E_CERT_UNKNOWN;
+    }
+}
+
+/* Windows schannel checks the chain of a server itself unless the caller asked to do it */
+static BOOL schan_chain_has_offline_source(PCCERT_CHAIN_CONTEXT chain)
+{
+    DWORD i, j;
+
+    for (i = 0; i < chain->cChain; i++)
+        for (j = 0; j < chain->rgpChain[i]->cElement; j++)
+        {
+            DWORD err = chain->rgpChain[i]->rgpElement[j]->TrustStatus.dwErrorStatus;
+
+            if ((err & CERT_TRUST_IS_OFFLINE_REVOCATION) && !(err & CERT_TRUST_REVOCATION_STATUS_UNKNOWN))
+                return TRUE;
+        }
+    return FALSE;
+}
+
+static SECURITY_STATUS schan_validate_server_chain(MBEDTLS_SESSION *s)
+{
+    static char server_auth_oid[] = szOID_PKIX_KP_SERVER_AUTH;
+    char *usages[] = { server_auth_oid };
+    SSL_EXTRA_CERT_CHAIN_POLICY_PARA ssl_para;
+    CERT_CHAIN_POLICY_PARA policy_para;
+    CERT_CHAIN_POLICY_STATUS policy_status;
+    CERT_CHAIN_PARA chain_para;
+    PCCERT_CHAIN_CONTEXT chain = NULL;
+    PCCERT_CONTEXT leaf = NULL;
+    HCERTSTORE store;
+    SECURITY_STATUS status;
+    DWORD chain_flags = 0;
+
+    /* Without a target name there is nothing to match, which Windows reports before any chain error */
+    if (!s->target && !(s->cred_flags & SCH_CRED_NO_SERVERNAME_CHECK))
+        return SEC_E_WRONG_PRINCIPAL;
+
+    store = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0, CERT_STORE_CREATE_NEW_FLAG, NULL);
+    if (!store)
+        return SEC_E_INTERNAL_ERROR;
+
+    status = schan_add_peer_chain(s->ssl.session_negotiate ? s->ssl.session_negotiate->peer_cert : NULL, store, &leaf);
+    if (status != SEC_E_OK || !leaf)
+    {
+        CertCloseStore(store, 0);
+        return SEC_E_CERT_UNKNOWN;
+    }
+
+    memset(&chain_para, 0, sizeof(chain_para));
+    chain_para.cbSize = sizeof(chain_para);
+    chain_para.RequestedUsage.dwType = USAGE_MATCH_TYPE_OR;
+    chain_para.RequestedUsage.Usage.cUsageIdentifier = 1;
+    chain_para.RequestedUsage.Usage.rgpszUsageIdentifier = usages;
+
+    if (s->cred_flags & SCH_CRED_REVOCATION_CHECK_CHAIN_END_CERT)
+        chain_flags = CERT_CHAIN_REVOCATION_CHECK_END_CERT;
+    else if (s->cred_flags & SCH_CRED_REVOCATION_CHECK_CHAIN)
+        chain_flags = CERT_CHAIN_REVOCATION_CHECK_CHAIN;
+    else if (s->cred_flags & SCH_CRED_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT)
+        chain_flags = CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT;
+
+    if (!CertGetCertificateChain(NULL, leaf, NULL, store, &chain_para, chain_flags, NULL, &chain))
+    {
+        status = SEC_E_CERT_UNKNOWN;
+        goto done;
+    }
+
+    memset(&ssl_para, 0, sizeof(ssl_para));
+    ssl_para.cbSize = sizeof(ssl_para);
+    ssl_para.dwAuthType = AUTHTYPE_SERVER;
+    /* The policy would also drop a known revocation, so revocation is judged below from the chain status */
+    ssl_para.fdwChecks = SECURITY_FLAG_IGNORE_REVOCATION;
+    if (s->cred_flags & SCH_CRED_NO_SERVERNAME_CHECK)
+        ssl_para.fdwChecks |= SECURITY_FLAG_IGNORE_CERT_CN_INVALID;
+    ssl_para.pwszServerName = s->target;
+
+    memset(&policy_para, 0, sizeof(policy_para));
+    policy_para.cbSize = sizeof(policy_para);
+    policy_para.pvExtraPolicyPara = &ssl_para;
+
+    memset(&policy_status, 0, sizeof(policy_status));
+    policy_status.cbSize = sizeof(policy_status);
+
+    if (!CertVerifyCertificateChainPolicy(CERT_CHAIN_POLICY_SSL, chain, &policy_para, &policy_status))
+    {
+        status = SEC_E_CERT_UNKNOWN;
+        goto done;
+    }
+
+    status = SEC_E_OK;
+    if (policy_status.dwError && policy_status.dwError != CERT_E_CN_NO_MATCH)
+    {
+        WARN("MBEDTLS server certificate rejected: %#x\n", policy_status.dwError);
+        status = schan_status_from_chain_error(policy_status.dwError);
+    }
+    /* crypt32's SSL policy ignores these, so a missing issuer, a signer that is not a CA or a name constraint pass it */
+    else if (chain->TrustStatus.dwErrorStatus & CERT_TRUST_INVALID_BASIC_CONSTRAINTS)
+        status = SEC_E_CERT_WRONG_USAGE;
+    else if (chain->TrustStatus.dwErrorStatus & SCHAN_FATAL_CHAIN_ERRORS)
+        status = SEC_E_UNTRUSTED_ROOT;
+    /* Windows reports a name mismatch before any revocation state, so an excused revocation error cannot hide it */
+    else if (policy_status.dwError == CERT_E_CN_NO_MATCH)
+        status = SEC_E_WRONG_PRINCIPAL;
+    else if (chain_flags && (chain->TrustStatus.dwErrorStatus & CERT_TRUST_IS_REVOKED))
+        status = CRYPT_E_REVOKED;
+    /* A source that was unreachable makes the whole revocation state offline, and only the offline flag may excuse it;
+     * crypt32 also sets the offline bit on an element without any revocation information, so look for it per element */
+    else if (chain_flags && schan_chain_has_offline_source(chain))
+    {
+        if (!(s->cred_flags & SCH_CRED_IGNORE_REVOCATION_OFFLINE))
+            status = CRYPT_E_REVOCATION_OFFLINE;
+    }
+    else if (chain_flags && (chain->TrustStatus.dwErrorStatus & CERT_TRUST_REVOCATION_STATUS_UNKNOWN) &&
+             !(s->cred_flags & SCH_CRED_IGNORE_NO_REVOCATION_CHECK))
+        status = CRYPT_E_NO_REVOCATION_CHECK;
+
+done:
+    if (chain)
+        CertFreeCertificateChain(chain);
+    CertFreeCertificateContext(leaf);
+    CertCloseStore(store, 0);
+    return status;
+}
+
+SECURITY_STATUS schan_imp_handshake(schan_imp_session session)
+{
+    MBEDTLS_SESSION *s = (MBEDTLS_SESSION *)session;
+    int err = 0;
+
+    /* Step through the handshake so the server certificate is checked before the client answers it */
+    while (s->ssl.state != MBEDTLS_SSL_HANDSHAKE_OVER)
+    {
+        if (!s->cert_checked && s->conf.endpoint == MBEDTLS_SSL_IS_CLIENT &&
+            s->ssl.state > MBEDTLS_SSL_SERVER_CERTIFICATE)
+        {
+            /* Windows answers a rejected server with the status alone, no alert record */
+            if (!s->manual_validation)
+            {
+                SECURITY_STATUS status = schan_validate_server_chain(s);
+
+                if (status != SEC_E_OK)
+                    return status;
+            }
+
+            /* Mark checked only after the chain validates, so a retried handshake re-validates instead of completing against an unvalidated server */
+            s->cert_checked = TRUE;
+        }
+
+        err = mbedtls_ssl_handshake_step(&s->ssl);
+        if (err != 0)
+            break;
+    }
 
     TRACE("MBEDTLS schan_imp_handshake: %p  err: %#x \n", session, err);
 
@@ -580,16 +784,11 @@ SECURITY_STATUS schan_imp_get_connection_info(schan_imp_session session,
     return SEC_E_OK;
 }
 
-SECURITY_STATUS schan_imp_get_session_peer_certificate(schan_imp_session session, HCERTSTORE store,
-                                                       PCCERT_CONTEXT *ret)
+static SECURITY_STATUS schan_add_peer_chain(const mbedtls_x509_crt *peer_cert, HCERTSTORE store,
+                                            PCCERT_CONTEXT *ret)
 {
-    MBEDTLS_SESSION *s = (MBEDTLS_SESSION *)session;
     PCCERT_CONTEXT cert_context = NULL;
-
     const mbedtls_x509_crt *next_cert;
-    const mbedtls_x509_crt *peer_cert = mbedtls_ssl_get_peer_cert(&s->ssl);
-
-    TRACE("MBEDTLS schan_imp_get_session_peer_certificate %p %p %p %p.\n", session, store, ret, ret != NULL ? *ret : NULL);
 
     if (!peer_cert)
         return SEC_E_INTERNAL_ERROR;
@@ -609,11 +808,27 @@ SECURITY_STATUS schan_imp_get_session_peer_certificate(schan_imp_session session
     return SEC_E_OK;
 }
 
+SECURITY_STATUS schan_imp_get_session_peer_certificate(schan_imp_session session, HCERTSTORE store,
+                                                       PCCERT_CONTEXT *ret)
+{
+    MBEDTLS_SESSION *s = (MBEDTLS_SESSION *)session;
+
+    TRACE("MBEDTLS schan_imp_get_session_peer_certificate %p %p %p %p.\n", session, store, ret, ret != NULL ? *ret : NULL);
+
+    return schan_add_peer_chain(mbedtls_ssl_get_peer_cert(&s->ssl), store, ret);
+}
+
 SECURITY_STATUS schan_imp_send(schan_imp_session session, const void *buffer,
                                SIZE_T *length)
 {
     MBEDTLS_SESSION *s = (MBEDTLS_SESSION *)session;
     int ret;
+
+    /* Fail-closed: a client context whose server certificate was never validated must not be
+       advanced to a completed handshake through the data path; mbedtls_ssl_write would otherwise
+       finish the handshake without re-entering schan_validate_server_chain */
+    if (s->conf.endpoint == MBEDTLS_SSL_IS_CLIENT && !s->manual_validation && !s->cert_checked)
+        return SEC_E_CONTEXT_EXPIRED;
 
     ret = mbedtls_ssl_write(&s->ssl, (unsigned char *)buffer, *length);
 
@@ -654,6 +869,12 @@ SECURITY_STATUS schan_imp_recv(schan_imp_session session, void *buffer,
 {
     PMBEDTLS_SESSION s = (PMBEDTLS_SESSION)session;
     int ret;
+
+    /* Fail-closed: a client context whose server certificate was never validated must not be
+       advanced to a completed handshake through the data path; mbedtls_ssl_read would otherwise
+       finish the handshake without re-entering schan_validate_server_chain */
+    if (s->conf.endpoint == MBEDTLS_SSL_IS_CLIENT && !s->manual_validation && !s->cert_checked)
+        return SEC_E_CONTEXT_EXPIRED;
 
     TRACE("MBEDTLS schan_imp_recv: (%p, %p, %p/%lu)\n", s, buffer, length, *length);
 

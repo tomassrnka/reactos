@@ -1,5 +1,8 @@
 
 list(APPEND SOURCE
+    GetAdaptersAddresses.c
+    GetBestInterfaceEx.c
+    GetBestRoute2.c
     GetExtendedTcpTable.c
     GetExtendedUdpTable.c
     GetInterfaceName.c
@@ -7,7 +10,11 @@ list(APPEND SOURCE
     GetOwnerModuleFromTcpEntry.c
     GetOwnerModuleFromUdpEntry.c
     icmp.c
+    IpTables2.c
+    NotifyIpInterfaceChange.c
+    NotifyRouteChange2.c
     SendARP.c
+    TcpUdpTableRows.c
     testlist.c)
 
 add_executable(iphlpapi_apitest ${SOURCE})

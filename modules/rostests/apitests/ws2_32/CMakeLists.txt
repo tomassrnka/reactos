@@ -1,5 +1,6 @@
 
 list(APPEND SOURCE
+    accept.c
     bind.c
     broadcast.c
     close.c
@@ -15,17 +16,22 @@ list(APPEND SOURCE
     iocpskip.c
     ioctlsocket.c
     listen.c
+    udpconnreset.c
     nonblocking.c
     nostartup.c
     open_osfhandle.c
     recv.c
+    WSASendMsg.c
     send.c
+    sotimeout.c
     udpbindretry.c
     udpcancel.c
     udprecv.c
     timewait.c
     WSAAsync.c
     WSAIoctl.c
+    WSAPoll.c
+    WSALookupService.c
     WSARecv.c
     WSARecvFrom.c
     WSAStartup.c)
@@ -39,6 +45,6 @@ add_executable(ws2_32_apitest
 
 target_link_libraries(ws2_32_apitest wine ${PSEH_LIB})
 set_module_type(ws2_32_apitest win32cui)
-add_importlibs(ws2_32_apitest advapi32 iphlpapi ws2_32 msvcrt kernel32 ntdll)
+add_importlibs(ws2_32_apitest advapi32 iphlpapi user32 ws2_32 msvcrt kernel32 ntdll)
 add_pch(ws2_32_apitest ws2_32.h "${PCH_SKIP_SOURCE}")
 add_rostests_file(TARGET ws2_32_apitest)

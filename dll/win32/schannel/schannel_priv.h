@@ -63,6 +63,7 @@ typedef struct schan_credentials
     ULONG credential_use;
     void *credentials;
     DWORD enabled_protocols;
+    DWORD flags;
 } schan_credentials;
 
 struct schan_transport;
@@ -96,6 +97,8 @@ extern void schan_imp_dispose_session(schan_imp_session session) DECLSPEC_HIDDEN
 extern void schan_imp_set_session_transport(schan_imp_session session,
                                             struct schan_transport *t) DECLSPEC_HIDDEN;
 extern void schan_imp_set_session_target(schan_imp_session session, const char *target) DECLSPEC_HIDDEN;
+extern void schan_imp_set_session_validation(schan_imp_session session, const WCHAR *target, DWORD flags,
+                                             BOOL manual) DECLSPEC_HIDDEN;
 extern SECURITY_STATUS schan_imp_handshake(schan_imp_session session) DECLSPEC_HIDDEN;
 extern unsigned int schan_imp_get_session_cipher_block_size(schan_imp_session session) DECLSPEC_HIDDEN;
 extern unsigned int schan_imp_get_max_message_size(schan_imp_session session) DECLSPEC_HIDDEN;

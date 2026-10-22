@@ -71,6 +71,95 @@ Cleanup:
     return (ptr ? TRUE : FALSE);
 }
 
+static BOOL
+IsAllChar(const CHAR *p, SIZE_T cb, CHAR c)
+{
+    SIZE_T i;
+    for (i = 0; i < cb; i++)
+    {
+        if (p[i] != c)
+            return FALSE;
+    }
+    return TRUE;
+}
+
+/* Called with Winsock started */
+static void
+TestBufferSizes(void)
+{
+    CHAR szName[256], szShort[300];
+    INT iResult, cchName;
+
+    ZeroMemory(szName, sizeof(szName));
+    iResult = gethostname(szName, sizeof(szName) - 1);
+    ok(iResult == 0, "gethostname failed with %d\n", WSAGetLastError());
+    if (iResult != 0)
+        return;
+    cchName = lstrlenA(szName);
+    ok(cchName > 0, "Empty host name\n");
+
+    /* No room for the terminator: the buffer is left alone */
+    memset(szShort, 'x', sizeof(szShort));
+    WSASetLastError(0xdeadbeef);
+    iResult = gethostname(szShort, cchName);
+    ok_dec(iResult, SOCKET_ERROR);
+    ok_dec(WSAGetLastError(), WSAEFAULT);
+    ok(IsAllChar(szShort, sizeof(szShort), 'x'), "Buffer changed: '%.*s'\n", cchName, szShort);
+
+    /* Exactly the name and its terminator */
+    memset(szShort, 'x', sizeof(szShort));
+    WSASetLastError(0xdeadbeef);
+    iResult = gethostname(szShort, cchName + 1);
+    ok_dec(iResult, 0);
+    ok(szShort[cchName] == ANSI_NULL, "Name not terminated\n");
+    ok(!memcmp(szShort, szName, cchName), "Got '%.*s', expected '%s'\n", cchName, szShort, szName);
+    ok(IsAllChar(szShort + cchName + 1, sizeof(szShort) - cchName - 1, 'x'), "Wrote past the buffer\n");
+
+    /* One byte */
+    memset(szShort, 'x', sizeof(szShort));
+    WSASetLastError(0xdeadbeef);
+    iResult = gethostname(szShort, 1);
+    ok_dec(iResult, SOCKET_ERROR);
+    ok_dec(WSAGetLastError(), WSAEFAULT);
+    ok(IsAllChar(szShort, sizeof(szShort), 'x'), "Buffer changed\n");
+
+    memset(szShort, 'x', sizeof(szShort));
+    WSASetLastError(0xdeadbeef);
+    iResult = gethostname(szShort, 0);
+    ok_dec(iResult, SOCKET_ERROR);
+    ok_dec(WSAGetLastError(), WSAEFAULT);
+    ok(IsAllChar(szShort, sizeof(szShort), 'x'), "Buffer changed\n");
+
+    WSASetLastError(0xdeadbeef);
+    iResult = gethostname(NULL, sizeof(szShort));
+    ok_dec(iResult, SOCKET_ERROR);
+    ok_dec(WSAGetLastError(), WSAEFAULT);
+}
+
+/* Called with Winsock started and the host name key open for writing */
+static void
+TestLongName(HKEY hKeyHN, PCSTR pszOldName)
+{
+    static const CHAR szLong[] = "ROSHOSTNAME-LONGER-THAN-A-NETBIOS-NAME";
+    CHAR szName[256];
+    LONG Error;
+    INT iResult;
+
+    Error = RegSetValueExA(hKeyHN, "Hostname", 0, REG_SZ, (LPBYTE)szLong, sizeof(szLong));
+    ok(Error == ERROR_SUCCESS, "Error setting the long host name (%ld).\n", Error);
+    if (Error != ERROR_SUCCESS)
+        return;
+
+    /* A DNS host name can be longer than a NetBIOS computer name */
+    ZeroMemory(szName, sizeof(szName));
+    iResult = gethostname(szName, sizeof(szName) - 1);
+    ok(iResult == 0, "gethostname failed with %d\n", WSAGetLastError());
+    ok(!strcmp(szName, szLong), "Got '%s', expected '%s'\n", szName, szLong);
+
+    Error = RegSetValueExA(hKeyHN, "Hostname", 0, REG_SZ, (LPBYTE)pszOldName, lstrlenA(pszOldName) + 1);
+    ok(Error == ERROR_SUCCESS, "Error resetting the host name (%ld).\n", Error);
+}
+
 START_TEST(gethostname)
 {
     INT pos;
@@ -100,6 +189,15 @@ START_TEST(gethostname)
  *   "ComputerName" under "System\\CurrentControlSet\\Control\\ComputerName\\ComputerName",
  *   and also in the registry value "NV Hostname" under "System\\CurrentControlSet\\Services\\Tcpip\\Parameters" .
  */
+
+    /* Buffer sizes, independent of the host name changes below */
+    iResult = WSAStartup(MAKEWORD(2,2), &wsaData);
+    ok(iResult == 0, "Error occurred starting Winsock");
+    if (iResult == 0)
+    {
+        TestBufferSizes();
+        WSACleanup();
+    }
 
     /* Retrieve the current host name using API */
     uApiHostNameSize = _countof(szApiHostName);
@@ -238,6 +336,8 @@ START_TEST(gethostname)
     pos = strcmp(szHostNameOld, hostbuffer);
     printf("The test results were '%s'.\n", pos==0 ? "good" : "bad");
     ok(pos == 0, "szHostNameOld '%s' should be hostbuffer '%s'.\n", szHostNameOld, hostbuffer);
+
+    TestLongName(hKeyHN, szHostNameOld);
 
 Cleanup:
     iResult = WSACleanup();
