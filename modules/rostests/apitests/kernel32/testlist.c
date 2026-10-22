@@ -5,6 +5,7 @@
 extern void func_ActCtxWithXmlNamespaces(void);
 extern void func_BindIoCompletionCallback(void);
 extern void func_CancelIoEx(void);
+extern void func_ApplicationRestart(void);
 extern void func_ConsoleCP(void);
 extern void func_CopyFile2(void);
 extern void func_CopyFile2Identity(void);
@@ -56,6 +57,8 @@ extern void func_LCMapString(void);
 extern void func_LoadLibraryErrorMode(void);
 extern void func_LoadLibraryExW(void);
 extern void func_LoadLibraryMachine(void);
+extern void func_LocalDumps(void);
+extern void func_CrashDialog(void);
 extern void func_LocaleNameToLCID(void);
 extern void func_LocalTimeZone(void);
 extern void func_lstrcpynW(void);
@@ -88,6 +91,7 @@ extern void func_VolumeMountPoint(void);
 extern void func_TzSetPrivilege(void);
 extern void func_UEFIFirmware(void);
 extern void func_WerFlags(void);
+extern void func_WerRuntimeExceptionModule(void);
 extern void func_WideCharToMultiByte(void);
 extern void func_SetFileInformationByHandle(void);
 
@@ -96,6 +100,7 @@ const struct test winetest_testlist[] =
     { "ActCtxWithXmlNamespaces",     func_ActCtxWithXmlNamespaces },
     { "BindIoCompletionCallback",    func_BindIoCompletionCallback },
     { "CancelIoEx",                  func_CancelIoEx },
+    { "ApplicationRestart",          func_ApplicationRestart },
     { "ConsoleCP",                   func_ConsoleCP },
     { "CopyFile2",                   func_CopyFile2 },
     { "CopyFile2Identity",           func_CopyFile2Identity },
@@ -147,6 +152,8 @@ const struct test winetest_testlist[] =
     { "LoadLibraryErrorMode",        func_LoadLibraryErrorMode },
     { "LoadLibraryExW",              func_LoadLibraryExW },
     { "LoadLibraryMachine",          func_LoadLibraryMachine },
+    { "LocalDumps",                  func_LocalDumps },
+    { "CrashDialog",                 func_CrashDialog },
     { "LocaleNameToLCID",            func_LocaleNameToLCID },
     { "LocalTimeZone",               func_LocalTimeZone },
     { "lstrcpynW",                   func_lstrcpynW },
@@ -179,6 +186,7 @@ const struct test winetest_testlist[] =
     { "TzSetPrivilege",              func_TzSetPrivilege },
     { "UEFIFirmware",                func_UEFIFirmware },
     { "WerFlags",                    func_WerFlags },
+    { "WerRuntimeExceptionModule",   func_WerRuntimeExceptionModule },
     { "WideCharToMultiByte",         func_WideCharToMultiByte },
     { "SetFileInformationByHandle",  func_SetFileInformationByHandle },
     { 0, 0 }

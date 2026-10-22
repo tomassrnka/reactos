@@ -352,7 +352,7 @@
 @ stdcall -version=0x601+ GetActiveProcessorCount(long)
 @ stdcall -version=0x601+ GetActiveProcessorGroupCount()
 @ stdcall -version=0x600+ GetApplicationRecoveryCallback(ptr ptr ptr ptr ptr)
-@ stub -version=0x600+ GetApplicationRestartSettings
+@ stdcall -version=0x600+ GetApplicationRestartSettings(ptr ptr ptr ptr)
 @ stdcall GetAtomNameA(long ptr long)
 @ stdcall GetAtomNameW(long ptr long)
 @ stdcall GetBinaryType(str ptr) GetBinaryTypeA
@@ -1192,8 +1192,8 @@
 @ stdcall UnlockFile(long long long long long)
 @ stdcall UnlockFileEx(long long long long ptr)
 @ stdcall UnmapViewOfFile(ptr)
-@ stub -version=0x600+ UnregisterApplicationRecoveryCallback
-@ stub -version=0x600+ UnregisterApplicationRestart
+@ stdcall -version=0x600+ UnregisterApplicationRecoveryCallback()
+@ stdcall -version=0x600+ UnregisterApplicationRestart()
 @ stdcall UnregisterConsoleIME()
 @ stdcall UnregisterWait(long)
 @ stdcall UnregisterWaitEx(long long)
@@ -1223,6 +1223,8 @@
 @ stdcall VirtualQuery(ptr ptr long)
 @ stdcall VirtualQueryEx(long ptr ptr long)
 @ stdcall VirtualUnlock(ptr long)
+@ stdcall -version=0x601+ WerRegisterRuntimeExceptionModule(wstr ptr)
+@ stdcall -version=0x601+ WerUnregisterRuntimeExceptionModule(wstr ptr)
 @ stdcall WTSGetActiveConsoleSessionId()
 @ stdcall WaitCommEvent(long ptr ptr)
 @ stdcall WaitForDebugEvent(ptr long)
