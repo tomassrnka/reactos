@@ -1608,6 +1608,17 @@ Phase1InitializationDiscard(IN PVOID Context)
         if (strstr(CommandLine, "NOIPICOALESCE"))
             KiSmpIpiCoalesce = FALSE;
 
+        /* Check for MCSDISPATCH (ReactOS, nitro SMP, T72): route the global
+         * dispatcher lock through the MCS queued spinlock instead of the default
+         * test-and-set, to de-livelock high-core-count SMP (FIFO, bounded
+         * acquire). Off by default while the hottest kernel lock soaks; this is
+         * latched here at boot and must not be toggled at runtime. */
+        if (strstr(CommandLine, "MCSDISPATCH"))
+        {
+            KiDispatcherLockMcsEnabled = TRUE;
+            DPRINT1("T72: MCS dispatcher lock ENABLED (MCSDISPATCH)\n");
+        }
+
         /* Check for IDLEPOLL (ReactOS): microseconds an idle processor
          * looks for work before it halts, 0 disables, at most 1000 */
         for (Option = strstr(CommandLine, "IDLEPOLL=");
