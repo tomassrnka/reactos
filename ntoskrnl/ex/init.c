@@ -1602,6 +1602,12 @@ Phase1InitializationDiscard(IN PVOID Context)
         if (strstr(CommandLine, "MAXPROC"))
             KeMaximumProcessors = MAXIMUM_PROCESSORS;
 
+        /* Check for NOIPICOALESCE (ReactOS, nitro SMP): kill-switch that
+         * restores the pre-T79 behaviour of always sending reschedule/DPC IPIs
+         * even when the target already has the request pending */
+        if (strstr(CommandLine, "NOIPICOALESCE"))
+            KiSmpIpiCoalesce = FALSE;
+
         /* Check for IDLEPOLL (ReactOS): microseconds an idle processor
          * looks for work before it halts, 0 disables, at most 1000 */
         for (Option = strstr(CommandLine, "IDLEPOLL=");
