@@ -79,6 +79,7 @@ extern void func_NtUserScrollDC(void);
 extern void func_NtUserSelectPalette(void);
 extern void func_NtUserSetTimer(void);
 extern void func_NtUserSystemParametersInfo(void);
+extern void func_NtUserThunkedMenuInfo(void);
 extern void func_NtUserToUnicodeEx(void);
 extern void func_NtUserUpdatePerUserSystemParameters(void);
 
@@ -164,6 +165,7 @@ const struct test winetest_testlist[] =
     { "NtUserSelectPalette", func_NtUserSelectPalette },
     { "NtUserSetTimer", func_NtUserSetTimer },
     { "NtUserSystemParametersInfo", func_NtUserSystemParametersInfo },
+    { "NtUserThunkedMenuInfo", func_NtUserThunkedMenuInfo },
     { "NtUserToUnicodeEx", func_NtUserToUnicodeEx },
     { "NtUserUpdatePerUserSystemParameters", func_NtUserUpdatePerUserSystemParameters },
 

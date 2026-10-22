@@ -81,6 +81,7 @@ list(APPEND SOURCE
     ntuser/NtUserSelectPalette.c
     ntuser/NtUserSetTimer.c
     ntuser/NtUserSystemParametersInfo.c
+    ntuser/NtUserThunkedMenuInfo.c
     ntuser/NtUserToUnicodeEx.c
     ntuser/NtUserUpdatePerUserSystemParameters.c
 

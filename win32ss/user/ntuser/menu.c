@@ -903,7 +903,10 @@ IntGetMenuInfo(PMENU Menu, PROSMENUINFO lpmi)
      lpmi->iItem = Menu->iItem;
      lpmi->cxMenu = Menu->cxMenu;
      lpmi->cyMenu = Menu->cyMenu;
-     lpmi->spwndNotify = Menu->spwndNotify;
+     /* SECURITY (T68): spwndNotify is a kernel PWND pointer. It must never be
+        copied out to a user-mode caller regardless of cbSize (kernel-pointer
+        info-leak -> defeats kernel ASLR, aids EoP). Return NULL instead. */
+     lpmi->spwndNotify = NULL;
      lpmi->cxTextAlign = Menu->cxTextAlign;
      lpmi->iTop = Menu->iTop;
      lpmi->iMaxTop = Menu->iMaxTop;
@@ -947,14 +950,20 @@ IntSetMenuInfo(PMENU Menu, PROSMENUINFO lpmi)
       Menu->iItem = lpmi->iItem;
       Menu->cyMenu = lpmi->cyMenu;
       Menu->cxMenu = lpmi->cxMenu;
-      Menu->spwndNotify = lpmi->spwndNotify;
+      /* SECURITY (T68): spwndNotify (kernel PWND) and Wnd (owner window) are
+         internal/kernel-owned fields. A caller can pass cbSize > sizeof(MENUINFO)
+         and smuggle an arbitrary kernel pointer in spwndNotify, which win32k later
+         dereferences -> type-confusion / kernel-pointer write = EoP. Never take
+         these from user input; the kernel sets spwndNotify/hWnd itself from real
+         window objects (see IntSetMenuContextHelpId / MENU_InitPopup paths). */
+      /* Menu->spwndNotify = lpmi->spwndNotify;  -- intentionally not taken from user */
       Menu->cxTextAlign = lpmi->cxTextAlign;
       Menu->iTop = lpmi->iTop;
       Menu->iMaxTop = lpmi->iMaxTop;
       Menu->dwArrowsOn = lpmi->dwArrowsOn;
 
       Menu->TimeToHide = lpmi->TimeToHide;
-      Menu->hWnd = lpmi->Wnd;
+      /* Menu->hWnd = lpmi->Wnd;  -- intentionally not taken from user (see above) */
    }
    if ( lpmi->fMask & MIM_STYLE)
    {
@@ -1028,7 +1037,11 @@ IntGetMenuItemInfo(PMENU Menu, /* UNUSED PARAM!! */
       lpmii->Rect.right  = MenuItem->cxItem; // Do this for now......
       lpmii->Rect.bottom = MenuItem->cyItem;
       lpmii->dxTab = MenuItem->dxTab;
-      lpmii->lpstr = MenuItem->lpstr.Buffer;
+      /* SECURITY (T68): lpstr is a kernel desktop-heap pointer (MenuItem text
+         buffer). It must never be handed back to a user-mode caller via the
+         cbSize-extended ROSMENUITEMINFO tail (kernel-pointer info-leak). User
+         mode reads item text from the shared ITEM->Xlpstr instead. Return NULL. */
+      lpmii->lpstr = NULL;
       lpmii->maxBmpSize.cx = MenuItem->cxBmp;
       lpmii->maxBmpSize.cy = MenuItem->cyBmp;
    }
@@ -1211,7 +1224,11 @@ IntSetMenuItemInfo(PMENU MenuObject, PITEM MenuItem, PROSMENUITEMINFO lpmii, PUN
       MenuItem->cxItem = lpmii->Rect.right; // Do this for now......
       MenuItem->cyItem = lpmii->Rect.bottom;
       MenuItem->dxTab = lpmii->dxTab;
-      lpmii->lpstr = MenuItem->lpstr.Buffer; /* Send back new allocated string or zero */
+      /* SECURITY (T68): never place the kernel desktop-heap text pointer into the
+         transfer struct. The Set caller does not copy this back today, but keep the
+         invariant that ROSMENUITEMINFO.lpstr never carries a kernel pointer toward
+         user mode. (Was: lpmii->lpstr = MenuItem->lpstr.Buffer;) */
+      lpmii->lpstr = NULL;
       MenuItem->cxBmp = lpmii->maxBmpSize.cx;
       MenuItem->cyBmp = lpmii->maxBmpSize.cy;
    }
