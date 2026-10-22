@@ -368,6 +368,20 @@ AfdCreateSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
         //EaLength = sizeof(FILE_FULL_EA_INFORMATION) + EaInfo->EaNameLength + EaInfo->EaValueLength;
 
+        /* The EA value must span the create-packet header and the transport
+         * name it declares; without this, reading SizeOfTransportName and then
+         * copying that many bytes from TransportName over-reads the EA pool
+         * block (the declared name length is a DWORD, up to 64KB-1). */
+        if( EaInfo->EaValueLength < FIELD_OFFSET(AFD_CREATE_PACKET, TransportName) ||
+            ConnectInfo->SizeOfTransportName >
+                EaInfo->EaValueLength - FIELD_OFFSET(AFD_CREATE_PACKET, TransportName) )
+        {
+            AFD_DbgPrint(MIN_TRACE,("Invalid AFD_CREATE_PACKET EA length\n"));
+            Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
+            IoCompleteRequest( Irp, IO_NO_INCREMENT );
+            return STATUS_INVALID_PARAMETER;
+        }
+
         AFD_DbgPrint(MID_TRACE,("EaInfo: %p, EaInfoValue: %p\n",
                                 EaInfo, EaInfoValue));
     }
