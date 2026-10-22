@@ -31,6 +31,7 @@
 #include "irpcss.h"
 #ifdef __REACTOS__
 #include <objbase.h>
+#include <sddl.h>
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 #endif
 
@@ -246,6 +247,31 @@ static DWORD WINAPI service_handler( DWORD ctrl, DWORD event_type, LPVOID event_
 
 #ifdef __REACTOS__
 extern VOID DoRpcSsSetupConfiguration(VOID);
+
+static HANDLE scm_created_event;
+
+/* Programs such as the shell wait for this event before they use COM */
+static void signal_scm_created(void)
+{
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, FALSE };
+
+    /* The security Windows gives it: everyone may wait for it and query it */
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:(A;;0x120001;;;WD)(A;;0x1c0002;;;PS)",
+                                                              SDDL_REVISION_1, &sa.lpSecurityDescriptor, NULL))
+    {
+        WARN("Failed to build the ScmCreatedEvent security descriptor (%lu)\n", GetLastError());
+        return;
+    }
+    scm_created_event = CreateEventW(&sa, TRUE, TRUE, L"Global\\ScmCreatedEvent");
+    LocalFree(sa.lpSecurityDescriptor);
+    if (!scm_created_event)
+    {
+        WARN("Failed to create ScmCreatedEvent (%lu)\n", GetLastError());
+        return;
+    }
+    /* A waiter may have created it first, not signaled */
+    SetEvent(scm_created_event);
+}
 #endif
 
 static void WINAPI ServiceMain( DWORD argc, LPWSTR *argv )
@@ -260,6 +286,9 @@ static void WINAPI ServiceMain( DWORD argc, LPWSTR *argv )
         WARN("Failed to initialize rpc interfaces, status %ld.\n", ret);
         return;
     }
+#ifdef __REACTOS__
+    signal_scm_created();
+#endif
 
     exit_event = CreateEventW( NULL, TRUE, FALSE, NULL );
 

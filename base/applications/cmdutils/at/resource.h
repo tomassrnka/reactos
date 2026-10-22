@@ -6,6 +6,9 @@
 #define IDS_NEW_JOB        106
 #define IDS_JOBS_LIST      107
 #define IDS_NO_ENTRIES     108
+#define IDS_ERROR_CODE     113
+#define IDS_DAY_CODES      114
+#define IDS_INVALID_COMMAND 115
 
 #define IDS_TODAY          109
 #define IDS_TOMORROW       110

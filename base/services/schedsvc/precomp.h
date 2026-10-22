@@ -39,9 +39,13 @@ typedef struct _JOB
     DWORD DaysOfMonth;
     UCHAR DaysOfWeek;
     UCHAR Flags;
+    BOOL bMissed;
     WCHAR Command[1];
 } JOB, *PJOB;
 
+
+/* [MS-TSCH] status for an AT job ID that does not exist (message text in netmsg.dll) */
+#define APE_AT_ID_NOT_FOUND 3806
 
 extern DWORD dwNextJobId;
 extern DWORD dwJobCount;
@@ -56,6 +60,12 @@ extern HANDLE Events[3];
 
 
 /* job.c */
+
+BOOL
+IsValidSchedule(
+    DWORD_PTR JobTime,
+    DWORD DaysOfMonth,
+    UCHAR DaysOfWeek);
 
 VOID
 GetNextJobTimeout(
