@@ -356,6 +356,16 @@ FORCEINLINE
 KIRQL
 KiAcquireDispatcherLock(VOID)
 {
+    /* T72: route the dispatcher lock through the MCS queued lock when enabled */
+    if (KiDispatcherLockMcsEnabled)
+    {
+        KIRQL OldIrql = KfRaiseIrql(SYNCH_LEVEL);
+        KiAcquireQueuedSpinLockMcs(&KiDispatcherMcsTail,
+                                   &KeGetCurrentPrcb()->
+                                       LockQueue[LockQueueDispatcherLock]);
+        return OldIrql;
+    }
+
     /* Raise to synchronization level and acquire the dispatcher lock */
     return KeAcquireQueuedSpinLockRaiseToSynch(LockQueueDispatcherLock);
 }
@@ -364,9 +374,18 @@ FORCEINLINE
 VOID
 KiReleaseDispatcherLock(IN KIRQL OldIrql)
 {
-    /* First release the lock */
-    KeReleaseQueuedSpinLockFromDpcLevel(&KeGetCurrentPrcb()->
-                                        LockQueue[LockQueueDispatcherLock]);
+    /* First release the lock (T72: MCS path when enabled) */
+    if (KiDispatcherLockMcsEnabled)
+    {
+        KiReleaseQueuedSpinLockMcs(&KiDispatcherMcsTail,
+                                   &KeGetCurrentPrcb()->
+                                       LockQueue[LockQueueDispatcherLock]);
+    }
+    else
+    {
+        KeReleaseQueuedSpinLockFromDpcLevel(&KeGetCurrentPrcb()->
+                                            LockQueue[LockQueueDispatcherLock]);
+    }
 
     /* Then exit the dispatcher */
     KiExitDispatcher(OldIrql);
@@ -378,17 +397,35 @@ KiAcquireDispatcherLockAtSynchLevel(VOID)
 {
     /* Acquire the dispatcher lock */
     ASSERT(KeGetCurrentIrql() >= SYNCH_LEVEL);
-    KeAcquireQueuedSpinLockAtDpcLevel(&KeGetCurrentPrcb()->
-                                      LockQueue[LockQueueDispatcherLock]);
+    if (KiDispatcherLockMcsEnabled)
+    {
+        KiAcquireQueuedSpinLockMcs(&KiDispatcherMcsTail,
+                                   &KeGetCurrentPrcb()->
+                                       LockQueue[LockQueueDispatcherLock]);
+    }
+    else
+    {
+        KeAcquireQueuedSpinLockAtDpcLevel(&KeGetCurrentPrcb()->
+                                          LockQueue[LockQueueDispatcherLock]);
+    }
 }
 
 FORCEINLINE
 VOID
 KiReleaseDispatcherLockFromSynchLevel(VOID)
 {
-    /* Release the dispatcher lock */
-    KeReleaseQueuedSpinLockFromDpcLevel(&KeGetCurrentPrcb()->
-                                        LockQueue[LockQueueDispatcherLock]);
+    /* Release the dispatcher lock (T72: MCS path when enabled) */
+    if (KiDispatcherLockMcsEnabled)
+    {
+        KiReleaseQueuedSpinLockMcs(&KiDispatcherMcsTail,
+                                   &KeGetCurrentPrcb()->
+                                       LockQueue[LockQueueDispatcherLock]);
+    }
+    else
+    {
+        KeReleaseQueuedSpinLockFromDpcLevel(&KeGetCurrentPrcb()->
+                                            LockQueue[LockQueueDispatcherLock]);
+    }
 }
 
 //
