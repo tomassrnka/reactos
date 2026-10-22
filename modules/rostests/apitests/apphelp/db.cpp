@@ -1494,7 +1494,10 @@ static void test_match_ex(const WCHAR* workdir, HSDB hsdb)
         if (!Vendor)
             continue;
         Succeed = !_wcsicmp(Vendor, L"Succeed");
-        if (!Succeed && _wcsicmp(Vendor, L"Fail"))
+        /* Matches on ReactOS only: a version range (BIN_xxx_VERSION up to UPTO_BIN_xxx_VERSION) */
+        if (!_wcsicmp(Vendor, L"RosSucceed"))
+            Succeed = is_reactos();
+        else if (!Succeed && _wcsicmp(Vendor, L"Fail"))
             continue;
         tagid = pSdbFindFirstTag(pdb, exetag, TAG_APP_NAME);
         AppName = pSdbGetStringTagPtr(pdb, tagid);
@@ -1509,7 +1512,13 @@ static void test_match_ex(const WCHAR* workdir, HSDB hsdb)
         _swprintf(exename, L"%s\\%s", workdir, AppName);
         test_create_exe(exename, 0);
 
+        /* The layer in the environment is the user's choice, the EXE entry names the other one */
+        bool env_layer = is_reactos() && (!_wcsicmp(TestName, L"test_match27.exe") || !_wcsicmp(TestName, L"test_match28.exe"));
+        if (env_layer)
+            SetEnvironmentVariableW(L"__COMPAT_LAYER", L"DATA_LAYER2");
         ret = pSdbGetMatchingExe(hsdb, exename, NULL, NULL, 0, (SDBQUERYRESULT_VISTA*)&query);
+        if (env_layer)
+            SetEnvironmentVariableW(L"__COMPAT_LAYER", NULL);
         DWORD exe_count = Succeed ? 1 : 0;
 
         if (Succeed && !ret && g_WinVersion == _WIN32_WINNT_WS03)
@@ -1530,6 +1539,22 @@ static void test_match_ex(const WCHAR* workdir, HSDB hsdb)
                 ok(ret == FALSE, "SdbGetMatchingExe should not succeed for %s.\n", wine_dbgstr_w(TestName));
 
             ok(query.dwExeCount == exe_count, "Expected dwExeCount to be %d, was %d for %s\n", exe_count, query.dwExeCount, wine_dbgstr_w(TestName));
+
+            if (env_layer)
+            {
+                TAGREF chosen = 0, named = 0;
+                TAGID layer_tag = pSdbFindFirstNamedTag(pdb, dbtag, TAG_LAYER, TAG_NAME, L"DATA_LAYER2");
+                TAGID named_tag = pSdbFindFirstNamedTag(pdb, dbtag, TAG_LAYER, TAG_NAME, L"DATA_LAYER");
+                pSdbTagIDToTagRef(hsdb, pdb, layer_tag, &chosen);
+                pSdbTagIDToTagRef(hsdb, pdb, named_tag, &named);
+                ok(query.dwLayerCount == 2 && query.atrLayers[0] == chosen && query.atrLayers[1] == named,
+                   "Expected the chosen layer 0x%x before the named one 0x%x, got %d layers: 0x%x, 0x%x for %s\n",
+                   chosen, named, query.dwLayerCount, query.atrLayers[0], query.atrLayers[1], wine_dbgstr_w(TestName));
+            }
+
+            /* The layer named by the EXE is found by its name */
+            if (is_reactos() && Succeed && !_wcsicmp(TestName, L"test_match26.exe"))
+                ok(query.dwLayerCount == 1, "Expected dwLayerCount to be 1, was %d for %s\n", query.dwLayerCount, wine_dbgstr_w(TestName));
         }
         DeleteFileW(exename);
     }
@@ -2071,6 +2096,66 @@ static int validate_SDBQUERYRESULT_size()
 }
 
 
+/*
+ * An entry for any executable name that gives a compatibility layer (a Windows version) must recognise the program
+ * itself, by its own file attributes: a rule that is keyed on another file next to the program reaches every program
+ * in that directory.
+ */
+static void test_SystemDatabaseWildcards(void)
+{
+    WCHAR path[MAX_PATH];
+    PDB pdb;
+    TAGID dbtag, exetag, nametag, filetag, child;
+    LPWSTR name, filename;
+    unsigned exes = 0, wildcards = 0;
+
+    if (!is_reactos())
+    {
+        skip("The Windows database is not ours\n");
+        return;
+    }
+    GetWindowsDirectoryW(path, ARRAYSIZE(path));
+    lstrcatW(path, L"\\AppPatch\\sysmain.sdb");
+    pdb = pSdbOpenDatabase(path, DOS_PATH);
+    ok(pdb != NULL, "Cannot open %ls: %lu\n", path, GetLastError());
+    if (!pdb)
+        return;
+
+    dbtag = pSdbFindFirstTag(pdb, TAGID_ROOT, TAG_DATABASE);
+    ok(dbtag != TAGID_NULL, "Expected to get a valid TAG_DATABASE\n");
+    for (exetag = pSdbFindFirstTag(pdb, dbtag, TAG_EXE); exetag; exetag = pSdbFindNextTag(pdb, dbtag, exetag))
+    {
+        BOOL Own = FALSE;
+
+        exes++;
+        nametag = pSdbFindFirstTag(pdb, exetag, TAG_NAME);
+        name = nametag ? pSdbGetStringTagPtr(pdb, nametag) : NULL;
+        ok(name != NULL, "An entry without a name\n");
+        if (!name || (!wcschr(name, L'*') && !wcschr(name, L'?')))
+            continue;
+        wildcards++;
+        if (!pSdbFindFirstTag(pdb, exetag, TAG_LAYER))
+            continue;
+
+        for (filetag = pSdbFindFirstTag(pdb, exetag, TAG_MATCHING_FILE); filetag && !Own; filetag = pSdbFindNextTag(pdb, exetag, filetag))
+        {
+            nametag = pSdbFindFirstTag(pdb, filetag, TAG_NAME);
+            filename = nametag ? pSdbGetStringTagPtr(pdb, nametag) : NULL;
+            if (!filename || wcscmp(filename, L"*"))
+                continue;
+            for (child = pSdbGetFirstChild(pdb, filetag); child; child = pSdbGetNextChild(pdb, filetag, child))
+            {
+                if (pSdbGetTagFromTagID(pdb, child) != TAG_NAME)
+                    Own = TRUE;
+            }
+        }
+        ok(Own, "The entry '%ls' gives a layer to every program that has a file next to it, not to one that it recognises\n", name);
+    }
+    ok(exes > 0, "No entries in %ls\n", path);
+    trace("%u entries, %u with a wildcard\n", exes, wildcards);
+    pSdbCloseDatabase(pdb);
+}
+
 START_TEST(db)
 {
     //SetEnvironmentVariableA("SHIM_DEBUG_LEVEL", "4");
@@ -2155,4 +2240,5 @@ START_TEST(db)
     test_Data();
     skip("test_SecondaryDB()\n");
     test_IndexKeyFromString();
+    test_SystemDatabaseWildcards();
 }

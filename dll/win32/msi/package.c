@@ -628,6 +628,37 @@ done:
     free(version);
 }
 
+static BOOL msi_is_server2003_layer( const WCHAR *name, SIZE_T len )
+{
+    static const WCHAR *layers[] = { L"WINSRV03RTM", L"WINSRV03SP1", L"WINSRV03SP2" };
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(layers); i++)
+        if (wcslen( layers[i] ) == len && !wcsnicmp( name, layers[i], len )) return TRUE;
+    return FALSE;
+}
+
+/* The layers are the words of the list, as the compatibility database reads them */
+static BOOL msi_has_server2003_layer(void)
+{
+    WCHAR layers[256], *p = layers, *end;
+    DWORD len = GetEnvironmentVariableW( L"__COMPAT_LAYER", layers, ARRAY_SIZE(layers) );
+
+    /* A list that does not fit the 255 characters the database reads is not applied at all */
+    if (!len || len >= ARRAY_SIZE(layers)) return FALSE;
+
+    while (*p == '!' || *p == '#' || *p == ' ' || *p == '\t') p++;
+    while (*p)
+    {
+        end = p;
+        while (*end && *end != ' ' && *end != '\t') end++;
+        if (msi_is_server2003_layer( p, end - p )) return TRUE;
+        p = end;
+        while (*p == ' ' || *p == '\t') p++;
+    }
+    return FALSE;
+}
+
 static VOID set_installer_properties(MSIPACKAGE *package)
 {
     WCHAR *ptr;
@@ -750,6 +781,10 @@ static VOID set_installer_properties(MSIPACKAGE *package)
     OSVersion.dwOSVersionInfoSize = sizeof(OSVersion);
     RtlGetVersion(&OSVersion);
     verval = OSVersion.dwMinorVersion + OSVersion.dwMajorVersion * 100;
+    /* The system reports 5.2 and provides the Windows 7 platform: packages see Windows 7, unless a Windows Server 2003
+       compatibility layer (the only version layers that also say 5.2) was chosen */
+    if (verval == 502 && OSVersion.dwBuildNumber == 3790 && !msi_has_server2003_layer())
+        verval = 601;
     if (verval > 603)
     {
         verval = 603;
