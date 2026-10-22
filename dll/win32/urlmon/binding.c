@@ -886,13 +886,18 @@ static HRESULT WINAPI Binding_Abort(IBinding *iface)
     if(This->state & BINDING_ABORTED)
         return E_FAIL;
 
+    /* Abort may synchronously stop and release this binding */
+    IBinding_AddRef(&This->IBinding_iface);
+
     hres = IInternetProtocolEx_Abort(&This->protocol->IInternetProtocolEx_iface, E_ABORT,
             ERROR_SUCCESS);
-    if(FAILED(hres))
-        return hres;
+    if(SUCCEEDED(hres)) {
+        This->state |= BINDING_ABORTED;
+        hres = S_OK;
+    }
 
-    This->state |= BINDING_ABORTED;
-    return S_OK;
+    IBinding_Release(&This->IBinding_iface);
+    return hres;
 }
 
 static HRESULT WINAPI Binding_Suspend(IBinding *iface)
@@ -1023,8 +1028,12 @@ static HRESULT WINAPI InternetProtocolSink_ReportProgress(IInternetProtocolSink 
         ULONG ulStatusCode, LPCWSTR szStatusText)
 {
     Binding *This = impl_from_IInternetProtocolSink(iface);
+    HRESULT hres = S_OK;
 
     TRACE("(%p)->(%s %s)\n", This, debugstr_bindstatus(ulStatusCode), debugstr_w(szStatusText));
+
+    /* A client callback may abort and release this binding */
+    IBinding_AddRef(&This->IBinding_iface);
 
     switch(ulStatusCode) {
     case BINDSTATUS_FINDINGRESOURCE:
@@ -1066,10 +1075,11 @@ static HRESULT WINAPI InternetProtocolSink_ReportProgress(IInternetProtocolSink 
         break;
     default:
         FIXME("Unhandled status code %ld\n", ulStatusCode);
-        return E_NOTIMPL;
+        hres = E_NOTIMPL;
     };
 
-    return S_OK;
+    IBinding_Release(&This->IBinding_iface);
+    return hres;
 }
 
 static void report_data(Binding *This, DWORD bscf, ULONG progress, ULONG progress_max)
@@ -1164,7 +1174,10 @@ static HRESULT WINAPI InternetProtocolSink_ReportData(IInternetProtocolSink *ifa
 
     TRACE("(%p)->(%ld %lu %lu)\n", This, grfBSCF, ulProgress, ulProgressMax);
 
+    /* A client callback may abort and release this binding */
+    IBinding_AddRef(&This->IBinding_iface);
     report_data(This, grfBSCF, ulProgress, ulProgressMax);
+    IBinding_Release(&This->IBinding_iface);
     return S_OK;
 }
 

@@ -25,7 +25,7 @@
 125 stdcall -noname RunInstallUninstallStubs()
 126 stub DoAddToFavDlg
 127 stub DoAddToFavDlgW
-128 stdcall DoFileDownload(wstr)
+128 stdcall DoFileDownload(wstr) ieframe.DoFileDownload
 129 stub DoFileDownloadEx
 130 stdcall -noname RunInstallUninstallStubs2(long)
 131 stub -noname SHCreateSplashScreen
