@@ -1135,10 +1135,11 @@ bool CNotifyToolbar::SendNotifyCallback(InternalIconData* notifyItem, UINT uMsg)
     }
     else
     {
-        ::SendMessage(notifyItem->hWnd,
-                      notifyItem->uCallbackMessage,
-                      notifyItem->uID,
-                      uMsg);
+        /* The result is not used; never wait for another process's window thread */
+        ::SendNotifyMessage(notifyItem->hWnd,
+                            notifyItem->uCallbackMessage,
+                            notifyItem->uID,
+                            uMsg);
     }
     return false;
 }

@@ -45,6 +45,7 @@ list(APPEND SOURCE
     propsheet.cpp
     shell32.cpp
     utils.cpp
+    wndpropstore.cpp
     CShellItem.cpp
     CShellItemArray.cpp
     CShellLink.cpp
@@ -76,6 +77,8 @@ list(APPEND SOURCE
     CDefViewBckgrndMenu.cpp
     stubs.cpp
     systray.cpp
+    CApplicationAssociationRegistration.cpp
+    CApplicationAssociationRegistration.h
     CUserEventTimer.cpp
     CUserEventTimer.h
     CUserNotification.cpp

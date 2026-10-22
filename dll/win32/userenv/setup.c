@@ -22,6 +22,7 @@ typedef struct _FOLDERDATA
     BOOL bShellFolder;
     BOOL bUserShellFolder;
     BOOL bProgramData;
+    DWORD dwAttributes;
 } FOLDERDATA, *PFOLDERDATA;
 
 
@@ -31,11 +32,11 @@ UserShellFolders[] =
     {L"AppData Root", L"AppData", TRUE, FALSE, FALSE, FALSE},
     {L"AppData", L"AppData\\Roaming", FALSE, TRUE, TRUE, FALSE},
     {L"Desktop", L"Desktop", FALSE, TRUE, TRUE, FALSE},
-    {L"{374DE290-123F-4565-9164-39C4925E467B}", L"Downloads", FALSE, TRUE, TRUE, FALSE},
+    {L"{374DE290-123F-4565-9164-39C4925E467B}", L"Downloads", FALSE, TRUE, TRUE, FALSE, FILE_ATTRIBUTE_READONLY},
     {L"Favorites", L"Favorites", FALSE, TRUE, TRUE, FALSE},
     {L"Personal", L"Documents", FALSE, TRUE, TRUE, FALSE},
     {L"My Music", L"Music", FALSE, TRUE, TRUE, FALSE},
-    {L"My Pictures", L"Music", FALSE, TRUE, TRUE, FALSE},
+    {L"My Pictures", L"Pictures", FALSE, TRUE, TRUE, FALSE},
     {L"My Video", L"Videos", FALSE, TRUE, TRUE, FALSE},
     {L"NetHood", L"AppData\\Roaming\\Microsoft\\Windows\\Network Shortcuts", TRUE, TRUE, TRUE, FALSE},
     {L"PrintHood", L"AppData\\Roaming\\Microsoft\\Windows\\Printer Shortcuts", TRUE, TRUE, TRUE, FALSE},
@@ -60,7 +61,7 @@ UserShellFolders[] =
 static FOLDERDATA
 CommonShellFolders[] =
 {
-    {L"{3D644C9B-1FB8-4f30-9B45-F670235F79C0}", L"Downloads", FALSE, TRUE, TRUE, FALSE},
+    {L"{3D644C9B-1FB8-4f30-9B45-F670235F79C0}", L"Downloads", FALSE, TRUE, TRUE, FALSE, FILE_ATTRIBUTE_READONLY},
     {L"Common Desktop", L"Desktop", FALSE, TRUE, TRUE, FALSE},
     {L"Common Documents", L"Documents", FALSE, TRUE, TRUE, FALSE},
     {L"Common Templates", L"Microsoft\\Windows\\Templates", TRUE, TRUE, TRUE, TRUE},
@@ -248,6 +249,17 @@ CreateStandardProfile(
 
         if (lpFolderData->bHidden)
             SetFileAttributesW(szBuffer, FILE_ATTRIBUTE_HIDDEN);
+
+        if (lpFolderData->dwAttributes)
+        {
+            DWORD dwAttributes = GetFileAttributesW(szBuffer);
+
+            if (dwAttributes == INVALID_FILE_ATTRIBUTES ||
+                !SetFileAttributesW(szBuffer, dwAttributes | lpFolderData->dwAttributes))
+            {
+                DPRINT1("Failed to set the attributes of %ws, error: %lu\n", szBuffer, GetLastError());
+            }
+        }
 
         lpFolderData++;
     }

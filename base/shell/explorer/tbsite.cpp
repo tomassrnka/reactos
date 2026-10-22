@@ -26,6 +26,46 @@
  ** ITrayBandSite ************************************************************
  *****************************************************************************/
 
+/* OleLoadFromStream leaves its result pointer behind when the class does not support
+ * IPersistStream, so the owner of the object would release it twice */
+static HRESULT
+LoadObjectFromStream(IN IStream *pStm, IN REFIID riid, OUT PVOID *pvObj)
+{
+    CLSID clsid;
+    CComPtr<IUnknown> punk;
+    CComPtr<IPersistStream> pPersist;
+
+    *pvObj = NULL;
+
+    HRESULT hr = ReadClassStm(pStm, &clsid);
+    if (FAILED(hr))
+        return hr;
+    hr = CoCreateInstance(clsid, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARG(IUnknown, &punk));
+    if (FAILED(hr))
+        return hr;
+    hr = punk->QueryInterface(IID_PPV_ARG(IPersistStream, &pPersist));
+    if (FAILED(hr))
+        return hr;
+
+    /* Only what a band site can take is asked to read the stream: a stream that names another class must not reach its parser */
+    {
+        CComPtr<IDeskBand> pDeskBand;
+        CComPtr<IObjectWithSite> pWithSite;
+        CComPtr<IWinEventHandler> pEvents;
+        if (FAILED(punk->QueryInterface(IID_PPV_ARG(IDeskBand, &pDeskBand))) ||
+            FAILED(punk->QueryInterface(IID_PPV_ARG(IObjectWithSite, &pWithSite))) ||
+            FAILED(punk->QueryInterface(IID_PPV_ARG(IWinEventHandler, &pEvents))))
+        {
+            return E_NOINTERFACE;
+        }
+    }
+
+    hr = pPersist->Load(pStm);
+    if (FAILED(hr))
+        return hr;
+    return punk->QueryInterface(riid, pvObj);
+}
+
 // WARNING: Can't use ATL for this class due to our ATL not fully supporting the AGGREGATION functions needed for this class to be an "outer" class
 // it works just fine this way.
 class CTrayBandSite :
@@ -45,6 +85,8 @@ class CTrayBandSite :
     CComPtr<IContextMenu> m_ContextMenu;
 
     HWND m_Rebar;
+    BOOL m_bNoSave;
+    BOOL m_bSaving;
 
     union
     {
@@ -111,7 +153,9 @@ public:
 public:
     CTrayBandSite() :
         m_RefCount(0),
-        m_Rebar(NULL)
+        m_Rebar(NULL),
+        m_bNoSave(TRUE),
+        m_bSaving(FALSE)
     {
     }
 
@@ -153,6 +197,10 @@ public:
                 if (IsEqualGUID(clsid, CLSID_ITaskBand))
                 {
                     ASSERT(m_TaskBand != NULL);
+
+                    /* There is one task band, a second entry of the stream is refused */
+                    if (HasTaskBand())
+                        return E_FAIL;
                     /* We're trying to load the task band! Let's create it... */
 
                     hRet = m_TaskBand->QueryInterface(
@@ -177,9 +225,7 @@ public:
         if (SUCCEEDED(hRet))
         {
             /* Let the shell handle everything else for us :) */
-            hRet = OleLoadFromStream(pStm,
-                riid,
-                pvObj);
+            hRet = LoadObjectFromStream(pStm, riid, pvObj);
         }
 
         if (!SUCCEEDED(hRet))
@@ -198,9 +244,19 @@ public:
         /* NOTE: Callback routine called by the shell while saving the task band
                  stream. We use it to intercept the default behavior when the task
                  band is saved to the stream */
-        /* FIXME: Implement */
-        TRACE("IBandSiteStreamCallback::OnSave(0x%p, 0x%p) returns E_NOTIMPL\n", pUnk, pStm);
-        return E_NOTIMPL;
+        CComPtr<IPersistStream> pPersist;
+
+        if (m_TaskBand != NULL && IsSameObject(m_TaskBand, pUnk) == S_OK)
+        {
+            /* The task band has nothing to save but its class */
+            return WriteClassStm(pStm, CLSID_ITaskBand);
+        }
+
+        HRESULT hRet = pUnk->QueryInterface(IID_PPV_ARG(IPersistStream, &pPersist));
+        if (FAILED(hRet))
+            return hRet;
+
+        return OleSaveToStream(pPersist, pStm);
     }
 
     STDMETHODIMP
@@ -264,6 +320,13 @@ public:
 
         /*TRACE("Calling IWinEventHandler::ProcessMessage(0x%p, 0x%x, 0x%p, 0x%p, 0x%p) hWndRebar=0x%p\n", hWnd, uMsg, wParam, lParam, plResult, hWndRebar);*/
         hRet = m_WindowEventHandler->OnWinEvent(hWnd, uMsg, wParam, lParam, plResult);
+
+        if (uMsg == WM_NOTIFY && ((const NMHDR *) lParam)->hwndFrom == m_Rebar &&
+            ((const NMHDR *) lParam)->code == RBN_LAYOUTCHANGED)
+        {
+            /* The user moved a band */
+            SaveBands();
+        }
 
 #if 0
         if (FAILED(hRet))
@@ -348,7 +411,163 @@ public:
         return S_FALSE;
     }
 
+    /* The Quick Launch toolbar is the folder band of the Quick Launch folder, created as the
+     * Toolbars menu (browseui's CBandSiteMenu) creates it */
+    static HRESULT
+    GetQuickLaunchPidl(OUT PIDLIST_ABSOLUTE *ppidl)
+    {
+        WCHAR szPath[MAX_PATH];
+
+        *ppidl = NULL;
+        HRESULT hr = SHGetFolderPathAndSubDirW(NULL, CSIDL_APPDATA, NULL, SHGFP_TYPE_CURRENT,
+                                               L"Microsoft\\Internet Explorer\\Quick Launch", szPath);
+        if (FAILED(hr))
+            return hr;
+        /* ILCreateFromPathW without dropping the reason of a failure */
+        hr = SHILCreateFromPath(szPath, ppidl, NULL);
+        if (FAILED(hr))
+            *ppidl = NULL;
+        return hr;
+    }
+
+    DWORD
+    FindQuickLaunchBand(IN PCIDLIST_ABSOLUTE pidlQuickLaunch)
+    {
+        DWORD dwBandID;
+
+        for (UINT uBand = 0; SUCCEEDED(m_BandSite->EnumBands(uBand, &dwBandID)); uBand++)
+        {
+            CComPtr<IShellFolderBand> pBand;
+            if (FAILED(m_BandSite->GetBandObject(dwBandID, IID_PPV_ARG(IShellFolderBand, &pBand))))
+                continue;
+
+            BANDINFOSFB bi = { ISFB_MASK_IDLIST };
+            if (FAILED(pBand->GetBandInfoSFB(&bi)) || bi.pidl == NULL)
+                continue;
+
+            BOOL bMatch = ILIsEqual(bi.pidl, pidlQuickLaunch);
+            ILFree(bi.pidl);
+            if (bMatch)
+                return dwBandID;
+        }
+
+        return (DWORD)-1;
+    }
+
+    STDMETHODIMP
+    IsQuickLaunchShown() override
+    {
+        CComHeapPtr<ITEMIDLIST_ABSOLUTE> pidl;
+        if (FAILED(GetQuickLaunchPidl(&pidl)))
+            return S_FALSE;
+
+        return (FindQuickLaunchBand(pidl) != (DWORD)-1) ? S_OK : S_FALSE;
+    }
+
+    STDMETHODIMP
+    ShowQuickLaunch(IN BOOL bShow) override
+    {
+        CComHeapPtr<ITEMIDLIST_ABSOLUTE> pidl;
+        HRESULT hr = GetQuickLaunchPidl(&pidl);
+        if (FAILED(hr))
+            return hr;
+
+        DWORD dwBandID = FindQuickLaunchBand(pidl);
+        if (!bShow)
+            return (dwBandID != (DWORD)-1) ? RemoveBand(dwBandID) : S_OK;
+        if (dwBandID != (DWORD)-1)
+            return S_OK;
+
+        CComPtr<IShellFolderBand> pBand;
+        hr = CoCreateInstance(CLSID_ISFBand, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARG(IShellFolderBand, &pBand));
+        if (FAILED_UNEXPECTEDLY(hr))
+            return hr;
+
+        hr = pBand->InitializeSFB(NULL, pidl);
+        if (FAILED_UNEXPECTEDLY(hr))
+            return hr;
+
+        BANDINFOSFB bi = { ISFB_MASK_STATE, ISFB_STATE_QLINKSMODE, ISFB_STATE_QLINKSMODE };
+        pBand->SetBandInfoSFB(&bi);
+
+        return AddBand(pBand);
+    }
+
     /*******************************************************************/
+
+    /* The bands are kept in the registry, in the stream the next Load reads */
+    HRESULT
+    SaveBands()
+    {
+        HRESULT hRet;
+
+        /* A band that notifies the site while it is saved must not start a second save */
+        if (m_bNoSave || m_bSaving || m_BandSite == NULL || SHRestricted(REST_NOSAVESET))
+            return S_FALSE;
+
+        m_bSaving = TRUE;
+        hRet = SaveBandsToRegistry();
+        m_bSaving = FALSE;
+        return hRet;
+    }
+
+    HRESULT
+    SaveBandsToRegistry()
+    {
+        CComPtr<IPersistStream> pPersist;
+        CComPtr<IStream> pMem;
+        STATSTG stat;
+        HGLOBAL hGlobal;
+        HRESULT hRet;
+
+        hRet = m_BandSite->QueryInterface(IID_PPV_ARG(IPersistStream, &pPersist));
+        if (FAILED(hRet))
+            return hRet;
+
+        /* Save into memory first, a failed save must not replace the stored bands */
+        hRet = CreateStreamOnHGlobal(NULL, TRUE, &pMem);
+        if (FAILED_UNEXPECTEDLY(hRet))
+            return hRet;
+
+        hRet = pPersist->Save(pMem, TRUE);
+        if (FAILED(hRet))
+            return hRet;
+
+        hRet = pMem->Stat(&stat, STATFLAG_NONAME);
+        if (FAILED(hRet))
+            return hRet;
+        hRet = GetHGlobalFromStream(pMem, &hGlobal);
+        if (FAILED(hRet))
+            return hRet;
+
+        PVOID pData = GlobalLock(hGlobal);
+        if (pData == NULL)
+            return E_OUTOFMEMORY;
+
+        HKEY hkStreams;
+        LONG lRet = RegCreateKeyW(hkExplorer, L"Streams", &hkStreams);
+        if (lRet == ERROR_SUCCESS)
+        {
+            HKEY hkDesktop;
+            lRet = RegCreateKeyW(hkStreams, L"Desktop", &hkDesktop);
+            if (lRet == ERROR_SUCCESS)
+            {
+                lRet = RegSetValueExW(hkDesktop, L"TaskbarWinXP", 0, REG_BINARY,
+                                      (const BYTE *)pData, (DWORD)stat.cbSize.LowPart);
+                RegCloseKey(hkDesktop);
+            }
+            RegCloseKey(hkStreams);
+        }
+
+        GlobalUnlock(hGlobal);
+        return HRESULT_FROM_WIN32(lRet);
+    }
+
+    STDMETHODIMP
+    Save() override
+    {
+        return SaveBands();
+    }
 
     STDMETHODIMP
     AddBand(IN IUnknown *punk) override
@@ -373,6 +592,7 @@ public:
 
         SysFreeString(V_BSTR(&vThemeName));
 
+        SaveBands();
         return S_OK;
     }
 
@@ -438,7 +658,10 @@ public:
     STDMETHODIMP
     RemoveBand(IN DWORD dwBandID) override
     {
-        return m_BandSite->RemoveBand(dwBandID);
+        HRESULT hRet = m_BandSite->RemoveBand(dwBandID);
+        if (SUCCEEDED(hRet))
+            SaveBands();
+        return hRet;
     }
 
     STDMETHODIMP
@@ -464,7 +687,6 @@ public:
 
     virtual BOOL HasTaskBand()
     {
-        CComPtr<IPersist> pBand;
         CLSID BandCLSID;
         DWORD dwBandID;
         UINT uBand = 0;
@@ -472,7 +694,8 @@ public:
         /* Enumerate all bands */
         while (SUCCEEDED(m_BandSite->EnumBands(uBand, &dwBandID)))
         {
-            if (dwBandID && SUCCEEDED(m_BandSite->GetBandObject(dwBandID, IID_PPV_ARG(IPersist, &pBand))))
+            CComPtr<IPersist> pBand;
+            if (SUCCEEDED(m_BandSite->GetBandObject(dwBandID, IID_PPV_ARG(IPersist, &pBand))))
             {
                 if (SUCCEEDED(pBand->GetClassID(&BandCLSID)))
                 {
@@ -713,6 +936,9 @@ public:
 
         /* Should we send this after showing it? */
         Update();
+
+        /* From now on a change of the bands is stored */
+        m_bNoSave = FALSE;
 
         /* FIXME: When should we send this? Does anyone care anyway? */
         FinishInit();

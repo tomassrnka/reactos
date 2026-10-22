@@ -204,6 +204,14 @@
 #define IDS_NO_FORMAT_TITLE       188
 #define IDS_NO_FORMAT             189
 
+/* Drive tools messages */
+#define IDS_CHKDSK_COMPLETE         60100
+#define IDS_CHKDSK_NOT_SUPPORTED    60101
+#define IDS_CHKDSK_VOLUME_IN_USE    60102
+#define IDS_CHKDSK_FAILED           60103
+#define IDS_DEFRAG_UNAVAILABLE      60104
+#define IDS_BACKUP_UNAVAILABLE      60105
+
 #define IDS_UNKNOWN_APP     190
 #define IDS_EXE_DESCRIPTION 191
 
@@ -563,6 +571,20 @@
 #define IDD_ACTION       37
 #define IDD_FOLDER_CUSTOMIZE    38
 #define IDD_LINK_PROBLEM 39
+#define IDD_RECYCLE_ITEM_PROPERTIES 60110
+
+/* Control IDs for IDD_RECYCLE_ITEM_PROPERTIES dialog */
+#define IDC_RBITEM_ICON                     14000
+#define IDC_RBITEM_NAME                     14001
+#define IDC_RBITEM_ORIGIN                   14002
+#define IDC_RBITEM_TYPE                     14003
+#define IDC_RBITEM_SIZE                     14004
+#define IDC_RBITEM_DELETED                  14005
+#define IDC_RBITEM_CREATED                  14006
+#define IDC_RBITEM_MODIFIED                 14007
+#define IDC_RBITEM_READONLY                 14008
+#define IDC_RBITEM_HIDDEN                   14009
+#define IDC_RBITEM_ARCHIVE                  14010
 
 /* Control IDs for IDD_FOLDER_CUSTOMIZE dialog */
 #define IDC_FOLDERCUST_COMBOBOX             14001
@@ -963,3 +985,4 @@
 #define IDR_SYSTEMFILEASSOC     164
 #define IDR_SHELLLIBRARY        165
 #define IDR_USEREVENTTIMER      166
+#define IDR_APPASSOCREGISTRATION 167

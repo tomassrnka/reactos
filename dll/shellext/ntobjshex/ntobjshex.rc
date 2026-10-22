@@ -15,6 +15,16 @@ IDI_NTOBJECTPORT    ICON "resources/6.ico"
 IDI_REGISTRYKEY     ICON "resources/7.ico"
 IDI_REGISTRYVALUE   ICON "resources/8.ico"
 
+/* The labels come from the folder's columns, which are not localized either */
+IDD_OBJECTPROPERTIES DIALOGEX 0, 0, 227, 215
+STYLE DS_SHELLFONT | WS_CHILD | WS_CAPTION
+CAPTION "General"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    CONTROL "", IDC_OBJECTPROPERTIES, "SysListView32", LVS_REPORT | LVS_NOCOLUMNHEADER | LVS_SINGLESEL |
+            LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 7, 7, 213, 201
+END
+
 IDR_NTOBJECTFOLDER REGISTRY "resources/rgs/ntobjectfolder.rgs"
 IDR_REGISTRYFOLDER REGISTRY "resources/rgs/regfolder.rgs"
 

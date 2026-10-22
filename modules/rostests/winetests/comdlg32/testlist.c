@@ -14,7 +14,7 @@ const struct test winetest_testlist[] =
     { "filedlg", func_filedlg },
     { "finddlg", func_finddlg },
     { "fontdlg", func_fontdlg },
-    //{ "itemdlg", func_itemdlg }, // Win 7
+    { "itemdlg", func_itemdlg },
     { "printdlg", func_printdlg },
     { 0, 0 }
 };

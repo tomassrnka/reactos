@@ -293,6 +293,35 @@ BEGIN
     PUSHBUTTON "A&dvanced...", 14028, 180, 185, 50, 15
 END
 
+IDD_RECYCLE_ITEM_PROPERTIES DIALOGEX 0, 0, 240, 205
+STYLE DS_SHELLFONT | WS_CHILD | WS_CAPTION
+CAPTION "General"
+FONT 8, "MS Shell Dlg", 0, 0, 0x0
+BEGIN
+    ICON "", IDC_RBITEM_ICON, 16, 7, 32, 32, WS_VISIBLE
+    EDITTEXT IDC_RBITEM_NAME, 58, 9, 170, 14, ES_LEFT | ES_READONLY | ES_AUTOHSCROLL
+    LTEXT "", -1, 8, 29, 221, 1, SS_ETCHEDHORZ | WS_CHILD | WS_VISIBLE
+    LTEXT "Origin:", -1, 8, 35, 50, 10
+    EDITTEXT IDC_RBITEM_ORIGIN, 58, 35, 170, 10, ES_LEFT | ES_READONLY | NOT WS_BORDER | ES_AUTOHSCROLL | NOT WS_TABSTOP
+    LTEXT "", -1, 8, 50, 221, 1, SS_ETCHEDHORZ | WS_CHILD | WS_VISIBLE
+    LTEXT "Type of file:", -1, 8, 57, 50, 10
+    EDITTEXT IDC_RBITEM_TYPE, 58, 57, 170, 10, ES_LEFT | ES_READONLY | NOT WS_BORDER | ES_AUTOHSCROLL | NOT WS_TABSTOP
+    LTEXT "Size:", -1, 8, 73, 50, 10
+    EDITTEXT IDC_RBITEM_SIZE, 58, 73, 170, 10, ES_LEFT | ES_READONLY | NOT WS_BORDER | NOT WS_TABSTOP
+    LTEXT "", -1, 8, 89, 221, 1, SS_ETCHEDHORZ | WS_CHILD | WS_VISIBLE
+    LTEXT "Deleted:", -1, 8, 96, 50, 10
+    EDITTEXT IDC_RBITEM_DELETED, 58, 96, 170, 10, ES_LEFT | ES_READONLY | NOT WS_BORDER | NOT WS_TABSTOP
+    LTEXT "Created:", -1, 8, 112, 50, 10
+    EDITTEXT IDC_RBITEM_CREATED, 58, 112, 170, 10, ES_LEFT | ES_READONLY | NOT WS_BORDER | NOT WS_TABSTOP
+    LTEXT "Modified:", -1, 8, 128, 50, 10
+    EDITTEXT IDC_RBITEM_MODIFIED, 58, 128, 170, 10, ES_LEFT | ES_READONLY | NOT WS_BORDER | NOT WS_TABSTOP
+    LTEXT "", -1, 8, 144, 221, 1, SS_ETCHEDHORZ | WS_CHILD | WS_VISIBLE
+    LTEXT "Attributes:", -1, 8, 154, 45, 10
+    CHECKBOX "&Read-only", IDC_RBITEM_READONLY, 58, 153, 67, 10, WS_DISABLED
+    CHECKBOX "&Hidden", IDC_RBITEM_HIDDEN, 126, 153, 50, 10, WS_DISABLED
+    CHECKBOX "&Archive", IDC_RBITEM_ARCHIVE, 181, 153, 49, 10, WS_DISABLED
+END
+
 IDD_FILE_VERSION DIALOGEX 0, 0, 235, 215
 STYLE DS_SHELLFONT | WS_CHILD | WS_CAPTION
 CAPTION "Version"
@@ -862,6 +891,12 @@ BEGIN
     /* Warning format system drive dialog strings */
     IDS_NO_FORMAT_TITLE "Cannot format this volume"
     IDS_NO_FORMAT "This volume cannot be formatted! It contains important system files in order for ReactOS to run."
+    IDS_CHKDSK_COMPLETE "Disk Check Complete."
+    IDS_CHKDSK_NOT_SUPPORTED "The disk check could not be performed because checking the %1 file system is not supported."
+    IDS_CHKDSK_VOLUME_IN_USE "The disk check could not be performed because the disk check utility needs exclusive access to the drive, and the drive is in use."
+    IDS_CHKDSK_FAILED "The disk check could not be completed."
+    IDS_DEFRAG_UNAVAILABLE "Disk Defragmenter is not installed on this computer, or it could not be started."
+    IDS_BACKUP_UNAVAILABLE "The backup utility is not installed on this computer, or it could not be started."
 
     /* Run File dialog */
     IDS_RUNDLG_ERROR "Unable to display Run File dialog box (internal error)"

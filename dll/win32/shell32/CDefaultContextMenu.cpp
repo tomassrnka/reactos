@@ -1601,6 +1601,10 @@ CDefaultContextMenu::InvokeRegVerb(
 
                 continue;
             }
+
+            /* The user cancelled the browse (an empty drive's disk prompt), so do not open it another way */
+            if (hr == HRESULT_FROM_WIN32(ERROR_CANCELLED))
+                continue;
         }
 
         InvokePidl(lpcmi, m_apidl[i], pEntry);

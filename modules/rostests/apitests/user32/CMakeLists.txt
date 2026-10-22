@@ -76,6 +76,7 @@ list(APPEND SOURCE
     SetScrollInfo.c
     SetScrollRange.c
     SetWindowPlacement.c
+    SetWindowPosOwned.c
     ShowWindow.c
     ShowWindowFrame.c
     SwitchDesktop.c

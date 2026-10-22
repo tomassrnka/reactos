@@ -346,4 +346,6 @@ STRINGTABLE
 BEGIN
     IDS_PARSE_ADDR_ERR_TITLE "ReactOS Explorer"
     IDS_PARSE_ADDR_ERR_TEXT "'%1' kann nicht gefunden werden."
+    IDS_INSERTDISK_TITLE "Insert disk"
+    IDS_INSERTDISK_TEXT "Please insert a disk into %s."
 END

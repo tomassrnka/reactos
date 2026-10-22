@@ -5,6 +5,7 @@ list(APPEND SOURCE
     AddCommas.cpp
     AssocCreateElement.cpp
     CFSFolder.cpp
+    CFontsFolder.cpp
     CheckEscapes.cpp
     CIDLData.cpp
     CMyComputer.cpp
@@ -16,12 +17,15 @@ list(APPEND SOURCE
     #CUserNotification.cpp # Test is broken on Win 2003
     Control_RunDLLW.cpp
     DragDrop.cpp
+    DriveTools.cpp
     ExtractIconEx.cpp
     FindExecutable.cpp
+    FormerStubs.cpp
     GetDisplayNameOf.cpp
     GUIDFromString.cpp
     LockServer.cpp
     Int64ToString.cpp
+    IApplicationAssociationRegistration.cpp
     IQueryAssociations.cpp
     IShellFolderViewCB.cpp
     ItemIDList.cpp
@@ -35,12 +39,18 @@ list(APPEND SOURCE
     RealShellExecuteEx.cpp
     RegenerateUserEnvironment.cpp
     SHAppBarMessage.cpp
+    SHBindToFolderIDListParent.cpp
     SHChangeNotify.cpp
     SHCreateDataObject.cpp
     SHCreateFileDataObject.cpp
     SHCreateFileExtractIconW.cpp
+    SHEmptyRecycleBin.cpp
     SHEvaluateSystemCommandTemplate.cpp
     SHGetComputerDisplayNameW.cpp
+    SHGetKnownFolderPath.cpp
+    SHGetPathFromIDListEx.cpp
+    SHGetStockIconInfo.cpp
+    SHGetPropertyStoreForWindow.cpp
     SHGetUnreadMailCountW.cpp
     SHIsBadInterfacePtr.cpp
     SHParseDisplayName.cpp
@@ -51,6 +61,7 @@ list(APPEND SOURCE
     #ShellExec_RunDLL.cpp # Broke on Windows
     #ShellExecCmdLine.cpp # Broke on Windows
     ShellExecuteEx.cpp
+    ShellExecuteLinkDir.cpp
     #ShellExecuteW.cpp # Broke on Windows
     ShellFolder.cpp
     ShellHook.cpp
@@ -61,6 +72,7 @@ list(APPEND SOURCE
     SHLimitInputEdit.cpp
     SHSetUnreadMailCountW.cpp
     StrRStr.cpp
+    TaskbarFullscreen.cpp
     menu.cpp
     shelltest.cpp)
 

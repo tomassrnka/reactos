@@ -19,6 +19,10 @@
 #define DEBUG_SHELL_HOOK 0
 
 #define MAX_TASKS_COUNT (0x7FFF)
+
+/* The task switch never waits longer than this for another process's window (milliseconds) */
+#define ICON_QUERY_TIMEOUT 200
+
 #define TASK_ITEM_ARRAY_ALLOC   64
 
 //************************************************************************
@@ -187,6 +191,13 @@ typedef struct _TASK_ITEM
             /* RenderFlashed is only TRUE if the task bar item should be
                drawn with a flash. */
             DWORD RenderFlashed : 1;
+
+            /* IconPending is TRUE while the window has not answered a WM_GETICON
+               request in time; the last known icon stays until it answers. */
+            DWORD IconPending : 1;
+
+            /* The WM_GETICON request (0..2) that is outstanding when IconPending is set. */
+            DWORD IconStage : 2;
         };
     };
 } TASK_ITEM, *PTASK_ITEM;
@@ -413,6 +424,10 @@ class CTaskSwitchWnd :
     BOOL m_IsDestroying;
 
     INT m_nRudeAppValidationCounter;
+    HWND m_hwndRudeApp;     // The full-screen window the taskbar was last arranged for
+    HMONITOR m_hmonRudeApp; // Its monitor and rectangle then: it can move or resize and keep its handle
+    RECT m_rcRudeApp;
+    BOOL m_bTrayLowered;    // The taskbar was sent to the bottom because of m_hwndRudeApp
 
     SIZE m_ButtonSize;
 
@@ -435,8 +450,12 @@ public:
         m_ImageList(NULL),
         m_IsGroupingEnabled(FALSE),
         m_IsDestroying(FALSE),
-        m_nRudeAppValidationCounter(0)
+        m_nRudeAppValidationCounter(0),
+        m_hwndRudeApp(NULL),
+        m_hmonRudeApp(NULL),
+        m_bTrayLowered(FALSE)
     {
+        ZeroMemory(&m_rcRudeApp, sizeof(m_rcRudeApp));
         ZeroMemory(&m_ButtonSize, sizeof(m_ButtonSize));
         m_uHardErrorMsg = RegisterWindowMessageW(L"HardError");
     }
@@ -583,39 +602,118 @@ public:
         /* FIXME: Implement */
     }
 
-    HICON GetWndIcon(HWND hwnd)
+    UINT GetIconTypeForStage(UINT Stage)
     {
-        HICON hIcon = NULL;
-
-        /* Retrieve icon by sending a message */
-#define GET_ICON(type) \
-    SendMessageTimeout(hwnd, WM_GETICON, (type), 0, SMTO_NOTIMEOUTIFNOTHUNG, 100, (PDWORD_PTR)&hIcon)
-
-        LRESULT bAlive = GET_ICON(g_TaskbarSettings.bSmallIcons ? ICON_SMALL2 : ICON_BIG);
-        if (hIcon)
-            return hIcon;
-
-        if (bAlive)
+        switch (Stage)
         {
-            bAlive = GET_ICON(ICON_SMALL);
-            if (hIcon)
-                return hIcon;
+            case 0:  return g_TaskbarSettings.bSmallIcons ? ICON_SMALL2 : ICON_BIG;
+            case 1:  return ICON_SMALL;
+            default: return g_TaskbarSettings.bSmallIcons ? ICON_BIG : ICON_SMALL2;
         }
+    }
 
-        if (bAlive)
-        {
-            GET_ICON(g_TaskbarSettings.bSmallIcons ? ICON_BIG : ICON_SMALL2);
-            if (hIcon)
-                return hIcon;
-        }
-#undef GET_ICON
-
-        /* If we failed, retrieve icon from the window class */
-        hIcon = (HICON)GetClassLongPtr(hwnd, g_TaskbarSettings.bSmallIcons ? GCLP_HICONSM : GCLP_HICON);
+    HICON GetWndClassIcon(HWND hwnd)
+    {
+        HICON hIcon = (HICON)GetClassLongPtr(hwnd, g_TaskbarSettings.bSmallIcons ? GCLP_HICONSM : GCLP_HICON);
         if (hIcon)
             return hIcon;
 
         return (HICON)GetClassLongPtr(hwnd, g_TaskbarSettings.bSmallIcons ? GCLP_HICON : GCLP_HICONSM);
+    }
+
+    /* The reply of an asynchronous WM_GETICON runs in this thread's message loop; it only posts the
+       answer to the task switch window, which looks the task up again */
+    static VOID CALLBACK IconReplyProc(HWND hwnd, UINT uMsg, ULONG_PTR dwData, LRESULT lResult)
+    {
+        ::PostMessageW((HWND)dwData, TSWM_ICONREPLY, (WPARAM)hwnd, (LPARAM)lResult);
+    }
+
+    /* Ask the window for its icon without waiting; the answer arrives as TSWM_ICONREPLY */
+    VOID StartIconQuery(IN OUT PTASK_ITEM TaskItem, UINT Stage)
+    {
+        TaskItem->IconPending = 0;
+        if (!::IsWindow(TaskItem->hWnd))
+            return;
+
+        if (::SendMessageCallbackW(TaskItem->hWnd, WM_GETICON, GetIconTypeForStage(Stage), 0,
+                                   IconReplyProc, (ULONG_PTR)m_hWnd))
+        {
+            TaskItem->IconPending = 1;
+            TaskItem->IconStage = Stage;
+        }
+    }
+
+    /* Returns the window icon, the class icon if the window has none, or NULL to keep the icon the
+       button shows now because the window did not answer in time */
+    HICON GetWndIcon(IN OUT PTASK_ITEM TaskItem)
+    {
+        HWND hwnd = TaskItem->hWnd;
+        HICON hIcon;
+
+        if (!TaskItem->IconPending)
+        {
+            for (UINT Stage = 0; Stage < 3; ++Stage)
+            {
+                DWORD_PTR Result = 0;
+                hIcon = NULL;
+                if (!SendMessageTimeoutW(hwnd, WM_GETICON, GetIconTypeForStage(Stage), 0,
+                                         SMTO_ABORTIFHUNG, ICON_QUERY_TIMEOUT, &Result))
+                {
+                    /* No answer: ask again without waiting, and use what we have meanwhile */
+                    StartIconQuery(TaskItem, Stage);
+                    break;
+                }
+
+                hIcon = (HICON)Result;
+                if (hIcon)
+                    return hIcon;
+            }
+        }
+
+        /* The window did not answer yet: keep the icon the button has */
+        if (TaskItem->IconPending && TaskItem->IconIndex >= 0)
+            return NULL;
+
+        /* If we failed, retrieve icon from the window class */
+        return GetWndClassIcon(hwnd);
+    }
+
+    LRESULT OnIconReply(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
+    {
+        PTASK_ITEM TaskItem = FindTaskItem((HWND)wParam);
+        HICON hIcon = (HICON)lParam;
+
+        if (TaskItem == NULL || !TaskItem->IconPending)
+            return 0;
+
+        TaskItem->IconPending = 0;
+        if (!hIcon)
+        {
+            /* The window answered but has no icon of this kind; try the next kind */
+            if (TaskItem->IconStage < 2)
+            {
+                StartIconQuery(TaskItem, TaskItem->IconStage + 1);
+                return 0;
+            }
+            hIcon = GetWndClassIcon(TaskItem->hWnd);
+            if (!hIcon)
+                return 0;
+        }
+
+        if (TaskItem->Index >= 0)
+        {
+            TBBUTTONINFO tbbi = { 0 };
+            tbbi.cbSize = sizeof(tbbi);
+            tbbi.dwMask = TBIF_BYINDEX | TBIF_IMAGE;
+            /* The icon may be gone by now; on failure keep the image and the slot we have */
+            INT iImage = ImageList_ReplaceIcon(m_ImageList, TaskItem->IconIndex, hIcon);
+            if (iImage < 0)
+                return 0;
+            TaskItem->IconIndex = iImage;
+            tbbi.iImage = iImage;
+            m_TaskBar.SetButtonInfo(TaskItem->Index, &tbbi);
+        }
+        return 0;
     }
 
     INT UpdateTaskItemButton(IN PTASK_ITEM TaskItem)
@@ -648,10 +746,11 @@ public:
             tbbi.pszText = windowText;
         }
 
-        icon = GetWndIcon(TaskItem->hWnd);
-        if (!icon)
+        icon = GetWndIcon(TaskItem);
+        if (!icon && !(TaskItem->IconPending && TaskItem->IconIndex >= 0))
             icon = static_cast<HICON>(LoadImageW(NULL, MAKEINTRESOURCEW(OIC_SAMPLE), IMAGE_ICON, 0, 0, LR_SHARED | LR_DEFAULTSIZE));
-        TaskItem->IconIndex = ImageList_ReplaceIcon(m_ImageList, TaskItem->IconIndex, icon);
+        if (icon)
+            TaskItem->IconIndex = ImageList_ReplaceIcon(m_ImageList, TaskItem->IconIndex, icon);
         tbbi.iImage = TaskItem->IconIndex;
 
         if (!m_TaskBar.SetButtonInfo(TaskItem->Index, &tbbi))
@@ -793,7 +892,7 @@ public:
             return UpdateTaskGroupButton(TaskItem->Group);
         }
 
-        icon = GetWndIcon(TaskItem->hWnd);
+        icon = GetWndIcon(TaskItem);
         if (!icon)
             icon = static_cast<HICON>(LoadImageW(NULL, MAKEINTRESOURCEW(OIC_SAMPLE), IMAGE_ICON, 0, 0, LR_SHARED | LR_DEFAULTSIZE));
         TaskItem->IconIndex = ImageList_ReplaceIcon(m_ImageList, -1, icon);
@@ -1210,6 +1309,7 @@ public:
                 ZeroMemory(TaskItem, sizeof(*TaskItem));
                 TaskItem->hWnd = hWnd;
                 TaskItem->Index = -1;
+                TaskItem->IconIndex = -1;
                 TaskItem->Group = AddToTaskGroup(hWnd);
 
                 if (!m_IsDestroying)
@@ -1972,6 +2072,31 @@ public:
         return TRUE;
     }
 
+    void SaveRudeAppState(_In_opt_ HWND hwndRude)
+    {
+        m_hwndRudeApp = hwndRude;
+        m_hmonRudeApp = NULL;
+        ZeroMemory(&m_rcRudeApp, sizeof(m_rcRudeApp));
+        if (hwndRude)
+        {
+            m_hmonRudeApp = ::MonitorFromWindow(hwndRude, MONITOR_DEFAULTTONULL);
+            ::GetWindowRect(hwndRude, &m_rcRudeApp);
+        }
+    }
+
+    BOOL IsRudeAppChanged(_In_opt_ HWND hwndRude)
+    {
+        if (hwndRude != m_hwndRudeApp)
+            return TRUE;
+        if (!hwndRude)
+            return FALSE;
+
+        RECT rc = { 0 };
+        ::GetWindowRect(hwndRude, &rc);
+        return ::MonitorFromWindow(hwndRude, MONITOR_DEFAULTTONULL) != m_hmonRudeApp ||
+               !::EqualRect(&rc, &m_rcRudeApp);
+    }
+
     void HandleFullScreenApp(_In_opt_ HWND hwndRude)
     {
         // Notify ABN_FULLSCREENAPP for every monitor
@@ -1985,17 +2110,27 @@ public:
         Data.pTray = m_Tray;
         ::EnumDisplayMonitors(NULL, NULL, FullScreenEnumProc, (LPARAM)&Data);
 
+        SaveRudeAppState(hwndRude);
+
+        UINT uFlags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+        HWND hwndTray = m_Tray->GetHWND();
         if (hwndRude)
         {
             // Make the taskbar bottom
-            UINT uFlags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
-            HWND hwndTray = m_Tray->GetHWND();
+            m_bTrayLowered = TRUE;
             ::SetWindowPos(hwndTray, HWND_BOTTOM, 0, 0, 0, 0, uFlags);
 
             // Switch to the rude app if necessary
             DWORD exstyle = (DWORD)::GetWindowLongPtrW(hwndRude, GWL_EXSTYLE);
             if (!(exstyle & WS_EX_TOPMOST) && !SHELL_IsRudeWindowActive(hwndRude))
                 ::SwitchToThisWindow(hwndRude, TRUE);
+        }
+        else if (m_bTrayLowered)
+        {
+            // The full-screen app is gone: give the taskbar its place back
+            m_bTrayLowered = FALSE;
+            ::SetWindowPos(hwndTray, g_TaskbarSettings.sr.AlwaysOnTop ? HWND_TOPMOST : HWND_NOTOPMOST,
+                           0, 0, 0, 0, uFlags);
         }
     }
 
@@ -2273,11 +2408,13 @@ public:
                 // Real activation of rude app might take some time after HSHELL_...ACTIVATED.
                 // Wait up to 5 seconds with validating the rude app at each second.
                 HWND hwndRude = FindRudeApp(NULL);
-                HandleFullScreenApp(hwndRude);
+                if (IsRudeAppChanged(hwndRude))
+                    HandleFullScreenApp(hwndRude);
 
                 KillTimer(wParam);
                 ++m_nRudeAppValidationCounter;
-                if (m_nRudeAppValidationCounter < VALIDATE_RUDE_MAX_COUNT && !hwndRude)
+                // Nothing tells us when a full-screen app leaves full screen mode, so keep watching it
+                if (hwndRude || m_nRudeAppValidationCounter < VALIDATE_RUDE_MAX_COUNT)
                     SetTimer(wParam, VALIDATE_RUDE_INTERVAL, NULL);
                 break;
             }
@@ -2362,6 +2499,7 @@ public:
         MESSAGE_HANDLER(WM_NOTIFY, OnNotify)
         MESSAGE_HANDLER(TSWM_UPDATETASKBARPOS, OnUpdateTaskbarPos)
         MESSAGE_HANDLER(TSWM_ACTIVATETASKINDEX, OnActivateTaskIndex)
+        MESSAGE_HANDLER(TSWM_ICONREPLY, OnIconReply)
         MESSAGE_HANDLER(TWM_SETTINGSCHANGED, OnTaskbarSettingsChanged)
         MESSAGE_HANDLER(WM_CONTEXTMENU, OnContextMenu)
         MESSAGE_HANDLER(WM_TIMER, OnTimer)

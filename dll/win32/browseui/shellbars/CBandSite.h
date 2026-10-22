@@ -47,6 +47,8 @@ private:
         IWinEventHandler                    *WndEvtHandler;
         DESKBANDINFO                        dbi;
         BOOL                                bHiddenTitle;
+        BOOL                                bBreak;
+        LONG                                cxSaved;
     };
 
     LONG                                    m_cBands;
@@ -129,6 +131,7 @@ private:
     HRESULT _UpdateBand(DWORD dwBandID);
     struct BandObject *_GetBandFromHwnd(HWND hwnd);
     HRESULT _IsBandDeletable(DWORD dwBandID);
+    struct BandObject *_GetBandByObject(IUnknown *punk);
     HRESULT _OnContextMenu(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, LRESULT *plrResult);
 
     BEGIN_COM_MAP(CBandSiteBase)

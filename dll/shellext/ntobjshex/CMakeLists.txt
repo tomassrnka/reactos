@@ -10,6 +10,7 @@ list(APPEND SOURCE
     ntobjenum.cpp
     ntobjfolder.cpp
     ntobjshex.cpp
+    properties.cpp
     regfolder.cpp
     precomp.h)
 

@@ -173,6 +173,14 @@ VfatxChkdsk(
     IN PULONG ExitStatus)
 {
     UNIMPLEMENTED;
+    if (!CheckOnlyIfDirty)
+    {
+        /* There is no checker: fail a requested check instead of reporting a clean volume */
+        if (Callback)
+            Callback(FSNOTSUPPORTED, 0, NULL);
+        *ExitStatus = (ULONG)STATUS_NOT_SUPPORTED;
+        return FALSE;
+    }
     *ExitStatus = (ULONG)STATUS_SUCCESS;
     return TRUE;
 }

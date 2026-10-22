@@ -902,7 +902,10 @@ static DWORD SHNotifyCopyFileW(FILE_OPERATION *op, LPCWSTR src, LPCWSTR dest, BO
     }
 
     ret = CopyFileExW(src, dest, SHCopyProgressRoutine, op, &op->bCancelled, bFailIfExists);
-    const DWORD error = ret ? 0 : GetLastError();
+    DWORD error = ret ? 0 : GetLastError();
+    /* The user cancelled the copy in the progress dialog: no error message */
+    if (error == ERROR_REQUEST_ABORTED && op->bCancelled)
+        error = ERROR_CANCELLED;
     FileOpCallback(op, FOCE_POSTCOPYITEM, src, dest, attribs, HRESULT_FROM_WIN32(error));
     if (!error)
     {
@@ -917,6 +920,8 @@ static DWORD SHNotifyCopyFileW(FILE_OPERATION *op, LPCWSTR src, LPCWSTR dest, BO
         SHChangeNotify(SHCNE_CREATE, SHCNF_PATHW, dest, NULL);
         return ERROR_SUCCESS;
     }
+    if (error == ERROR_CANCELLED)
+        return error;
     return CheckForError(op, error, src);
 }
 
@@ -2184,7 +2189,9 @@ cleanup:
     TRACE("SHFO FINISHOPERATIONS %#x (%d)\n", hr, ret);
     FileOpCallback(&op, FOCE_FINISHOPERATIONS, NULL, NULL, 0, hr);
 
-    if (FAILED(hr) && CanShowFileOpErrorUI(*op.req) && !op.bHasDisplayedError)
+    /* Windows shows no message when the user cancels */
+    const BOOL UserCancelled = op.bCancelled && ret == ERROR_CANCELLED;
+    if (FAILED(hr) && CanShowFileOpErrorUI(*op.req) && !op.bHasDisplayedError && !UserCancelled)
         SHELL_ErrorBox(op.hWndOwner, hr);
 
     CoUninitialize();
