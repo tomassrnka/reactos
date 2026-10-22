@@ -158,6 +158,7 @@ extern KEVENT KiSwapEvent;
 extern KAFFINITY KiIdleSummary;
 extern ULONG KiIdlePollMicroseconds;
 #define KI_IDLE_POLL_DEFAULT 50
+extern BOOLEAN KiSmpIpiCoalesce;    /* T79 redundant-IPI coalescing kill-switch */
 extern PVOID KeUserApcDispatcher;
 extern PVOID KeUserCallbackDispatcher;
 extern PVOID KeUserExceptionDispatcher;

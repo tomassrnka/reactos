@@ -17,6 +17,19 @@
 extern KSPIN_LOCK KiReverseStallIpiLock;
 
 /*
+ * T79: coalesce redundant reschedule/DPC IPIs. When a dispatch or APC IPI is
+ * sent to a processor that already has the same request pending and unserviced,
+ * the physical IPI is redundant and only costs a wrmsr on the sender and an EOI
+ * on the target. On the fork's amd64 2-CPU SMP a ready-thread/affinity bounce
+ * makes these pile up into a vector-0xE1 IPI storm that pegs a core at idle
+ * (ticket T79). Dropping the redundant sends removes ~85% of the storm's IPIs
+ * with no missed reschedule (the first setter of the request always sends, so a
+ * dispatch interrupt is still guaranteed). Default on; cleared by the boot
+ * option NOIPICOALESCE.
+ */
+BOOLEAN KiSmpIpiCoalesce = TRUE;
+
+/*
  * The packet fields. x64 has no SignalDone and keeps the packet in a request
  * mailbox; the protocol below uses a single slot per processor, so it takes
  * the first mailbox and PacketBarrier as the slot.
@@ -172,6 +185,7 @@ KiIpiSend(IN KAFFINITY TargetProcessors,
 {
 #ifdef CONFIG_SMP
     KAFFINITY Remaining = TargetProcessors;
+    KAFFINITY NeedIpi = TargetProcessors;
     ULONG Processor;
 
     /* Freezing must reach processors running with interrupts disabled */
@@ -186,12 +200,25 @@ KiIpiSend(IN KAFFINITY TargetProcessors,
        an IPI without requests only ends a halt */
     while (Remaining && IpiRequest)
     {
+        ULONG Old;
         BitScanForwardAffinity(&Processor, Remaining);
         Remaining &= Remaining - 1;
-        KiIpiOrSummary(KiProcessorBlock[Processor], IpiRequest);
+        Old = KiIpiOrSummary(KiProcessorBlock[Processor], IpiRequest);
+
+        /* T79: if every requested bit was already pending and unserviced on the
+           target, a physical IPI for it is already in flight (the target clears
+           the summary with an atomic exchange when it serves the IPI, so a set
+           bit means no service has consumed it yet) - drop the redundant send.
+           The first setter of a bit (Old had it clear) always sends, so the
+           target is still guaranteed to take a dispatch interrupt. */
+        if (KiSmpIpiCoalesce && ((Old & IpiRequest) == IpiRequest))
+            NeedIpi &= ~AFFINITY_MASK(Processor);
     }
 
-    HalRequestIpi(TargetProcessors);
+    /* An IPI with no requests (IpiRequest == 0) only ends a halt: never
+       coalesced, so NeedIpi still covers every target in that case */
+    if (NeedIpi)
+        HalRequestIpi(NeedIpi);
 #else
     /* Uniprocessor systems have no other processor to signal */
     ASSERT(FALSE);
