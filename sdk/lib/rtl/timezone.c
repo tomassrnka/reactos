@@ -94,6 +94,18 @@ RtlSetTimeZoneInformation(PRTL_TIME_ZONE_INFORMATION TimeZoneInformation)
 
     PAGED_CODE_RTL();
 
+    /* The zone key name set before may not name this zone; Windows empties it too */
+    Status = RtlWriteRegistryValue(RTL_REGISTRY_CONTROL,
+                                   L"TimeZoneInformation",
+                                   L"TimeZoneKeyName",
+                                   REG_SZ,
+                                   (PVOID)L"",
+                                   sizeof(WCHAR));
+    if (!NT_SUCCESS(Status))
+    {
+        return Status;
+    }
+
     Status = RtlWriteRegistryValue(RTL_REGISTRY_CONTROL,
                                    L"TimeZoneInformation",
                                    L"Bias",

@@ -534,6 +534,96 @@ static void Test_FindFirstFileExW(void)
     SetCurrentDirectoryW(CurrentDirectory);
 }
 
+/* Windows writes only the header, the name and its terminator: the rest of the structure keeps the caller's bytes */
+static void CheckUntouched(const char *what, const BYTE *base, SIZE_T from, SIZE_T to)
+{
+    SIZE_T i;
+
+    for (i = from; i < to; i++)
+    {
+        if (base[i] != 0xAA)
+        {
+            ok(0, "%s: byte at offset %lu was written (0x%02x)\n", what, (ULONG)i, base[i]);
+            return;
+        }
+    }
+}
+
+static void Test_FindFirstFileWriteExtent(void)
+{
+    static const WCHAR SubDir[] = L"\\system32";
+    WCHAR Path[MAX_PATH];
+    BYTE buf[sizeof(WIN32_FIND_DATAW) + 256];
+    WIN32_FIND_DATAW *fdw = (WIN32_FIND_DATAW *)buf;
+    WIN32_FIND_DATAA *fda = (WIN32_FIND_DATAA *)buf;
+    SIZE_T NameEnd;
+    HANDLE h;
+
+    wcscpy(Path, OSDirW);
+    wcscat(Path, SubDir);
+
+    memset(buf, 0xAA, sizeof(buf));
+    h = FindFirstFileExW(Path, FindExInfoBasic, fdw, FindExSearchNameMatch, NULL, 0);
+    ok(h != INVALID_HANDLE_VALUE, "FindFirstFileExW failed, error %lu\n", GetLastError());
+    if (h != INVALID_HANDLE_VALUE)
+    {
+        NameEnd = FIELD_OFFSET(WIN32_FIND_DATAW, cFileName) + (wcslen(fdw->cFileName) + 1) * sizeof(WCHAR);
+        ok(fdw->cAlternateFileName[0] == 0, "cAlternateFileName is not empty for FindExInfoBasic\n");
+        CheckUntouched("FindFirstFileExW basic, after the name", buf, NameEnd, FIELD_OFFSET(WIN32_FIND_DATAW, cAlternateFileName));
+        CheckUntouched("FindFirstFileExW basic, after the alternate name", buf,
+                       FIELD_OFFSET(WIN32_FIND_DATAW, cAlternateFileName) + sizeof(WCHAR), sizeof(buf));
+        FindClose(h);
+    }
+
+    memset(buf, 0xAA, sizeof(buf));
+    h = FindFirstFileW(Path, fdw);
+    ok(h != INVALID_HANDLE_VALUE, "FindFirstFileW failed, error %lu\n", GetLastError());
+    if (h != INVALID_HANDLE_VALUE)
+    {
+        NameEnd = FIELD_OFFSET(WIN32_FIND_DATAW, cFileName) + (wcslen(fdw->cFileName) + 1) * sizeof(WCHAR);
+        CheckUntouched("FindFirstFileW, after the name", buf, NameEnd, FIELD_OFFSET(WIN32_FIND_DATAW, cAlternateFileName));
+        CheckUntouched("FindFirstFileW, after the alternate name", buf,
+                       FIELD_OFFSET(WIN32_FIND_DATAW, cAlternateFileName) +
+                       (wcslen(fdw->cAlternateFileName) + 1) * sizeof(WCHAR), sizeof(buf));
+        FindClose(h);
+    }
+
+    wcscpy(Path, OSDirW);
+    wcscat(Path, L"\\*");
+    memset(buf, 0xAA, sizeof(buf));
+    h = FindFirstFileW(Path, fdw);
+    ok(h != INVALID_HANDLE_VALUE, "FindFirstFileW(*) failed, error %lu\n", GetLastError());
+    if (h != INVALID_HANDLE_VALUE)
+    {
+        memset(buf, 0xAA, sizeof(buf));
+        ok(FindNextFileW(h, fdw), "FindNextFileW failed, error %lu\n", GetLastError());
+        NameEnd = FIELD_OFFSET(WIN32_FIND_DATAW, cFileName) + (wcslen(fdw->cFileName) + 1) * sizeof(WCHAR);
+        CheckUntouched("FindNextFileW, after the name", buf, NameEnd, FIELD_OFFSET(WIN32_FIND_DATAW, cAlternateFileName));
+        CheckUntouched("FindNextFileW, after the alternate name", buf,
+                       FIELD_OFFSET(WIN32_FIND_DATAW, cAlternateFileName) +
+                       (wcslen(fdw->cAlternateFileName) + 1) * sizeof(WCHAR), sizeof(buf));
+        FindClose(h);
+    }
+
+    {
+        CHAR PathA[MAX_PATH];
+
+        strcpy(PathA, OSDirA);
+        strcat(PathA, "\\system32");
+        memset(buf, 0xAA, sizeof(buf));
+        h = FindFirstFileA(PathA, fda);
+        ok(h != INVALID_HANDLE_VALUE, "FindFirstFileA failed, error %lu\n", GetLastError());
+        if (h != INVALID_HANDLE_VALUE)
+        {
+            NameEnd = FIELD_OFFSET(WIN32_FIND_DATAA, cFileName) + strlen(fda->cFileName) + 1;
+            CheckUntouched("FindFirstFileA, after the name", buf, NameEnd, FIELD_OFFSET(WIN32_FIND_DATAA, cAlternateFileName));
+            CheckUntouched("FindFirstFileA, after the alternate name", buf,
+                           FIELD_OFFSET(WIN32_FIND_DATAA, cAlternateFileName) + strlen(fda->cAlternateFileName) + 1, sizeof(buf));
+            FindClose(h);
+        }
+    }
+}
+
 static int init(void)
 {
     LPSTR p;
@@ -582,4 +672,5 @@ START_TEST(FindFiles)
     Test_FindFirstFileW();
     Test_FindFirstFileExA();
     Test_FindFirstFileExW();
+    Test_FindFirstFileWriteExtent();
 }

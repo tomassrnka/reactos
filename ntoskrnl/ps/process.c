@@ -381,7 +381,9 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
                  IN HANDLE SectionHandle OPTIONAL,
                  IN HANDLE DebugPort OPTIONAL,
                  IN HANDLE ExceptionPort OPTIONAL,
-                 IN BOOLEAN InJob)
+                 IN BOOLEAN InJob,
+                 IN PHANDLE HandleList OPTIONAL,
+                 IN SIZE_T HandleCount)
 {
     HANDLE hProcess;
     PEPROCESS Process, Parent;
@@ -643,7 +645,7 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
         /* Initialize object manager for the process */
         Status = ObInitProcess(Flags & PROCESS_CREATE_FLAGS_INHERIT_HANDLES ?
                                Parent : NULL,
-                               Process);
+                               Process, HandleList, HandleCount);
         if (!NT_SUCCESS(Status)) goto CleanupWithRef;
     }
     else
@@ -968,7 +970,7 @@ PsCreateSystemProcess(OUT PHANDLE ProcessHandle,
                             NULL,
                             NULL,
                             NULL,
-                            FALSE);
+                            FALSE, NULL, 0);
 }
 
 /*
@@ -1450,10 +1452,131 @@ NtCreateProcessEx(OUT PHANDLE ProcessHandle,
                                   SectionHandle,
                                   DebugPort,
                                   ExceptionPort,
-                                  InJob);
+                                  InJob, NULL, 0);
     }
 
     /* Return Status */
+    return Status;
+}
+
+/* Sort captured handle values without subtraction (which could overflow). */
+static int __cdecl
+PspCompareHandleValues(const void *Left, const void *Right)
+{
+    ULONG_PTR A = *(const ULONG_PTR *)Left;
+    ULONG_PTR B = *(const ULONG_PTR *)Right;
+    return (A > B) - (A < B);
+}
+
+/*
+ * ReactOS-private process-only counterpart of the PS_ATTRIBUTE_LIST input to
+ * NtCreateUserProcess. Keep the old native creation entry points unchanged.
+ */
+NTSTATUS
+NTAPI
+NtCreateProcessWithAttributes(OUT PHANDLE ProcessHandle,
+                              IN ACCESS_MASK DesiredAccess,
+                              IN POBJECT_ATTRIBUTES ObjectAttributes OPTIONAL,
+                              IN HANDLE ParentProcess,
+                              IN ULONG Flags,
+                              IN HANDLE SectionHandle OPTIONAL,
+                              IN HANDLE DebugPort OPTIONAL,
+                              IN HANDLE ExceptionPort OPTIONAL,
+                              IN BOOLEAN InJob,
+                              IN PROS_PS_ATTRIBUTE_LIST AttributeList)
+{
+    KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+    ROS_PS_ATTRIBUTE_LIST Attributes;
+    PHANDLE Handles = NULL;
+    SIZE_T Count = 0, CaptureSize = 0, i;
+    BOOLEAN Empty = FALSE;
+    BOOLEAN QuotaCharged = FALSE;
+    NTSTATUS Status = STATUS_SUCCESS;
+    PAGED_CODE();
+
+    if (!ParentProcess || !(Flags & PROCESS_CREATE_FLAGS_INHERIT_HANDLES))
+        return STATUS_INVALID_PARAMETER;
+
+    _SEH2_TRY
+    {
+        if (PreviousMode != KernelMode)
+        {
+            ProbeForWriteHandle(ProcessHandle);
+            ProbeForRead(AttributeList, sizeof(Attributes), sizeof(ULONG_PTR));
+        }
+        Attributes = *AttributeList;
+        if (Attributes.TotalLength != sizeof(Attributes) ||
+            Attributes.Attributes[0].Attribute != ROS_PS_ATTRIBUTE_HANDLE_LIST ||
+            Attributes.Attributes[0].ReturnLength ||
+            Attributes.Attributes[0].Size % sizeof(HANDLE) ||
+            Attributes.Attributes[0].Size / sizeof(HANDLE) > ROS_PS_MAX_HANDLE_COUNT)
+        {
+            Status = STATUS_INVALID_PARAMETER;
+        }
+        else
+        {
+            Count = Attributes.Attributes[0].Size / sizeof(HANDLE);
+            if (PreviousMode != KernelMode)
+                ProbeForRead(Attributes.Attributes[0].ValuePtr,
+                             Attributes.Attributes[0].Size, sizeof(HANDLE));
+            /* Allocate a sentinel for an explicit empty list, distinct from
+             * NULL, which means the legacy inherit-all path. Charge explicitly:
+             * ExAllocatePoolWithQuotaTag does not charge page-sized allocations. */
+            CaptureSize = Count ? Attributes.Attributes[0].Size : sizeof(HANDLE);
+            Status = PsChargeProcessPagedPoolQuota(PsGetCurrentProcess(), CaptureSize);
+            if (NT_SUCCESS(Status))
+            {
+                QuotaCharged = TRUE;
+                Handles = ExAllocatePoolWithTag(PagedPool, CaptureSize, 'lHsP');
+                if (!Handles)
+                    Status = STATUS_INSUFFICIENT_RESOURCES;
+                else if (Count)
+                    RtlCopyMemory(Handles, Attributes.Attributes[0].ValuePtr,
+                                  Attributes.Attributes[0].Size);
+            }
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    if (NT_SUCCESS(Status))
+    {
+        /* Native handles permit two tag bits; reject pseudo/kernel handles. */
+        for (i = 0; i < Count; ++i)
+        {
+            if (!Handles[i]) Empty = TRUE;
+            if ((LONG_PTR)Handles[i] < 0)
+            {
+                Status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+            Handles[i] = (HANDLE)((ULONG_PTR)Handles[i] & ~(ULONG_PTR)3);
+        }
+    }
+    if (NT_SUCCESS(Status))
+    {
+        /* A NULL entry selects an empty table on both reference systems. */
+        if (Empty) Count = 0;
+        qsort(Handles, Count, sizeof(HANDLE), PspCompareHandleValues);
+        for (i = 1; i < Count; ++i)
+        {
+            if (Handles[i] == Handles[i - 1])
+            {
+                Status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+        }
+        if (NT_SUCCESS(Status))
+            Status = PspCreateProcess(ProcessHandle, DesiredAccess, ObjectAttributes,
+                                      ParentProcess, Flags, SectionHandle, DebugPort,
+                                      ExceptionPort, InJob, Handles, Count);
+    }
+    if (Handles) ExFreePoolWithTag(Handles, 'lHsP');
+    if (QuotaCharged)
+        PsReturnProcessPagedPoolQuota(PsGetCurrentProcess(), CaptureSize);
     return Status;
 }
 

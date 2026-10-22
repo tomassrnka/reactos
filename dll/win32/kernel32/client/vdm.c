@@ -15,16 +15,9 @@
 
 /* TYPES **********************************************************************/
 
-#define BINARY_UNKNOWN  (0)
-#define BINARY_PE_EXE32 (1)
-#define BINARY_PE_DLL32 (2)
-#define BINARY_PE_EXE64 (3)
-#define BINARY_PE_DLL64 (4)
 #define BINARY_WIN16    (5)
 #define BINARY_OS216    (6)
 #define BINARY_DOS      (7)
-#define BINARY_UNIX_EXE (8)
-#define BINARY_UNIX_LIB (9)
 
 
 typedef enum _ENV_NAME_TYPE
@@ -1112,127 +1105,110 @@ InternalIsOS2OrOldWin(HANDLE hFile, IMAGE_DOS_HEADER *mz, IMAGE_OS2_HEADER *ne)
   return Ret;
 }
 
+/* Classify an MZ file that is not a valid PE image: a 16-bit Windows or OS/2 NE image, or a DOS program */
 static DWORD WINAPI
 InternalGetBinaryType(HANDLE hFile)
 {
-  union
-  {
-    struct
-    {
-      unsigned char magic[4];
-      unsigned char ignored[12];
-      unsigned short type;
-    } elf;
-    struct
-    {
-      unsigned long magic;
-      unsigned long cputype;
-      unsigned long cpusubtype;
-      unsigned long filetype;
-    } macho;
-    IMAGE_DOS_HEADER mz;
-  } Header;
+  IMAGE_DOS_HEADER mz;
   char magic[4];
   DWORD Read;
 
   if((SetFilePointer(hFile, 0, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER) ||
-     (!ReadFile(hFile, &Header, sizeof(Header), &Read, NULL) ||
-      (Read != sizeof(Header))))
+     (!ReadFile(hFile, &mz, sizeof(mz), &Read, NULL) ||
+      (Read != sizeof(mz))) ||
+     (mz.e_magic != IMAGE_DOS_SIGNATURE))
   {
-    return BINARY_UNKNOWN;
+    return BINARY_DOS;
   }
 
-  if(!memcmp(Header.elf.magic, "\177ELF", sizeof(Header.elf.magic)))
+  /* Seek into the file by the offset to the extended header and read its magic */
+  if((SetFilePointer(hFile, mz.e_lfanew, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER) ||
+     (!ReadFile(hFile, magic, sizeof(magic), &Read, NULL) ||
+      (Read != sizeof(magic))))
   {
-    /* FIXME: we don't bother to check byte order, architecture, etc. */
-    switch(Header.elf.type)
-    {
-      case 2:
-        return BINARY_UNIX_EXE;
-      case 3:
-        return BINARY_UNIX_LIB;
-    }
-    return BINARY_UNKNOWN;
+    return BINARY_DOS;
   }
 
-  /* Mach-o File with Endian set to Big Endian or Little Endian*/
-  if(Header.macho.magic == 0xFEEDFACE ||
-     Header.macho.magic == 0xCEFAEDFE)
+  if(!memcmp(magic, "NE", 2))
   {
-    switch(Header.macho.filetype)
-    {
-      case 0x8:
-        /* MH_BUNDLE */
-        return BINARY_UNIX_LIB;
-    }
-    return BINARY_UNKNOWN;
-  }
-
-  /* Not ELF, try DOS */
-  if(Header.mz.e_magic == IMAGE_DOS_SIGNATURE)
-  {
-    /* We do have a DOS image so we will now try to seek into
-     * the file by the amount indicated by the field
-     * "Offset to extended header" and read in the
-     * "magic" field information at that location.
-     * This will tell us if there is more header information
-     * to read or not.
+    /* This is a Windows executable (NE) header.  This can
+     * mean either a 16-bit OS/2 or a 16-bit Windows or even a
+     * DOS program (running under a DOS extender).  To decide
+     * which, we'll have to read the NE header.
      */
-    if((SetFilePointer(hFile, Header.mz.e_lfanew, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER) ||
-       (!ReadFile(hFile, magic, sizeof(magic), &Read, NULL) ||
-        (Read != sizeof(magic))))
+    IMAGE_OS2_HEADER ne;
+    if((SetFilePointer(hFile, mz.e_lfanew, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER) ||
+       !ReadFile(hFile, &ne, sizeof(IMAGE_OS2_HEADER), &Read, NULL) ||
+       (Read != sizeof(IMAGE_OS2_HEADER)))
     {
+      /* Couldn't read header, so abort. */
       return BINARY_DOS;
     }
 
-    /* Reading the magic field succeeded so
-     * we will try to determine what type it is.
-     */
-    if(!memcmp(magic, "PE\0\0", sizeof(magic)))
+    switch(ne.ne_exetyp)
     {
-      IMAGE_FILE_HEADER FileHeader;
-      if(!ReadFile(hFile, &FileHeader, sizeof(IMAGE_FILE_HEADER), &Read, NULL) ||
-         (Read != sizeof(IMAGE_FILE_HEADER)))
-      {
+      case 2:
+        return BINARY_WIN16;
+      case 5:
         return BINARY_DOS;
-      }
-
-      /* FIXME - detect 32/64 bit */
-
-      if(FileHeader.Characteristics & IMAGE_FILE_DLL)
-        return BINARY_PE_DLL32;
-      return BINARY_PE_EXE32;
+      default:
+        return InternalIsOS2OrOldWin(hFile, &mz, &ne);
     }
-
-    if(!memcmp(magic, "NE", 2))
-    {
-      /* This is a Windows executable (NE) header.  This can
-       * mean either a 16-bit OS/2 or a 16-bit Windows or even a
-       * DOS program (running under a DOS extender).  To decide
-       * which, we'll have to read the NE header.
-       */
-      IMAGE_OS2_HEADER ne;
-      if((SetFilePointer(hFile, Header.mz.e_lfanew, NULL, FILE_BEGIN) == 1) ||
-         !ReadFile(hFile, &ne, sizeof(IMAGE_OS2_HEADER), &Read, NULL) ||
-         (Read != sizeof(IMAGE_OS2_HEADER)))
-      {
-        /* Couldn't read header, so abort. */
-        return BINARY_DOS;
-      }
-
-      switch(ne.ne_exetyp)
-      {
-        case 2:
-          return BINARY_WIN16;
-        case 5:
-          return BINARY_DOS;
-        default:
-          return InternalIsOS2OrOldWin(hFile, &Header.mz, &ne);
-      }
-    }
-    return BINARY_DOS;
   }
-  return BINARY_UNKNOWN;
+
+  return BINARY_DOS;
+}
+
+typedef struct _PE_HEADER_PREFIX
+{
+    DWORD Signature;
+    IMAGE_FILE_HEADER FileHeader;
+    WORD OptionalMagic;
+} PE_HEADER_PREFIX;
+
+/*
+ * Read the signature, file header and optional header magic of an MZ file's PE header.
+ * FALSE if the file ends inside the signature or the file header: no section can be made of it.
+ */
+static BOOL
+InternalReadPeHeader(HANDLE hFile, PE_HEADER_PREFIX *Pe)
+{
+  IMAGE_DOS_HEADER mz;
+  DWORD Read;
+
+  if((SetFilePointer(hFile, 0, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER) ||
+     !ReadFile(hFile, &mz, sizeof(mz), &Read, NULL) ||
+     (Read != sizeof(mz)) ||
+     (mz.e_magic != IMAGE_DOS_SIGNATURE) ||
+     (mz.e_lfanew <= 0) ||
+     (SetFilePointer(hFile, mz.e_lfanew, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER))
+  {
+    return FALSE;
+  }
+
+  Pe->OptionalMagic = 0;
+  if(!ReadFile(hFile, Pe, sizeof(*Pe), &Read, NULL) ||
+     (Read < FIELD_OFFSET(PE_HEADER_PREFIX, OptionalMagic)) ||
+     (Pe->Signature != IMAGE_NT_SIGNATURE))
+  {
+    return FALSE;
+  }
+
+  return TRUE;
+}
+
+static BOOL
+InternalHasSuffix(LPCWSTR lpName, PUNICODE_STRING Suffix)
+{
+  UNICODE_STRING Tail;
+  SIZE_T Length = wcslen(lpName) * sizeof(WCHAR);
+
+  if(Length < Suffix->Length)
+    return FALSE;
+
+  Tail.Buffer = (PWSTR)((ULONG_PTR)lpName + Length - Suffix->Length);
+  Tail.Length = Tail.MaximumLength = Suffix->Length;
+  return RtlEqualUnicodeString(&Tail, Suffix, TRUE);
 }
 
 /*
@@ -1245,10 +1221,17 @@ GetBinaryTypeW (
     LPDWORD lpBinaryType
     )
 {
-  HANDLE hFile;
+  HANDLE hFile, hSection;
+  NTSTATUS Status;
+  SECTION_IMAGE_INFORMATION ImageInfo;
   DWORD BinType;
 
-  if(!lpApplicationName || !lpBinaryType)
+  if(!lpApplicationName)
+  {
+    SetLastError(ERROR_INVALID_NAME);
+    return FALSE;
+  }
+  if(!lpBinaryType)
   {
     SetLastError(ERROR_INVALID_PARAMETER);
     return FALSE;
@@ -1261,70 +1244,133 @@ GetBinaryTypeW (
     return FALSE;
   }
 
-  BinType = InternalGetBinaryType(hFile);
-  CloseHandle(hFile);
-
-  switch(BinType)
+  /* The section code validates a PE image, which this function must report only for an executable */
+  Status = NtCreateSection(&hSection,
+                           STANDARD_RIGHTS_REQUIRED | SECTION_QUERY,
+                           NULL,
+                           NULL,
+                           PAGE_READONLY,
+                           SEC_IMAGE,
+                           hFile);
+  if(NT_SUCCESS(Status))
   {
-    case BINARY_UNKNOWN:
+    Status = NtQuerySection(hSection,
+                            SectionImageInformation,
+                            &ImageInfo,
+                            sizeof(ImageInfo),
+                            NULL);
+    NtClose(hSection);
+    if(NT_SUCCESS(Status))
     {
-      WCHAR *dot;
+      CloseHandle(hFile);
 
-      /*
-       * guess from filename
-       */
-      if(!(dot = wcsrchr(lpApplicationName, L'.')))
+      /* A DLL, and an image for another machine, are not executables this function reports */
+      if((ImageInfo.ImageCharacteristics & IMAGE_FILE_EXECUTABLE_IMAGE) &&
+         !(ImageInfo.ImageCharacteristics & IMAGE_FILE_DLL))
       {
-        return FALSE;
+        if(ImageInfo.Machine == IMAGE_FILE_MACHINE_I386)
+        {
+          *lpBinaryType = SCS_32BIT_BINARY;
+          return TRUE;
+        }
+        if(ImageInfo.Machine == IMAGE_FILE_MACHINE_AMD64)
+        {
+          *lpBinaryType = SCS_64BIT_BINARY;
+          return TRUE;
+        }
       }
-      if(!lstrcmpiW(dot, L".COM"))
-      {
-        *lpBinaryType = SCS_DOS_BINARY;
-        return TRUE;
-      }
-      if(!lstrcmpiW(dot, L".PIF"))
-      {
-        *lpBinaryType = SCS_PIF_BINARY;
-        return TRUE;
-      }
-      return FALSE;
-    }
-    case BINARY_PE_EXE32:
-    case BINARY_PE_DLL32:
-    {
-      *lpBinaryType = SCS_32BIT_BINARY;
-      return TRUE;
-    }
-    case BINARY_PE_EXE64:
-    case BINARY_PE_DLL64:
-    {
-      *lpBinaryType = SCS_64BIT_BINARY;
-      return TRUE;
-    }
-    case BINARY_WIN16:
-    {
-      *lpBinaryType = SCS_WOW_BINARY;
-      return TRUE;
-    }
-    case BINARY_OS216:
-    {
-      *lpBinaryType = SCS_OS216_BINARY;
-      return TRUE;
-    }
-    case BINARY_DOS:
-    {
-      *lpBinaryType = SCS_DOS_BINARY;
-      return TRUE;
-    }
-    case BINARY_UNIX_EXE:
-    case BINARY_UNIX_LIB:
-    {
+      SetLastError(ERROR_BAD_EXE_FORMAT);
       return FALSE;
     }
   }
 
-  DPRINT1("Invalid binary type %lu returned!\n", BinType);
-  return FALSE;
+  switch(Status)
+  {
+    case STATUS_INVALID_IMAGE_WIN_16:
+      BinType = BINARY_WIN16;
+      break;
+
+    case STATUS_INVALID_IMAGE_NE_FORMAT:
+      BinType = BINARY_OS216;
+      break;
+
+    case STATUS_INVALID_IMAGE_PROTECT:
+      /* An MZ file without a valid PE header: ReactOS does not tell NE images apart here */
+      BinType = InternalGetBinaryType(hFile);
+      break;
+
+    case STATUS_INVALID_IMAGE_FORMAT:
+    {
+      PE_HEADER_PREFIX Pe;
+
+      /* A PE header cut off by the end of the file is a DOS program, as for a bad e_lfanew */
+      if(!InternalReadPeHeader(hFile, &Pe))
+      {
+        BinType = BINARY_DOS;
+        break;
+      }
+      CloseHandle(hFile);
+      SetLastError(ERROR_BAD_EXE_FORMAT);
+      return FALSE;
+    }
+
+    case STATUS_INVALID_IMAGE_WIN_64:
+    {
+      PE_HEADER_PREFIX Pe;
+
+      /* A 32-bit system's section code stops at the optional header magic of a 64-bit image */
+      if(InternalReadPeHeader(hFile, &Pe) &&
+         (Pe.FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64) &&
+         (Pe.FileHeader.Characteristics & IMAGE_FILE_EXECUTABLE_IMAGE) &&
+         !(Pe.FileHeader.Characteristics & IMAGE_FILE_DLL))
+      {
+        CloseHandle(hFile);
+        *lpBinaryType = SCS_64BIT_BINARY;
+        return TRUE;
+      }
+      CloseHandle(hFile);
+      SetLastError(ERROR_BAD_EXE_FORMAT);
+      return FALSE;
+    }
+
+    case STATUS_INVALID_IMAGE_NOT_MZ:
+      /* Not a program image: only the file name can tell a DOS program or a PIF */
+      CloseHandle(hFile);
+      if(InternalHasSuffix(lpApplicationName, &BaseDotComSuffixName) ||
+         InternalHasSuffix(lpApplicationName, &BaseDotExeSuffixName))
+      {
+        *lpBinaryType = SCS_DOS_BINARY;
+        return TRUE;
+      }
+      if(InternalHasSuffix(lpApplicationName, &BaseDotPifSuffixName))
+      {
+        *lpBinaryType = SCS_PIF_BINARY;
+        return TRUE;
+      }
+      SetLastError(ERROR_BAD_EXE_FORMAT);
+      return FALSE;
+
+    default:
+      CloseHandle(hFile);
+      BaseSetLastNTError(Status);
+      return FALSE;
+  }
+  CloseHandle(hFile);
+
+  switch(BinType)
+  {
+    case BINARY_WIN16:
+      *lpBinaryType = SCS_WOW_BINARY;
+      return TRUE;
+
+    case BINARY_OS216:
+      *lpBinaryType = SCS_OS216_BINARY;
+      return TRUE;
+
+    default:
+      *lpBinaryType = SCS_DOS_BINARY;
+      return TRUE;
+  }
 }
 
 /*
@@ -1339,6 +1385,12 @@ GetBinaryTypeA(IN LPCSTR lpApplicationName,
     UNICODE_STRING ApplicationNameW;
     BOOL StringAllocated = FALSE, Result;
     NTSTATUS Status;
+
+    if (!lpApplicationName)
+    {
+        SetLastError(ERROR_INVALID_NAME);
+        return FALSE;
+    }
 
     RtlInitAnsiString(&ApplicationNameString, lpApplicationName);
 

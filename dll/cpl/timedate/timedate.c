@@ -84,11 +84,45 @@ PropSheetProc(HWND hwndDlg, UINT uMsg, LPARAM lParam)
     return 0;
 }
 
+/* SetTimeZoneInformation fails unless the caller has enabled SeTimeZonePrivilege */
+static HANDLE
+EnableTimeZonePrivilege(PTOKEN_PRIVILEGES Previous)
+{
+    HANDLE hToken;
+    TOKEN_PRIVILEGES Privilege;
+    DWORD Size;
+
+    Previous->PrivilegeCount = 0;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken))
+        return NULL;
+
+    Privilege.PrivilegeCount = 1;
+    Privilege.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    if (!LookupPrivilegeValueW(NULL, SE_TIME_ZONE_NAME, &Privilege.Privileges[0].Luid) ||
+        !AdjustTokenPrivileges(hToken, FALSE, &Privilege, sizeof(*Previous), Previous, &Size))
+    {
+        Previous->PrivilegeCount = 0;
+    }
+    return hToken;
+}
+
+static VOID
+RestorePrivilege(HANDLE hToken, PTOKEN_PRIVILEGES Previous)
+{
+    if (hToken == NULL)
+        return;
+    if (Previous->PrivilegeCount > 0)
+        AdjustTokenPrivileges(hToken, FALSE, Previous, 0, NULL, NULL);
+    CloseHandle(hToken);
+}
+
 static LONG APIENTRY
 Applet(HWND hwnd, UINT uMsg, LPARAM wParam, LPARAM lParam)
 {
     PROPSHEETHEADER psh;
     PROPSHEETPAGEW psp[3];
+    TOKEN_PRIVILEGES PreviousPrivilege;
+    HANDLE hToken;
     LONG Ret = 0;
 
     UNREFERENCED_PARAMETER(uMsg);
@@ -114,7 +148,9 @@ Applet(HWND hwnd, UINT uMsg, LPARAM wParam, LPARAM lParam)
         InitPropSheetPage(&psp[1], IDD_TIMEZONEPAGE, TimeZonePageProc);
         InitPropSheetPage(&psp[2], IDD_INETTIMEPAGE, InetTimePageProc);
 
+        hToken = EnableTimeZonePrivilege(&PreviousPrivilege);
         Ret = (LONG)(PropertySheetW(&psh) != -1);
+        RestorePrivilege(hToken, &PreviousPrivilege);
 
         UnregisterMonthCalControl(hApplet);
         UnregisterClockControl();

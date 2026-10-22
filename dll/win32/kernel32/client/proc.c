@@ -224,114 +224,118 @@ BasepConfigureAppCertDlls(IN PWSTR ValueName,
     return BasepSaveAppCertRegistryValue(Context, ValueName, ValueData);
 }
 
-NTSTATUS
-WINAPI
-BasepIsProcessAllowed(IN LPWSTR ApplicationName)
+static
+VOID
+BasepInitializeAppCert(VOID)
 {
     NTSTATUS Status, Status1;
     PWCHAR Buffer;
     UINT Length;
     HMODULE TrustLibrary;
-    PBASEP_APPCERT_ENTRY Entry;
-    ULONG CertFlag;
-    PLIST_ENTRY NextEntry;
     HANDLE KeyHandle;
     UNICODE_STRING CertKey = RTL_CONSTANT_STRING(L"\\Registry\\MACHINE\\System\\CurrentControlSet\\Control\\Session Manager\\AppCertDlls");
     OBJECT_ATTRIBUTES KeyAttributes = RTL_CONSTANT_OBJECT_ATTRIBUTES(&CertKey, OBJ_CASE_INSENSITIVE);
 
-    /* Try to initialize the certification subsystem */
-    while (!g_AppCertInitialized)
+    /* Defaults */
+    Status = STATUS_SUCCESS;
+    Buffer = NULL;
+
+    /* On embedded, there is a special DLL */
+    if (SharedUserData->SuiteMask & VER_SUITE_EMBEDDEDNT)
     {
-        /* Defaults */
-        Status = STATUS_SUCCESS;
-        Buffer = NULL;
-
-        /* Acquire the lock while initializing and see if we lost a race */
-        RtlEnterCriticalSection(&gcsAppCert);
-        if (g_AppCertInitialized) break;
-
-        /* On embedded, there is a special DLL */
-        if (SharedUserData->SuiteMask & VER_SUITE_EMBEDDEDNT)
+        /* Allocate a buffer for the name */
+        Buffer = RtlAllocateHeap(RtlGetProcessHeap(),
+                                 0,
+                                 MAX_PATH * sizeof(WCHAR) +
+                                 sizeof(UNICODE_NULL));
+        if (!Buffer)
         {
-            /* Allocate a buffer for the name */
-            Buffer = RtlAllocateHeap(RtlGetProcessHeap(),
-                                     0,
-                                     MAX_PATH * sizeof(WCHAR) +
-                                     sizeof(UNICODE_NULL));
-            if (!Buffer)
-            {
-                /* Fail if no memory */
-                Status = STATUS_NO_MEMORY;
-            }
-            else
-            {
-                /* Now get the system32 directory in our buffer, make sure it fits */
-                Length = GetSystemDirectoryW(Buffer, MAX_PATH - sizeof("EmbdTrst.DLL"));
-                if ((Length) && (Length <= MAX_PATH - sizeof("EmbdTrst.DLL")))
-                {
-                    /* Add a slash if needed, and add the embedded cert DLL name */
-                    if (Buffer[Length - 1] != '\\') Buffer[Length++] = '\\';
-                    RtlCopyMemory(&Buffer[Length],
-                                  L"EmbdTrst.DLL",
-                                  sizeof(L"EmbdTrst.DLL"));
-
-                    /* Try to load it */
-                    TrustLibrary = LoadLibraryW(Buffer);
-                    if (TrustLibrary)
-                    {
-                        /* And extract the special function out of it */
-                        fEmbeddedCertFunc = (PVOID)GetProcAddress(TrustLibrary,
-                                                                  "ImageOkToRunOnEmbeddedNT");
-                    }
-                }
-
-                /* If we didn't get this far, set a failure code */
-                if (!fEmbeddedCertFunc) Status = STATUS_UNSUCCESSFUL;
-            }
+            /* Fail if no memory */
+            Status = STATUS_NO_MEMORY;
         }
         else
         {
-            /* Other systems have a registry entry for this */
-            Status1 = NtOpenKey(&KeyHandle, KEY_READ, &KeyAttributes);
-            if (NT_SUCCESS(Status1))
+            /* Now get the system32 directory in our buffer, make sure it fits */
+            Length = GetSystemDirectoryW(Buffer, MAX_PATH - sizeof("EmbdTrst.DLL"));
+            if ((Length) && (Length <= MAX_PATH - sizeof("EmbdTrst.DLL")))
             {
-                /* Close it, we'll query it through Rtl */
-                NtClose(KeyHandle);
+                /* Add a slash if needed, and add the embedded cert DLL name */
+                if (Buffer[Length - 1] != '\\') Buffer[Length++] = '\\';
+                RtlCopyMemory(&Buffer[Length],
+                              L"EmbdTrst.DLL",
+                              sizeof(L"EmbdTrst.DLL"));
 
-                /* Do the query, which will call a special callback */
-                Status = RtlQueryRegistryValues(RTL_REGISTRY_CONTROL,
-                                                L"Session Manager",
-                                                BasepAppCertTable,
-                                                NULL,
-                                                NULL);
-                if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+                /* Try to load it */
+                TrustLibrary = LoadLibraryW(Buffer);
+                if (TrustLibrary)
                 {
-                    Status = STATUS_SUCCESS;
+                    /* And extract the special function out of it */
+                    fEmbeddedCertFunc = (PVOID)GetProcAddress(TrustLibrary,
+                                                              "ImageOkToRunOnEmbeddedNT");
                 }
             }
-        }
 
-        /* Free any buffer if we had one */
-        if (Buffer) RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
-
-        /* Check for errors, or a missing embedded/custom certification DLL */
-        if (!NT_SUCCESS(Status) ||
-            (!(fEmbeddedCertFunc) && (IsListEmpty(&BasepAppCertDllsList))))
-        {
-            /* The subsystem is not active on this machine, so give up */
-            g_HaveAppCerts = FALSE;
-            g_AppCertStatus = Status;
+            /* If we didn't get this far, set a failure code */
+            if (!fEmbeddedCertFunc) Status = STATUS_UNSUCCESSFUL;
         }
-        else
-        {
-            /* We have certification DLLs active, remember this */
-            g_HaveAppCerts = TRUE;
-        }
-
-        /* We are done the initialization phase, release the lock */
-        g_AppCertInitialized = TRUE;
-        RtlLeaveCriticalSection(&gcsAppCert);
     }
+    else
+    {
+        /* Other systems have a registry entry for this */
+        Status1 = NtOpenKey(&KeyHandle, KEY_READ, &KeyAttributes);
+        if (NT_SUCCESS(Status1))
+        {
+            /* Close it, we'll query it through Rtl */
+            NtClose(KeyHandle);
+
+            /* Do the query, which will call a special callback */
+            Status = RtlQueryRegistryValues(RTL_REGISTRY_CONTROL,
+                                            L"Session Manager",
+                                            BasepAppCertTable,
+                                            NULL,
+                                            NULL);
+            if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+            {
+                Status = STATUS_SUCCESS;
+            }
+        }
+    }
+
+    /* Free any buffer if we had one */
+    if (Buffer) RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
+
+    /* Check for errors, or a missing embedded/custom certification DLL */
+    if (!NT_SUCCESS(Status) ||
+        (!(fEmbeddedCertFunc) && (IsListEmpty(&BasepAppCertDllsList))))
+    {
+        /* The subsystem is not active on this machine, so give up */
+        g_HaveAppCerts = FALSE;
+        g_AppCertStatus = Status;
+    }
+    else
+    {
+        /* We have certification DLLs active, remember this */
+        g_HaveAppCerts = TRUE;
+    }
+}
+
+NTSTATUS
+WINAPI
+BasepIsProcessAllowed(IN LPWSTR ApplicationName)
+{
+    NTSTATUS Status;
+    PBASEP_APPCERT_ENTRY Entry;
+    ULONG CertFlag;
+    PLIST_ENTRY NextEntry;
+
+    /* The lock is taken on every call: it also orders the reads below after the initialization */
+    RtlEnterCriticalSection(&gcsAppCert);
+    if (!g_AppCertInitialized)
+    {
+        BasepInitializeAppCert();
+        g_AppCertInitialized = TRUE;
+    }
+    RtlLeaveCriticalSection(&gcsAppCert);
 
     /* If there's no certification DLLs present, return the failure code */
     if (!g_HaveAppCerts) return g_AppCertStatus;
@@ -954,6 +958,72 @@ GetActiveProcessorGroupCount(VOID)
     return 1; // TODO: SharedUserData->ActiveGroupCount?
 }
 
+/*
+ * @implemented
+ */
+WORD
+WINAPI
+GetMaximumProcessorGroupCount(VOID)
+{
+    // FIXME: Real group support
+    return 1;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+GetProcessGroupAffinity(IN HANDLE hProcess,
+                        IN OUT PUSHORT GroupCount,
+                        OUT PUSHORT GroupArray)
+{
+    PROCESS_BASIC_INFORMATION ProcessInfo;
+    NTSTATUS Status;
+    BOOL Ret = TRUE;
+
+    // FIXME: Real group support, every process lives in the one group
+    Status = NtQueryInformationProcess(hProcess,
+                                       ProcessBasicInformation,
+                                       &ProcessInfo,
+                                       sizeof(ProcessInfo),
+                                       NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    _SEH2_TRY
+    {
+        if (*GroupCount < 1)
+        {
+            *GroupCount = 1;
+            SetLastError(ERROR_INSUFFICIENT_BUFFER);
+            Ret = FALSE;
+        }
+        else if ((ULONG_PTR)GroupArray & (sizeof(ULONG) - 1))
+        {
+            /* Windows needs the array aligned to 4 bytes */
+            SetLastError(ERROR_NOACCESS);
+            Ret = FALSE;
+        }
+        else
+        {
+            GroupArray[0] = THEONLYGROUP;
+            *GroupCount = 1;
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        SetLastError(ERROR_NOACCESS);
+        Ret = FALSE;
+    }
+    _SEH2_END;
+
+    return Ret;
+}
+
 static DWORD
 GetProcessorCountInfo(IN WORD GroupNumber, IN BOOL Maximum)
 {
@@ -1206,6 +1276,33 @@ GetProcessTimes(IN HANDLE hProcess,
     lpKernelTime->dwHighDateTime = Kut.KernelTime.u.HighPart;
     lpUserTime->dwLowDateTime = Kut.UserTime.u.LowPart;
     lpUserTime->dwHighDateTime = Kut.UserTime.u.HighPart;
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+QueryProcessCycleTime(
+    _In_ HANDLE ProcessHandle,
+    _Out_ PULONG64 CycleTime)
+{
+    PROCESS_CYCLE_TIME_INFORMATION CycleTimeInfo;
+    NTSTATUS Status;
+
+    Status = NtQueryInformationProcess(ProcessHandle,
+                                       ProcessCycleTime,
+                                       &CycleTimeInfo,
+                                       sizeof(CycleTimeInfo),
+                                       NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    *CycleTime = CycleTimeInfo.AccumulatedCycles;
     return TRUE;
 }
 
@@ -2157,6 +2254,293 @@ ProcessIdToSessionId(IN DWORD dwProcessId,
 #define RemoveFromHandle(x,y)  ((x) = (HANDLE)((ULONG_PTR)(x) & ~(y)))
 C_ASSERT(PROCESS_PRIORITY_CLASS_REALTIME == (PROCESS_PRIORITY_CLASS_HIGH + 1));
 
+/* Process and thread attribute lists. The layout matches the one Windows uses
+ * (count, slots, then one entry per attribute pointing at the caller's value). */
+typedef struct _PROC_THREAD_ATTRIBUTE_ENTRY
+{
+    DWORD_PTR Attribute;
+    SIZE_T Size;
+    PVOID Value;
+} PROC_THREAD_ATTRIBUTE_ENTRY, *PPROC_THREAD_ATTRIBUTE_ENTRY;
+
+typedef struct _PROC_THREAD_ATTRIBUTE_LIST
+{
+    DWORD PresentFlags;
+    DWORD AttributeCount;
+    DWORD LastAttribute;
+    DWORD SpareUlong0;
+    PPROC_THREAD_ATTRIBUTE_ENTRY ExtendedFlagsAttribute;
+    PROC_THREAD_ATTRIBUTE_ENTRY Attributes[ANYSIZE_ARRAY];
+} PROC_THREAD_ATTRIBUTE_LIST;
+
+#ifndef EXTENDED_STARTUPINFO_PRESENT
+#define EXTENDED_STARTUPINFO_PRESENT 0x00080000
+#endif
+
+#define PROC_THREAD_ATTRIBUTE_LIST_SIZE(Count) \
+    FIELD_OFFSET(PROC_THREAD_ATTRIBUTE_LIST, Attributes[Count])
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+InitializeProcThreadAttributeList(
+    _Out_writes_bytes_to_opt_(*lpSize, *lpSize) LPPROC_THREAD_ATTRIBUTE_LIST lpAttributeList,
+    _In_ DWORD dwAttributeCount,
+    _Reserved_ DWORD dwFlags,
+    _When_(lpAttributeList == NULL, _Out_) _When_(lpAttributeList != NULL, _Inout_) PSIZE_T lpSize)
+{
+    SIZE_T Needed;
+
+    if (dwFlags != 0 || dwAttributeCount > PROC_THREAD_ATTRIBUTE_NUMBER)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    Needed = PROC_THREAD_ATTRIBUTE_LIST_SIZE(dwAttributeCount);
+
+    if (!lpAttributeList || *lpSize < Needed)
+    {
+        *lpSize = Needed;
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+
+    lpAttributeList->PresentFlags = 0;
+    lpAttributeList->AttributeCount = dwAttributeCount;
+    lpAttributeList->LastAttribute = 0;
+    lpAttributeList->ExtendedFlagsAttribute = NULL;
+    *lpSize = Needed;
+    return TRUE;
+}
+
+static
+DWORD
+BasepCheckProcThreadAttribute(
+    _In_ DWORD_PTR Attribute,
+    _In_ SIZE_T Size)
+{
+    switch (Attribute)
+    {
+        case PROC_THREAD_ATTRIBUTE_HANDLE_LIST:
+            return (Size && !(Size % sizeof(HANDLE))) ? ERROR_SUCCESS : ERROR_BAD_LENGTH;
+
+        case PROC_THREAD_ATTRIBUTE_IDEAL_PROCESSOR:
+            return (Size == sizeof(PROCESSOR_NUMBER)) ? ERROR_SUCCESS : ERROR_BAD_LENGTH;
+
+        case PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY:
+            /* A DWORD on Windows 7; Windows 8 adds a DWORD64 and Windows 10 two of them */
+            return (Size == sizeof(DWORD) || Size == sizeof(DWORD64) || Size == 2 * sizeof(DWORD64)) ?
+                   ERROR_SUCCESS : ERROR_BAD_LENGTH;
+
+        default:
+            /* Refuse attributes that cannot be honoured. */
+            return ERROR_NOT_SUPPORTED;
+    }
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+UpdateProcThreadAttribute(
+    _Inout_ LPPROC_THREAD_ATTRIBUTE_LIST lpAttributeList,
+    _In_ DWORD dwFlags,
+    _In_ DWORD_PTR Attribute,
+    _In_reads_bytes_opt_(cbSize) PVOID lpValue,
+    _In_ SIZE_T cbSize,
+    _Out_writes_bytes_opt_(cbSize) PVOID lpPreviousValue,
+    _In_opt_ PSIZE_T lpReturnSize)
+{
+    PPROC_THREAD_ATTRIBUTE_ENTRY Entry;
+    DWORD Error, Bit;
+
+    if (dwFlags != 0 || lpPreviousValue || lpReturnSize || !lpValue)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if (lpAttributeList->LastAttribute >= lpAttributeList->AttributeCount)
+    {
+        SetLastError(ERROR_GEN_FAILURE);
+        return FALSE;
+    }
+
+    Error = BasepCheckProcThreadAttribute(Attribute, cbSize);
+    if (Error != ERROR_SUCCESS)
+    {
+        SetLastError(Error);
+        return FALSE;
+    }
+
+    Bit = 1UL << (Attribute & PROC_THREAD_ATTRIBUTE_NUMBER);
+    if (lpAttributeList->PresentFlags & Bit)
+    {
+        SetLastError(ERROR_OBJECT_NAME_EXISTS);
+        return FALSE;
+    }
+
+    Entry = &lpAttributeList->Attributes[lpAttributeList->LastAttribute];
+    Entry->Attribute = Attribute;
+    Entry->Size = cbSize;
+    Entry->Value = lpValue;
+    lpAttributeList->PresentFlags |= Bit;
+    lpAttributeList->LastAttribute++;
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+VOID
+WINAPI
+DeleteProcThreadAttributeList(
+    _Inout_ LPPROC_THREAD_ATTRIBUTE_LIST lpAttributeList)
+{
+    /* The list owns no resources: the values stay with the caller */
+    UNREFERENCED_PARAMETER(lpAttributeList);
+}
+
+/* There is one processor group: a valid number names an active processor */
+static
+BOOLEAN
+BasepIsValidIdealProcessor(
+    _In_ const PROCESSOR_NUMBER *IdealProcessor)
+{
+    return IdealProcessor->Group == 0 &&
+           IdealProcessor->Reserved == 0 &&
+           IdealProcessor->Number < BaseStaticServerData->SysInfo.NumberOfProcessors;
+}
+
+/* The DWORD form of the mitigation policy defines DEP (0x1), DEP-ATL thunk emulation (0x2)
+ * and SEHOP (0x4); Windows 7 refuses any other bit when the process is created. The
+ * mitigations a child process really gets on ReactOS, by measurement: DEP wherever the
+ * processor enforces no-execute, no ATL thunk emulation and no SEHOP anywhere. DEP holds
+ * for every process on an amd64 kernel - a 64-bit child, and a 32-bit child under WOW64
+ * alike, because the processor enforces no-execute for both; an i386 kernel runs data
+ * pages as code, so it holds for nothing there. A request for anything else is refused
+ * like Windows refuses a mitigation it does not support, rather than starting a child
+ * that is less protected than the caller asked for. */
+static
+ULONGLONG
+BasepHonouredMitigations(VOID)
+{
+#ifdef _WIN64
+    return 0x1;
+#else
+    /* A 32-bit guest under WOW64 runs on an amd64 kernel, where the child gets
+     * processor-enforced DEP just as a native child does, so it honours DEP like the
+     * native path; a real i386 kernel honours none. SharedUserData->ImageNumberLow is
+     * the kernel's own architecture (see RtlWow64GetProcessMachines). */
+    return (SharedUserData->ImageNumberLow == IMAGE_FILE_MACHINE_AMD64) ? 0x1 : 0x0;
+#endif
+}
+
+static
+NTSTATUS
+BasepCheckMitigationPolicy(
+    _In_ PPROC_THREAD_ATTRIBUTE_ENTRY Entry)
+{
+    ULONGLONG Policy[2] = {0, 0};
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    /* Read the whole declared width: the caller may give a bad pointer */
+    _SEH2_TRY
+    {
+        RtlCopyMemory(Policy, Entry->Value, Entry->Size);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = STATUS_ACCESS_VIOLATION;
+    }
+    _SEH2_END;
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if ((Policy[0] & ~BasepHonouredMitigations()) || Policy[1])
+        return STATUS_INVALID_PARAMETER;
+
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+BasepReadProcThreadAttributes(
+    _In_ LPPROC_THREAD_ATTRIBUTE_LIST AttributeList,
+    _Out_ PPROC_THREAD_ATTRIBUTE_ENTRY *HandleList)
+{
+    DWORD i;
+    *HandleList = NULL;
+    if (AttributeList->LastAttribute > AttributeList->AttributeCount ||
+        AttributeList->AttributeCount > PROC_THREAD_ATTRIBUTE_NUMBER)
+        return STATUS_INVALID_PARAMETER;
+    for (i = 0; i < AttributeList->LastAttribute; ++i)
+    {
+        PPROC_THREAD_ATTRIBUTE_ENTRY Entry = &AttributeList->Attributes[i];
+
+        if (Entry->Attribute == PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY)
+        {
+            NTSTATUS Status = BasepCheckMitigationPolicy(Entry);
+
+            if (!NT_SUCCESS(Status))
+                return Status;
+            continue;
+        }
+
+        if (Entry->Attribute != PROC_THREAD_ATTRIBUTE_HANDLE_LIST)
+            return STATUS_NOT_SUPPORTED;
+        if (*HandleList || !Entry->Size || Entry->Size % sizeof(HANDLE))
+            return STATUS_INVALID_PARAMETER;
+        *HandleList = Entry;
+    }
+    return STATUS_SUCCESS;
+}
+
+/* Reads the attributes CreateRemoteThreadEx supports */
+NTSTATUS
+WINAPI
+BasepReadThreadAttributes(
+    _In_ LPPROC_THREAD_ATTRIBUTE_LIST AttributeList,
+    _Out_ PPROCESSOR_NUMBER *IdealProcessor)
+{
+    DWORD i;
+
+    *IdealProcessor = NULL;
+
+    if (AttributeList->LastAttribute > AttributeList->AttributeCount ||
+        AttributeList->AttributeCount > PROC_THREAD_ATTRIBUTE_NUMBER)
+        return STATUS_INVALID_PARAMETER;
+
+    for (i = 0; i < AttributeList->LastAttribute; i++)
+    {
+        if (AttributeList->Attributes[i].Attribute != PROC_THREAD_ATTRIBUTE_IDEAL_PROCESSOR)
+            return STATUS_NOT_SUPPORTED;
+        if (!BasepIsValidIdealProcessor(AttributeList->Attributes[i].Value))
+            return STATUS_INVALID_PARAMETER;
+        *IdealProcessor = AttributeList->Attributes[i].Value;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+/* Sets the ideal processor of a thread of the current process. The kernel's
+ * ThreadIdealProcessor setter writes the TEB without attaching to the thread's
+ * process, so callers do not use it for threads of other processes. */
+NTSTATUS
+WINAPI
+BasepSetIdealProcessor(
+    _In_ HANDLE ThreadHandle,
+    _In_ const PROCESSOR_NUMBER *IdealProcessor)
+{
+    ULONG_PTR Number = IdealProcessor->Number;
+
+    return NtSetInformationThread(ThreadHandle, ThreadIdealProcessor, &Number, sizeof(Number));
+}
+
 /*
  * @implemented
  */
@@ -2187,8 +2571,11 @@ CreateProcessInternalW(IN HANDLE hUserToken,
     ULONG NoWindow, StackSize, ErrorCode, Flags;
     SIZE_T RegionSize;
     USHORT ImageMachine;
-    ULONG ParameterFlags, PrivilegeValue, HardErrorMode, ErrorResponse;
+    ULONG ParameterFlags, PrivilegeValue, HardErrorMode;
+#ifndef _WIN64
+    ULONG ErrorResponse;
     ULONG_PTR ErrorParameters[2];
+#endif
     BOOLEAN InJob, SaferNeeded, UseLargePages, HavePrivilege;
     BOOLEAN QuerySection, SkipSaferAndAppCompat;
     CONTEXT Context;
@@ -2207,6 +2594,10 @@ CreateProcessInternalW(IN HANDLE hUserToken,
     PVOID TibValue;
     PIMAGE_NT_HEADERS NtHeaders;
     STARTUPINFOW StartupInfo;
+    PPROC_THREAD_ATTRIBUTE_ENTRY HandleListAttribute = NULL;
+    PHANDLE KernelHandleList = NULL, ConsoleHandleList = NULL;
+    SIZE_T KernelHandleCount = 0, ConsoleHandleCount = 0;
+    ROS_PS_ATTRIBUTE_LIST NativeAttributes;
     PRTL_USER_PROCESS_PARAMETERS ProcessParameters;
     UNICODE_STRING DebuggerString;
     BOOL Result;
@@ -2270,6 +2661,34 @@ CreateProcessInternalW(IN HANDLE hUserToken,
     UNICODE_STRING VdmString, VdmUnicodeEnv;
     BOOLEAN IsWowApp;
     PBASE_CHECK_VDM CheckVdmMsg;
+
+    /* Read the attribute list of an extended startup info before anything
+     * is allocated, so that a refused list needs no cleanup */
+    if (dwCreationFlags & EXTENDED_STARTUPINFO_PRESENT)
+    {
+        if (lpStartupInfo->cb < sizeof(STARTUPINFOEXW))
+        {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+
+        if (((LPSTARTUPINFOEXW)lpStartupInfo)->lpAttributeList)
+        {
+            Status = BasepReadProcThreadAttributes(((LPSTARTUPINFOEXW)lpStartupInfo)->lpAttributeList,
+                                                   &HandleListAttribute);
+            if (!NT_SUCCESS(Status))
+            {
+                BaseSetLastNTError(Status);
+                return FALSE;
+            }
+        }
+        dwCreationFlags &= ~EXTENDED_STARTUPINFO_PRESENT;
+    }
+    if (HandleListAttribute && !bInheritHandles)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
 
     /* Zero out the initial core variables and handles */
     QuerySection = FALSE;
@@ -3081,6 +3500,14 @@ StartScan:
     {
         case STATUS_INVALID_IMAGE_WIN_16:
         {
+            /* A VDM task cannot apply a per-process handle list. */
+            if (HandleListAttribute)
+            {
+                BaseSetLastNTError(STATUS_NOT_SUPPORTED);
+                Result = FALSE;
+                goto Quickie;
+            }
+
             /* 16-bit binary. Should we use WOW or does the caller force VDM? */
             if (!(dwCreationFlags & CREATE_FORCEDOS))
             {
@@ -3229,6 +3656,13 @@ StartScan:
                 (Status == STATUS_INVALID_IMAGE_NE_FORMAT) ||
                 (BinarySubType = BaseIsDosApplication(&PathName, Status)))
             {
+                if (HandleListAttribute)
+                {
+                    BaseSetLastNTError(STATUS_NOT_SUPPORTED);
+                    Result = FALSE;
+                    goto Quickie;
+                }
+
                 /* We're launching a DOS application */
                 VdmBinaryType = BINARY_TYPE_DOS;
 
@@ -3556,6 +3990,13 @@ StartScan:
     if ((ImageInformation.Machine < SharedUserData->ImageNumberLow) ||
         (ImageInformation.Machine > SharedUserData->ImageNumberHigh))
     {
+#ifdef _WIN64
+        /* There is no WoW64: a 32-bit or foreign image is simply not runnable here */
+        DPRINT1("'%wZ': image machine %x cannot run here\n", &PathName, ImageInformation.Machine);
+        SetLastError(ERROR_BAD_EXE_FORMAT);
+        Result = FALSE;
+        goto Quickie;
+#else
         /* It was not -- raise a hard error */
         ErrorResponse = ResponseOk;
         ErrorParameters[0] = (ULONG_PTR)&PathName;
@@ -3580,6 +4021,7 @@ StartScan:
         DPRINT1("Invalid image architecture: %lx\n", ImageInformation.Machine);
         Result = FALSE;
         goto Quickie;
+#endif
     }
 
     /* Check if this isn't a Windows image */
@@ -3773,6 +4215,70 @@ StartScan:
     /* Set inherit flag */
     if (bInheritHandles) Flags |= PROCESS_CREATE_FLAGS_INHERIT_HANDLES;
 
+    /* Capture the caller's list once. Console pseudo-handles belong to CSRSS;
+     * real handles are captured again at the native boundary and filtered while
+     * the kernel creates the child's handle table. Parent flags never change. */
+    if (HandleListAttribute && bInheritHandles)
+    {
+        SIZE_T Size = HandleListAttribute->Size;
+        SIZE_T HandleCount = Size / sizeof(HANDLE), HandleIndex;
+        PHANDLE Source = HandleListAttribute->Value;
+        BOOLEAN EmptyList = FALSE;
+
+        /* No native handle table can contain a larger selection. Match the
+         * native boundary before allocating the user-mode split buffers. */
+        if (HandleCount > ROS_PS_MAX_HANDLE_COUNT)
+        {
+            BaseSetLastNTError(STATUS_INVALID_PARAMETER);
+            Result = FALSE;
+            goto Quickie;
+        }
+        if (Size > MAXULONG / 2)
+        {
+            BaseSetLastNTError(STATUS_NO_MEMORY);
+            Result = FALSE;
+            goto Quickie;
+        }
+        KernelHandleList = RtlAllocateHeap(RtlGetProcessHeap(), 0, Size * 2);
+        if (!KernelHandleList)
+        {
+            BaseSetLastNTError(STATUS_NO_MEMORY);
+            Result = FALSE;
+            goto Quickie;
+        }
+        ConsoleHandleList = KernelHandleList + HandleCount;
+        Status = STATUS_SUCCESS;
+        _SEH2_TRY
+        {
+            for (HandleIndex = 0; HandleIndex < HandleCount; ++HandleIndex)
+            {
+                HANDLE Handle = Source[HandleIndex];
+                if (!Handle) EmptyList = TRUE;
+                if (IsConsoleHandle(Handle))
+                    ConsoleHandleList[ConsoleHandleCount++] = Handle;
+                else
+                    KernelHandleList[KernelHandleCount++] = Handle;
+            }
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+        if (!NT_SUCCESS(Status))
+        {
+            BaseSetLastNTError(Status);
+            Result = FALSE;
+            goto Quickie;
+        }
+        if (EmptyList) KernelHandleCount = ConsoleHandleCount = 0;
+        NativeAttributes.TotalLength = sizeof(NativeAttributes);
+        NativeAttributes.Attributes[0].Attribute = ROS_PS_ATTRIBUTE_HANDLE_LIST;
+        NativeAttributes.Attributes[0].Size = KernelHandleCount * sizeof(HANDLE);
+        NativeAttributes.Attributes[0].ValuePtr = KernelHandleList;
+        NativeAttributes.Attributes[0].ReturnLength = NULL;
+    }
+
     /* Check if the process should be created with large pages */
     HavePrivilege = FALSE;
     PrivilegeState = NULL;
@@ -3791,8 +4297,17 @@ StartScan:
     /* Save the current TIB value since kernel overwrites it to store PEB */
     TibValue = Teb->NtTib.ArbitraryUserPointer;
 
-    /* Tell the kernel to create the process */
-    Status = NtCreateProcessEx(&ProcessHandle,
+    if (KernelHandleList)
+    {
+        Status = NtCreateProcessWithAttributes(&ProcessHandle, PROCESS_ALL_ACCESS,
+                                               ObjectAttributes, NtCurrentProcess(),
+                                               Flags, SectionHandle, DebugHandle,
+                                               NULL, InJob, &NativeAttributes);
+    }
+    else
+    {
+        /* Preserve the legacy native creation path without a handle list. */
+        Status = NtCreateProcessEx(&ProcessHandle,
                                PROCESS_ALL_ACCESS,
                                ObjectAttributes,
                                NtCurrentProcess(),
@@ -3801,6 +4316,7 @@ StartScan:
                                DebugHandle,
                                NULL,
                                InJob);
+    }
 
     /* Load the PEB address from the hacky location where the kernel stores it */
     RemotePeb = Teb->NtTib.ArbitraryUserPointer;
@@ -4151,6 +4667,7 @@ StartScan:
         goto Quickie;
     }
 
+
     /* Begin filling out the CSRSS message, first with our IDs and handles */
     CreateProcessMsg->ProcessHandle = ProcessHandle;
     CreateProcessMsg->ThreadHandle = ThreadHandle;
@@ -4249,6 +4766,26 @@ StartScan:
         NtTerminateProcess(ProcessHandle, STATUS_NOT_IMPLEMENTED);
         Result = FALSE;
         goto Quickie;
+    }
+
+    /* Pass the same captured selection to the console server. An explicit
+     * empty console selection is different from legacy console inheritance. */
+    CreateProcessMsg->HandleListPresent = (KernelHandleList != NULL);
+    CreateProcessMsg->ConsoleHandleCount = (ULONG)ConsoleHandleCount;
+    CreateProcessMsg->ConsoleHandleList = NULL;
+    if (ConsoleHandleCount)
+    {
+        ASSERT(CaptureBuffer == NULL);
+        CaptureBuffer = CsrAllocateCaptureBuffer(1, ConsoleHandleCount * sizeof(HANDLE));
+        if (!CaptureBuffer)
+        {
+            BaseSetLastNTError(STATUS_NO_MEMORY);
+            Result = FALSE;
+            goto Quickie;
+        }
+        CsrCaptureMessageBuffer(CaptureBuffer, ConsoleHandleList,
+                                ConsoleHandleCount * sizeof(HANDLE),
+                                (PVOID*)&CreateProcessMsg->ConsoleHandleList);
     }
 
     /* We are finally ready to call CSRSS to tell it about our new process! */
@@ -4368,6 +4905,7 @@ VdmShortCircuit:
     ThreadHandle = NULL;
 
 Quickie:
+    if (KernelHandleList) RtlFreeHeap(RtlGetProcessHeap(), 0, KernelHandleList);
     /* Free the debugger command line if one was allocated */
     if (DebuggerCmdLine) RtlFreeHeap(RtlGetProcessHeap(), 0, DebuggerCmdLine);
 

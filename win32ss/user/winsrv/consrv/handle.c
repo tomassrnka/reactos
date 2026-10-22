@@ -12,6 +12,7 @@
 
 #include "consrv.h"
 
+#include <stdlib.h>
 #include <win/console.h>
 
 #define NDEBUG
@@ -116,12 +117,22 @@ ConSrvCloseHandle(IN PCONSOLE_IO_HANDLE Handle)
 }
 
 
+static int __cdecl
+ConSrvCompareHandleValues(const void *Left, const void *Right)
+{
+    ULONG_PTR A = (ULONG_PTR)*(const HANDLE *)Left;
+    ULONG_PTR B = (ULONG_PTR)*(const HANDLE *)Right;
+    return (A > B) - (A < B);
+}
+
+
 NTSTATUS
 ConSrvInheritHandlesTable(IN PCONSOLE_PROCESS_DATA SourceProcessData,
                           IN PCONSOLE_PROCESS_DATA TargetProcessData)
 {
     NTSTATUS Status = STATUS_SUCCESS;
     ULONG i, j;
+    PCSR_PROCESS TargetProcess = TargetProcessData->Process;
 
     RtlEnterCriticalSection(&SourceProcessData->HandleTableLock);
 
@@ -130,6 +141,40 @@ ConSrvInheritHandlesTable(IN PCONSOLE_PROCESS_DATA SourceProcessData,
     {
         Status = STATUS_UNSUCCESSFUL;
         goto Quit;
+    }
+
+    if (TargetProcess->HandleListPresent)
+    {
+        /* A valid selection cannot contain more entries than the table.
+         * Sort the captured CSR buffer to validate duplicates in O(n log n). */
+        if (TargetProcess->InheritHandleCount > SourceProcessData->HandleTableSize)
+        {
+            Status = STATUS_INVALID_PARAMETER;
+            goto Quit;
+        }
+        if (TargetProcess->InheritHandleCount > 1)
+            qsort(TargetProcess->InheritHandleList,
+                  TargetProcess->InheritHandleCount, sizeof(HANDLE),
+                  ConSrvCompareHandleValues);
+
+        /* Validate and copy while the parent table remains locked. */
+        for (i = 0; i < TargetProcess->InheritHandleCount; ++i)
+        {
+            ULONG_PTR Index = (ULONG_PTR)TargetProcess->InheritHandleList[i] >> 2;
+            if (i && TargetProcess->InheritHandleList[i - 1] == TargetProcess->InheritHandleList[i])
+            {
+                Status = STATUS_INVALID_PARAMETER;
+                goto Quit;
+            }
+            if (!IsConsoleHandle(TargetProcess->InheritHandleList[i]) ||
+                Index >= SourceProcessData->HandleTableSize ||
+                !SourceProcessData->HandleTable[Index].Object ||
+                !SourceProcessData->HandleTable[Index].Inheritable)
+            {
+                Status = STATUS_INVALID_PARAMETER;
+                goto Quit;
+            }
+        }
     }
 
     /* Allocate a new handle table for the child process */
@@ -157,6 +202,10 @@ ConSrvInheritHandlesTable(IN PCONSOLE_PROCESS_DATA SourceProcessData,
              * Copy the handle data and increment the reference count of the
              * pointed object (via the call to ConSrvCreateHandleEntry == AdjustHandleCounts).
              */
+            /* Windows 7 inherits console handles separately from the native
+             * list. Preserve their values, including unlisted standard handles.
+             * Keep the legacy path unchanged when there is no attribute. */
+            if (TargetProcess->HandleListPresent) j = i;
             TargetProcessData->HandleTable[j] = SourceProcessData->HandleTable[i];
             AdjustHandleCounts(&TargetProcessData->HandleTable[j], +1);
             ++j;

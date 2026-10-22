@@ -1457,12 +1457,15 @@ NTAPI
 ExDupHandleTable(IN PEPROCESS Process,
                  IN PHANDLE_TABLE HandleTable,
                  IN PEX_DUPLICATE_HANDLE_CALLBACK DupHandleProcedure,
-                 IN ULONG_PTR Mask)
+                 IN ULONG_PTR Mask,
+                 IN PHANDLE HandleList OPTIONAL,
+                 IN SIZE_T HandleCount)
 {
     PHANDLE_TABLE NewTable;
     EXHANDLE Handle;
     PHANDLE_TABLE_ENTRY HandleTableEntry, NewEntry;
     BOOLEAN Failed = FALSE;
+    SIZE_T ListIndex = 0;
     PAGED_CODE();
 
     /* Allocate the duplicated copy */
@@ -1500,8 +1503,16 @@ ExDupHandleTable(IN PEPROCESS Process,
         /* Loop each entry */
         do
         {
-            /* Check if it doesn't match the audit mask */
-            if (!(HandleTableEntry->Value & Mask))
+            /* The captured list is sorted and has no duplicates. Never inspect or
+             * duplicate an unlisted slot, even if another thread creates an
+             * inheritable handle or changes its flags while we walk the table. */
+            while (HandleList && ListIndex < HandleCount &&
+                   (ULONG_PTR)HandleList[ListIndex] < Handle.Value)
+                ++ListIndex;
+
+            if ((HandleList && (ListIndex == HandleCount ||
+                                (ULONG_PTR)HandleList[ListIndex] != Handle.Value)) ||
+                !(HandleTableEntry->Value & Mask))
             {
                 /* Free it since we won't use it */
                 Failed = TRUE;
@@ -1512,6 +1523,12 @@ ExDupHandleTable(IN PEPROCESS Process,
                 if (!ExpLockHandleTableEntry(HandleTable, HandleTableEntry))
                 {
                     /* Free it since we can't lock it, so we won't use it */
+                    Failed = TRUE;
+                }
+                else if (!(HandleTableEntry->Value & Mask))
+                {
+                    /* The inherit flag may have changed before we locked it. */
+                    ExUnlockHandleTableEntry(HandleTable, HandleTableEntry);
                     Failed = TRUE;
                 }
                 else

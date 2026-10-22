@@ -264,6 +264,64 @@ GetErrorMode(VOID)
     return ErrMode;
 }
 
+/* The native thread mode keeps SEM_NOOPENFILEERRORBOX in bit 6 */
+#define RTL_SEM_NOOPENFILEERRORBOX 0x40
+
+/*
+ * @implemented
+ */
+DWORD
+WINAPI
+GetThreadErrorMode(VOID)
+{
+    ULONG NativeMode = RtlGetThreadErrorMode();
+    DWORD ErrMode = 0;
+
+    if (NativeMode & RTL_SEM_FAILCRITICALERRORS)
+        ErrMode |= SEM_FAILCRITICALERRORS;
+    if (NativeMode & RTL_SEM_NOGPFAULTERRORBOX)
+        ErrMode |= SEM_NOGPFAULTERRORBOX;
+    if (NativeMode & RTL_SEM_NOOPENFILEERRORBOX)
+        ErrMode |= SEM_NOOPENFILEERRORBOX;
+
+    return ErrMode;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+SetThreadErrorMode(
+    _In_ DWORD dwNewMode,
+    _Out_opt_ LPDWORD lpOldMode)
+{
+    ULONG NativeMode = 0;
+    DWORD OldMode;
+
+    if (dwNewMode & ~(SEM_FAILCRITICALERRORS |
+                      SEM_NOGPFAULTERRORBOX |
+                      SEM_NOOPENFILEERRORBOX))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if (dwNewMode & SEM_FAILCRITICALERRORS)
+        NativeMode |= RTL_SEM_FAILCRITICALERRORS;
+    if (dwNewMode & SEM_NOGPFAULTERRORBOX)
+        NativeMode |= RTL_SEM_NOGPFAULTERRORBOX;
+    if (dwNewMode & SEM_NOOPENFILEERRORBOX)
+        NativeMode |= RTL_SEM_NOOPENFILEERRORBOX;
+
+    OldMode = GetThreadErrorMode();
+    RtlSetThreadErrorMode(NativeMode, NULL);
+    if (lpOldMode)
+        *lpOldMode = OldMode;
+
+    return TRUE;
+}
+
 /*
  * @implemented
  */

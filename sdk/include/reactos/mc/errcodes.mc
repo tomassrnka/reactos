@@ -3352,7 +3352,7 @@ Severity=Success
 Facility=System
 SymbolicName=ERROR_EXE_MACHINE_TYPE_MISMATCH
 Language=English
-The image file %1 is valid, but is for a machine type other than the current machine.
+This version of %1 is not compatible with the version of ReactOS you're running. Check your computer's system information and then contact the software publisher.
 .
 Language=Russian
 The image file %1 is valid, but is for a machine type other than the current machine.

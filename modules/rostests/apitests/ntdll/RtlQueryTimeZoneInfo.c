@@ -112,7 +112,14 @@ START_TEST(RtlQueryTimeZoneInformation)
 {
     /* Test modeled after reactos\modules\rostests\winetests\ntdll\time.c for Vista+ */
     HMODULE mod = GetModuleHandleA("ntdll.dll");
+    BOOLEAN WasEnabled = FALSE;
+    NTSTATUS Status;
+
     pRtlQueryTimeZoneInformation = (void *)GetProcAddress(mod, "RtlQueryTimeZoneInformation");
 
+    /* SetTimeZoneInformation needs SeTimeZonePrivilege enabled (NT 6) */
+    Status = RtlAdjustPrivilege(SE_TIME_ZONE_PRIVILEGE, TRUE, FALSE, &WasEnabled);
     test_RtlQueryTimeZoneInformation();
+    if (NT_SUCCESS(Status))
+        RtlAdjustPrivilege(SE_TIME_ZONE_PRIVILEGE, WasEnabled, FALSE, &WasEnabled);
 }

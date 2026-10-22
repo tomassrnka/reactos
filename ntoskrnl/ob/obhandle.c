@@ -2187,7 +2187,9 @@ ObClearProcessHandleTable(IN PEPROCESS Process)
 NTSTATUS
 NTAPI
 ObInitProcess(IN PEPROCESS Parent OPTIONAL,
-              IN PEPROCESS Process)
+              IN PEPROCESS Process,
+              IN PHANDLE HandleList OPTIONAL,
+              IN SIZE_T HandleCount)
 {
     PHANDLE_TABLE ParentTable, ObjectTable;
 
@@ -2202,7 +2204,8 @@ ObInitProcess(IN PEPROCESS Parent OPTIONAL,
         ObjectTable = ExDupHandleTable(Process,
                                        ParentTable,
                                        ObpDuplicateHandleCallback,
-                                       OBJ_INHERIT);
+                                       OBJ_INHERIT,
+                                       HandleList, HandleCount);
     }
     else
     {
@@ -2216,6 +2219,15 @@ ObInitProcess(IN PEPROCESS Parent OPTIONAL,
     {
         /* Associate it */
         Process->ObjectTable = ObjectTable;
+
+        /* Each distinct listed entry must have been copied while locked. A
+         * closed, invalid or non-inheritable handle fails the entire create.
+         * Process teardown closes any entries already copied on this path. */
+        if (HandleList && ObjectTable->HandleCount != HandleCount)
+        {
+            if (ParentTable) ObDereferenceProcessHandleTable(Parent);
+            return STATUS_INVALID_PARAMETER;
+        }
 
         /* Check for auditing */
         if (SeDetailedAuditingWithToken(NULL))

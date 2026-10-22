@@ -274,6 +274,60 @@ GetOverlappedResult(IN HANDLE hFile,
  */
 BOOL
 WINAPI
+GetOverlappedResultEx(IN HANDLE hFile,
+                      IN LPOVERLAPPED lpOverlapped,
+                      OUT LPDWORD lpNumberOfBytesTransferred,
+                      IN DWORD dwMilliseconds,
+                      IN BOOL bAlertable)
+{
+    NTSTATUS Status = STATUS_PENDING;
+    BOOL CompatMode = (((ULONG_PTR)hFile & 1) != 0);
+    DWORD WaitStatus;
+
+    /*
+     * The order of the checks is the one Windows 10 has, found by the tests of Wine that pass there: a file handle
+     * with the low bit set (the old behaviour of GetOverlappedResult) or no time to wait looks at the status
+     * first; otherwise the call always waits, also for an operation that is done, and so eats an automatic event
+     * and runs queued APCs.
+     */
+    if (CompatMode || !dwMilliseconds)
+        Status = *(volatile NTSTATUS *)&lpOverlapped->Internal;
+
+    if (dwMilliseconds && Status == STATUS_PENDING)
+    {
+        WaitStatus = WaitForSingleObjectEx(lpOverlapped->hEvent ? lpOverlapped->hEvent : hFile,
+                                           dwMilliseconds,
+                                           bAlertable);
+        if (WaitStatus == WAIT_FAILED)
+            return FALSE;
+
+        /* The result of the wait is the last error: WAIT_TIMEOUT, or WAIT_IO_COMPLETION after a user APC */
+        if (WaitStatus && !(CompatMode && WaitStatus == WAIT_TIMEOUT))
+        {
+            SetLastError(WaitStatus);
+            return FALSE;
+        }
+
+        Status = (NTSTATUS)lpOverlapped->Internal;
+    }
+    else if (Status == STATUS_PENDING)
+    {
+        SetLastError(ERROR_IO_INCOMPLETE);
+        return FALSE;
+    }
+
+    *lpNumberOfBytesTransferred = lpOverlapped->InternalHigh;
+    SetLastError(RtlNtStatusToDosError(Status));
+
+    /* An operation that is still pending after a wait that succeeded counts as done */
+    return (!Status || Status == STATUS_PENDING);
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
 BindIoCompletionCallback(IN HANDLE FileHandle,
                          IN LPOVERLAPPED_COMPLETION_ROUTINE Function,
                          IN ULONG Flags)

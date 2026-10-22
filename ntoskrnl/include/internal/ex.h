@@ -211,7 +211,7 @@ C_ASSERT(sizeof(EX_HANDLE_CPU_CACHE) == EX_HANDLE_CACHE_LINE);
 //
 #define LOW_LEVEL_ENTRIES   (PAGE_SIZE / sizeof(HANDLE_TABLE_ENTRY))
 #define MID_LEVEL_ENTRIES   (PAGE_SIZE / sizeof(PHANDLE_TABLE_ENTRY))
-#define HIGH_LEVEL_ENTRIES  (16777216 / (LOW_LEVEL_ENTRIES * MID_LEVEL_ENTRIES))
+#define HIGH_LEVEL_ENTRIES  (ROS_PS_MAX_HANDLE_COUNT / (LOW_LEVEL_ENTRIES * MID_LEVEL_ENTRIES))
 
 //
 // Maximum index in each table level before we need another table
@@ -566,7 +566,9 @@ ExDupHandleTable(
     IN PEPROCESS Process,
     IN PHANDLE_TABLE HandleTable,
     IN PEX_DUPLICATE_HANDLE_CALLBACK DupHandleProcedure,
-    IN ULONG_PTR Mask
+    IN ULONG_PTR Mask,
+    IN PHANDLE HandleList OPTIONAL,
+    IN SIZE_T HandleCount
 );
 
 BOOLEAN

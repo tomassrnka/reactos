@@ -192,6 +192,18 @@ BaseFreeThreadStack(
     _In_ HANDLE hProcess,
     _In_ PINITIAL_TEB InitialTeb);
 
+NTSTATUS
+WINAPI
+BasepReadThreadAttributes(
+    _In_ LPPROC_THREAD_ATTRIBUTE_LIST AttributeList,
+    _Out_ PPROCESSOR_NUMBER *IdealProcessor);
+
+NTSTATUS
+WINAPI
+BasepSetIdealProcessor(
+    _In_ HANDLE ThreadHandle,
+    _In_ const PROCESSOR_NUMBER *IdealProcessor);
+
 VOID
 WINAPI
 BaseInitializeContext(IN PCONTEXT Context,
@@ -328,6 +340,15 @@ WINAPI
 BaseIsDosApplication(
     IN PUNICODE_STRING PathName,
     IN NTSTATUS Status
+);
+
+/* The handle must be of the given object type and grant one of the access rights (the check of the Windows 8 information functions) */
+NTSTATUS
+WINAPI
+BasepCheckHandleType(
+    IN HANDLE Handle,
+    IN PCWSTR TypeName,
+    IN ACCESS_MASK DesiredAccess
 );
 
 NTSTATUS

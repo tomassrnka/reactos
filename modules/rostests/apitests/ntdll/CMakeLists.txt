@@ -165,6 +165,7 @@ list(APPEND SOURCE
     RtlQueryRegistryValues.c
     RtlQueryPerformanceCounter.c
     RtlQueryTimeZoneInfo.c
+    RtlSetTimeZoneInformation.c
     RtlReAllocateHeap.c
     RtlRemovePrivileges.c
     RtlSRWLock.c
