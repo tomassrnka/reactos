@@ -48,6 +48,7 @@ typedef struct _QUEUE_WINDOW
     HWND hStatus;
     HANDLE hPrinter;
     context_t *cx;
+    BOOL bCreated;
     WCHAR szPrinter[MAX_PATH];
 } QUEUE_WINDOW, *PQUEUE_WINDOW;
 
@@ -259,14 +260,25 @@ static void queue_refresh(PQUEUE_WINDOW pQueue)
     if (!EnumJobsW(pQueue->hPrinter, 0, MAXDWORD, 2, NULL, 0, &cbNeeded, &cReturned))
     {
         dwError = GetLastError();
-        if (dwError == ERROR_INSUFFICIENT_BUFFER)
+        /* a job that arrives between the two calls makes the first size too small: ask again once */
+        for (i = 0; i < 2 && dwError == ERROR_INSUFFICIENT_BUFFER; i++)
         {
             dwError = ERROR_SUCCESS;
             pJobs = HeapAlloc(GetProcessHeap(), 0, cbNeeded);
             if (!pJobs)
+            {
                 dwError = ERROR_NOT_ENOUGH_MEMORY;
-            else if (!EnumJobsW(pQueue->hPrinter, 0, MAXDWORD, 2, (LPBYTE)pJobs, cbNeeded, &cbNeeded, &cReturned))
+                break;
+            }
+            if (!EnumJobsW(pQueue->hPrinter, 0, MAXDWORD, 2, (LPBYTE)pJobs, cbNeeded, &cbNeeded, &cReturned))
+            {
                 dwError = GetLastError();
+                if (dwError == ERROR_INSUFFICIENT_BUFFER)
+                {
+                    HeapFree(GetProcessHeap(), 0, pJobs);
+                    pJobs = NULL;
+                }
+            }
         }
     }
 
@@ -525,6 +537,7 @@ static LRESULT CALLBACK queue_wnd_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 
             queue_refresh(pQueue);
             SetTimer(hwnd, REFRESH_TIMER, REFRESH_MS, NULL);
+            pQueue->bCreated = TRUE;
             return 0;
         }
 
@@ -589,7 +602,9 @@ static LRESULT CALLBACK queue_wnd_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 
         case WM_DESTROY:
             KillTimer(hwnd, REFRESH_TIMER);
-            PostQuitMessage(0);
+            /* a window whose creation failed leaves no loop of its own to end */
+            if (pQueue && pQueue->bCreated)
+                PostQuitMessage(0);
             return 0;
     }
 

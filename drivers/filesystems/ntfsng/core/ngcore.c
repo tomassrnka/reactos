@@ -302,8 +302,10 @@ static int ngc_mount_pass(void *osdev, unsigned long long size, unsigned int sec
 			v->jv = NULL;
 		} else {
 			/* Test only: a mount that had to recover does not inject the fault again. */
+#if DBG
 			if (v->jv->replayed || v->jv->torn)
 				kshim_jnl_fault = 0;
+#endif
 		}
 	} else if (jerr0 == -EIO || jerr0 == -ENOMEM) {
 		jrec = NGJ_UNREAD;
@@ -1363,18 +1365,6 @@ long ngc_read_direct(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned i
 	return len;
 }
 
-void ngc_stats(unsigned long *pages, unsigned long *inodes, unsigned long *reads)
-{
-	*pages = kshim_pc_pages;
-	*inodes = kshim_inodes_live;
-	*reads = kshim_counter_reads;
-}
-
-void ngc_trim(ngc_node *n)
-{
-	kshim_mapping_shrink(((struct inode *)n)->i_mapping);
-}
-
 void ngc_debug_dump(void)
 {
 	printk("shim: %lu cache pages, %lu live inodes, %lu device reads\n",
@@ -1651,10 +1641,12 @@ int ngc_raw_write(ngc_vol *v, unsigned long long off, const void *buf, unsigned 
 	return err;
 }
 
+#if DBG
 void ngc_set_journal_fault(unsigned long commit_no)
 {
 	kshim_jnl_fault = commit_no;
 }
+#endif
 
 static int ngc_dev_write(struct ngc_vol *v, u64 off, const u8 *buf, u64 len)
 {
@@ -2112,7 +2104,9 @@ int ngc_set_label(ngc_vol *v, const unsigned short *label, unsigned int len)
 
 /* ------------------------------------------------------------- volume size */
 
+#if DBG
 int ngc_resize_fault;
+#endif
 
 /* $Bitmap bytes for @nr clusters: whole 8-byte units, as format writes it. */
 static s64 ngc_bmp_bytes(s64 nr)

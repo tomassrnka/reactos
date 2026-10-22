@@ -69,6 +69,19 @@ _EqualStrings(PCWSTR pwszA, PCWSTR pwszB)
     return (wcscmp(pwszA, pwszB) == 0);
 }
 
+// Frees a job that is in no list and has no files yet, with whatever fields were filled in so far.
+static void
+_FreeUnlistedJob(PLOCAL_JOB pJob)
+{
+    DllFreeSplMem(pJob->pDevMode);
+    DllFreeSplStr(pJob->pwszDatatype);
+    DllFreeSplStr(pJob->pwszDocumentName);
+    DllFreeSplStr(pJob->pwszMachineName);
+    DllFreeSplStr(pJob->pwszNotifyName);
+    DllFreeSplStr(pJob->pwszUserName);
+    DllFreeSplMem(pJob);
+}
+
 static BOOL
 _GetNextJobID(PDWORD dwJobID)
 {
@@ -308,6 +321,13 @@ CreateJob(PLOCAL_PRINTER_HANDLE pPrinterHandle)
     // Get the user name for the Job.
     cchUserName = UNLEN + 1;
     pJob->pwszUserName = DllAllocSplMem(cchUserName * sizeof(WCHAR));
+    if (!pJob->pwszUserName)
+    {
+        dwErrorCode = ERROR_NOT_ENOUGH_MEMORY;
+        ERR("DllAllocSplMem failed!\n");
+        goto Cleanup;
+    }
+
     if (!GetUserNameW(pJob->pwszUserName, &cchUserName))
     {
         dwErrorCode = GetLastError();
@@ -342,6 +362,13 @@ CreateJob(PLOCAL_PRINTER_HANDLE pPrinterHandle)
 
     cchMachineName = wcslen(pwszMachineName);
     pJob->pwszMachineName = DllAllocSplMem((cchMachineName + cchDoubleBackslash + 1) * sizeof(WCHAR));
+    if (!pJob->pwszMachineName)
+    {
+        dwErrorCode = ERROR_NOT_ENOUGH_MEMORY;
+        ERR("DllAllocSplMem failed!\n");
+        goto Cleanup;
+    }
+
     CopyMemory(pJob->pwszMachineName, wszDoubleBackslash, cchDoubleBackslash * sizeof(WCHAR));
     CopyMemory(&pJob->pwszMachineName[cchDoubleBackslash], pwszMachineName, (cchMachineName + 1) * sizeof(WCHAR));
 
@@ -352,14 +379,6 @@ CreateJob(PLOCAL_PRINTER_HANDLE pPrinterHandle)
     {
         LeaveCriticalSection(&PrinterDeletionSection);
         dwErrorCode = ERROR_PRINTER_DELETED;
-
-        // The job is in no list and has no files yet: free only its own memory (FreeJob would remove a job with the same ID).
-        DllFreeSplMem(pJob->pDevMode);
-        DllFreeSplStr(pJob->pwszDatatype);
-        DllFreeSplStr(pJob->pwszDocumentName);
-        DllFreeSplStr(pJob->pwszMachineName);
-        DllFreeSplStr(pJob->pwszNotifyName);
-        DllFreeSplStr(pJob->pwszUserName);
         goto Cleanup;
     }
 
@@ -395,8 +414,9 @@ CreateJob(PLOCAL_PRINTER_HANDLE pPrinterHandle)
     pJob = NULL;
 
 Cleanup:
+    // The job is in no list and has no files yet: free only its own memory (FreeJob would remove a job with the same ID).
     if (pJob)
-        DllFreeSplMem(pJob);
+        _FreeUnlistedJob(pJob);
 
     if (pwszMachineName)
         RpcStringFreeW(&pwszMachineName);
@@ -751,6 +771,27 @@ Cleanup:
     return (dwErrorCode == ERROR_SUCCESS);
 }
 
+// Moves a job to its position for a new priority. PrinterDeletionSection must be held.
+// If the job cannot be inserted again, it goes back to the old priority. The skiplist frees the node on deletion, so this
+// second insert needs memory too: when it fails as well, the job stays out of the queue and the error is returned.
+static DWORD
+_SetJobPriority(PLOCAL_JOB pJob, DWORD dwPriority)
+{
+    const DWORD dwOldPriority = pJob->dwPriority;
+
+    DeleteElementSkiplist(&pJob->pPrinter->JobList, pJob);
+    pJob->dwPriority = dwPriority;
+    if (InsertElementSkiplist(&pJob->pPrinter->JobList, pJob))
+        return ERROR_SUCCESS;
+
+    ERR("InsertElementSkiplist failed for job %lu for the Printer's Job List!\n", pJob->dwJobID);
+    pJob->dwPriority = dwOldPriority;
+    if (!InsertElementSkiplist(&pJob->pPrinter->JobList, pJob))
+        ERR("InsertElementSkiplist failed again for job %lu, it is no longer in the Printer's Job List!\n", pJob->dwJobID);
+
+    return ERROR_NOT_ENOUGH_MEMORY;
+}
+
 static DWORD
 _LocalSetJobLevel1(PLOCAL_PRINTER_HANDLE pPrinterHandle, PLOCAL_JOB pJob, PJOB_INFO_1W pJobInfo)
 {
@@ -819,14 +860,16 @@ _LocalSetJobLevel1(PLOCAL_PRINTER_HANDLE pPrinterHandle, PLOCAL_JOB pJob, PJOB_I
         // Remove the job from the Printer's Job List while the Compare function still finds it by its old priority,
         // then reinsert it at the position for the new priority. CreateJob changes this list under the same lock.
         EnterCriticalSection(&PrinterDeletionSection);
-        DeleteElementSkiplist(&pJob->pPrinter->JobList, pJob);
-        pJob->dwPriority = pJobInfo->Priority;
-        if (!InsertElementSkiplist(&pJob->pPrinter->JobList, pJob))
-            ERR("InsertElementSkiplist failed for job %lu for the Printer's Job List!\n", pJob->dwJobID);
+        dwErrorCode = _SetJobPriority(pJob, pJobInfo->Priority);
         LeaveCriticalSection(&PrinterDeletionSection);
+
+        if (dwErrorCode != ERROR_SUCCESS)
+            goto Cleanup;
     }
 
     // Check if the status flags have changed.
+    // The status is also changed by SetJob deleting the job and by EndJobSpooling: change it under their lock.
+    EnterCriticalSection(&PrinterDeletionSection);
     if (pJob->dwStatus != pJobInfo->Status)
     {
         // Only add status flags that make sense.
@@ -842,6 +885,7 @@ _LocalSetJobLevel1(PLOCAL_PRINTER_HANDLE pPrinterHandle, PLOCAL_JOB pJob, PJOB_I
         if (pJobInfo->Status & JOB_STATUS_PAPEROUT)
             pJob->dwStatus |= JOB_STATUS_PAPEROUT;
     }
+    LeaveCriticalSection(&PrinterDeletionSection);
 
     dwErrorCode = ERROR_SUCCESS;
 
@@ -951,14 +995,16 @@ _LocalSetJobLevel2(PLOCAL_PRINTER_HANDLE pPrinterHandle, PLOCAL_JOB pJob, PJOB_I
         // Remove the job from the Printer's Job List while the Compare function still finds it by its old priority,
         // then reinsert it at the position for the new priority. CreateJob changes this list under the same lock.
         EnterCriticalSection(&PrinterDeletionSection);
-        DeleteElementSkiplist(&pJob->pPrinter->JobList, pJob);
-        pJob->dwPriority = pJobInfo->Priority;
-        if (!InsertElementSkiplist(&pJob->pPrinter->JobList, pJob))
-            ERR("InsertElementSkiplist failed for job %lu for the Printer's Job List!\n", pJob->dwJobID);
+        dwErrorCode = _SetJobPriority(pJob, pJobInfo->Priority);
         LeaveCriticalSection(&PrinterDeletionSection);
+
+        if (dwErrorCode != ERROR_SUCCESS)
+            goto Cleanup;
     }
 
     // Check if the status flags have changed.
+    // The status is also changed by SetJob deleting the job and by EndJobSpooling: change it under their lock.
+    EnterCriticalSection(&PrinterDeletionSection);
     if (pJob->dwStatus != pJobInfo->Status)
     {
         // Only add status flags that make sense.
@@ -974,6 +1020,7 @@ _LocalSetJobLevel2(PLOCAL_PRINTER_HANDLE pPrinterHandle, PLOCAL_JOB pJob, PJOB_I
         if (pJobInfo->Status & JOB_STATUS_PAPEROUT)
             pJob->dwStatus |= JOB_STATUS_PAPEROUT;
     }
+    LeaveCriticalSection(&PrinterDeletionSection);
 
     dwErrorCode = ERROR_SUCCESS;
 
@@ -1010,6 +1057,15 @@ LocalSetJob(HANDLE hPrinter, DWORD JobId, DWORD Level, PBYTE pJobInfo, DWORD Com
         goto Cleanup;
     }
 
+    // Refuse a command that cannot be carried out before any change is applied.
+    if (Command && Command != JOB_CONTROL_SENT_TO_PRINTER &&
+        !((Command == JOB_CONTROL_DELETE || Command == JOB_CONTROL_CANCEL) && (pJob->dwStatus & JOB_STATUS_SPOOLING)))
+    {
+        ERR("Unimplemented SetJob Command: %lu!\n", Command);
+        dwErrorCode = ERROR_NOT_SUPPORTED;
+        goto Cleanup;
+    }
+
     // Set new job information if a valid level was given.
     if (Level == 1)
         dwErrorCode = _LocalSetJobLevel1(pPrinterHandle, pJob, (PJOB_INFO_1W)pJobInfo);
@@ -1029,26 +1085,33 @@ LocalSetJob(HANDLE hPrinter, DWORD JobId, DWORD Level, PBYTE pJobInfo, DWORD Com
     }
 
     // Perform an additional command if desired.
-    if (Command)
+    if (Command == JOB_CONTROL_SENT_TO_PRINTER)
     {
-        if (Command == JOB_CONTROL_SENT_TO_PRINTER)
-        {
-            // This indicates the end of the Print Job.
+        // This indicates the end of the Print Job.
 
-            // Cancel the Job at the Print Processor.
-            if (pJob->hPrintProcessor)
-                pJob->pPrintProcessor->pfnControlPrintProcessor(pJob->hPrintProcessor, JOB_CONTROL_CANCEL);
+        // Cancel the Job at the Print Processor.
+        if (pJob->hPrintProcessor)
+            pJob->pPrintProcessor->pfnControlPrintProcessor(pJob->hPrintProcessor, JOB_CONTROL_CANCEL);
 
-            FreeJob(pJob);
+        FreeJob(pJob);
 
-            // TODO: All open handles associated with the job need to be invalidated.
-            // This certainly needs handle tracking...
-        }
+        // TODO: All open handles associated with the job need to be invalidated.
+        // This certainly needs handle tracking...
+    }
+    else if (Command)
+    {
+        // A job that is still being spooled belongs to the handle spooling it.
+        // It is discarded when its document ends, as on Windows: by ScheduleJob, EndDocPrinter or ClosePrinter.
+        // Its document may have ended meanwhile: decide together with EndJobSpooling.
+        // The job may also have been freed since it was looked up: FreeJob removes it from the list under this lock.
+        EnterCriticalSection(&PrinterDeletionSection);
+        if (LookupElementSkiplist(&GlobalJobList, &JobId, NULL) != pJob)
+            dwErrorCode = ERROR_INVALID_PARAMETER;
+        else if (pJob->dwStatus & JOB_STATUS_SPOOLING)
+            pJob->dwStatus |= JOB_STATUS_DELETING;
         else
-        {
-            ERR("Unimplemented SetJob Command: %lu!\n", Command);
             dwErrorCode = ERROR_NOT_SUPPORTED;
-        }
+        LeaveCriticalSection(&PrinterDeletionSection);
     }
 
 Cleanup:
@@ -1200,11 +1263,33 @@ LocalScheduleJob(HANDLE hPrinter, DWORD dwJobID)
     // Construct the full path to the spool file.
     GetJobFilePath(L"SPL", dwJobID, wszFullPath);
 
+    // A job deleted while it was spooled is discarded instead of printed, as on Windows.
+    if (pJob->dwStatus & JOB_STATUS_DELETING)
+    {
+        DeleteFileW(wszFullPath);
+        FreeJob(pJob);
+        pPrinterHandle->bStartedDoc = FALSE;
+        pPrinterHandle->pJob = NULL;
+        dwErrorCode = ERROR_SUCCESS;
+        goto Cleanup;
+    }
+
     // Check if it exists.
     dwAttributes = GetFileAttributesW(wszFullPath);
     if (dwAttributes == INVALID_FILE_ATTRIBUTES || dwAttributes & FILE_ATTRIBUTE_DIRECTORY)
     {
         dwErrorCode = ERROR_SPOOL_FILE_NOT_FOUND;
+        goto Cleanup;
+    }
+
+    // A deletion that came in meanwhile still wins.
+    if (!EndJobSpooling(pJob))
+    {
+        DeleteFileW(wszFullPath);
+        FreeJob(pJob);
+        pPrinterHandle->bStartedDoc = FALSE;
+        pPrinterHandle->pJob = NULL;
+        dwErrorCode = ERROR_SUCCESS;
         goto Cleanup;
     }
 
@@ -1225,6 +1310,29 @@ Cleanup:
 }
 
 /**
+ * @name EndJobSpooling
+ *
+ * Ends spooling of a job whose SPL file is complete, unless the job was deleted while it was spooled.
+ * A SetJob deleting the job either comes first, or is refused because the job is no longer spooled.
+ *
+ * @return
+ * TRUE if the job can be printed, FALSE if it was deleted and has to be discarded.
+ */
+BOOL
+EndJobSpooling(PLOCAL_JOB pJob)
+{
+    BOOL bPrint;
+
+    EnterCriticalSection(&PrinterDeletionSection);
+    bPrint = !(pJob->dwStatus & JOB_STATUS_DELETING);
+    if (bPrint)
+        pJob->dwStatus &= ~JOB_STATUS_SPOOLING;
+    LeaveCriticalSection(&PrinterDeletionSection);
+
+    return bPrint;
+}
+
+/**
  * @name StartJobPrinting
  *
  * Ends spooling of a job whose SPL file is complete and starts the thread that prints it.
@@ -1237,7 +1345,9 @@ StartJobPrinting(PLOCAL_JOB pJob)
     WCHAR wszFullPath[MAX_PATH];
 
     // Spooling is finished at this point.
+    EnterCriticalSection(&PrinterDeletionSection);
     pJob->dwStatus &= ~JOB_STATUS_SPOOLING;
+    LeaveCriticalSection(&PrinterDeletionSection);
 
     // Write the job data into the shadow file.
     // A shadow file cannot hold an output file, so such a job is not resumed after a restart.

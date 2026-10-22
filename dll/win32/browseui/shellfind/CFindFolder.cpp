@@ -790,7 +790,15 @@ void CFindFolder::DiscardQueuedSearchMessages()
         if (msg.message == WM_SEARCH_STOPPED)
             break;
         if (msg.message == WM_SEARCH_ADD_RESULT || msg.message == WM_SEARCH_UPDATE_STATUS)
+        {
             SHFree((void*)msg.lParam);
+        }
+        else if (msg.message == WM_SEARCH_START && msg.lParam)
+        {
+            SearchStart *pSearchStart = (SearchStart *)msg.lParam;
+            FreeList(pSearchStart->pPaths);
+            SHFree(pSearchStart);
+        }
     }
 }
 

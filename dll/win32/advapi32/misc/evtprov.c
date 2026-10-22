@@ -12,83 +12,7 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(advapi);
 
-/* A provider registers and gets a handle; with no tracing session nothing is ever enabled. */
-#define EVENT_PROVIDER_HANDLE 0xdeadbeef
-
-ULONG
-WINAPI
-EventRegister(
-    _In_ LPCGUID ProviderId,
-    _In_opt_ PENABLECALLBACK EnableCallback,
-    _In_opt_ PVOID CallbackContext,
-    _Out_ PREGHANDLE RegHandle)
-{
-    TRACE("(%p, %p, %p, %p) stub\n", ProviderId, EnableCallback, CallbackContext, RegHandle);
-
-    if (RegHandle == NULL)
-        return ERROR_INVALID_PARAMETER;
-
-    *RegHandle = EVENT_PROVIDER_HANDLE;
-    return ERROR_SUCCESS;
-}
-
-ULONG
-WINAPI
-EventUnregister(
-    _In_ REGHANDLE RegHandle)
-{
-    TRACE("(%I64x) stub\n", RegHandle);
-    return ERROR_SUCCESS;
-}
-
-BOOLEAN
-WINAPI
-EventEnabled(
-    _In_ REGHANDLE RegHandle,
-    _In_ PCEVENT_DESCRIPTOR EventDescriptor)
-{
-    TRACE("(%I64x, %p) stub\n", RegHandle, EventDescriptor);
-    return FALSE;
-}
-
-BOOLEAN
-WINAPI
-EventProviderEnabled(
-    _In_ REGHANDLE RegHandle,
-    _In_ UCHAR Level,
-    _In_ ULONGLONG MatchAnyKeyword)
-{
-    TRACE("(%I64x, %u, %I64x) stub\n", RegHandle, Level, MatchAnyKeyword);
-    return FALSE;
-}
-
-ULONG
-WINAPI
-EventWrite(
-    _In_ REGHANDLE RegHandle,
-    _In_ PCEVENT_DESCRIPTOR EventDescriptor,
-    _In_ ULONG UserDataCount,
-    _In_reads_opt_(UserDataCount) PEVENT_DATA_DESCRIPTOR UserData)
-{
-    TRACE("(%I64x, %p, %lu, %p) stub\n", RegHandle, EventDescriptor, UserDataCount, UserData);
-    return ERROR_SUCCESS;
-}
-
-ULONG
-WINAPI
-EventWriteTransfer(
-    _In_ REGHANDLE RegHandle,
-    _In_ PCEVENT_DESCRIPTOR EventDescriptor,
-    _In_opt_ LPCGUID ActivityId,
-    _In_opt_ LPCGUID RelatedActivityId,
-    _In_ ULONG UserDataCount,
-    _In_reads_opt_(UserDataCount) PEVENT_DATA_DESCRIPTOR UserData)
-{
-    TRACE("(%I64x, %p, %p, %p, %lu, %p) stub\n", RegHandle, EventDescriptor, ActivityId,
-          RelatedActivityId, UserDataCount, UserData);
-    return ERROR_SUCCESS;
-}
-
+/* The other Event* provider exports forward to the Etw* functions of ntdll in advapi32.spec */
 ULONG
 WINAPI
 EventWriteEx(
@@ -103,18 +27,6 @@ EventWriteEx(
 {
     TRACE("(%I64x, %p, %I64x, %lx, %p, %p, %lu, %p) stub\n", RegHandle, EventDescriptor, Filter, Flags,
           ActivityId, RelatedActivityId, UserDataCount, UserData);
-    return ERROR_SUCCESS;
-}
-
-ULONG
-WINAPI
-EventWriteString(
-    _In_ REGHANDLE RegHandle,
-    _In_ UCHAR Level,
-    _In_ ULONGLONG Keyword,
-    _In_ PCWSTR String)
-{
-    TRACE("(%I64x, %u, %I64x, %S) stub\n", RegHandle, Level, Keyword, String);
     return ERROR_SUCCESS;
 }
 

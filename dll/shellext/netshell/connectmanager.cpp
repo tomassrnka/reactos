@@ -18,20 +18,25 @@ WINAPI
 CNetConnection::Initialize(PINetConnectionItem pItem)
 {
     m_Props = pItem->Props;
+    /* the strings still belong to the manager: this object owns only its own copies */
+    m_Props.pszwName = NULL;
+    m_Props.pszwDeviceName = NULL;
     m_dwAdapterIndex = pItem->dwAdapterIndex;
 
     if (pItem->Props.pszwName)
     {
         m_Props.pszwName = static_cast<PWSTR>(CoTaskMemAlloc((wcslen(pItem->Props.pszwName)+1)*sizeof(WCHAR)));
-        if (m_Props.pszwName)
-            wcscpy(m_Props.pszwName, pItem->Props.pszwName);
+        if (!m_Props.pszwName)
+            return E_OUTOFMEMORY;
+        wcscpy(m_Props.pszwName, pItem->Props.pszwName);
     }
 
     if (pItem->Props.pszwDeviceName)
     {
         m_Props.pszwDeviceName = static_cast<PWSTR>(CoTaskMemAlloc((wcslen(pItem->Props.pszwDeviceName)+1)*sizeof(WCHAR)));
-        if (m_Props.pszwDeviceName)
-            wcscpy(m_Props.pszwDeviceName, pItem->Props.pszwDeviceName);
+        if (!m_Props.pszwDeviceName)
+            return E_OUTOFMEMORY;
+        wcscpy(m_Props.pszwDeviceName, pItem->Props.pszwDeviceName);
     }
 
     return S_OK;
@@ -224,12 +229,17 @@ CNetConnection::GetProperties(NETCON_PROPERTIES **ppProps)
 
     CopyMemory(pProperties, &m_Props, sizeof(NETCON_PROPERTIES));
     pProperties->pszwName = NULL;
+    pProperties->pszwDeviceName = NULL;
 
     if (m_Props.pszwDeviceName)
     {
         pProperties->pszwDeviceName = static_cast<LPWSTR>(CoTaskMemAlloc((wcslen(m_Props.pszwDeviceName)+1)*sizeof(WCHAR)));
-        if (pProperties->pszwDeviceName)
-            wcscpy(pProperties->pszwDeviceName, m_Props.pszwDeviceName);
+        if (!pProperties->pszwDeviceName)
+        {
+            CoTaskMemFree(pProperties);
+            return E_OUTOFMEMORY;
+        }
+        wcscpy(pProperties->pszwDeviceName, m_Props.pszwDeviceName);
     }
 
     *ppProps = pProperties;
@@ -439,7 +449,9 @@ CNetConnectionManager::Next(
         return S_FALSE;
 
     hr = CNetConnection_CreateInstance(m_pCurrent, IID_PPV_ARG(INetConnection, rgelt));
-    m_pCurrent = m_pCurrent->Next;
+    /* a failed item stays current, so that a retry does not skip it */
+    if (SUCCEEDED(hr))
+        m_pCurrent = m_pCurrent->Next;
 
     return hr;
 }

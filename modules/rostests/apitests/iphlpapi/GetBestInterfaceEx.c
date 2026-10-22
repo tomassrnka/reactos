@@ -12,7 +12,6 @@
 #include <stdio.h>
 
 #define UNSET 0xdeadbeef
-#define MAX_ADDRESS_TABLE 64
 
 typedef DWORD (WINAPI *PGET_BEST_INTERFACE_EX)(struct sockaddr *, PDWORD);
 
