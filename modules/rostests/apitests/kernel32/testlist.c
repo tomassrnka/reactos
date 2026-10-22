@@ -35,6 +35,7 @@ extern void func_CreateFile2(void);
 extern void func_CreateRemoteThreadEx(void);
 extern void func_CreateProcess(void);
 extern void func_CreateProcessRace(void);
+extern void func_DefaultDllDirectories(void);
 extern void func_CreateWaitableTimerEx(void);
 extern void func_ThreadImpersonationToken(void);
 extern void func_DebugTrapInterrupts(void);
@@ -108,6 +109,7 @@ extern void func_PowerRequest(void);
 extern void func_PrefetchVirtualMemory(void);
 extern void func_PrivMoveFileIdentityW(void);
 extern void func_ProcessAffinity(void);
+extern void func_ProcessInformation(void);
 extern void func_ProcessMitigationPolicy(void);
 extern void func_ProcThreadMitigation(void);
 extern void func_QueryCycleTime(void);
@@ -184,6 +186,7 @@ const struct test winetest_testlist[] =
     { "CreateRemoteThreadEx",        func_CreateRemoteThreadEx },
     { "CreateProcess",               func_CreateProcess },
     { "CreateProcessRace",           func_CreateProcessRace },
+    { "DefaultDllDirectories",      func_DefaultDllDirectories },
     { "CreateWaitableTimerEx",       func_CreateWaitableTimerEx },
     { "ThreadImpersonationToken",    func_ThreadImpersonationToken },
     { "DebugTrapInterrupts",         func_DebugTrapInterrupts },
@@ -259,6 +262,7 @@ const struct test winetest_testlist[] =
     { "ProcessMitigationPolicy",     func_ProcessMitigationPolicy },
     { "ProcThreadMitigation",        func_ProcThreadMitigation },
     { "ProcessAffinity",             func_ProcessAffinity },
+    { "ProcessInformation",         func_ProcessInformation },
     { "QueryCycleTime",              func_QueryCycleTime },
     { "QueryUnbiasedInterruptTime",  func_QueryUnbiasedInterruptTime },
     { "ProcessToken",                func_ProcessToken },

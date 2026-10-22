@@ -572,6 +572,313 @@ BaseComputeProcessDllPath(IN LPWSTR FullPath,
     return DllPath;
 }
 
+/*
+ * The LOAD_LIBRARY_SEARCH_* search order: the directory of the library (when its name is a full path), the
+ * directory of the executable, the directories of the process (those of AddDllDirectory, the last added first, then
+ * the one of SetDllDirectory) and the system directory. The list of directories and the default flags of
+ * SetDefaultDllDirectories are kept under BaseDllDirectoryLock.
+ */
+typedef struct _BASEP_DLL_DIRECTORY
+{
+    LIST_ENTRY Entry;
+    UNICODE_STRING Path;
+} BASEP_DLL_DIRECTORY, *PBASEP_DLL_DIRECTORY;
+
+static LIST_ENTRY BasepUserDllDirectories = { &BasepUserDllDirectories, &BasepUserDllDirectories };
+static ULONG BasepDefaultDllDirectories;
+
+/* Adds a directory to the search path that is being built; a NULL buffer only measures */
+static
+VOID
+BasepAddSearchDirectory(
+    _In_opt_ PWCHAR Buffer,
+    _Inout_ PSIZE_T Position,
+    _In_reads_(Count) PCWCH Directory,
+    _In_ SIZE_T Count)
+{
+    if (Count == 0)
+        return;
+
+    if (Buffer)
+    {
+        RtlCopyMemory(Buffer + *Position, Directory, Count * sizeof(WCHAR));
+        Buffer[*Position + Count] = L';';
+    }
+    *Position += Count + 1;
+}
+
+/* Whether a name is a full path: the search order has no say in where it is loaded from */
+BOOLEAN
+WINAPI
+BasepIsFullPathName(
+    _In_ LPCWSTR Name)
+{
+    RTL_PATH_TYPE Type = RtlDetermineDosPathNameType_U(Name);
+
+    return Type == RtlPathTypeDriveAbsolute || Type == RtlPathTypeUncAbsolute ||
+           Type == RtlPathTypeLocalDevice || Type == RtlPathTypeRootLocalDevice;
+}
+
+/*
+ * Returns the flags of the search for a load: the search flags of the call or, when it gave none, the default flags
+ * of SetDefaultDllDirectories (0 if it was not called, and the usual search order is the one to use).
+ */
+ULONG
+WINAPI
+BasepGetDllSearchFlags(
+    _In_ ULONG LoadFlags)
+{
+    ULONG SearchFlags = LoadFlags & BASEP_LOAD_LIBRARY_SEARCH_MASK;
+
+    if (SearchFlags == 0)
+    {
+        RtlEnterCriticalSection(&BaseDllDirectoryLock);
+        SearchFlags = BasepDefaultDllDirectories;
+        RtlLeaveCriticalSection(&BaseDllDirectoryLock);
+    }
+
+    return SearchFlags;
+}
+
+LPWSTR
+WINAPI
+BasepComputeDllSearchFlagsPath(
+    _In_ ULONG SearchFlags,
+    _In_opt_ LPCWSTR DllName,
+    _Out_ PNTSTATUS Status)
+{
+    PWCHAR Buffer = NULL, LoadDirEnd = NULL, AppName = NULL, AppNameEnd = NULL;
+    PLIST_ENTRY Entry;
+    SIZE_T Position = 0;
+    ULONG Pass;
+
+    if ((SearchFlags & LOAD_LIBRARY_SEARCH_DEFAULT_DIRS))
+    {
+        SearchFlags |= LOAD_LIBRARY_SEARCH_APPLICATION_DIR |
+                       LOAD_LIBRARY_SEARCH_USER_DIRS |
+                       LOAD_LIBRARY_SEARCH_SYSTEM32;
+    }
+
+    *Status = STATUS_SUCCESS;
+
+    /* The directory of the library is only known for a full path, a name that is not one cannot ask for it */
+    if (SearchFlags & LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR)
+    {
+        if (!DllName || !BasepIsFullPathName(DllName))
+        {
+            *Status = STATUS_INVALID_PARAMETER;
+            return NULL;
+        }
+        LoadDirEnd = BasepEndOfDirName((PWCHAR)DllName);
+    }
+
+    if (SearchFlags & LOAD_LIBRARY_SEARCH_APPLICATION_DIR)
+    {
+        if (!BasepExeLdrEntry)
+        {
+            LdrEnumerateLoadedModules(0, BasepLocateExeLdrEntry, NtCurrentPeb()->ImageBaseAddress);
+        }
+        if (BasepExeLdrEntry)
+        {
+            AppName = BasepExeLdrEntry->FullDllName.Buffer;
+            AppNameEnd = BasepEndOfDirName(AppName);
+        }
+    }
+
+    RtlEnterCriticalSection(&BaseDllDirectoryLock);
+    for (Pass = 0; Pass < 2; Pass++)
+    {
+        Position = 0;
+
+        if (LoadDirEnd)
+            BasepAddSearchDirectory(Buffer, &Position, DllName, LoadDirEnd - DllName);
+
+        if (AppNameEnd)
+            BasepAddSearchDirectory(Buffer, &Position, AppName, AppNameEnd - AppName);
+
+        if (SearchFlags & LOAD_LIBRARY_SEARCH_USER_DIRS)
+        {
+            for (Entry = BasepUserDllDirectories.Flink; Entry != &BasepUserDllDirectories; Entry = Entry->Flink)
+            {
+                PBASEP_DLL_DIRECTORY Directory = CONTAINING_RECORD(Entry, BASEP_DLL_DIRECTORY, Entry);
+                BasepAddSearchDirectory(Buffer, &Position, Directory->Path.Buffer, Directory->Path.Length / sizeof(WCHAR));
+            }
+
+            /* The directory of SetDllDirectory counts as one of the directories of the process */
+            if (BaseDllDirectory.Buffer)
+            {
+                BasepAddSearchDirectory(Buffer, &Position, BaseDllDirectory.Buffer, BaseDllDirectory.Length / sizeof(WCHAR));
+            }
+        }
+
+        if (SearchFlags & LOAD_LIBRARY_SEARCH_SYSTEM32)
+        {
+            BasepAddSearchDirectory(Buffer,
+                                    &Position,
+                                    BaseWindowsSystemDirectory.Buffer,
+                                    BaseWindowsSystemDirectory.Length / sizeof(WCHAR));
+        }
+
+        if (Pass == 0)
+        {
+            /* The separator of the last directory becomes the terminator; no directory leaves an empty path */
+            Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, (Position ? Position : 1) * sizeof(WCHAR));
+            if (!Buffer)
+            {
+                *Status = STATUS_NO_MEMORY;
+                break;
+            }
+        }
+    }
+    RtlLeaveCriticalSection(&BaseDllDirectoryLock);
+
+    if (Buffer)
+    {
+        Buffer[Position ? Position - 1 : 0] = UNICODE_NULL;
+
+        /*
+         * No directory is no search: an empty path would be taken for the current directory. A full path needs no
+         * directory.
+         */
+        if (Position == 0 && (!DllName || !BasepIsFullPathName(DllName)))
+        {
+            RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
+            Buffer = NULL;
+            *Status = STATUS_DLL_NOT_FOUND;
+        }
+    }
+
+    return Buffer;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+SetDefaultDllDirectories(
+    _In_ DWORD DirectoryFlags)
+{
+    /*
+     * No flag is no choice, and the directory of the library is the choice of one load, not a default. The two flags
+     * of Windows 10 that this loader has no use for (the current directory is not searched by this order whatever
+     * the flag says, and there are no forwarders to the system directory) are taken and have no effect.
+     */
+    if (DirectoryFlags == 0 ||
+        (DirectoryFlags & ~(LOAD_LIBRARY_SEARCH_APPLICATION_DIR |
+                            LOAD_LIBRARY_SEARCH_USER_DIRS |
+                            LOAD_LIBRARY_SEARCH_SYSTEM32 |
+                            LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |
+                            BASEP_LOAD_LIBRARY_SAFE_CURRENT_DIRS |
+                            BASEP_LOAD_LIBRARY_SEARCH_SYSTEM32_NO_FORWARDER)))
+    {
+        BaseSetLastNTError(STATUS_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    DirectoryFlags &= BASEP_LOAD_LIBRARY_SEARCH_MASK;
+    if (DirectoryFlags & LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)
+    {
+        DirectoryFlags |= LOAD_LIBRARY_SEARCH_APPLICATION_DIR |
+                          LOAD_LIBRARY_SEARCH_USER_DIRS |
+                          LOAD_LIBRARY_SEARCH_SYSTEM32;
+    }
+
+    RtlEnterCriticalSection(&BaseDllDirectoryLock);
+    BasepDefaultDllDirectories = DirectoryFlags;
+    RtlLeaveCriticalSection(&BaseDllDirectoryLock);
+
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+DLL_DIRECTORY_COOKIE
+WINAPI
+AddDllDirectory(
+    _In_ PCWSTR NewDirectory)
+{
+    PBASEP_DLL_DIRECTORY Directory;
+    UNICODE_STRING Path;
+    RTL_PATH_TYPE Type;
+    SIZE_T Length;
+
+    /* Only a full path names the same directory whatever the current directory is */
+    if (!NewDirectory)
+    {
+        BaseSetLastNTError(STATUS_INVALID_PARAMETER);
+        return NULL;
+    }
+
+    Type = RtlDetermineDosPathNameType_U(NewDirectory);
+    if (Type != RtlPathTypeDriveAbsolute && Type != RtlPathTypeUncAbsolute)
+    {
+        BaseSetLastNTError(STATUS_INVALID_PARAMETER);
+        return NULL;
+    }
+
+    Length = wcslen(NewDirectory);
+    if (Length >= UNICODE_STRING_MAX_CHARS)
+    {
+        BaseSetLastNTError(STATUS_NAME_TOO_LONG);
+        return NULL;
+    }
+
+    Directory = RtlAllocateHeap(RtlGetProcessHeap(), 0, sizeof(*Directory) + (Length + 1) * sizeof(WCHAR));
+    if (!Directory)
+    {
+        BaseSetLastNTError(STATUS_NO_MEMORY);
+        return NULL;
+    }
+
+    Path.Buffer = (PWCHAR)(Directory + 1);
+    Path.Length = (USHORT)(Length * sizeof(WCHAR));
+    Path.MaximumLength = Path.Length + sizeof(WCHAR);
+    RtlCopyMemory(Path.Buffer, NewDirectory, Path.MaximumLength);
+    Directory->Path = Path;
+
+    RtlEnterCriticalSection(&BaseDllDirectoryLock);
+    InsertHeadList(&BasepUserDllDirectories, &Directory->Entry);
+    RtlLeaveCriticalSection(&BaseDllDirectoryLock);
+
+    return (DLL_DIRECTORY_COOKIE)Directory;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+RemoveDllDirectory(
+    _In_ DLL_DIRECTORY_COOKIE Cookie)
+{
+    PLIST_ENTRY Entry;
+    BOOL Found = FALSE;
+
+    /* The cookie is only taken when it is one that AddDllDirectory gave and that is not removed yet */
+    RtlEnterCriticalSection(&BaseDllDirectoryLock);
+    for (Entry = BasepUserDllDirectories.Flink; Entry != &BasepUserDllDirectories; Entry = Entry->Flink)
+    {
+        if (Entry == (PLIST_ENTRY)Cookie)
+        {
+            RemoveEntryList(Entry);
+            Found = TRUE;
+            break;
+        }
+    }
+    RtlLeaveCriticalSection(&BaseDllDirectoryLock);
+
+    if (!Found)
+    {
+        BaseSetLastNTError(STATUS_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    RtlFreeHeap(RtlGetProcessHeap(), 0, Cookie);
+    return TRUE;
+}
+
 BOOLEAN
 WINAPI
 CheckForSameCurdir(IN PUNICODE_STRING DirName)

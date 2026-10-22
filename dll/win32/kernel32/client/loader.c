@@ -292,8 +292,8 @@ LoadLibraryExW(LPCWSTR lpLibFileName,
     UNICODE_STRING DllName;
     HINSTANCE hInst;
     NTSTATUS Status;
-    PWSTR SearchPath;
-    ULONG DllCharacteristics = 0;
+    PWSTR SearchPath = NULL;
+    ULONG DllCharacteristics = 0, SearchFlags;
     BOOL FreeString = FALSE;
 
     /* Check for any flags LdrLoadDll might be interested in */
@@ -335,16 +335,41 @@ LoadLibraryExW(LPCWSTR lpLibFileName,
         FreeString = TRUE;
     }
 
-    /* Compute the load path */
-    SearchPath = BaseComputeProcessDllPath((dwFlags & LOAD_WITH_ALTERED_SEARCH_PATH) ?
-                                           DllName.Buffer : NULL,
-                                           NULL);
-    if (!SearchPath)
+    /* Compute the load path: from the search flags of the call, those of SetDefaultDllDirectories or the usual order */
+    SearchFlags = BasepGetDllSearchFlags(dwFlags);
+    if (SearchFlags && (dwFlags & LOAD_WITH_ALTERED_SEARCH_PATH) && !(dwFlags & BASEP_LOAD_LIBRARY_SEARCH_MASK) &&
+        BasepIsFullPathName(DllName.Buffer))
     {
-        /* Getting DLL path failed, so set last error, free mem and return */
-        BaseSetLastNTError(STATUS_NO_MEMORY);
-        if (FreeString) RtlFreeUnicodeString(&DllName);
-        return NULL;
+        /* The default directories of the process do not take the altered search path of a full path away */
+        SearchFlags = 0;
+    }
+
+    if (SearchFlags)
+    {
+        /* The search flags are a search of their own, the altered search path is another order */
+        if (dwFlags & LOAD_WITH_ALTERED_SEARCH_PATH)
+            Status = STATUS_INVALID_PARAMETER;
+        else
+            SearchPath = BasepComputeDllSearchFlagsPath(SearchFlags, DllName.Buffer, &Status);
+        if (!SearchPath)
+        {
+            BaseSetLastNTError(Status);
+            if (FreeString) RtlFreeUnicodeString(&DllName);
+            return NULL;
+        }
+    }
+    else
+    {
+        SearchPath = BaseComputeProcessDllPath((dwFlags & LOAD_WITH_ALTERED_SEARCH_PATH) ?
+                                               DllName.Buffer : NULL,
+                                               NULL);
+        if (!SearchPath)
+        {
+            /* Getting DLL path failed, so set last error, free mem and return */
+            BaseSetLastNTError(STATUS_NO_MEMORY);
+            if (FreeString) RtlFreeUnicodeString(&DllName);
+            return NULL;
+        }
     }
 
     _SEH2_TRY

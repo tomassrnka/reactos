@@ -48,6 +48,7 @@ list(APPEND SOURCE
     client/perfcnt.c
     client/power.c
     client/proc.c
+    client/procinfo.c
     client/procansi.c
     client/resntfy.c
     client/session.c

@@ -238,6 +238,50 @@ SetThreadInformation(
     _In_reads_bytes_(ThreadInformationSize) LPVOID ThreadInformation,
     _In_ DWORD ThreadInformationSize);
 
+#define PROCESS_POWER_THROTTLING_CURRENT_VERSION        1
+#define PROCESS_POWER_THROTTLING_EXECUTION_SPEED        0x1
+#define PROCESS_POWER_THROTTLING_DELAYTIMERS            0x2
+#define PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION 0x4
+#define PROCESS_POWER_THROTTLING_VALID_FLAGS            (PROCESS_POWER_THROTTLING_EXECUTION_SPEED | \
+                                                         PROCESS_POWER_THROTTLING_DELAYTIMERS | \
+                                                         PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION)
+
+#define PROTECTION_LEVEL_NONE                           0xFFFFFFFE
+
+typedef struct _PROCESS_POWER_THROTTLING_STATE
+{
+    ULONG Version;
+    ULONG ControlMask;
+    ULONG StateMask;
+} PROCESS_POWER_THROTTLING_STATE, *PPROCESS_POWER_THROTTLING_STATE;
+
+#define PROCESS_LEAP_SECOND_INFO_FLAG_ENABLE_SIXTY_SECOND   0x1
+#define PROCESS_LEAP_SECOND_INFO_VALID_FLAGS                (PROCESS_LEAP_SECOND_INFO_FLAG_ENABLE_SIXTY_SECOND)
+
+typedef struct _PROCESS_LEAP_SECOND_INFO
+{
+    ULONG Flags;
+    ULONG Reserved;
+} PROCESS_LEAP_SECOND_INFO, *PPROCESS_LEAP_SECOND_INFO;
+
+WINBASEAPI
+BOOL
+WINAPI
+GetProcessInformation(
+    _In_ HANDLE hProcess,
+    _In_ PROCESS_INFORMATION_CLASS ProcessInformationClass,
+    _Out_writes_bytes_(ProcessInformationSize) LPVOID ProcessInformation,
+    _In_ DWORD ProcessInformationSize);
+
+WINBASEAPI
+BOOL
+WINAPI
+SetProcessInformation(
+    _In_ HANDLE hProcess,
+    _In_ PROCESS_INFORMATION_CLASS ProcessInformationClass,
+    _In_reads_bytes_(ProcessInformationSize) LPVOID ProcessInformation,
+    _In_ DWORD ProcessInformationSize);
+
 
 typedef enum _PROCESS_MITIGATION_POLICY
 {
