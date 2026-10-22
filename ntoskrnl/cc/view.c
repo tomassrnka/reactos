@@ -248,7 +248,7 @@ CcRosDeleteFileCache (
      * removing them from CacheMapVacbListHead here (under the lock), we ensure
      * that a concurrent CcRosLookupVacb (which also holds the lock) cannot find
      * any of these VACBs after we release the lock. Without this, a caller that
-     * already has a SharedCacheMap pointer (e.g. CcFlushCache) could look up a
+     * already has a SharedCacheMap pointer without a reference could look up a
      * VACB between our lock release and the point where the second loop removes
      * it from the list — leaving an outstanding reference that races with our
      * CcRosVacbDecRefCount call below.
@@ -426,12 +426,31 @@ CcRosFlushDirtyPages (
         {
             DPRINT("Not locked\n");
             ASSERT(!Wait);
-            CcRosVacbDecRefCount(current);
             OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+
+            /*
+             * The dirty list may have changed while the lock was released: a cache map that
+             * was deleted meanwhile took its views off it, and the next entry read before the
+             * release may be one of them. Go on after this view if it is still listed, from
+             * the start otherwise.
+             */
+            if (IsListEmpty(&current->DirtyVacbListEntry))
+                current_entry = DirtyVacbListHead.Flink;
+            else
+                current_entry = current->DirtyVacbListEntry.Flink;
+
+            /* The cache map still holds the view, so this is not its last reference */
+            CcRosVacbDecRefCount(current);
+
             SharedCacheMap->Flags &= ~SHARED_CACHE_MAP_IN_LAZYWRITE;
 
             if (--SharedCacheMap->OpenCount == 0)
+            {
                 CcRosDeleteFileCache(SharedCacheMap->FileObject, SharedCacheMap, &OldIrql);
+
+                /* That released the lock as well */
+                current_entry = DirtyVacbListHead.Flink;
+            }
 
             continue;
         }
@@ -1179,6 +1198,35 @@ CcRosInternalFreeVacb (
     return STATUS_SUCCESS;
 }
 
+VOID
+CcRosDereferenceFlushedCacheMap(
+    _In_ PROS_SHARED_CACHE_MAP SharedCacheMap)
+{
+    KIRQL OldIrql;
+
+    OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+    if (--SharedCacheMap->OpenCount == 0)
+        CcRosDeleteFileCache(SharedCacheMap->FileObject, SharedCacheMap, &OldIrql);
+    KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+}
+
+/*
+ * Hand the last reference of a flush to a Cc worker thread, so that waiting for the lazy
+ * writer's activity also waits for it. The entry is part of the map: only the reference that
+ * is handed over can post it, so it is never queued twice.
+ */
+static
+VOID
+CcpPostFlushDereference(
+    _In_ PROS_SHARED_CACHE_MAP SharedCacheMap)
+{
+    PWORK_QUEUE_ENTRY WorkItem = &SharedCacheMap->FlushDereferenceEntry;
+
+    WorkItem->Function = DereferenceSharedMap;
+    WorkItem->Parameters.Write.SharedCacheMap = (PVOID)SharedCacheMap;
+    CcPostWorkQueue(WorkItem, &CcRegularWorkQueue);
+}
+
 /*
  * @implemented
  */
@@ -1205,8 +1253,8 @@ CcFlushCache (
     }
 
     /*
-     * Reference the shared cache map for the flush: the lazy writer drops its own reference
-     * after releasing the file system's locks, and deletes the map if that was the last one.
+     * Reference the shared cache map for the flush: a close of the last cached handle or the
+     * lazy writer's dereference can otherwise delete the map while the flush uses it.
      */
     OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
     SharedCacheMap = SectionObjectPointers->SharedCacheMap;
@@ -1321,10 +1369,22 @@ CcFlushCache (
     KeReleaseGuardedMutex(&SharedCacheMap->FlushCacheLock);
 
 dereference:
+    /*
+     * A worker drops the last reference: deleting the map releases its file object, and the
+     * close that follows must not run here, where the caller may hold file system locks.
+     */
     OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
-    if (--SharedCacheMap->OpenCount == 0)
-        CcRosDeleteFileCache(SharedCacheMap->FileObject, SharedCacheMap, &OldIrql);
-    KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+    if (SharedCacheMap->OpenCount > 1)
+    {
+        SharedCacheMap->OpenCount--;
+        KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+    }
+    else
+    {
+        ASSERT(SharedCacheMap->OpenCount == 1);
+        KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+        CcpPostFlushDereference(SharedCacheMap);
+    }
 
 quit:
     if (IoStatus)

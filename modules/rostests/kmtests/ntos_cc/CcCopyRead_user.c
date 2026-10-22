@@ -49,8 +49,10 @@ START_TEST(CcCopyRead)
     ok_eq_hex(Status, STATUS_SUCCESS);
     ok_eq_hex(((USHORT *)Buffer)[0], 0xBABA);
 
+    /* Up to the end of the 1004-byte file: the test driver passes the length
+       to CcCopyRead as it is, and callers must not ask it to read past EOF */
     ByteOffset.QuadPart = 514;
-    Status = NtReadFile(Handle, NULL, NULL, NULL, &IoStatusBlock, Buffer, 514, &ByteOffset, NULL);
+    Status = NtReadFile(Handle, NULL, NULL, NULL, &IoStatusBlock, Buffer, 490, &ByteOffset, NULL);
     ok_eq_hex(Status, STATUS_SUCCESS);
     ok_eq_hex(((USHORT *)Buffer)[242], 0xBABA);
     ok_eq_hex(((USHORT *)Buffer)[243], 0xFFFF);

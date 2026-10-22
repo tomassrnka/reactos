@@ -24,8 +24,12 @@ KMT_TESTFUNC Test_ExTimer;
 KMT_TESTFUNC Test_ExUuid;
 KMT_TESTFUNC Test_FsRtlDissect;
 KMT_TESTFUNC Test_FsRtlExpression;
+KMT_TESTFUNC Test_FsRtlFileLock;
+KMT_TESTFUNC Test_FsRtlFileLockIrp;
+KMT_TESTFUNC Test_FsRtlFileLockStress;
 KMT_TESTFUNC Test_FsRtlLegal;
 KMT_TESTFUNC Test_FsRtlMcb;
+KMT_TESTFUNC Test_FsRtlPerStreamContext;
 KMT_TESTFUNC Test_FsRtlRemoveDotsFromPath;
 KMT_TESTFUNC Test_FsRtlTunnel;
 #if defined(_M_IX86) || defined(_M_AMD64)
@@ -125,8 +129,12 @@ const KMT_TEST TestList[] =
     { "Example",                            Test_Example },
     { "FsRtlDissect",                       Test_FsRtlDissect },
     { "FsRtlExpression",                    Test_FsRtlExpression },
+    { "FsRtlFileLock",                      Test_FsRtlFileLock },
+    { "FsRtlFileLockIrp",                   Test_FsRtlFileLockIrp },
+    { "FsRtlFileLockStress",                Test_FsRtlFileLockStress },
     { "FsRtlLegal",                         Test_FsRtlLegal },
     { "FsRtlMcb",                           Test_FsRtlMcb },
+    { "FsRtlPerStreamContext",              Test_FsRtlPerStreamContext },
     { "FsRtlRemoveDotsFromPath",            Test_FsRtlRemoveDotsFromPath },
     { "FsRtlTunnel",                        Test_FsRtlTunnel },
 #if defined(_M_IX86) || defined(_M_AMD64)

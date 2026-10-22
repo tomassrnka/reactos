@@ -332,6 +332,12 @@ CcWorkerThread(
                 DropThrottle = TRUE;
                 break;
 
+            case DereferenceSharedMap:
+                /* The entry is part of the map, which this can free: it does not go back to the lookaside list */
+                CcRosDereferenceFlushedCacheMap(
+                    (PROS_SHARED_CACHE_MAP)WorkItem->Parameters.Write.SharedCacheMap);
+                continue;
+
             default:
                 DPRINT1("Ignored item: %p (%d)\n", WorkItem, WorkItem->Function);
                 break;

@@ -270,8 +270,10 @@ FsRtlCheckNotifyForDelete(IN PLIST_ENTRY NotifyList,
              NextEntry = NextEntry->Flink)
         {
             NotifyChange = CONTAINING_RECORD(NextEntry, NOTIFY_CHANGE, NotifyList);
-            /* If the current record matches with the given context, it's the good one */
-            if (NotifyChange->FsContext == FsContext && !IsListEmpty(&(NotifyChange->NotifyIrps)))
+            /* The FSD identifies the deleted directory by its stream context,
+             * saved as StreamID, or by the context the watcher registered with */
+            if ((NotifyChange->StreamID == FsContext || NotifyChange->FsContext == FsContext) &&
+                !IsListEmpty(&(NotifyChange->NotifyIrps)))
             {
                 FsRtlNotifyCompleteIrpList(NotifyChange, STATUS_DELETE_PENDING);
             }
@@ -338,6 +340,8 @@ FsRtlNotifyCompleteIrp(IN PIRP Irp,
     Stack = IoGetCurrentIrpStackLocation(Irp);
     if (!DataLength || Stack->Parameters.NotifyDirectory.Length < DataLength)
     {
+        /* The watcher re-enumerates, so a pending overflow has been reported */
+        NotifyChange->Flags &= ~NOTIFY_IMMEDIATELY;
         Status = STATUS_NOTIFY_ENUM_DIR;
         goto Completion;
     }
@@ -424,7 +428,7 @@ FsRtlNotifyCompleteIrpList(IN PNOTIFY_CHANGE NotifyChange,
 
     DataLength = NotifyChange->DataLength;
 
-    NotifyChange->Flags &= (NOTIFY_IMMEDIATELY | WATCH_TREE);
+    NotifyChange->Flags &= (NOTIFY_IMMEDIATELY | WATCH_TREE | WATCH_ROOT);
     NotifyChange->DataLength = 0;
     NotifyChange->LastEntry = 0;
 
@@ -1216,6 +1220,7 @@ FsRtlNotifyFilterReportChange(IN PNOTIFY_SYNC NotifySync,
                                 }
                                 /* Now, we start looking for matching parts (unless we watch root) */
                                 TargetNumberOfParts = 0;
+                                LastPartOffset = 0;
                                 if (!(NotifyChange->Flags & WATCH_ROOT))
                                 {
                                     FullNumberOfParts = 1;
@@ -1410,6 +1415,11 @@ FsRtlNotifyFilterReportChange(IN PNOTIFY_SYNC NotifySync,
                             NotifyChange->ThisBufferLength = 0;
                         }
                     }
+                }
+                else
+                {
+                    /* No buffer to record the change in: the watcher must re-enumerate */
+                    NotifyChange->Flags |= NOTIFY_IMMEDIATELY;
                 }
             }
 

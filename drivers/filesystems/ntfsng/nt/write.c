@@ -222,9 +222,8 @@ NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize)
         Status = Err == -NGC_ENOSPC ? STATUS_DISK_FULL : NgErrnoToStatus(Err);
     }
     /*
-     * Keep Cc from showing bytes from before a truncation once the file grows again.  ReactOS's
-     * CcPurgeCacheSection skips a 256 KiB view that starts before the purge offset, and
-     * CcSetFileSizes purges only past the allocation, so pages past EOF can survive a shrink.
+     * Keep the bytes from before a truncation hidden once the file grows again.  ntfsng zero-fills
+     * paging reads only past EOF, so the disk can still hold them past the old size.
      */
     _SEH2_TRY
     {
@@ -232,8 +231,8 @@ NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize)
         {
             if (NewSize > OldSize && NT_SUCCESS(Status))
             {
-                /* CcZeroData skips the work when the range straddles the cache map's valid data
-                 * length, so that is held at the old size while zeroing the exposed range. */
+                /* With the cache map's valid data length held at the old size, CcZeroData reads
+                 * nothing past it from the disk and zeroes the exposed range. */
                 CC_FILE_SIZES Sizes;
                 Sizes.AllocationSize = Fcb->Header.AllocationSize;
                 Sizes.FileSize = Fcb->Header.FileSize;

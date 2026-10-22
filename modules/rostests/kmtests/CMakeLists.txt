@@ -73,8 +73,10 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ex/ExUuid.c
     ntos_fsrtl/FsRtlDissect.c
     ntos_fsrtl/FsRtlExpression.c
+    ntos_fsrtl/FsRtlFileLock.c
     ntos_fsrtl/FsRtlLegal.c
     ntos_fsrtl/FsRtlMcb.c
+    ntos_fsrtl/FsRtlPerStreamContext.c
     ntos_fsrtl/FsRtlTunnel.c
     ntos_io/IoCreateFile.c
     ntos_io/IoDeviceInterface.c
@@ -175,6 +177,7 @@ list(APPEND KMTEST_SOURCE
     kernel32/FindFile_user.c
     ntos_cc/CcCopyRead_user.c
     ntos_cc/CcCopyWrite_user.c
+    ntos_cc/CcLazyWriteDelete_user.c
     ntos_cc/CcMapData_user.c
     ntos_cc/CcPinMappedData_user.c
     ntos_cc/CcPinRead_user.c
