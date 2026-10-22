@@ -2062,6 +2062,41 @@ CmpUnlockHiveFlusher(IN PCMHIVE Hive)
 
 BOOLEAN
 NTAPI
+CmpAcquireHiveCellLock(
+    _In_ PHHIVE Hive)
+{
+    PCMHIVE CmHive = CONTAINING_RECORD(Hive, CMHIVE, Hive);
+
+    /* The cell routines call each other, so the owner may already hold it */
+    if (CmHive->HiveLockOwner == KeGetCurrentThread())
+        return FALSE;
+
+    KeEnterCriticalRegion();
+    ExAcquirePushLockExclusive(&CmHive->HiveLock);
+    ASSERT(CmHive->HiveLockOwner == NULL);
+    CmHive->HiveLockOwner = KeGetCurrentThread();
+    return TRUE;
+}
+
+VOID
+NTAPI
+CmpReleaseHiveCellLock(
+    _In_ PHHIVE Hive,
+    _In_ BOOLEAN Acquired)
+{
+    PCMHIVE CmHive = CONTAINING_RECORD(Hive, CMHIVE, Hive);
+
+    ASSERT(CmHive->HiveLockOwner == KeGetCurrentThread());
+    if (!Acquired)
+        return;
+
+    CmHive->HiveLockOwner = NULL;
+    ExReleasePushLockExclusive(&CmHive->HiveLock);
+    KeLeaveCriticalRegion();
+}
+
+BOOLEAN
+NTAPI
 CmpTestHiveFlusherLockShared(IN PCMHIVE Hive)
 {
     /* Test the lock */

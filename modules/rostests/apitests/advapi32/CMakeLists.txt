@@ -8,9 +8,12 @@ list(APPEND SOURCE
     IsTextUnicode.c
     LockServiceDatabase.c
     QueryServiceConfig2.c
+    RegConcurrentWrite.c
     RegCreateKeyEx.c
     RegEnumKey.c
     RegEnumValueW.c
+    RegFlushKey.c
+    RegLoadKey.c
     RegOpenKeyExW.c
     RegQueryInfoKey.c
     RegQueryValueExW.c

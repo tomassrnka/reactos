@@ -82,7 +82,6 @@ CmpDoFlushAll(IN BOOLEAN ForceFlush)
 {
     PLIST_ENTRY NextEntry;
     PCMHIVE Hive;
-    NTSTATUS Status;
     BOOLEAN Result = TRUE;
 
     /* Make sure that the registry isn't read-only now */
@@ -114,11 +113,8 @@ CmpDoFlushAll(IN BOOLEAN ForceFlush)
             /* Only sync if we are forced to or if it won't cause a hive shrink */
             if (ForceFlush || !HvHiveWillShrink(&Hive->Hive))
             {
-                /* Do the sync */
-                Status = HvSyncHive(&Hive->Hive);
-
-                /* If something failed - set the flag and continue looping */
-                if (!NT_SUCCESS(Status))
+                /* Do the sync. If something failed - set the flag and continue looping */
+                if (!HvSyncHive(&Hive->Hive))
                     Result = FALSE;
             }
             else
@@ -1955,18 +1951,26 @@ CmFlushKey(IN PCM_KEY_CONTROL_BLOCK Kcb,
     if (CmHive == CmiVolatileHive)
     {
         /* Flush all the hives instead */
-        CmpDoFlushAll(FALSE);
+        if (!CmpDoFlushAll(FALSE))
+        {
+            /* Fail */
+            Status = STATUS_REGISTRY_IO_FAILED;
+        }
     }
     else
     {
+        /* Don't touch the hive */
+        CmpLockHiveFlusherExclusive(CmHive);
+
 #if DBG
-        /* Make sure the registry hive we're going to flush is OK */
+        /*
+         * Make sure the registry hive we're going to flush is OK. Writers of
+         * other keys hold the flusher lock shared, so check only once it is
+         * held exclusively: the check repairs what it takes for damage.
+         */
         CheckStatus = CmCheckRegistry(CmHive, CM_CHECK_REGISTRY_DONT_PURGE_VOLATILES | CM_CHECK_REGISTRY_VALIDATE_HIVE);
         ASSERT(CM_CHECK_REGISTRY_SUCCESS(CheckStatus));
 #endif
-
-        /* Don't touch the hive */
-        CmpLockHiveFlusherExclusive(CmHive);
 
         ASSERT(CmHive->ViewLock);
         KeAcquireGuardedMutex(CmHive->ViewLock);
@@ -2715,7 +2719,10 @@ CmSaveKey(IN PCM_KEY_CONTROL_BLOCK Kcb,
     KeyHive->FileHandles[HFILE_TYPE_PRIMARY] = FileHandle;
 
     /* Dump the hive into the file */
-    HvWriteHive(&KeyHive->Hive);
+    if (!HvWriteHive(&KeyHive->Hive))
+    {
+        Status = STATUS_REGISTRY_IO_FAILED;
+    }
 
 Cleanup:
 
@@ -2819,7 +2826,10 @@ CmSaveMergedKeys(IN PCM_KEY_CONTROL_BLOCK HighKcb,
     KeyHive->FileHandles[HFILE_TYPE_PRIMARY] = FileHandle;
 
     /* Dump the hive into the file */
-    HvWriteHive(&KeyHive->Hive);
+    if (!HvWriteHive(&KeyHive->Hive))
+    {
+        Status = STATUS_REGISTRY_IO_FAILED;
+    }
 
 done:
     /* Free the hive */
