@@ -664,6 +664,37 @@ CreateEnvironmentBlock(OUT LPVOID *lpEnvironment,
         RegCloseKey(hKey);
     }
 
+    /* Set 'PUBLIC' variable to the public user directory */
+    lError = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                        L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList",
+                        0,
+                        KEY_READ,
+                        &hKey);
+    if (lError == ERROR_SUCCESS)
+    {
+        Length = sizeof(szValue);
+        lError = RegQueryValueExW(hKey,
+                                  L"Public",
+                                  NULL,
+                                  &dwType,
+                                  (LPBYTE)szValue,
+                                  &Length);
+        if (lError == ERROR_SUCCESS)
+        {
+            if (!ExpandEnvironmentStringsW(szValue,
+                                            PublicDirectory,
+                                            ARRAYSIZE(PublicDirectory)))
+            {
+                DPRINT1("Error: %lu\n", GetLastError());
+                RegCloseKey(hKey);
+                return FALSE;
+            }
+
+            SetUserEnvironmentVariable(Environment, L"PUBLIC", PublicDirectory, FALSE);
+        }
+        RegCloseKey(hKey);
+    }
+
     /*
      * If no user token is specified, the system environment variables are set
      * and we stop here, otherwise continue setting the user-specific variables.

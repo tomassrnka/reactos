@@ -679,6 +679,7 @@ SHCreateItemFromRelativeName(
     CComPtr<IShellFolder> folder;
     CComHeapPtr<ITEMIDLIST> pidlFolder;
     CComHeapPtr<ITEMIDLIST> pidlChild;
+    CComHeapPtr<ITEMIDLIST> pidlItem;
     HRESULT hr;
 
     TRACE("(%p,%s,%p,%s,%p)\n", parent, debugstr_w(pszName), pbc, debugstr_guid(&riid), ppv);
@@ -712,7 +713,12 @@ SHCreateItemFromRelativeName(
     if (FAILED_UNEXPECTEDLY(hr))
         return hr;
 
-    return SHCreateItemFromIDList(pidlChild, riid, ppv);
+    /* The parsed ID list is relative to the parent folder */
+    pidlItem.Attach(ILCombine(pidlFolder, pidlChild));
+    if (!pidlItem)
+        return E_OUTOFMEMORY;
+
+    return SHCreateItemFromIDList(pidlItem, riid, ppv);
 }
 
 /***********************************************************************

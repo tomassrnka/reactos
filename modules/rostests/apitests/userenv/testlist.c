@@ -3,11 +3,13 @@
 #include <apitest.h>
 
 extern void func_GetProfileDirs(void);
+extern void func_LegacyProfileJunctions(void);
 extern void func_LoadUserProfile(void);
 
 const struct test winetest_testlist[] =
 {
     { "GetProfileDirs", func_GetProfileDirs },
+    { "LegacyProfileJunctions", func_LegacyProfileJunctions },
     { "LoadUserProfile", func_LoadUserProfile },
     { 0, 0 }
 };
