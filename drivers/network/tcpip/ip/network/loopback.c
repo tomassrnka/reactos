@@ -12,15 +12,32 @@
 
 PIP_INTERFACE Loopback = NULL;
 
-VOID LoopPassiveWorker(
+/* Looped TCP segments are received one at a time, in the order they were sent */
+static CHEW_SERIAL_QUEUE LoopQueue;
+
+#define LOOP_QUEUE_LIMIT 1024
+
+typedef struct _LOOP_ITEM
+{
+  LIST_ENTRY ListEntry;
+  IP_PACKET IPPacket;
+} LOOP_ITEM, *PLOOP_ITEM;
+
+VOID LoopPassiveWorkItem(
   PVOID Context)
 {
-  PIP_PACKET IPPacket = Context;
+  PLOOP_ITEM Item = Context;
 
   /* IPReceive() takes care of the NDIS packet */
-  IPReceive(Loopback, IPPacket);
+  IPReceive(Loopback, &Item->IPPacket);
 
-  ExFreePool(IPPacket);
+  ExFreePool(Item);
+}
+
+VOID LoopPassiveWorker(
+  PLIST_ENTRY Entry)
+{
+  LoopPassiveWorkItem(CONTAINING_RECORD(Entry, LOOP_ITEM, ListEntry));
 }
 
 VOID LoopTransmit(
@@ -43,7 +60,8 @@ VOID LoopTransmit(
     UINT PacketLength;
     PNDIS_PACKET XmitPacket;
     NDIS_STATUS NdisStatus;
-    PIP_PACKET IPPacket;
+    PLOOP_ITEM Item;
+    BOOLEAN Queued;
 
     ASSERT_KM_POINTER(NdisPacket);
     ASSERT_KM_POINTER(PC(NdisPacket));
@@ -64,29 +82,38 @@ VOID LoopTransmit(
         ( &XmitPacket, PacketBuffer, PacketLength );
 
     if( NT_SUCCESS(NdisStatus) ) {
-        IPPacket = ExAllocatePool(NonPagedPool, sizeof(IP_PACKET));
-        if (IPPacket)
+        Item = ExAllocatePool(NonPagedPool, sizeof(LOOP_ITEM));
+        if (Item)
         {
-            IPInitializePacket(IPPacket, 0);
+            IPInitializePacket(&Item->IPPacket, 0);
 
-            IPPacket->NdisPacket = XmitPacket;
+            Item->IPPacket.NdisPacket = XmitPacket;
 
-            GetDataPtr(IPPacket->NdisPacket,
+            GetDataPtr(Item->IPPacket.NdisPacket,
                        0,
-                       (PCHAR*)&IPPacket->Header,
-                       &IPPacket->TotalSize);
+                       (PCHAR*)&Item->IPPacket.Header,
+                       &Item->IPPacket.TotalSize);
 
-            IPPacket->MappedHeader = TRUE;
+            Item->IPPacket.MappedHeader = TRUE;
 
-            if (!ChewCreate(LoopPassiveWorker, IPPacket))
+            /* As on a LAN adapter: TCP in order, everything else in a work item of its own */
+            if (PacketLength >= 10 && (PacketBuffer[0] & 0xF0) == 0x40 && PacketBuffer[9] == IPPROTO_TCP)
+                Queued = ChewSerialInsert(&LoopQueue, &Item->ListEntry);
+            else
+                Queued = ChewCreate(LoopPassiveWorkItem, Item);
+
+            if (!Queued)
             {
-                IPPacket->Free(IPPacket);
-                ExFreePool(IPPacket);
+                Item->IPPacket.Free(&Item->IPPacket);
+                ExFreePool(Item);
                 NdisStatus = NDIS_STATUS_RESOURCES;
             }
         }
         else
+        {
+            FreeNdisPacket(XmitPacket);
             NdisStatus = NDIS_STATUS_RESOURCES;
+        }
     }
 
     (PC(NdisPacket)->DLComplete)
@@ -109,6 +136,9 @@ NDIS_STATUS LoopRegisterAdapter(
 
   TI_DbgPrint(MID_TRACE, ("Called.\n"));
 
+  if (!ChewSerialInit(&LoopQueue, LoopPassiveWorker, LOOP_QUEUE_LIMIT))
+    return NDIS_STATUS_RESOURCES;
+
   /* Bind the adapter to network (IP) layer */
   BindInfo.Context = NULL;
   BindInfo.HeaderSize = 0;
@@ -118,7 +148,10 @@ NDIS_STATUS LoopRegisterAdapter(
   BindInfo.Transmit = LoopTransmit;
 
   Loopback = IPCreateInterface(&BindInfo);
-  if (!Loopback) return NDIS_STATUS_RESOURCES;
+  if (!Loopback) {
+    ChewSerialRundown(&LoopQueue);
+    return NDIS_STATUS_RESOURCES;
+  }
 
   Loopback->MTU = 16384;
 
@@ -157,6 +190,7 @@ NDIS_STATUS LoopUnregisterAdapter(
   if (Loopback != NULL)
     {
       IPUnregisterInterface(Loopback);
+      ChewSerialRundown(&LoopQueue);
       IPDestroyInterface(Loopback);
       Loopback = NULL;
     }

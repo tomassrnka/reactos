@@ -40,3 +40,14 @@ sys_arch_protect(sys_prot_t *lev);
 
 void
 sys_arch_unprotect(sys_prot_t lev);
+
+/* LOCK_TCPIP_CORE and UNLOCK_TCPIP_CORE (lwipopts.h) */
+void
+sys_lock_tcpip_core(void);
+
+void
+sys_unlock_tcpip_core(void);
+
+/* TRUE if the calling thread holds the lwIP core lock */
+BOOLEAN
+sys_tcpip_core_locked(void);

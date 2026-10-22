@@ -56,7 +56,12 @@ NTSTATUS IPSendFragment(
     TI_DbgPrint(MAX_TRACE, ("Called. NdisPacket (0x%X)  NCE (0x%X).\n", NdisPacket, NCE));
 
     TI_DbgPrint(MAX_TRACE, ("NCE->State = %d.\n", NCE->State));
-    return NBQueuePacket(NCE, NdisPacket, IPSendComplete, IFC);
+
+    /* NBQueuePacket returns a BOOLEAN, and FALSE is not a failure status */
+    if (!NBQueuePacket(NCE, NdisPacket, IPSendComplete, IFC))
+        return NDIS_STATUS_RESOURCES;
+
+    return NDIS_STATUS_SUCCESS;
 }
 
 BOOLEAN PrepareNextFragment(
@@ -198,6 +203,9 @@ NTSTATUS SendFragments(
 
     while (PrepareNextFragment(IFC))
     {
+        /* Wait for this fragment's own completion, not the last one's (the event is a
+           notification event); it may complete before IPSendFragment returns */
+        KeClearEvent(&IFC->Event);
         NdisStatus = IPSendFragment(IFC->NdisPacket, NCE, IFC);
         if (NT_SUCCESS(NdisStatus))
         {

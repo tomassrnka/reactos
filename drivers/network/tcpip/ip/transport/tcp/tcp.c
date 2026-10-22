@@ -605,19 +605,28 @@ NTSTATUS TCPSendData
     TI_DbgPrint(DEBUG_TCP,("[IP, TCPSendData] Connection->SocketContext = %x\n",
                            Connection->SocketContext));
 
+    /* Allocated up front: a request that has to wait is queued under the lwIP core lock,
+       so the sent event that makes room cannot come between the attempt and the queuing.
+       Freed in TCPSocketState */
+    Bucket = ExAllocateFromNPagedLookasideList(&TdiBucketLookasideList);
+    if (Bucket)
+    {
+        Bucket->Request.RequestNotifyObject = Complete;
+        Bucket->Request.RequestContext = Context;
+    }
+
     Status = TCPTranslateError(LibTCPSend(Connection,
                                           BufferData,
                                           SendLength,
                                           BytesSent,
-                                          FALSE));
+                                          FALSE,
+                                          Bucket));
 
     TI_DbgPrint(DEBUG_TCP,("[IP, TCPSendData] Send: %x, %d\n", Status, SendLength));
 
     /* Keep this request around ... there was no data yet */
     if (Status == STATUS_PENDING)
     {
-        /* Freed in TCPSocketState */
-        Bucket = ExAllocateFromNPagedLookasideList(&TdiBucketLookasideList);
         if (!Bucket)
         {
             DereferenceObject(Connection);
@@ -625,13 +634,11 @@ NTSTATUS TCPSendData
             return STATUS_NO_MEMORY;
         }
 
-        Bucket->Request.RequestNotifyObject = Complete;
-        Bucket->Request.RequestContext = Context;
-
-        LockObject(Connection);
-        InsertTailList( &Connection->SendRequest, &Bucket->Entry );
         TI_DbgPrint(DEBUG_TCP,("[IP, TCPSendData] Queued write irp\n"));
-        UnlockObject(Connection);
+    }
+    else if (Bucket)
+    {
+        ExFreeToNPagedLookasideList(&TdiBucketLookasideList, Bucket);
     }
 
 

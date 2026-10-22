@@ -552,23 +552,27 @@ PNEIGHBOR_CACHE_ENTRY NBFindOrCreateNeighbor(
   return NCE;
 }
 
-BOOLEAN NBQueuePacket(
+BOOLEAN NBQueuePacketLimited(
   PNEIGHBOR_CACHE_ENTRY NCE,
   PNDIS_PACKET NdisPacket,
   PNEIGHBOR_PACKET_COMPLETE PacketComplete,
-  PVOID PacketContext)
+  PVOID PacketContext,
+  UINT UnresolvedLimit)
 /*
  * FUNCTION: Queues a packet on an NCE for later transmission
  * ARGUMENTS:
  *   NCE        = Pointer to NCE to queue packet on
  *   NdisPacket = Pointer to NDIS packet to queue
+ *   UnresolvedLimit = If not 0, the packet is refused when the NCE is
+ *                     unresolved and that many packets already wait on it
  * RETURNS:
  *   TRUE if the packet was successfully queued, FALSE if not
  */
 {
   KIRQL OldIrql;
   PNEIGHBOR_PACKET Packet;
-  UINT HashValue;
+  PLIST_ENTRY Entry;
+  UINT HashValue, Waiting;
 
   TI_DbgPrint
       (DEBUG_NCACHE,
@@ -578,8 +582,6 @@ BOOLEAN NBQueuePacket(
                                   NEIGHBOR_PACKET_TAG );
   if( !Packet ) return FALSE;
 
-  /* FIXME: Should we limit the number of queued packets? */
-
   HashValue  = *(PULONG)(&NCE->Address.Address);
   HashValue ^= HashValue >> 16;
   HashValue ^= HashValue >> 8;
@@ -587,6 +589,22 @@ BOOLEAN NBQueuePacket(
   HashValue &= NB_HASHMASK;
 
   TcpipAcquireSpinLock(&NeighborCache[HashValue].Lock, &OldIrql);
+
+  if (UnresolvedLimit && (NCE->State & NUD_INCOMPLETE))
+  {
+      Waiting = 0;
+      for (Entry = NCE->PacketQueue.Flink;
+           Entry != &NCE->PacketQueue && Waiting < UnresolvedLimit;
+           Entry = Entry->Flink)
+          Waiting++;
+
+      if (Waiting >= UnresolvedLimit)
+      {
+          TcpipReleaseSpinLock(&NeighborCache[HashValue].Lock, OldIrql);
+          ExFreePoolWithTag( Packet, NEIGHBOR_PACKET_TAG );
+          return FALSE;
+      }
+  }
 
   Packet->Complete = PacketComplete;
   Packet->Context = PacketContext;
@@ -599,6 +617,16 @@ BOOLEAN NBQueuePacket(
       NBSendPackets( NCE );
 
   return TRUE;
+}
+
+BOOLEAN NBQueuePacket(
+  PNEIGHBOR_CACHE_ENTRY NCE,
+  PNDIS_PACKET NdisPacket,
+  PNEIGHBOR_PACKET_COMPLETE PacketComplete,
+  PVOID PacketContext)
+{
+  /* FIXME: Should we limit the number of queued packets? */
+  return NBQueuePacketLimited(NCE, NdisPacket, PacketComplete, PacketContext, 0);
 }
 
 VOID NBRemoveNeighbor(
