@@ -18,6 +18,7 @@
 #include "ntfs/index.h"
 #include "ntfs/reparse.h"
 #include "ntfs/ea.h"
+#include "ntfs/bitmap.h"
 #include "ngapi.h"
 #include <kshim_jnl.h>
 #include "ngjrec.h"
@@ -224,6 +225,10 @@ static void ngc_core_error(struct super_block *sb, const char *msg)
 {
 	struct ntfs_volume *vol = NTFS_SB(sb);
 	if (!vol || NVolErrors(vol) || !ngc_msg_means_corruption(msg))
+		return;
+	/* A resize's write refused for lack of memory reads to the core as an I/O error: the resize
+	 * fails and ngc_resize_failed decides, the disk holding the last committed state. */
+	if (kshim_jnl_refusing(sb->s_bdev))
 		return;
 	NVolSetErrors(vol);
 	kshim_jnl_mark_errors(sb->s_bdev);
@@ -1407,6 +1412,11 @@ int ngc_is_rw(ngc_vol *v)
 	return !sb_rdonly(v->sb);
 }
 
+int ngc_failed(ngc_vol *v)
+{
+	return v->failed || kshim_jnl_failed(v->bdev);
+}
+
 /*
  * Writeback did not complete, so committing now would publish part of an operation (an MFT record
  * without its bitmap change).  Nothing is committed: the overlay and the dirty pages stay, and the
@@ -2098,6 +2108,536 @@ int ngc_set_label(ngc_vol *v, const unsigned short *label, unsigned int len)
 	mutex_unlock(&vol->volume_label_lock);
 	kfree(old);
 	return 0;
+}
+
+/* ------------------------------------------------------------- volume size */
+
+int ngc_resize_fault;
+
+/* $Bitmap bytes for @nr clusters: whole 8-byte units, as format writes it. */
+static s64 ngc_bmp_bytes(s64 nr)
+{
+	return ((nr + 63) >> 6) << 3;
+}
+
+/* The allocator's per-page free-bit hints, grown for @nr clusters (the counts are redone by ngc_recount_free). */
+static int ngc_grow_lcn_hints(struct ntfs_volume *vol, s64 old_nr, s64 nr)
+{
+	size_t oldp = (size_t)((((old_nr + 7) >> 3) + PAGE_SIZE - 1) >> PAGE_SHIFT);
+	size_t newp = (size_t)((((nr + 7) >> 3) + PAGE_SIZE - 1) >> PAGE_SHIFT);
+	unsigned int *a, *old;
+
+	if (newp <= oldp)
+		return 0;
+	a = kvmalloc_array(newp, sizeof(*a), GFP_NOFS);
+	if (!a)
+		return -ENOMEM;
+	memcpy(a, vol->lcn_empty_bits_per_page, oldp * sizeof(*a));
+	memset(a + oldp, 0, (newp - oldp) * sizeof(*a));
+	down_write(&vol->lcnbmp_lock);
+	old = vol->lcn_empty_bits_per_page;
+	vol->lcn_empty_bits_per_page = a;
+	up_write(&vol->lcnbmp_lock);
+	kvfree(old);
+	return 0;
+}
+
+/* The free-cluster count and the per-page hints, read again from $Bitmap for the current nr_clusters. */
+static void ngc_recount_free(struct ntfs_volume *vol)
+{
+	down_write(&vol->lcnbmp_lock);
+	NVolClearFreeClusterKnown(vol);
+	get_nr_free_clusters(vol);
+	up_write(&vol->lcnbmp_lock);
+}
+
+/* Boot sector's sector count (0 if it cannot be read). */
+static u64 ngc_boot_sectors(struct ngc_vol *v)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	u8 *buf = kmalloc(vol->sector_size, GFP_NOFS);
+	u64 n = 0;
+
+	if (buf && !kshim_dev_rw(v->bdev, 0, 0, buf, vol->sector_size))
+		n = le64_to_cpu(((struct ntfs_boot_sector *)buf)->number_of_sectors);
+	kfree(buf);
+	return n;
+}
+
+/*
+ * Writes the boot sector with @sectors as its sector count, and its copy in the sector after the
+ * volume (where Windows and the core look for it), through the journal like any metadata write.
+ */
+static int ngc_write_boot(struct ngc_vol *v, u64 sectors, u8 *buf)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	u32 ss = vol->sector_size;
+	int err;
+
+	err = kshim_dev_rw(v->bdev, 0, 0, buf, ss);
+	if (!err) {
+		((struct ntfs_boot_sector *)buf)->number_of_sectors = cpu_to_le64(sectors);
+		err = kshim_dev_rw(v->bdev, 1, sectors * ss, buf, ss);
+		if (!err) {
+			kshim_mapping_update(v->bdev->bd_mapping, sectors * ss, buf, ss);
+			err = kshim_dev_rw(v->bdev, 1, 0, buf, ss);
+		}
+		if (!err)
+			kshim_mapping_update(v->bdev->bd_mapping, 0, buf, ss);
+	}
+	return err;
+}
+
+/*
+ * A resize failed after it changed metadata in memory: nothing more may be written, whatever the
+ * error, so the core stops writing for good (ngc_writeback_failed would retry out-of-space and
+ * out-of-memory).  While the journal holds every metadata write, the disk still has the last
+ * committed state, as after a power cut, and mounts read-write again: the volume is not marked for
+ * repair.  Without the journal, or once it wrote in place or stopped, the disk may hold part of
+ * the change, and the volume is marked for repair.
+ */
+static int ngc_resize_failed(struct ngc_vol *v, int err)
+{
+	if (kshim_jnl_in_place(v->bdev)) {
+		printk(KERN_ERR "ngc: volume resize failed %d; part of it may be on the disk\n", err);
+		ngc_writeback_failed(v, -EIO);
+		return err;
+	}
+	printk(KERN_ERR "ngc: volume resize failed %d; the disk keeps the last committed state, "
+	       "nothing is written until the next mount\n", err);
+	v->failed = 1;
+	v->sb->s_flags |= SB_RDONLY;
+	return err;
+}
+
+/* $Bitmap pages one resize step may change: half of what makes a commit, so that the step, its MFT
+ * record and the bits of its own clusters fit the journal (0 without the journal: no steps). */
+static s64 ngc_step_pages(struct ngc_vol *v)
+{
+	if (!v->bdev->jnl)
+		return 0;
+	return max_t(s64, 1, (s64)(ngc_commit_threshold(v) / 2));
+}
+
+/*
+ * Grows $Bitmap from @from to @to bytes, the new bytes zero, with real clusters below the old end
+ * (a sparse $Bitmap is invalid).  With the journal it grows in steps that each fit one commit, and
+ * commits after each but the last: one large transaction would not fit the journal and would go to
+ * the disk in place.  Every state between the steps is the old size with a larger $Bitmap.
+ */
+static int ngc_grow_bitmap(struct ngc_vol *v, s64 from, s64 to)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	struct inode *bvi = vol->lcnbmp_ino;
+	struct ntfs_inode *bni = NTFS_I(bvi);
+	s64 pages = ngc_step_pages(v), cur = from, end, n = 0, steps;
+	int err = 0;
+
+	steps = pages ? (to - from + (pages << PAGE_SHIFT) - 1) / (pages << PAGE_SHIFT) : 1;
+	while (cur < to) {
+		end = pages ? min_t(s64, to, round_down(cur, PAGE_SIZE) + (pages << PAGE_SHIFT)) : to;
+		mutex_lock(&bni->mrec_lock);
+		err = ntfs_attr_truncate_i(bni, end, HOLES_NO);
+		mutex_unlock(&bni->mrec_lock);
+		if (err)
+			break;
+		i_size_write(bvi, end);
+		err = ntfs_attr_set(bni, cur, end - cur, 0);
+		if (!err && bni->initialized_size < end) {
+			mutex_lock(&bni->mrec_lock);
+			err = ntfs_attr_set_initialized_size(bni, end);
+			mutex_unlock(&bni->mrec_lock);
+		}
+		mark_inode_dirty(bvi);
+		if (err)
+			break;
+		cur = end;
+		n++;
+		if (cur < to && pages) {
+			err = ngc_commit(v);
+			if (err)
+				break;
+			printk(KERN_INFO "ngc: extend: $Bitmap step %lld of %lld committed\n", n, steps);
+		}
+	}
+	return err;
+}
+
+/* Clears the bits [@from, @to) of $Bitmap, committing after each step but the last (see ngc_grow_bitmap). */
+static int ngc_clear_bits_stepped(struct ngc_vol *v, s64 from, s64 to)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	s64 bits = ngc_step_pages(v) << (PAGE_SHIFT + 3), end;
+	int err = 0;
+
+	while (from < to) {
+		end = bits ? min_t(s64, to, round_down(from, 8LL << PAGE_SHIFT) + bits) : to;
+		down_write(&vol->lcnbmp_lock);
+		err = ntfs_bitmap_clear_run(vol->lcnbmp_ino, from, end - from);
+		up_write(&vol->lcnbmp_lock);
+		if (err)
+			break;
+		from = end;
+		if (from < to && bits) {
+			err = ngc_commit(v);
+			if (err)
+				break;
+		}
+	}
+	return err;
+}
+
+/*
+ * Grows the volume to @sectors sectors on a device now @dev_size bytes long (FSCTL_EXTEND_VOLUME):
+ * $Bitmap grows (its clusters come from the old free space, in journal-sized steps), the new
+ * clusters are free, the padding bits past the last cluster move to the new end, then the boot
+ * sector and its copy.
+ */
+static int ngc_extend_impl(ngc_vol *v, unsigned long long sectors, unsigned long long dev_size)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	struct inode *bvi = vol->lcnbmp_ino;
+	struct ntfs_inode *bni = NTFS_I(bvi);
+	u32 ss = vol->sector_size;
+	s64 old_nr = vol->nr_clusters, nr, old_bytes, bytes, pad_end, blk_end;
+	u64 old_sectors;
+	u8 *boot;
+	int err;
+
+	if (sb_rdonly(v->sb))
+		return -EROFS;
+	if (v->failed)
+		return -EIO;
+	if (!sectors || sectors > (U64_MAX / ss) - 1 || (sectors + 1) * ss > dev_size)
+		return -EINVAL;
+	/* A device that large would not mount again, and its page indexes would wrap now. */
+	if (dev_size >= NGC_MAX_DEVICE_BYTES)
+		return -EFBIG;
+	old_sectors = ngc_boot_sectors(v);
+	if (!old_sectors)
+		return -EIO;
+	/* As on Windows: fewer clusters is invalid, the same number changes nothing. */
+	nr = (s64)((sectors * ss) >> vol->cluster_size_bits);
+	if (nr <= old_nr)
+		return nr == old_nr ? 0 : -EINVAL;
+	/* Windows' NTFS limit, and the 32-bit cluster numbers of the NT interfaces. */
+	if (nr > 0xffffffffLL)
+		return -EFBIG;
+
+	/* Everything that can run out of memory comes before the first change. */
+	boot = kmalloc(ss, GFP_NOFS);
+	if (!boot)
+		return -ENOMEM;
+	err = ngc_mark_dirty(v);
+	if (!err)
+		err = ngc_before_alloc(v);
+	if (err)
+		goto out;
+	if (ngc_resize_fault == 5)
+		kshim_jnl_degrade(v->bdev);
+	/* A degraded journal writes in place: no resize until a commit has made it whole again. */
+	if (kshim_jnl_degraded(v->bdev)) {
+		err = -ENOMEM;
+		goto out;
+	}
+	/* From here every metadata write goes through the journal or fails: none goes in place. */
+	kshim_jnl_strict(v->bdev, 1);
+	if (ngc_resize_fault == 6)
+		kshim_jnl_arm_fault(v->bdev, KJ_FAULT_CAPTURE);
+
+	/* The partition grew under the mount: device I/O may reach its new end. */
+	v->bdev->size = dev_size;
+	v->bdev->bd_inode->i_size = dev_size;
+	vol->nr_blocks = dev_size >> v->sb->s_blocksize_bits;
+
+	{
+		old_bytes = i_size_read(bvi);
+		bytes = ngc_bmp_bytes(nr);
+		if (bytes > old_bytes) {
+			/*
+			 * Real clusters (a sparse $Bitmap is invalid), allocated below the old end.  The free
+			 * space is checked first, so that a full volume refuses cleanly instead of failing
+			 * half way.
+			 */
+			s64 need = (s64)((round_up((u64)bytes, vol->cluster_size) - (u64)bni->allocated_size)
+					 >> vol->cluster_size_bits);
+			if (need > 0 && atomic64_read(&vol->free_clusters) - atomic64_read(&vol->dirty_clusters) < need + 16) {
+				err = -ENOSPC;
+				goto out;
+			}
+			err = ngc_grow_bitmap(v, old_bytes, bytes);
+			if (err)
+				goto failed;
+		}
+		err = ngc_grow_lcn_hints(vol, old_nr, nr);
+		if (err)
+			goto failed;
+		/*
+		 * Until the last commit the volume has its old size, so the bits past its last cluster are
+		 * padding: set to the end of the 8 KiB $Bitmap block that holds the last cluster (as ntfsck
+		 * expects them; the grown bytes there are zero now), zero after it.  Bits past that block
+		 * (an oversized $Bitmap that an interrupted extend left) become free clusters now.
+		 */
+		pad_end = min_t(s64, nr, round_up(old_nr, 64));
+		blk_end = round_up(((old_nr - 1) >> 3) + 1, 8192) << 3;
+		if (bytes > old_bytes && min_t(s64, bytes << 3, blk_end) > (old_bytes << 3)) {
+			down_write(&vol->lcnbmp_lock);
+			err = ntfs_bitmap_set_bits_in_run(bvi, old_bytes << 3, min_t(s64, bytes << 3, blk_end) - (old_bytes << 3), 1);
+			up_write(&vol->lcnbmp_lock);
+			if (err)
+				goto failed;
+		}
+		err = ngc_clear_bits_stepped(v, max_t(s64, pad_end, blk_end), min_t(s64, nr, (s64)old_bytes << 3));
+		if (err)
+			goto failed;
+	}
+	if (ngc_resize_fault == 1) {
+		err = -EIO;
+		goto failed;
+	}
+	if (ngc_resize_fault == 4)
+		kshim_jnl_arm_fault(v->bdev, KJ_FAULT_APPLY);
+	/*
+	 * $Bitmap first: an interruption after this commit leaves the old size, its padding intact,
+	 * with a $Bitmap larger than it needs, which every reader and checker accepts.  The old
+	 * padding (at most one 8 KiB block) then becomes free clusters, the new padding word is set
+	 * and the boot sector follows, all in the last commit.  Once the clusters are in use in
+	 * memory, a failed write leaves the volume read-only.
+	 */
+	err = ngc_commit(v);
+	if (!err && ngc_resize_fault == 2)
+		err = -EIO;
+	if (!err) {
+		down_write(&vol->lcnbmp_lock);
+		if (min_t(s64, nr, max_t(s64, pad_end, blk_end)) > old_nr)
+			err = ntfs_bitmap_clear_run(bvi, old_nr, min_t(s64, nr, max_t(s64, pad_end, blk_end)) - old_nr);
+		if (!err && (nr & 63))
+			err = ntfs_bitmap_set_bits_in_run(bvi, nr, 64 - (nr & 63), 1);
+		if (!err)
+			vol->nr_clusters = nr;
+		up_write(&vol->lcnbmp_lock);
+		if (!err)
+			ngc_recount_free(vol);
+	}
+	if (!err)
+		err = ngc_write_boot(v, sectors, boot);
+	if (!err && ngc_resize_fault == 7)
+		kshim_jnl_arm_fault(v->bdev, KJ_FAULT_APPLY);
+	if (!err)
+		err = ngc_commit(v);
+	if (!err)
+		goto out;
+failed:
+	err = ngc_resize_failed(v, err);
+out:
+	kshim_jnl_strict(v->bdev, 0);
+	kfree(boot);
+	return err;
+}
+
+/* A shrink to @sectors sectors leaves fewer clusters, and at least one: 0, else -EINVAL. */
+int ngc_shrink_valid(ngc_vol *v, unsigned long long sectors)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	s64 nr;
+
+	if (!sectors || sectors > U64_MAX / vol->sector_size)
+		return -EINVAL;
+	nr = (s64)((sectors * vol->sector_size) >> vol->cluster_size_bits);
+	return nr >= 1 && nr < vol->nr_clusters ? 0 : -EINVAL;
+}
+
+/*
+ * The shrink check: 0 when every cluster from where a volume of @sectors sectors ends is free,
+ * so that ngc_shrink can drop them; -ENOSPC when one is in use; -EINVAL when @sectors does not
+ * shrink the volume.  Sets *@first_used to the first cluster in use there (or nr_clusters).
+ */
+static int ngc_shrink_check_locked(struct ngc_vol *v, u64 sectors, s64 *first_used)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	struct address_space *mapping = vol->lcnbmp_ino->i_mapping;
+	s64 nr, lcn;
+	int err;
+
+	*first_used = vol->nr_clusters;
+	err = ngc_shrink_valid(v, sectors);
+	if (err)
+		return err;
+	nr = (s64)((sectors * vol->sector_size) >> vol->cluster_size_bits);
+	for (lcn = nr; lcn < vol->nr_clusters; ) {
+		pgoff_t index = (pgoff_t)(lcn >> (3 + PAGE_SHIFT));
+		struct folio *folio = read_mapping_folio(mapping, index, NULL);
+		s64 page_end = ((s64)index + 1) << (3 + PAGE_SHIFT);
+		u8 *kaddr;
+
+		if (IS_ERR(folio))
+			return PTR_ERR(folio);
+		kaddr = kmap_local_folio(folio, 0);
+		for (; lcn < page_end && lcn < vol->nr_clusters; lcn++) {
+			u64 bit = (u64)lcn & ((8ULL << PAGE_SHIFT) - 1);
+			if (kaddr[bit >> 3] & (1 << (bit & 7))) {
+				*first_used = lcn;
+				break;
+			}
+		}
+		kunmap_local(kaddr);
+		folio_put(folio);
+		if (*first_used != vol->nr_clusters)
+			return -ENOSPC;
+	}
+	return 0;
+}
+
+/*
+ * Shrinks the volume to @sectors sectors (FSCTL_SHRINK_VOLUME ShrinkCommit) when the clusters past
+ * the new end are all free (-ENOSPC otherwise: this driver moves no data): padding bits at the new
+ * end, $Bitmap truncated to the new size, then the boot sector and its copy after the new end.
+ * The device keeps its size; the caller shrinks the partition afterwards.
+ */
+static int ngc_shrink_impl(ngc_vol *v, unsigned long long sectors)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	struct inode *bvi = vol->lcnbmp_ino;
+	struct ntfs_inode *bni = NTFS_I(bvi);
+	u32 ss = vol->sector_size;
+	s64 nr, first, bytes;
+	u8 *boot;
+	int err;
+
+	if (sb_rdonly(v->sb))
+		return -EROFS;
+	if (v->failed)
+		return -EIO;
+	boot = kmalloc(ss, GFP_NOFS);
+	if (!boot)
+		return -ENOMEM;
+	err = ngc_mark_dirty(v);
+	if (!err && kshim_jnl_degraded(v->bdev))
+		err = -ENOMEM;	/* a degraded journal writes in place: see ngc_extend_impl */
+	if (err)
+		goto out;
+	kshim_jnl_strict(v->bdev, 1);
+	nr = (s64)((sectors * ss) >> vol->cluster_size_bits);
+	down_write(&vol->lcnbmp_lock);
+	err = ngc_shrink_check_locked(v, sectors, &first);
+	if (!err) {
+		err = ntfs_bitmap_set_bits_in_run(bvi, nr, round_up(nr, 64) - nr, 1);
+		if (!err) {
+			vol->nr_clusters = nr;
+			/* The allocator's zones inside the volume again, the MFT zone halved as at mount. */
+			while (vol->mft_zone_end >= nr && vol->mft_zone_end > vol->mft_lcn)
+				vol->mft_zone_end = vol->mft_lcn + (vol->mft_zone_end - vol->mft_lcn) / 2;
+			if (vol->mft_zone_pos >= vol->mft_zone_end)
+				vol->mft_zone_pos = vol->mft_zone_start;
+			if (vol->data1_zone_pos >= nr || vol->data1_zone_pos < vol->mft_zone_end)
+				vol->data1_zone_pos = vol->mft_zone_end;
+			if (vol->data2_zone_pos >= vol->mft_zone_start)
+				vol->data2_zone_pos = 0;
+		}
+	}
+	up_write(&vol->lcnbmp_lock);
+	if (err)
+		goto out;
+	/*
+	 * In three commits, each leaving a volume every reader mounts (a checker reports the bitmap
+	 * bits of the first state and corrects them): the padding bits (at the old size a few free
+	 * clusters marked in use), the boot sector (the new size with a $Bitmap larger than it
+	 * needs), then the shorter $Bitmap.
+	 */
+	ngc_recount_free(vol);
+	err = ngc_commit(v);
+	if (!err && ngc_resize_fault == 3)
+		err = -EIO;
+	if (!err)
+		err = ngc_write_boot(v, sectors, boot);
+	if (!err)
+		err = ngc_commit(v);
+	bytes = ngc_bmp_bytes(nr);
+	if (!err && bytes < i_size_read(bvi)) {
+		/* The cached pages lose the bytes past the new end: the free count reads whole pages. */
+		truncate_setsize(bvi, bytes);
+		mutex_lock(&bni->mrec_lock);
+		err = ntfs_attr_truncate_i(bni, bytes, HOLES_NO);
+		mutex_unlock(&bni->mrec_lock);
+		mark_inode_dirty(bvi);
+		if (!err) {
+			ngc_recount_free(vol);
+			err = ngc_commit(v);
+		}
+	}
+	if (err)
+		err = ngc_resize_failed(v, err);
+out:
+	kshim_jnl_strict(v->bdev, 0);
+	kfree(boot);
+	return err;
+}
+
+int ngc_extend(ngc_vol *v, unsigned long long sectors, unsigned long long dev_size)
+{
+	return ngc_extend_impl(v, sectors, dev_size);
+}
+
+int ngc_shrink(ngc_vol *v, unsigned long long sectors)
+{
+	return ngc_shrink_impl(v, sectors);
+}
+
+/* FSCTL_GET_NTFS_VOLUME_DATA's values. */
+void ngc_ntfs_data(ngc_vol *v, struct ngc_ntfsdata *d)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	s64 fc = atomic64_read(&vol->free_clusters);
+
+	memset(d, 0, sizeof(*d));
+	d->serial = vol->serial_no;
+	d->sectors = ngc_boot_sectors(v);
+	d->total_clusters = vol->nr_clusters;
+	d->free_clusters = fc > 0 ? fc : 0;
+	d->bytes_per_sector = vol->sector_size;
+	d->bytes_per_cluster = vol->cluster_size;
+	d->bytes_per_record = vol->mft_record_size;
+	d->mft_valid_data = NTFS_I(vol->mft_ino)->initialized_size;
+	d->mft_lcn = vol->mft_lcn;
+	d->mft2_lcn = vol->mftmirr_lcn;
+	d->mft_zone_start = vol->mft_zone_start;
+	d->mft_zone_end = vol->mft_zone_end;
+	d->major = vol->major_ver;
+	d->minor = vol->minor_ver;
+}
+
+/* Copies $Bitmap bytes [@off, @off+@len) (FSCTL_GET_VOLUME_BITMAP); bytes past its end read as zero. */
+int ngc_read_bitmap(ngc_vol *v, unsigned long long off, unsigned int len, void *buf)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	struct address_space *mapping = vol->lcnbmp_ino->i_mapping;
+	u64 size = (u64)ngc_bmp_bytes(vol->nr_clusters);
+	u8 *out = buf;
+	int err = 0;
+
+	memset(buf, 0, len);
+	down_read(&vol->lcnbmp_lock);
+	while (len && off < size) {
+		pgoff_t index = (pgoff_t)(off >> PAGE_SHIFT);
+		unsigned int in = (unsigned int)(off & (PAGE_SIZE - 1));
+		unsigned int n = (unsigned int)min_t(u64, min_t(u64, PAGE_SIZE - in, len), size - off);
+		struct folio *folio = read_mapping_folio(mapping, index, NULL);
+		u8 *kaddr;
+
+		if (IS_ERR(folio)) {
+			err = PTR_ERR(folio);
+			break;
+		}
+		kaddr = kmap_local_folio(folio, 0);
+		memcpy(out, kaddr + in, n);
+		kunmap_local(kaddr);
+		folio_put(folio);
+		off += n;
+		out += n;
+		len -= n;
+	}
+	up_read(&vol->lcnbmp_lock);
+	return err;
 }
 
 /* ------------------------------------------------------------- reparse points */

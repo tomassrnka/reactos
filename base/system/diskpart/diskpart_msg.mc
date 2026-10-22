@@ -5237,7 +5237,31 @@ SymbolicName=MSG_COMMAND_EXTEND
 Severity=Informational
 Facility=System
 Language=English
-<Add EXTEND command help text here>
+    Extends the volume or partition with focus, and its file system, into
+    the free space that follows it on the same disk.
+
+Syntax:  EXTEND [SIZE=<N>] [NOERR]
+         EXTEND FILESYSTEM [NOERR]
+
+    SIZE=<N>    The space, in megabytes (MB), to add to the partition. Without
+                it, all the free space right after the partition is added.
+
+    FILESYSTEM  Extends the file system of the volume with focus to the size
+                of its partition, for a partition that grew without it.
+
+    NOERR       For scripting only. When an error is encountered, DiskPart
+                continues to process commands as if the error did not occur.
+
+    NTFS, FAT, FAT32 and single-device Btrfs volumes can be extended, and
+    partitions without a file system. When the file allocation tables of a FAT volume have no room for
+    the new space, they grow too; the volume must then not be in use. A
+    logical partition at the end of its extended partition takes the
+    extended partition along. Space on another disk (DISK=<N>) is not
+    supported.
+
+Example:
+
+    EXTEND SIZE=500
 .
 Language=German
 <Add EXTEND command help text here>
@@ -10624,7 +10648,32 @@ SymbolicName=MSG_COMMAND_SHRINK
 Severity=Informational
 Facility=System
 Language=English
-<Add SHRINK command help text here>
+    Reduces the size of the NTFS volume with focus, and of its partition, by
+    the amount specified. The space is left free at the end of the partition.
+
+Syntax:  SHRINK [DESIRED=<N>] [MINIMUM=<N>] [NOWAIT] [NOERR]
+         SHRINK QUERYMAX [NOERR]
+
+    DESIRED=<N> The amount, in megabytes (MB), to reduce the volume by. Without
+                it, the volume is reduced by as much as it can be.
+
+    MINIMUM=<N> The least amount, in megabytes (MB), the volume must be reduced
+                by; if it cannot, nothing changes.
+
+    QUERYMAX    Shows how much the volume can be reduced by.
+
+    NOWAIT      Accepted for compatibility; the command always completes
+                before it returns.
+
+    NOERR       For scripting only. When an error is encountered, DiskPart
+                continues to process commands as if the error did not occur.
+
+    No data is moved: the volume can be reduced by the free space after the
+    last cluster in use.
+
+Example:
+
+    SHRINK DESIRED=500 MINIMUM=250
 .
 Language=German
 <Add SHRINK command help text here>

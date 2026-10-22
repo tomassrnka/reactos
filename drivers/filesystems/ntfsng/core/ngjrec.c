@@ -379,12 +379,14 @@ static int vol_usn(struct ngj_vol *jv, u8 *buf, u16 *usn)
 	return kj_rec_usn(buf + (off - base), jv->devsec - (size_t)(off - base), usn) ? -EINVAL : 0;
 }
 
+/* The sectors of a partial page; each must lie on the device (the last page may be partial). */
 static int replay_sectors(struct ngj_vol *jv, const struct kj_desc *d, u8 *pg)
 {
-	if (d->blk >= jv->size / KJ_PAGE)
+	if (d->blk > jv->size / KJ_PAGE)
 		return -EIO;
 	for (int s = 0; s < 8; s++)
-		if (d->mask & (1u << s) && dwrite(jv, d->blk * KJ_PAGE + s * 512, pg + s * 512, 512))
+		if (d->mask & (1u << s) &&
+		    (d->blk * KJ_PAGE + (s + 1) * 512 > jv->size || dwrite(jv, d->blk * KJ_PAGE + s * 512, pg + s * 512, 512)))
 			return -EIO;
 	return 0;
 }

@@ -276,6 +276,54 @@ NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize)
     return Status;
 }
 
+/*
+ * A page write Mm sends for a file of a volume whose lock holder wrote the disk directly, or that is
+ * dismounted: the disk is no longer the mounted state's, so the page is not written.  It completes as
+ * written: Mm retries a failed page write until it succeeds (MiShutdownSystem would loop) or drops it
+ * on the segment's last release anyway.  Logged once per volume and counted.
+ */
+NTSTATUS NgDropPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, ULONG Length)
+{
+    if (InterlockedIncrement(&Vcb->DroppedPagingWrites) == 1)
+        DbgPrint("ntfsng: volume %08lx: page writes of mapped files are dropped (file %I64x first): %s\n",
+                 Vcb->Vpb->SerialNumber, Fcb->MftNo, Vcb->Dismounted ? "dismounted" : "the lock holder wrote the disk directly");
+    Irp->IoStatus.Information = Length;
+    return STATUS_SUCCESS;
+}
+
+/*
+ * A page write of a file (not the volume, not a paging file) that writes nothing: the file is deleted,
+ * or the lock holder wrote the disk directly (RawWritten, published under CoreLock and read under it).
+ * Decided before the medium and read-only checks, which would refuse it.  TRUE with Status set.
+ */
+BOOLEAN NgDropIfDiscardable(PNG_VCB Vcb, PIRP Irp, PNTSTATUS Status)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PNG_FCB Fcb = Stack->FileObject ? Stack->FileObject->FsContext : NULL;
+    ULONG Length = Stack->Parameters.Write.Length;
+    BOOLEAN Drop;
+
+    if (!(Irp->Flags & IRP_PAGING_IO) || !Fcb || Fcb->IsVolume || Fcb->IsPagingFile || !Length)
+        return FALSE;
+    if (Fcb->Deleted)
+    {
+        Irp->IoStatus.Information = Length;
+        *Status = STATUS_SUCCESS;
+        return TRUE;
+    }
+    /* Neither set: a transition after this read is caught under CoreLock in NgPagingWrite. */
+    if (!Vcb->RawWritten && !Vcb->ReadOnly)
+        return FALSE;
+    NgAcquireCore(Vcb);
+    /* also a volume cut off from its device: a refused page write would be retried forever */
+    Drop = Vcb->RawWritten || Vcb->WrongMedia;
+    NgReleaseCore(Vcb);
+    if (!Drop)
+        return FALSE;
+    *Status = NgDropPagingWrite(Vcb, Fcb, Irp, Length);
+    return TRUE;
+}
+
 /* Paging write from the lazy writer or Mm: no FCB resources here, only CoreLock. */
 static NTSTATUS NgPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, LONGLONG Offset, ULONG Length)
 {
@@ -290,13 +338,22 @@ static NTSTATUS NgPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, LONGLONG Offse
     Clipped = (ULONG)min((LONGLONG)Length, FileSize - Offset);
     Buffer = MmGetSystemAddressForMdlSafe(Irp->MdlAddress, HighPagePriority);
     if (!Buffer)
+    {
+        Irp->IoStatus.Information = 0;
         return STATUS_INSUFFICIENT_RESOURCES;
+    }
     NgAcquireCore(Vcb);
     /* Deleted under CoreLock: a page writer that raced with the last cleanup's delete drops its data. */
     if (Fcb->Deleted)
     {
         NgReleaseCore(Vcb);
         return STATUS_SUCCESS;
+    }
+    /* RawWritten is published under CoreLock: a writer that passed NgDropIfDiscardable before it is dropped here. */
+    if (Vcb->RawWritten)
+    {
+        NgReleaseCore(Vcb);
+        return NgDropPagingWrite(Vcb, Fcb, Irp, Length);
     }
     Done = NgEnsureNode(Fcb);
     if (!Done)
@@ -324,7 +381,7 @@ static NTSTATUS NgPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, LONGLONG Offse
  * this volume.  (A swap after the dismount that no verify sees is not caught: a dismounted volume is not
  * verified again, and the storage driver reports the change only to a mounted volume.)
  */
-static NTSTATUS NgWriteDevice(PNG_VCB Vcb, LONGLONG Offset, PUCHAR Buffer, ULONG Length)
+static NTSTATUS NgWriteDevice(PNG_VCB Vcb, PFILE_OBJECT Holder, LONGLONG Offset, PUCHAR Buffer, ULONG Length)
 {
     PUCHAR Bounce = ExAllocatePoolWithTag(NonPagedPool, 64 * 1024, TAG_NTFSNG);
     NTSTATUS Status = STATUS_SUCCESS;
@@ -336,20 +393,50 @@ static NTSTATUS NgWriteDevice(PNG_VCB Vcb, LONGLONG Offset, PUCHAR Buffer, ULONG
     while (Done < Length)
     {
         ULONG n = min(Length - Done, 64 * 1024);
-        BOOLEAN Failed;
+        int Err;
         RtlCopyMemory(Bounce, Buffer + Done, n);
         NgAcquireCoreShared(Vcb, &Hold);
+        /*
+         * The lock again: an unlock may have run, or be running (LockEnding), since the request started.
+         * A dismounted volume's handle writes only while it still holds the lock, as on Windows.
+         */
+        if (Done == 0 && (Vcb->LockedBy != Holder || Vcb->LockEnding))
+        {
+            NgReleaseCoreShared(Vcb, &Hold);
+            Status = STATUS_ACCESS_DENIED;
+            break;
+        }
         if (Vcb->WrongMedia)
         {
             NgReleaseCoreShared(Vcb, &Hold);
             Status = STATUS_FILE_INVALID;
             break;
         }
-        Failed = NgDevWriteDurable(Vcb->StorageDevice, (unsigned long long)Offset + Done, Bounce, n) != 0;
-        NgReleaseCoreShared(Vcb, &Hold);
-        if (Failed)
+        Err = NgDevWriteDurable(Vcb->StorageDevice, (unsigned long long)Offset + Done, Bounce, n);
+        /*
+         * The hand-over, in the hold of the first chunk's device write: no core I/O lands between the
+         * two, and a write that never reached the device hands nothing over.  From here on the core does
+         * no device I/O at all (a read would find what the holder wrote through a stale map), write
+         * opens, flushes and the flusher see a read-only volume, a label set is refused (it checks
+         * RawWritten under CoreLock), and page writes of files are dropped (NgDropIfDiscardable).  The
+         * end of the lock dismounts the volume (NgEndLock), so the next open mounts what is on the disk.
+         */
+        if (Done == 0 && Err != NG_DEV_NOT_SENT)
         {
-            Status = STATUS_UNEXPECTED_IO_ERROR;
+            if (!Vcb->RawWritten && !Vcb->Dismounted)
+            {
+                DPRINT1("ntfsng: the lock holder writes the volume directly (at %I64d len %lu): no I/O of the mount until the lock ends, then a dismount\n",
+                        Offset, Length);
+                ngc_stop_writes(Vcb->Core);
+                ngc_medium_gone(Vcb->Core);
+            }
+            Vcb->RawWritten = TRUE;
+            Vcb->ReadOnly = TRUE;
+        }
+        NgReleaseCoreShared(Vcb, &Hold);
+        if (Err)
+        {
+            Status = Err == NG_DEV_NOT_SENT ? STATUS_INSUFFICIENT_RESOURCES : STATUS_UNEXPECTED_IO_ERROR;
             break;
         }
         Done += n;
@@ -370,13 +457,13 @@ static NTSTATUS NgWriteDevice(PNG_VCB Vcb, LONGLONG Offset, PUCHAR Buffer, ULONG
 
 /*
  * Writes through a volume handle.  The handle that holds the volume lock writes anywhere, as on
- * Windows (formatters lock the volume and write it); from then on the mounted state no longer
- * describes the disk, so the mount does no device I/O of its own any more (no flusher pass, lazy
- * write or close lands in what the holder writes), every later write of the holder goes straight
- * to the disk, and nothing is written back when the volume is dismounted.  Without
- * the lock only the boot code ($Boot, the first 8 KiB) may change under the mounted volume: setup
- * installs the boot sector that way, through the core's device path so the journal overlay and
- * the cached boot sector see it.
+ * Windows (formatters lock the volume and write it).  Once its first direct write was sent to the
+ * device, the mounted state no longer describes the disk: the core does no device I/O any more (no
+ * flusher pass, lazy write, close or read touches what the holder writes), every later write of the
+ * holder goes straight to the disk, the boot code area included, nothing is written back at the
+ * dismount, and the end of the lock dismounts the volume.  Without the lock only the boot code
+ * ($Boot, the first 8 KiB) may change under the mounted volume: setup installs the boot sector that
+ * way, through the core's device path so the journal overlay and the cached boot sector see it.
  */
 #define NG_BOOT_REGION 8192
 static NTSTATUS NgWriteVolume(PNG_VCB Vcb, PIRP Irp, LONGLONG Offset, ULONG Length)
@@ -458,21 +545,8 @@ static NTSTATUS NgWriteVolume(PNG_VCB Vcb, PIRP Irp, LONGLONG Offset, ULONG Leng
     }
     if (Raw || Vcb->ReadOnly)
     {
-        if (!Vcb->RawWritten)
-        {
-            /* Under the core lock: a flusher pass or a request already in the core finishes first. */
-            NgAcquireCore(Vcb);
-            if (!Vcb->RawWritten && !Vcb->Dismounted)
-            {
-                DPRINT1("ntfsng: the lock holder writes the volume directly (at %I64d len %lu): the mount stops its own I/O, its state is dropped at dismount\n",
-                        Offset, Length);
-                if (Vcb->Core)
-                    ngc_medium_gone(Vcb->Core);
-            }
-            Vcb->RawWritten = TRUE;
-            NgReleaseCore(Vcb);
-        }
-        Status = NgWriteDevice(Vcb, Offset, Buffer, Length);
+        /* Authorized and handed over with its first device write (NgWriteDevice). */
+        Status = NgWriteDevice(Vcb, FileObject, Offset, Buffer, Length);
         if (NT_SUCCESS(Status))
             Irp->IoStatus.Information = Length;
         goto out;
@@ -771,6 +845,12 @@ NTSTATUS NgFlushBuffers(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     IO_STATUS_BLOCK Iosb;
     int Err;
 
+    /* After the lock holder's direct writes only the disk's cache is flushed, never the mounted state. */
+    if (Fcb && Fcb->IsVolume && Vcb->RawWritten)
+        return NgDevFlushDurable(Vcb->StorageDevice) ? STATUS_UNEXPECTED_IO_ERROR : STATUS_SUCCESS;
+    /* Data written before a failed resize can no longer reach the disk: a flush must not report it there. */
+    if (Fcb && Vcb->WritesLost)
+        return STATUS_UNEXPECTED_IO_ERROR;
     if (!Fcb || Vcb->ReadOnly)
         return STATUS_SUCCESS;
     if (Fcb->IsVolume)
@@ -883,7 +963,7 @@ static VOID NTAPI NgFlusherThread(PVOID Context)
         if (KeWaitForSingleObject(&Vcb->FlusherStop, Executive, KernelMode, FALSE, &Period) == STATUS_SUCCESS)
             break;
         NgAcquireCore(Vcb);
-        if (!Vcb->WrongMedia && ngc_dirty(Vcb->Core))
+        if (!Vcb->WrongMedia && !Vcb->RawWritten && ngc_dirty(Vcb->Core))
         {
             /* Busy: commit and keep VOLUME_IS_DIRTY.  Quiet for a whole period: also clear the flag. */
             int Err = ngc_changed(Vcb->Core) ? ngc_commit_now(Vcb->Core) : ngc_sync(Vcb->Core);
