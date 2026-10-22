@@ -215,7 +215,30 @@ Return Value:
 
             _SEH2_TRY {
 
+#ifdef __REACTOS__
+                NTSTATUS FlushStatus;
+
+                FlushStatus = FatFlushVolume( IrpContext, Vcb, Flush );
+
+                //
+                //  A fat sector still dirty after the flush did not reach
+                //  the disk.  A deferred clean that checked the fat before a
+                //  write of it failed may have marked the volume clean, and
+                //  none runs after shutdown: write the dirty marks.  The
+                //  purge below still drops the sector: Mm would otherwise
+                //  write the page again at shutdown for as long as it fails.
+                //
+
+                if (FatIsFatDirty( Vcb )) {
+
+                    FlushStatus = STATUS_UNSUCCESSFUL;
+
+                    FatMarkVolume( IrpContext, Vcb, VolumeDirty );
+                    (VOID)FatFlushFat( IrpContext, Vcb );
+                }
+#else
                 (VOID)FatFlushVolume( IrpContext, Vcb, Flush );
+#endif
 
                 //
                 //  The volume is now clean, note it.  We purge the
@@ -230,7 +253,14 @@ Return Value:
                                          0,
                                          FALSE );
 
+#ifdef __REACTOS__
+                    if (NT_SUCCESS( FlushStatus )) {
+
+                        FatMarkVolumeClean( IrpContext, Vcb );
+                    }
+#else
                     FatMarkVolume( IrpContext, Vcb, VolumeClean );
+#endif
                 }
 
             } _SEH2_EXCEPT( EXCEPTION_EXECUTE_HANDLER ) {

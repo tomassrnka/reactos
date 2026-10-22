@@ -153,46 +153,20 @@ GetDefaultClusterSize(LPWSTR szFs, PDWORD pClusterSize, PULARGE_INTEGER TotalNum
 {
     DWORD ClusterSize;
 
+    // The formatter picks the default FAT and FAT32 cluster sizes from the
+    // final layout; these only limit which file systems are offered.
     if (!_wcsicmp(szFs, L"FAT16") ||
         !_wcsicmp(szFs, L"FAT")) // REACTOS HACK
     {
-        if (TotalNumberOfBytes->QuadPart <= (16 * 1024 * 1024))
-            ClusterSize = 2048;
-        else if (TotalNumberOfBytes->QuadPart <= (32 * 1024 * 1024))
-            ClusterSize = 512;
-        else if (TotalNumberOfBytes->QuadPart <= (64 * 1024 * 1024))
-            ClusterSize = 1024;
-        else if (TotalNumberOfBytes->QuadPart <= (128 * 1024 * 1024))
-            ClusterSize = 2048;
-        else if (TotalNumberOfBytes->QuadPart <= (256 * 1024 * 1024))
-            ClusterSize = 4096;
-        else if (TotalNumberOfBytes->QuadPart <= (512 * 1024 * 1024))
-            ClusterSize = 8192;
-        else if (TotalNumberOfBytes->QuadPart <= (1024 * 1024 * 1024))
-            ClusterSize = 16384;
-        else if (TotalNumberOfBytes->QuadPart <= (2048LL * 1024LL * 1024LL))
-            ClusterSize = 32768;
-        else if (TotalNumberOfBytes->QuadPart <= (4096LL * 1024LL * 1024LL))
-            ClusterSize = 8192;
-        else
+        if (TotalNumberOfBytes->QuadPart > (4096LL * 1024LL * 1024LL))
             return FALSE;
+        ClusterSize = 0;
     }
     else if (!_wcsicmp(szFs, L"FAT32"))
     {
-        if (TotalNumberOfBytes->QuadPart <= (64 * 1024 * 1024))
-            ClusterSize = 512;
-        else if (TotalNumberOfBytes->QuadPart <= (128   * 1024 * 1024))
-            ClusterSize = 1024;
-        else if (TotalNumberOfBytes->QuadPart <= (256   * 1024 * 1024))
-            ClusterSize = 2048;
-        else if (TotalNumberOfBytes->QuadPart <= (8192LL  * 1024LL * 1024LL))
-            ClusterSize = 2048;
-        else if (TotalNumberOfBytes->QuadPart <= (16384LL * 1024LL * 1024LL))
-            ClusterSize = 8192;
-        else if (TotalNumberOfBytes->QuadPart <= (32768LL * 1024LL * 1024LL))
-            ClusterSize = 16384;
-        else
+        if (TotalNumberOfBytes->QuadPart > (32768LL * 1024LL * 1024LL))
             return FALSE;
+        ClusterSize = 0;
     }
     else if (!_wcsicmp(szFs, L"FATX"))
     {
@@ -217,14 +191,8 @@ GetDefaultClusterSize(LPWSTR szFs, PDWORD pClusterSize, PULARGE_INTEGER TotalNum
     }
     else if (!_wcsicmp(szFs, L"NTFS"))
     {
-        if (TotalNumberOfBytes->QuadPart <= (512 * 1024 * 1024))
-            ClusterSize = 512;
-        else if (TotalNumberOfBytes->QuadPart <= (1024 * 1024 * 1024))
-            ClusterSize = 1024;
-        else if (TotalNumberOfBytes->QuadPart <= (2048LL * 1024LL * 1024LL))
-            ClusterSize = 2048;
-        else
-            ClusterSize = 2048;
+        // the formatter's default (4 KB up to 16 TB), as setup uses it
+        ClusterSize = 0;
     }
     else if (!_wcsicmp(szFs, L"EXT2"))
     {
@@ -332,6 +300,10 @@ InsertDefaultClusterSizeForFs(HWND hwndDlg, PFORMAT_DRIVE_CONTEXT pContext)
                 ClusterSize *= 2;
             }
         }
+
+        /* A FAT label has at most 11 characters */
+        SendDlgItemMessageW(hwndDlg, 28679, EM_LIMITTEXT,
+                            (!_wcsicmp(wszBuf, L"FAT") || !_wcsicmp(wszBuf, L"FAT32")) ? 11 : 0, 0);
 
         SendMessageW(GetDlgItem(hwndDlg, 28675), BM_SETCHECK, BST_UNCHECKED, 0);
 #if 0 // TODO: Call EnableVolumeCompression if checked
@@ -498,10 +470,18 @@ FormatExCB(
         case DONE:
             pSuccess = (PBOOLEAN)ActionInfo;
             pCtx->Result = (*pSuccess);
-            SendDlgItemMessageW(pCtx->hWndMain, 28679, WM_GETTEXT, _countof(szLabel), (LPARAM)szLabel);
-            SetVolumeLabelW(szDrive, *szLabel ? szLabel : NULL);
-            ShellMessageBoxW(shell32_hInstance, pCtx->hWndMain, MAKEINTRESOURCEW(IDS_FORMAT_COMPLETE),
-                             MAKEINTRESOURCEW(IDS_FORMAT_TITLE), MB_OK | MB_ICONINFORMATION);
+            if (*pSuccess)
+            {
+                SendDlgItemMessageW(pCtx->hWndMain, 28679, WM_GETTEXT, _countof(szLabel), (LPARAM)szLabel);
+                SetVolumeLabelW(szDrive, *szLabel ? szLabel : NULL);
+                ShellMessageBoxW(shell32_hInstance, pCtx->hWndMain, MAKEINTRESOURCEW(IDS_FORMAT_COMPLETE),
+                                 MAKEINTRESOURCEW(IDS_FORMAT_TITLE), MB_OK | MB_ICONINFORMATION);
+            }
+            else
+            {
+                ShellMessageBoxW(shell32_hInstance, pCtx->hWndMain, MAKEINTRESOURCEW(IDS_NO_FORMAT_TITLE),
+                                 MAKEINTRESOURCEW(IDS_FORMAT_TITLE), MB_OK | MB_ICONERROR);
+            }
             SendDlgItemMessageW(pCtx->hWndMain, 28678, PBM_SETPOS, 0, 0);
             break;
 
@@ -554,7 +534,7 @@ FormatDrive(HWND hwndDlg, PFORMAT_DRIVE_CONTEXT pContext)
     szFileSys[_countof(szFileSys)-1] = L'\0';
 
     /* retrieve the volume label */
-    hDlgCtrl = GetWindow(hwndDlg, 28679);
+    hDlgCtrl = GetDlgItem(hwndDlg, 28679);
     Length = SendMessageW(hDlgCtrl, WM_GETTEXTLENGTH, 0, 0);
     if (Length + 1 > _countof(szLabel))
     {

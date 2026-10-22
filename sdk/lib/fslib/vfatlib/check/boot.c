@@ -161,6 +161,10 @@ static void check_backup_boot(DOS_FS * fs, struct boot_sector *b, unsigned int l
     }
 
     fs_read(fs->backupboot_start, sizeof(b2), &b2);
+#ifdef __REACTOS__
+    /* vfatfs keeps the dirty state in the primary boot sector only */
+    b2.reserved3 = b->reserved3;
+#endif
     if (memcmp(b, &b2, sizeof(b2)) != 0) {
 	/* there are any differences */
 	uint8_t *p, *q;
@@ -306,8 +310,23 @@ static char print_fat_dirty_state(void)
 #endif
 }
 
+#ifdef __REACTOS__
+/* vfatfs sets the dirty bit itself when it mounts a clean volume */
+static int fat_state_bit_set_by_mount(void)
+{
+    BOOLEAN Dirty;
+
+    return NT_SUCCESS(fs_query_dirty(&Dirty)) && !Dirty;
+}
+#endif
+
 static void check_fat_state_bit(DOS_FS * fs, void *b)
 {
+#ifdef __REACTOS__
+    if (fat_state_bit_set_by_mount())
+	return;
+#endif
+
     if (fs->fat_bits == 32) {
 	struct boot_sector *b32 = b;
 

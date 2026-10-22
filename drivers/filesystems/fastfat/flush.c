@@ -422,9 +422,22 @@ Return Value:
                 //  The volume is now clean, note it.
                 //
 
+#ifdef __REACTOS__
+                //
+                //  A fat sector may not be on the disk (a write of it failed
+                //  or is still running): keep the volume marked dirty and
+                //  let the deferred clean check again.
+                //
+
+                if (!FlagOn(Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY) &&
+                    FatPrepareCleanVolume( Vcb, FALSE )) {
+
+                    FatMarkVolumeClean( IrpContext, Vcb );
+#else
                 if (!FlagOn(Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY)) {
 
                     FatMarkVolume( IrpContext, Vcb, VolumeClean );
+#endif
                     ClearFlag( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY );
                 }
 
@@ -859,6 +872,10 @@ Return Value:
         return STATUS_FILE_INVALID;
     }
 
+#ifdef __REACTOS__
+    FatWaitForDirtyFatWrites( Vcb );
+#endif
+
     //
     //  The only way we have to correctly synchronize things is to
     //  repin stuff, and then unpin repin it.
@@ -896,12 +913,40 @@ Return Value:
 
             _SEH2_TRY {
 
+#ifdef __REACTOS__
+                //
+                //  ReactOS Cc frees a Bcb at its last unpin, dirty or not, so
+                //  the dirty fat Mcb, not the Bcb, says which pages to write.
+                //
+
+                VBO DirtyVbo;
+                ULONG DirtyByteCount;
+                BOOLEAN Pinned = FALSE;
+
+                if (FatFindDirtyFat( Vcb, Offset.LowPart, PAGE_SIZE, &DirtyVbo, &DirtyByteCount )) {
+
+                    Pinned = CcPinRead( Vcb->VirtualVolumeFile,
+                                        &Offset,
+                                        PAGE_SIZE,
+                                        PIN_WAIT,
+                                        &Bcb,
+                                        &DontCare );
+
+                    if (!Pinned) {
+
+                        ReturnStatus = STATUS_INSUFFICIENT_RESOURCES;
+                    }
+                }
+
+                if (Pinned) {
+#else
                 if (CcPinRead( Vcb->VirtualVolumeFile,
                                &Offset,
                                PAGE_SIZE,
                                PIN_WAIT | PIN_IF_BCB,
                                &Bcb,
                                &DontCare )) {
+#endif
 
                     CcSetDirtyPinnedData( Bcb, NULL );
                     CcRepinBcb( Bcb );
@@ -931,12 +976,35 @@ Return Value:
 
         _SEH2_TRY {
 
+#ifdef __REACTOS__
+            VBO DirtyVbo;
+            ULONG DirtyByteCount;
+            BOOLEAN Pinned = FALSE;
+
+            if (FatFindDirtyFat( Vcb, Offset.LowPart, FatBytesPerFat( &Vcb->Bpb ), &DirtyVbo, &DirtyByteCount )) {
+
+                Pinned = CcPinRead( Vcb->VirtualVolumeFile,
+                                    &Offset,
+                                    FatBytesPerFat( &Vcb->Bpb ),
+                                    PIN_WAIT,
+                                    &Bcb,
+                                    &DontCare );
+
+                if (!Pinned) {
+
+                    ReturnStatus = STATUS_INSUFFICIENT_RESOURCES;
+                }
+            }
+
+            if (Pinned) {
+#else
             if (CcPinRead( Vcb->VirtualVolumeFile,
                            &Offset,
                            FatBytesPerFat( &Vcb->Bpb ),
                            PIN_WAIT | PIN_IF_BCB,
                            &Bcb,
                            &DontCare )) {
+#endif
 
                 CcSetDirtyPinnedData( Bcb, NULL );
                 CcRepinBcb( Bcb );
@@ -954,6 +1022,10 @@ Return Value:
             ReturnStatus = IrpContext->ExceptionStatus;
         } _SEH2_END;
     }
+
+#ifdef __REACTOS__
+    FatWaitForDirtyFatWrites( Vcb );
+#endif
 
     return ReturnStatus;
 }

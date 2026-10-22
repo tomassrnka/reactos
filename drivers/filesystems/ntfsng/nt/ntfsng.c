@@ -39,13 +39,18 @@ NTSTATUS NgErrnoToStatus(int Err)
 }
 
 /* Lock timing uses the TSC (cheap to read), calibrated against the performance counter at load. */
+#if DBG
 static LONGLONG NgPerfFrequency;
+#endif
 
+#if DBG
 static ULONGLONG NgTicksToUs(LONGLONG Ticks)
 {
     return NgPerfFrequency ? (ULONGLONG)(Ticks * 1000000 / NgPerfFrequency) : 0;
 }
+#endif
 
+#if DBG
 /* The request a CoreLock acquisition serves, from the top-level IRP of the thread. */
 static UCHAR NgLockCategory(VOID)
 {
@@ -63,10 +68,13 @@ static UCHAR NgLockCategory(VOID)
     }
     return Stack->MajorFunction <= IRP_MJ_MAXIMUM_FUNCTION ? Stack->MajorFunction : NG_LOCK_NO_IRP;
 }
+#endif
 
 VOID NgAcquireCore(PNG_VCB Vcb)
 {
+#if DBG
     LARGE_INTEGER T0, T1;
+#endif
     BOOLEAN Waited = FALSE;
     KeEnterCriticalRegion();
     if (ExIsResourceAcquiredExclusiveLite(&Vcb->CoreLock))
@@ -75,14 +83,17 @@ VOID NgAcquireCore(PNG_VCB Vcb)
         Vcb->CoreDepth++;
         return;
     }
+#if DBG
     T0.QuadPart = (LONGLONG)__rdtsc();
+#endif
     if (!ExAcquireResourceExclusiveLite(&Vcb->CoreLock, FALSE))
     {
         ExAcquireResourceExclusiveLite(&Vcb->CoreLock, TRUE);
         Waited = TRUE;
     }
-    T1.QuadPart = (LONGLONG)__rdtsc();
     Vcb->CoreDepth = 1;
+#if DBG
+    T1.QuadPart = (LONGLONG)__rdtsc();
     Vcb->CoreCategory = NgLockCategory();
     Vcb->CoreSince = T1;
     Vcb->LockStats.Stat[Vcb->CoreCategory].Acquired++;
@@ -91,6 +102,9 @@ VOID NgAcquireCore(PNG_VCB Vcb)
         Vcb->LockStats.Stat[Vcb->CoreCategory].Contended++;
         Vcb->LockStats.Stat[Vcb->CoreCategory].WaitUs += NgTicksToUs(T1.QuadPart - T0.QuadPart);
     }
+#else
+    (void)Waited;
+#endif
 }
 
 VOID NgReleaseCore(PNG_VCB Vcb)
@@ -99,9 +113,11 @@ VOID NgReleaseCore(PNG_VCB Vcb)
         ngc_icache_trim(Vcb->Core);
     if (--Vcb->CoreDepth == 0)
     {
+#if DBG
         LARGE_INTEGER T;
         T.QuadPart = (LONGLONG)__rdtsc();
         Vcb->LockStats.Stat[Vcb->CoreCategory].HeldUs += NgTicksToUs(T.QuadPart - Vcb->CoreSince.QuadPart);
+#endif
     }
     ExReleaseResourceLite(&Vcb->CoreLock);
     KeLeaveCriticalRegion();
@@ -146,6 +162,7 @@ VOID NgPrintLockStats(PNG_VCB Vcb)
  */
 static ULONG_PTR NgStackFill(VOID)
 {
+#if DBG
     ULONG_PTR Low, High, Here = (ULONG_PTR)&Low, P;
     IoGetStackLimits(&Low, &High);
     /* A diagnostic must not trust limits that do not describe a kernel stack around us. */
@@ -154,10 +171,14 @@ static ULONG_PTR NgStackFill(VOID)
     for (P = Low + 256; P + 512 < Here; P += sizeof(ULONG))
         *(volatile ULONG *)P = NG_STACK_FILL;
     return Low;
+#else
+    return 0;
+#endif
 }
 
 static VOID NgStackScan(ULONG_PTR Low, UCHAR Major)
 {
+#if DBG
     ULONG_PTR High, L2, P;
     ULONG Used;
     if (!Low)
@@ -176,8 +197,13 @@ static VOID NgStackScan(ULONG_PTR Low, UCHAR Major)
         DPRINT1("ntfsng: stack: new max %lu bytes of %lu (IRP_MJ 0x%x)\n",
                 Used, (ULONG)(High - Low), Major);
     }
+#else
+    UNREFERENCED_PARAMETER(Low);
+    UNREFERENCED_PARAMETER(Major);
+#endif
 }
 
+#if DBG
 VOID NgStackSample(VOID)
 {
     ULONG_PTR Low, High, Here = (ULONG_PTR)&Low;
@@ -188,6 +214,7 @@ VOID NgStackSample(VOID)
         DPRINT1("ntfsng: stack: core at device read %lu bytes deep\n", NgGlobal.MaxStackAtIo);
     }
 }
+#endif
 
 PNG_FCB NgAllocateFcb(PNG_VCB Vcb)
 {
@@ -630,7 +657,9 @@ static NTSTATUS NTAPI NgDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     PERESOURCE Gate = NULL;
     ULONG_PTR Low;
     NTSTATUS Status;
+#if DBG
     ULONGLONG T0 = __rdtsc();
+#endif
 
     /* Not a request of this file system: the storage device completes it (NgPnp). */
     if (DeviceObject != NgGlobal.ControlDevice && Major == IRP_MJ_PNP)
@@ -710,7 +739,9 @@ out:
         IoSetTopLevelIrp(NULL);
     FsRtlExitFileSystem();
     NgStackScan(Low, Major);
+#if DBG
     ngos_prof(NGP_IRP + Major, T0, 0);
+#endif
     return Status;
 }
 
@@ -752,6 +783,7 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
     ngos_physical_pages();
     ExInitializeFastMutex(&NgGlobal.VcbListLock);
     InitializeListHead(&NgGlobal.VcbList);
+#if DBG
     {
         LARGE_INTEGER F, P0, P1, Delay;
         ULONGLONG C0, C1;
@@ -766,6 +798,7 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
         NgProfile.TicksPerSecond = (ULONGLONG)NgPerfFrequency;
         DPRINT1("ntfsng: lock timing at %I64d ticks/s\n", NgPerfFrequency);
     }
+#endif
     NgGlobal.PermissiveOpen = NgReadDword(RegistryPath, L"PermissiveOpen");
     NgGlobal.ForceReadOnly = NgReadDword(RegistryPath, L"ReadOnly");
     NgGlobal.Verbose = NgReadDword(RegistryPath, L"Verbose");
@@ -778,6 +811,7 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
         NgGlobal.Disable8dot3 = NgReadDword(&Fs, L"NtfsDisable8dot3NameCreation") == 1;
     }
     DPRINT1("ntfsng: ReadOnly=%lu\n", NgGlobal.ForceReadOnly);
+#if DBG
     i = NgReadDword(RegistryPath, L"JournalFault");
     if (i)
     {
@@ -789,6 +823,7 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
         ngc_set_journal_fault(Target);
         DPRINT1("ntfsng: JournalFault: the system stops in the middle of commit %lu\n", Target);
     }
+#endif
     DPRINT1("ntfsng: service key %wZ, PermissiveOpen=%lu%s\n", RegistryPath, NgGlobal.PermissiveOpen,
             NgGlobal.PermissiveOpen ? " (opens with write access are granted, modifications are still refused)" : "");
 

@@ -321,7 +321,7 @@ int kshim_jnl_capture(struct block_device *b, u64 off, const u8 *buf, size_t len
 		if (!e) {
 			e = kzalloc(sizeof(*e), GFP_NOFS);
 			if (e)
-				e->data = kmalloc(KJ_PAGE, GFP_NOFS);
+				e->data = kzalloc(KJ_PAGE, GFP_NOFS);
 			if (!e || !e->data) {
 				kfree(e);
 				return -ENOMEM;

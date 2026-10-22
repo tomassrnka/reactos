@@ -154,6 +154,59 @@ FatLookupMcbEntry (
     OUT PULONG Index OPTIONAL
     );
 
+#ifdef __REACTOS__
+BOOLEAN
+FatFindDirtyFat (
+    IN PVCB Vcb,
+    IN VBO StartingVbo,
+    IN ULONG ByteCount,
+    OUT PVBO FirstDirtyVbo,
+    OUT PULONG DirtyByteCount
+    );
+
+VOID
+FatMarkFatDirty (
+    IN PVCB Vcb,
+    IN VBO Vbo,
+    IN ULONG ByteCount
+    );
+
+LONG
+FatBeginDirtyFatWrite (
+    IN PVCB Vcb
+    );
+
+VOID
+FatEndDirtyFatWrite (
+    IN PVCB Vcb,
+    IN LONG Generation
+    );
+
+VOID
+FatWaitForDirtyFatWrites (
+    IN PVCB Vcb
+    );
+
+BOOLEAN
+FatIsFatDirty (
+    IN PVCB Vcb
+    );
+
+BOOLEAN
+FatPrepareCleanVolume (
+    IN PVCB Vcb,
+    IN BOOLEAN CheckCache
+    );
+
+VOID
+FatSetDirtyFatBits (
+    IN PVCB Vcb,
+    IN VBO Vbo,
+    IN ULONG ByteCount,
+    IN BOOLEAN Dirty
+    );
+#endif
+
 BOOLEAN
 FatLookupLastMcbEntry (
     IN PVCB Vcb,
@@ -1997,6 +2050,15 @@ FatMarkVolume (
     IN PVCB Vcb,
     IN FAT_VOLUME_STATE VolumeState
     );
+
+#ifdef __REACTOS__
+_Requires_lock_held_(_Global_critical_region_)
+VOID
+FatMarkVolumeClean (
+    IN PIRP_CONTEXT IrpContext,
+    IN PVCB Vcb
+    );
+#endif
 
 WORKER_THREAD_ROUTINE FatFspMarkVolumeDirtyWithRecover;
 

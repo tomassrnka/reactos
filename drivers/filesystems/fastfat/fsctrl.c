@@ -378,6 +378,14 @@ FatAddMcbEntry (
 
     PAGED_CODE();
 
+#ifdef __REACTOS__
+    if (Mcb == &Vcb->DirtyFatMcb) {
+
+        FatSetDirtyFatBits( Vcb, Vbo, SectorCount, TRUE );
+        return TRUE;
+    }
+#endif
+
     if (SectorCount) {
 
         //
@@ -604,6 +612,14 @@ FatRemoveMcbEntry (
     )
 {
     PAGED_CODE();
+
+#ifdef __REACTOS__
+    if (Mcb == &Vcb->DirtyFatMcb) {
+
+        FatSetDirtyFatBits( Vcb, Vbo, SectorCount, FALSE );
+        return;
+    }
+#endif
 
     if ((SectorCount) && (SectorCount != 0xFFFFFFFF)) {
 
@@ -3585,9 +3601,16 @@ Return Value:
     if (NT_SUCCESS( Status ) &&
         FlagOn( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY ) &&
         !FlagOn( Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY ) &&
+#ifdef __REACTOS__
+        !FatIsFatDirty( Vcb ) &&
+#endif
         !CcIsThereDirtyData(Vcb->Vpb)) {
 
+#ifdef __REACTOS__
+        FatMarkVolumeClean( IrpContext, Vcb );
+#else
         FatMarkVolume( IrpContext, Vcb, VolumeClean );
+#endif
         ClearFlag( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY );
     }
 
@@ -7575,6 +7598,10 @@ Return Value:
 
 --*/
 {
+#ifdef __REACTOS__
+    BOOLEAN MarkedClean = FALSE;
+#endif
+
     PAGED_CODE();
 
     //
@@ -7641,9 +7668,17 @@ Return Value:
             //  The volume is now clean, note it.
             //
 
+#ifdef __REACTOS__
+            if (!FlagOn(Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY) &&
+                FatPrepareCleanVolume( Vcb, FALSE )) {
+
+                FatMarkVolumeClean( IrpContext, Vcb );
+                MarkedClean = TRUE;
+#else
             if (!FlagOn(Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY)) {
 
                 FatMarkVolume( IrpContext, Vcb, VolumeClean );
+#endif
                 ClearFlag( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY );
             }
 
@@ -7659,6 +7694,19 @@ Return Value:
         }
     }
 
+#ifdef __REACTOS__
+    //
+    //  A fat sector still dirty did not reach the disk.  A deferred clean
+    //  that checked the fat before a write of it failed may have marked the
+    //  volume clean, and none may run after this: write the dirty marks.
+    //
+
+    if ((FlushType != NoFlush) && !MarkedClean && FatIsFatDirty( Vcb )) {
+
+        FatMarkVolume( IrpContext, Vcb, VolumeDirty );
+        SetFlag( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY );
+    }
+#endif
 }
 
 #if (NTDDI_VERSION >= NTDDI_WIN8)

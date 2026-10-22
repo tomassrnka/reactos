@@ -210,13 +210,13 @@ NTSTATUS fs_open(PUNICODE_STRING DriveRoot, int read_write)
     return Status;
 }
 
-BOOLEAN fs_isdirty(void)
+NTSTATUS fs_query_dirty(PBOOLEAN Dirty)
 {
     NTSTATUS Status;
     ULONG DirtyMask = 0;
     IO_STATUS_BLOCK IoSb;
 
-    /* Check if volume is dirty */
+    /* Ask the mounted file system whether the volume is dirty */
     Status = NtFsControlFile(fd,
                              NULL, NULL, NULL, &IoSb,
                              FSCTL_IS_VOLUME_DIRTY,
@@ -225,11 +225,21 @@ BOOLEAN fs_isdirty(void)
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("NtFsControlFile() failed with Status 0x%08x\n", Status);
-        return FALSE;
+        *Dirty = FALSE;
+        return Status;
     }
 
     /* Convert Dirty mask to a boolean value */
-    return (DirtyMask & 1);
+    *Dirty = (DirtyMask & VOLUME_IS_DIRTY) != 0;
+    return STATUS_SUCCESS;
+}
+
+BOOLEAN fs_isdirty(void)
+{
+    BOOLEAN Dirty;
+
+    fs_query_dirty(&Dirty);
+    return Dirty;
 }
 
 NTSTATUS fs_lock(BOOLEAN LockVolume)
