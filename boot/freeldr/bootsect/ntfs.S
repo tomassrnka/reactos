@@ -314,10 +314,37 @@ BootFlagSignature:
 // $MFT's own $DATA run list (the MFT may be fragmented).
 #define MFT0_SEG HEX(1000)
 StartSearch:
+    // Paragraphs per cluster: the stride of cluster-by-cluster reads
+    mov   ax, word ptr [BytesPerSector]
+    shr   ax, 4
+    movzx cx, byte ptr [SectsPerCluster]
+    imul  ax, cx
+    mov   word ptr [ClusterParas], ax
+
+    // Clusters per index record (an index record is never smaller than a cluster here)
+    mov   al, byte ptr [ClustersPerIndexRecord]
+    test  al, al
+    js    IndexRecordBytes
+    movzx ax, al
+    jmp   IndexRecordDone
+    IndexRecordBytes:
+    neg   al
+    mov   cl, al
+    mov   eax, 1
+    shl   eax, cl                           // index record size in bytes
+    xor   edx, edx
+    movzx ecx, word ptr [ClusterParas]
+    shl   ecx, 4                            // cluster size in bytes
+    div   ecx
+    test  ax, ax
+    jnz   IndexRecordDone
+    inc   ax                                // clusters larger than an index record are not supported
+    IndexRecordDone:
+    mov   word ptr [IndexRecClusters], ax
+
     // Compute MFT start sector
     mov   eax, dword ptr [MftLocation]
-    mov   cl, byte ptr [SectsPerCluster]
-    movzx ecx, cx
+    movzx ecx, byte ptr [SectsPerCluster]
     mul   ecx
     mov   dword ptr [MFTStartSector], eax
 
@@ -326,9 +353,9 @@ StartSearch:
     mov   al, byte ptr [ClustersPerMftRecord]
     test  al, al
     js    NegativeOffset
-    mov   cx, word ptr [SectsPerCluster]
+    movzx cx, byte ptr [SectsPerCluster]
     mul   cx
-    mov   word ptr [SectsPerMFT], cx
+    mov   word ptr [SectsPerMFT], ax
     jmp   SearchNext
     NegativeOffset:
     // ClustersPerMftRecord is negative, so we need to perform 1 << (-ClustersPerMftRecord)
@@ -425,7 +452,7 @@ StartSearch:
         call  ReadNonResidentAttribute
         popad
         mov   bx, fs
-        add   bx, HEX(100)
+        add   bx, word ptr [ClusterParas]
         mov   fs, bx
         xor   bx, bx
         inc   ecx
@@ -632,8 +659,7 @@ CompareWideStrInsensitive:
 //  - ES:BX  : address to read
 ReadCluster:
     push  ecx
-    mov   cl, byte ptr [SectsPerCluster]   // Convert clusters to sectors
-    movzx ecx, cx
+    movzx ecx, byte ptr [SectsPerCluster]   // Convert clusters to sectors
     call  Multiply64
     call  ReadSectors
     pop   ecx
@@ -736,6 +762,8 @@ ReadInodeContiguous:
 
 // $MFT run-list walk state (see ReadInode / bootstrap)
 MftRunsOffset:  .word 0
+ClusterParas:   .word 0
+IndexRecClusters: .word 0
 InodeSecInClus: .long 0
 InodeCurLCN:    .long 0
 InodeRemVCN:    .long 0
@@ -911,18 +939,35 @@ UnpackLen_mask:
     pop   cx
     ret
 
-// Reads an INDX sector and applies fixups
+// Reads an index record (all of its clusters) and applies fixups
 // INPUT:
 //  - ES:[AX] : Address of the data runs
-//  - ECX     : LCN to read
+//  - ECX     : VCN of the index record
 // OUTPUT:
-//  - FS:[BX] : Address to write to
+//  - FS:[0]  : Address to write to (BX must be 0)
 ReadINDX:
     push  es
     push  bx
-    call  ReadNonResidentAttribute
-    test  ax, ax
-    jz    PrintFileSystemError
+    push  fs
+    mov   di, word ptr [IndexRecClusters]
+    ReadINDXNext:
+        push  ax
+        push  ecx
+        push  di
+        call  ReadNonResidentAttribute
+        test  ax, ax
+        pop   di
+        pop   ecx
+        pop   ax
+        jz    PrintFileSystemError
+        mov   bx, fs
+        add   bx, word ptr [ClusterParas]
+        mov   fs, bx
+        xor   bx, bx
+        inc   ecx
+        dec   di
+        jnz   ReadINDXNext
+    pop   fs
     cmp   dword ptr fs:[0], INDX_MAGIC
     jnz   PrintFileSystemError  // jump if not valid
     pop   bx

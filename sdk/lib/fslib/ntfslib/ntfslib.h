@@ -519,4 +519,7 @@ WriteBootSector(VOID);
 NTSTATUS
 WriteMetafiles(VOID);
 
+ULONG
+GetDefaultSdsLength(VOID);
+
 #endif

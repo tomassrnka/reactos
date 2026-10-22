@@ -171,7 +171,8 @@ RegLoadHiveLog(
     _In_ PCSTR DirectoryPath,
     _In_ ULONG LogFileOffset,
     _In_ PCSTR LogName,
-    _Out_ PVOID *LogData)
+    _Out_ PVOID *LogData,
+    _Out_opt_ PULONG LogDataSize)
 {
     ARC_STATUS Status;
     ULONG LogId;
@@ -247,6 +248,8 @@ RegLoadHiveLog(
     }
 
     *LogData = LogDataVirtual;
+    if (LogDataSize)
+        *LogDataSize = BytesRead;
     ArcClose(LogId);
     return TRUE;
 }
@@ -288,7 +291,7 @@ RegRecoverHeaderHive(
     /* Build the complete path of the hive log */
     RtlStringCbCopyA(FullLogFileName, sizeof(FullLogFileName), LogName);
     RtlStringCbCatA(FullLogFileName, sizeof(FullLogFileName), ".LOG");
-    Success = RegLoadHiveLog(DirectoryPath, 0, FullLogFileName, &LogData);
+    Success = RegLoadHiveLog(DirectoryPath, 0, FullLogFileName, &LogData, NULL);
     if (!Success)
     {
         ERR("Failed to read the hive log\n");
@@ -349,12 +352,14 @@ static
 BOOLEAN
 RegRecoverDataHive(
     _Inout_ PVOID ChunkBase,
+    _In_ ULONG ChunkSize,
     _In_ PCSTR DirectoryPath,
     _In_ PCSTR LogName)
 {
     BOOLEAN Success;
     ULONG StorageLength;
     ULONG BlockIndex, LogIndex;
+    ULONG LogSize, VectorSize;
     PUCHAR BlockPtr, BlockDest;
     CHAR FullLogFileName[MAX_PATH];
     PVOID LogData;
@@ -364,16 +369,24 @@ RegRecoverDataHive(
     /* Build the complete path of the hive log */
     RtlStringCbCopyA(FullLogFileName, sizeof(FullLogFileName), LogName);
     RtlStringCbCatA(FullLogFileName, sizeof(FullLogFileName), ".LOG");
-    Success = RegLoadHiveLog(DirectoryPath, HV_LOG_HEADER_SIZE, FullLogFileName, &LogData);
+    Success = RegLoadHiveLog(DirectoryPath, HV_LOG_HEADER_SIZE, FullLogFileName, &LogData, &LogSize);
     if (!Success)
     {
         ERR("Failed to read the hive log\n");
         return FALSE;
     }
 
+    /*
+     * The log holds the dirty vector (one byte per block, rounded up as
+     * HvpWriteLog does it) after the header, then the dirty blocks.
+     */
+    HiveBaseBlock = GET_HBASE_BLOCK(ChunkBase);
+    StorageLength = HiveBaseBlock->Length / HBLOCK_SIZE;
+    VectorSize = ROUND_UP(sizeof(HV_LOG_DIRTY_SIGNATURE) + ROUND_UP(StorageLength, sizeof(ULONG) * 8), HSECTOR_SIZE);
+
     /* Make sure the dirty vector signature is there otherwise the hive log is corrupt */
     LogDataPhysical = (PUCHAR)VaToPa(LogData);
-    if (*((PULONG)LogDataPhysical) != HV_LOG_DIRTY_SIGNATURE)
+    if (LogSize < VectorSize || *((PULONG)LogDataPhysical) != HV_LOG_DIRTY_SIGNATURE)
     {
         ERR("The hive log dirty signature could not be found\n");
         return FALSE;
@@ -381,10 +394,7 @@ RegRecoverDataHive(
 
     /* Copy the dirty data into the primary hive */
     LogIndex = 0;
-    BlockIndex = 0;
-    HiveBaseBlock = GET_HBASE_BLOCK(ChunkBase);
-    StorageLength = HiveBaseBlock->Length / HBLOCK_SIZE;
-    for (; BlockIndex < StorageLength; ++BlockIndex)
+    for (BlockIndex = 0; BlockIndex < StorageLength; ++BlockIndex)
     {
         /* Skip this block if it's not dirty and go to the next one */
         if (LogDataPhysical[BlockIndex + sizeof(HV_LOG_DIRTY_SIGNATURE)] != HV_LOG_DIRTY_BLOCK)
@@ -392,8 +402,15 @@ RegRecoverDataHive(
             continue;
         }
 
+        if ((LogSize - VectorSize) / HBLOCK_SIZE <= LogIndex ||
+            (ChunkSize / HBLOCK_SIZE) < BlockIndex + 2)
+        {
+            ERR("The hive log or the hive is too short for dirty block %lu\n", BlockIndex);
+            return FALSE;
+        }
+
         /* Read the dirty block and copy it at right offsets */
-        BlockPtr = (PUCHAR)((ULONG_PTR)LogDataPhysical + 2 * HSECTOR_SIZE + LogIndex * HBLOCK_SIZE);
+        BlockPtr = LogDataPhysical + VectorSize + LogIndex * HBLOCK_SIZE;
         BlockDest = (PUCHAR)((ULONG_PTR)ChunkBase + (BlockIndex + 1) * HBLOCK_SIZE);
         RtlCopyMemory(BlockDest, BlockPtr, HBLOCK_SIZE);
 
@@ -420,8 +437,8 @@ RegRecoverDataHive(
  * @param[in] ChunkSize
  * The size of the registry base chunk. This
  * parameter refers to the actual size of
- * the SYSTEM hive. This parameter is currently
- * unused.
+ * the SYSTEM hive. Data recovery from the
+ * hive log stays within it.
  *
  * @param[in] LoadAlternate
  * If set to TRUE, the function will initialize the
@@ -462,7 +479,7 @@ RegImportBinaryHive(
             return FALSE;
         }
 
-        if (!RegRecoverDataHive(ChunkBase, SearchPath, "SYSTEM"))
+        if (!RegRecoverDataHive(ChunkBase, ChunkSize, SearchPath, "SYSTEM"))
         {
             ERR("Failed to recover the hive data\n");
             return FALSE;

@@ -859,6 +859,11 @@ InitSystemPartition(
 
     *pSystemPartition = SystemPartition;
 
+    /* Another system's boot partition that loses the active flag stays bootable through FreeLoader */
+    PartitionList->ForeignBootPartition = NULL;
+    if (OldActivePart && OldActivePart != SystemPartition && IsForeignNtfsBootPartition(OldActivePart))
+        PartitionList->ForeignBootPartition = OldActivePart;
+
     /*
      * If the system partition can be created in some
      * non-partitioned space, create it now.
@@ -1199,7 +1204,7 @@ InitializeSetup(
     pSetupData->BootLoaderLocation = 2; // Default to "System partition"
     pSetupData->FormatPartition = 0;
     pSetupData->AutoPartition = 0;
-    pSetupData->FsType = 0;
+    pSetupData->FsType = 2; // NTFS, unless the unattend file says otherwise
 
     /* Load 'txtsetup.sif' from the installation media */
     Error = LoadSetupInf(pSetupData);

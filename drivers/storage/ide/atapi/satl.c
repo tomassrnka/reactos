@@ -562,6 +562,24 @@ AtaReqBuildNcqReadWriteTaskFile(
     return TRUE;
 }
 
+/*
+ * The write part of an emulated FUA write is done: put the SRB back in the device queue marked, so it
+ * runs again as a cache flush, and the IRP completes only after that (with the flush's status).
+ */
+static
+ATA_COMPLETION_ACTION
+AtaReqCompleteFuaWrite(
+    _In_ PATA_DEVICE_REQUEST Request)
+{
+    if (SRB_STATUS(Request->SrbStatus) != SRB_STATUS_SUCCESS)
+        return COMPLETE_IRP;
+
+    SRB_SET_FLAGS(Request->Srb, SRB_FLAG_FUA_FLUSH);
+    Request->SrbStatus = SRB_STATUS_BUSY;
+    Request->InternalState = REQUEST_STATE_REQUEUE;
+    return COMPLETE_NO_IRP;
+}
+
 static
 UCHAR
 AtaReqScsiReadWrite(
@@ -626,9 +644,23 @@ AtaReqScsiReadWrite(
     else
         Request->Flags |= REQUEST_FLAG_DATA_IN;
 
-    // FIXME: HACK Workaround for disk.sys which incorrectly enables FUA support
-    if (!(DevExt->Device.DeviceFlags & DEVICE_NCQ))
+    /*
+     * Without NCQ the FUA bit is not used here (FUA EXT commands are not issued, and disk.sys asks
+     * for FUA whatever the drive supports).  A FUA write must still be on the medium when it
+     * completes, so when the drive caches writes it is followed by a cache flush first.
+     */
+    if (!(DevExt->Device.DeviceFlags & DEVICE_NCQ) && (Request->Flags & REQUEST_FLAG_FUA))
+    {
         Request->Flags &= ~REQUEST_FLAG_FUA;
+
+        /* A drive without a flush command (before ATA-4) has no way to do that: as before */
+        if ((Request->Flags & REQUEST_FLAG_DATA_OUT) &&
+            AtaDevIsVolatileWriteCacheEnabled(&DevExt->IdentifyDeviceData) &&
+            AtaDeviceGetFlushCacheCommand(DevExt) != 0)
+        {
+            Request->Complete = AtaReqCompleteFuaWrite;
+        }
+    }
 
     SectorCount = Request->DataTransferLength + (DevExt->Device.SectorSize - 1);
     SectorCount /= DevExt->Device.SectorSize;
@@ -1913,6 +1945,15 @@ AtaReqExecuteScsiAta(
     _In_ PATA_DEVICE_REQUEST Request,
     _In_ PSCSI_REQUEST_BLOCK Srb)
 {
+    /* Second part of an emulated FUA write (see AtaReqCompleteFuaWrite): the cache flush */
+    if (SRB_GET_FLAGS(Srb) & SRB_FLAG_FUA_FLUSH)
+    {
+        Request->TaskFile.Command = AtaDeviceGetFlushCacheCommand(DevExt);
+        /* As disk.sys allows its own SYNCHRONIZE CACHE: a flush can take much longer than a write */
+        Request->TimeOut = Srb->TimeOutValue * 4;
+        return SRB_STATUS_PENDING;
+    }
+
     switch (Srb->Cdb[0])
     {
         case SCSIOP_REPORT_LUNS:
