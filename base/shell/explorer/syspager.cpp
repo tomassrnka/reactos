@@ -1489,6 +1489,14 @@ LRESULT CSysPagerWnd::OnGetInfoTip(INT uCode, LPNMHDR hdr, BOOL& bHandled)
 LRESULT CSysPagerWnd::OnCustomDraw(INT uCode, LPNMHDR hdr, BOOL& bHandled)
 {
     NMCUSTOMDRAW * cdraw = (NMCUSTOMDRAW *) hdr;
+
+    /* Only the drawing of the toolbar, not that of its tooltip, which the toolbar passes on */
+    if (hdr->hwndFrom != Toolbar.m_hWnd)
+    {
+        bHandled = FALSE;
+        return 0;
+    }
+
     switch (cdraw->dwDrawStage)
     {
     case CDDS_PREPAINT:
@@ -1585,6 +1593,13 @@ LRESULT CSysPagerWnd::OnCtxMenu(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& b
 
 LRESULT CSysPagerWnd::OnBalloonPop(UINT uCode, LPNMHDR hdr , BOOL& bHandled)
 {
+    /* The tooltip of the toolbar notifies its parent as well, the balloons are the ones that count */
+    if (hdr->hwndFrom != m_Balloons.m_hWnd)
+    {
+        bHandled = FALSE;
+        return 0;
+    }
+
     m_BalloonQueue.CloseCurrent();
     bHandled = TRUE;
     return 0;

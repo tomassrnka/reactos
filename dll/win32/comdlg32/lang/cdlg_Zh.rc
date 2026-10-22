@@ -38,6 +38,7 @@ STRINGTABLE
 / : < > |"
     IDS_PATHNOTEXISTING     "路径不存在"
     IDS_FILENOTEXISTING     "文件不存在"
+    IDS_PATHTOOLONG         "The path is too long.\nTry a shorter name."
     IDS_INVALID_FOLDERNAME  "所选内容包含一个非文件夹物体"
 }
 
@@ -540,6 +541,7 @@ STRINGTABLE
 / : < > |"
     IDS_PATHNOTEXISTING     "路徑不存在"
     IDS_FILENOTEXISTING     "檔案不存在"
+    IDS_PATHTOOLONG         "The path is too long.\nTry a shorter name."
     IDS_INVALID_FOLDERNAME  "已選項目包含非資料夾物件"
 }
 

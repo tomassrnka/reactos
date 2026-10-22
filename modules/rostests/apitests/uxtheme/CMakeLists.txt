@@ -3,6 +3,8 @@ list(APPEND SOURCE
     CloseThemeData.c
     DrawThemeParentBackground.c
     GetThemeParseErrorInfo.c
+    Ordinals.c
+    PanningFeedback.c
     SetWindowTheme.c
     SetThemeAppProperties.c
     ../include/msgtrace.c

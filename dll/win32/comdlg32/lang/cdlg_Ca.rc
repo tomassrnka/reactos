@@ -34,6 +34,7 @@ El voleu reemplaçar?"
 / : < > |"
     IDS_PATHNOTEXISTING     "La ruta no existeix"
     IDS_FILENOTEXISTING     "El fitxer no existeix"
+    IDS_PATHTOOLONG         "The path is too long.\nTry a shorter name."
     IDS_INVALID_FOLDERNAME  "The selection contains a non-folder object"
 }
 

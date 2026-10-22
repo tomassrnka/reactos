@@ -10153,8 +10153,24 @@ static LRESULT LISTVIEW_KeyDown(LISTVIEW_INFO *infoPtr, INT nVirtualKey, LONG lK
   case VK_RETURN:
     if ((infoPtr->nItemCount > 0) && (infoPtr->nFocusedItem != -1))
     {
+#ifdef __REACTOS__
+        NMITEMACTIVATE nmia;
+#endif
         if (!notify(infoPtr, NM_RETURN)) return 0;
+#ifdef __REACTOS__
+        /* As Windows: a full NMITEMACTIVATE for the focused item, ptAction (-1,-1) */
+        ZeroMemory(&nmia, sizeof(nmia));
+        nmia.iItem = infoPtr->nFocusedItem;
+        nmia.ptAction.x = -1;
+        nmia.ptAction.y = -1;
+        if (GetKeyState(VK_SHIFT) & 0x8000) nmia.uKeyFlags |= LVKF_SHIFT;
+        if (GetKeyState(VK_CONTROL) & 0x8000) nmia.uKeyFlags |= LVKF_CONTROL;
+        if (GetKeyState(VK_MENU) & 0x8000) nmia.uKeyFlags |= LVKF_ALT;
+        notify_hdr(infoPtr, LVN_ITEMACTIVATE, &nmia.hdr);
+        if (!IsWindow(hwndSelf)) return 0;
+#else
         if (!notify(infoPtr, LVN_ITEMACTIVATE)) return 0;
+#endif
     }
     break;
 

@@ -27,6 +27,7 @@
 #include <richedit.h>
 #include <commctrl.h>
 #include <commdlg.h>
+#include <cderr.h>
 
 #include "wordpad.h"
 
@@ -573,6 +574,17 @@ void dialog_print(HWND hMainWnd, LPWSTR wszFileName)
         print(&pd, wszFileName);
         update_ruler(get_ruler_wnd(hMainWnd));
     }
+#ifdef __REACTOS__
+    else if (CommDlgExtendedError() == PDERR_CREATEICFAILURE)
+    {
+        WCHAR wszText[MAX_STRING_LEN];
+
+        devMode = pd.hDevMode;
+        devNames = pd.hDevNames;
+        LoadStringW(GetModuleHandleW(0), STRING_PRINTING_NOT_IMPLEMENTED, wszText, sizeof(wszText) / sizeof(wszText[0]));
+        MessageBoxW(hMainWnd, wszText, L"Wordpad", MB_OK | MB_ICONEXCLAMATION);
+    }
+#endif
 }
 
 static void preview_bar_show(HWND hMainWnd, BOOL show)
