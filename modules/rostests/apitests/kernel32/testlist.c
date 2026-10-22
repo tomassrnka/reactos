@@ -140,6 +140,7 @@ extern void func_WaitOnAddress(void);
 extern void func_WerFlags(void);
 extern void func_WerRuntimeExceptionModule(void);
 extern void func_WideCharToMultiByte(void);
+extern void func_WriteProcessMemory(void);
 extern void func_SetFileInformationByHandle(void);
 
 extern void func_Wow64Environment(void);
@@ -288,6 +289,7 @@ const struct test winetest_testlist[] =
     { "WerFlags",                    func_WerFlags },
     { "WerRuntimeExceptionModule",   func_WerRuntimeExceptionModule },
     { "WideCharToMultiByte",         func_WideCharToMultiByte },
+    { "WriteProcessMemory",          func_WriteProcessMemory },
     { "SetFileInformationByHandle",  func_SetFileInformationByHandle },
     { 0, 0 }
 };

@@ -2112,6 +2112,30 @@ ReadProcessMemory(IN HANDLE hProcess,
 }
 
 /*
+ * Returns TRUE when lpBaseAddress in hProcess belongs to a mapped image
+ * (SEC_IMAGE) view. Image views are copy-on-write per PE section, so a write
+ * to a read-only subsection (for example .rdata) is serviced by faulting in a
+ * private copy rather than failing - WriteProcessMemory relies on this to let
+ * debuggers and injectors patch remote image data, matching Windows.
+ */
+static
+BOOLEAN
+BasepIsImageBaseAddress(IN HANDLE hProcess,
+                        IN PVOID lpBaseAddress)
+{
+    MEMORY_BASIC_INFORMATION MemoryInfo;
+    NTSTATUS Status;
+
+    Status = NtQueryVirtualMemory(hProcess,
+                                  lpBaseAddress,
+                                  MemoryBasicInformation,
+                                  &MemoryInfo,
+                                  sizeof(MemoryInfo),
+                                  NULL);
+    return NT_SUCCESS(Status) && (MemoryInfo.Type == MEM_IMAGE);
+}
+
+/*
  * @implemented
  */
 BOOL
@@ -2132,11 +2156,23 @@ WriteProcessMemory(IN HANDLE hProcess,
     RegionSize = nSize;
     Base = lpBaseAddress;
 
-    /* Check the current status */
+    /*
+     * Make the target range writable.
+     *
+     * Request read+write only, never execute: WriteProcessMemory only copies
+     * data in, and gaining execute on a non-executable image subsection would
+     * be a W^X / privilege escalation that the section maximum-protection
+     * ceiling rejects (STATUS_SECTION_PROTECTION, surfacing as
+     * ERROR_INVALID_PARAMETER). The page's original protection - including any
+     * execute bit - is restored after the write, and writes to copy-on-write
+     * image segments (every non-shared PE section: .text/.data/.bss/.rdata/
+     * .idata/.tls/.rsrc) are made private by the kernel, so neither the backing
+     * file nor other mappers of the image are affected.
+     */
     Status = NtProtectVirtualMemory(hProcess,
                                     &Base,
                                     &RegionSize,
-                                    PAGE_EXECUTE_READWRITE,
+                                    PAGE_READWRITE,
                                     &OldValue);
     if (NT_SUCCESS(Status))
     {
@@ -2180,16 +2216,32 @@ WriteProcessMemory(IN HANDLE hProcess,
             /* Check if we were read only */
             if (OldValue & (PAGE_NOACCESS | PAGE_READONLY))
             {
-                /* Restore protection and fail */
-                NtProtectVirtualMemory(hProcess,
-                                       &Base,
-                                       &RegionSize,
-                                       OldValue,
-                                       &OldValue);
-                BaseSetLastNTError(STATUS_ACCESS_VIOLATION);
+                /*
+                 * The page was read-only. For a copy-on-write image view the
+                 * write still succeeds by faulting in a private copy - this is
+                 * how debuggers and injectors patch remote image data such as
+                 * .rdata, and it matches Windows. The reprotect to PAGE_READWRITE
+                 * above already armed copy-on-write on the (write-copy) view, so
+                 * the write below lands in a private page and the original
+                 * protection is restored afterwards.
+                 *
+                 * Any other read-only memory (private committed or a shared file
+                 * mapping) genuinely cannot be written, so fail with
+                 * STATUS_ACCESS_VIOLATION - the behaviour callers depend on.
+                 */
+                if (!BasepIsImageBaseAddress(hProcess, lpBaseAddress))
+                {
+                    /* Restore protection and fail */
+                    NtProtectVirtualMemory(hProcess,
+                                           &Base,
+                                           &RegionSize,
+                                           OldValue,
+                                           &OldValue);
+                    BaseSetLastNTError(STATUS_ACCESS_VIOLATION);
 
-                /* Note: This is what Windows returns and code depends on it */
-                return STATUS_ACCESS_VIOLATION;
+                    /* Note: This is what Windows returns and code depends on it */
+                    return STATUS_ACCESS_VIOLATION;
+                }
             }
 
             /* Otherwise, do the write */
