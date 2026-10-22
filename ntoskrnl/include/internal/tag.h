@@ -24,6 +24,7 @@
 #define TAG_RESOURCE_EVENT          'aTeR'
 #define TAG_RESOURCE_SEMAPHORE      'aTeR'
 #define TAG_OBJECT_TABLE            'btbO'
+#define TAG_HANDLE_CPU_CACHE        'cHxE'
 #define TAG_INIT                    'tinI'
 #define TAG_RTLI                    'iltR'
 #define TAG_ATOM                    'motA'
