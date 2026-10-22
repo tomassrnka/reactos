@@ -26,6 +26,28 @@ static KSPIN_LOCK PspQuotaLock;
 
 /**
  * @brief
+ * Raises a peak counter to the given usage value without any lock.
+ * The peak only ever grows, so a compare-exchange loop is enough.
+ */
+FORCEINLINE
+VOID
+PspRaiseQuotaPeak(
+    _Inout_ volatile SIZE_T *Peak,
+    _In_ SIZE_T Usage)
+{
+    SIZE_T OldPeak = *Peak;
+
+    while (OldPeak < Usage)
+    {
+        SIZE_T Seen = InterlockedCompareExchangeSizeT(Peak, Usage, OldPeak);
+        if (Seen == OldPeak)
+            break;
+        OldPeak = Seen;
+    }
+}
+
+/**
+ * @brief
  * Returns pool quotas back to the Memory Manager
  * when the pool quota block is no longer being
  * used by anybody.
@@ -201,10 +223,30 @@ PspChargeProcessQuotaSpecifiedPool(
     KIRQL OldIrql;
     SIZE_T ReturnedQuotas;
     SIZE_T UpdatedLimit;
+    SIZE_T NewUsage;
 
     /* Sanity checks */
     ASSERT(QuotaType < PsQuotaTypes);
     ASSERT((SSIZE_T)Amount >= 0);
+
+    /*
+     * The default quota block has no limit to enforce, so charging it can
+     * never fail and needs no serialization: usage and peak are plain
+     * interlocked counters. Only blocks with explicit limits take the lock.
+     */
+    if (QuotaBlock == &PspDefaultQuotaBlock)
+    {
+        NewUsage = InterlockedExchangeAddSizeT(&QuotaBlock->QuotaEntry[QuotaType].Usage, Amount) + Amount;
+        PspRaiseQuotaPeak(&QuotaBlock->QuotaEntry[QuotaType].Peak, NewUsage);
+
+        if (Process)
+        {
+            ASSERT(Process != PsInitialSystemProcess);
+            NewUsage = InterlockedExchangeAddSizeT(&Process->QuotaUsage[QuotaType], Amount) + Amount;
+            PspRaiseQuotaPeak(&Process->QuotaPeak[QuotaType], NewUsage);
+        }
+        return STATUS_SUCCESS;
+    }
 
     /* Guard ourselves in a spin lock */
     KeAcquireSpinLock(&PspQuotaLock, &OldIrql);
@@ -275,15 +317,10 @@ PspChargeProcessQuotaSpecifiedPool(
     }
 
     /* Update the quota usage */
-    InterlockedExchangeAddSizeT(&QuotaBlock->QuotaEntry[QuotaType].Usage, Amount);
+    NewUsage = InterlockedExchangeAddSizeT(&QuotaBlock->QuotaEntry[QuotaType].Usage, Amount) + Amount;
 
     /* Update the entry peak if it's less than the usage */
-    if (QuotaBlock->QuotaEntry[QuotaType].Peak <
-        QuotaBlock->QuotaEntry[QuotaType].Usage)
-    {
-        InterlockedExchangeSizeT(&QuotaBlock->QuotaEntry[QuotaType].Peak,
-                                 QuotaBlock->QuotaEntry[QuotaType].Usage);
-    }
+    PspRaiseQuotaPeak(&QuotaBlock->QuotaEntry[QuotaType].Peak, NewUsage);
 
     /* Are we being given a process as well? */
     if (Process)
@@ -291,7 +328,7 @@ PspChargeProcessQuotaSpecifiedPool(
         /* We're being given, check that's not a system one */
         ASSERT(Process != PsInitialSystemProcess);
 
-        InterlockedExchangeAddSizeT(&Process->QuotaUsage[QuotaType], Amount);
+        NewUsage = InterlockedExchangeAddSizeT(&Process->QuotaUsage[QuotaType], Amount) + Amount;
 
         /*
          * OK, we've now updated the quota usage of the process
@@ -299,11 +336,7 @@ PspChargeProcessQuotaSpecifiedPool(
          * Although the peak of process quota can be less than it was
          * before so update the peaks as well accordingly.
          */
-        if (Process->QuotaPeak[QuotaType] < Process->QuotaUsage[QuotaType])
-        {
-            InterlockedExchangeSizeT(&Process->QuotaPeak[QuotaType],
-                                     Process->QuotaUsage[QuotaType]);
-        }
+        PspRaiseQuotaPeak(&Process->QuotaPeak[QuotaType], NewUsage);
     }
 
     /* Release the lock */
@@ -356,6 +389,35 @@ PspReturnProcessQuotaSpecifiedPool(
     ASSERT(QuotaType < PsQuotaTypes);
     ASSERT((SSIZE_T)Amount >= 0);
 
+    /*
+     * Returning to the default quota block never trims limits nor hands
+     * quota back to Mm, so it is just two interlocked subtractions. Detect
+     * an underflow from the previous values instead of pre-checking them.
+     */
+    if (QuotaBlock == &PspDefaultQuotaBlock)
+    {
+        SIZE_T OldBlockUsage, OldProcessUsage = 0;
+
+        OldBlockUsage = InterlockedExchangeAddSizeT(&QuotaBlock->QuotaEntry[QuotaType].Usage,
+                                                    -(LONG_PTR)Amount);
+        if (Process)
+        {
+            ASSERT(Process != PsInitialSystemProcess);
+            OldProcessUsage = InterlockedExchangeAddSizeT(&Process->QuotaUsage[QuotaType],
+                                                          -(LONG_PTR)Amount);
+        }
+
+        if (OldBlockUsage < Amount || (Process && OldProcessUsage < Amount))
+        {
+            KeBugCheckEx(QUOTA_UNDERFLOW,
+                         (ULONG_PTR)Process,
+                         (ULONG_PTR)QuotaType,
+                         Process ? (ULONG_PTR)OldProcessUsage : (ULONG_PTR)OldBlockUsage,
+                         (ULONG_PTR)Amount);
+        }
+        return;
+    }
+
     /* Guard ourselves in a spin lock */
     KeAcquireSpinLock(&PspQuotaLock, &OldIrql);
 
@@ -373,7 +435,7 @@ PspReturnProcessQuotaSpecifiedPool(
     }
 
     /* The return threshold can be non paged or paged */
-    ReturnThreshold = QuotaType ? PSP_NON_PAGED_POOL_QUOTA_THRESHOLD : PSP_PAGED_POOL_QUOTA_THRESHOLD;
+    ReturnThreshold = (QuotaType == PsPagedPool) ? PSP_PAGED_POOL_QUOTA_THRESHOLD : PSP_NON_PAGED_POOL_QUOTA_THRESHOLD;
 
     /*
      * We need to trim the quota limits based on the
@@ -400,7 +462,7 @@ PspReturnProcessQuotaSpecifiedPool(
         if (QuotaBlock->QuotaEntry[QuotaType].Return > ReturnThreshold)
         {
             MmReturnPoolQuota(QuotaType, QuotaBlock->QuotaEntry[QuotaType].Return);
-            InterlockedExchangeSizeT(QuotaBlock->QuotaEntry[QuotaType].Return, 0);
+            InterlockedExchangeSizeT(&QuotaBlock->QuotaEntry[QuotaType].Return, 0);
         }
 
         /* And try to trim the limit */
@@ -1051,6 +1113,8 @@ PspSetQuotaLimits(
 {
     QUOTA_LIMITS_EX CapturedQuotaLimits;
     PEPROCESS_QUOTA_BLOCK QuotaBlock, OldQuotaBlock;
+    PS_QUOTA_TYPE QuotaType;
+    SIZE_T MovedUsage[PsQuotaTypes];
     BOOLEAN IncreaseOkay;
     KAPC_STATE SavedApcState;
     NTSTATUS Status;
@@ -1158,24 +1222,58 @@ PspSetQuotaLimits(
             return STATUS_PRIVILEGE_NOT_HELD;
         }
 
+        /*
+         * Validate the requested pool limits. Zero and SIZE_T_MAX both mean
+         * "no limit". A finite limit below what the process already holds
+         * would leave it over quota from the start, so reject it.
+         */
+        if (CapturedQuotaLimits.NonPagedPoolLimit != 0 &&
+            CapturedQuotaLimits.NonPagedPoolLimit != SIZE_T_MAX &&
+            CapturedQuotaLimits.NonPagedPoolLimit < Process->QuotaUsage[PsNonPagedPool])
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+        if (CapturedQuotaLimits.PagedPoolLimit != 0 &&
+            CapturedQuotaLimits.PagedPoolLimit != SIZE_T_MAX &&
+            CapturedQuotaLimits.PagedPoolLimit < Process->QuotaUsage[PsPagedPool])
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+
         /* Allocate a new quota block */
         QuotaBlock = ExAllocatePoolWithTag(NonPagedPool,
                                            sizeof(EPROCESS_QUOTA_BLOCK),
                                            TAG_QUOTA_BLOCK);
         if (QuotaBlock == NULL)
         {
-            ObDereferenceObject(Process);
             return STATUS_NO_MEMORY;
         }
 
-        /* Initialize the quota block */
+        /* Initialize the quota block (Return must start at zero) */
+        RtlZeroMemory(QuotaBlock, sizeof(*QuotaBlock));
         QuotaBlock->ReferenceCount = 1;
         QuotaBlock->ProcessCount = 1;
+
+        /*
+         * The process already holds quota charged against the default block
+         * (handle tables, VADs, ...). It returns that quota through its
+         * current block, which is this new one, so the block has to start
+         * with the usage of the process or the first such return underflows.
+         */
+        for (QuotaType = PsNonPagedPool; QuotaType < PsQuotaTypes; QuotaType++)
+        {
+            MovedUsage[QuotaType] = Process->QuotaUsage[QuotaType];
+            QuotaBlock->QuotaEntry[QuotaType].Usage = MovedUsage[QuotaType];
+        }
         QuotaBlock->QuotaEntry[PsNonPagedPool].Peak = Process->QuotaPeak[PsNonPagedPool];
         QuotaBlock->QuotaEntry[PsPagedPool].Peak = Process->QuotaPeak[PsPagedPool];
         QuotaBlock->QuotaEntry[PsPageFile].Peak = Process->QuotaPeak[PsPageFile];
-        QuotaBlock->QuotaEntry[PsNonPagedPool].Limit = PspDefaultQuotaBlock.QuotaEntry[PsNonPagedPool].Limit;
-        QuotaBlock->QuotaEntry[PsPagedPool].Limit = PspDefaultQuotaBlock.QuotaEntry[PsPagedPool].Limit;
+        QuotaBlock->QuotaEntry[PsNonPagedPool].Limit =
+            CapturedQuotaLimits.NonPagedPoolLimit ? CapturedQuotaLimits.NonPagedPoolLimit :
+            PspDefaultQuotaBlock.QuotaEntry[PsNonPagedPool].Limit;
+        QuotaBlock->QuotaEntry[PsPagedPool].Limit =
+            CapturedQuotaLimits.PagedPoolLimit ? CapturedQuotaLimits.PagedPoolLimit :
+            PspDefaultQuotaBlock.QuotaEntry[PsPagedPool].Limit;
         QuotaBlock->QuotaEntry[PsPageFile].Limit = PspDefaultQuotaBlock.QuotaEntry[PsPageFile].Limit;
 
         /* Try to exchange the quota block, if that failed, just drop it */
@@ -1186,6 +1284,17 @@ PspSetQuotaLimits(
         {
             /* Success, insert the new quota block */
             PspInsertQuotaBlock(QuotaBlock);
+
+            /*
+             * That usage moved over to the new block, so the default block
+             * must no longer account for it. The default block never limits
+             * anything, this only keeps its usage counters truthful.
+             */
+            for (QuotaType = PsNonPagedPool; QuotaType < PsQuotaTypes; QuotaType++)
+            {
+                InterlockedExchangeAddSizeT(&PspDefaultQuotaBlock.QuotaEntry[QuotaType].Usage,
+                                            -(LONG_PTR)MovedUsage[QuotaType]);
+            }
         }
         else
         {

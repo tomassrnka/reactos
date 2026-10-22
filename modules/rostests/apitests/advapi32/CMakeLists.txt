@@ -16,6 +16,8 @@ list(APPEND SOURCE
     RegQueryValueExW.c
     RtlEncryptMemory.c
     SaferIdentifyLevel.c
+    TokenIntegrity.c
+    TokenLogonSid.c
     ServiceArgs.c
     ServiceEnv.c
     ServiceNetwork.c

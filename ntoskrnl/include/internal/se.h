@@ -386,6 +386,62 @@ SepTokenIsOwner(
     _In_ PSECURITY_DESCRIPTOR SecurityDescriptor,
     _In_ BOOLEAN TokenLocked);
 
+/* Mandatory label of tokens */
+#define SEP_MANDATORY_LABEL_SID_LENGTH ((ULONG)FIELD_OFFSET(SID, SubAuthority[1]))
+
+BOOLEAN
+NTAPI
+SepIsMandatoryLabelSid(
+    _In_ PSID Sid,
+    _Out_opt_ PULONG Rid);
+
+VOID
+NTAPI
+SepInitializeMandatoryLabelSid(
+    _Out_writes_bytes_(SEP_MANDATORY_LABEL_SID_LENGTH) PSID Sid,
+    _In_ ULONG Rid);
+
+ULONG
+NTAPI
+SepComputeIntegrityLevel(
+    _In_ PTOKEN Token);
+
+NTSTATUS
+NTAPI
+SepValidateLabelAce(
+    _In_ PACE_HEADER Header,
+    _Out_opt_ PULONG Rid);
+
+NTSTATUS
+NTAPI
+SepGetDescriptorLabel(
+    _In_ PSECURITY_DESCRIPTOR SecurityDescriptor,
+    _Out_ PBOOLEAN HasLabel,
+    _Out_opt_ PULONG LabelLevel,
+    _Out_opt_ PACCESS_MASK LabelPolicy);
+
+NTSTATUS
+NTAPI
+SeCheckLabelChange(
+    _In_ PSECURITY_DESCRIPTOR SecurityDescriptor,
+    _In_ KPROCESSOR_MODE AccessMode);
+
+NTSTATUS
+NTAPI
+SeAssignObjectLabel(
+    _In_ PTOKEN Token,
+    _In_ ACCESS_MASK Policy,
+    _Inout_ PSECURITY_DESCRIPTOR *SecurityDescriptor,
+    _In_ PGENERIC_MAPPING GenericMapping);
+
+NTSTATUS
+NTAPI
+SeAssignProcessObjectLabel(
+    _In_ PTOKEN OwnerToken,
+    _In_ PTOKEN CreatorToken,
+    _Inout_ PSECURITY_DESCRIPTOR *SecurityDescriptor,
+    _In_ PGENERIC_MAPPING GenericMapping);
+
 NTSTATUS
 SepCreateTokenLock(
     _Inout_ PTOKEN Token);
@@ -692,10 +748,11 @@ NTSTATUS
 SepPropagateAcl(
     _Out_writes_bytes_opt_(DaclLength) PACL AclDest,
     _Inout_ PULONG AclLength,
-    _In_reads_bytes_(AclSource->AclSize) PACL AclSource,
+    _In_opt_ PACL ExplicitAcl,
+    _In_opt_ PACL ParentAcl,
     _In_ PSID Owner,
     _In_ PSID Group,
-    _In_ BOOLEAN IsInherited,
+    _In_ BOOLEAN AutoInherit,
     _In_ BOOLEAN IsDirectoryObject,
     _In_ PGENERIC_MAPPING GenericMapping);
 
@@ -710,7 +767,9 @@ SepSelectAcl(
     _In_ PSID Owner,
     _In_ PSID Group,
     _Out_ PBOOLEAN AclPresent,
-    _Out_ PBOOLEAN IsInherited,
+    _Out_ PACL *InheritedAcl,
+    _In_ BOOLEAN ExplicitProtected,
+    _In_ BOOLEAN AutoInherit,
     _In_ BOOLEAN IsDirectoryObject,
     _In_ PGENERIC_MAPPING GenericMapping);
 

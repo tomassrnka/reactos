@@ -43,6 +43,7 @@ list(APPEND SOURCE
     LdrLoadDll.c
     load_notifications.c
     locale.c
+    LpcCallbackRequest.c
     NtAcceptConnectPort.c
     NtAccessCheck.c
     NtAccessCheckByType.c
@@ -53,7 +54,9 @@ list(APPEND SOURCE
     NtAllocateVirtualMemory.c
     NtApphelpCacheControl.c
     NtCompareTokens.c
+    NtConnectPortTerminate.c
     NtContinue.c
+    NtCreateDirectoryObject.c
     NtCreateFile.c
     NtCreateKey.c
     NtCreateProfile.c
@@ -67,6 +70,7 @@ list(APPEND SOURCE
     NtFilterToken.c
     NtFreeVirtualMemory.c
     NtGetCurrentProcessorNumberEx.c
+    NtGetNextThread.c
     NtImpersonateAnonymousToken.c
     NtKeyedEvent.c
     NtLoadUnloadKey.c
@@ -85,6 +89,7 @@ list(APPEND SOURCE
     NtQueryKey.c
     NtQueryObject.c
     NtQueryOpenSubKeys.c
+    NtQuerySecurityObject.c
     NtQuerySection.c
     NtQuerySystemEnvironmentValue.c
     NtQuerySystemInformation.c

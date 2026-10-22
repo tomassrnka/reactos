@@ -38,20 +38,6 @@
                                    FALSE,                   \
                                    NULL);                   \
     LPCTRACE(LPC_SEND_DEBUG, "Wait done: %lx\n", Status);   \
-    if (Status == STATUS_USER_APC)                          \
-    {                                                       \
-        /* We were preempted by an APC */                   \
-        if (KeReadStateSemaphore(s))                        \
-        {                                                   \
-            /* It's still signaled, so wait on it */        \
-            KeWaitForSingleObject(s,                        \
-                                  WrExecutive,              \
-                                  KernelMode,               \
-                                  FALSE,                    \
-                                  NULL);                    \
-            Status = STATUS_SUCCESS;                        \
-        }                                                   \
-    }                                                       \
 }
 
 //
@@ -66,20 +52,6 @@
                                    FALSE,                   \
                                    NULL);                   \
     LPCTRACE(LPC_CONNECT_DEBUG, "Wait done: %lx\n", Status);\
-    if (Status == STATUS_USER_APC)                          \
-    {                                                       \
-        /* We were preempted by an APC */                   \
-        if (KeReadStateSemaphore(s))                        \
-        {                                                   \
-            /* It's still signaled, so wait on it */        \
-            KeWaitForSingleObject(s,                        \
-                                  WrExecutive,              \
-                                  KernelMode,               \
-                                  FALSE,                    \
-                                  NULL);                    \
-            Status = STATUS_SUCCESS;                        \
-        }                                                   \
-    }                                                       \
 }
 
 //
@@ -90,6 +62,38 @@
     /* Release the semaphore */                             \
     LPCTRACE(LPC_SEND_DEBUG, "Release: %p\n", s);           \
     KeReleaseSemaphore(s, 1, 1, FALSE);                     \
+}
+
+//
+// Takes the release owed to a woken thread whose wait was aborted; it may still be in flight
+//
+#define LpcpCompleteAbortedWait(s)                          \
+{                                                           \
+    KeWaitForSingleObject(s,                                \
+                          WrExecutive,                      \
+                          KernelMode,                       \
+                          FALSE,                            \
+                          NULL);                            \
+}
+
+//
+// Drops a count left by keyed events, which share this semaphore through the ETHREAD union
+//
+FORCEINLINE
+VOID
+LpcpResetReplySemaphore(IN PETHREAD Thread)
+{
+    LARGE_INTEGER Timeout;
+
+    if (KeReadStateSemaphore(&Thread->LpcReplySemaphore))
+    {
+        Timeout.QuadPart = 0;
+        KeWaitForSingleObject(&Thread->LpcReplySemaphore,
+                              WrExecutive,
+                              KernelMode,
+                              FALSE,
+                              &Timeout);
+    }
 }
 
 //

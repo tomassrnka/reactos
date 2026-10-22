@@ -3,6 +3,7 @@
 #include <apitest.h>
 
 extern void func_devclass(void);
+extern void func_RootDeviceRemove(void);
 extern void func_SetupDiGetActualModelsSection(void);
 extern void func_SetupDiInstallClassExA(void);
 extern void func_SetupInstallServicesFromInfSectionEx(void);
@@ -10,6 +11,7 @@ extern void func_SetupInstallServicesFromInfSectionEx(void);
 const struct test winetest_testlist[] =
 {
     { "devclass", func_devclass },
+    { "RootDeviceRemove", func_RootDeviceRemove },
     { "SetupDiGetActualModelsSection", func_SetupDiGetActualModelsSection },
     { "SetupDiInstallClassExA", func_SetupDiInstallClassExA },
     { "SetupInstallServicesFromInfSectionEx", func_SetupInstallServicesFromInfSectionEx },

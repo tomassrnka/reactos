@@ -380,3 +380,29 @@ extern KSPIN_LOCK PopDopeGlobalLock;
 extern POP_POWER_ACTION PopAction;
 extern SYSTEM_POWER_CAPABILITIES PopCapabilities;
 
+//
+// Power requests
+//
+CODE_SEG("INIT")
+BOOLEAN
+NTAPI
+PopInitializePowerRequests(VOID);
+
+NTSTATUS
+NTAPI
+PopCreatePowerRequest(
+    _Out_writes_bytes_(OutputBufferLength) PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _In_ KPROCESSOR_MODE PreviousMode);
+
+NTSTATUS
+NTAPI
+PopPowerRequestAction(
+    _In_reads_bytes_(InputBufferLength) PVOID InputBuffer,
+    _In_ ULONG InputBufferLength,
+    _In_ KPROCESSOR_MODE PreviousMode);
+
+EXECUTION_STATE
+NTAPI
+PopQueryPowerRequestState(VOID);
+

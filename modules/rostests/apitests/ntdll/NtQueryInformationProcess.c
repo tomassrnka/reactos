@@ -704,6 +704,241 @@ Test_ProcQueryAlignmentProbe(void)
     }
 }
 
+/* The process list, in a heap buffer that grows as needed */
+static
+PSYSTEM_PROCESS_INFORMATION
+QueryProcessList(VOID)
+{
+    PVOID Buffer;
+    ULONG Size = 0x40000, Length, Try;
+    NTSTATUS Status;
+
+    for (Try = 0; Try < 8; Try++)
+    {
+        Buffer = HeapAlloc(GetProcessHeap(), 0, Size);
+        if (!Buffer)
+            break;
+        Length = 0;
+        Status = NtQuerySystemInformation(SystemProcessInformation, Buffer, Size, &Length);
+        if (NT_SUCCESS(Status))
+            return Buffer;
+        HeapFree(GetProcessHeap(), 0, Buffer);
+        if (Status != STATUS_INFO_LENGTH_MISMATCH)
+        {
+            ok_hex(Status, STATUS_SUCCESS);
+            return NULL;
+        }
+        Size = max(Size * 2, Length + 0x10000);
+    }
+    ok(FALSE, "Cannot query the process list\n");
+    return NULL;
+}
+
+typedef struct _PRIVATE_COMMIT
+{
+    /* ProcessVmCounters with a VM_COUNTERS_EX */
+    SIZE_T PagefileUsage;
+    SIZE_T PeakPagefileUsage;
+    SIZE_T PrivateUsage;
+    /* The entry of the current process in SystemProcessInformation */
+    SIZE_T SpiPagefileUsage;
+    SIZE_T SpiPeakPagefileUsage;
+    SIZE_T SpiPrivatePageCount;
+} PRIVATE_COMMIT, *PPRIVATE_COMMIT;
+
+static BOOL IsWow64;
+
+/* Read the private commit charge of the current process through both queries */
+static
+BOOLEAN
+QueryPrivateCommit(
+    _Out_ PPRIVATE_COMMIT Commit,
+    _In_ PCSTR What)
+{
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
+    VM_COUNTERS_EX Counters, ShortCounters;
+    PSYSTEM_PROCESS_INFORMATION List, ProcessInfo;
+    ULONG Length, Try;
+
+    for (Try = 0; Try < 8; Try++)
+    {
+        /* Allocated before the counters are read, so that the buffer is in both */
+        List = QueryProcessList();
+        if (!List)
+            return FALSE;
+
+        RtlFillMemory(&Counters, sizeof(Counters), 0x55);
+        Length = 0x55555555;
+        Status = NtQueryInformationProcess(NtCurrentProcess(), ProcessVmCounters, &Counters, sizeof(Counters), &Length);
+        ok_hex(Status, STATUS_SUCCESS);
+        ok_dec(Length, sizeof(Counters));
+
+        /* VM_COUNTERS has no PrivateUsage, and nothing is written after it */
+        RtlFillMemory(&ShortCounters, sizeof(ShortCounters), 0x55);
+        Length = 0x55555555;
+        Status = NtQueryInformationProcess(NtCurrentProcess(), ProcessVmCounters, &ShortCounters, sizeof(VM_COUNTERS), &Length);
+        ok_hex(Status, STATUS_SUCCESS);
+        ok_dec(Length, sizeof(VM_COUNTERS));
+        ok(ShortCounters.PrivateUsage == (SIZE_T)0x5555555555555555ULL, "%s: PrivateUsage written: %Iu\n",
+           What, ShortCounters.PrivateUsage);
+        ok(ShortCounters.PagefileUsage + 1024 * 1024 > Counters.PagefileUsage &&
+           ShortCounters.PagefileUsage < Counters.PagefileUsage + 1024 * 1024,
+           "%s: VM_COUNTERS PagefileUsage %Iu, VM_COUNTERS_EX %Iu\n", What, ShortCounters.PagefileUsage, Counters.PagefileUsage);
+
+        /* A new process or thread may have grown the list meanwhile; then sample again */
+        Status = NtQuerySystemInformation(SystemProcessInformation, List, (ULONG)HeapSize(GetProcessHeap(), 0, List), &Length);
+        if (Status != STATUS_INFO_LENGTH_MISMATCH)
+            break;
+        HeapFree(GetProcessHeap(), 0, List);
+    }
+    ok_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+    {
+        if (Status != STATUS_INFO_LENGTH_MISMATCH)
+            HeapFree(GetProcessHeap(), 0, List);
+        return FALSE;
+    }
+
+    for (ProcessInfo = List; ; )
+    {
+        if (ProcessInfo->UniqueProcessId == NtCurrentTeb()->ClientId.UniqueProcess)
+            break;
+        if (ProcessInfo->NextEntryOffset == 0)
+        {
+            ok(FALSE, "%s: the current process is not in the process list\n", What);
+            HeapFree(GetProcessHeap(), 0, List);
+            return FALSE;
+        }
+        ProcessInfo = (PSYSTEM_PROCESS_INFORMATION)((PUCHAR)ProcessInfo + ProcessInfo->NextEntryOffset);
+    }
+    Commit->PagefileUsage = Counters.PagefileUsage;
+    Commit->PeakPagefileUsage = Counters.PeakPagefileUsage;
+    Commit->PrivateUsage = Counters.PrivateUsage;
+    Commit->SpiPagefileUsage = ProcessInfo->PagefileUsage;
+    Commit->SpiPeakPagefileUsage = ProcessInfo->PeakPagefileUsage;
+    Commit->SpiPrivatePageCount = ProcessInfo->PrivatePageCount;
+    HeapFree(GetProcessHeap(), 0, List);
+
+    /* The fields of one query are one value */
+    ok(Commit->PrivateUsage == Commit->PagefileUsage, "%s: PrivateUsage %Iu, PagefileUsage %Iu\n",
+       What, Commit->PrivateUsage, Commit->PagefileUsage);
+    ok(Commit->PeakPagefileUsage >= Commit->PagefileUsage, "%s: PeakPagefileUsage %Iu, PagefileUsage %Iu\n",
+       What, Commit->PeakPagefileUsage, Commit->PagefileUsage);
+    ok(Commit->SpiPrivatePageCount == Commit->SpiPagefileUsage, "%s: SystemProcessInformation PrivatePageCount %Iu, PagefileUsage %Iu\n",
+       What, Commit->SpiPrivatePageCount, Commit->SpiPagefileUsage);
+    ok(Commit->SpiPeakPagefileUsage >= Commit->SpiPagefileUsage, "%s: SystemProcessInformation PeakPagefileUsage %Iu, PagefileUsage %Iu\n",
+       What, Commit->SpiPeakPagefileUsage, Commit->SpiPagefileUsage);
+
+    /* Both queries report the same charge, give or take what another thread commits meanwhile.
+       Under WOW64 they differ by a constant amount. */
+    if (!IsWow64)
+    {
+        ok(Commit->SpiPagefileUsage + 1024 * 1024 > Commit->PagefileUsage &&
+           Commit->SpiPagefileUsage < Commit->PagefileUsage + 1024 * 1024,
+           "%s: SystemProcessInformation PagefileUsage %Iu, ProcessVmCounters %Iu\n",
+           What, Commit->SpiPagefileUsage, Commit->PagefileUsage);
+    }
+    return TRUE;
+}
+
+/* The charge must have changed by Size, give or take 1 MB (Windows also charges page tables,
+   and other threads of the process may commit or free memory meanwhile) */
+#define ok_delta(Before, After, Size, What) \
+    ok((SSIZE_T)((After) - (Before)) > (SSIZE_T)(Size) - 1024 * 1024 && \
+       (SSIZE_T)((After) - (Before)) < (SSIZE_T)(Size) + 1024 * 1024, \
+       "%s: the charge changed by %Id bytes, expected %Id\n", What, (SSIZE_T)((After) - (Before)), (SSIZE_T)(Size))
+
+/* Both queries must have changed by Size */
+#define ok_commit_delta(Before, After, Size, What) \
+    do { \
+        ok_delta((Before).PrivateUsage, (After).PrivateUsage, Size, What); \
+        ok_delta((Before).SpiPagefileUsage, (After).SpiPagefileUsage, Size, What " (SystemProcessInformation)"); \
+    } while (0)
+
+static
+void
+Test_ProcessVmCounters(void)
+{
+    NTSTATUS Status;
+    PVOID Committed = NULL, Reserved = NULL;
+    SIZE_T Size;
+    PRIVATE_COMMIT Start, Previous, Commit;
+    const SIZE_T Mb = 1024 * 1024;
+
+    if (!IsWow64Process(GetCurrentProcess(), &IsWow64))
+        IsWow64 = FALSE;
+
+    /* The charge is in bytes */
+    if (!QueryPrivateCommit(&Start, "start"))
+        return;
+    ok(Start.PrivateUsage >= 64 * 1024, "PrivateUsage %Iu is less than 64 KB\n", Start.PrivateUsage);
+    ok((Start.PrivateUsage % PAGE_SIZE) == 0, "PrivateUsage %Iu is not a multiple of the page size\n", Start.PrivateUsage);
+    ok((Start.SpiPagefileUsage % PAGE_SIZE) == 0, "SystemProcessInformation PagefileUsage %Iu is not a multiple of the page size\n",
+       Start.SpiPagefileUsage);
+
+    /* A committed reservation is charged in full, before it is touched */
+    Size = 16 * Mb;
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Committed, 0, &Size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status) || !QueryPrivateCommit(&Commit, "16 MB reserved and committed"))
+        goto Cleanup;
+    ok_commit_delta(Start, Commit, 16 * Mb, "16 MB reserved and committed");
+    Previous = Commit;
+
+    /* A reservation alone is not charged (page tables aside) */
+    Size = 16 * Mb;
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Reserved, 0, &Size, MEM_RESERVE, PAGE_READWRITE);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status) || !QueryPrivateCommit(&Commit, "16 MB reserved"))
+        goto Cleanup;
+    ok_commit_delta(Previous, Commit, 0, "16 MB reserved");
+    Previous = Commit;
+
+    /* Committing part of it charges that part */
+    Size = 8 * Mb;
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Reserved, 0, &Size, MEM_COMMIT, PAGE_READWRITE);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status) || !QueryPrivateCommit(&Commit, "8 MB committed"))
+        goto Cleanup;
+    ok_commit_delta(Previous, Commit, 8 * Mb, "8 MB committed");
+    Previous = Commit;
+
+    /* Decommitting returns the charge */
+    Size = 4 * Mb;
+    Status = NtFreeVirtualMemory(NtCurrentProcess(), &Reserved, &Size, MEM_DECOMMIT);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status) || !QueryPrivateCommit(&Commit, "4 MB decommitted"))
+        goto Cleanup;
+    ok_commit_delta(Previous, Commit, -(SSIZE_T)(4 * Mb), "4 MB decommitted");
+
+    /* Releasing both returns to the start; the peak stays */
+    Size = 0;
+    Status = NtFreeVirtualMemory(NtCurrentProcess(), &Reserved, &Size, MEM_RELEASE);
+    ok_hex(Status, STATUS_SUCCESS);
+    Reserved = NULL;
+    Size = 0;
+    Status = NtFreeVirtualMemory(NtCurrentProcess(), &Committed, &Size, MEM_RELEASE);
+    ok_hex(Status, STATUS_SUCCESS);
+    Committed = NULL;
+    if (QueryPrivateCommit(&Commit, "both released"))
+    {
+        ok_commit_delta(Start, Commit, 0, "both released");
+        ok(Commit.PeakPagefileUsage >= Start.PagefileUsage + 23 * Mb, "PeakPagefileUsage %Iu, expected at least %Iu\n",
+           Commit.PeakPagefileUsage, Start.PagefileUsage + 23 * Mb);
+        ok(Commit.SpiPeakPagefileUsage >= Start.SpiPagefileUsage + 23 * Mb,
+           "SystemProcessInformation PeakPagefileUsage %Iu, expected at least %Iu\n",
+           Commit.SpiPeakPagefileUsage, Start.SpiPagefileUsage + 23 * Mb);
+    }
+
+Cleanup:
+    Size = 0;
+    if (Reserved)
+        NtFreeVirtualMemory(NtCurrentProcess(), &Reserved, &Size, MEM_RELEASE);
+    Size = 0;
+    if (Committed)
+        NtFreeVirtualMemory(NtCurrentProcess(), &Committed, &Size, MEM_RELEASE);
+}
+
 START_TEST(NtQueryInformationProcess)
 {
     NTSTATUS Status;
@@ -721,4 +956,5 @@ START_TEST(NtQueryInformationProcess)
     Test_ProcessPriorityClassAlignment();
     Test_ProcessWx86Information();
     Test_ProcQueryAlignmentProbe();
+    Test_ProcessVmCounters();
 }

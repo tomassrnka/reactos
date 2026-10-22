@@ -972,7 +972,8 @@ pGetSecurityInfoCheck(SECURITY_INFORMATION SecurityInfo,
     if ((SecurityInfo & (OWNER_SECURITY_INFORMATION |
                          GROUP_SECURITY_INFORMATION |
                          DACL_SECURITY_INFORMATION |
-                         SACL_SECURITY_INFORMATION)) &&
+                         SACL_SECURITY_INFORMATION |
+                         LABEL_SECURITY_INFORMATION)) &&
         ppSecurityDescriptor == NULL)
     {
         /* if one of the SIDs or ACLs are present, the security descriptor
@@ -997,7 +998,8 @@ pGetSecurityInfoCheck(SECURITY_INFORMATION SecurityInfo,
         {
             *ppDacl = NULL;
         }
-        if ((SecurityInfo & SACL_SECURITY_INFORMATION) &&
+        /* A label comes in the SACL */
+        if ((SecurityInfo & (SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION)) &&
             ppSacl != NULL)
         {
             *ppSacl = NULL;
@@ -1006,7 +1008,8 @@ pGetSecurityInfoCheck(SECURITY_INFORMATION SecurityInfo,
         if (SecurityInfo & (OWNER_SECURITY_INFORMATION |
                             GROUP_SECURITY_INFORMATION |
                             DACL_SECURITY_INFORMATION |
-                            SACL_SECURITY_INFORMATION))
+                            SACL_SECURITY_INFORMATION |
+                            LABEL_SECURITY_INFORMATION))
         {
             *ppSecurityDescriptor = NULL;
         }
@@ -1099,7 +1102,8 @@ ProtectDacl:
         }
     }
 
-    if (SecurityInfo & SACL_SECURITY_INFORMATION)
+    /* A label comes in the SACL */
+    if (SecurityInfo & (SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION))
     {
         if (pSacl != NULL)
         {
@@ -1120,7 +1124,7 @@ ProtectDacl:
                 return GetLastError();
             }
         }
-        else
+        else if (SecurityInfo & SACL_SECURITY_INFORMATION)
         {
 ProtectSacl:
             /* protect the SACL from being modified by inheritable ACEs */

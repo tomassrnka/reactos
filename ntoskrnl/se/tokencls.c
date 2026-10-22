@@ -55,6 +55,28 @@ static const INFORMATION_CLASS_INFO SeTokenInformationClass[] = {
     IQS_SAME(TOKEN_AUDIT_POLICY_INFORMATION, ULONG, ICIF_SET | ICIF_SET_SIZE_VARIABLE),
     /* TokenOrigin */
     IQS_SAME(TOKEN_ORIGIN, ULONG, ICIF_QUERY | ICIF_SET),
+    /* TokenElevationType */
+    IQS_NONE,
+    /* TokenLinkedToken */
+    IQS_NONE,
+    /* TokenElevation */
+    IQS_NONE,
+    /* TokenHasRestrictions */
+    IQS_NONE,
+    /* TokenAccessInformation */
+    IQS_NONE,
+    /* TokenVirtualizationAllowed */
+    IQS_NONE,
+    /* TokenVirtualizationEnabled */
+    IQS_NONE,
+    /* TokenIntegrityLevel */
+    IQS_SAME(TOKEN_MANDATORY_LABEL, ULONG, ICIF_QUERY | ICIF_SET | ICIF_SIZE_VARIABLE),
+    /* TokenUIAccess */
+    IQS_NONE,
+    /* TokenMandatoryPolicy */
+    IQS_NONE,
+    /* TokenLogonSid */
+    IQS_SAME(TOKEN_GROUPS, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
 };
 
 /* PUBLIC FUNCTIONS *****************************************************************/
@@ -150,10 +172,10 @@ SeQueryInformationToken(
             PSID Sid;
 
             DPRINT("SeQueryInformationToken(TokenGroups)\n");
-            RequiredLength = sizeof(tg->GroupCount) +
+            RequiredLength = FIELD_OFFSET(TOKEN_GROUPS, Groups) +
                 RtlLengthSidAndAttributes(Token->UserAndGroupCount - 1, &Token->UserAndGroups[1]);
 
-            SidLen = RequiredLength - sizeof(tg->GroupCount) -
+            SidLen = RequiredLength - FIELD_OFFSET(TOKEN_GROUPS, Groups) -
                 ((Token->UserAndGroupCount - 1) * sizeof(SID_AND_ATTRIBUTES));
 
             /* Allocate the output buffer */
@@ -164,7 +186,7 @@ SeQueryInformationToken(
                 break;
             }
 
-            Sid = (PSID)((ULONG_PTR)tg + sizeof(tg->GroupCount) +
+            Sid = (PSID)((ULONG_PTR)tg + FIELD_OFFSET(TOKEN_GROUPS, Groups) +
                          ((Token->UserAndGroupCount - 1) * sizeof(SID_AND_ATTRIBUTES)));
 
             tg->GroupCount = Token->UserAndGroupCount - 1;
@@ -562,16 +584,16 @@ NtQueryInformationToken(
                 PTOKEN_GROUPS tg = (PTOKEN_GROUPS)TokenInformation;
 
                 DPRINT("NtQueryInformationToken(TokenGroups)\n");
-                RequiredLength = sizeof(tg->GroupCount) +
+                RequiredLength = FIELD_OFFSET(TOKEN_GROUPS, Groups) +
                     RtlLengthSidAndAttributes(Token->UserAndGroupCount - 1, &Token->UserAndGroups[1]);
 
                 _SEH2_TRY
                 {
                     if (TokenInformationLength >= RequiredLength)
                     {
-                        ULONG SidLen = RequiredLength - sizeof(tg->GroupCount) -
+                        ULONG SidLen = RequiredLength - FIELD_OFFSET(TOKEN_GROUPS, Groups) -
                             ((Token->UserAndGroupCount - 1) * sizeof(SID_AND_ATTRIBUTES));
-                        PSID Sid = (PSID_AND_ATTRIBUTES)((ULONG_PTR)tg + sizeof(tg->GroupCount) +
+                        PSID Sid = (PSID_AND_ATTRIBUTES)((ULONG_PTR)tg + FIELD_OFFSET(TOKEN_GROUPS, Groups) +
                                                          ((Token->UserAndGroupCount - 1) * sizeof(SID_AND_ATTRIBUTES)));
 
                         tg->GroupCount = Token->UserAndGroupCount - 1;
@@ -988,16 +1010,16 @@ NtQueryInformationToken(
                 PTOKEN_GROUPS tg = (PTOKEN_GROUPS)TokenInformation;
 
                 DPRINT("NtQueryInformationToken(TokenRestrictedSids)\n");
-                RequiredLength = sizeof(tg->GroupCount) +
+                RequiredLength = FIELD_OFFSET(TOKEN_GROUPS, Groups) +
                 RtlLengthSidAndAttributes(Token->RestrictedSidCount, Token->RestrictedSids);
 
                 _SEH2_TRY
                 {
                     if (TokenInformationLength >= RequiredLength)
                     {
-                        ULONG SidLen = RequiredLength - sizeof(tg->GroupCount) -
+                        ULONG SidLen = RequiredLength - FIELD_OFFSET(TOKEN_GROUPS, Groups) -
                             (Token->RestrictedSidCount * sizeof(SID_AND_ATTRIBUTES));
-                        PSID Sid = (PSID)((ULONG_PTR)tg + sizeof(tg->GroupCount) +
+                        PSID Sid = (PSID)((ULONG_PTR)tg + FIELD_OFFSET(TOKEN_GROUPS, Groups) +
                                           (Token->RestrictedSidCount * sizeof(SID_AND_ATTRIBUTES)));
 
                         tg->GroupCount = Token->RestrictedSidCount;
@@ -1068,6 +1090,95 @@ NtQueryInformationToken(
                     }
                     _SEH2_END;
                 }
+
+                break;
+            }
+
+            case TokenIntegrityLevel:
+            {
+                PTOKEN_MANDATORY_LABEL Label = (PTOKEN_MANDATORY_LABEL)TokenInformation;
+                PSID LabelSid = (PSID)(Label + 1);
+
+                DPRINT("NtQueryInformationToken(TokenIntegrityLevel)\n");
+
+                RequiredLength = sizeof(TOKEN_MANDATORY_LABEL) + SEP_MANDATORY_LABEL_SID_LENGTH;
+
+                _SEH2_TRY
+                {
+                    if (TokenInformationLength >= RequiredLength)
+                    {
+                        /* The SID goes right after the structure; never read the pointer back from the caller's buffer */
+                        Label->Label.Sid = LabelSid;
+                        Label->Label.Attributes = SE_GROUP_INTEGRITY | SE_GROUP_INTEGRITY_ENABLED;
+                        SepInitializeMandatoryLabelSid(LabelSid, Token->IntegrityLevel);
+                    }
+                    else
+                    {
+                        Status = STATUS_BUFFER_TOO_SMALL;
+                    }
+
+                    *ReturnLength = RequiredLength;
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    Status = _SEH2_GetExceptionCode();
+                }
+                _SEH2_END;
+
+                break;
+            }
+
+            case TokenLogonSid:
+            {
+                PTOKEN_GROUPS tg = (PTOKEN_GROUPS)TokenInformation;
+                PSID_AND_ATTRIBUTES LogonGroup = NULL;
+                ULONG i;
+
+                DPRINT("NtQueryInformationToken(TokenLogonSid)\n");
+
+                /* The first group marked as the logon SID; a token without one has nothing to report */
+                for (i = 1; i < Token->UserAndGroupCount; i++)
+                {
+                    if ((Token->UserAndGroups[i].Attributes & SE_GROUP_LOGON_ID) == SE_GROUP_LOGON_ID)
+                    {
+                        LogonGroup = &Token->UserAndGroups[i];
+                        break;
+                    }
+                }
+
+                if (!LogonGroup)
+                {
+                    Status = STATUS_NOT_FOUND;
+                    break;
+                }
+
+                RequiredLength = FIELD_OFFSET(TOKEN_GROUPS, Groups[1]) + RtlLengthSid(LogonGroup->Sid);
+
+                _SEH2_TRY
+                {
+                    /* Windows stores the length first; a result sharing its storage wins */
+                    *ReturnLength = RequiredLength;
+                    if (TokenInformationLength >= RequiredLength)
+                    {
+                        tg->GroupCount = 1;
+                        Status = RtlCopySidAndAttributesArray(1,
+                                                              LogonGroup,
+                                                              RequiredLength - FIELD_OFFSET(TOKEN_GROUPS, Groups[1]),
+                                                              &tg->Groups[0],
+                                                              (PSID)&tg->Groups[1],
+                                                              &Unused.PSid,
+                                                              &Unused.Ulong);
+                    }
+                    else
+                    {
+                        Status = STATUS_BUFFER_TOO_SMALL;
+                    }
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    Status = _SEH2_GetExceptionCode();
+                }
+                _SEH2_END;
 
                 break;
             }
@@ -1502,6 +1613,70 @@ NtSetInformationToken(
                 /* Unlock the token */
                 SepReleaseTokenLock(Token);
 
+                break;
+            }
+
+            case TokenIntegrityLevel:
+            {
+                ULONG LabelSid[(FIELD_OFFSET(SID, SubAuthority[1]) + sizeof(ULONG) - 1) / sizeof(ULONG)];
+                PISID InputSid;
+                BOOLEAN HasTcb = FALSE;
+                ULONG Rid, Level, i;
+
+                if (TokenInformationLength < sizeof(TOKEN_MANDATORY_LABEL))
+                {
+                    Status = STATUS_INFO_LENGTH_MISMATCH;
+                    break;
+                }
+
+                /* A mandatory label SID has one sub-authority: capture exactly that much */
+                _SEH2_TRY
+                {
+                    InputSid = ((PTOKEN_MANDATORY_LABEL)TokenInformation)->Label.Sid;
+                    if (PreviousMode != KernelMode)
+                        ProbeForRead(InputSid, SEP_MANDATORY_LABEL_SID_LENGTH, sizeof(UCHAR));
+                    RtlCopyMemory(LabelSid, InputSid, SEP_MANDATORY_LABEL_SID_LENGTH);
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    Status = _SEH2_GetExceptionCode();
+                    _SEH2_YIELD(goto Cleanup);
+                }
+                _SEH2_END;
+
+                if (!SepIsMandatoryLabelSid((PSID)LabelSid, &Rid))
+                {
+                    Status = STATUS_INVALID_PARAMETER;
+                    break;
+                }
+
+                /* A token can be lowered freely; raising it needs the TCB privilege, checked before the token is locked */
+                SepAcquireTokenLockShared(Token);
+                Level = Token->IntegrityLevel;
+                SepReleaseTokenLock(Token);
+                if (Rid > Level)
+                    HasTcb = SeSinglePrivilegeCheck(SeTcbPrivilege, PreviousMode);
+
+                SepAcquireTokenLockExclusive(Token);
+                if (Rid > Token->IntegrityLevel && !HasTcb)
+                {
+                    Status = STATUS_PRIVILEGE_NOT_HELD;
+                }
+                else
+                {
+                    /* An integrity group the token was created with follows the level (same size SID, changed in place) */
+                    Token->IntegrityLevel = Rid;
+                    for (i = 1; i < Token->UserAndGroupCount; i++)
+                    {
+                        if ((Token->UserAndGroups[i].Attributes & SE_GROUP_INTEGRITY) &&
+                            SepIsMandatoryLabelSid(Token->UserAndGroups[i].Sid, NULL))
+                        {
+                            *RtlSubAuthoritySid(Token->UserAndGroups[i].Sid, 0) = Rid;
+                        }
+                    }
+                    ExAllocateLocallyUniqueId(&Token->ModifiedId);
+                }
+                SepReleaseTokenLock(Token);
                 break;
             }
 

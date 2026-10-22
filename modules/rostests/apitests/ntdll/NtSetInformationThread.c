@@ -127,8 +127,54 @@ Test_ThreadSetAlignmentProbe(void)
     }
 }
 
+static
+void
+Test_ThreadZeroTlsCell(void)
+{
+    NTSTATUS Status;
+    ULONG TlsIndex;
+    PVOID *SavedSlots;
+    PVOID GuardPage;
+    PTEB Teb = NtCurrentTeb();
+
+    /*
+     * Install a committed-but-PAGE_NOACCESS user pointer as the current
+     * thread's TlsExpansionSlots. Index TLS_MINIMUM_AVAILABLE selects the
+     * first expansion slot. Without the kernel-side probe/SEH,
+     * ThreadZeroTlsCell dereferenced this user-controlled pointer and the
+     * resulting write faulted in the kernel (bugcheck / pointer-sized kernel
+     * zero-write). With the fix the slot is probed under SEH, so the call
+     * returns a status instead of taking the machine down.
+     */
+    GuardPage = VirtualAlloc(NULL, PAGE_SIZE, MEM_RESERVE | MEM_COMMIT, PAGE_NOACCESS);
+    if (GuardPage == NULL)
+    {
+        skip("Failed to reserve guard page for ThreadZeroTlsCell test\n");
+        return;
+    }
+
+    SavedSlots = Teb->TlsExpansionSlots;
+    Teb->TlsExpansionSlots = (PVOID *)GuardPage;
+
+    TlsIndex = TLS_MINIMUM_AVAILABLE; /* first expansion slot */
+    Status = NtSetInformationThread(GetCurrentThread(),
+                                    ThreadZeroTlsCell,
+                                    &TlsIndex,
+                                    sizeof(ULONG));
+
+    /* Restore the real vector before asserting (reaching here means the
+       kernel did not fault, i.e. the probe/SEH fix is present). */
+    Teb->TlsExpansionSlots = SavedSlots;
+    VirtualFree(GuardPage, 0, MEM_RELEASE);
+
+    ok(Status == STATUS_ACCESS_VIOLATION || Status == STATUS_SUCCESS,
+       "ThreadZeroTlsCell with a bogus expansion vector returned 0x%lx\n",
+       (unsigned long)Status);
+}
+
 START_TEST(NtSetInformationThread)
 {
     Test_ThreadPriorityClass();
     Test_ThreadSetAlignmentProbe();
+    Test_ThreadZeroTlsCell();
 }

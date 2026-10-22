@@ -125,25 +125,33 @@ PspWriteTebImpersonationInfo(IN PETHREAD Thread,
     /* Sanity check */
     ASSERT(CurrentThread == PsGetCurrentThread());
 
+    /* Another thread deletes its TEB only after its rundown protection is released */
+    if ((Thread != CurrentThread) &&
+        !ExAcquireRundownProtection(&Thread->RundownProtect))
+    {
+        /* It is exiting, there is no TEB to update */
+        return STATUS_SUCCESS;
+    }
+
     /* Get process and TEB */
     Process = Thread->ThreadsProcess;
     Teb = Thread->Tcb.Teb;
     if (Teb)
     {
-        /* Check if we're not in the right process */
-        if (Thread->Tcb.ApcState.Process != &Process->Pcb)
+        /* The TEB is only mapped in the thread's own process */
+        if (PsGetCurrentProcess() != Process)
         {
             /* Attach to the process */
             KeStackAttachProcess(&Process->Pcb, &ApcState);
             Attached = TRUE;
         }
 
-        /* Check if we're in a different thread or acquire rundown */
-        if ((Thread == CurrentThread) ||
-            (ExAcquireRundownProtection(&Thread->RundownProtect)))
+        /* Check if the thread is impersonating */
+        IsImpersonating = (BOOLEAN)Thread->ActiveImpersonationInfo;
+
+        /* User mode may have freed or reprotected the TEB page */
+        _SEH2_TRY
         {
-            /* Check if the thread is impersonating */
-            IsImpersonating = (BOOLEAN)Thread->ActiveImpersonationInfo;
             if (IsImpersonating)
             {
                 /* Set TEB data */
@@ -157,16 +165,21 @@ PspWriteTebImpersonationInfo(IN PETHREAD Thread,
                 Teb->IsImpersonating = 0;
             }
         }
-
-        /* Check if we're in a different thread */
-        if (Thread != CurrentThread)
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
         {
-            /* Release protection */
-            ExReleaseRundownProtection(&Thread->RundownProtect);
+            /* Nothing to update */
+            NOTHING;
         }
+        _SEH2_END;
 
         /* Detach */
         if (Attached) KeUnstackDetachProcess(&ApcState);
+    }
+
+    /* Release the protection we took for another thread */
+    if (Thread != CurrentThread)
+    {
+        ExReleaseRundownProtection(&Thread->RundownProtect);
     }
 
     /* Return to caller */
@@ -317,6 +330,7 @@ PspSetPrimaryToken(IN PEPROCESS Process,
                                        PROCESS_VM_READ |
                                        PROCESS_VM_WRITE |
                                        PROCESS_QUERY_INFORMATION |
+                                       PROCESS_QUERY_LIMITED_INFORMATION |
                                        PROCESS_TERMINATE |
                                        PROCESS_CREATE_THREAD |
                                        PROCESS_DUP_HANDLE |

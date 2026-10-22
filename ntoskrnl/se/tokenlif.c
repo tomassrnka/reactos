@@ -359,6 +359,9 @@ SepCreateToken(
         goto Quit;
     }
 
+    /* The level the token runs at; the token object is labelled with it when it gets its descriptor */
+    AccessToken->IntegrityLevel = SepComputeIntegrityLevel(AccessToken);
+
     /*
      * Now allocate the token's dynamic information area
      * and set the data. The dynamic part consists of two
@@ -551,6 +554,9 @@ SepDuplicateToken(
     AccessToken->ModifiedId = Token->ModifiedId;
 
     AccessToken->TokenFlags = Token->TokenFlags & ~TOKEN_SESSION_NOT_REFERENCED;
+
+    /* A duplicate runs at the same level; its object gets the default label of that level */
+    AccessToken->IntegrityLevel = Token->IntegrityLevel;
 
     /* Reference the logon session */
     Status = SepRmReferenceLogonSession(&AccessToken->AuthenticationId);
@@ -879,6 +885,8 @@ SepPerformTokenFiltering(
     ULONG PrimaryGroupIndex;
     ULONG RestrictedSidsInList;
     ULONG RestrictedSidsInToken;
+    PSID RestrictedSidsEnd;
+    ULONG RestrictedSidsRemaining;
     ULONG VariableLength, TotalSize;
     ULONG PrivsInToken, PrivsInList;
     ULONG GroupsInToken, GroupsInList;
@@ -992,6 +1000,9 @@ SepPerformTokenFiltering(
     /* Copy the mutable fields */
     AccessToken->SessionId = Token->SessionId;
     AccessToken->TokenFlags = Token->TokenFlags & ~TOKEN_SESSION_NOT_REFERENCED;
+
+    /* A filtered token runs at the same level; its object gets the default label of that level */
+    AccessToken->IntegrityLevel = Token->IntegrityLevel;
 
     /* Reference the logon session */
     Status = SepRmReferenceLogonSession(&AccessToken->AuthenticationId);
@@ -1135,9 +1146,22 @@ SepPerformTokenFiltering(
         EndMem = (PVOID)((ULONG_PTR)EndMem + RestrictedSidsLength);
         VariableLength -= RestrictedSidsLength;
 
-        RtlCopyMemory(AccessToken->RestrictedSids,
-                      RestrictedSidsIntoToken,
-                      AccessToken->RestrictedSidCount * sizeof(SID_AND_ATTRIBUTES));
+        /*
+         * Copy the SIDs themselves, not only the array: the caller's list
+         * (NtFilterToken's captured copy) is freed when the call returns.
+         */
+        Status = RtlCopySidAndAttributesArray(RestrictedSidsCount,
+                                              RestrictedSidsIntoToken,
+                                              RestrictedSidsLength - RestrictedSidsCount * sizeof(SID_AND_ATTRIBUTES),
+                                              AccessToken->RestrictedSids,
+                                              &AccessToken->RestrictedSids[RestrictedSidsCount],
+                                              &RestrictedSidsEnd,
+                                              &RestrictedSidsRemaining);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("SepPerformTokenFiltering(): Failed to copy the requested restricted SIDs (Status 0x%lx)\n", Status);
+            goto Quit;
+        }
 
         /*
          * As we've copied the restricted SIDs into

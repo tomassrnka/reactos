@@ -71,8 +71,9 @@ ObpDeallocateObject(IN PVOID Object)
         HeaderLocation = QuotaInfo;
     }
 
-    /* Decrease the total */
-    InterlockedDecrement((PLONG)&ObjectType->TotalNumberOfObjects);
+    /* Decrease the total (T32: per-processor) */
+    ObpBumpTypeCount(ObjectType->PerProcessorObjects,
+                     &ObjectType->TotalNumberOfObjects, -1);
 
     /* Check if we have create info */
     if (Header->Flags & OB_FLAG_CREATE_INFO)
@@ -855,14 +856,10 @@ ObpAllocateObject(IN POBJECT_CREATE_INFORMATION ObjectCreateInfo,
     /* Check if we have a type */
     if (ObjectType)
     {
-        /* Increase the number of objects of this type */
-        InterlockedIncrement((PLONG)&ObjectType->TotalNumberOfObjects);
-
-        /* Update the high water */
-        ObjectType->HighWaterNumberOfObjects = max(ObjectType->
-                                                   TotalNumberOfObjects,
-                                                   ObjectType->
-                                                   HighWaterNumberOfObjects);
+        /* Increase the number of objects of this type (T32: bump only this
+           processor; HighWater is computed lazily on query) */
+        ObpBumpTypeCount(ObjectType->PerProcessorObjects,
+                         &ObjectType->TotalNumberOfObjects, 1);
     }
 
     /* Return Header */
@@ -982,14 +979,21 @@ ObQueryTypeInfo(
         }
 
         /* Build the data */
-        ObjectTypeInfo->TotalNumberOfHandles =
-            ObjectType->TotalNumberOfHandles;
-        ObjectTypeInfo->TotalNumberOfObjects =
-            ObjectType->TotalNumberOfObjects;
-        ObjectTypeInfo->HighWaterNumberOfHandles =
-            ObjectType->HighWaterNumberOfHandles;
-        ObjectTypeInfo->HighWaterNumberOfObjects =
-            ObjectType->HighWaterNumberOfObjects;
+        /* T32: totals are base + sum(per-processor); refresh HighWater here */
+        {
+            ULONG CurObjects = ObpSumTypeCount(ObjectType->PerProcessorObjects,
+                                               ObjectType->TotalNumberOfObjects);
+            ULONG CurHandles = ObpSumTypeCount(ObjectType->PerProcessorHandles,
+                                               ObjectType->TotalNumberOfHandles);
+            if (CurObjects > ObjectType->HighWaterNumberOfObjects)
+                ObjectType->HighWaterNumberOfObjects = CurObjects;
+            if (CurHandles > ObjectType->HighWaterNumberOfHandles)
+                ObjectType->HighWaterNumberOfHandles = CurHandles;
+            ObjectTypeInfo->TotalNumberOfHandles = CurHandles;
+            ObjectTypeInfo->TotalNumberOfObjects = CurObjects;
+            ObjectTypeInfo->HighWaterNumberOfHandles = ObjectType->HighWaterNumberOfHandles;
+            ObjectTypeInfo->HighWaterNumberOfObjects = ObjectType->HighWaterNumberOfObjects;
+        }
         ObjectTypeInfo->PoolType =
             ObjectType->TypeInfo.PoolType;
         ObjectTypeInfo->DefaultNonPagedPoolCharge =
@@ -1248,6 +1252,17 @@ ObCreateObjectType(IN PUNICODE_STRING TypeName,
     LocalObjectType->HighWaterNumberOfObjects =
     LocalObjectType->HighWaterNumberOfHandles = 0;
 
+    /* T32: allocate per-processor object/handle counter arrays (pool is up by
+       the time object types are created; on failure the base counters are used). */
+    LocalObjectType->PerProcessorObjects =
+        ExAllocatePoolWithTag(NonPagedPool, OBP_PERCPU_MAX * sizeof(OBP_PERCPU_COUNTER), 0x4F627054);
+    if (LocalObjectType->PerProcessorObjects)
+        RtlZeroMemory((PVOID)LocalObjectType->PerProcessorObjects, OBP_PERCPU_MAX * sizeof(OBP_PERCPU_COUNTER));
+    LocalObjectType->PerProcessorHandles =
+        ExAllocatePoolWithTag(NonPagedPool, OBP_PERCPU_MAX * sizeof(OBP_PERCPU_COUNTER), 0x4F627054);
+    if (LocalObjectType->PerProcessorHandles)
+        RtlZeroMemory((PVOID)LocalObjectType->PerProcessorHandles, OBP_PERCPU_MAX * sizeof(OBP_PERCPU_COUNTER));
+
     /* Check if this is the first Object Type */
     if (!ObpTypeObjectType)
     {
@@ -1367,7 +1382,8 @@ ObCreateObjectType(IN PUNICODE_STRING TypeName,
     }
 
     /* Set the index and the entry into the object type array */
-    LocalObjectType->Index = ObpTypeObjectType->TotalNumberOfObjects;
+    LocalObjectType->Index = ObpSumTypeCount(ObpTypeObjectType->PerProcessorObjects,
+                                             ObpTypeObjectType->TotalNumberOfObjects);
 
     ASSERT(LocalObjectType->Index != 0);
 

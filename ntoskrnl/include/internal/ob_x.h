@@ -17,6 +17,52 @@
 
 #define OBP_NAME_LOOKASIDE_MAX_SIZE 248
 
+/* T32: per-processor type-counter helpers.  The create/close hot path bumps
+   only the current processor slot (no global cache-line bounce); the rare read
+   paths sum base + per-processor. */
+#define OBP_PERCPU_MAX 64
+
+/* Each processor counter sits on its own cache line: per-CPU alone would still
+   false-share (16 LONGs per 64-byte line), so pad to a full line. */
+typedef struct _OBP_PERCPU_COUNTER
+{
+    volatile LONG Value;
+    UCHAR Pad[64 - sizeof(LONG)];
+} OBP_PERCPU_COUNTER, *POBP_PERCPU_COUNTER;
+
+FORCEINLINE
+VOID
+ObpBumpTypeCount(IN PVOID PerProcessor,
+                 IN volatile ULONG *FallbackBase,
+                 IN LONG Delta)
+{
+    POBP_PERCPU_COUNTER Array = (POBP_PERCPU_COUNTER)PerProcessor;
+    ULONG Cpu = KeGetCurrentProcessorNumber();
+    if ((Array != NULL) && (Cpu < OBP_PERCPU_MAX))
+    {
+        InterlockedExchangeAdd((PLONG)&Array[Cpu].Value, Delta);
+    }
+    else
+    {
+        InterlockedExchangeAdd((PLONG)FallbackBase, Delta);
+    }
+}
+
+FORCEINLINE
+ULONG
+ObpSumTypeCount(IN PVOID PerProcessor,
+                IN ULONG FallbackBase)
+{
+    POBP_PERCPU_COUNTER Array = (POBP_PERCPU_COUNTER)PerProcessor;
+    LONG Sum = (LONG)FallbackBase;
+    ULONG i;
+    if (Array != NULL)
+    {
+        for (i = 0; i < OBP_PERCPU_MAX; i++) Sum += Array[i].Value;
+    }
+    return (Sum < 0) ? 0 : (ULONG)Sum;
+}
+
 FORCEINLINE
 ULONG
 ObpValidateAttributes(IN ULONG Attributes,

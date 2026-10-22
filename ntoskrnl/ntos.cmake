@@ -199,6 +199,7 @@ list(APPEND SOURCE
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/thrdschd.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/time.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/timerobj.c
+    ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/tlbflush.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/wait.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/kse/kse.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/kse/ksedb.c
@@ -264,6 +265,7 @@ list(APPEND SOURCE
     ${REACTOS_SOURCE_DIR}/ntoskrnl/po/poshtdwn.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/po/povolume.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/po/power.c
+    ${REACTOS_SOURCE_DIR}/ntoskrnl/po/powreq.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ps/apphelp.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ps/debug.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ps/job.c
@@ -324,7 +326,6 @@ if(ARCH STREQUAL "i386")
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/i386/cpu.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/i386/context.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/i386/exp.c
-        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/i386/freeze.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/i386/irqobj.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/i386/kiinit.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/i386/ldt.c
@@ -336,6 +337,7 @@ if(ARCH STREQUAL "i386")
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/i386/v86vdm.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/x86x64/cacheinfo.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/x86x64/cpuinfo.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/x86x64/freeze.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/mm/i386/page.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/mm/i386/procsup.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/mm/ARM3/i386/init.c
@@ -357,7 +359,6 @@ elseif(ARCH STREQUAL "amd64")
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/amd64/context.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/amd64/cpu.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/amd64/except.c
-        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/amd64/freeze.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/amd64/interrupt.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/amd64/irql.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/amd64/kiinit.c
@@ -372,7 +373,8 @@ elseif(ARCH STREQUAL "amd64")
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/amd64/usercall.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/amd64/xstate.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/x86x64/cacheinfo.c
-        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/x86x64/cpuinfo.c)
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/x86x64/cpuinfo.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/x86x64/freeze.c)
 elseif(ARCH STREQUAL "arm")
     list(APPEND ASM_SOURCE
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/arm/ioport.s

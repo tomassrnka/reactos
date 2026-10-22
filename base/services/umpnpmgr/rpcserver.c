@@ -3965,8 +3965,20 @@ PNP_QueryRemove(
     Status = NtPlugPlayControl(PlugPlayControlQueryAndRemoveDevice,
                                &PlugPlayData,
                                sizeof(PlugPlayData));
-    if (!NT_SUCCESS(Status))
+    if (Status == STATUS_PLUGPLAY_QUERY_VETOED)
+    {
+        /* A device in the subtree refused the removal (e.g. a mounted volume
+         * with open handles). Report that as a veto, with the reason, and not
+         * as a generic failure, so callers can tell the user why. */
+        if (pVetoType != NULL)
+            *pVetoType = PlugPlayData.VetoType;
+
+        ret = CR_REMOVE_VETOED;
+    }
+    else if (!NT_SUCCESS(Status))
+    {
         ret = NtStatusToCrError(Status);
+    }
 
     return ret;
 }
@@ -4013,8 +4025,20 @@ PNP_RequestDeviceEject(
     Status = NtPlugPlayControl(PlugPlayControlQueryAndRemoveDevice,
                                &PlugPlayData,
                                sizeof(PlugPlayData));
-    if (!NT_SUCCESS(Status))
+    if (Status == STATUS_PLUGPLAY_QUERY_VETOED)
+    {
+        /* A device in the subtree refused the removal (e.g. a mounted volume
+         * with open handles). Report that as a veto, with the reason, and not
+         * as a generic failure, so callers can tell the user why. */
+        if (pVetoType != NULL)
+            *pVetoType = PlugPlayData.VetoType;
+
+        ret = CR_REMOVE_VETOED;
+    }
+    else if (!NT_SUCCESS(Status))
+    {
         ret = NtStatusToCrError(Status);
+    }
 
     return ret;
 }

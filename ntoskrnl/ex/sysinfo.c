@@ -827,7 +827,7 @@ QSI_DEF(SystemPerformanceInformation)
 QSI_DEF(SystemTimeOfDayInformation)
 {
     SYSTEM_TIMEOFDAY_INFORMATION Sti;
-    LARGE_INTEGER CurrentTime;
+    LARGE_INTEGER CurrentTime, LocalTime;
 
     /* Set amount of written information to 0 */
     *ReqSize = 0;
@@ -847,7 +847,9 @@ QSI_DEF(SystemTimeOfDayInformation)
     /* Fill local time structure */
     Sti.BootTime= KeBootTime;
     Sti.CurrentTime = CurrentTime;
-    Sti.TimeZoneBias.QuadPart = ExpTimeZoneBias.QuadPart;
+    /* One read of the bias, so that it cannot tear */
+    ExSystemTimeToLocalTime(&CurrentTime, &LocalTime);
+    Sti.TimeZoneBias.QuadPart = CurrentTime.QuadPart - LocalTime.QuadPart;
     Sti.TimeZoneId = ExpTimeZoneId;
     Sti.Reserved = 0;
 
@@ -890,7 +892,8 @@ ExpQuerySystemProcessInformation(
     PSYSTEM_PROCESS_INFORMATION SpiCurrent;
     PSYSTEM_THREAD_INFORMATION ThreadInfo;
     PSYSTEM_EXTENDED_THREAD_INFORMATION ThreadInfoEx;
-    PEPROCESS Process = NULL, SystemProcess;
+    _SEH2_VOLATILE PEPROCESS Process = NULL;
+    PEPROCESS SystemProcess;
     PETHREAD CurrentThread;
     ANSI_STRING ImageName;
     ULONG CurrentSize;
@@ -905,6 +908,16 @@ ExpQuerySystemProcessInformation(
     _SEH2_VOLATILE PUNICODE_STRING ProcessImageName = NULL;
     PWCHAR szSrc;
     BOOLEAN Overflow = FALSE;
+    SIZE_T CommitCharge;
+    ULONG NameBytes;
+    /* Kernel-side buffer the fallback image name is composed in.
+     * EPROCESS::ImageFileName is CHAR[16], so 16 WCHARs always suffice. */
+    WCHAR KernelImageName[sizeof(Process->ImageFileName)];
+    UNICODE_STRING KernelImageNameString;
+    PWCHAR DestImageName;
+    /* Set only while this function owns Process->ProcessLock, so that the
+     * exception handler knows whether it has to drop the lock. */
+    _SEH2_VOLATILE BOOLEAN ProcessLockHeld = FALSE;
 
     _SEH2_TRY
     {
@@ -935,6 +948,7 @@ ExpQuerySystemProcessInformation(
             /* Lock the Process */
             KeEnterCriticalRegion();
             ExAcquirePushLockShared(&Process->ProcessLock);
+            ProcessLockHeld = TRUE;
 
             if ((Process->ProcessExiting) &&
                 (Process->Pcb.Header.SignalState) &&
@@ -949,6 +963,7 @@ ExpQuerySystemProcessInformation(
                 /* Unlock the Process */
                 ExReleasePushLockShared(&Process->ProcessLock);
                 KeLeaveCriticalRegion();
+                ProcessLockHeld = FALSE;
                 goto Skip;
             }
 
@@ -963,7 +978,7 @@ ExpQuerySystemProcessInformation(
 
             // size of the structure for every process
             CurrentSize = sizeof(SYSTEM_PROCESS_INFORMATION) + ThreadInfoSize * ThreadsCount;
-            ImageNameLength = 0;
+            NameBytes = 0;
             Status = SeLocateProcessImageName(Process, &TempProcessImageName);
             ProcessImageName = TempProcessImageName;
             szSrc = NULL;
@@ -981,14 +996,21 @@ ExpQuerySystemProcessInformation(
                 }
                 else
                 {
-                    ImageNameLength += sizeof(WCHAR);
+                    NameBytes += sizeof(WCHAR);
                 }
               }
             }
-            if (!ImageNameLength && Process != PsIdleProcess)
+            if (!NameBytes && Process != PsIdleProcess)
             {
-              ImageNameLength = (USHORT)strlen(Process->ImageFileName) * sizeof(WCHAR);
+              NameBytes = (ULONG)strnlen(Process->ImageFileName,
+                                         sizeof(Process->ImageFileName)) * sizeof(WCHAR);
             }
+
+            /* Truncate so that the rounded up maximum length still fits in
+             * the USHORT fields of the UNICODE_STRING. */
+            if (NameBytes > (MAXUSHORT & ~7UL) - 8)
+                NameBytes = (MAXUSHORT & ~7UL) - 8;
+            ImageNameLength = (USHORT)NameBytes;
 
             /* Round up the image name length as NT does */
             if (ImageNameLength > 0)
@@ -1012,30 +1034,55 @@ ExpQuerySystemProcessInformation(
                 SpiCurrent->CreateTime = Process->CreateTime;
                 /* The cycles of the process' threads, as of their last context switch */
                 SpiCurrent->CycleTime = (ULONG64)InterlockedCompareExchange64((PLONG64)&Process->CycleTime, 0, 0);
-                SpiCurrent->ImageName.Length = ImageNameLength;
-                SpiCurrent->ImageName.MaximumLength = ImageNameMaximumLength;
-                SpiCurrent->ImageName.Buffer = (void*)(Current + CurrentSize);
 
-                /* Copy name to the end of the struct */
-                if(Process != PsIdleProcess)
+                /*
+                 * The UNICODE_STRING header lives in the caller's buffer, so
+                 * it is write-only for us: another thread can change it at any
+                 * time. Everything is composed from kernel-side values and
+                 * stored once; nothing is ever read back from SpiCurrent.
+                 */
+                DestImageName = (PWCHAR)(Current + CurrentSize);
+                if (Process != PsIdleProcess)
                 {
                     if (szSrc)
                     {
-                        RtlCopyMemory(SpiCurrent->ImageName.Buffer, szSrc, SpiCurrent->ImageName.Length);
+                        /* The source is kernel pool, the length a kernel local */
+                        RtlCopyMemory(DestImageName, szSrc, ImageNameLength);
                     }
                     else
                     {
+                        /* Compose the name in kernel memory, then copy it out */
                         RtlInitAnsiString(&ImageName, Process->ImageFileName);
-                        Status = RtlAnsiStringToUnicodeString(&SpiCurrent->ImageName, &ImageName, FALSE);
-                        if (!NT_SUCCESS(Status))
+                        ImageName.Length = (USHORT)(NameBytes / sizeof(WCHAR));
+                        KernelImageNameString.Buffer = KernelImageName;
+                        KernelImageNameString.Length = 0;
+                        KernelImageNameString.MaximumLength = sizeof(KernelImageName);
+                        Status = RtlAnsiStringToUnicodeString(&KernelImageNameString,
+                                                              &ImageName,
+                                                              FALSE);
+                        if (NT_SUCCESS(Status) &&
+                            KernelImageNameString.Length <= ImageNameLength)
                         {
-                            SpiCurrent->ImageName.Length = 0;
+                            ImageNameLength = KernelImageNameString.Length;
+                            RtlCopyMemory(DestImageName,
+                                          KernelImageName,
+                                          ImageNameLength);
+                        }
+                        else
+                        {
+                            ImageNameLength = 0;
                         }
                     }
+
+                    SpiCurrent->ImageName.Length = ImageNameLength;
+                    SpiCurrent->ImageName.MaximumLength = ImageNameMaximumLength;
+                    SpiCurrent->ImageName.Buffer = DestImageName;
                 }
                 else
                 {
-                    RtlInitUnicodeString(&SpiCurrent->ImageName, NULL);
+                    SpiCurrent->ImageName.Length = 0;
+                    SpiCurrent->ImageName.MaximumLength = 0;
+                    SpiCurrent->ImageName.Buffer = NULL;
                 }
 
                 SpiCurrent->BasePriority = Process->Pcb.BasePriority;
@@ -1055,9 +1102,11 @@ ExpQuerySystemProcessInformation(
                 SpiCurrent->QuotaPagedPoolUsage = Process->QuotaUsage[PsPagedPool];
                 SpiCurrent->QuotaPeakNonPagedPoolUsage = Process->QuotaPeak[PsNonPagedPool];
                 SpiCurrent->QuotaNonPagedPoolUsage = Process->QuotaUsage[PsNonPagedPool];
-                SpiCurrent->PagefileUsage = Process->QuotaUsage[PsPageFile];
-                SpiCurrent->PeakPagefileUsage = Process->QuotaPeak[PsPageFile];
-                SpiCurrent->PrivatePageCount = Process->CommitCharge;
+                /* The private commit charge, in bytes despite the field names */
+                CommitCharge = Process->CommitCharge;
+                SpiCurrent->PagefileUsage = CommitCharge << PAGE_SHIFT;
+                SpiCurrent->PeakPagefileUsage = Process->CommitChargePeak << PAGE_SHIFT;
+                SpiCurrent->PrivatePageCount = CommitCharge << PAGE_SHIFT;
 
                 /* Now do the threads */
                 ThreadInfo = (PSYSTEM_THREAD_INFORMATION)(SpiCurrent + 1);
@@ -1107,6 +1156,7 @@ ExpQuerySystemProcessInformation(
             /* Unlock the Process */
             ExReleasePushLockShared(&Process->ProcessLock);
             KeLeaveCriticalRegion();
+            ProcessLockHeld = FALSE;
 
             /* Handle idle process entry */
 Skip:
@@ -1130,7 +1180,19 @@ Skip:
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
-        if(Process != NULL)
+        /* A store to the user buffer faulted while the process was locked:
+         * drop the lock and leave the critical region, or the process could
+         * never be locked exclusively again and kernel APCs would stay
+         * disabled for this thread. */
+        if (ProcessLockHeld)
+        {
+            ExReleasePushLockShared(&Process->ProcessLock);
+            KeLeaveCriticalRegion();
+            ProcessLockHeld = FALSE;
+        }
+
+        /* The idle process is never referenced by PsGetNextProcess */
+        if (Process != NULL && Process != PsIdleProcess)
             ObDereferenceObject(Process);
         if (ProcessImageName)
         {
@@ -2098,6 +2160,8 @@ QSI_DEF(SystemLegacyDriverInformation)
 /* Class 44 - Current Time Zone Information */
 QSI_DEF(SystemCurrentTimeZoneInformation)
 {
+    RTL_TIME_ZONE_INFORMATION TimeZoneInformation;
+
     *ReqSize = sizeof(RTL_TIME_ZONE_INFORMATION);
 
     if (sizeof(RTL_TIME_ZONE_INFORMATION) != Size)
@@ -2106,8 +2170,9 @@ QSI_DEF(SystemCurrentTimeZoneInformation)
     }
 
     /* Copy the time zone information struct */
+    ExpQueryTimeZoneInformation(&TimeZoneInformation);
     memcpy(Buffer,
-           &ExpTimeZoneInfo,
+           &TimeZoneInformation,
            sizeof(RTL_TIME_ZONE_INFORMATION));
 
     return STATUS_SUCCESS;

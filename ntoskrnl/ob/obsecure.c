@@ -567,6 +567,44 @@ ObAssignSecurity(IN PACCESS_STATE AccessState,
                               PagedPool);
     if (!NT_SUCCESS(Status)) return Status;
 
+    /* A token object is labelled with the token's integrity level */
+    if (Type == SeTokenObjectType)
+    {
+        Status = SeAssignObjectLabel(Object,
+                                     SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+                                     &NewDescriptor,
+                                     &Type->TypeInfo.GenericMapping);
+        if (!NT_SUCCESS(Status))
+        {
+            SeDeassignSecurity(&NewDescriptor);
+            return Status;
+        }
+    }
+
+    else if (Type == PsProcessType || Type == PsThreadType)
+    {
+        /*
+         * A process is labelled from its own token. A thread is labelled from
+         * the owning process's token and its creator's primary token, also
+         * when the creator impersonates.
+         */
+        PEPROCESS Process = (Type == PsProcessType) ?
+                            Object : ((PETHREAD)Object)->ThreadsProcess;
+        PACCESS_TOKEN Token = PsReferencePrimaryToken(Process);
+
+        Status = SeAssignProcessObjectLabel(Token,
+                                            (Type == PsProcessType) ? Token :
+                                            AccessState->SubjectSecurityContext.PrimaryToken,
+                                            &NewDescriptor,
+                                            &Type->TypeInfo.GenericMapping);
+        PsDereferencePrimaryToken(Token);
+        if (!NT_SUCCESS(Status))
+        {
+            SeDeassignSecurity(&NewDescriptor);
+            return Status;
+        }
+    }
+
     /* Call the security method */
     ObpCalloutStart(&CalloutIrql);
     Status = Type->TypeInfo.SecurityProcedure(Object,
@@ -962,10 +1000,18 @@ NtSetSecurityObject(IN HANDLE Handle,
         }
         else
         {
+            /* A mandatory label above the caller's own level needs SeRelabelPrivilege */
+            Status = STATUS_SUCCESS;
+            if (SecurityInformation & LABEL_SECURITY_INFORMATION)
+                Status = SeCheckLabelChange(CapturedDescriptor, PreviousMode);
+
             /* Set security */
-            Status = ObSetSecurityObjectByPointer(Object,
-                                                  SecurityInformation,
-                                                  CapturedDescriptor);
+            if (NT_SUCCESS(Status))
+            {
+                Status = ObSetSecurityObjectByPointer(Object,
+                                                      SecurityInformation,
+                                                      CapturedDescriptor);
+            }
         }
 
         /* Release the descriptor and return status */

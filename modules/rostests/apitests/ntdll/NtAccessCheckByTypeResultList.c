@@ -684,9 +684,127 @@ Quit:
     }
 }
 
+/*
+ * A NULL DACL grants every requested right. The answer is decided before the
+ * per-object checks, so it must still be written to every list entry.
+ */
+static
+VOID
+NullDaclFillsEveryEntryTest(VOID)
+{
+    NTSTATUS Status;
+    NTSTATUS AccessStatus[3];
+    ACCESS_MASK GrantedAccess[3];
+    PPRIVILEGE_SET PrivilegeSet = NULL;
+    ULONG PrivilegeSetLength;
+    HANDLE Token = NULL;
+    ULONG i;
+    SECURITY_DESCRIPTOR Sd;
+    OBJECT_TYPE_LIST ObjTypeList[3];
+    PSID EveryoneSid = NULL;
+    GUID ChildObjectType2 = {0x34578901, 0x3456, 0x7896, {0x3, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0x00}};
+
+    PrivilegeSetLength = FIELD_OFFSET(PRIVILEGE_SET, Privilege[16]);
+    PrivilegeSet = RtlAllocateHeap(RtlGetProcessHeap(), 0, PrivilegeSetLength);
+    if (PrivilegeSet == NULL)
+    {
+        skip("Failed to allocate PrivilegeSet, skipping tests\n");
+        return;
+    }
+
+    Status = RtlAllocateAndInitializeSid(&WorldAuthority,
+                                         1,
+                                         SECURITY_WORLD_RID,
+                                         0,
+                                         0,
+                                         0,
+                                         0,
+                                         0,
+                                         0,
+                                         0,
+                                         &EveryoneSid);
+    if (!NT_SUCCESS(Status))
+    {
+        skip("Failed to create Everyone SID, skipping tests\n");
+        goto Quit;
+    }
+
+    Token = GetTokenProcess(TRUE, TRUE);
+    if (Token == NULL)
+    {
+        skip("Failed to get token, skipping tests\n");
+        goto Quit;
+    }
+
+    Status = RtlCreateSecurityDescriptor(&Sd, SECURITY_DESCRIPTOR_REVISION);
+    if (!NT_SUCCESS(Status))
+    {
+        skip("Failed to create a security descriptor, skipping tests\n");
+        goto Quit;
+    }
+
+    RtlSetGroupSecurityDescriptor(&Sd, EveryoneSid, FALSE);
+    RtlSetOwnerSecurityDescriptor(&Sd, EveryoneSid, FALSE);
+    RtlSetDaclSecurityDescriptor(&Sd, TRUE, NULL, FALSE);
+
+    ObjTypeList[0].Level = ACCESS_OBJECT_GUID;
+    ObjTypeList[0].Sbz = 0;
+    ObjTypeList[0].ObjectType = &ObjectType;
+
+    ObjTypeList[1].Level = ACCESS_PROPERTY_SET_GUID;
+    ObjTypeList[1].Sbz = 0;
+    ObjTypeList[1].ObjectType = &ChildObjectType;
+
+    ObjTypeList[2].Level = ACCESS_PROPERTY_GUID;
+    ObjTypeList[2].Sbz = 0;
+    ObjTypeList[2].ObjectType = &ChildObjectType2;
+
+    /* Fill the outputs with a pattern the kernel must overwrite */
+    for (i = 0; i < RTL_NUMBER_OF(ObjTypeList); i++)
+    {
+        AccessStatus[i] = 0xCCCCCCCC;
+        GrantedAccess[i] = 0xCCCCCCCC;
+    }
+
+    Status = NtAccessCheckByTypeResultList(&Sd,
+                                           NULL,
+                                           Token,
+                                           KEY_QUERY_VALUE,
+                                           ObjTypeList,
+                                           RTL_NUMBER_OF(ObjTypeList),
+                                           &RegMapping,
+                                           PrivilegeSet,
+                                           &PrivilegeSetLength,
+                                           GrantedAccess,
+                                           AccessStatus);
+    ok_hex(Status, STATUS_SUCCESS);
+    for (i = 0; i < RTL_NUMBER_OF(ObjTypeList); i++)
+    {
+        ok(AccessStatus[i] == STATUS_SUCCESS, "Entry %lu: expected STATUS_SUCCESS but got 0x%08lx\n", i, AccessStatus[i]);
+        ok(GrantedAccess[i] == KEY_QUERY_VALUE, "Entry %lu: expected 0x%08lx but got 0x%08lx\n", i, (ULONG)KEY_QUERY_VALUE, GrantedAccess[i]);
+    }
+
+Quit:
+    if (Token)
+    {
+        NtClose(Token);
+    }
+
+    if (EveryoneSid)
+    {
+        RtlFreeSid(EveryoneSid);
+    }
+
+    if (PrivilegeSet)
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, PrivilegeSet);
+    }
+}
+
 START_TEST(NtAccessCheckByTypeResultList)
 {
     ParamValidationNoObjsList();
     GrantedAccessTests();
     DenyAccessTests();
+    NullDaclFillsEveryEntryTest();
 }

@@ -254,6 +254,10 @@ SepCompareTokens(
     SepAcquireTokenLockShared(FirstToken);
     SepAcquireTokenLockShared(SecondToken);
 
+    /* Tokens at different integrity levels are not equal */
+    if (FirstToken->IntegrityLevel != SecondToken->IntegrityLevel)
+        goto Quit;
+
     /* Check if every SID that is present in either token is also present in the other one */
     if (!SepCompareSidAndAttributesFromTokens(FirstToken->UserAndGroups,
                                               FirstToken->UserAndGroupCount,
@@ -1634,6 +1638,362 @@ SepDeleteToken(
     /* Delete the dynamic information area */
     if (AccessToken->DynamicPart)
         ExFreePoolWithTag(AccessToken->DynamicPart, TAG_TOKEN_DYNAMIC);
+}
+
+/* MANDATORY LABEL ***********************************************************/
+
+/*
+ * Tokens carry a mandatory integrity level, and token objects a mandatory
+ * label, as on NT 6. The level and the label are stored and reported
+ * (TokenIntegrityLevel, LABEL_SECURITY_INFORMATION); access checks do not
+ * enforce mandatory integrity policy yet. The level is Token->IntegrityLevel;
+ * an integrity group in the token, when the creator gave one, is kept at the
+ * same level.
+ */
+
+static SID_IDENTIFIER_AUTHORITY SepMandatoryLabelAuthority = {SECURITY_MANDATORY_LABEL_AUTHORITY};
+
+/* Whether a SID is a mandatory label SID (S-1-16-RID); returns its RID */
+BOOLEAN
+NTAPI
+SepIsMandatoryLabelSid(
+    _In_ PSID Sid,
+    _Out_opt_ PULONG Rid)
+{
+    PISID LabelSid = Sid;
+
+    if (LabelSid->Revision != SID_REVISION ||
+        LabelSid->SubAuthorityCount != 1 ||
+        RtlCompareMemory(&LabelSid->IdentifierAuthority,
+                         &SepMandatoryLabelAuthority,
+                         sizeof(SID_IDENTIFIER_AUTHORITY)) != sizeof(SID_IDENTIFIER_AUTHORITY))
+    {
+        return FALSE;
+    }
+
+    if (Rid)
+        *Rid = LabelSid->SubAuthority[0];
+    return TRUE;
+}
+
+/* Writes the mandatory label SID S-1-16-Rid into a buffer of SEP_MANDATORY_LABEL_SID_LENGTH bytes */
+VOID
+NTAPI
+SepInitializeMandatoryLabelSid(
+    _Out_writes_bytes_(SEP_MANDATORY_LABEL_SID_LENGTH) PSID Sid,
+    _In_ ULONG Rid)
+{
+    RtlInitializeSid(Sid, &SepMandatoryLabelAuthority, 1);
+    *RtlSubAuthoritySid(Sid, 0) = Rid;
+}
+
+/*
+ * The level of a new token: an integrity group given by the creator, else
+ * what an NT 6 system without UAC gives: system for the service accounts,
+ * untrusted for anonymous, high for administrators, medium for others.
+ */
+ULONG
+NTAPI
+SepComputeIntegrityLevel(
+    _In_ PTOKEN Token)
+{
+    PSID User = Token->UserAndGroups[0].Sid;
+    ULONG Rid;
+    ULONG i;
+
+    for (i = 1; i < Token->UserAndGroupCount; i++)
+    {
+        if ((Token->UserAndGroups[i].Attributes & SE_GROUP_INTEGRITY) &&
+            SepIsMandatoryLabelSid(Token->UserAndGroups[i].Sid, &Rid))
+        {
+            return Rid;
+        }
+    }
+
+    if (RtlEqualSid(User, SeLocalSystemSid) ||
+        RtlEqualSid(User, SeLocalServiceSid) ||
+        RtlEqualSid(User, SeNetworkServiceSid))
+    {
+        return SECURITY_MANDATORY_SYSTEM_RID;
+    }
+
+    if (RtlEqualSid(User, SeAnonymousLogonSid))
+        return SECURITY_MANDATORY_UNTRUSTED_RID;
+
+    if (Token->TokenFlags & TOKEN_HAS_ADMIN_GROUP)
+        return SECURITY_MANDATORY_HIGH_RID;
+
+    return SECURITY_MANDATORY_MEDIUM_RID;
+}
+
+/* Size of a label ACE with a mandatory label SID */
+#define SEP_LABEL_ACE_SIZE \
+    ((USHORT)(FIELD_OFFSET(SYSTEM_MANDATORY_LABEL_ACE, SidStart) + SEP_MANDATORY_LABEL_SID_LENGTH))
+
+/*
+ * Checks a mandatory label ACE before anything reads or copies its SID.
+ * An ACE that cannot hold its SID, or whose size breaks ACL alignment, is
+ * STATUS_INVALID_ACL. A whole ACE whose SID is not a mandatory label, or
+ * whose mask has bits beyond the label policies, is STATUS_INVALID_PARAMETER,
+ * as NT 6 reports for such a label at process and thread creation.
+ */
+NTSTATUS
+NTAPI
+SepValidateLabelAce(
+    _In_ PACE_HEADER Header,
+    _Out_opt_ PULONG Rid)
+{
+    PSYSTEM_MANDATORY_LABEL_ACE Ace = (PSYSTEM_MANDATORY_LABEL_ACE)Header;
+    PISID Sid = (PISID)&Ace->SidStart;
+
+    ASSERT(Header->AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE);
+    if ((Header->AceSize % sizeof(ULONG)) ||
+        Header->AceSize < FIELD_OFFSET(SYSTEM_MANDATORY_LABEL_ACE, SidStart) +
+                          FIELD_OFFSET(SID, SubAuthority) ||
+        Sid->Revision != SID_REVISION ||
+        Sid->SubAuthorityCount > SID_MAX_SUB_AUTHORITIES ||
+        Header->AceSize < FIELD_OFFSET(SYSTEM_MANDATORY_LABEL_ACE, SidStart) +
+                          RtlLengthRequiredSid(Sid->SubAuthorityCount))
+    {
+        return STATUS_INVALID_ACL;
+    }
+
+    if (!SepIsMandatoryLabelSid((PSID)Sid, Rid) ||
+        (Ace->Mask & ~SYSTEM_MANDATORY_LABEL_VALID_MASK))
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+    return STATUS_SUCCESS;
+}
+
+/*
+ * The labels of a descriptor: whether its SACL holds mandatory label ACEs,
+ * and the highest level and its policy among them. A SACL may hold several
+ * (Windows keeps them all); one that is malformed makes the descriptor
+ * invalid.
+ */
+NTSTATUS
+NTAPI
+SepGetDescriptorLabel(
+    _In_ PSECURITY_DESCRIPTOR SecurityDescriptor,
+    _Out_ PBOOLEAN HasLabel,
+    _Out_opt_ PULONG LabelLevel,
+    _Out_opt_ PACCESS_MASK LabelPolicy)
+{
+    PSYSTEM_MANDATORY_LABEL_ACE Ace;
+    BOOLEAN Present, Defaulted;
+    PACE_HEADER Entry;
+    PACL Sacl = NULL;
+    ULONG Rid, MaxRid = 0, i;
+    ACCESS_MASK Policy = 0;
+
+    *HasLabel = FALSE;
+    if (!NT_SUCCESS(RtlGetSaclSecurityDescriptor(SecurityDescriptor, &Present, &Sacl, &Defaulted)) ||
+        !Present || !Sacl)
+    {
+        return STATUS_SUCCESS;
+    }
+
+    for (i = 0; i < Sacl->AceCount; i++)
+    {
+        if (!NT_SUCCESS(RtlGetAce(Sacl, i, (PVOID*)&Entry)))
+            return STATUS_INVALID_ACL;
+        if (Entry->AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE)
+            continue;
+
+        Ace = (PSYSTEM_MANDATORY_LABEL_ACE)Entry;
+        if (!NT_SUCCESS(SepValidateLabelAce(Entry, &Rid)))
+            return STATUS_INVALID_ACL;
+        if (!*HasLabel || Rid > MaxRid)
+        {
+            MaxRid = Rid;
+            Policy = Ace->Mask;
+        }
+        *HasLabel = TRUE;
+    }
+
+    if (*HasLabel)
+    {
+        if (LabelLevel)
+            *LabelLevel = MaxRid;
+        if (LabelPolicy)
+            *LabelPolicy = Policy;
+    }
+    return STATUS_SUCCESS;
+}
+
+/*
+ * A caller may set a mandatory label up to its own level; above that it
+ * needs SeRelabelPrivilege, as on NT 6. Checked for every label in a
+ * descriptor that is about to be set with LABEL_SECURITY_INFORMATION (the
+ * highest one decides).
+ */
+NTSTATUS
+NTAPI
+SeCheckLabelChange(
+    _In_ PSECURITY_DESCRIPTOR SecurityDescriptor,
+    _In_ KPROCESSOR_MODE AccessMode)
+{
+    SECURITY_SUBJECT_CONTEXT SubjectContext;
+    PTOKEN CallerToken;
+    ULONG Rid, CallerLevel;
+    BOOLEAN HasLabel;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    Status = SepGetDescriptorLabel(SecurityDescriptor, &HasLabel, &Rid, NULL);
+    if (!NT_SUCCESS(Status) || !HasLabel || AccessMode == KernelMode)
+        return Status;
+
+    SeCaptureSubjectContext(&SubjectContext);
+    CallerToken = SeQuerySubjectContextToken(&SubjectContext);
+    SepAcquireTokenLockShared(CallerToken);
+    CallerLevel = CallerToken->IntegrityLevel;
+    SepReleaseTokenLock(CallerToken);
+    SeReleaseSubjectContext(&SubjectContext);
+
+    if (Rid > CallerLevel && !SeSinglePrivilegeCheck(SeRelabelPrivilege, AccessMode))
+        return STATUS_INVALID_LABEL;
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+SepAssignObjectLabelLevel(
+    _In_ ULONG Level,
+    _In_ ACCESS_MASK Policy,
+    _Inout_ PSECURITY_DESCRIPTOR *SecurityDescriptor,
+    _In_ PGENERIC_MAPPING GenericMapping);
+
+/*
+ * Add a default mandatory label from the supplied token unless the descriptor
+ * already supplies one. Token objects use NO_WRITE_UP; process and thread
+ * objects also use NO_READ_UP. The ordinary descriptor query/set path owns
+ * the label after assignment.
+ */
+NTSTATUS
+NTAPI
+SeAssignObjectLabel(
+    _In_ PTOKEN Token,
+    _In_ ACCESS_MASK Policy,
+    _Inout_ PSECURITY_DESCRIPTOR *SecurityDescriptor,
+    _In_ PGENERIC_MAPPING GenericMapping)
+{
+    ULONG Level;
+
+    PAGED_CODE();
+
+    SepAcquireTokenLockShared(Token);
+    Level = Token->IntegrityLevel;
+    SepReleaseTokenLock(Token);
+    return SepAssignObjectLabelLevel(Level, Policy, SecurityDescriptor, GenericMapping);
+}
+
+static
+NTSTATUS
+SepAssignObjectLabelLevel(
+    _In_ ULONG Level,
+    _In_ ACCESS_MASK Policy,
+    _Inout_ PSECURITY_DESCRIPTOR *SecurityDescriptor,
+    _In_ PGENERIC_MAPPING GenericMapping)
+{
+    ULONG AclBuffer[(sizeof(ACL) + SEP_LABEL_ACE_SIZE + sizeof(ULONG) - 1) / sizeof(ULONG)];
+    SECURITY_INFORMATION Information = LABEL_SECURITY_INFORMATION;
+    PSECURITY_DESCRIPTOR NewDescriptor = *SecurityDescriptor;
+    SECURITY_DESCRIPTOR Label;
+    PSYSTEM_MANDATORY_LABEL_ACE Ace;
+    PACL Sacl = (PACL)AclBuffer;
+    BOOLEAN HasLabel;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    Status = SepGetDescriptorLabel(NewDescriptor, &HasLabel, NULL, NULL);
+    if (!NT_SUCCESS(Status) || HasLabel)
+        return Status;
+
+    RtlZeroMemory(AclBuffer, sizeof(AclBuffer));
+    Status = RtlCreateAcl(Sacl, sizeof(AclBuffer), ACL_REVISION);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    Ace = (PSYSTEM_MANDATORY_LABEL_ACE)(Sacl + 1);
+    Ace->Header.AceType = SYSTEM_MANDATORY_LABEL_ACE_TYPE;
+    Ace->Header.AceFlags = 0;
+    Ace->Header.AceSize = SEP_LABEL_ACE_SIZE;
+    Ace->Mask = Policy;
+    SepInitializeMandatoryLabelSid((PSID)&Ace->SidStart, Level);
+    Sacl->AceCount = 1;
+
+    RtlCreateSecurityDescriptor(&Label, SECURITY_DESCRIPTOR_REVISION);
+    RtlSetSaclSecurityDescriptor(&Label, TRUE, Sacl, FALSE);
+
+    /* A new descriptor with the label merged into the SACL replaces the one given */
+    Status = SeSetSecurityDescriptorInfoEx(NULL, &Information, &Label, &NewDescriptor, 0, PagedPool, GenericMapping);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    SeDeassignSecurity(SecurityDescriptor);
+    *SecurityDescriptor = NewDescriptor;
+    return STATUS_SUCCESS;
+}
+
+/*
+ * Process and thread creation imposes both policies, also on explicit labels.
+ * The owner token is the new process's own token or the owning process's
+ * primary token of a new thread; the creator token is the creator's primary
+ * token. An explicit label may not exceed the creator's level without
+ * SeRelabelPrivilege; the default label takes the lower of the two levels,
+ * as Server 2008 R2 does for a thread created in another process.
+ */
+NTSTATUS
+NTAPI
+SeAssignProcessObjectLabel(
+    _In_ PTOKEN OwnerToken,
+    _In_ PTOKEN CreatorToken,
+    _Inout_ PSECURITY_DESCRIPTOR *SecurityDescriptor,
+    _In_ PGENERIC_MAPPING GenericMapping)
+{
+    const ACCESS_MASK Policy = SYSTEM_MANDATORY_LABEL_NO_WRITE_UP |
+                               SYSTEM_MANDATORY_LABEL_NO_READ_UP;
+    BOOLEAN HasLabel, Present, Defaulted;
+    ULONG Level, OwnerLevel, CreatorLevel, Index;
+    PACL Sacl;
+    PACE_HEADER Header;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    SepAcquireTokenLockShared(OwnerToken);
+    OwnerLevel = OwnerToken->IntegrityLevel;
+    SepReleaseTokenLock(OwnerToken);
+    SepAcquireTokenLockShared(CreatorToken);
+    CreatorLevel = CreatorToken->IntegrityLevel;
+    SepReleaseTokenLock(CreatorToken);
+
+    Status = SepGetDescriptorLabel(*SecurityDescriptor, &HasLabel, &Level, NULL);
+    if (!NT_SUCCESS(Status)) return Status;
+    if (HasLabel && Level > CreatorLevel &&
+        !SeSinglePrivilegeCheck(SeRelabelPrivilege, ExGetPreviousMode()))
+    {
+        return STATUS_PRIVILEGE_NOT_HELD;
+    }
+
+    Status = SepAssignObjectLabelLevel(min(OwnerLevel, CreatorLevel), Policy,
+                                       SecurityDescriptor, GenericMapping);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    RtlGetSaclSecurityDescriptor(*SecurityDescriptor, &Present, &Sacl, &Defaulted);
+    ASSERT(Present && Sacl);
+    for (Index = 0; Index < Sacl->AceCount; ++Index)
+    {
+        Status = RtlGetAce(Sacl, Index, (PVOID *)&Header);
+        ASSERT(NT_SUCCESS(Status));
+        if (Header->AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE)
+            ((PSYSTEM_MANDATORY_LABEL_ACE)Header)->Mask |= Policy;
+    }
+    ((PISECURITY_DESCRIPTOR)*SecurityDescriptor)->Control |= SE_SACL_AUTO_INHERITED;
+    return STATUS_SUCCESS;
 }
 
 /**

@@ -70,6 +70,25 @@ KPRIORITY PspPriorityTable[PROCESS_PRIORITY_CLASS_ABOVE_NORMAL + 1] =
 
 /* PRIVATE FUNCTIONS *********************************************************/
 
+NTSTATUS
+NTAPI
+PspProcessOpen(
+    _In_ OB_OPEN_REASON Reason,
+    _In_ KPROCESSOR_MODE AccessMode,
+    _In_opt_ PEPROCESS Process,
+    _In_ PVOID ObjectBody,
+    _Inout_ PACCESS_MASK GrantedAccess,
+    _In_ ULONG HandleCount)
+{
+    /* As on Windows 7, the set right does not imply PROCESS_SET_LIMITED_INFORMATION */
+    if (*GrantedAccess & PROCESS_QUERY_INFORMATION)
+    {
+        *GrantedAccess |= PROCESS_QUERY_LIMITED_INFORMATION;
+    }
+
+    return STATUS_SUCCESS;
+}
+
 PETHREAD
 NTAPI
 PsGetNextProcessThread(IN PEPROCESS Process,
@@ -870,6 +889,7 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
                                    PROCESS_VM_READ |
                                    PROCESS_VM_WRITE |
                                    PROCESS_QUERY_INFORMATION |
+                                   PROCESS_QUERY_LIMITED_INFORMATION |
                                    PROCESS_TERMINATE |
                                    PROCESS_CREATE_THREAD |
                                    PROCESS_DUP_HANDLE |
@@ -1878,6 +1898,22 @@ NtGetNextThread(
     else
     {
         Thread = NULL;
+    }
+
+    /*
+     * Reject a starting thread that does not belong to the queried process.
+     * PsGetNextProcessThread() resumes the walk from Thread->ThreadListEntry but
+     * terminates on Process->ThreadListHead; a thread from another process links
+     * into a foreign list, so the helper would eventually treat that process's
+     * list head as an ETHREAD (CONTAINING_RECORD type confusion) and reference a
+     * fabricated object header. Release both references on rejection.
+     */
+    if (Thread != NULL && Thread->ThreadsProcess != Process)
+    {
+        DPRINT1("Thread %p does not belong to process %p\n", Thread, Process);
+        ObDereferenceObject(Thread);
+        ObDereferenceObject(Process);
+        return STATUS_INVALID_PARAMETER;
     }
 
     /* Get the next thread (this will dereference the previous thread) */
