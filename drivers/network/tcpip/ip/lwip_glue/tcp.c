@@ -3,6 +3,9 @@
 
 #include "lwip_glue.h"
 
+/* tcp_process_refused_data hands over data held while a connection waited to be accepted */
+#include <lwip/priv/tcp_priv.h>
+
 static const char * const tcp_state_str[] = {
   "CLOSED",
   "LISTEN",
@@ -260,6 +263,102 @@ InternalRecvEventHandler(void *arg, PTCP_PCB pcb, struct pbuf *p, const err_t er
     return ERR_OK;
 }
 
+/* An established connection that no listen request has taken yet */
+typedef struct _PENDING_ACCEPT
+{
+    LIST_ENTRY ListEntry;
+    PCONNECTION_ENDPOINT Listener;
+    PTCP_PCB Pcb;
+    BOOLEAN PeerClosed;
+} PENDING_ACCEPT, *PPENDING_ACCEPT;
+
+/* Bounds the connections a listener keeps waiting, like the lwIP backlog */
+#define MAX_PENDING_ACCEPTS 255
+
+static
+err_t
+InternalPendingRecvEventHandler(void *arg, PTCP_PCB pcb, struct pbuf *p, const err_t err)
+{
+    PPENDING_ACCEPT Pending = arg;
+
+    /* Refusing the data makes lwIP keep it until the connection is accepted */
+    if (p)
+        return ERR_MEM;
+
+    if (Pending && err == ERR_OK)
+        Pending->PeerClosed = TRUE;
+
+    return ERR_OK;
+}
+
+static
+void
+InternalPendingErrorEventHandler(void *arg, const err_t err)
+{
+    PPENDING_ACCEPT Pending = arg;
+    PCONNECTION_ENDPOINT Listener;
+
+    /* lwIP already freed the PCB */
+    if (!Pending)
+        return;
+
+    Listener = Pending->Listener;
+    RemoveEntryList(&Pending->ListEntry);
+    Listener->PendingAcceptCount--;
+    ExFreePoolWithTag(Pending, LWIP_ACCEPT_TAG);
+    DereferenceObject(Listener);
+}
+
+static void LibTCPClaimPendingAcceptCallback(void *arg);
+
+static
+VOID
+LibTCPPostClaim(PCONNECTION_ENDPOINT Listener, u8_t Block)
+{
+    struct lwip_callback_msg *msg;
+
+    msg = ExAllocateFromNPagedLookasideList(&MessageLookasideList);
+    if (!msg)
+        return;
+
+    ReferenceObject(Listener);
+    msg->Input.Socket.Arg = Listener;
+    if (tcpip_callback_with_block(LibTCPClaimPendingAcceptCallback, msg, Block) != ERR_OK)
+    {
+        DereferenceObject(Listener);
+        ExFreeToNPagedLookasideList(&MessageLookasideList, msg);
+    }
+}
+
+static
+BOOLEAN
+LibTCPQueuePendingAccept(PCONNECTION_ENDPOINT Listener, PTCP_PCB pcb)
+{
+    PPENDING_ACCEPT Pending;
+
+    if (Listener->PendingAcceptCount >= MAX_PENDING_ACCEPTS)
+        return FALSE;
+
+    Pending = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Pending), LWIP_ACCEPT_TAG);
+    if (!Pending)
+        return FALSE;
+
+    /* Each pending connection keeps its listener */
+    ReferenceObject(Listener);
+    Pending->Listener = Listener;
+    Pending->Pcb = pcb;
+    Pending->PeerClosed = FALSE;
+    InsertTailList(&Listener->PendingAccepts, &Pending->ListEntry);
+    Listener->PendingAcceptCount++;
+
+    tcp_arg(pcb, Pending);
+    tcp_recv(pcb, InternalPendingRecvEventHandler);
+    tcp_err(pcb, InternalPendingErrorEventHandler);
+    tcp_sent(pcb, NULL);
+
+    return TRUE;
+}
+
 /* This function MUST return an error value that is not ERR_ABRT or ERR_OK if the connection
  * is not accepted to avoid leaking the new PCB */
 static
@@ -270,13 +369,100 @@ InternalAcceptEventHandler(void *arg, PTCP_PCB newpcb, const err_t err)
     if (!arg)
         return ERR_CLSD;
 
+    /* lwIP reports a failed PCB allocation through this callback too */
+    if (!newpcb || err != ERR_OK)
+        return ERR_VAL;
+
+    /* lwIP gave the new PCB the listener's argument; only LibTCPAccept may set it */
+    tcp_arg(newpcb, NULL);
+
+    /* Older connections are served first; the lwIP thread must not wait on its own queue */
+    if (!IsListEmpty(&((PCONNECTION_ENDPOINT)arg)->PendingAccepts))
+    {
+        if (!LibTCPQueuePendingAccept(arg, newpcb))
+            return ERR_CLSD;
+        LibTCPPostClaim(arg, 0);
+        return ERR_OK;
+    }
+
     TCPAcceptEventHandler(arg, newpcb);
 
     /* Set in LibTCPAccept (called from TCPAcceptEventHandler) */
     if (newpcb->callback_arg)
         return ERR_OK;
-    else
-        return ERR_CLSD;
+
+    /* No listen request was queued, keep the connection until the next one comes */
+    if (LibTCPQueuePendingAccept(arg, newpcb))
+        return ERR_OK;
+
+    return ERR_CLSD;
+}
+
+static
+void
+LibTCPClaimPendingAcceptCallback(void *arg)
+{
+    struct lwip_callback_msg *msg = arg;
+    PCONNECTION_ENDPOINT Listener = msg->Input.Socket.Arg;
+    PPENDING_ACCEPT Pending;
+    PTCP_PCB pcb;
+    BOOLEAN PeerClosed;
+
+    /* A closed listener has already aborted its pending connections */
+    while (Listener->SocketContext && !IsListEmpty(&Listener->PendingAccepts))
+    {
+        Pending = CONTAINING_RECORD(Listener->PendingAccepts.Flink, PENDING_ACCEPT, ListEntry);
+        pcb = Pending->Pcb;
+
+        tcp_arg(pcb, NULL);
+        TCPAcceptEventHandler(Listener, pcb);
+        if (!pcb->callback_arg)
+        {
+            /* No listen request took it, keep it waiting */
+            tcp_arg(pcb, Pending);
+            break;
+        }
+
+        RemoveEntryList(&Pending->ListEntry);
+        Listener->PendingAcceptCount--;
+        PeerClosed = Pending->PeerClosed;
+        ExFreePoolWithTag(Pending, LWIP_ACCEPT_TAG);
+        DereferenceObject(Listener);
+
+        /* Hand over what arrived while the connection waited */
+        if (pcb->refused_data)
+            tcp_process_refused_data(pcb);
+        else if (PeerClosed)
+            InternalRecvEventHandler(pcb->callback_arg, pcb, NULL, ERR_OK);
+    }
+
+    DereferenceObject(Listener);
+    ExFreeToNPagedLookasideList(&MessageLookasideList, msg);
+}
+
+VOID
+LibTCPClaimPendingAccept(PCONNECTION_ENDPOINT Listener)
+{
+    /* Not waited for: the caller may hold locks the accept path takes */
+    LibTCPPostClaim(Listener, 1);
+}
+
+/* Runs on the lwIP thread when the listener closes */
+static
+void
+LibTCPAbortPendingAccepts(PCONNECTION_ENDPOINT Listener)
+{
+    PPENDING_ACCEPT Pending;
+
+    while (!IsListEmpty(&Listener->PendingAccepts))
+    {
+        Pending = CONTAINING_RECORD(RemoveHeadList(&Listener->PendingAccepts), PENDING_ACCEPT, ListEntry);
+        tcp_arg(Pending->Pcb, NULL);
+        tcp_abort(Pending->Pcb);
+        ExFreePoolWithTag(Pending, LWIP_ACCEPT_TAG);
+        DereferenceObject(Listener);
+    }
+    Listener->PendingAcceptCount = 0;
 }
 
 static
@@ -466,7 +652,7 @@ done:
 }
 
 PTCP_PCB
-LibTCPListen(PCONNECTION_ENDPOINT Connection, const u8_t backlog)
+LibTCPListen(PCONNECTION_ENDPOINT Connection, UINT Backlog)
 {
     struct lwip_callback_msg *msg;
     PTCP_PCB ret;
@@ -476,7 +662,8 @@ LibTCPListen(PCONNECTION_ENDPOINT Connection, const u8_t backlog)
     {
         KeInitializeEvent(&msg->Event, NotificationEvent, FALSE);
         msg->Input.Listen.Connection = Connection;
-        msg->Input.Listen.Backlog = backlog;
+        /* lwIP keeps the backlog in a u8_t, a plain cast turned 1024 into 0 */
+        msg->Input.Listen.Backlog = (u8_t)min(Backlog, 0xFF);
 
         tcpip_callback_with_block(LibTCPListenCallback, msg, 1);
 
@@ -752,6 +939,7 @@ LibTCPCloseCallback(void *arg)
 
     /* Empty the queue even if we're already "closed" */
     LibTCPEmptyQueue(msg->Input.Close.Connection);
+    LibTCPAbortPendingAccepts(msg->Input.Close.Connection);
 
     /* Check if we've already been closed */
     if (msg->Input.Close.Connection->Closing)

@@ -59,7 +59,7 @@ static NTSTATUS NTAPI SendComplete
             NextIrp->IoStatus.Information = 0;
             UnlockBuffers(SendReq->BufferArray, SendReq->BufferCount, FALSE);
             if( NextIrp->MdlAddress ) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
-            (void)IoSetCancelRoutine(NextIrp, NULL);
+            AfdClearCancelRoutine(NextIrp);
             IoCompleteRequest( NextIrp, IO_NETWORK_INCREMENT );
         }
 
@@ -88,7 +88,7 @@ static NTSTATUS NTAPI SendComplete
             NextIrp->IoStatus.Information = 0;
 
             if ( NextIrp->MdlAddress ) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
-            (void)IoSetCancelRoutine(NextIrp, NULL);
+            AfdClearCancelRoutine(NextIrp);
             IoCompleteRequest( NextIrp, IO_NETWORK_INCREMENT );
         }
 
@@ -143,7 +143,7 @@ static NTSTATUS NTAPI SendComplete
         TotalBytesProcessed += TotalBytesCopied;
         SendLength -= TotalBytesCopied;
 
-        (void)IoSetCancelRoutine(NextIrp, NULL);
+        AfdClearCancelRoutine(NextIrp);
 
         UnlockBuffers( SendReq->BufferArray,
                        SendReq->BufferCount,
@@ -288,7 +288,7 @@ static NTSTATUS NTAPI PacketSocketSendComplete
             SendReq = GetLockedData(NextIrp, IoGetCurrentIrpStackLocation(NextIrp));
             NextIrp->IoStatus.Status = STATUS_FILE_CLOSED;
             NextIrp->IoStatus.Information = 0;
-            (void)IoSetCancelRoutine(NextIrp, NULL);
+            AfdClearCancelRoutine(NextIrp);
             UnlockBuffers(SendReq->BufferArray, SendReq->BufferCount, FALSE);
             UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
             IoCompleteRequest( NextIrp, IO_NETWORK_INCREMENT );
@@ -308,7 +308,7 @@ static NTSTATUS NTAPI PacketSocketSendComplete
     NextIrp->IoStatus.Status = Irp->IoStatus.Status;
     NextIrp->IoStatus.Information = Irp->IoStatus.Information;
 
-    (void)IoSetCancelRoutine(NextIrp, NULL);
+    AfdClearCancelRoutine(NextIrp);
 
     UnlockBuffers(SendReq->BufferArray, SendReq->BufferCount, FALSE);
 
@@ -395,7 +395,7 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                     NT_VERIFY(RemoveHeadList(&FCB->PendingIrpList[FUNCTION_SEND]) == &Irp->Tail.Overlay.ListEntry);
                     Irp->IoStatus.Status = Status;
                     Irp->IoStatus.Information = ((Status == STATUS_SUCCESS) ? SendReq->BufferArray[0].len : 0);
-                    (void)IoSetCancelRoutine(Irp, NULL);
+                    AfdClearCancelRoutine(Irp);
                     UnlockBuffers(SendReq->BufferArray, SendReq->BufferCount, FALSE);
                     UnlockRequest(Irp, IoGetCurrentIrpStackLocation(Irp));
                     IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
@@ -665,7 +665,7 @@ AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                 NT_VERIFY(RemoveHeadList(&FCB->PendingIrpList[FUNCTION_SEND]) == &Irp->Tail.Overlay.ListEntry);
                 Irp->IoStatus.Status = Status;
                 Irp->IoStatus.Information = ((Status == STATUS_SUCCESS) ? SendReq->BufferArray[0].len : 0);
-                (void)IoSetCancelRoutine(Irp, NULL);
+                AfdClearCancelRoutine(Irp);
                 UnlockBuffers(SendReq->BufferArray, SendReq->BufferCount, FALSE);
                 UnlockRequest(Irp, IoGetCurrentIrpStackLocation(Irp));
                 IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
