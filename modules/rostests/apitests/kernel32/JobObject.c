@@ -504,12 +504,105 @@ test_LimitQuery(VOID)
     CloseHandle(hJob);
 }
 
+/*
+ * Regression test for bugcheck 0x20 (KERNEL_APC_PENDING_DURING_EXIT).
+ *
+ * A process that self-assigns to a job with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+ * and then closes the last job handle makes the kernel terminate the current
+ * process from the job-close kill path. If that termination runs the current
+ * threads exit from inside the job lock critical region, PspExitThread exits
+ * with APCs disabled and the machine bugchecks (0x20). Nodes child_process
+ * and Chromium use exactly this pattern on teardown.
+ *
+ * This runs in a child process: on an unfixed kernel the child (and the whole
+ * VM) bugchecks, so the parents wait never returns. On a fixed kernel the
+ * child is cleanly killed by kill-on-close and the parent observes its exit.
+ */
+static
+int
+KillOnCloseChild(void)
+{
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION Eli;
+    HANDLE hJob;
+
+    hJob = CreateJobObjectW(NULL, NULL);
+    if (hJob == NULL)
+        return 11;
+
+    ZeroMemory(&Eli, sizeof(Eli));
+    Eli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, &Eli, sizeof(Eli)))
+        return 12;
+
+    if (!AssignProcessToJobObject(hJob, GetCurrentProcess()))
+        return 13;
+
+    /* Last handle: kill-on-close fires and should terminate us right here. */
+    CloseHandle(hJob);
+
+    /* Reaching this point means kill-on-close did not kill us. That is itself
+       a behavior bug, but it is not the crash this test guards against. */
+    return 123;
+}
+
+static
+void
+test_KillOnClose(void)
+{
+    WCHAR Self[MAX_PATH];
+    WCHAR CmdLine[MAX_PATH + 32];
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    DWORD Length, Wait, Code = 0xDEADBEEF;
+
+    Length = GetModuleFileNameW(NULL, Self, ARRAYSIZE(Self));
+    ok(Length != 0 && Length < ARRAYSIZE(Self), "GetModuleFileNameW failed: %lu\n", GetLastError());
+    if (Length == 0 || Length >= ARRAYSIZE(Self))
+        return;
+
+    StringCchPrintfW(CmdLine, ARRAYSIZE(CmdLine), L"\"%s\" JobObject killchild", Self);
+
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    ZeroMemory(&pi, sizeof(pi));
+    if (!CreateProcessW(Self, CmdLine, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
+    {
+        ok(FALSE, "CreateProcessW failed: %lu\n", GetLastError());
+        return;
+    }
+
+    Wait = WaitForSingleObject(pi.hProcess, 30000);
+    /* The important assertion: the child terminated (and the machine survived).
+       On an unfixed kernel the kill-on-close path bugchecks and we never get
+       here at all. */
+    ok(Wait == WAIT_OBJECT_0, "kill-on-close child did not terminate (hang/bugcheck), wait=%lu\n", Wait);
+    if (Wait == WAIT_OBJECT_0)
+    {
+        GetExitCodeProcess(pi.hProcess, &Code);
+        ok(Code != 123, "kill-on-close did not terminate the self-assigned process (exit=%lu)\n", Code);
+    }
+
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+}
+
 START_TEST(JobObject)
 {
+    char **argv;
+    int argc = winetest_get_mainargs(&argv);
+
+    /* Child mode for test_KillOnClose: self-assign to a KILL_ON_JOB_CLOSE job
+       and close the last handle. */
+    if (argc >= 3 && !strcmp(argv[2], "killchild"))
+    {
+        ExitProcess(KillOnCloseChild());
+    }
+
     test_LimitQuery();
     test_CompletionPort();
     test_RoundTrip();
     test_InvalidParameters();
     test_Access();
     test_SandboxPolicies();
+    test_KillOnClose();
 }

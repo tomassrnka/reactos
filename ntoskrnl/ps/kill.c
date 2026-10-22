@@ -1122,6 +1122,76 @@ PspTerminateThreadByPointer(IN PETHREAD Thread,
     return Status;
 }
 
+/*
+ * Terminates the current process from a context that holds a critical region
+ * (for example an object CloseProcedure, which the object manager always
+ * invokes inside ObpCloseHandle's critical region). PspExitThread must run on
+ * the current thread at PASSIVE_LEVEL with APCs enabled, so it cannot be
+ * called directly here: doing so exits the thread with CombinedApcDisable != 0
+ * and bugchecks 0x20 (KERNEL_APC_PENDING_DURING_EXIT).
+ *
+ * Instead the other threads are terminated the usual way (queuing their kill
+ * APCs is safe), and the current thread is terminated through a queued kernel
+ * APC. That APC is delivered only once the caller's critical region unwinds
+ * and APCs are re-enabled, after which it exits this thread cleanly, mirroring
+ * how a thread kills another thread but applied to ourselves.
+ */
+NTSTATUS
+NTAPI
+PspTerminateCurrentProcessDeferred(IN NTSTATUS ExitStatus)
+{
+    PEPROCESS Process = PsGetCurrentProcess();
+    PETHREAD CurrentThread = PsGetCurrentThread();
+    PETHREAD Thread;
+    PKAPC Apc;
+    ULONG Flags;
+    PAGED_CODE();
+
+    /* Flag the process for deletion */
+    InterlockedOr((PLONG)&Process->Flags, PSF_PROCESS_DELETE_BIT);
+
+    /* Terminate every other thread now; their kill APCs fire in their own
+       context, so queuing them while we hold a critical region is fine */
+    Thread = PsGetNextProcessThread(Process, NULL);
+    while (Thread)
+    {
+        if (Thread != CurrentThread)
+            PspTerminateThreadByPointer(Thread, ExitStatus, FALSE);
+        Thread = PsGetNextProcessThread(Process, Thread);
+    }
+
+    /* Queue our own exit as a kernel APC instead of exiting inline */
+    Apc = ExAllocatePoolWithTag(NonPagedPool, sizeof(KAPC), TAG_TERMINATE_APC);
+    if (!Apc) return STATUS_INSUFFICIENT_RESOURCES;
+
+    /* Set the Terminated flag, unless somebody already did */
+    Flags = CurrentThread->CrossThreadFlags | CT_TERMINATED_BIT;
+    if (!(InterlockedExchange((PLONG)&CurrentThread->CrossThreadFlags, Flags) &
+          CT_TERMINATED_BIT))
+    {
+        /* Initialize the kill APC and queue it to ourselves */
+        KeInitializeApc(Apc,
+                        &CurrentThread->Tcb,
+                        OriginalApcEnvironment,
+                        PsExitSpecialApc,
+                        PspExitApcRundown,
+                        PspExitNormalApc,
+                        KernelMode,
+                        UlongToPtr(ExitStatus));
+
+        if (KeInsertQueueApc(Apc, Apc, NULL, 2))
+        {
+            /* Queued: it is delivered once the caller leaves its critical
+               region, exiting this thread then */
+            return STATUS_SUCCESS;
+        }
+    }
+
+    /* Already terminating or the APC could not be queued; drop the APC */
+    ExFreePoolWithTag(Apc, TAG_TERMINATE_APC);
+    return STATUS_SUCCESS;
+}
+
 BOOLEAN
 NTAPI
 PspIsProcessExiting(IN PEPROCESS Process)

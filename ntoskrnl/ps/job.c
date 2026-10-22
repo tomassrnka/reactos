@@ -99,6 +99,7 @@ typedef struct PSP_TERMINATE_PROCESS_CONTEXT
 {
     PEJOB Job;
     NTSTATUS ExitStatus;
+    BOOLEAN SelfDeferred;
 } PSP_TERMINATE_PROCESS_CONTEXT, *PPSP_TERMINATE_PROCESS_CONTEXT;
 
 /*!
@@ -722,6 +723,21 @@ PspTerminateProcessCallback(
     ASSERT(Job != NULL);
     ASSERT(Process->Job == Job);
 
+    /* Defer termination of the current process: terminating ourselves ends in
+       PspExitThread on the current thread, which must run at PASSIVE_LEVEL with
+       APCs enabled. Doing it here, inside the job lock critical region, would
+       exit the thread with CombinedApcDisable != 0 and bugcheck 0x20
+       (KERNEL_APC_PENDING_DURING_EXIT); it also never returns, so the lock
+       would never be released. PspTerminateJobObject terminates us last, once
+       the rest of the job has been torn down and the lock has been dropped. The
+       job accounting for our own process is still completed by its normal exit
+       path (PspExitThread -> PspExitProcessFromJob). */
+    if (Process == PsGetCurrentProcess())
+    {
+        TerminateContext->SelfDeferred = TRUE;
+        return STATUS_SUCCESS;
+    }
+
     /* Avoid entering process termination when the process has already
        completed its active job transition */
     ExEnterCriticalRegionAndAcquireResourceExclusive(&Job->JobLock);
@@ -804,6 +820,7 @@ PspTerminateJobObject(
 
     Context.Job = Job;
     Context.ExitStatus = ExitStatus;
+    Context.SelfDeferred = FALSE;
 
     Status = PspEnumerateProcessesInJob(Job,
                                         PspTerminateProcessCallback,
@@ -814,6 +831,16 @@ PspTerminateJobObject(
     ASSERT(NT_SUCCESS(Status));
 
     InterlockedAnd((PLONG)&Job->JobFlags, ~PSP_JOB_TERMINATING);
+
+    /* If the current process is a member of this job, terminate it last. The
+       object manager invokes job close inside ObpCloseHandle's critical
+       region, so the current thread cannot be exited inline here (that
+       bugchecks 0x20); PspTerminateCurrentProcessDeferred queues our own exit
+       as a kernel APC that is delivered once that critical region unwinds. */
+    if (Context.SelfDeferred)
+    {
+        (VOID)PspTerminateCurrentProcessDeferred(ExitStatus);
+    }
 
     return Status;
 }
