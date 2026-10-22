@@ -1857,6 +1857,18 @@ MmArmAccessFault(IN ULONG FaultCode,
             }
         }
 
+        /* An instruction fetch from a valid no-execute page faults again on
+           every retry, so returning success would loop forever */
+        if (MI_IS_INSTRUCTION_FETCH(FaultCode) &&
+            !MI_IS_PAGE_EXECUTABLE(PointerPte))
+        {
+            KeBugCheckEx(ATTEMPTED_EXECUTE_OF_NOEXECUTE_MEMORY,
+                         (ULONG_PTR)Address,
+                         PointerPte->u.Long,
+                         (ULONG_PTR)TrapInformation,
+                         3);
+        }
+
         /* Nothing is actually wrong */
         DPRINT1("Fault at IRQL %u is ok (%p)\n", OldIrql, Address);
         return STATUS_SUCCESS;

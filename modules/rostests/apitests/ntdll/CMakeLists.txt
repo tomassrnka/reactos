@@ -47,6 +47,7 @@ list(APPEND SOURCE
     NtAccessCheck.c
     NtAccessCheckByType.c
     NtAccessCheckByTypeResultList.c
+    NtAccessCheckByTypeResultListAndAuditAlarmByHandle.c
     NtAdjustGroupsToken.c
     NtAdjustPrivilegesToken.c
     NtAllocateVirtualMemory.c
@@ -67,6 +68,7 @@ list(APPEND SOURCE
     NtFreeVirtualMemory.c
     NtGetCurrentProcessorNumberEx.c
     NtImpersonateAnonymousToken.c
+    NtKeyedEvent.c
     NtLoadUnloadKey.c
     NtMapViewOfSection.c
     NtMutant.c
@@ -92,10 +94,12 @@ list(APPEND SOURCE
     NtReadFile.c
     NtSaveKey.c
     NtSetDefaultLocale.c
+    NtSetInformationDebugObject.c
     NtSetInformationFile.c
     NtSetInformationProcess.c
     NtSetInformationThread.c
     NtSetInformationToken.c
+    NtSetLdtEntries.c
     NtSetValueKey.c
     NtSetVolumeInformationFile.c
     NtStartProfile.c
@@ -115,6 +119,7 @@ list(APPEND SOURCE
     RtlDosPathNameToNtPathName_U.c
     RtlDosSearchPath_U.c
     RtlDosSearchPath_Ustr.c
+    RtlFailFast.c
     RtlFirstFreeAce.c
     RtlFls.c
     RtlGenerate8dot3Name.c
@@ -155,7 +160,11 @@ list(APPEND SOURCE
     RtlValidateUnicodeString.c
     RtlxUnicodeStringToAnsiSize.c
     RtlxUnicodeStringToOemSize.c
+    BadSegmentFault.c
+    RaiseExceptionLeak.c
+    ExceptionInfoLeak.c
     StackOverflow.c
+    StackOverflowDispatch.c
     SystemCallStubs.c
     SystemInfo.c
     UserModeException.c
@@ -167,12 +176,15 @@ if(ARCH STREQUAL "i386")
         ../crt/i386/setjmp_helper.s
         i386/NtContinue.S
         i386/NtCreateThread.S
+        i386/StackOverflowDispatch.S
     )
 elseif(ARCH STREQUAL "amd64")
     add_asm_files(ntdll_apitest_asm
         ../crt/amd64/setjmp_helper.s
         amd64/NtContinue.S
         amd64/NtCreateThread.S
+        amd64/StackOverflowDispatch.S
+        amd64/BadSegmentFault.S
     )
 endif()
 

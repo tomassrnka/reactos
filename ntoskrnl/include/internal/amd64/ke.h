@@ -5,6 +5,8 @@
 extern "C" {
 #endif
 
+extern ULONG KiMxCsrMask;
+
 #define X86_EFLAGS_TF           0x00000100 /* Trap flag */
 #define X86_EFLAGS_IF           0x00000200 /* Interrupt Enable flag */
 #define X86_EFLAGS_IOPL         0x00003000 /* I/O Privilege Level bits */
@@ -88,6 +90,8 @@ extern "C" {
 #define MSR_APIC_BASE 0x0000001B
 #define MSR_APIC_BASE_X2APIC_ENABLE 0x400
 #define X2APIC_MSR_EOI 0x80B
+#define APIC_ISR_REGISTER 0xFFFFFFFFFFFE0100ULL
+#define X2APIC_MSR_ISR 0x810
 
 #ifndef __ASM__
 
@@ -409,6 +413,7 @@ VOID KiMcheckAbort(VOID);
 VOID KiXmmException(VOID);
 VOID KiApcInterrupt(VOID);
 VOID KiRaiseAssertion(VOID);
+VOID KiRaiseSecurityCheckFailure(VOID);
 VOID KiDebugServiceTrap(VOID);
 VOID KiDpcInterrupt(VOID);
 VOID KiIpiInterrupt(VOID);

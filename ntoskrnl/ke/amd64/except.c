@@ -40,6 +40,7 @@ KIDT_INIT KiInterruptInitTable[] =
     {0x12, 0x00, 0x02, KiMcheckAbort},
     {0x13, 0x00, 0x00, KiXmmException},
     {0x1F, 0x00, 0x00, KiApcInterrupt},
+    {0x29, 0x03, 0x00, KiRaiseSecurityCheckFailure},
     {0x2C, 0x03, 0x00, KiRaiseAssertion},
     {0x2D, 0x03, 0x00, KiDebugServiceTrap},
     {0x2F, 0x00, 0x00, KiDpcInterrupt},
@@ -99,18 +100,26 @@ KiDispatchExceptionToUser(
     IN PCONTEXT Context,
     IN PEXCEPTION_RECORD ExceptionRecord)
 {
-    EXCEPTION_RECORD LocalExceptRecord;
+    EXCEPTION_RECORD LocalExceptRecord, FaultRecord;
+    PEXCEPTION_RECORD volatile UserRecord = ExceptionRecord;
+    volatile BOOLEAN Retried = FALSE;
     ULONG64 UserRsp;
     PKUSER_EXCEPTION_STACK UserStack;
+    ULONG ParamCount, i;
 
     /* Make sure we have a valid SS */
     if (TrapFrame->SegSs != (KGDT64_R3_DATA | RPL_MASK))
     {
-        /* Raise an access violation instead */
+        /* Raise an access violation instead. Zero the whole record first:
+           it is copied to the user stack in full, so leftover stack bytes
+           in the unused ExceptionInformation slots would leak to user mode. */
+        RtlZeroMemory(&LocalExceptRecord, sizeof(LocalExceptRecord));
         LocalExceptRecord.ExceptionCode = STATUS_ACCESS_VIOLATION;
         LocalExceptRecord.ExceptionFlags = 0;
+        LocalExceptRecord.ExceptionRecord = NULL;
+        LocalExceptRecord.ExceptionAddress = ExceptionRecord->ExceptionAddress;
         LocalExceptRecord.NumberParameters = 0;
-        ExceptionRecord = &LocalExceptRecord;
+        UserRecord = &LocalExceptRecord;
     }
 
     /* Get new stack pointer and align it to 16 bytes */
@@ -123,15 +132,33 @@ KiDispatchExceptionToUser(
     _enable();
 
     /* Set up the user-stack */
+DispatchToUser:
     _SEH2_TRY
     {
         /* Probe the user stack frame and zero it out */
         ProbeForWrite(UserStack, sizeof(*UserStack), TYPE_ALIGNMENT(KUSER_EXCEPTION_STACK));
         RtlZeroMemory(UserStack, sizeof(*UserStack));
 
-        /* Copy Context and ExceptionFrame */
+        /* Copy Context */
         UserStack->Context = *Context;
-        UserStack->ExceptionRecord = *ExceptionRecord;
+
+        /* Copy only the declared exception parameters. UserStack was zeroed
+           above, so the unused ExceptionInformation slots - including the one
+           trap.S fills from the volatile R11 register - stay zero instead of
+           leaking stale kernel register contents to user mode. */
+        UserStack->ExceptionRecord.ExceptionCode = UserRecord->ExceptionCode;
+        UserStack->ExceptionRecord.ExceptionFlags = UserRecord->ExceptionFlags;
+        UserStack->ExceptionRecord.ExceptionRecord = UserRecord->ExceptionRecord;
+        UserStack->ExceptionRecord.ExceptionAddress = UserRecord->ExceptionAddress;
+        ParamCount = UserRecord->NumberParameters;
+        if (ParamCount > EXCEPTION_MAXIMUM_PARAMETERS)
+            ParamCount = EXCEPTION_MAXIMUM_PARAMETERS;
+        UserStack->ExceptionRecord.NumberParameters = ParamCount;
+        for (i = 0; i < ParamCount; i++)
+        {
+            UserStack->ExceptionRecord.ExceptionInformation[i] =
+                UserRecord->ExceptionInformation[i];
+        }
 
         /* Setup the machine frame */
         UserStack->MachineFrame.Rip = Context->Rip;
@@ -140,15 +167,28 @@ KiDispatchExceptionToUser(
         UserStack->MachineFrame.Rsp = Context->Rsp;
         UserStack->MachineFrame.SegSs = Context->SegSs;
     }
-    _SEH2_EXCEPT((LocalExceptRecord = *_SEH2_GetExceptionInformation()->ExceptionRecord),
+    _SEH2_EXCEPT((FaultRecord = *_SEH2_GetExceptionInformation()->ExceptionRecord),
                  EXCEPTION_EXECUTE_HANDLER)
     {
-        // FIXME: handle stack overflow
+        /* Check if we got a stack overflow and raise that instead. The
+           overflow committed the rest of the stack, so one retry is enough. */
+        if (((NTSTATUS)FaultRecord.ExceptionCode == STATUS_STACK_OVERFLOW) && !Retried)
+        {
+            /* Keep the address of the original exception. The caller's
+               record is replaced, so a second chance sees the overflow too. */
+            FaultRecord.ExceptionAddress = ExceptionRecord->ExceptionAddress;
+            *ExceptionRecord = FaultRecord;
+            UserRecord = ExceptionRecord;
+            Retried = TRUE;
+
+            /* Do the exception again */
+            _SEH2_YIELD(goto DispatchToUser);
+        }
 
         /* Nothing we can do here. Keep interrupts enabled, the caller goes
            on to the second-chance path, which can wait and terminate the
            process. */
-        return FALSE;
+        _SEH2_YIELD(return FALSE);
     }
     _SEH2_END;
 
@@ -241,7 +281,8 @@ KiPrepareUserDebugData(void)
     }
     _SEH2_END;
 
-    _disable();
+    /* Leave interrupts enabled: the kernel debugger and the debug port,
+       which the caller calls next, can wait */
 }
 
 VOID
@@ -378,7 +419,10 @@ KiDispatchException(IN PEXCEPTION_RECORD ExceptionRecord,
             /* Handled, get out */
             return;
         }
-        else if (DbgkForwardException(ExceptionRecord, FALSE, TRUE))
+        /* A fast fail must end the process with its own status, so it skips the
+           exception port, whose server may choose another status or continue it */
+        else if (!KiIsFastFailException(ExceptionRecord) &&
+                 DbgkForwardException(ExceptionRecord, FALSE, TRUE))
         {
             /* Handled, get out */
             return;
@@ -428,6 +472,29 @@ KiSystemFatalException(IN ULONG ExceptionCode,
                      ExceptionCode,
                      0,
                      0,
+                     0,
+                     TrapFrame);
+}
+
+VOID
+DECLSPEC_NORETURN
+KiRaiseSecurityCheckFailureKernel(
+    _In_ PKTRAP_FRAME TrapFrame)
+{
+    EXCEPTION_RECORD ExceptionRecord;
+
+    /* A kernel mode __fastfail reports detected corruption, never continue */
+    ExceptionRecord.ExceptionCode = STATUS_STACK_BUFFER_OVERRUN;
+    ExceptionRecord.ExceptionFlags = EXCEPTION_NONCONTINUABLE;
+    ExceptionRecord.ExceptionRecord = NULL;
+    ExceptionRecord.ExceptionAddress = (PVOID)TrapFrame->Rip;
+    ExceptionRecord.NumberParameters = 1;
+    ExceptionRecord.ExceptionInformation[0] = TrapFrame->Rcx;
+
+    KeBugCheckWithTf(KERNEL_SECURITY_CHECK_FAILURE,
+                     TrapFrame->Rcx,
+                     (ULONG_PTR)TrapFrame,
+                     (ULONG_PTR)&ExceptionRecord,
                      0,
                      TrapFrame);
 }

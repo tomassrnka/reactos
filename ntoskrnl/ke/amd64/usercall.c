@@ -11,6 +11,28 @@
 #define NDEBUG
 #include <debug.h>
 
+/* Copy only the defined part of an exception record into a zeroed one, so a
+   record raised with fewer parameters does not carry stack contents along */
+static
+LONG
+KiCaptureExceptionRecord(
+    _Out_ PEXCEPTION_RECORD Destination,
+    _In_ PEXCEPTION_RECORD Source)
+{
+    ULONG Count = min(Source->NumberParameters, EXCEPTION_MAXIMUM_PARAMETERS);
+
+    RtlZeroMemory(Destination, sizeof(*Destination));
+    Destination->ExceptionCode = Source->ExceptionCode;
+    Destination->ExceptionFlags = Source->ExceptionFlags;
+    Destination->ExceptionRecord = Source->ExceptionRecord;
+    Destination->ExceptionAddress = Source->ExceptionAddress;
+    Destination->NumberParameters = Count;
+    RtlCopyMemory(Destination->ExceptionInformation,
+                  Source->ExceptionInformation,
+                  Count * sizeof(ULONG_PTR));
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
 /*!
  *  \name KiInitializeUserApc
  *
@@ -84,7 +106,7 @@ KiInitializeUserApc(
         ApcFrame->MachineFrame.Rip = TrapFrame->Rip;
         ApcFrame->MachineFrame.Rsp = TrapFrame->Rsp;
     }
-    _SEH2_EXCEPT(ExceptionRecord = *_SEH2_GetExceptionInformation()->ExceptionRecord, EXCEPTION_EXECUTE_HANDLER)
+    _SEH2_EXCEPT(KiCaptureExceptionRecord(&ExceptionRecord, _SEH2_GetExceptionInformation()->ExceptionRecord))
     {
         /* Dispatch the exception */
         ExceptionRecord.ExceptionAddress = (PVOID)TrapFrame->Rip;

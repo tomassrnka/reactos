@@ -1010,6 +1010,8 @@ ExpQuerySystemProcessInformation(
                 SpiCurrent->NextEntryOffset = CurrentSize + ImageNameMaximumLength; // relative offset to the beginning of the next structure
                 SpiCurrent->NumberOfThreads = ThreadsCount;
                 SpiCurrent->CreateTime = Process->CreateTime;
+                /* The cycles of the process' threads, as of their last context switch */
+                SpiCurrent->CycleTime = (ULONG64)InterlockedCompareExchange64((PLONG64)&Process->CycleTime, 0, 0);
                 SpiCurrent->ImageName.Length = ImageNameLength;
                 SpiCurrent->ImageName.MaximumLength = ImageNameMaximumLength;
                 SpiCurrent->ImageName.Buffer = (void*)(Current + CurrentSize);

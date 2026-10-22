@@ -1927,7 +1927,7 @@ NtSetInformationDebugObject(IN HANDLE DebugHandle,
     PDEBUG_OBJECT DebugObject;
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
     NTSTATUS Status;
-    PDEBUG_OBJECT_KILL_PROCESS_ON_EXIT_INFORMATION DebugInfo = DebugInformation;
+    BOOLEAN KillOnExit = FALSE;
     PAGED_CODE();
 
     /* Check buffers and parameters */
@@ -1948,7 +1948,7 @@ NtSetInformationDebugObject(IN HANDLE DebugHandle,
         {
             /* Return required length to user-mode */
             ProbeForWriteUlong(ReturnLength);
-            *ReturnLength = sizeof(*DebugInfo);
+            *ReturnLength = sizeof(DEBUG_OBJECT_KILL_PROCESS_ON_EXIT_INFORMATION);
         }
         _SEH2_EXCEPT(ExSystemExceptionFilter())
         {
@@ -1957,6 +1957,17 @@ NtSetInformationDebugObject(IN HANDLE DebugHandle,
         }
         _SEH2_END;
     }
+
+    /* Capture the user value under SEH, before taking any lock */
+    _SEH2_TRY
+    {
+        KillOnExit = ((PDEBUG_OBJECT_KILL_PROCESS_ON_EXIT_INFORMATION)DebugInformation)->KillProcessOnExit;
+    }
+    _SEH2_EXCEPT(ExSystemExceptionFilter())
+    {
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
 
     /* Open the Object */
     Status = ObReferenceObjectByHandle(DebugHandle,
@@ -1971,7 +1982,7 @@ NtSetInformationDebugObject(IN HANDLE DebugHandle,
         ExAcquireFastMutex(&DebugObject->Mutex);
 
         /* Set the proper flag */
-        if (DebugInfo->KillProcessOnExit)
+        if (KillOnExit)
         {
             /* Enable killing the process */
             DebugObject->KillProcessOnExit = TRUE;

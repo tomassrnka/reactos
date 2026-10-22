@@ -36,6 +36,7 @@ extern void func_NtAcceptConnectPort(void);
 extern void func_NtAccessCheck(void);
 extern void func_NtAccessCheckByType(void);
 extern void func_NtAccessCheckByTypeResultList(void);
+extern void func_NtAccessCheckByTypeResultListAndAuditAlarmByHandle(void);
 extern void func_NtAdjustGroupsToken(void);
 extern void func_NtAdjustPrivilegesToken(void);
 extern void func_NtAllocateVirtualMemory(void);
@@ -55,6 +56,7 @@ extern void func_NtExtendSection(void);
 extern void func_NtFilterToken(void);
 extern void func_NtFreeVirtualMemory(void);
 extern void func_NtImpersonateAnonymousToken(void);
+extern void func_NtKeyedEvent(void);
 extern void func_NtLoadUnloadKey(void);
 extern void func_NtMapViewOfSection(void);
 extern void func_NtMutant(void);
@@ -80,10 +82,12 @@ extern void func_NtQueryVolumeInformationFile(void);
 extern void func_NtReadFile(void);
 extern void func_NtSaveKey(void);
 extern void func_NtSetDefaultLocale(void);
+extern void func_NtSetInformationDebugObject(void);
 extern void func_NtSetInformationFile(void);
 extern void func_NtSetInformationProcess(void);
 extern void func_NtSetInformationThread(void);
 extern void func_NtSetInformationToken(void);
+extern void func_NtSetLdtEntries(void);
 extern void func_NtSetValueKey(void);
 extern void func_NtSetVolumeInformationFile(void);
 extern void func_NtStartProfile(void);
@@ -104,6 +108,7 @@ extern void func_RtlDoesFileExists(void);
 extern void func_RtlDosPathNameToNtPathName_U(void);
 extern void func_RtlDosSearchPath_U(void);
 extern void func_RtlDosSearchPath_Ustr(void);
+extern void func_RtlFailFast(void);
 extern void func_RtlFirstFreeAce(void);
 extern void func_RtlFindMessage(void);
 extern void func_RtlGenerate8dot3Name(void);
@@ -150,6 +155,7 @@ extern void func_StackOverflow(void);
 extern void func_SystemCallStubs(void);
 extern void func_TimerResolution(void);
 extern void func_UserModeException(void);
+extern void func_StackOverflowDispatch(void);
 
 const struct test winetest_testlist[] =
 {
@@ -188,6 +194,7 @@ const struct test winetest_testlist[] =
     { "NtAccessCheck",                  func_NtAccessCheck },
     { "NtAccessCheckByType",            func_NtAccessCheckByType },
     { "NtAccessCheckByTypeResultList",  func_NtAccessCheckByTypeResultList },
+    { "NtAccessCheckByTypeResultListAndAuditAlarmByHandle", func_NtAccessCheckByTypeResultListAndAuditAlarmByHandle },
     { "NtAdjustGroupsToken",            func_NtAdjustGroupsToken },
     { "NtAdjustPrivilegesToken",        func_NtAdjustPrivilegesToken },
     { "NtAllocateVirtualMemory",        func_NtAllocateVirtualMemory },
@@ -207,6 +214,7 @@ const struct test winetest_testlist[] =
     { "NtFilterToken",                  func_NtFilterToken },
     { "NtFreeVirtualMemory",            func_NtFreeVirtualMemory },
     { "NtImpersonateAnonymousToken",    func_NtImpersonateAnonymousToken },
+    { "NtKeyedEvent",                   func_NtKeyedEvent },
     { "NtLoadUnloadKey",                func_NtLoadUnloadKey },
     { "NtMapViewOfSection",             func_NtMapViewOfSection },
     { "NtMutant",                       func_NtMutant },
@@ -232,10 +240,12 @@ const struct test winetest_testlist[] =
     { "NtReadFile",                     func_NtReadFile },
     { "NtSaveKey",                      func_NtSaveKey},
     { "NtSetDefaultLocale",             func_NtSetDefaultLocale },
+    { "NtSetInformationDebugObject",   func_NtSetInformationDebugObject },
     { "NtSetInformationFile",           func_NtSetInformationFile },
     { "NtSetInformationProcess",        func_NtSetInformationProcess },
     { "NtSetInformationThread",         func_NtSetInformationThread },
     { "NtSetInformationToken",          func_NtSetInformationToken },
+    { "NtSetLdtEntries",                func_NtSetLdtEntries },
     { "NtSetValueKey",                  func_NtSetValueKey},
     { "NtSetVolumeInformationFile",     func_NtSetVolumeInformationFile },
     { "NtStartProfile",                 func_NtStartProfile },
@@ -255,6 +265,7 @@ const struct test winetest_testlist[] =
     { "RtlDosPathNameToNtPathName_U",   func_RtlDosPathNameToNtPathName_U },
     { "RtlDosSearchPath_U",             func_RtlDosSearchPath_U },
     { "RtlDosSearchPath_Ustr",          func_RtlDosSearchPath_Ustr },
+    { "RtlFailFast",                    func_RtlFailFast },
     { "RtlFirstFreeAce",                func_RtlFirstFreeAce },
     { "RtlFindMessage",                 func_RtlFindMessage },
     { "RtlGenerate8dot3Name",           func_RtlGenerate8dot3Name },
@@ -299,6 +310,7 @@ const struct test winetest_testlist[] =
     { "SystemCallStubs",                func_SystemCallStubs },
     { "TimerResolution",                func_TimerResolution },
     { "UserModeException",              func_UserModeException },
+    { "StackOverflowDispatch",          func_StackOverflowDispatch },
 #ifdef _M_IX86
     { "RtlUnwind",                      func_RtlUnwind },
 #endif

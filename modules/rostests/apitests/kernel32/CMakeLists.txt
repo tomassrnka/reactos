@@ -8,6 +8,7 @@ list(APPEND SOURCE
     ConsoleCP.c
     CreateProcess.c
     CreateWaitableTimerEx.c
+    DebugTrapInterrupts.c
     DefaultActCtx.c
     DeviceIoControl.c
     dosdev.c
@@ -28,6 +29,7 @@ list(APPEND SOURCE
     GetModuleFileName.c
     GetQueuedCompletionStatusEx.c
     GetVolumeInformation.c
+    IdleProcessor.c
     InitOnce.c
     interlck.c
     IsDBCSLeadByteEx.c

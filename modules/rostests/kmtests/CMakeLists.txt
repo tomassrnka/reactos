@@ -92,11 +92,13 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ke/KeDevQueue.c
     ntos_ke/KeDpc.c
     ntos_ke/KeEvent.c
+    ntos_ke/KeFastFail.c
     ntos_ke/KeFloatPointState.c
     ntos_ke/KeGenericCallDpc.c
     ntos_ke/KeGuardedMutex.c
     ntos_ke/KeIrql.c
     ntos_ke/KeMutex.c
+    ntos_ke/KePriority.c
     ntos_ke/KeProcessor.c
     ntos_ke/KeQpc.c
     ntos_ke/KeSpinLock.c

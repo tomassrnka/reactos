@@ -26,11 +26,13 @@ extern "C" {
 
 typedef VOID KMT_TESTFUNC(VOID);
 typedef KMT_TESTFUNC *PKMT_TESTFUNC;
+typedef VOID KMT_TESTFUNC_WITH_DATA(_In_reads_bytes_(DataLength) PVOID Data, _In_ SIZE_T DataLength);
 
 typedef struct
 {
     const char *TestName;
     KMT_TESTFUNC *TestFunction;
+    KMT_TESTFUNC_WITH_DATA *TestFunctionWithData;
 } KMT_TEST, *PKMT_TEST;
 
 typedef const KMT_TEST CKMT_TEST, *PCKMT_TEST;
@@ -175,6 +177,7 @@ PKTHREAD KmtStartThread(IN PKSTART_ROUTINE StartRoutine, IN PVOID StartContext O
 VOID KmtFinishThread(IN PKTHREAD Thread OPTIONAL, IN PKEVENT Event OPTIONAL);
 #elif defined KMT_USER_MODE
 DWORD KmtRunKernelTest(IN PCSTR TestName);
+DWORD KmtRunKernelTestWithData(IN PCSTR TestName, IN PVOID Data, IN DWORD DataLength);
 
 DWORD KmtLoadDriver(IN PCWSTR ServiceName, IN BOOLEAN RestartIfRunning);
 VOID KmtUnloadDriverKeepService(VOID);

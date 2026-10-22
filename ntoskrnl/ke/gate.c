@@ -58,7 +58,14 @@ KeWaitForGate(IN PKGATE Gate,
         {
             /* Check if we have a queue and lock the dispatcher if so */
             Queue = Thread->Queue;
-            if (Queue) KiAcquireDispatcherLockAtSynchLevel();
+            if (Queue)
+            {
+                KiAcquireDispatcherLockAtSynchLevel();
+
+                /* KeRundownQueue may have detached us before the queue goes away */
+                Queue = Thread->Queue;
+                if (!Queue) KiReleaseDispatcherLockFromSynchLevel();
+            }
 
             /* Lock the thread */
             KiAcquireThreadLock(Thread);
@@ -171,7 +178,7 @@ KeSignalGateBoostPriority(IN PKGATE Gate)
             WaitThread = WaitBlock->Thread;
 
             /* Check to see if the waiting thread is locked */
-            if (!KiTryToAcquireThreadLock(WaitThread))
+            if (KiTryThreadLock(WaitThread))
             {
                 /* Unlock the gate */
                 KiReleaseDispatcherObject(&Gate->Header);

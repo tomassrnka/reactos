@@ -124,6 +124,7 @@ ExpReleaseOrWaitForKeyedEvent(
     ULONG_PTR HashIndex;
     PVOID PreviousKeyedWaitValue;
     KPROCESSOR_MODE PreviousMode;
+    BOOLEAN Paired;
 
     /* Get the current process */
     CurrentProcess = PsGetCurrentProcess();
@@ -224,11 +225,30 @@ ExpReleaseOrWaitForKeyedEvent(
             /* Remove the thread from the list */
             RemoveEntryList(&CurrentThread->KeyedWaitChain);
             InitializeListHead(&CurrentThread->KeyedWaitChain);
+            Paired = FALSE;
+        }
+        else
+        {
+            /* The other side took this thread off the list and signaled the semaphore,
+               both under the lock, before this wait ended in the timeout or abort. It
+               already counted the pairing as done, so this side must report it too. */
+            Paired = TRUE;
         }
 
         /* Unlock the list */
         ExReleasePushLockExclusive(&KeyedEvent->HashTable[HashIndex].Lock);
         KeLeaveCriticalRegion();
+
+        if (Paired)
+        {
+            /* Take the signal, so that the semaphore is clear when it is reused */
+            KeWaitForSingleObject(&CurrentThread->KeyedWaitSemaphore,
+                                  WrKeyedEvent,
+                                  KernelMode,
+                                  FALSE,
+                                  NULL);
+            Status = STATUS_SUCCESS;
+        }
     }
 
     /* Restore the previous KeyedWaitValue, since this is a union member */

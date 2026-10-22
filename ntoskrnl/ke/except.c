@@ -124,11 +124,14 @@ KiRaiseException(
 
             /* Probe the entire parameters now*/
             Size = (sizeof(EXCEPTION_RECORD) -
-                    ((EXCEPTION_MAXIMUM_PARAMETERS - ParameterCount) * sizeof(ULONG)));
+                    ((EXCEPTION_MAXIMUM_PARAMETERS - ParameterCount) * sizeof(ULONG_PTR)));
             ProbeForRead(ExceptionRecord, Size, sizeof(ULONG));
 
-            /* Now make copies in the stack */
+            /* Now make copies in the stack. The unused parameters of the
+               local record are dispatched too, so they must not hold stack
+               contents. */
             RtlCopyMemory(&LocalContext, Context, sizeof(CONTEXT));
+            RtlZeroMemory(&LocalExceptionRecord, sizeof(LocalExceptionRecord));
             RtlCopyMemory(&LocalExceptionRecord, ExceptionRecord, Size);
             Context = &LocalContext;
             ExceptionRecord = &LocalExceptionRecord;
