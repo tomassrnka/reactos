@@ -2431,36 +2431,66 @@ GetSystemWindowsDirectoryW(OUT LPWSTR lpBuffer,
     return ReturnLength / sizeof(WCHAR);
 }
 
-/*
- * @unimplemented
- */
+#if defined(SYSWOW64_GUEST) || (defined(_WIN64) && defined(BUILD_WOW64_ENABLED))
+static UINT
+BasepGetWow64Directory(PWSTR Path)
+{
+    static const WCHAR Suffix[] = L"\\SysWOW64";
+    UINT Length = BaseWindowsDirectory.Length / sizeof(WCHAR);
+    if (Length + ARRAYSIZE(Suffix) > MAX_PATH)
+    {
+        SetLastError(ERROR_FILENAME_EXCED_RANGE);
+        return 0;
+    }
+    RtlCopyMemory(Path, BaseWindowsDirectory.Buffer, Length * sizeof(WCHAR));
+    RtlCopyMemory(Path + Length, Suffix, sizeof(Suffix));
+    return Length + ARRAYSIZE(Suffix) - 1;
+}
+#endif
+
 UINT
 WINAPI
-GetSystemWow64DirectoryW(OUT LPWSTR lpBuffer,
-                         IN UINT uSize)
+GetSystemWow64DirectoryW(OUT LPWSTR lpBuffer, IN UINT uSize)
 {
+#if defined(SYSWOW64_GUEST) || (defined(_WIN64) && defined(BUILD_WOW64_ENABLED))
+    WCHAR Path[MAX_PATH];
+    UINT Length = BasepGetWow64Directory(Path);
+    if (!Length) return 0;
+    if (uSize <= Length) return Length + 1;
+    RtlCopyMemory(lpBuffer, Path, (Length + 1) * sizeof(WCHAR));
+    return Length;
+#else
 #ifdef _WIN64
     UNIMPLEMENTED;
-    return 0;
 #else
     SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+#endif
     return 0;
 #endif
 }
 
-/*
- * @unimplemented
- */
 UINT
 WINAPI
-GetSystemWow64DirectoryA(OUT LPSTR lpBuffer,
-                         IN UINT uSize)
+GetSystemWow64DirectoryA(OUT LPSTR lpBuffer, IN UINT uSize)
 {
+#if defined(SYSWOW64_GUEST) || (defined(_WIN64) && defined(BUILD_WOW64_ENABLED))
+    WCHAR Path[MAX_PATH];
+    UINT Length = BasepGetWow64Directory(Path);
+    ULONG Bytes;
+    NTSTATUS Status;
+    if (!Length) return 0;
+    Status = RtlUnicodeToMultiByteSize(&Bytes, Path, Length * sizeof(WCHAR));
+    if (!NT_SUCCESS(Status)) { BaseSetLastNTError(Status); return 0; }
+    if (uSize <= Bytes) return Bytes + 1;
+    Status = RtlUnicodeToMultiByteN(lpBuffer, uSize, &Bytes, Path, (Length + 1) * sizeof(WCHAR));
+    if (!NT_SUCCESS(Status)) { BaseSetLastNTError(Status); return 0; }
+    return Bytes - 1;
+#else
 #ifdef _WIN64
     UNIMPLEMENTED;
-    return 0;
 #else
     SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+#endif
     return 0;
 #endif
 }

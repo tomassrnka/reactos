@@ -25,6 +25,9 @@ NTSTATUS
 NTAPI
 CsrNewThread(VOID)
 {
+#ifdef _M_IX86
+    if (CsrIsWow64()) return CsrWow64Call(2, NULL);
+#endif
     /* Register the termination port to CSR's */
     return NtRegisterThreadTerminatePort(CsrApiPort);
 }

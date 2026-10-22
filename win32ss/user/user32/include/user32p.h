@@ -38,7 +38,7 @@ typedef struct
 /* global variables */
 extern HINSTANCE User32Instance;
 #define user32_module User32Instance
-extern PPROCESSINFO g_ppi;
+extern KPTRTYPE(PPROCESSINFO) g_ppi;
 extern SHAREDINFO gSharedInfo;
 extern PSERVERINFO gpsi;
 extern PUSER_HANDLE_TABLE gHandleTable;
@@ -138,5 +138,12 @@ HRESULT User32GetSystemFilePath(_Out_writes_(cchBuffer) PWSTR lpBuffer, _In_ SIZ
 BOOL WINAPI UpdatePerUserImmEnabling(VOID);
 VOID APIENTRY CliImmInitializeHotKeys(DWORD dwAction, HKL hKL);
 VOID IntLoadPreloadKeyboardLayouts(VOID);
+
+/* The current THREADINFO pointer at full width: the guest reads it from the 64-bit TEB */
+#ifdef W32K_WIDE_ACTIVE
+KPTRTYPE(PTHREADINFO) GetW32ThreadInfoK(VOID);
+#else
+#define GetW32ThreadInfoK GetW32ThreadInfo
+#endif
 
 /* EOF */

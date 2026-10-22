@@ -1170,7 +1170,7 @@ MiMapViewOfDataSection(
     _In_range_(ViewShare, ViewUnmap) SECTION_INHERIT InheritDisposition,
     _In_ ULONG ProtectionMask,
     _In_ SIZE_T CommitSize,
-    _In_ ULONG_PTR ZeroBits,
+    _In_ ULONG_PTR HighestAddress,
     _In_ ULONG AllocationType)
 {
     PMMVAD_LONG Vad;
@@ -1433,7 +1433,7 @@ MiMapViewOfDataSection(
     Status = MiInsertVadEx((PMMVAD)Vad,
                            &StartAddress,
                            ViewSizeInPages * PAGE_SIZE,
-                           MAXULONG_PTR >> ZeroBits,
+                           HighestAddress,
                            Granularity,
                            AllocationType);
     if (!NT_SUCCESS(Status))
@@ -2689,8 +2689,12 @@ MmMapViewOfArm3Section(
     ULONG ProtectionMask;
     NTSTATUS Status;
     ULONG64 CalculatedViewSize;
+    ULONG_PTR HighestAddress;
 
     PAGED_CODE();
+
+    if (!MiZeroBitsToHighestAddress(ZeroBits, &HighestAddress))
+        return STATUS_INVALID_PARAMETER_4;
 
     /* Check for invalid inherit disposition */
     // Let MiMapViewOfDataSection() check InheritDisposition value.
@@ -2780,6 +2784,22 @@ MmMapViewOfArm3Section(
         return STATUS_INVALID_PARAMETER_10;
     }
 
+    /* Check the base MiMapViewOfDataSection will actually use. Kernel callers
+     * may supply an unaligned address; i386 MEM_DOS_LIM uses page granularity. */
+    if (*BaseAddress)
+    {
+        ULONG Granularity = MM_VIRTMEM_GRANULARITY;
+        ULONG_PTR StartAddress;
+#ifdef _M_IX86
+        if (AllocationType & MEM_DOS_LIM) Granularity = PAGE_SIZE;
+#endif
+        StartAddress = ALIGN_DOWN_BY((ULONG_PTR)*BaseAddress, Granularity);
+        if (StartAddress > HighestAddress ||
+            *ViewSize > HighestAddress ||
+            PAGE_ROUND_UP(*ViewSize) - 1 > HighestAddress - StartAddress)
+            return STATUS_INVALID_PARAMETER_4;
+    }
+
     /* Start by attaching to the current process if needed */
     if (PsGetCurrentProcess() != Process)
     {
@@ -2797,7 +2817,7 @@ MmMapViewOfArm3Section(
                                     InheritDisposition,
                                     ProtectionMask,
                                     CommitSize,
-                                    ZeroBits,
+                                    HighestAddress,
                                     AllocationType);
 
     /* Detach if needed, then return status */
@@ -3429,6 +3449,7 @@ NtMapViewOfSection(
     NTSTATUS Status;
     ACCESS_MASK DesiredAccess;
     ULONG ProtectionMask;
+    ULONG_PTR HighestAddress;
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
 #if defined(_M_IX86) || defined(_M_AMD64)
     static const ULONG ValidAllocationType = (MEM_TOP_DOWN | MEM_LARGE_PAGES |
@@ -3510,26 +3531,16 @@ NtMapViewOfSection(
         return STATUS_INVALID_PARAMETER_3;
     }
 
-    /* Check for invalid zero bits */
-    if (ZeroBits)
+    if (!MiZeroBitsToHighestAddress(ZeroBits, &HighestAddress))
+        return STATUS_INVALID_PARAMETER_4;
+
+    if (ZeroBits && SafeBaseAddress)
     {
-        if (ZeroBits > MI_MAX_ZERO_BITS)
-        {
-            DPRINT1("Invalid zero bits\n");
+        /* Explicit bases must satisfy the caller's mask, including its holes. */
+        if ((ZeroBits >= 32 && ((ULONG_PTR)SafeBaseAddress & ~ZeroBits)) ||
+            (ULONG_PTR)SafeBaseAddress > HighestAddress ||
+            (SafeViewSize && SafeViewSize - 1 > HighestAddress - (ULONG_PTR)SafeBaseAddress))
             return STATUS_INVALID_PARAMETER_4;
-        }
-
-        if ((((ULONG_PTR)SafeBaseAddress << ZeroBits) >> ZeroBits) != (ULONG_PTR)SafeBaseAddress)
-        {
-            DPRINT1("Invalid zero bits\n");
-            return STATUS_INVALID_PARAMETER_4;
-        }
-
-        if (((((ULONG_PTR)SafeBaseAddress + SafeViewSize) << ZeroBits) >> ZeroBits) != ((ULONG_PTR)SafeBaseAddress + SafeViewSize))
-        {
-            DPRINT1("Invalid zero bits\n");
-            return STATUS_INVALID_PARAMETER_4;
-        }
     }
 
     /* Reference the process */

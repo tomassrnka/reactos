@@ -284,7 +284,7 @@ GdiDeleteBrushOrPen(
 {
     GDILOOBJTYPE eObjectType;
     PBRUSH_ATTR pbrattr;
-    PTEB pTeb;
+    PW32TEB pTeb;
     PGDIBSOBJECT pgO;
 
     eObjectType = GDI_HANDLE_GET_TYPE(hobj);
@@ -292,14 +292,14 @@ GdiDeleteBrushOrPen(
     if ((GdiGetHandleUserData(hobj, eObjectType, (PVOID*)&pbrattr)) &&
         (pbrattr != NULL))
     {
-        pTeb = NtCurrentTeb();
-        if (pTeb->Win32ThreadInfo != NULL)
+        pTeb = W32GetCurrentTeb();
+        if (pTeb->Win32ThreadInfo != 0)
         {
             pgO = GdiAllocBatchCommand(NULL, GdiBCDelObj);
             if (pgO)
             {
                 /// FIXME: we need to mark the object as deleted!
-                pgO->hgdiobj = hobj;
+                KSET(pgO, hgdiobj, hobj);
                 return TRUE;
             }
         }

@@ -2825,7 +2825,7 @@ static BOOL MENU_InitPopup( PWND pWndOwner, PMENU menu, UINT flags )
     RtlZeroMemory(&Cs, sizeof(Cs));
     Cs.style = WS_POPUP | WS_CLIPSIBLINGS | WS_BORDER;
     Cs.dwExStyle = ex_style;
-    Cs.hInstance = hModClient; // hModuleWin; // Server side winproc!
+    Cs.hInstance = IntGetClientModule(GetW32ProcessInfo()); // hModuleWin; // Server side winproc!
     Cs.lpszName = (LPCWSTR) &WindowName;
     Cs.lpszClass = (LPCWSTR) &ClassName;
     Cs.lpCreateParams = UserHMGetHandle(menu);
@@ -5354,12 +5354,12 @@ PMENU FASTCALL MENU_GetSystemMenu(PWND Window, PMENU Popup)
       if ( Window->ExStyle & WS_EX_MDICHILD )
       {
          RtlInitUnicodeString( &MenuName, L"SYSMENUMDI");
-         hNewMenu = co_IntCallLoadMenu( hModClient, &MenuName);
+         hNewMenu = co_IntCallLoadMenu( IntGetClientModule(GetW32ProcessInfo()), &MenuName);
       }
       else
       {
          RtlInitUnicodeString( &MenuName, L"SYSMENU");
-         hNewMenu = co_IntCallLoadMenu( hModClient, &MenuName);
+         hNewMenu = co_IntCallLoadMenu( IntGetClientModule(GetW32ProcessInfo()), &MenuName);
          //ERR("%wZ\n",&MenuName);
       }
       if (!hNewMenu)

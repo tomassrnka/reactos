@@ -771,7 +771,15 @@ GreOpenDCW(
     /* FIXME: HACK! */
     DC_InitHack(pdc);
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (!DC_bAllocDcAttr(pdc) && Win32kUserViewZeroBits(PsGetCurrentProcess()))
+    {
+        GDIOBJ_vDeleteObject(&pdc->BaseObject);
+        return NULL;
+    }
+#else
     DC_bAllocDcAttr(pdc);
+#endif
 
     DC_UnlockDc(pdc);
 
@@ -962,7 +970,15 @@ GreCreateCompatibleDC(HDC hdc, BOOL bAltDc)
     DC_InitHack(pdcNew);
 
     /* Allocate a dc attribute */
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (!DC_bAllocDcAttr(pdcNew) && Win32kUserViewZeroBits(PsGetCurrentProcess()))
+    {
+        GDIOBJ_vDeleteObject(&pdcNew->BaseObject);
+        return NULL;
+    }
+#else
     DC_bAllocDcAttr(pdcNew);
+#endif
 
     DC_UnlockDc(pdcNew);
 

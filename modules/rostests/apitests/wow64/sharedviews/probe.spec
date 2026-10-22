@@ -1,0 +1,1 @@
+@ stdcall ProbeSharedViews(ptr)

@@ -1,0 +1,1 @@
+@ stdcall Wow64LocalValue()

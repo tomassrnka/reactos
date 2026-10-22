@@ -957,6 +957,29 @@ PUBLIC KiSystemCallEntry64
     mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_EFlags], r11
     mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Rbp], rbp
 
+    /* NtContinue/NtRaiseException can return through KiExceptionExit with a
+     * partial context. Every trap slot that path restores or reports must
+     * describe user state, including groups omitted from the supplied context. */
+    mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_R10], r10
+    mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_R11], r11
+    movaps [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Xmm0], xmm0
+    movaps [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Xmm1], xmm1
+    movaps [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Xmm2], xmm2
+    movaps [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Xmm3], xmm3
+    movaps [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Xmm4], xmm4
+    movaps [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Xmm5], xmm5
+    mov word ptr [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_SegDs], ds
+    mov word ptr [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_SegEs], es
+    mov word ptr [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_SegFs], fs
+    mov word ptr [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_SegGs], gs
+    mov word ptr [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_SegCs], (KGDT64_R3_CODE or RPL_MASK)
+    mov word ptr [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_SegSs], (KGDT64_R3_DATA or RPL_MASK)
+    /* Debug registers are maintained in the base trap frame by the context
+     * APIs. Until amd64 loads them into hardware, reading DRs here would
+     * overwrite that user state with the kernel's hardware debug state. */
+
+    mov byte ptr [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_PreviousIrql], PASSIVE_LEVEL
+
     /* Store user stack pointer in the trap frame */
     mov rax, gs:[PcUserRsp]
     mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Rsp], rax
@@ -1033,6 +1056,11 @@ GLOBAL_LABEL KiSystemServiceExit
     call KiInitiateUserApc
 
 NoUserApcPending:
+#ifdef BUILD_WOW64_ENABLED
+    mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Rax], rax
+    call KiRestoreWow64Gs
+    mov rax, [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Rax]
+#endif
     /* Disable interrupts for return */
     cli
 
@@ -1128,8 +1156,16 @@ PUBLIC KiServiceExit3
 
 PUBLIC KiSystemCallEntry32
 KiSystemCallEntry32:
-    swapgs
-    int 3
+    /*
+     * SYSCALL has not switched stacks or GS. No 32-bit argument thunk is
+     * installed here: reject the call without touching user memory, taking
+     * an exception on the user stack, or falling into KiZwSystemService.
+     * Truncate RIP/RSP to compatibility width before the non-REX.W SYSRET.
+     */
+    mov eax, HEX(0C000001C) /* STATUS_INVALID_SYSTEM_SERVICE */
+    mov ecx, ecx
+    mov esp, esp
+    .byte HEX(0F), HEX(07) /* SYSRET with 32-bit operand size, no REX.W. */
 
 
 PUBLIC KiZwSystemService
@@ -1263,6 +1299,29 @@ KiConvertToGuiThreadFailed:
     ret
 
 ENDFUNC
+
+/* Capture the service caller's nonvolatile state before any C prologue.
+ * KeContextToTrapFrame replaces only the context groups explicitly supplied.
+ * On a probing failure, the normal ABI return preserves the same registers. */
+EXTERN KiContinueService:PROC
+PUBLIC NtContinue
+.PROC NtContinue
+    GENERATE_EXCEPTION_FRAME
+    mov r8, rsp
+    call KiContinueService
+    RESTORE_EXCEPTION_STATE
+    ret
+.ENDP
+
+EXTERN KiRaiseExceptionService:PROC
+PUBLIC NtRaiseException
+.PROC NtRaiseException
+    GENERATE_EXCEPTION_FRAME
+    mov r9, rsp
+    call KiRaiseExceptionService
+    RESTORE_EXCEPTION_STATE
+    ret
+.ENDP
 
 EXTERN KiGetTrapContextInternal:PROC
 

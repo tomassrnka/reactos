@@ -32,8 +32,8 @@
 static
 BOOL
 SetUserEnvironmentVariable(PWSTR* Environment,
-                           LPWSTR lpName,
-                           LPWSTR lpValue,
+                           LPCWSTR lpName,
+                           LPCWSTR lpValue,
                            BOOL bExpand)
 {
     NTSTATUS Status;
@@ -516,6 +516,7 @@ CreateEnvironmentBlock(OUT LPVOID *lpEnvironment,
     WCHAR Buffer[MAX_PATH];
     WCHAR PublicDirectory[MAX_PATH];
     WCHAR szValue[1024];
+    BOOL Wow64 = FALSE, HasWow64 = FALSE;
 
     DPRINT("CreateEnvironmentBlock() called\n");
 
@@ -532,6 +533,12 @@ CreateEnvironmentBlock(OUT LPVOID *lpEnvironment,
         SetLastError(RtlNtStatusToDosError(Status));
         return FALSE;
     }
+
+    IsWow64Process(GetCurrentProcess(), &Wow64);
+    HasWow64 = Wow64;
+#if defined(_M_AMD64) && defined(BUILD_WOW64_ENABLED)
+    HasWow64 = TRUE;
+#endif
 
     /* Set 'SystemRoot' variable */
     Length = ARRAYSIZE(Buffer);
@@ -557,6 +564,12 @@ CreateEnvironmentBlock(OUT LPVOID *lpEnvironment,
     {
         RtlDestroyEnvironment(*Environment);
         return FALSE;
+    }
+
+    if (Wow64)
+    {
+        SetUserEnvironmentVariable(Environment, L"PROCESSOR_ARCHITECTURE", L"x86", FALSE);
+        SetUserEnvironmentVariable(Environment, L"PROCESSOR_ARCHITEW6432", L"AMD64", FALSE);
     }
 
     /* Set 'COMPUTERNAME' variable */
@@ -596,13 +609,13 @@ CreateEnvironmentBlock(OUT LPVOID *lpEnvironment,
     lError = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
                            L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion",
                            0,
-                           KEY_READ,
+                           KEY_READ | (Wow64 ? KEY_WOW64_64KEY : 0),
                            &hKey);
     if (lError == ERROR_SUCCESS)
     {
         Length = sizeof(szValue);
         lError = RegQueryValueExW(hKey,
-                                  L"ProgramFilesDir",
+                                  Wow64 ? L"ProgramFilesDir (x86)" : L"ProgramFilesDir",
                                   NULL,
                                   &dwType,
                                   (LPBYTE)szValue,
@@ -617,7 +630,7 @@ CreateEnvironmentBlock(OUT LPVOID *lpEnvironment,
 
         Length = sizeof(szValue);
         lError = RegQueryValueExW(hKey,
-                                  L"CommonFilesDir",
+                                  Wow64 ? L"CommonFilesDir (x86)" : L"CommonFilesDir",
                                   NULL,
                                   &dwType,
                                   (LPBYTE)szValue,
@@ -630,37 +643,26 @@ CreateEnvironmentBlock(OUT LPVOID *lpEnvironment,
                                        FALSE);
         }
 
-        RegCloseKey(hKey);
-    }
-
-    /* Set 'PUBLIC' variable to the public user directory */
-    lError = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                        L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList",
-                        0,
-                        KEY_READ,
-                        &hKey);
-    if (lError == ERROR_SUCCESS)
-    {
-        Length = sizeof(szValue);
-        lError = RegQueryValueExW(hKey,
-                                  L"Public",
-                                  NULL,
-                                  &dwType,
-                                  (LPBYTE)szValue,
-                                  &Length);
-        if (lError == ERROR_SUCCESS)
+        if (HasWow64)
         {
-            if (!ExpandEnvironmentStringsW(szValue,
-                                            PublicDirectory,
-                                            ARRAYSIZE(PublicDirectory)))
+            static const struct { PCWSTR Value, Variable; } Paths[] = {
+                {L"ProgramFilesDir", L"ProgramW6432"},
+                {L"CommonFilesDir", L"CommonProgramW6432"},
+                {L"ProgramFilesDir (x86)", L"ProgramFiles(x86)"},
+                {L"CommonFilesDir (x86)", L"CommonProgramFiles(x86)"}
+            };
+            DWORD i;
+            for (i = 0; i < ARRAYSIZE(Paths); ++i)
             {
-                DPRINT1("Error: %lu\n", GetLastError());
-                RegCloseKey(hKey);
-                return FALSE;
+                Length = sizeof(szValue);
+                lError = RegQueryValueExW(hKey, Paths[i].Value, NULL, &dwType, (LPBYTE)szValue, &Length);
+                if (lError == ERROR_SUCCESS && dwType == REG_SZ && Length >= sizeof(WCHAR) &&
+                    Length <= sizeof(szValue) && !(Length % sizeof(WCHAR)) &&
+                    szValue[Length / sizeof(WCHAR) - 1] == UNICODE_NULL)
+                    SetUserEnvironmentVariable(Environment, Paths[i].Variable, szValue, FALSE);
             }
-
-            SetUserEnvironmentVariable(Environment, L"PUBLIC", PublicDirectory, FALSE);
         }
+
         RegCloseKey(hKey);
     }
 

@@ -46,6 +46,18 @@ DWORD WINAPI SHIM_OBJ_NAME(APIHook_RtlGetVersion)(LPOSVERSIONINFOEXA lpOsVersion
     return STATUS_INVALID_PARAMETER;
 }
 
+#if defined(SYSWOW64_GUEST) && !defined(VERSIONLIE_NT6)
+/* MSYS consults RtlGetNtVersionNumbers after RtlGetVersion; keep the explicitly
+ * selected guest version layer consistent across both queries. The NT6 layers
+ * hook this through their own, richer set below. */
+VOID NTAPI SHIM_OBJ_NAME(APIHook_RtlGetNtVersionNumbers)(PULONG pMajor, PULONG pMinor, PULONG pBuild)
+{
+    if (pMajor) *pMajor = VERSION_INFO.dwMajorVersion;
+    if (pMinor) *pMinor = VERSION_INFO.dwMinorVersion;
+    if (pBuild) *pBuild = VERSION_INFO.dwBuildNumber | 0xF0000000;
+}
+#endif
+
 #ifdef VERSIONLIE_NT6
 
 /* Programs that ask whether Windows is at least some version go through VerifyVersionInfo */
@@ -210,6 +222,14 @@ BOOL WINAPI SHIM_OBJ_NAME(Notify)(DWORD fdwReason, PVOID ptr)
     SHIM_HOOK(9, "ADVAPI32.DLL", "RegQueryValueExW", SHIM_OBJ_NAME(APIHook_RegQueryValueExW)) \
     SHIM_HOOK(10, "ADVAPI32.DLL", "RegGetValueA", SHIM_OBJ_NAME(APIHook_RegGetValueA)) \
     SHIM_HOOK(11, "ADVAPI32.DLL", "RegGetValueW", SHIM_OBJ_NAME(APIHook_RegGetValueW))
+#elif defined(SYSWOW64_GUEST)
+#define SHIM_NUM_HOOKS  5
+#define SHIM_SETUP_HOOKS \
+    SHIM_HOOK(0, "KERNEL32.DLL", "GetVersionExA", SHIM_OBJ_NAME(APIHook_GetVersionExA)) \
+    SHIM_HOOK(1, "KERNEL32.DLL", "GetVersionExW", SHIM_OBJ_NAME(APIHook_GetVersionExW)) \
+    SHIM_HOOK(2, "KERNEL32.DLL", "GetVersion", SHIM_OBJ_NAME(APIHook_GetVersion)) \
+    SHIM_HOOK(3, "NTDLL.DLL", "RtlGetVersion", SHIM_OBJ_NAME(APIHook_RtlGetVersion)) \
+    SHIM_HOOK(4, "NTDLL.DLL", "RtlGetNtVersionNumbers", SHIM_OBJ_NAME(APIHook_RtlGetNtVersionNumbers))
 #else
 #define SHIM_NUM_HOOKS  4
 #define SHIM_SETUP_HOOKS \

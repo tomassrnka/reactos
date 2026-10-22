@@ -2378,6 +2378,13 @@ REGION_AllocUserRgnWithHandle(
 
     if (!REGION_bAllocRgnAttr(prgn))
     {
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+        if (Win32kUserViewZeroBits(PsGetCurrentProcess()))
+        {
+            REGION_Delete(prgn);
+            return NULL;
+        }
+#endif
         ASSERT(FALSE);
     }
 

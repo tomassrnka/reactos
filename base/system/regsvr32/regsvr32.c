@@ -244,6 +244,51 @@ void DisplayMessage(BOOL bConsole, BOOL bSilent, LPCTSTR lpMessage, LPCTSTR lpTi
 		_tprintf(_T("%s: %s\n\n"),lpTitle,lpMessage);
 }
 
+#ifdef SYSWOW64_GUEST
+PIMAGE_NT_HEADERS NTAPI RtlImageNtHeader(PVOID Base);
+
+/* Like Wine's regsvr32, retry the first DLL with the registrar matching its
+ * machine type. Mapping as data validates the header without executing it. */
+static BOOL RetryNativeRegistrar(PCWSTR Dll, PCWSTR Arguments, DWORD *ExitCode)
+{
+    HMODULE Data;
+    PIMAGE_NT_HEADERS Header;
+    WCHAR Application[MAX_PATH];
+    PWSTR Command;
+    UINT Count;
+    BOOL Native, Result;
+    STARTUPINFOW Startup = {sizeof(Startup)};
+    PROCESS_INFORMATION Process;
+
+    Data = LoadLibraryExW(Dll, NULL, LOAD_LIBRARY_AS_DATAFILE);
+    if (!Data) return FALSE;
+    Header = RtlImageNtHeader((PVOID)((ULONG_PTR)Data & ~(ULONG_PTR)3));
+    Native = Header && Header->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64;
+    FreeLibrary(Data);
+    if (!Native) return FALSE;
+    Count = GetWindowsDirectoryW(Application, ARRAYSIZE(Application));
+    if (!Count || Count + ARRAYSIZE(L"\\Sysnative\\regsvr32.exe") > ARRAYSIZE(Application))
+        return FALSE;
+    wcscat(Application, L"\\Sysnative\\regsvr32.exe");
+    Command = HeapAlloc(GetProcessHeap(), 0,
+                        (wcslen(Application) + wcslen(Arguments) + 4) * sizeof(WCHAR));
+    if (!Command) return FALSE;
+    wcscpy(Command, L"\"");
+    wcscat(Command, Application);
+    wcscat(Command, L"\" ");
+    wcscat(Command, Arguments);
+    Result = CreateProcessW(Application, Command, NULL, NULL, FALSE, 0,
+                            NULL, NULL, &Startup, &Process);
+    HeapFree(GetProcessHeap(), 0, Command);
+    if (!Result) return FALSE;
+    Result = WaitForSingleObject(Process.hProcess, INFINITE) == WAIT_OBJECT_0 &&
+             GetExitCodeProcess(Process.hProcess, ExitCode);
+    CloseHandle(Process.hThread);
+    CloseHandle(Process.hProcess);
+    return Result;
+}
+#endif
+
 int WINAPI _tWinMain(
   HINSTANCE hInstance,
   HINSTANCE hPrevInstance,
@@ -265,6 +310,9 @@ int WINAPI _tWinMain(
 	HRESULT hResult;
 	DWORD dwErr;
 	int nRetValue,i;
+#ifdef SYSWOW64_GUEST
+	BOOL FirstDll = TRUE;
+#endif
 
 	// Get Langues msg
 	LoadString( GetModuleHandle(NULL), IDS_UsageMessage, (LPTSTR) UsageMessage,RC_STRING_MAX_SIZE);
@@ -466,12 +514,23 @@ int WINAPI _tWinMain(
 				// The dll could not be loaded; display an error message
 				dwErr = GetLastError();
 				SetErrorMode(fuOldErrorMode);
+#ifdef SYSWOW64_GUEST
+                if (FirstDll && dwErr == ERROR_BAD_EXE_FORMAT &&
+                    RetryNativeRegistrar(lptDllName, lpCmdLine, &dwErr))
+                {
+                    nRetValue = dwErr;
+                    break;
+                }
+#endif
 				lptMsgBuffer = (LPTSTR)malloc((_tcslen(DllNotLoaded) + 2 + _tcslen(lptDllName) + 1) * sizeof(TCHAR));
 				_stprintf(lptMsgBuffer,DllNotLoaded,lptDllName,dwErr);
 				DisplayMessage(bConsole,bSilent,lptMsgBuffer,ModuleTitle,MB_ICONEXCLAMATION);
 				free(lptMsgBuffer);
 				nRetValue = EXITCODE_LOADERROR;
 			}
+#ifdef SYSWOW64_GUEST
+            FirstDll = FALSE;
+#endif
 		}
 	}
 

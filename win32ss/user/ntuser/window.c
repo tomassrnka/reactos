@@ -794,12 +794,12 @@ IntGetWindowProc(PWND pWnd,
    {
       for ( i = FNID_FIRST; i <= FNID_SWITCH; i++)
       {
-         if (GETPFNSERVER(i) == pWnd->lpfnWndProc)
+         if (IntGetClientProcServer(pWnd->head.pti->ppi, i) == pWnd->lpfnWndProc)
          {
             if (Ansi)
-               Ret = GETPFNCLIENTA(i);
+               Ret = IntGetClientProcA(pWnd->head.pti->ppi, i);
             else
-               Ret = GETPFNCLIENTW(i);
+               Ret = IntGetClientProcW(pWnd->head.pti->ppi, i);
          }
       }
       return Ret;
@@ -815,13 +815,13 @@ IntGetWindowProc(PWND pWnd,
       {
          if (Ansi)
          {
-            if (GETPFNCLIENTW(Class->fnid) == pWnd->lpfnWndProc)
-               Ret = GETPFNCLIENTA(Class->fnid);
+            if (IntGetClientProcW(pWnd->head.pti->ppi, Class->fnid) == pWnd->lpfnWndProc)
+               Ret = IntGetClientProcA(pWnd->head.pti->ppi, Class->fnid);
          }
          else
          {
-            if (GETPFNCLIENTA(Class->fnid) == pWnd->lpfnWndProc)
-               Ret = GETPFNCLIENTW(Class->fnid);
+            if (IntGetClientProcA(pWnd->head.pti->ppi, Class->fnid) == pWnd->lpfnWndProc)
+               Ret = IntGetClientProcW(pWnd->head.pti->ppi, Class->fnid);
          }
       }
       if ( Ret != pWnd->lpfnWndProc)
@@ -866,14 +866,14 @@ IntSetWindowProc(PWND pWnd,
    // Switch from Client Side call to Server Side call if match. Ref: "deftest".
    for ( i = FNID_FIRST; i <= FNID_SWITCH; i++)
    {
-       if (GETPFNCLIENTW(i) == NewWndProc)
+       if (IntGetClientProcW(pWnd->head.pti->ppi, i) == NewWndProc)
        {
-          chWndProc = GETPFNSERVER(i);
+          chWndProc = IntGetClientProcServer(pWnd->head.pti->ppi, i);
           break;
        }
-       if (GETPFNCLIENTA(i) == NewWndProc)
+       if (IntGetClientProcA(pWnd->head.pti->ppi, i) == NewWndProc)
        {
-          chWndProc = GETPFNSERVER(i);
+          chWndProc = IntGetClientProcServer(pWnd->head.pti->ppi, i);
           break;
        }
    }
@@ -903,13 +903,13 @@ IntSetWindowProc(PWND pWnd,
       {
          if (Ansi)
          {
-            if (GETPFNCLIENTW(Class->fnid) == NewWndProc)
-               chWndProc = GETPFNCLIENTA(Class->fnid);
+            if (IntGetClientProcW(pWnd->head.pti->ppi, Class->fnid) == NewWndProc)
+               chWndProc = IntGetClientProcA(pWnd->head.pti->ppi, Class->fnid);
          }
          else
          {
-            if (GETPFNCLIENTA(Class->fnid) == NewWndProc)
-               chWndProc = GETPFNCLIENTW(Class->fnid);
+            if (IntGetClientProcA(pWnd->head.pti->ppi, Class->fnid) == NewWndProc)
+               chWndProc = IntGetClientProcW(pWnd->head.pti->ppi, Class->fnid);
          }
       }
       // Now set the new window proc.
@@ -1985,13 +1985,13 @@ PWND FASTCALL IntCreateWindow(CREATESTRUCTW* Cs,
     {
       if (bUnicodeWindow)
       {
-         if (GETPFNCLIENTA(pWnd->pcls->fnid) == pWnd->lpfnWndProc)
-            pWnd->lpfnWndProc = GETPFNCLIENTW(pWnd->pcls->fnid);
+         if (IntGetClientProcA(pWnd->head.pti->ppi, pWnd->pcls->fnid) == pWnd->lpfnWndProc)
+            pWnd->lpfnWndProc = IntGetClientProcW(pWnd->head.pti->ppi, pWnd->pcls->fnid);
       }
       else
       {
-         if (GETPFNCLIENTW(pWnd->pcls->fnid) == pWnd->lpfnWndProc)
-            pWnd->lpfnWndProc = GETPFNCLIENTA(pWnd->pcls->fnid);
+         if (IntGetClientProcW(pWnd->head.pti->ppi, pWnd->pcls->fnid) == pWnd->lpfnWndProc)
+            pWnd->lpfnWndProc = IntGetClientProcA(pWnd->head.pti->ppi, pWnd->pcls->fnid);
       }
     }
 

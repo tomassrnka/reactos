@@ -10,6 +10,85 @@
 
 #include "afd.h"
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+typedef struct
+{
+    ULONG Handle, Events;
+    NTSTATUS Status;
+} AFD_HANDLE32;
+
+typedef struct
+{
+    ULONG Event, PollEvents;
+    NTSTATUS EventStatus[AFD_MAX_EVENTS];
+} AFD_ENUM_NETWORK_EVENTS_INFO32;
+
+typedef struct
+{
+    LARGE_INTEGER Timeout;
+    ULONG HandleCount, Exclusive;
+    AFD_HANDLE32 Handles[1];
+} AFD_POLL_INFO32;
+
+C_ASSERT(FIELD_OFFSET(AFD_POLL_INFO32, Handles) == 16);
+C_ASSERT(sizeof(AFD_HANDLE32) == 12);
+
+/* METHOD_BUFFERED keeps the native poll alive through timeout/cancellation.
+ * Completion packs its result before the I/O manager copies it to the guest. */
+static NTSTATUS
+AfdCapturePoll32(PIRP Irp, PIO_STACK_LOCATION IrpSp)
+{
+    AFD_POLL_INFO32 *From = Irp->AssociatedIrp.SystemBuffer;
+    PAFD_POLL_INFO To;
+    ULONG Count, i, Length;
+
+    if (!From || IrpSp->Parameters.DeviceIoControl.InputBufferLength <
+                 FIELD_OFFSET(AFD_POLL_INFO32, Handles))
+        return STATUS_BUFFER_TOO_SMALL;
+    Count = From->HandleCount;
+    if (!Count || Count > (MAXULONG - FIELD_OFFSET(AFD_POLL_INFO, Handles)) / sizeof(AFD_HANDLE))
+        return STATUS_INVALID_PARAMETER;
+    Length = FIELD_OFFSET(AFD_POLL_INFO32, Handles) + Count * sizeof(AFD_HANDLE32);
+    if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < Length ||
+        IrpSp->Parameters.DeviceIoControl.OutputBufferLength < Length)
+        return STATUS_BUFFER_TOO_SMALL;
+    To = ExAllocatePoolWithTag(NonPagedPool,
+                              FIELD_OFFSET(AFD_POLL_INFO, Handles) + Count * sizeof(AFD_HANDLE),
+                              TAG_AFD_DATA_BUFFER);
+    if (!To) return STATUS_NO_MEMORY;
+    To->Timeout = From->Timeout;
+    To->HandleCount = Count;
+    To->Exclusive = From->Exclusive;
+    Irp->Tail.Overlay.DriverContext[3] = UlongToPtr(From->Exclusive);
+    for (i = 0; i < Count; ++i)
+    {
+        To->Handles[i].Handle = (SOCKET)(LONG_PTR)(LONG)From->Handles[i].Handle;
+        To->Handles[i].Events = From->Handles[i].Events;
+        To->Handles[i].Status = From->Handles[i].Status;
+    }
+    ExFreePool(From);
+    Irp->AssociatedIrp.SystemBuffer = To;
+    return STATUS_SUCCESS;
+}
+
+static VOID
+AfdCompletePoll32(PIRP Irp, PAFD_POLL_INFO From)
+{
+    AFD_POLL_INFO32 *To = (PVOID)From;
+    ULONG Count = From->HandleCount, i;
+
+    To->Exclusive = PtrToUlong(Irp->Tail.Overlay.DriverContext[3]);
+    for (i = 0; i < Count; ++i)
+    {
+        AFD_HANDLE Handle = From->Handles[i];
+        To->Handles[i].Handle = (ULONG)Handle.Handle;
+        To->Handles[i].Events = Handle.Events;
+        To->Handles[i].Status = Handle.Status;
+    }
+    Irp->IoStatus.Information = FIELD_OFFSET(AFD_POLL_INFO32, Handles) + Count * sizeof(AFD_HANDLE32);
+}
+#endif
+
 static VOID PrintEvents( ULONG Events ) {
 #if DBG
     char *events_list[] = { "AFD_EVENT_RECEIVE",
@@ -89,6 +168,9 @@ VOID SignalSocket(
     }
     UnlockHandles( AFD_HANDLES(Irp), PollReq->HandleCount );
     SET_AFD_HANDLES(Irp, NULL);
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (IoIs32bitProcess(Irp)) AfdCompletePoll32(Irp, PollReq);
+#endif
     if( Irp->MdlAddress ) UnlockRequest( Irp, IoGetCurrentIrpStackLocation( Irp ) );
     AFD_DbgPrint(MID_TRACE,("Completing\n"));
     AfdClearCancelRoutine(Irp);
@@ -187,6 +269,22 @@ AfdSelect( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     SET_AFD_HANDLES(Irp, NULL);
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (IoIs32bitProcess(Irp))
+    {
+        /* Convert the 32-bit request in place and validate it in native layout */
+        Status = AfdCapturePoll32(Irp, IrpSp);
+        if (!NT_SUCCESS(Status))
+        {
+            Irp->IoStatus.Status = Status;
+            Irp->IoStatus.Information = 0;
+            IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
+            return Status;
+        }
+        PollReq = Irp->AssociatedIrp.SystemBuffer;
+    }
+    else
+#endif
     /* The reply is written over the request, so the output must hold the request */
     if( !PollReq ||
         InputLength < FIELD_OFFSET(AFD_POLL_INFO, Handles) ||
@@ -301,12 +399,27 @@ AfdEventSelect( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                 PIO_STACK_LOCATION IrpSp ) {
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     NTSTATUS Status = STATUS_NO_MEMORY;
-    PAFD_EVENT_SELECT_INFO EventSelectInfo =
-        (PAFD_EVENT_SELECT_INFO)LockRequest( Irp, IrpSp, FALSE, NULL );
+    PAFD_EVENT_SELECT_INFO EventSelectInfo;
+    HANDLE EventHandle;
+    ULONG Events;
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    BOOLEAN Guest = IoIs32bitProcess(Irp);
+#endif
     PAFD_FCB FCB = FileObject->FsContext;
 
     UNREFERENCED_PARAMETER(DeviceObject);
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (Guest && (!IrpSp->Parameters.DeviceIoControl.Type3InputBuffer ||
+                  IrpSp->Parameters.DeviceIoControl.InputBufferLength < 2 * sizeof(ULONG)))
+    {
+        if (!SocketAcquireStateLock(FCB)) return LostSocket(Irp);
+        return UnlockAndMaybeComplete(FCB,
+            IrpSp->Parameters.DeviceIoControl.Type3InputBuffer ? STATUS_BUFFER_TOO_SMALL : STATUS_INVALID_PARAMETER,
+            Irp, 0);
+    }
+#endif
+    EventSelectInfo = LockRequest(Irp, IrpSp, FALSE, NULL);
     if( !SocketAcquireStateLock( FCB ) ) {
         return LostSocket( Irp );
     }
@@ -315,16 +428,25 @@ AfdEventSelect( PDEVICE_OBJECT DeviceObject, PIRP Irp,
          return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY, Irp,
                                         0 );
     }
-    AFD_DbgPrint(MID_TRACE,("Called (Event %p Triggers %u)\n",
-                            EventSelectInfo->EventObject,
-                            EventSelectInfo->Events));
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (Guest)
+    {
+        EventHandle = (HANDLE)(LONG_PTR)(LONG)((PULONG)EventSelectInfo)[0];
+        Events = ((PULONG)EventSelectInfo)[1];
+    }
+    else
+#endif
+    {
+        EventHandle = EventSelectInfo->EventObject;
+        Events = EventSelectInfo->Events;
+    }
+    AFD_DbgPrint(MID_TRACE,("Called (Event %p Triggers %u)\n", EventHandle, Events));
 
     if( FCB->EventSelect ) ObDereferenceObject( FCB->EventSelect );
     FCB->EventSelect = NULL;
 
-    if( EventSelectInfo->EventObject && EventSelectInfo->Events ) {
-        Status = ObReferenceObjectByHandle( (PVOID)EventSelectInfo->
-                                            EventObject,
+    if( EventHandle && Events ) {
+        Status = ObReferenceObjectByHandle( EventHandle,
                                             EVENT_ALL_ACCESS,
                                             *ExEventObjectType,
                                             UserMode,
@@ -337,7 +459,7 @@ AfdEventSelect( PDEVICE_OBJECT DeviceObject, PIRP Irp,
             FCB->EventSelect = NULL;
         }
         else
-            FCB->EventSelectTriggers = EventSelectInfo->Events;
+            FCB->EventSelectTriggers = Events;
     } else {
         FCB->EventSelect = NULL;
         FCB->EventSelectTriggers = 0;
@@ -363,8 +485,11 @@ NTSTATUS NTAPI
 AfdEnumEvents( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                PIO_STACK_LOCATION IrpSp ) {
     PFILE_OBJECT FileObject = IrpSp->FileObject;
-    PAFD_ENUM_NETWORK_EVENTS_INFO EnumReq =
-        (PAFD_ENUM_NETWORK_EVENTS_INFO)LockRequest( Irp, IrpSp, TRUE, NULL );
+    PAFD_ENUM_NETWORK_EVENTS_INFO EnumReq;
+    HANDLE EventHandle;
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    BOOLEAN Guest = IoIs32bitProcess(Irp);
+#endif
     PAFD_FCB FCB = FileObject->FsContext;
     PKEVENT UserEvent;
     NTSTATUS Status;
@@ -373,6 +498,35 @@ AfdEnumEvents( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     AFD_DbgPrint(MID_TRACE,("Called (FCB %p)\n", FCB));
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (Guest && (!IrpSp->Parameters.DeviceIoControl.Type3InputBuffer ||
+                  IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(AFD_ENUM_NETWORK_EVENTS_INFO32)))
+    {
+        if (!SocketAcquireStateLock(FCB)) return LostSocket(Irp);
+        return UnlockAndMaybeComplete(FCB,
+            IrpSp->Parameters.DeviceIoControl.Type3InputBuffer ? STATUS_BUFFER_TOO_SMALL : STATUS_INVALID_PARAMETER,
+            Irp, 0);
+    }
+#endif
+    /* Native (non-WoW64) path: the output below writes PollEvents and the whole
+     * EventStatus array into the captured buffer, whose size equals the user's
+     * InputBufferLength (lock.c). Reject input too small to hold the structure,
+     * otherwise those writes overrun the NonPagedPool copy. The 32-bit guest
+     * path above validates against the 32-bit layout. */
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (!Guest)
+#endif
+    {
+        if (!IrpSp->Parameters.DeviceIoControl.Type3InputBuffer ||
+            IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(AFD_ENUM_NETWORK_EVENTS_INFO))
+        {
+            if (!SocketAcquireStateLock(FCB)) return LostSocket(Irp);
+            return UnlockAndMaybeComplete(FCB,
+                IrpSp->Parameters.DeviceIoControl.Type3InputBuffer ? STATUS_BUFFER_TOO_SMALL : STATUS_INVALID_PARAMETER,
+                Irp, 0);
+        }
+    }
+    EnumReq = LockRequest(Irp, IrpSp, TRUE, NULL);
     if( !SocketAcquireStateLock( FCB ) ) {
         return LostSocket( Irp );
     }
@@ -381,10 +535,17 @@ AfdEnumEvents( PDEVICE_OBJECT DeviceObject, PIRP Irp,
          return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY, Irp, 0 );
     }
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (Guest)
+        EventHandle = (HANDLE)(LONG_PTR)(LONG)((AFD_ENUM_NETWORK_EVENTS_INFO32 *)EnumReq)->Event;
+    else
+#endif
+        EventHandle = EnumReq->Event;
+
     /* An event may optionally be provided for us to clear */
-    if (EnumReq->Event != NULL)
+    if (EventHandle != NULL)
     {
-        Status = ObReferenceObjectByHandle(EnumReq->Event,
+        Status = ObReferenceObjectByHandle(EventHandle,
                                            EVENT_ALL_ACCESS,
                                            *ExEventObjectType,
                                            UserMode,
@@ -402,10 +563,19 @@ AfdEnumEvents( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     }
 
     /* Copy the poll state, masking out disabled events */
-    EnumReq->PollEvents = (FCB->PollState & ~FCB->EventSelectDisabled);
-    RtlCopyMemory( EnumReq->EventStatus,
-                   FCB->PollStatus,
-                   sizeof(EnumReq->EventStatus) );
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (Guest)
+    {
+        AFD_ENUM_NETWORK_EVENTS_INFO32 *To = (PVOID)EnumReq;
+        To->PollEvents = FCB->PollState & ~FCB->EventSelectDisabled;
+        RtlCopyMemory(To->EventStatus, FCB->PollStatus, sizeof(To->EventStatus));
+    }
+    else
+#endif
+    {
+        EnumReq->PollEvents = (FCB->PollState & ~FCB->EventSelectDisabled);
+        RtlCopyMemory(EnumReq->EventStatus, FCB->PollStatus, sizeof(EnumReq->EventStatus));
+    }
 
     /* Disable the events that triggered the select until the reenabling function is called */
     FCB->EventSelectDisabled |= (FCB->PollState & FCB->EventSelectTriggers);

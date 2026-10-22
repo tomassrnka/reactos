@@ -2,6 +2,8 @@
 #define STANDALONE
 #include <apitest.h>
 
+extern void func_ZeroBits(void);
+
 extern void func__snprintf(void);
 extern void func__snwprintf(void);
 extern void func__stricmp(void);
@@ -48,6 +50,7 @@ extern void func_NtApphelpCacheControl(void);
 extern void func_NtCompareTokens(void);
 extern void func_NtConnectPortTerminate(void);
 extern void func_NtContinue(void);
+extern void func_Wow64Continue(void);
 extern void func_NtCreateDirectoryObject(void);
 extern void func_NtCreateFile(void);
 extern void func_NtCreateKey(void);
@@ -188,6 +191,7 @@ extern void func_StackOverflowDispatch(void);
 
 const struct test winetest_testlist[] =
 {
+    { "ZeroBits", func_ZeroBits },
     // CRT tests from ../crt
     { "_snprintf", func__snprintf },
     { "_snwprintf", func__snwprintf },
@@ -235,6 +239,7 @@ const struct test winetest_testlist[] =
     { "NtCompareTokens",                func_NtCompareTokens },
     { "NtConnectPortTerminate",         func_NtConnectPortTerminate },
     { "NtContinue",                     func_NtContinue },
+    { "Wow64Continue",                  func_Wow64Continue },
     { "NtCreateDirectoryObject",        func_NtCreateDirectoryObject },
     { "NtCreateFile",                   func_NtCreateFile },
     { "NtCreateKey",                    func_NtCreateKey },

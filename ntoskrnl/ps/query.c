@@ -1324,39 +1324,9 @@ NtQueryInformationProcess(
             /* Make sure the process isn't dying */
             if (ExAcquireRundownProtection(&Process->RundownProtect))
             {
-                /* FIXME: A two-part hack: delay setting Process->Wow64Process,
-                   so 64-bit NTDLL can use IO to init stuff. */
-                if (IS_WOW64_PROCESS_INITIALIZING(Process))
-                {
-                    PsChargeProcessNonPagedPoolQuota(Process, sizeof(WOW64_PROCESS));
-                    Process->Wow64Process = ExAllocatePoolWithTag(NonPagedPool, sizeof(WOW64_PROCESS), TAG_PS_WOW64);
-                    if (!Process->Wow64Process)
-                    {
-                        PsReturnProcessNonPagedPoolQuota(Process, sizeof(WOW64_PROCESS));
-
-                        Status = STATUS_NO_MEMORY;
-                        Process->Wow64Process = UlongToPtr(1);
-                    }
-                    else
-                    {
-                        Process->Wow64Process->Wow64 = (PVOID)((ULONG_PTR)(Process->Peb) + ROUND_TO_PAGES(sizeof(PEB)));
-                    }
-                }
-
-                /* Get the WOW64 process structure */
-                if (Process->Wow64Process == NULL)
-                {
-                    Wow64 = 0;
-                }
-                /* FIXME */
-                else if (IS_WOW64_PROCESS_INITIALIZING(Process))
-                {
-                    Wow64 = TRUE;
-                }
-                else
-                {
-                    Wow64 = (ULONG_PTR)Process->Wow64Process->Wow64;
-                }
+                /* Process creation owns allocation; a query never changes state. */
+                if (Process->Wow64Process)
+                    Wow64 = (ULONG_PTR)Process->Wow64Process->Peb;
 
                 /* Release the lock */
                 ExReleaseRundownProtection(&Process->RundownProtect);
@@ -2568,6 +2538,11 @@ NtSetInformationThread(
     /* Check what kind of information class this is */
     switch (ThreadInformationClass)
     {
+#if defined(_M_AMD64) && defined(BUILD_WOW64_ENABLED)
+        case ThreadWow64Context:
+            return PspWow64ContextThread(ThreadHandle, ThreadInformation,
+                                         ThreadInformationLength, TRUE, PreviousMode);
+#endif
         /* Thread priority */
         case ThreadPriority:
         {
@@ -2972,6 +2947,9 @@ NtSetInformationThread(
         {
             ULONG_PTR TlsIndex;
             PETHREAD ProcThread;
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+            BOOLEAN Wow64Tls;
+#endif
 
             /* Check buffer length */
             if (ThreadInformationLength != sizeof(ULONG))
@@ -3015,6 +2993,10 @@ NtSetInformationThread(
 
             /* Get the process */
             Process = Thread->ThreadsProcess;
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+            Wow64Tls = Process->Wow64Process && (TlsIndex & 0x80000000);
+            if (Wow64Tls) TlsIndex &= ~0x80000000UL;
+#endif
 
             /* Loop the threads */
             ProcThread = PsGetNextProcessThread(Process, NULL);
@@ -3027,6 +3009,23 @@ NtSetInformationThread(
                     Teb = ProcThread->Tcb.Teb;
                     if (Teb)
                     {
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+                        if (Wow64Tls)
+                        {
+                            PTEB32 Guest = PS_GET_TEB32_FROM_TEB(Teb);
+                            _SEH2_TRY
+                            {
+                                if (TlsIndex < TLS_MINIMUM_AVAILABLE)
+                                    Guest->TlsSlots[TlsIndex] = 0;
+                                else if (TlsIndex < TLS_MINIMUM_AVAILABLE + TLS_EXPANSION_SLOTS &&
+                                         Guest->TlsExpansionSlots)
+                                    ((PULONG)UlongToPtr(Guest->TlsExpansionSlots))[TlsIndex - TLS_MINIMUM_AVAILABLE] = 0;
+                            }
+                            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Status = _SEH2_GetExceptionCode(); }
+                            _SEH2_END;
+                        }
+                        else
+#endif
                         /* Check if we're in the expansion range */
                         if (TlsIndex > TLS_MINIMUM_AVAILABLE - 1)
                         {
@@ -3288,6 +3287,13 @@ NtQueryInformationThread(
     /* Check what kind of information class this is */
     switch (ThreadInformationClass)
     {
+#if defined(_M_AMD64) && defined(BUILD_WOW64_ENABLED)
+        case ThreadWow64Context:
+            Status = PspWow64ContextThread(ThreadHandle, ThreadInformation,
+                                           ThreadInformationLength, FALSE, PreviousMode);
+            if (NT_SUCCESS(Status)) Length = sizeof(WOW64_CONTEXT);
+            break;
+#endif
         /* Basic thread information */
         case ThreadBasicInformation:
         {

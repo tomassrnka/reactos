@@ -2,6 +2,8 @@
 list(APPEND SOURCE
     AddMandatoryAce.c
     ConvertStringSidToSid.c
+    RegWow64.c
+    RegWow64Review.c
     CreateService.c
     CloseTrace.c
     DuplicateTokenEx.c

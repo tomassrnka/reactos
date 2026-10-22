@@ -26,7 +26,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(user32);
 static ULONG User32TlsIndex;
 HINSTANCE User32Instance;
 
-PPROCESSINFO g_ppi = NULL;
+KPTRTYPE(PPROCESSINFO) g_ppi = 0;
 SHAREDINFO gSharedInfo = {0};
 PSERVERINFO gpsi = NULL;
 PUSER_HANDLE_TABLE gHandleTable = NULL;
@@ -264,8 +264,8 @@ ClientThreadSetupHelper(BOOL IsCallback)
         if (!NT_SUCCESS(Status)) return FALSE;
 
         /* Retrieve data */
-        g_ppi = ClientInfo->ppi; // Snapshot PI, used as pointer only!
-        gSharedInfo = UserCon.siClient;
+        g_ppi = KPTR(ClientInfo->ppi); // Snapshot PI, used as pointer only!
+        KASSIGN(gSharedInfo, UserCon.siClient);
         gpsi = gSharedInfo.psi;
         gHandleTable = gSharedInfo.aheList;
         /* ReactOS-Specific! */ gHandleEntries = SharedPtrToUser(gHandleTable->handles);
@@ -282,7 +282,7 @@ ClientThreadSetupHelper(BOOL IsCallback)
     }
 
     /* Mark this thread as initialized */
-    ClientInfo->CI_flags |= CI_INITTHREAD;
+    KOR(ClientInfo, CI_flags, CI_INITTHREAD);
 
     /* Initialization that should be done once per process */
     if (IsFirstThread)
@@ -418,8 +418,8 @@ Init(PUSERCONNECT UserCon /*PUSERSRV_API_CONNECTINFO*/)
         //
 
         /* Retrieve data */
-        g_ppi = GetWin32ClientInfo()->ppi; // Snapshot PI, used as pointer only!
-        gSharedInfo = UserCon->siClient;
+        g_ppi = KPTR(GetWin32ClientInfo()->ppi); // Snapshot PI, used as pointer only!
+        KASSIGN(gSharedInfo, UserCon->siClient);
         gpsi = gSharedInfo.psi;
         gHandleTable = gSharedInfo.aheList;
         /* ReactOS-Specific! */ gHandleEntries = SharedPtrToUser(gHandleTable->handles);

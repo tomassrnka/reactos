@@ -1,0 +1,1 @@
+@ stdcall ThreadNotifications(ptr ptr)

@@ -2,6 +2,16 @@
 #define STANDALONE
 #include <apitest.h>
 
+extern void func_Wow64Process(void);
+extern void func_Wow64Threads(void);
+extern void func_Wow64ReviewThreads(void);
+extern void func_Wow64RemoteThread(void);
+extern void func_Wow64ThreadApc(void);
+extern void func_Wow64ThreadLifetime(void);
+extern void func_Wow64ThreadExitProcess(void);
+extern void func_Wow64Run(void);
+extern void func_Wow64ReviewFixes(void);
+
 extern void func_ActCtxWithXmlNamespaces(void);
 extern void func_BindIoCompletionCallback(void);
 extern void func_CancelIoEx(void);
@@ -105,8 +115,24 @@ extern void func_WerRuntimeExceptionModule(void);
 extern void func_WideCharToMultiByte(void);
 extern void func_SetFileInformationByHandle(void);
 
+extern void func_Wow64Environment(void);
+extern void func_Wow64ProgramFiles(void);
+extern void func_Wow64EnvironmentBlock(void);
+
 const struct test winetest_testlist[] =
 {
+    { "Wow64Environment", func_Wow64Environment },
+    { "Wow64ProgramFiles", func_Wow64ProgramFiles },
+    { "Wow64EnvironmentBlock", func_Wow64EnvironmentBlock },
+    { "Wow64ThreadApc", func_Wow64ThreadApc },
+    { "Wow64ThreadLifetime", func_Wow64ThreadLifetime },
+    { "Wow64ThreadExitProcess", func_Wow64ThreadExitProcess },
+    { "Wow64Threads", func_Wow64Threads },
+    { "Wow64ReviewThreads", func_Wow64ReviewThreads },
+    { "Wow64RemoteThread", func_Wow64RemoteThread },
+    { "Wow64Process", func_Wow64Process },
+    { "Wow64Run", func_Wow64Run },
+    { "Wow64ReviewFixes", func_Wow64ReviewFixes },
     { "ActCtxWithXmlNamespaces",     func_ActCtxWithXmlNamespaces },
     { "BindIoCompletionCallback",    func_BindIoCompletionCallback },
     { "CancelIoEx",                  func_CancelIoEx },

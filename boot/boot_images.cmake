@@ -135,6 +135,16 @@ function(add_user_profile_dirs _image_filelist _rootdir _username)
 endfunction()
 
 
+# With SYSWOW64, the LiveCD and BootCD file lists get the i386 files appended
+# at build time, once the nested i386 build has produced them
+if(SYSWOW64)
+    set(_bootcd_lst ${SYSWOW64_BOOTCD_LST})
+    set(_livecd_lst ${SYSWOW64_LIVECD_LST})
+else()
+    set(_bootcd_lst ${CMAKE_CURRENT_BINARY_DIR}/bootcd.$<CONFIG>.lst)
+    set(_livecd_lst ${CMAKE_CURRENT_BINARY_DIR}/livecd.$<CONFIG>.lst)
+endif()
+
 ## BootCD
 # Create the file list
 file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/bootcd.cmake.lst "${CMAKE_CURRENT_BINARY_DIR}/empty\n")
@@ -142,7 +152,7 @@ file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/bootcd.cmake.lst "${CMAKE_CURRENT_BINARY_
 add_custom_target(bootcd
     COMMAND native-mkisofs -quiet -o ${REACTOS_BINARY_DIR}/bootcd.iso
         ${ISO_COMMON_OPTIONS} ${ISO_BOOT_OPTIONS} ${ISO_BOOT_FILES_OPTIONS} ${ISO_LAYOUT_OPTIONS}
-        -path-list ${CMAKE_CURRENT_BINARY_DIR}/bootcd.$<CONFIG>.lst
+        -path-list ${_bootcd_lst}
     COMMAND native-isohybrid -b ${_isombr_file} -t 0x96 ${REACTOS_BINARY_DIR}/bootcd.iso
     DEPENDS isombr native-isohybrid native-mkisofs livecd
     VERBATIM)
@@ -173,10 +183,15 @@ add_user_profile_dirs(${CMAKE_CURRENT_BINARY_DIR}/livecd.cmake.lst "Users" "Defa
 add_custom_target(livecd
     COMMAND native-mkisofs -quiet -o ${REACTOS_BINARY_DIR}/liveimg.iso
         ${ISO_COMMON_OPTIONS} ${ISO_LAYOUT_OPTIONS}
-        -path-list ${CMAKE_CURRENT_BINARY_DIR}/livecd.$<CONFIG>.lst
+        -path-list ${_livecd_lst}
     DEPENDS native-mkisofs
     VERBATIM)
 
+
+if(SYSWOW64)
+    add_dependencies(livecd syswow64_stage)
+    add_dependencies(bootcd syswow64_stage)
+endif()
 
 if(DEFINED EFI_PLATFORM_ID)
     # For devices such as USB drives, add also the EFI boot image into efi/boot.

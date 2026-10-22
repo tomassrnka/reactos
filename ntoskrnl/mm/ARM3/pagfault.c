@@ -39,6 +39,9 @@ MiCheckForUserStackOverflow(IN PVOID Address,
     PVOID StackBase, DeallocationStack, NextStackAddress;
     SIZE_T GuaranteedSize, StackSize, RegionSize;
     NTSTATUS Status;
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    PTEB32 GuestTeb = NULL;
+#endif
 
     /* Do we own the address space lock? */
     if (CurrentThread->AddressSpaceOwner == 1)
@@ -61,6 +64,20 @@ MiCheckForUserStackOverflow(IN PVOID Address,
     StackBase = Teb->NtTib.StackBase;
     DeallocationStack = Teb->DeallocationStack;
     GuaranteedSize = Teb->GuaranteedStackBytes;
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (CurrentThread->ThreadsProcess->Wow64Process)
+    {
+        PTEB32 Candidate = PS_GET_TEB32_FROM_TEB(Teb);
+        if ((ULONG_PTR)Address >= Candidate->DeallocationStack &&
+            (ULONG_PTR)Address < Candidate->NtTib.StackBase)
+        {
+            GuestTeb = Candidate;
+            StackBase = UlongToPtr(GuestTeb->NtTib.StackBase);
+            DeallocationStack = UlongToPtr(GuestTeb->DeallocationStack);
+            GuaranteedSize = GuestTeb->GuaranteedStackBytes;
+        }
+    }
+#endif
     DPRINT("Handling guard page fault with Stacks Addresses 0x%p and 0x%p, guarantee: %lx\n",
             StackBase, DeallocationStack, GuaranteedSize);
 
@@ -113,15 +130,11 @@ MiCheckForUserStackOverflow(IN PVOID Address,
         if (NT_SUCCESS(Status))
         {
             /* Success! */
-            Teb->NtTib.StackLimit = NextStackAddress;
-
 #if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
-            /* Update WOW64 32-bit TEB stack limit */
-            if (CurrentThread->ThreadsProcess->Wow64Process != NULL)
-            {
-                PS_GET_TEB32_FROM_TEB(Teb)->NtTib.StackLimit = PtrToUlong(Teb->NtTib.StackLimit);
-            }
+            if (GuestTeb) GuestTeb->NtTib.StackLimit = PtrToUlong(NextStackAddress);
+            else
 #endif
+                Teb->NtTib.StackLimit = NextStackAddress;
         }
         else
         {
@@ -135,15 +148,11 @@ MiCheckForUserStackOverflow(IN PVOID Address,
     ASSERT((PsGetCurrentProcess()->Peb->NtGlobalFlag & FLG_DISABLE_STACK_EXTENSION) == 0);
 
     /* Update the stack limit */
-    Teb->NtTib.StackLimit = (PVOID)((ULONG_PTR)NextStackAddress + PAGE_SIZE);
-
 #if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
-    /* Update WOW64 32-bit TEB stack limit */
-    if (CurrentThread->ThreadsProcess->Wow64Process != NULL)
-    {
-        PS_GET_TEB32_FROM_TEB(Teb)->NtTib.StackLimit = PtrToUlong(Teb->NtTib.StackLimit);
-    }
+    if (GuestTeb) GuestTeb->NtTib.StackLimit = PtrToUlong(NextStackAddress) + PAGE_SIZE;
+    else
 #endif
+        Teb->NtTib.StackLimit = (PVOID)((ULONG_PTR)NextStackAddress + PAGE_SIZE);
 
     /* Now move the guard page to the next page */
     RegionSize = PAGE_SIZE;
@@ -604,6 +613,10 @@ MiCopyPfn(
     if (SrcPfn->u3.e1.CacheAttribute == MiNonCached)
     {
         MI_MAKE_PTE_NON_CACHED(&TempPte);
+    }
+    else if (SrcPfn->u3.e1.CacheAttribute == MiWriteCombined)
+    {
+        MI_MAKE_PTE_WRITE_COMBINE(&TempPte);
     }
 
     /* Make the system PTE valid with our PFN */
@@ -1380,6 +1393,13 @@ MiResolveProtoPteFault(IN BOOLEAN StoreInstruction,
                                           (ULONG)TempPte.u.Soft.Protection,
                                           Process,
                                           OldIrql);
+
+        /* Out of pages: the PFN lock is released, let the caller wait and retry */
+        if (!NT_SUCCESS(Status))
+        {
+            ASSERT(Status == STATUS_NO_MEMORY);
+            return Status;
+        }
 #if MI_TRACE_PFNS
         /* Update debug info */
         if (TrapInformation)
@@ -1387,8 +1407,6 @@ MiResolveProtoPteFault(IN BOOLEAN StoreInstruction,
         else
             MiGetPfnEntry(PointerProtoPte->u.Hard.PageFrameNumber)->CallSite = _ReturnAddress();
 #endif
-
-        ASSERT(NT_SUCCESS(Status));
     }
 
     /* Complete the prototype PTE fault -- this will release the PFN lock */
@@ -1472,7 +1490,7 @@ MiDispatchFault(IN ULONG FaultCode,
                                             Process,
                                             LockIrql,
                                             TrapInformation);
-            ASSERT(Status == STATUS_SUCCESS);
+            ASSERT((Status == STATUS_SUCCESS) || (Status == STATUS_NO_MEMORY));
 
             /* Complete this as a transition fault */
             ASSERT(OldIrql == KeGetCurrentIrql());
@@ -2024,7 +2042,6 @@ _WARN("Session space stuff is not implemented yet!")
                 return STATUS_IN_PAGE_ERROR | 0x10000000;
             }
         }
-RetryKernel:
         /* Acquire the working set lock */
         KeRaiseIrql(APC_LEVEL, &LockIrql);
         MiLockWorkingSet(CurrentThread, WorkingSet);
@@ -2191,13 +2208,7 @@ RetryKernel:
         MiUnlockWorkingSet(CurrentThread, WorkingSet);
         KeLowerIrql(LockIrql);
 
-        if (Status == STATUS_NO_MEMORY)
-        {
-            MmRebalanceMemoryConsumersAndWait();
-            goto RetryKernel;
-        }
-
-        /* We are done! */
+        /* We are done! STATUS_NO_MEMORY is retried by MmAccessFault */
         DPRINT("Fault resolved with status: %lx\n", Status);
         return Status;
     }
@@ -2211,6 +2222,21 @@ UserFault:
     MiLockProcessWorkingSet(CurrentProcess, CurrentThread);
 
     ProtectionCode = MM_INVALID_PROTECTION;
+
+    /*
+     * MmAccessFault chose ARM3 before this lock was taken. If another thread
+     * has since replaced the mapping with a ReactOS Mm view, let it choose
+     * again.
+     */
+    if (Address <= MM_HIGHEST_USER_ADDRESS)
+    {
+        PMMVAD CurrentVad = MiLocateAddress(Address);
+        if ((CurrentVad != NULL) && MI_IS_ROSMM_VAD(CurrentVad))
+        {
+            MiUnlockProcessWorkingSet(CurrentProcess, CurrentThread);
+            return STATUS_MM_RESTART_OPERATION;
+        }
+    }
 
 #if (_MI_PAGING_LEVELS == 4)
     /* Check if the PXE is valid */
@@ -2382,7 +2408,14 @@ UserFault:
                 OldPageFrameIndex = PFN_FROM_PTE(&TempPte);
 
                 /* The private copy keeps the type of the mapping it replaces; copy through a mapping of it */
-                CacheAttribute = TempPte.u.Hard.CacheDisable ? MiNonCached : MiCached;
+                if (TempPte.u.Hard.CacheDisable)
+                    CacheAttribute = MiNonCached;
+#if defined(_M_IX86) || defined(_M_AMD64)
+                else if (TempPte.u.Hard.WriteThrough && (KeFeatureBits & KF_PAT))
+                    CacheAttribute = MiWriteCombined; /* PAT1 (MI_MAKE_PTE_WRITE_COMBINE); without the PAT it is WT */
+#endif
+                else
+                    CacheAttribute = MiCached;
                 MI_PFN_ELEMENT(PageFrameIndex)->u3.e1.CacheAttribute = CacheAttribute;
                 if (CacheAttribute != MiCached) MiFlushReleasedSystemPtesBeforeUncachedMapping();
 
@@ -2739,23 +2772,7 @@ ExitUser:
     ASSERT(KeGetCurrentIrql() <= APC_LEVEL);
     MiUnlockProcessWorkingSet(CurrentProcess, CurrentThread);
 
-    if (Status == STATUS_NO_MEMORY)
-    {
-        /* Don't wait on the balancer while holding AddressCreationLock (CORE-20761) */
-        if (CurrentProcess->AddressCreationLock.Owner == KeGetCurrentThread())
-        {
-            static LARGE_INTEGER TinyTime = {{-1L, -1L}};
-            MmRebalanceMemoryConsumers();
-            KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
-        }
-        else
-        {
-            MmRebalanceMemoryConsumersAndWait();
-        }
-
-        goto UserFault;
-    }
-
+    /* STATUS_NO_MEMORY is retried by MmAccessFault */
     return Status;
 }
 

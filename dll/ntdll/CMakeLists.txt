@@ -1,7 +1,28 @@
 
 add_subdirectory(nt_0600)
 
-spec2def(ntdll.dll def/ntdll.spec ADD_IMPORTLIB)
+set(ntdll_spec def/ntdll.spec)
+if(SYSWOW64_GUEST)
+    configure_file(def/ntdll.spec ntdll-guest.spec COPYONLY)
+    file(READ "${CMAKE_CURRENT_BINARY_DIR}/ntdll-guest.spec" guest_thread_spec)
+    string(REPLACE "@ stub -version=0x600+ NtCreateThreadEx" "@ stdcall -version=0x600+ NtCreateThreadEx(ptr long ptr ptr ptr ptr long long long long ptr)" guest_thread_spec "${guest_thread_spec}")
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/ntdll-guest.spec" "${guest_thread_spec}")
+    file(APPEND "${CMAKE_CURRENT_BINARY_DIR}/ntdll-guest.spec"
+        "@ stdcall -arch=i386 LdrInitializeWow64(ptr ptr)\n"
+        "@ stdcall -arch=i386 RtlWow64CreateProcess(ptr)\n")
+    file(RELATIVE_PATH ntdll_spec "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${CMAKE_CURRENT_BINARY_DIR}/ntdll-guest.spec")
+endif()
+if(BUILD_WOW64_ENABLED)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/def/ntdll.spec")
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/def/ntdll.spec" wow64_native_spec)
+    string(REPLACE "-stub -version=0x600+ -arch=x86_64 RtlWow64GetThreadContext" "-version=0x600+ -arch=x86_64 RtlWow64GetThreadContext" wow64_native_spec "${wow64_native_spec}")
+    string(REPLACE "-stub -version=0x600+ -arch=x86_64 RtlWow64SetThreadContext(long long)" "-version=0x600+ -arch=x86_64 RtlWow64SetThreadContext(ptr ptr)" wow64_native_spec "${wow64_native_spec}")
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/ntdll-wow64.spec" "${wow64_native_spec}")
+    file(RELATIVE_PATH ntdll_spec "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/ntdll-wow64.spec")
+endif()
+spec2def(ntdll.dll ${ntdll_spec} ADD_IMPORTLIB)
 
 # Link GCC stack protector lib
 if (STACK_PROTECTOR)
@@ -29,6 +50,7 @@ add_dependencies(rtl_um psdk)
 add_library(etwtrace etw/trace.c)
 target_link_libraries(etwtrace ${PSEH_LIB})
 add_dependencies(etwtrace psdk)
+
 
 list(APPEND SOURCE
     compat/ktm.c
@@ -90,4 +112,8 @@ add_cd_file(TARGET ntdll DESTINATION reactos/system32 NO_CAB FOR all)
 # Newer VS versions link to _ftol2 / _ftoul2_legacy
 if(MSVC AND ARCH STREQUAL "i386")
     target_link_libraries(libntdll ftol2)
+endif()
+
+if(SYSWOW64_GUEST)
+    target_sources(ntdll PRIVATE rtl/wow64thread.c)
 endif()

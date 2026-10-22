@@ -37,12 +37,12 @@ GetW32ThreadInfo(VOID)
 {
     PTHREADINFO ti;
 
-    ti = (PTHREADINFO)NtCurrentTeb()->Win32ThreadInfo;
+    ti = (PTHREADINFO)(ULONG_PTR)W32GetCurrentThreadInfo();
     if (ti == NULL)
     {
         /* create the THREADINFO structure */
         NtUserGetThreadState(THREADSTATE_GETTHREADINFO);
-        ti = (PTHREADINFO)NtCurrentTeb()->Win32ThreadInfo;
+        ti = (PTHREADINFO)(ULONG_PTR)W32GetCurrentThreadInfo();
     }
 
     return ti;
@@ -145,13 +145,13 @@ WINAPI
 IsGUIThread(
     BOOL bConvert)
 {
-  PTHREADINFO ti = (PTHREADINFO)NtCurrentTeb()->Win32ThreadInfo;
+  PTHREADINFO ti = (PTHREADINFO)(ULONG_PTR)W32GetCurrentThreadInfo();
   if (ti == NULL)
   {
     if(bConvert)
     {
       NtUserGetThreadState(THREADSTATE_GETTHREADINFO);
-      if ((PTHREADINFO)NtCurrentTeb()->Win32ThreadInfo) return TRUE;
+      if ((PTHREADINFO)(ULONG_PTR)W32GetCurrentThreadInfo()) return TRUE;
       else
          SetLastError(ERROR_NOT_ENOUGH_MEMORY);
     }
@@ -165,7 +165,7 @@ BOOL
 FASTCALL
 TestWindowProcess(PWND Wnd)
 {
-   if (Wnd->head.pti == (PTHREADINFO)NtCurrentTeb()->Win32ThreadInfo)
+   if (KPTR_EQ(KPTR(Wnd->head.pti), KTEB_PTI()))
       return TRUE;
    else
       return (NtUserQueryWindow(Wnd->head.h, QUERY_WINDOW_UNIQUE_PROCESS_ID) ==
@@ -344,7 +344,7 @@ ValidateCallProc(HANDLE hCallProc)
 
   pEntry = GetUser32Handle(hCallProc);
 
-  if (CallProc != NULL && pEntry->ppi == g_ppi)
+  if (CallProc != NULL && KPTR_EQ(KPTR(pEntry->ppi), g_ppi))
      return CallProc;
 
   return NULL;
@@ -487,3 +487,14 @@ DWORD WINAPI MBToWCSEx(WORD CodePage,LPSTR MBString,LONG MBSize,LPWSTR *UnicodeS
 	}
 	return Size;
 }
+
+#ifdef W32K_WIDE_ACTIVE
+KPTRTYPE(PTHREADINFO)
+GetW32ThreadInfoK(VOID)
+{
+    if (KPTR_NULL(KTEB_PTI()))
+        NtUserGetThreadState(THREADSTATE_GETTHREADINFO);
+
+    return KTEB_PTI();
+}
+#endif

@@ -384,10 +384,11 @@ PspDeleteProcess(IN PVOID ObjectBody)
 
 #if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
     /* Check if this is a WOW64 process */
-    if (Process->Wow64Process && !IS_WOW64_PROCESS_INITIALIZING(Process))
+    if (Process->Wow64Process)
     {
         /* Free WOW64_PROCESS structure */
         ExFreePoolWithTag(Process->Wow64Process, TAG_PS_WOW64);
+        Process->Wow64Process = NULL;
 
         PsReturnProcessNonPagedPoolQuota(Process, sizeof(WOW64_PROCESS));
     }
@@ -484,6 +485,9 @@ PspExitThread(IN NTSTATUS ExitStatus)
     PLIST_ENTRY FirstEntry, CurrentEntry;
     PKAPC Apc;
     PTOKEN PrimaryToken;
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    BOOLEAN FreeNativeStack = TRUE;
+#endif
     PAGED_CODE();
     PSTRACE(PS_KILL_DEBUG, "ExitStatus: %d\n", ExitStatus);
 
@@ -808,6 +812,9 @@ PspExitThread(IN NTSTATUS ExitStatus)
             /* Check if we need to free its stack */
             if (Teb->FreeStackOnTermination)
             {
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+                FreeNativeStack = FALSE;
+#endif
                 /* Set the TEB's Deallocation Stack as the Base Address */
                 Dummy = 0;
                 DeallocationStack = Teb->DeallocationStack;
@@ -824,6 +831,30 @@ PspExitThread(IN NTSTATUS ExitStatus)
                                                      UserMode);
         }
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+        if (CurrentProcess->Wow64Process)
+        {
+            PVOID NativeStack = NULL, GuestStack = NULL;
+            /* Both stacks belong to this thread. The native stack cannot be
+             * released by guest ExitThread; forced exits also arrive here. */
+            _SEH2_TRY
+            {
+                /* RtlExitUserThread on a native helper already released this
+                 * allocation above. Do not release a new allocation which
+                 * another thread may have placed at the same address. */
+                NativeStack = Teb->DeallocationStack;
+                GuestStack = UlongToPtr(PS_GET_TEB32_FROM_TEB(Teb)->DeallocationStack);
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { }
+            _SEH2_END;
+            Dummy = 0;
+            if (GuestStack && GuestStack != NativeStack)
+                ZwFreeVirtualMemory(NtCurrentProcess(), &GuestStack, &Dummy, MEM_RELEASE);
+            Dummy = 0;
+            if (NativeStack && FreeNativeStack)
+                ZwFreeVirtualMemory(NtCurrentProcess(), &NativeStack, &Dummy, MEM_RELEASE);
+        }
+#endif
         /* Decommit the TEB */
         MmDeleteTeb(CurrentProcess, Teb);
         Thread->Tcb.Teb = NULL;

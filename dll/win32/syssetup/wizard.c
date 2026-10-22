@@ -2375,6 +2375,61 @@ RegistrationNotificationProc(PVOID Context,
 }
 
 
+#if defined(_M_AMD64) && defined(BUILD_WOW64_ENABLED)
+static DWORD
+RegisterWow64Dlls(VOID)
+{
+    /* Registration must execute in the guest: provider and COM registrations
+     * belong in the redirected 32-bit registry view. Keep this list in sync
+     * with the registration-capable runtime in packages/syswow64.lst. */
+    static const WCHAR *Dlls[] =
+    {
+        L"ole32.dll", L"oleaut32.dll", L"rsaenh.dll", L"wintrust.dll",
+        L"softpub.dll", L"mscat32.dll", L"cryptnet.dll", L"winhttp.dll", L"shell32.dll"
+    };
+    WCHAR Directory[MAX_PATH], Application[MAX_PATH], Command[2 * MAX_PATH + 64];
+    STARTUPINFOW Startup = {sizeof(Startup)};
+    PROCESS_INFORMATION Process;
+    DWORD Count, i, ExitCode, Wait, Error;
+
+    Count = GetWindowsDirectoryW(Directory, ARRAYSIZE(Directory));
+    if (!Count) return GetLastError();
+    if (Count + ARRAYSIZE(L"\\SysWOW64\\regsvr32.exe") > ARRAYSIZE(Application))
+        return ERROR_INSUFFICIENT_BUFFER;
+    wcscat(Directory, L"\\SysWOW64");
+    wcscpy(Application, Directory);
+    wcscat(Application, L"\\regsvr32.exe");
+    for (i = 0; i < ARRAYSIZE(Dlls); ++i)
+    {
+        _snwprintf(Command, ARRAYSIZE(Command), L"\"%s\" /s \"%s\\%s\"",
+                   Application, Directory, Dlls[i]);
+        if (!CreateProcessW(Application, Command, NULL, NULL, FALSE, 0,
+                            NULL, NULL, &Startup, &Process))
+            return GetLastError();
+        Wait = WaitForSingleObject(Process.hProcess, 60000);
+        if (Wait == WAIT_OBJECT_0)
+        {
+            Error = GetExitCodeProcess(Process.hProcess, &ExitCode) ?
+                    (ExitCode ? ERROR_DLL_INIT_FAILED : ERROR_SUCCESS) : GetLastError();
+        }
+        else
+        {
+            Error = Wait == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError();
+            TerminateProcess(Process.hProcess, Error);
+            WaitForSingleObject(Process.hProcess, INFINITE);
+        }
+        CloseHandle(Process.hThread);
+        CloseHandle(Process.hProcess);
+        if (Error)
+        {
+            DPRINT1("SysWOW64 registration of %S failed: %lu\n", Dlls[i], Error);
+            return Error;
+        }
+    }
+    return ERROR_SUCCESS;
+}
+#endif
+
 static
 DWORD
 RegisterDlls(
@@ -2453,6 +2508,11 @@ RegisterDlls(
 
     if (SUCCEEDED(HrCoInit))
         CoUninitialize();
+
+#if defined(_M_AMD64) && defined(BUILD_WOW64_ENABLED)
+    if (Error == ERROR_SUCCESS)
+        Error = RegisterWow64Dlls();
+#endif
 
     SetupTermDefaultQueueCallback(RegistrationData.DefaultContext);
 

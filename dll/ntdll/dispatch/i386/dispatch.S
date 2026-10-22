@@ -23,6 +23,33 @@ EXTERN _ZwRaiseException@12:PROC
 /* FUNCTIONS ****************************************************************/
 .code
 
+PUBLIC _CsrWow64Call@8
+_CsrWow64Call@8:
+    mov eax, HEX(10000)
+    call dword ptr fs:[HEX(c0)]
+    ret 8
+
+/* Private user-mode WoW64 services, sharing the NT argument-list ABI. */
+PUBLIC _RtlpWow64GetNativeSystemInformation@16
+_RtlpWow64GetNativeSystemInformation@16:
+    mov eax, HEX(10001)
+    call dword ptr fs:[HEX(c0)]
+    ret 16
+
+PUBLIC _RtlpWow64EnableFsRedirectionEx@8
+_RtlpWow64EnableFsRedirectionEx@8:
+    mov eax, HEX(10002)
+    call dword ptr fs:[HEX(c0)]
+    ret 8
+
+#ifdef SYSWOW64_GUEST
+PUBLIC _RtlWow64CreateProcess@4
+_RtlWow64CreateProcess@4:
+    mov eax, HEX(10003)
+    call dword ptr fs:[HEX(c0)]
+    ret 4
+#endif
+
 PUBLIC _LdrInitializeThunk@16
 _LdrInitializeThunk@16:
 

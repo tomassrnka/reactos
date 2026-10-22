@@ -739,6 +739,7 @@
 @ extern -arch=i386,arm KiEnableTimerWatchdog
 @ stdcall -arch=i386,arm KiIpiServiceRoutine(ptr ptr)
 @ fastcall -arch=i386,arm KiReleaseSpinLock(ptr)
+@ stdcall -arch=x86_64 KiRestoreWow64Gs()
 @ cdecl -arch=i386,arm KiUnexpectedInterrupt()
 @ stdcall -arch=i386 Kii386SpinOnSpinLock(ptr long)
 @ stdcall LdrAccessResource(ptr ptr ptr ptr)

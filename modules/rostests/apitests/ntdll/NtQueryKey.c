@@ -196,6 +196,12 @@ Test_KeyNameInformation(void)
     ULONG InfoLength;
     OBJECT_ATTRIBUTES ObjectAttributes;
     NTSTATUS Status;
+    BOOL Wow64 = FALSE;
+
+    /* A handle opened in the 32-bit software view names the physical node.
+     * Keep the name/length assertions on both architectures. */
+    if (IsWow64Process(GetCurrentProcess(), &Wow64) && Wow64)
+        RtlInitUnicodeString(&HKLM_Software_Name, L"\\Registry\\Machine\\Software\\Wow6432Node");
 
     /* Open the HKCU key */
     InitializeObjectAttributes(&ObjectAttributes,

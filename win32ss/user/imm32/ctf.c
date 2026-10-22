@@ -584,7 +584,7 @@ CtfImmCoInitialize(VOID)
     if (FAILED_UNEXPECTEDLY(hr))
         return hr; /* CoInitializeEx failed */
 
-    GetWin32ClientInfo()->CI_flags |= CI_CTFCOINIT;
+    KOR(GetWin32ClientInfo(), CI_flags, CI_CTFCOINIT);
     Imm32InitTLS();
 
     pData = Imm32AllocateTLS();
@@ -625,7 +625,7 @@ CtfImmCoUninitialize(VOID)
         Imm32CoUninitialize(); /* Do CoUninitialize */
         pData->bUninitializing = FALSE;
 
-        GetWin32ClientInfo()->CI_flags &= ~CI_CTFCOINIT;
+        KCLR(GetWin32ClientInfo(), CI_flags, CI_CTFCOINIT);
     }
 
     pData = Imm32AllocateTLS();
@@ -791,9 +791,9 @@ VOID WINAPI CtfImmSetCiceroStartInThread(_In_ BOOL bStarted)
 {
     TRACE("(%d)\n", bStarted);
     if (bStarted)
-        GetWin32ClientInfo()->CI_flags |= CI_CICERO_STARTED;
+        KOR(GetWin32ClientInfo(), CI_flags, CI_CICERO_STARTED);
     else
-        GetWin32ClientInfo()->CI_flags &= ~CI_CICERO_STARTED;
+        KCLR(GetWin32ClientInfo(), CI_flags, CI_CICERO_STARTED);
 }
 
 /***********************************************************************
@@ -909,7 +909,7 @@ Imm32ActivateOrDeactivateTIM(
         {
             hr = CtfImeCreateThreadMgr();
             if (SUCCEEDED(hr))
-                GetWin32ClientInfo()->CI_flags |= CI_CTFTIM;
+                KOR(GetWin32ClientInfo(), CI_flags, CI_CTFTIM);
         }
     }
     else /* Destroy */
@@ -918,7 +918,7 @@ Imm32ActivateOrDeactivateTIM(
         {
             hr = CtfImeDestroyThreadMgr();
             if (SUCCEEDED(hr))
-                GetWin32ClientInfo()->CI_flags &= ~CI_CTFTIM;
+                KCLR(GetWin32ClientInfo(), CI_flags, CI_CTFTIM);
         }
     }
 
@@ -1022,8 +1022,8 @@ CtfAImmActivate(
     if (hr == S_OK)
     {
         /* Update CI_... flags of the thread client info */
-        GetWin32ClientInfo()->CI_flags |= CI_AIMMACTIVATED; /* Activate AIMM */
-        GetWin32ClientInfo()->CI_flags &= ~CI_TSFDISABLED;  /* Enable TSF */
+        KOR(GetWin32ClientInfo(), CI_flags, CI_AIMMACTIVATED); /* Activate AIMM */
+        KCLR(GetWin32ClientInfo(), CI_flags, CI_TSFDISABLED);  /* Enable TSF */
 
         /* Create the CTF input contexts */
         ImmEnumInputContext(0, Imm32EnumCreateCtfICProc, 0);
@@ -1052,8 +1052,8 @@ CtfAImmDeactivate(
     hr = CtfImeDestroyThreadMgr();
     if (hr == S_OK)
     {
-        GetWin32ClientInfo()->CI_flags &= ~CI_AIMMACTIVATED; /* Deactivate AIMM */
-        GetWin32ClientInfo()->CI_flags |= CI_TSFDISABLED;    /* Disable TSF */
+        KCLR(GetWin32ClientInfo(), CI_flags, CI_AIMMACTIVATED); /* Deactivate AIMM */
+        KOR(GetWin32ClientInfo(), CI_flags, CI_TSFDISABLED);    /* Disable TSF */
     }
 
     return hr;
@@ -1097,7 +1097,7 @@ ImmDisableTextFrameService(_In_ DWORD dwThreadId)
     if ((dwThreadId && !g_disable_CUAS_flag) || (GetWin32ClientInfo()->CI_flags & CI_TSFDISABLED))
         return TRUE;
 
-    GetWin32ClientInfo()->CI_flags |= CI_TSFDISABLED;
+    KOR(GetWin32ClientInfo(), CI_flags, CI_TSFDISABLED);
 
     if (IS_CICERO_MODE() && !IS_16BIT_MODE() &&
         (GetWin32ClientInfo()->CI_flags & CI_CTFCOINIT) &&
@@ -1106,7 +1106,7 @@ ImmDisableTextFrameService(_In_ DWORD dwThreadId)
         hr = CtfImeDestroyThreadMgr();
         if (SUCCEEDED(hr))
         {
-            GetWin32ClientInfo()->CI_flags &= ~CI_CTFTIM;
+            KCLR(GetWin32ClientInfo(), CI_flags, CI_CTFTIM);
             CtfImmCoUninitialize();
         }
     }
@@ -1129,7 +1129,7 @@ CtfImmTIMActivate(_In_ HKL hKL)
     if (g_disable_CUAS_flag)
     {
         TRACE("g_disable_CUAS_flag\n");
-        GetWin32ClientInfo()->CI_flags |= CI_TSFDISABLED;
+        KOR(GetWin32ClientInfo(), CI_flags, CI_TSFDISABLED);
         return S_OK;
     }
 
@@ -1142,7 +1142,7 @@ CtfImmTIMActivate(_In_ HKL hKL)
     if (Imm32IsTIMDisabledInRegistry())
     {
         TRACE("TIM is disabled in registry\n");
-        GetWin32ClientInfo()->CI_flags |= CI_TSFDISABLED;
+        KOR(GetWin32ClientInfo(), CI_flags, CI_TSFDISABLED);
         return S_OK;
     }
 
@@ -1155,14 +1155,14 @@ CtfImmTIMActivate(_In_ HKL hKL)
     if (!Imm32IsCUASEnabledInRegistry())
     {
         TRACE("CUAS is disabled in registry\n");
-        GetWin32ClientInfo()->CI_flags |= CI_TSFDISABLED;
+        KOR(GetWin32ClientInfo(), CI_flags, CI_TSFDISABLED);
         return S_OK;
     }
 
     if (NtCurrentTeb()->ProcessEnvironmentBlock->AppCompatFlags.LowPart & 0x100)
     {
         TRACE("CUAS is disabled by AppCompatFlags\n");
-        GetWin32ClientInfo()->CI_flags |= CI_TSFDISABLED;
+        KOR(GetWin32ClientInfo(), CI_flags, CI_TSFDISABLED);
         return S_OK;
     }
 
@@ -1191,7 +1191,7 @@ CtfImmTIMActivate(_In_ HKL hKL)
     {
         hr = CtfImeCreateThreadMgr();
         if (SUCCEEDED(hr))
-            GetWin32ClientInfo()->CI_flags |= CI_CTFTIM;
+            KOR(GetWin32ClientInfo(), CI_flags, CI_CTFTIM);
     }
 
     return hr;

@@ -1,0 +1,66 @@
+# Exercise the real guest registration and staging across package-list edits.
+# No compiler is needed: two custom targets stand in for guest DLL producers.
+cmake_minimum_required(VERSION 3.17)
+foreach(_arg MODULE STAGE WORK)
+    if(NOT DEFINED ${_arg})
+        message(FATAL_ERROR "${_arg} is required")
+    endif()
+endforeach()
+function(run)
+    execute_process(COMMAND ${ARGV} RESULT_VARIABLE _result)
+    if(NOT _result EQUAL 0)
+        message(FATAL_ERROR "Command failed (${_result}): ${ARGV}")
+    endif()
+endfunction()
+
+file(REMOVE_RECURSE "${WORK}")
+file(MAKE_DIRECTORY "${WORK}/src/boot/bootdata/packages")
+set(_list "${WORK}/src/boot/bootdata/packages/syswow64.lst")
+file(WRITE "${_list}" "SysWOW64/first.dll\n")
+file(WRITE "${WORK}/src/CMakeLists.txt" [=[
+cmake_minimum_required(VERSION 3.17)
+project(Syswow64Incremental NONE)
+set(ARCH i386)
+set(REACTOS_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+set(REACTOS_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}")
+include("${MODULE}")
+syswow64_guest_begin()
+foreach(_name first second)
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/${_name}.input" "${_name} guest content\n")
+    set(_output "${CMAKE_CURRENT_BINARY_DIR}/${_name}.dll")
+    add_custom_command(OUTPUT "${_output}"
+        COMMAND ${CMAKE_COMMAND} -E copy
+            "${CMAKE_CURRENT_BINARY_DIR}/${_name}.input" "${_output}")
+    add_custom_target(${_name} DEPENDS "${_output}")
+    syswow64_guest_add_cd_file(${_name} "${_output}" "reactos/system32" "" "bootcd")
+endforeach()
+syswow64_guest_end()
+]=])
+run("${CMAKE_COMMAND}" -S "${WORK}/src" -B "${WORK}/build" -G Ninja
+    "-DMODULE=${MODULE}" -DCMAKE_BUILD_TYPE=Debug)
+
+function(build_and_stage)
+    run("${CMAKE_COMMAND}" --build "${WORK}/build" --target syswow64_guest)
+    run("${CMAKE_COMMAND}" "-DMANIFEST=${WORK}/build/syswow64-guest.Debug.lst"
+        "-DLIST=${_list}" "-DOUT=${WORK}/stage" -P "${STAGE}")
+endfunction()
+build_and_stage()
+if(EXISTS "${WORK}/build/second.dll")
+    message(FATAL_ERROR "Unselected guest target was built")
+endif()
+
+# Only edit the package list: no explicit configure, source, or CMake edit.
+file(APPEND "${_list}" "SysWOW64/second.dll\n")
+build_and_stage()
+file(READ "${WORK}/stage/cab/wow64-200-second.dll" _content)
+if(NOT _content STREQUAL "second guest content\n")
+    message(FATAL_ERROR "Added package was not built and staged")
+endif()
+
+file(WRITE "${_list}" "SysWOW64/second.dll\n")
+build_and_stage()
+file(READ "${WORK}/build/syswow64-guest.Debug.lst" _manifest)
+if(_manifest MATCHES "first.dll" OR EXISTS "${WORK}/stage/cab/wow64-200-first.dll")
+    message(FATAL_ERROR "Removed package remained in the manifest or cabinet")
+endif()
+message(STATUS "SysWOW64 incremental addition/removal passed")
