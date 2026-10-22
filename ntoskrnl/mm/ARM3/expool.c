@@ -40,6 +40,20 @@ typedef struct _POOL_DPC_CONTEXT
 
 ULONG ExpNumberOfPagedPools;
 POOL_DESCRIPTOR NonPagedPoolDescriptor;
+
+//
+// T12: per-processor nonpaged pool descriptors.  Index 0 aliases the legacy
+// NonPagedPoolDescriptor so existing hardcoded references keep working; the
+// remaining descriptors use static storage (no bootstrap allocation).  Each
+// descriptor has its own in-stack queued spinlock, replacing the single global
+// LockQueueNonPagedPoolLock.  ExpNumberOfNonPagedPools == 1 keeps the historical
+// single-descriptor behaviour until per-CPU selection is activated.
+//
+#define EXP_MAXIMUM_NONPAGED_POOLS 16
+ULONG ExpNumberOfNonPagedPools = EXP_MAXIMUM_NONPAGED_POOLS;
+PPOOL_DESCRIPTOR ExpNonPagedPoolDescriptor[EXP_MAXIMUM_NONPAGED_POOLS];
+KSPIN_LOCK ExpNonPagedPoolLock[EXP_MAXIMUM_NONPAGED_POOLS];
+POOL_DESCRIPTOR ExpNonPagedPoolDescriptorStorage[EXP_MAXIMUM_NONPAGED_POOLS - 1];
 PPOOL_DESCRIPTOR ExpPagedPoolDescriptor[16 + 1];
 PPOOL_DESCRIPTOR PoolVector[2];
 PKGUARDED_MUTEX ExpPagedPoolMutex;
@@ -74,9 +88,9 @@ ULONGLONG MiLastPoolDumpTime;
  * number of kernel-mode attacks which depend on dangling list pointers and other
  * kinds of list-based attacks.
  *
- * For now, I will leave these checks on all the time, but later they are likely
- * to be DBG-only, at least until there are enough kernel-mode security attacks
- * against ReactOS to warrant the performance hit.
+ * The link check is O(1) and is pool-corruption hardening (safe unlink), so it
+ * stays on in all builds. The block check walks the whole page under the
+ * (single, global) nonpaged pool lock, so it is DBG-only here.
  *
  * For now, these are not made inline, so we can get good stack traces.
  */
@@ -371,6 +385,7 @@ ExpCheckPoolAllocation(
     }
 }
 
+#if DBG
 VOID
 NTAPI
 ExpCheckPoolBlocks(IN PVOID Block)
@@ -410,6 +425,10 @@ ExpCheckPoolBlocks(IN PVOID Block)
         KeBugCheckEx(BAD_POOL_HEADER, 10, (ULONG_PTR)Block, __LINE__, (ULONG_PTR)Entry);
     }
 }
+#else
+/* Release builds do not walk the whole page under the pool lock */
+#define ExpCheckPoolBlocks(Block) ((void)0)
+#endif
 
 FORCEINLINE
 VOID
@@ -1211,14 +1230,29 @@ InitializePool(IN POOL_TYPE PoolType,
         KeInitializeSpinLock(&ExpTaggedPoolLock);
 
         //
-        // Initialize the nonpaged pool descriptor
+        // Initialize the nonpaged pool descriptor(s).  Descriptor 0 aliases the
+        // legacy NonPagedPoolDescriptor; descriptors 1..N-1 use static storage.
+        // Each gets its own KSPIN_LOCK (T12).  All spinlocks are initialized up
+        // front so the (currently unused) extra descriptors are safe to enable.
         //
-        PoolVector[NonPagedPool] = &NonPagedPoolDescriptor;
-        ExInitializePoolDescriptor(PoolVector[NonPagedPool],
-                                   NonPagedPool,
-                                   0,
-                                   Threshold,
-                                   NULL);
+        ExpNonPagedPoolDescriptor[0] = &NonPagedPoolDescriptor;
+        for (i = 1; i < ExpNumberOfNonPagedPools; i++)
+        {
+            ExpNonPagedPoolDescriptor[i] = &ExpNonPagedPoolDescriptorStorage[i - 1];
+        }
+        for (i = 0; i < EXP_MAXIMUM_NONPAGED_POOLS; i++)
+        {
+            KeInitializeSpinLock(&ExpNonPagedPoolLock[i]);
+        }
+        for (i = 0; i < ExpNumberOfNonPagedPools; i++)
+        {
+            ExInitializePoolDescriptor(ExpNonPagedPoolDescriptor[i],
+                                       NonPagedPool,
+                                       i,
+                                       Threshold,
+                                       &ExpNonPagedPoolLock[i]);
+        }
+        PoolVector[NonPagedPool] = ExpNonPagedPoolDescriptor[0];
     }
     else
     {
@@ -1269,8 +1303,9 @@ InitializePool(IN POOL_TYPE PoolType,
 }
 
 FORCEINLINE
-KIRQL
-ExLockPool(IN PPOOL_DESCRIPTOR Descriptor)
+VOID
+ExLockPool(IN PPOOL_DESCRIPTOR Descriptor,
+           OUT PKLOCK_QUEUE_HANDLE LockHandle)
 {
     //
     // Check if this is nonpaged pool
@@ -1278,9 +1313,11 @@ ExLockPool(IN PPOOL_DESCRIPTOR Descriptor)
     if ((Descriptor->PoolType & BASE_POOL_TYPE_MASK) == NonPagedPool)
     {
         //
-        // Use the queued spin lock
+        // T12: per-descriptor in-stack queued spinlock (Descriptor->LockAddress
+        // points to this descriptor-specific KSPIN_LOCK).
         //
-        return KeAcquireQueuedSpinLock(LockQueueNonPagedPoolLock);
+        KeAcquireInStackQueuedSpinLock((PKSPIN_LOCK)Descriptor->LockAddress,
+                                       LockHandle);
     }
     else
     {
@@ -1288,14 +1325,14 @@ ExLockPool(IN PPOOL_DESCRIPTOR Descriptor)
         // Use the guarded mutex
         //
         KeAcquireGuardedMutex(Descriptor->LockAddress);
-        return APC_LEVEL;
+        LockHandle->OldIrql = APC_LEVEL;
     }
 }
 
 FORCEINLINE
 VOID
 ExUnlockPool(IN PPOOL_DESCRIPTOR Descriptor,
-             IN KIRQL OldIrql)
+             IN PKLOCK_QUEUE_HANDLE LockHandle)
 {
     //
     // Check if this is nonpaged pool
@@ -1303,9 +1340,9 @@ ExUnlockPool(IN PPOOL_DESCRIPTOR Descriptor,
     if ((Descriptor->PoolType & BASE_POOL_TYPE_MASK) == NonPagedPool)
     {
         //
-        // Use the queued spin lock
+        // T12: release the per-descriptor in-stack queued spinlock
         //
-        KeReleaseQueuedSpinLock(LockQueueNonPagedPoolLock, OldIrql);
+        KeReleaseInStackQueuedSpinLock(LockHandle);
     }
     else
     {
@@ -1804,21 +1841,16 @@ ExQueryPoolUsage(OUT PULONG PagedPoolPages,
     *NonPagedPoolFrees = PoolDesc->RunningDeAllocs;
 
     //
-    // If the system has more than one non-paged pool, copy the other descriptor
-    // totals as well
+    // T12: add the remaining per-processor non-paged descriptors (index 0 is the
+    // NonPagedPoolDescriptor already accounted for above).
     //
-#if 0
-    if (ExpNumberOfNonPagedPools > 1)
+    for (i = 1; i < ExpNumberOfNonPagedPools; i++)
     {
-        for (i = 0; i < ExpNumberOfNonPagedPools; i++)
-        {
-            PoolDesc = ExpNonPagedPoolDescriptor[i];
-            *NonPagedPoolPages += PoolDesc->TotalPages + PoolDesc->TotalBigPages;
-            *NonPagedPoolAllocs += PoolDesc->RunningAllocs;
-            *NonPagedPoolFrees += PoolDesc->RunningDeAllocs;
-        }
+        PoolDesc = ExpNonPagedPoolDescriptor[i];
+        *NonPagedPoolPages += PoolDesc->TotalPages + PoolDesc->TotalBigPages;
+        *NonPagedPoolAllocs += PoolDesc->RunningAllocs;
+        *NonPagedPoolFrees += PoolDesc->RunningDeAllocs;
     }
-#endif
 
     //
     // Get the amount of hits in the system lookaside lists
@@ -1842,6 +1874,22 @@ ExQueryPoolUsage(OUT PULONG PagedPoolPages,
             else
             {
                 *PagedPoolLookasideHits += Lookaside->AllocateHits;
+            }
+        }
+    }
+
+    //
+    // Add the hits accumulated on the true per-processor nonpaged lists, which
+    // are not linked into ExPoolLookasideListHead.
+    //
+    {
+        ULONG c, k;
+        for (c = 0; c < EX_PERCPU_LOOKASIDE_MAX_CPU; c++)
+        {
+            for (k = 0; k < NUMBER_POOL_LOOKASIDE_LISTS; k++)
+            {
+                *NonPagedPoolLookasideHits +=
+                    ExpSmallNPagedPoolLookasideListsPerCpu[c][k].AllocateHits;
             }
         }
     }
@@ -1908,7 +1956,7 @@ ExAllocatePoolWithTag(IN POOL_TYPE PoolType,
     PPOOL_DESCRIPTOR PoolDesc;
     PLIST_ENTRY ListHead;
     PPOOL_HEADER Entry, NextEntry, FragmentEntry;
-    KIRQL OldIrql;
+    KLOCK_QUEUE_HANDLE LockHandle;
     USHORT BlockSize, i;
     ULONG OriginalType;
     PKPRCB Prcb = KeGetCurrentPrcb();
@@ -2096,13 +2144,18 @@ ExAllocatePoolWithTag(IN POOL_TYPE PoolType,
         if (!Entry)
         {
             //
-            // We failed, try popping it from the global list
+            // We failed, try popping it from the global list (if that is a
+            // different list: until the lists are per-CPU, P and L are one)
             //
-            LookasideList = (PoolType == PagedPool) ?
+            PGENERAL_LOOKASIDE GlobalList = (PoolType == PagedPool) ?
                              Prcb->PPPagedLookasideList[i - 1].L :
                              Prcb->PPNPagedLookasideList[i - 1].L;
-            LookasideList->TotalAllocates++;
-            Entry = (PPOOL_HEADER)InterlockedPopEntrySList(&LookasideList->ListHead);
+            if (GlobalList != LookasideList)
+            {
+                LookasideList = GlobalList;
+                LookasideList->TotalAllocates++;
+                Entry = (PPOOL_HEADER)InterlockedPopEntrySList(&LookasideList->ListHead);
+            }
         }
 
         //
@@ -2132,6 +2185,17 @@ ExAllocatePoolWithTag(IN POOL_TYPE PoolType,
     }
 
     //
+    // T12: for nonpaged pool, steer this allocation to the current processor-local
+    // descriptor so each CPU carves from and frees to its own free lists and
+    // lock.  The block header records the owning descriptor (PoolIndex) so a
+    // cross-CPU free can return it to the right descriptor.
+    //
+    if (PoolType == NonPagedPool)
+    {
+        PoolDesc = ExpNonPagedPoolDescriptor[Prcb->Number % ExpNumberOfNonPagedPools];
+    }
+
+    //
     // Loop in the free lists looking for a block if this size. Start with the
     // list optimized for this kind of size lookup
     //
@@ -2146,7 +2210,7 @@ ExAllocatePoolWithTag(IN POOL_TYPE PoolType,
             //
             // Acquire the pool lock now
             //
-            OldIrql = ExLockPool(PoolDesc);
+            ExLockPool(PoolDesc, &LockHandle);
 
             //
             // And make sure the list still has entries
@@ -2159,7 +2223,7 @@ ExAllocatePoolWithTag(IN POOL_TYPE PoolType,
                 //
                 // Try again!
                 //
-                ExUnlockPool(PoolDesc, OldIrql);
+                ExUnlockPool(PoolDesc, &LockHandle);
                 continue;
             }
 
@@ -2265,6 +2329,7 @@ ExAllocatePoolWithTag(IN POOL_TYPE PoolType,
                 // was, and the actual size the caller needs/requested.
                 //
                 FragmentEntry->PoolType = 0;
+                FragmentEntry->PoolIndex = PoolDesc->PoolIndex;
                 BlockSize = FragmentEntry->BlockSize;
 
                 //
@@ -2289,8 +2354,9 @@ ExAllocatePoolWithTag(IN POOL_TYPE PoolType,
             // and release the lock since we're done
             //
             Entry->PoolType = OriginalType + 1;
+            Entry->PoolIndex = PoolDesc->PoolIndex;
             ExpCheckPoolBlocks(Entry);
-            ExUnlockPool(PoolDesc, OldIrql);
+            ExUnlockPool(PoolDesc, &LockHandle);
 
             //
             // Increment required counters
@@ -2388,6 +2454,7 @@ ExAllocatePoolWithTag(IN POOL_TYPE PoolType,
     Entry->Ulong1 = 0;
     Entry->BlockSize = i;
     Entry->PoolType = OriginalType + 1;
+    Entry->PoolIndex = PoolDesc->PoolIndex;
 
     //
     // This page will have two entries -- one for the allocation (which we just
@@ -2400,6 +2467,7 @@ ExAllocatePoolWithTag(IN POOL_TYPE PoolType,
     FragmentEntry->Ulong1 = 0;
     FragmentEntry->BlockSize = BlockSize;
     FragmentEntry->PreviousSize = i;
+    FragmentEntry->PoolIndex = PoolDesc->PoolIndex;
 
     //
     // Increment required counters
@@ -2417,7 +2485,7 @@ ExAllocatePoolWithTag(IN POOL_TYPE PoolType,
         //
         // Excellent -- acquire the pool lock
         //
-        OldIrql = ExLockPool(PoolDesc);
+        ExLockPool(PoolDesc, &LockHandle);
 
         //
         // And insert the free entry into the free list for this block size
@@ -2431,7 +2499,7 @@ ExAllocatePoolWithTag(IN POOL_TYPE PoolType,
         // Release the pool lock
         //
         ExpCheckPoolBlocks(Entry);
-        ExUnlockPool(PoolDesc, OldIrql);
+        ExUnlockPool(PoolDesc, &LockHandle);
     }
     else
     {
@@ -2495,14 +2563,14 @@ ExFreePoolWithTag(IN PVOID P,
 {
     PPOOL_HEADER Entry, NextEntry;
     USHORT BlockSize;
-    KIRQL OldIrql;
+    KLOCK_QUEUE_HANDLE LockHandle;
     POOL_TYPE PoolType;
     PPOOL_DESCRIPTOR PoolDesc;
     ULONG Tag;
     BOOLEAN Combined = FALSE;
     PFN_NUMBER PageCount, RealPageCount;
     PKPRCB Prcb = KeGetCurrentPrcb();
-    PGENERAL_LOOKASIDE LookasideList;
+    PGENERAL_LOOKASIDE LookasideList, GlobalList;
     PEPROCESS Process;
 
     //
@@ -2670,7 +2738,19 @@ ExFreePoolWithTag(IN PVOID P,
     //
     BlockSize = Entry->BlockSize;
     PoolType = (Entry->PoolType - 1) & BASE_POOL_TYPE_MASK;
-    PoolDesc = PoolVector[PoolType];
+    //
+    // T12: route nonpaged frees to the descriptor that owns the block page
+    // (recorded in the header at carve time).  The modulo is a safety net; a
+    // correctly-tagged block always resolves to its real owner.
+    //
+    if (PoolType == NonPagedPool)
+    {
+        PoolDesc = ExpNonPagedPoolDescriptor[Entry->PoolIndex % ExpNumberOfNonPagedPools];
+    }
+    else
+    {
+        PoolDesc = PoolVector[PoolType];
+    }
 
     //
     // Make sure that the IRQL makes sense
@@ -2746,15 +2826,19 @@ ExFreePoolWithTag(IN PVOID P,
         //
         // We failed, try to push it into the global lookaside list
         //
-        LookasideList = (PoolType == PagedPool) ?
-                         Prcb->PPPagedLookasideList[BlockSize - 1].L :
-                         Prcb->PPNPagedLookasideList[BlockSize - 1].L;
-        LookasideList->TotalFrees++;
-        if (ExQueryDepthSList(&LookasideList->ListHead) < LookasideList->Depth)
+        GlobalList = (PoolType == PagedPool) ?
+                      Prcb->PPPagedLookasideList[BlockSize - 1].L :
+                      Prcb->PPNPagedLookasideList[BlockSize - 1].L;
+        if (GlobalList != LookasideList)
         {
-            LookasideList->FreeHits++;
-            InterlockedPushEntrySList(&LookasideList->ListHead, P);
-            return;
+            LookasideList = GlobalList;
+            LookasideList->TotalFrees++;
+            if (ExQueryDepthSList(&LookasideList->ListHead) < LookasideList->Depth)
+            {
+                LookasideList->FreeHits++;
+                InterlockedPushEntrySList(&LookasideList->ListHead, P);
+                return;
+            }
         }
     }
 
@@ -2772,7 +2856,7 @@ ExFreePoolWithTag(IN PVOID P,
     //
     // Acquire the pool lock
     //
-    OldIrql = ExLockPool(PoolDesc);
+    ExLockPool(PoolDesc, &LockHandle);
 
     //
     // Check if the next allocation is at the end of the page
@@ -2872,7 +2956,7 @@ ExFreePoolWithTag(IN PVOID P,
         // In this case, release the pool lock, update the performance counter,
         // and free the page
         //
-        ExUnlockPool(PoolDesc, OldIrql);
+        ExUnlockPool(PoolDesc, &LockHandle);
         InterlockedExchangeAdd((PLONG)&PoolDesc->TotalPages, -1);
         MiFreePoolPages(Entry);
         return;
@@ -2908,7 +2992,7 @@ ExFreePoolWithTag(IN PVOID P,
     //
     ExpInsertPoolHeadList(&PoolDesc->ListHeads[BlockSize - 1], POOL_FREE_BLOCK(Entry));
     ExpCheckPoolLinks(POOL_FREE_BLOCK(Entry));
-    ExUnlockPool(PoolDesc, OldIrql);
+    ExUnlockPool(PoolDesc, &LockHandle);
 }
 
 /*

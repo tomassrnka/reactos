@@ -329,7 +329,8 @@ CcRosEnsureVacbResident(
     _In_ BOOLEAN Wait,
     _In_ BOOLEAN NoRead,
     _In_ ULONG Offset,
-    _In_ ULONG Length
+    _In_ ULONG Length,
+    _In_ BOOLEAN WaitForPages
 );
 
 CODE_SEG("INIT")

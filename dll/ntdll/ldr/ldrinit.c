@@ -2410,14 +2410,6 @@ LdrpInitializeProcess(IN PCONTEXT Context,
             return Status;
         }
 
-        /* Check if a start context was provided */
-        if (Context)
-        {
-            DPRINT1("WARNING: Relocated EXE Context");
-            UNIMPLEMENTED; // We should support this
-            return STATUS_INVALID_IMAGE_FORMAT;
-        }
-
         /* Restore the protection */
         Status = LdrpSetProtection(ViewBase, TRUE);
         if (!NT_SUCCESS(Status)) return Status;

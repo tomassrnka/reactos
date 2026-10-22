@@ -24,7 +24,10 @@ extern void func_strtoul(void);
 extern void func_wcstoul(void);
 extern void func_wcstombs(void);
 
+extern void func_CommitCharge(void);
 extern void func_DllLoadNotification(void);
+extern void func_EmptyPxeFree(void);
+extern void func_EmptyPxeProtect(void);
 extern void func_LdrEnumResources(void);
 extern void func_LdrFindResource_U(void);
 extern void func_LdrLoadDll(void);
@@ -42,10 +45,13 @@ extern void func_NtContinue(void);
 extern void func_NtCreateFile(void);
 extern void func_NtCreateKey(void);
 extern void func_NtCreateProfile(void);
+extern void func_NtCreateSectionImage(void);
+extern void func_NtCreateSectionSize(void);
 extern void func_NtCreateThread(void);
 extern void func_NtDeleteKey(void);
 extern void func_NtDuplicateObject(void);
 extern void func_NtDuplicateToken(void);
+extern void func_NtExtendSection(void);
 extern void func_NtFilterToken(void);
 extern void func_NtFreeVirtualMemory(void);
 extern void func_NtImpersonateAnonymousToken(void);
@@ -68,6 +74,7 @@ extern void func_NtQuerySection(void);
 extern void func_NtQuerySystemEnvironmentValue(void);
 extern void func_NtQuerySystemInformation(void);
 extern void func_NtQueryValueKey(void);
+extern void func_NtQueryVirtualMemory(void);
 extern void func_NtQueryVolumeInformationFile(void);
 extern void func_NtReadFile(void);
 extern void func_NtSaveKey(void);
@@ -168,7 +175,10 @@ const struct test winetest_testlist[] =
     { "wcstoul", func_wcstoul },
     { "wcstombs", func_wcstombs },
 
+    { "CommitCharge",                   func_CommitCharge },
     { "DllLoadNotification",            func_DllLoadNotification },
+    { "EmptyPxeFree",                   func_EmptyPxeFree },
+    { "EmptyPxeProtect",                func_EmptyPxeProtect },
     { "LdrEnumResources",               func_LdrEnumResources },
     { "LdrFindResource_U",              func_LdrFindResource_U },
     { "LdrLoadDll",                     func_LdrLoadDll },
@@ -186,10 +196,13 @@ const struct test winetest_testlist[] =
     { "NtCreateFile",                   func_NtCreateFile },
     { "NtCreateKey",                    func_NtCreateKey },
     { "NtCreateProfile",                func_NtCreateProfile },
+    { "NtCreateSectionImage",           func_NtCreateSectionImage },
+    { "NtCreateSectionSize",            func_NtCreateSectionSize },
     { "NtCreateThread",                 func_NtCreateThread },
     { "NtDeleteKey",                    func_NtDeleteKey },
     { "NtDuplicateObject",              func_NtDuplicateObject },
     { "NtDuplicateToken",               func_NtDuplicateToken },
+    { "NtExtendSection",                func_NtExtendSection },
     { "NtFilterToken",                  func_NtFilterToken },
     { "NtFreeVirtualMemory",            func_NtFreeVirtualMemory },
     { "NtImpersonateAnonymousToken",    func_NtImpersonateAnonymousToken },
@@ -212,6 +225,7 @@ const struct test winetest_testlist[] =
     { "NtQuerySystemEnvironmentValue",  func_NtQuerySystemEnvironmentValue },
     { "NtQuerySystemInformation",       func_NtQuerySystemInformation },
     { "NtQueryValueKey",                func_NtQueryValueKey },
+    { "NtQueryVirtualMemory",           func_NtQueryVirtualMemory },
     { "NtQueryVolumeInformationFile",   func_NtQueryVolumeInformationFile },
     { "NtReadFile",                     func_NtReadFile },
     { "NtSaveKey",                      func_NtSaveKey},

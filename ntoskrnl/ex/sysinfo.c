@@ -723,13 +723,9 @@ QSI_DEF(SystemPerformanceInformation)
 
     Spi->AvailablePages = (ULONG)MmAvailablePages;
 
+    /* Commit charge and limit (RAM plus the current paging files), in pages */
     Spi->CommittedPages = MmTotalCommittedPages;
-    /*
-     *  Add up the full system total + pagefile.
-     *  All this make Taskmgr happy but not sure it is the right numbers.
-     *  This too, fixes some of GlobalMemoryStatusEx numbers.
-     */
-    Spi->CommitLimit = MmNumberOfPhysicalPages + MiFreeSwapPages + MiUsedSwapPages;
+    Spi->CommitLimit = MmTotalCommitLimit;
 
     Spi->PeakCommitment = MmPeakCommitment;
     Spi->PageFaultCount = 0; /* FIXME */
@@ -1489,6 +1485,7 @@ QSI_DEF(SystemPageFileInformation)
     Spfi->TotalInUse = MiUsedSwapPages;
     Spfi->PeakUsage = MiUsedSwapPages; /* FIXME */
     Spfi->PageFileName = FileName;
+    *ReqSize = sizeof(SYSTEM_PAGEFILE_INFORMATION);
     return STATUS_SUCCESS;
 }
 
@@ -2181,6 +2178,68 @@ ExpCopyLookasideInformation(
     *RemainingPointer = Remaining;
 }
 
+/*
+ * Like ExpCopyLookasideInformation for the pool lookaside lists, but folds the
+ * true per-processor nonpaged list counters into the matching shared ("system")
+ * entry so the reported figures include per-CPU activity.  The pool lists track
+ * hits, so misses are derived (total - hits).
+ */
+static
+VOID
+ExpCopyPoolLookasideInformation(
+    PSYSTEM_LOOKASIDE_INFORMATION *InfoPointer,
+    PULONG RemainingPointer)
+{
+    PSYSTEM_LOOKASIDE_INFORMATION Info = *InfoPointer;
+    ULONG Remaining = *RemainingPointer;
+    PLIST_ENTRY ListEntry;
+
+    for (ListEntry = ExPoolLookasideListHead.Flink;
+         (ListEntry != &ExPoolLookasideListHead) && (Remaining > 0);
+         ListEntry = ListEntry->Flink, Info++, Remaining--)
+    {
+        PGENERAL_LOOKASIDE LookasideList =
+            CONTAINING_RECORD(ListEntry, GENERAL_LOOKASIDE, ListEntry);
+        ULONG TotalAllocates = LookasideList->TotalAllocates;
+        ULONG AllocateHits = LookasideList->AllocateHits;
+        ULONG TotalFrees = LookasideList->TotalFrees;
+        ULONG FreeHits = LookasideList->FreeHits;
+
+        /* Fold in the per-processor nonpaged list of the same size class */
+        if (LookasideList->Type == NonPagedPool)
+        {
+            ULONG Index = LookasideList->Size / 8;
+            if ((Index >= 1) && (Index <= NUMBER_POOL_LOOKASIDE_LISTS))
+            {
+                ULONG c;
+                Index--;
+                for (c = 0; c < EX_PERCPU_LOOKASIDE_MAX_CPU; c++)
+                {
+                    PGENERAL_LOOKASIDE Pc =
+                        &ExpSmallNPagedPoolLookasideListsPerCpu[c][Index];
+                    TotalAllocates += Pc->TotalAllocates;
+                    AllocateHits += Pc->AllocateHits;
+                    TotalFrees += Pc->TotalFrees;
+                    FreeHits += Pc->FreeHits;
+                }
+            }
+        }
+
+        Info->CurrentDepth = LookasideList->Depth;
+        Info->MaximumDepth = LookasideList->MaximumDepth;
+        Info->TotalAllocates = TotalAllocates;
+        Info->TotalFrees = TotalFrees;
+        Info->Type = LookasideList->Type;
+        Info->Tag = LookasideList->Tag;
+        Info->Size = LookasideList->Size;
+        Info->AllocateMisses = TotalAllocates - AllocateHits;
+        Info->FreeMisses = TotalFrees - FreeHits;
+    }
+
+    *InfoPointer = Info;
+    *RemainingPointer = Remaining;
+}
+
 /* Class 45 - Lookaside Information */
 QSI_DEF(SystemLookasideInformation)
 {
@@ -2213,11 +2272,8 @@ QSI_DEF(SystemLookasideInformation)
         return Status;
     }
 
-    /* Copy info from pool lookaside lists */
-    ExpCopyLookasideInformation(&Info,
-                                &Remaining,
-                                &ExPoolLookasideListHead,
-                                FALSE);
+    /* Copy info from pool lookaside lists (folds in per-processor nonpaged lists) */
+    ExpCopyPoolLookasideInformation(&Info, &Remaining);
     if (Remaining == 0)
     {
         goto Leave;

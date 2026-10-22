@@ -417,6 +417,21 @@ typedef enum _MI_PFN_CACHE_ATTRIBUTE
     MiNotMapped
 } MI_PFN_CACHE_ATTRIBUTE, *PMI_PFN_CACHE_ATTRIBUTE;
 
+/* The caching type a protection mask asks for: MM_NOACCESS shares its bits with MM_WRITECOMBINE */
+FORCEINLINE
+MI_PFN_CACHE_ATTRIBUTE
+MiCacheAttributeFromProtection(
+    _In_ ULONG ProtectionMask)
+{
+    if (!(ProtectionMask & MM_PROTECT_ACCESS))
+        return MiCached;
+    if ((ProtectionMask & MM_PROTECT_SPECIAL) == MM_NOCACHE)
+        return MiNonCached;
+    if ((ProtectionMask & MM_PROTECT_SPECIAL) == MM_WRITECOMBINE)
+        return MiWriteCombined;
+    return MiCached;
+}
+
 typedef struct _PHYSICAL_MEMORY_RUN
 {
     PFN_NUMBER BasePage;
@@ -594,6 +609,17 @@ extern PVOID MmSystemCacheEnd;
 extern MMSUPPORT MmSystemCacheWs;
 extern SIZE_T MmAllocatedNonPagedPool;
 extern ULONG MmSpecialPoolTag;
+extern ULONG MiSpecialPoolTagRaw[2];
+extern ULONG MiSpecialPoolTagRawLength;
+extern ULONG MiSpecialPoolTagRawType;
+extern ULONG MmSpecialPoolCatchOverruns;
+extern ULONG MiSpecialPoolOverrunsRaw[2];
+extern ULONG MiSpecialPoolOverrunsRawLength;
+extern ULONG MiSpecialPoolOverrunsRawType;
+#define MI_SPECIAL_POOL_TAG_LIST_CHARS 128
+extern WCHAR MiSpecialPoolTagList[MI_SPECIAL_POOL_TAG_LIST_CHARS + 1];
+extern ULONG MiSpecialPoolTagListLength;
+extern ULONG MiSpecialPoolTagListType;
 extern PVOID MmHyperSpaceEnd;
 extern PMMWSL MmSystemCacheWorkingSetList;
 extern SIZE_T MmMinimumNonPagedPoolSize;
@@ -2384,6 +2410,27 @@ MiDeletePte(
     IN PMMPTE PrototypePte
 );
 
+BOOLEAN
+NTAPI
+MiDeletePteDeferred(
+    IN PMMPTE PointerPte,
+    IN PVOID VirtualAddress,
+    IN PEPROCESS CurrentProcess,
+    IN PMMPTE PrototypePte,
+    IN OUT PMI_DEFERRED_RELEASE Deferred OPTIONAL
+);
+
+KIRQL
+NTAPI
+MiReplaceSharedPte(
+    IN PMMPTE PointerPte,
+    IN PVOID VirtualAddress,
+    IN PEPROCESS CurrentProcess,
+    IN PMMPTE PrototypePte,
+    IN PFN_NUMBER NewPageFrameIndex,
+    IN KIRQL OldIrql
+);
+
 ULONG
 NTAPI
 MiMakeSystemAddressValid(
@@ -2452,6 +2499,17 @@ VOID
 MiInitializeGlobalPages(
     VOID);
 #endif
+
+//
+// Pages that MiRemoveAnyPage and MiRemoveZeroPage can hand out: standby
+// pages count as available but are not taken from their list yet
+//
+FORCEINLINE
+PFN_NUMBER
+MiGetFreeOrZeroedPageCount(VOID)
+{
+    return MmFreePageListHead.Total + MmZeroedPageListHead.Total;
+}
 
 //
 // MiRemoveZeroPage will use inline code to zero out the page manually if only
@@ -2606,6 +2664,37 @@ MiDeletePde(
         if (MiDecrementPageTableReferences(PointerPde) == 0)
         {
             MiDeletePte(MiPdeToPxe(PointerPde), MiPdeToPpe(PointerPde), CurrentProcess, NULL);
+        }
+#endif
+    }
+#endif
+}
+
+/*
+ * MiDeletePde without the flush: the page tables it frees stay referenced until
+ * the deferred list is completed, which flushes every processor's TB and
+ * paging-structure caches first. The PFN lock must be held.
+ */
+FORCEINLINE
+VOID
+MiDeletePdeDeferred(
+    _In_ PMMPDE PointerPde,
+    _In_ PEPROCESS CurrentProcess,
+    _Inout_ PMI_DEFERRED_RELEASE Deferred)
+{
+    ASSERT(MiIsUserPde(PointerPde));
+    ASSERT(MiDeferredReleaseRoom(Deferred) >= MI_DEFERRED_PDE_ENTRIES);
+
+    MmForceEntireTbFlush(&Deferred->FlushList);
+    MiDeletePteDeferred((PMMPTE)PointerPde, MiPdeToPte(PointerPde), CurrentProcess, NULL, Deferred);
+#if _MI_PAGING_LEVELS >= 3
+    if (MiDecrementPageTableReferences(MiPdeToPte(PointerPde)) == 0)
+    {
+        MiDeletePteDeferred(MiPdeToPpe(PointerPde), PointerPde, CurrentProcess, NULL, Deferred);
+#if _MI_PAGING_LEVELS == 4
+        if (MiDecrementPageTableReferences(PointerPde) == 0)
+        {
+            MiDeletePteDeferred(MiPdeToPxe(PointerPde), MiPdeToPpe(PointerPde), CurrentProcess, NULL, Deferred);
         }
 #endif
     }

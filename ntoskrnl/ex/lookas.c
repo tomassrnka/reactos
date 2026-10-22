@@ -23,6 +23,12 @@ LIST_ENTRY ExPoolLookasideListHead;
 GENERAL_LOOKASIDE ExpSmallNPagedPoolLookasideLists[NUMBER_POOL_LOOKASIDE_LISTS];
 GENERAL_LOOKASIDE ExpSmallPagedPoolLookasideLists[NUMBER_POOL_LOOKASIDE_LISTS];
 
+/* True per-processor nonpaged small-block lists (see internal/ex.h). Static BSS:
+   the storage is inert (Depth 0 / empty SLIST) until ExpInitLookasideLists sets
+   it up, so binding to it before init in ExInitPoolLookasidePointers is safe. */
+GENERAL_LOOKASIDE
+ExpSmallNPagedPoolLookasideListsPerCpu[EX_PERCPU_LOOKASIDE_MAX_CPU][NUMBER_POOL_LOOKASIDE_LISTS];
+
 /* PRIVATE FUNCTIONS *********************************************************/
 
 CODE_SEG("INIT")
@@ -39,9 +45,19 @@ ExInitializeSystemLookasideList(IN PGENERAL_LOOKASIDE List,
     List->Tag = Tag;
     List->Type = Type;
     List->Size = Size;
-    InsertHeadList(ListHead, &List->ListEntry);
+    /* Per-processor lists pass ListHead == NULL: not linked into the global
+       ExPoolLookasideListHead (stats are folded into the shared lists and depth
+       is adjusted by index, not by list walk). */
+    if (ListHead != NULL) InsertHeadList(ListHead, &List->ListEntry);
     List->MaximumDepth = MaximumDepth;
     List->Depth = 2;
+
+    /* Special pool has to see every free of a selected allocation (IRP, MDL and pool lists too) */
+    if (MmSpecialPoolEnabled && MmSpecialPoolSelectsLookaside(Size, Tag))
+    {
+        List->MaximumDepth = 0;
+        List->Depth = 0;
+    }
     List->Allocate = ExAllocatePoolWithTag;
     List->Free = ExFreePool;
     InitializeSListHead(&List->ListHead);
@@ -61,22 +77,31 @@ ExInitPoolLookasidePointers(VOID)
     ULONG i;
     PKPRCB Prcb = KeGetCurrentPrcb();
     PGENERAL_LOOKASIDE Entry;
+    ULONG Cpu = Prcb->Number;
+    BOOLEAN PerCpu = (Cpu < EX_PERCPU_LOOKASIDE_MAX_CPU);
 
     /* Loop for all pool lists */
     for (i = 0; i < NUMBER_POOL_LOOKASIDE_LISTS; i++)
     {
-        /* The lists are shared by all processors; only the boot processor initializes them */
+        /* Nonpaged: the shared list is the global ".L" backing/overflow list,
+           whose SLIST header is initialized once by the boot processor. */
         Entry = &ExpSmallNPagedPoolLookasideLists[i];
-        if (Prcb->Number == 0) InitializeSListHead(&Entry->ListHead);
-
-        /* Bind to PRCB */
-        Prcb->PPNPagedLookasideList[i].P = Entry;
+        if (Cpu == 0) InitializeSListHead(&Entry->ListHead);
         Prcb->PPNPagedLookasideList[i].L = Entry;
 
-        Entry = &ExpSmallPagedPoolLookasideLists[i];
-        if (Prcb->Number == 0) InitializeSListHead(&Entry->ListHead);
+        /* Give this processor its own private ".P" list when it is within the
+           per-CPU table; otherwise fall back to the shared list (P == L), which
+           is exactly the historical single-set behaviour and is safe.  The
+           per-CPU bodies are set up in ExpInitLookasideLists; the static storage
+           is inert until then (Depth 0 / empty SLIST). */
+        if (PerCpu)
+            Prcb->PPNPagedLookasideList[i].P = &ExpSmallNPagedPoolLookasideListsPerCpu[Cpu][i];
+        else
+            Prcb->PPNPagedLookasideList[i].P = Entry;
 
-        /* Bind to PRCB */
+        /* Paged pool stays on the shared set (P == L) for now -- see handoff. */
+        Entry = &ExpSmallPagedPoolLookasideLists[i];
+        if (Cpu == 0) InitializeSListHead(&Entry->ListHead);
         Prcb->PPPagedLookasideList[i].P = Entry;
         Prcb->PPPagedLookasideList[i].L = Entry;
     }
@@ -87,7 +112,7 @@ VOID
 NTAPI
 ExpInitLookasideLists(VOID)
 {
-    ULONG i;
+    ULONG i, j;
 
     /* Initialize locks and lists */
     InitializeListHead(&ExpNonPagedLookasideListHead);
@@ -116,9 +141,131 @@ ExpInitLookasideLists(VOID)
                                         256,
                                         &ExPoolLookasideListHead);
     }
+
+    /* Initialize the true per-processor nonpaged small-block lists.  These are
+       NOT linked into ExPoolLookasideListHead (ListHead == NULL): their hit
+       counters are folded into the shared-list figures by ExQueryPoolUsage and
+       the SystemLookasideInformation query, and their depth is grown directly
+       by ExAdjustLookasideDepth. */
+    for (j = 0; j < EX_PERCPU_LOOKASIDE_MAX_CPU; j++)
+    {
+        for (i = 0; i < NUMBER_POOL_LOOKASIDE_LISTS; i++)
+        {
+            ExInitializeSystemLookasideList(&ExpSmallNPagedPoolLookasideListsPerCpu[j][i],
+                                            NonPagedPool,
+                                            (i + 1) * 8,
+                                            'looP',
+                                            256,
+                                            NULL);
+        }
+    }
+}
+
+/* Depth adjustment: called once a second by the balance set manager */
+static
+VOID
+ExpAdjustLookasideList(IN PGENERAL_LOOKASIDE List,
+                       IN BOOLEAN CountsHits,
+                       IN USHORT MinimumDepth)
+{
+    ULONG Allocates, Misses, Hits;
+    ULONG Depth, Delta;
+
+    /* Special pool lists (and lists with a pinned depth) are left alone */
+    if (List->MaximumDepth == 0) return;
+
+    /* Allocates and hits/misses since the last pass (the counters are approximate, so clamp) */
+    Allocates = List->TotalAllocates - List->LastTotalAllocates;
+    if (CountsHits)
+    {
+        /* System pool lists count hits */
+        Hits = List->AllocateHits - List->LastAllocateHits;
+        Misses = (Allocates > Hits) ? (Allocates - Hits) : 0;
+        List->LastAllocateHits = List->AllocateHits;
+    }
+    else
+    {
+        /* Driver lists count misses */
+        Misses = List->AllocateMisses - List->LastAllocateMisses;
+        List->LastAllocateMisses = List->AllocateMisses;
+    }
+    List->LastTotalAllocates = List->TotalAllocates;
+    if (Misses > Allocates) Misses = Allocates;
+
+    Depth = List->Depth;
+    if (Misses * 100 > Allocates && Misses != 0)
+    {
+        /* More than 1% of the allocates missed: grow, faster the deeper we already are */
+        Delta = Depth / 2;
+        if (Delta < 2) Delta = 2;
+        Depth += Delta;
+        if (Depth > List->MaximumDepth) Depth = List->MaximumDepth;
+    }
+    else if (Misses == 0 && Allocates < Depth / 2 && Depth > MinimumDepth)
+    {
+        /* The list is bigger than the allocate rate needs: shrink slowly */
+        Depth--;
+    }
+    if (Depth < MinimumDepth) Depth = min(MinimumDepth, List->MaximumDepth);
+    List->Depth = (USHORT)Depth;
 }
 
 /* PUBLIC FUNCTIONS **********************************************************/
+
+/* Not exported; declared without NTAPI in the SDK headers, so defined to match */
+VOID
+ExAdjustLookasideDepth(VOID)
+{
+    PLIST_ENTRY ListEntry;
+    KIRQL OldIrql;
+
+    /* The system pool lists are set up at boot and never removed */
+    for (ListEntry = ExPoolLookasideListHead.Flink;
+         ListEntry != &ExPoolLookasideListHead;
+         ListEntry = ListEntry->Flink)
+    {
+        ExpAdjustLookasideList(CONTAINING_RECORD(ListEntry, GENERAL_LOOKASIDE, ListEntry),
+                               TRUE,
+                               2);
+    }
+
+    /* Adjust each per-processor nonpaged list independently on its own traffic */
+    {
+        ULONG c, k;
+        for (c = 0; c < EX_PERCPU_LOOKASIDE_MAX_CPU; c++)
+        {
+            for (k = 0; k < NUMBER_POOL_LOOKASIDE_LISTS; k++)
+            {
+                ExpAdjustLookasideList(&ExpSmallNPagedPoolLookasideListsPerCpu[c][k],
+                                       TRUE,
+                                       2);
+            }
+        }
+    }
+
+    /* Driver lists come and go under their locks */
+    KeAcquireSpinLock(&ExpNonPagedLookasideListLock, &OldIrql);
+    for (ListEntry = ExpNonPagedLookasideListHead.Flink;
+         ListEntry != &ExpNonPagedLookasideListHead;
+         ListEntry = ListEntry->Flink)
+    {
+        ExpAdjustLookasideList(CONTAINING_RECORD(ListEntry, GENERAL_LOOKASIDE, ListEntry),
+                               FALSE,
+                               4);
+    }
+    KeReleaseSpinLock(&ExpNonPagedLookasideListLock, OldIrql);
+
+    KeAcquireSpinLock(&ExpPagedLookasideListLock, &OldIrql);
+    for (ListEntry = ExpPagedLookasideListHead.Flink;
+         ListEntry != &ExpPagedLookasideListHead;
+         ListEntry = ListEntry->Flink)
+    {
+        ExpAdjustLookasideList(CONTAINING_RECORD(ListEntry, GENERAL_LOOKASIDE, ListEntry),
+                               FALSE,
+                               4);
+    }
+    KeReleaseSpinLock(&ExpPagedLookasideListLock, OldIrql);
+}
 
 /*
  * @implemented
@@ -236,6 +383,13 @@ ExInitializeNPagedLookasideList(IN PNPAGED_LOOKASIDE_LIST Lookaside,
     Lookaside->L.LastTotalAllocates = 0;
     Lookaside->L.LastAllocateMisses = 0;
 
+    /* Special pool has to see every free of a selected allocation */
+    if (MmSpecialPoolEnabled && MmSpecialPoolSelectsLookaside(Size, Tag))
+    {
+        Lookaside->L.Depth = 0;
+        Lookaside->L.MaximumDepth = 0;
+    }
+
     /* Set the Allocate/Free Routines */
     if (Allocate)
     {
@@ -287,6 +441,13 @@ ExInitializePagedLookasideList(IN PPAGED_LOOKASIDE_LIST Lookaside,
     Lookaside->L.MaximumDepth = 256;
     Lookaside->L.LastTotalAllocates = 0;
     Lookaside->L.LastAllocateMisses = 0;
+
+    /* Special pool has to see every free of a selected allocation */
+    if (MmSpecialPoolEnabled && MmSpecialPoolSelectsLookaside(Size, Tag))
+    {
+        Lookaside->L.Depth = 0;
+        Lookaside->L.MaximumDepth = 0;
+    }
 
     /* Set the Allocate/Free Routines */
     if (Allocate)

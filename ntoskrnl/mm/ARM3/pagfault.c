@@ -15,7 +15,7 @@
 #define MODULE_INVOLVED_IN_ARM3
 #include <mm/ARM3/miarm.h>
 
-VOID
+BOOLEAN
 NTAPI
 MmRebalanceMemoryConsumersAndWait(VOID);
 
@@ -37,7 +37,7 @@ MiCheckForUserStackOverflow(IN PVOID Address,
     PETHREAD CurrentThread = PsGetCurrentThread();
     PTEB Teb = CurrentThread->Tcb.Teb;
     PVOID StackBase, DeallocationStack, NextStackAddress;
-    SIZE_T GuaranteedSize;
+    SIZE_T GuaranteedSize, StackSize, RegionSize;
     NTSTATUS Status;
 
     /* Do we own the address space lock? */
@@ -64,12 +64,6 @@ MiCheckForUserStackOverflow(IN PVOID Address,
     DPRINT("Handling guard page fault with Stacks Addresses 0x%p and 0x%p, guarantee: %lx\n",
             StackBase, DeallocationStack, GuaranteedSize);
 
-    /* Guarantees make this code harder, for now, assume there aren't any */
-    ASSERT(GuaranteedSize == 0);
-
-    /* So allocate only the minimum guard page size */
-    GuaranteedSize = PAGE_SIZE;
-
     /* Does this faulting stack address actually exist in the stack? */
     if ((Address >= StackBase) || (Address < DeallocationStack))
     {
@@ -79,25 +73,43 @@ MiCheckForUserStackOverflow(IN PVOID Address,
         return STATUS_GUARD_PAGE_VIOLATION;
     }
 
-    /* This is where the stack will start now */
-    NextStackAddress = (PVOID)((ULONG_PTR)PAGE_ALIGN(Address) - GuaranteedSize);
+    /*
+     * The guarantee is the stack space left to the handler when the
+     * overflow is raised. The TEB is writable from user mode, so do not
+     * let it exceed the stack reservation.
+     */
+    StackSize = (ULONG_PTR)StackBase - (ULONG_PTR)PAGE_ALIGN(DeallocationStack);
+    GuaranteedSize = ROUND_TO_PAGES(min(GuaranteedSize, StackSize));
 
-    /* Do we have at least one page between here and the end of the stack? */
-    if (((ULONG_PTR)NextStackAddress - PAGE_SIZE) <= (ULONG_PTR)DeallocationStack)
+    /* This is where the stack will start now */
+    NextStackAddress = (PVOID)((ULONG_PTR)PAGE_ALIGN(Address) - PAGE_SIZE);
+
+    /* Is there room for the guard page, the guarantee and the last page? */
+    if (((ULONG_PTR)PAGE_ALIGN(Address) - (ULONG_PTR)PAGE_ALIGN(DeallocationStack)) <=
+        (2 * PAGE_SIZE + GuaranteedSize))
     {
-        /* We don't -- Trying to make this guard page valid now */
+        /* There is not -- give the rest of the stack but its last page to the handler */
         DPRINT1("Close to our death...\n");
 
         /* Calculate the next memory address */
-        NextStackAddress = (PVOID)((ULONG_PTR)PAGE_ALIGN(DeallocationStack) + GuaranteedSize);
+        NextStackAddress = (PVOID)((ULONG_PTR)PAGE_ALIGN(DeallocationStack) + PAGE_SIZE);
 
-        /* Allocate the memory */
-        Status = ZwAllocateVirtualMemory(NtCurrentProcess(),
-                                         &NextStackAddress,
-                                         0,
-                                         &GuaranteedSize,
-                                         MEM_COMMIT,
-                                         PAGE_READWRITE);
+        /* Commit everything below the faulting page, which is committed already */
+        if ((ULONG_PTR)PAGE_ALIGN(Address) > (ULONG_PTR)NextStackAddress)
+        {
+            RegionSize = (ULONG_PTR)PAGE_ALIGN(Address) - (ULONG_PTR)NextStackAddress;
+            Status = ZwAllocateVirtualMemory(NtCurrentProcess(),
+                                             &NextStackAddress,
+                                             0,
+                                             &RegionSize,
+                                             MEM_COMMIT,
+                                             PAGE_READWRITE);
+        }
+        else
+        {
+            Status = STATUS_SUCCESS;
+        }
+
         if (NT_SUCCESS(Status))
         {
             /* Success! */
@@ -123,7 +135,7 @@ MiCheckForUserStackOverflow(IN PVOID Address,
     ASSERT((PsGetCurrentProcess()->Peb->NtGlobalFlag & FLG_DISABLE_STACK_EXTENSION) == 0);
 
     /* Update the stack limit */
-    Teb->NtTib.StackLimit = (PVOID)((ULONG_PTR)NextStackAddress + GuaranteedSize);
+    Teb->NtTib.StackLimit = (PVOID)((ULONG_PTR)NextStackAddress + PAGE_SIZE);
 
 #if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
     /* Update WOW64 32-bit TEB stack limit */
@@ -134,10 +146,11 @@ MiCheckForUserStackOverflow(IN PVOID Address,
 #endif
 
     /* Now move the guard page to the next page */
+    RegionSize = PAGE_SIZE;
     Status = ZwAllocateVirtualMemory(NtCurrentProcess(),
                                      &NextStackAddress,
                                      0,
-                                     &GuaranteedSize,
+                                     &RegionSize,
                                      MEM_COMMIT,
                                      PAGE_READWRITE | PAGE_GUARD);
     if ((NT_SUCCESS(Status) || (Status == STATUS_ALREADY_COMMITTED)))
@@ -736,6 +749,10 @@ MiResolveDemandZeroFault(IN PVOID Address,
         if (Process > HYDRA_PROCESS) Process->NumberOfPrivatePages++;
     }
 
+    /* A previous owner's write-back system PTE must be gone before the page is mapped another way */
+    if (MI_PFN_ELEMENT(PageFrameNumber)->u3.e1.CacheAttribute != MiCached)
+        MiFlushReleasedSystemPtesBeforeUncachedMapping();
+
     /* Zero the page if need be */
     if (NeedZero) MiZeroPfn(PageFrameNumber);
 
@@ -996,6 +1013,29 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
     return Status;
 }
 
+/*
+ * A page taken back from the standby or modified list into use keeps its
+ * OriginalPte, which MiUnlinkPageFromList clears: for a prototype page it
+ * holds the protection its PTE gets when the page goes into transition
+ * again.
+ */
+static
+VOID
+MiUnlinkPageFromListKeepOriginalPte(IN PMMPFN Pfn1)
+{
+    MMPTE OriginalPte = Pfn1->OriginalPte;
+
+    /* A page that a lock (VirtualLock or an MDL) kept referenced is on no list */
+    if (Pfn1->u3.e1.PageLocation == TransitionPage)
+    {
+        ASSERT(Pfn1->u3.e2.ReferenceCount != 0);
+        return;
+    }
+
+    MiUnlinkPageFromList(Pfn1);
+    Pfn1->OriginalPte = OriginalPte;
+}
+
 static
 NTSTATUS
 NTAPI
@@ -1050,12 +1090,8 @@ MiResolveTransitionFault(IN BOOLEAN StoreInstruction,
         }
     }
 
-    /* Windows checks there's some free pages and this isn't an in-page error */
-    ASSERT(MmAvailablePages > 0);
+    /* This isn't an in-page error. The page is reused: no free page is needed */
     ASSERT(Pfn1->u4.InPageError == 0);
-
-    /* ReactOS checks for this */
-    ASSERT(MmAvailablePages > 32);
 
     /* Was this a transition page in the valid list, or free/zero list? */
     if (Pfn1->u3.e1.PageLocation == ActiveAndValid)
@@ -1071,7 +1107,7 @@ MiResolveTransitionFault(IN BOOLEAN StoreInstruction,
     {
         /* Otherwise, the page is removed from its list */
         DPRINT("Transition page in free/zero list\n");
-        MiUnlinkPageFromList(Pfn1);
+        MiUnlinkPageFromListKeepOriginalPte(Pfn1);
         MiReferenceUnusedPageAndBumpLockCount(Pfn1);
     }
 
@@ -1103,6 +1139,21 @@ MiResolveTransitionFault(IN BOOLEAN StoreInstruction,
     ASSERT(PointerPte->u.Hard.Valid == 0);
     ASSERT(PointerPte->u.Trans.Prototype == 0);
     ASSERT(PointerPte->u.Trans.Transition == 1);
+
+    /*
+     * A private page reports the protection kept in its PFN once valid: take
+     * the one its transition PTE has now, which NtProtectVirtualMemory or a
+     * consumed guard page may have changed meanwhile
+     */
+    if (Pfn1->u3.e1.PrototypePte == 0)
+    {
+        Pfn1->OriginalPte.u.Soft.Protection = PointerPte->u.Trans.Protection;
+
+        /* It also comes back with that protection's caching type, as on Server 2008 R2 */
+        Pfn1->u3.e1.CacheAttribute = MiCacheAttributeFromProtection(PointerPte->u.Trans.Protection);
+        if (Pfn1->u3.e1.CacheAttribute != MiCached)
+            MiFlushReleasedSystemPtesBeforeUncachedMapping();
+    }
     TempPte.u.Long = (PointerPte->u.Long & ~0xFFF) |
                      (MmProtectToPteMask[PointerPte->u.Trans.Protection]) |
                      MiDetermineUserGlobalPteMask(PointerPte);
@@ -1218,6 +1269,7 @@ MiResolveProtoPteFault(IN BOOLEAN StoreInstruction,
     {
         PFN_NUMBER PageFrameIndex, ProtoPageFrameIndex;
         ULONG Color;
+        MI_PFN_CACHE_ATTRIBUTE CacheAttribute;
 
         /* Resolve the proto fault as if it was a read operation */
         Status = MiResolveProtoPteFault(FALSE,
@@ -1260,15 +1312,21 @@ MiResolveProtoPteFault(IN BOOLEAN StoreInstruction,
             return STATUS_NO_MEMORY;
         }
 
+        /* Copy through a mapping of the type the private copy is mapped with */
+        Pfn1 = MI_PFN_ELEMENT(PageFrameIndex);
+        CacheAttribute = MiCacheAttributeFromProtection(Protection);
+        Pfn1->u3.e1.CacheAttribute = CacheAttribute;
+        if (CacheAttribute != MiCached) MiFlushReleasedSystemPtesBeforeUncachedMapping();
+
         /* Perform the copy */
         MiCopyPfn(PageFrameIndex, ProtoPageFrameIndex);
 
-        /* This will drop everything MiResolveProtoPteFault referenced */
-        MiDeletePte(PointerPte, Address, Process, PointerProtoPte);
-
-        /* Because now we use this */
+        /* Drop everything MiResolveProtoPteFault referenced and use the copy. No
+           processor may still use the shared page when the copy becomes writable,
+           so this flushes the TB, with the PFN lock released for the wait */
+        OldIrql = MiReplaceSharedPte(PointerPte, Address, Process, PointerProtoPte, PageFrameIndex, OldIrql);
         Pfn1 = MI_PFN_ELEMENT(PageFrameIndex);
-        MiInitializePfn(PageFrameIndex, PointerPte, TRUE);
+        Pfn1->u3.e1.CacheAttribute = CacheAttribute;
 
         /* Fix the protection */
         Protection &= ~MM_WRITECOPY;
@@ -1475,7 +1533,7 @@ MiDispatchFault(IN ULONG FaultCode,
                     ASSERT(Pfn1->u4.InPageError == 0);
 
                     /* Get the page */
-                    MiUnlinkPageFromList(Pfn1);
+                    MiUnlinkPageFromListKeepOriginalPte(Pfn1);
 
                     /* Bump its reference count */
                     ASSERT(Pfn1->u2.ShareCount == 0);
@@ -2292,16 +2350,17 @@ UserFault:
             {
                 PFN_NUMBER PageFrameIndex, OldPageFrameIndex;
                 PMMPFN Pfn1;
+                MI_PFN_CACHE_ATTRIBUTE CacheAttribute;
 
                 LockIrql = MiAcquirePfnLock();
-
-                ASSERT(MmAvailablePages > 0);
 
                 MI_SET_USAGE(MI_USAGE_COW);
                 MI_SET_PROCESS(CurrentProcess);
 
                 /* Allocate a new page and copy it */
-                PageFrameIndex = MiRemoveAnyPage(MI_GET_NEXT_PROCESS_COLOR(CurrentProcess));
+                PageFrameIndex = 0;
+                if (MiGetFreeOrZeroedPageCount() != 0)
+                    PageFrameIndex = MiRemoveAnyPage(MI_GET_NEXT_PROCESS_COLOR(CurrentProcess));
                 if (PageFrameIndex == 0)
                 {
                     MiReleasePfnLock(LockIrql);
@@ -2310,6 +2369,11 @@ UserFault:
                 }
                 OldPageFrameIndex = PFN_FROM_PTE(&TempPte);
 
+                /* The private copy keeps the type of the mapping it replaces; copy through a mapping of it */
+                CacheAttribute = TempPte.u.Hard.CacheDisable ? MiNonCached : MiCached;
+                MI_PFN_ELEMENT(PageFrameIndex)->u3.e1.CacheAttribute = CacheAttribute;
+                if (CacheAttribute != MiCached) MiFlushReleasedSystemPtesBeforeUncachedMapping();
+
                 MiCopyPfn(PageFrameIndex, OldPageFrameIndex);
 
                 /* Dereference whatever this PTE is referencing */
@@ -2317,12 +2381,13 @@ UserFault:
                 ASSERT(Pfn1->u3.e1.PrototypePte == 1);
                 ASSERT(!MI_IS_PFN_DELETED(Pfn1));
                 ProtoPte = Pfn1->PteAddress;
-                MiDeletePte(PointerPte, Address, CurrentProcess, ProtoPte);
 
-                /* And make a new shiny one with our page */
-                MiInitializePfn(PageFrameIndex, PointerPte, TRUE);
+                /* And make a new shiny one with our page; the shared page goes only
+                   after the TB flush, waited for with the PFN lock released */
+                LockIrql = MiReplaceSharedPte(PointerPte, Address, CurrentProcess, ProtoPte, PageFrameIndex, LockIrql);
+                MI_PFN_ELEMENT(PageFrameIndex)->u3.e1.CacheAttribute = CacheAttribute;
                 TempPte.u.Hard.PageFrameNumber = PageFrameIndex;
-                TempPte.u.Hard.Write = 1;
+                MI_MAKE_WRITE_PAGE(&TempPte);
                 TempPte.u.Hard.CopyOnWrite = 0;
 
                 MI_WRITE_VALID_PTE(PointerPte, TempPte);
@@ -2492,6 +2557,13 @@ UserFault:
                 /* Grab a page out of there. Later we should grab a colored zero page */
                 PageFrameIndex = MiRemoveAnyPage(Color);
 
+                /* Zero it through a mapping of the type it is about to be mapped with */
+                if (PageFrameIndex != 0)
+                {
+                    MI_PFN_ELEMENT(PageFrameIndex)->u3.e1.CacheAttribute =
+                        MiCacheAttributeFromProtection(PointerPte->u.Soft.Protection);
+                }
+
                 /* Release the lock since we need to do some zeroing */
                 MiReleasePfnLock(OldIrql);
 
@@ -2502,6 +2574,8 @@ UserFault:
                 }
 
                 /* Zero out the page, since it's for user-mode */
+                if (MI_PFN_ELEMENT(PageFrameIndex)->u3.e1.CacheAttribute != MiCached)
+                    MiFlushReleasedSystemPtesBeforeUncachedMapping();
                 MiZeroPfn(PageFrameIndex);
 
                 /* Grab the lock again so we can initialize the PFN entry */
@@ -2519,6 +2593,10 @@ UserFault:
 
             /* And we're done with the lock */
             MiReleasePfnLock(OldIrql);
+
+            /* A page from the zeroed list was zeroed write-back */
+            if (MI_PFN_ELEMENT(PageFrameIndex)->u3.e1.CacheAttribute != MiCached)
+                MiFlushReleasedSystemPtesBeforeUncachedMapping();
 
             /* Fault on user PDE, or fault on user PTE? */
             if (PointerPte <= MiHighestUserPte)

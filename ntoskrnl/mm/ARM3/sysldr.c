@@ -228,21 +228,23 @@ MiLoadImageSection(_Inout_ PSECTION *SectionPtr,
  * The size of the image, in bytes.
  **/
 static
-VOID
+PFN_COUNT
 MiUnmapSystemImage(
     _In_ PVOID ImageBase,
     _In_ ULONG ImageSize)
 {
     PMMPTE BasePte = MiAddressToPte(ImageBase);
     PFN_COUNT NumberOfPages = BYTES_TO_PAGES(ImageSize);
+    PFN_COUNT PagesFreed;
 
     /* TODO: Support large-page and session image mappings */
     NT_ASSERT(!MI_IS_PHYSICAL_ADDRESS(ImageBase));
     NT_ASSERT(!MI_IS_SESSION_ADDRESS(ImageBase));
 
     /* Free the pages, then give the reserved PTEs back */
-    MiDeleteSystemPageableVm(BasePte, NumberOfPages, 0, NULL);
+    PagesFreed = (PFN_COUNT)MiDeleteSystemPageableVm(BasePte, NumberOfPages, 0, NULL);
     MiReleaseSystemPtes(BasePte, NumberOfPages, SystemPteSpace);
+    return PagesFreed;
 }
 
 #ifndef RVA
@@ -565,14 +567,13 @@ MiDereferenceImports(IN PLOAD_IMPORTS ImportList)
 
     /* Check if there's no imports or if we're a boot driver */
     if ((ImportList == MM_SYSLDR_NO_IMPORTS) ||
-        (ImportList == MM_SYSLDR_BOOT_LOADED) ||
-        (ImportList->Count == 0))
+        (ImportList == MM_SYSLDR_BOOT_LOADED))
     {
         /* Then there's nothing to do */
         return STATUS_SUCCESS;
     }
 
-    /* Check for single-entry */
+    /* Check for single-entry: the tagged pointer is an image, not a list */
     if ((ULONG_PTR)ImportList & MM_SYSLDR_SINGLE_ENTRY)
     {
         /* Set it up */
@@ -581,6 +582,11 @@ MiDereferenceImports(IN PLOAD_IMPORTS ImportList)
 
         /* Use this as the import list */
         ImportList = &SingleEntry;
+    }
+    else if (ImportList->Count == 0)
+    {
+        /* Nothing to do */
+        return STATUS_SUCCESS;
     }
 
     /* Loop the import list */
@@ -1024,7 +1030,11 @@ MmUnloadSystemImage(IN PVOID ImageHandle)
      */
     if (LdrEntry->Flags & LDRP_SYSTEM_MAPPED)
     {
-        MiUnmapSystemImage(LdrEntry->DllBase, LdrEntry->SizeOfImage);
+        PFN_COUNT PagesFreed = MiUnmapSystemImage(LdrEntry->DllBase, LdrEntry->SizeOfImage);
+
+        /* A boot-loaded image was charged as boot-time memory */
+        if (!(LdrEntry->Flags & LDRP_MM_LOADED))
+            MiReturnBootCommit(PagesFreed);
     }
     else
     {
@@ -1522,6 +1532,9 @@ MiFreeInitializationCode(IN PVOID InitStart,
                                           PagesFreed,
                                           0,
                                           NULL);
+
+    /* Boot image pages were charged as boot-time memory */
+    MiReturnBootCommit(PagesFreed);
 }
 
 CODE_SEG("INIT")
@@ -1763,8 +1776,10 @@ MmFreeDriverInitialization(IN PLDR_DATA_TABLE_ENTRY LdrEntry)
     PageCount = (PFN_NUMBER)(EndPte - StartPte);
     if (!PageCount) return;
 
-    /* Delete this many PTEs */
-    MiDeleteSystemPageableVm(StartPte, PageCount, 0, NULL);
+    /* Delete this many PTEs; a boot-loaded image was charged as boot-time memory */
+    PageCount = MiDeleteSystemPageableVm(StartPte, PageCount, 0, NULL);
+    if (!(LdrEntry->Flags & LDRP_MM_LOADED))
+        MiReturnBootCommit(PageCount);
 }
 
 CODE_SEG("INIT")

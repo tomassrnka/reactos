@@ -336,10 +336,14 @@ MiInsertVadEx(
     Vad->StartingVpn = StartingAddress >> PAGE_SHIFT;
     Vad->EndingVpn = EndingAddress >> PAGE_SHIFT;
 
-    /* Check if we already need to charge for the pages */
+    /*
+     * Committed private memory, and a copy-on-write view (any page of it can
+     * become private), carry a commit charge for the whole range. The caller
+     * charged it system-wide before calling us.
+     */
     if ((Vad->u.VadFlags.PrivateMemory && Vad->u.VadFlags.MemCommit) ||
         (!Vad->u.VadFlags.PrivateMemory &&
-         (Vad->u.VadFlags.Protection & PAGE_WRITECOPY)))
+         ((Vad->u.VadFlags.Protection & MM_WRITECOPY) == MM_WRITECOPY)))
     {
         /* Set the commit charge */
         Vad->u.VadFlags.CommitCharge = ViewSize / PAGE_SIZE;
@@ -373,6 +377,13 @@ MiInsertVadEx(
     {
         CurrentProcess->PeakVirtualSize = CurrentProcess->VirtualSize;
     }
+
+    /*
+     * The VAD now owns its charge: account it to the process before the
+     * address creation lock is released, so that no other thread can free
+     * the VAD and return the charge first
+     */
+    MiAddProcessCommit(CurrentProcess, Vad->u.VadFlags.CommitCharge);
 
     /* Unlock the address space */
     KeReleaseGuardedMutex(&CurrentProcess->AddressCreationLock);

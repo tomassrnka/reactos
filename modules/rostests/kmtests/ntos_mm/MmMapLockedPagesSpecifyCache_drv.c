@@ -19,6 +19,19 @@ static PVOID CurrentBuffer;
 static PMDL CurrentMdl;
 static PVOID CurrentUser;
 static SIZE_T NonCachedLength;
+static PVOID ExitBuffer;
+static PMDL ExitMdl;
+static PEPROCESS ExitProcess;
+static PMDL ViewMdl;
+static PVOID ViewMapped;
+static PMDL PhysicalMdl;
+static HANDLE PhysicalSection;
+static PVOID PhysicalView[2];
+
+static BOOLEAN ExitProcessHasExited(VOID);
+static VOID FreeExitBuffer(_In_ BOOLEAN Locked);
+static VOID UnmapView(VOID);
+static VOID UnmapPhysical(VOID);
 
 NTSTATUS
 TestEntry(
@@ -47,6 +60,10 @@ TestUnload(
     IN PDRIVER_OBJECT DriverObject)
 {
     PAGED_CODE();
+
+    /* Pages still mapped into a live helper process are leaked on purpose */
+    if (ExitMdl != NULL && ExitProcessHasExited())
+        FreeExitBuffer(TRUE);
 }
 
 VOID
@@ -96,6 +113,79 @@ TestCleanEverything(VOID)
         ExFreePoolWithTag(CurrentBuffer, 'MLPC');
     }
     CurrentMdl = NULL;
+}
+
+static
+VOID
+FreeExitBuffer(
+    _In_ BOOLEAN Locked)
+{
+    if (ExitMdl != NULL)
+    {
+        if (Locked)
+            MmUnlockPages(ExitMdl);
+        IoFreeMdl(ExitMdl);
+        ExitMdl = NULL;
+    }
+    if (ExitBuffer != NULL)
+    {
+        ExFreePoolWithTag(ExitBuffer, 'MLPC');
+        ExitBuffer = NULL;
+    }
+    if (ExitProcess != NULL)
+    {
+        ObDereferenceObject(ExitProcess);
+        ExitProcess = NULL;
+    }
+}
+
+/* Undo IOCTL_MAP_VIEW; called in the context of the process that asked for it */
+static
+VOID
+UnmapView(VOID)
+{
+    if (ViewMdl == NULL)
+        return;
+    if (ViewMapped != NULL)
+        MmUnmapLockedPages(ViewMapped, ViewMdl);
+    MmUnlockPages(ViewMdl);
+    IoFreeMdl(ViewMdl);
+    ViewMdl = NULL;
+    ViewMapped = NULL;
+}
+
+/* Undo IOCTL_MAP_PHYSICAL; called in the context of the process that asked for it */
+static
+VOID
+UnmapPhysical(VOID)
+{
+    ULONG i;
+
+    for (i = 0; i < RTL_NUMBER_OF(PhysicalView); i++)
+    {
+        if (PhysicalView[i] != NULL)
+            ZwUnmapViewOfSection(ZwCurrentProcess(), PhysicalView[i]);
+        PhysicalView[i] = NULL;
+    }
+    if (PhysicalSection != NULL)
+        ZwClose(PhysicalSection);
+    PhysicalSection = NULL;
+    if (PhysicalMdl != NULL)
+    {
+        MmFreePagesFromMdl(PhysicalMdl);
+        ExFreePool(PhysicalMdl);
+    }
+    PhysicalMdl = NULL;
+}
+
+static
+BOOLEAN
+ExitProcessHasExited(VOID)
+{
+    LARGE_INTEGER Timeout;
+
+    Timeout.QuadPart = 0;
+    return KeWaitForSingleObject(ExitProcess, Executive, KernelMode, FALSE, &Timeout) == STATUS_SUCCESS;
 }
 
 static
@@ -253,6 +343,213 @@ TestMessageHandler(
             TestCleanEverything();
             break;
         }
+        case IOCTL_MAP_IN_PROCESS:
+        {
+            PEXIT_BUFFER Exit = Buffer;
+            PEPROCESS Process;
+            KAPC_STATE ApcState;
+            PULONG User = NULL;
+
+            ok_eq_pointer(ExitBuffer, NULL);
+            if (skip(Buffer && InLength >= sizeof(EXIT_BUFFER) && *OutLength >= sizeof(EXIT_BUFFER), "Cannot read/write from/to buffer!\n") ||
+                skip(ExitBuffer == NULL, "Previous mapping still in use\n"))
+            {
+                break;
+            }
+
+            *OutLength = sizeof(EXIT_BUFFER);
+            Exit->Buffer = NULL;
+            Exit->Status = PsLookupProcessByProcessId((HANDLE)Exit->ProcessId, &Process);
+            ok_eq_hex(Exit->Status, STATUS_SUCCESS);
+            if (!NT_SUCCESS(Exit->Status))
+            {
+                break;
+            }
+            ExitProcess = Process;
+
+            ExitBuffer = ExAllocatePoolWithTag(NonPagedPool, EXIT_BUFFER_LENGTH, 'MLPC');
+            ok(ExitBuffer != NULL, "ExAllocatePool failed!\n");
+            if (ExitBuffer != NULL)
+            {
+                RtlFillMemoryUlong(ExitBuffer, EXIT_BUFFER_LENGTH, WRITE_PATTERN);
+                ExitMdl = IoAllocateMdl(ExitBuffer, EXIT_BUFFER_LENGTH, FALSE, FALSE, NULL);
+                ok(ExitMdl != NULL, "IoAllocateMdl failed!\n");
+            }
+            if (ExitMdl == NULL)
+            {
+                Exit->Status = STATUS_INSUFFICIENT_RESOURCES;
+                FreeExitBuffer(FALSE);
+                break;
+            }
+
+            _SEH2_TRY
+            {
+                MmProbeAndLockPages(ExitMdl, KernelMode, IoWriteAccess);
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Exit->Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+            ok_eq_hex(Exit->Status, STATUS_SUCCESS);
+            if (!NT_SUCCESS(Exit->Status))
+            {
+                FreeExitBuffer(FALSE);
+                break;
+            }
+
+            /* Map into the helper process and leave the mapping in place */
+            KeStackAttachProcess(&Process->Pcb, &ApcState);
+            _SEH2_TRY
+            {
+                User = MmMapLockedPagesSpecifyCache(ExitMdl, UserMode, MmCached, NULL, FALSE, NormalPagePriority);
+                if (User != NULL)
+                {
+                    ok_eq_hex(User[0], WRITE_PATTERN);
+                    ok_eq_hex(User[EXIT_BUFFER_LENGTH / sizeof(ULONG) - 1], WRITE_PATTERN);
+                }
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Exit->Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+            KeUnstackDetachProcess(&ApcState);
+
+            ok_eq_hex(Exit->Status, STATUS_SUCCESS);
+            ok(User != NULL, "MmMapLockedPagesSpecifyCache failed!\n");
+            if (User == NULL)
+            {
+                FreeExitBuffer(TRUE);
+            }
+            Exit->Buffer = User;
+            break;
+        }
+        case IOCTL_MAP_VIEW:
+        {
+            PVIEW_BUFFER View = Buffer;
+            MEMORY_CACHING_TYPE CacheType;
+
+            if (skip(Buffer && InLength >= sizeof(VIEW_BUFFER) && *OutLength >= sizeof(VIEW_BUFFER), "Cannot read/write from/to buffer!\n"))
+                break;
+            UnmapView();
+            *OutLength = sizeof(VIEW_BUFFER);
+            View->Mapped = NULL;
+            CacheType = View->Cached ? MmCached : MmNonCached;
+
+            /* Lock a user range and map the same pages into the process a second time */
+            ViewMdl = IoAllocateMdl(View->Address, View->Length, FALSE, FALSE, NULL);
+            if (ViewMdl == NULL)
+            {
+                View->Status = STATUS_INSUFFICIENT_RESOURCES;
+                break;
+            }
+            View->Status = STATUS_SUCCESS;
+            _SEH2_TRY
+            {
+                MmProbeAndLockPages(ViewMdl, UserMode, IoWriteAccess);
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                View->Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+            if (!NT_SUCCESS(View->Status))
+            {
+                IoFreeMdl(ViewMdl);
+                ViewMdl = NULL;
+                break;
+            }
+            _SEH2_TRY
+            {
+                ViewMapped = MmMapLockedPagesSpecifyCache(ViewMdl, UserMode, CacheType, NULL, FALSE, NormalPagePriority);
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                View->Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+            View->Mapped = ViewMapped;
+            break;
+        }
+        case IOCTL_UNMAP_VIEW:
+        {
+            UnmapView();
+            break;
+        }
+        case IOCTL_MAP_PHYSICAL:
+        {
+            PPHYSICAL_BUFFER Physical = Buffer;
+            PHYSICAL_ADDRESS Low, High, Skip;
+            UNICODE_STRING Name = RTL_CONSTANT_STRING(L"\\Device\\PhysicalMemory");
+            OBJECT_ATTRIBUTES ObjectAttributes;
+            LARGE_INTEGER Offset;
+            SIZE_T ViewSize;
+            ULONG i;
+
+            if (skip(Buffer && InLength >= sizeof(PHYSICAL_BUFFER) && *OutLength >= sizeof(PHYSICAL_BUFFER), "Cannot read/write from/to buffer!\n"))
+                break;
+            UnmapPhysical();
+            *OutLength = sizeof(PHYSICAL_BUFFER);
+            Physical->View[0] = Physical->View[1] = NULL;
+
+            /* One page without a cache type of its own, mapped uncached twice into the caller */
+            Low.QuadPart = 0;
+            High.QuadPart = -1;
+            Skip.QuadPart = 0;
+            PhysicalMdl = MmAllocatePagesForMdl(Low, High, Skip, PAGE_SIZE);
+            if (PhysicalMdl == NULL)
+            {
+                Physical->Status = STATUS_INSUFFICIENT_RESOURCES;
+                break;
+            }
+            Offset.QuadPart = (LONGLONG)MmGetMdlPfnArray(PhysicalMdl)[0] << PAGE_SHIFT;
+            InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+            Physical->Status = ZwOpenSection(&PhysicalSection, SECTION_MAP_READ | SECTION_MAP_WRITE, &ObjectAttributes);
+            ok_eq_hex(Physical->Status, STATUS_SUCCESS);
+            for (i = 0; NT_SUCCESS(Physical->Status) && i < RTL_NUMBER_OF(PhysicalView); i++)
+            {
+                LARGE_INTEGER SectionOffset = Offset;
+
+                ViewSize = PAGE_SIZE;
+                Physical->Status = ZwMapViewOfSection(PhysicalSection, ZwCurrentProcess(), &PhysicalView[i], 0, PAGE_SIZE,
+                                                      &SectionOffset, &ViewSize, ViewUnmap, 0, PAGE_READWRITE | PAGE_NOCACHE);
+                ok_eq_hex(Physical->Status, STATUS_SUCCESS);
+                Physical->View[i] = PhysicalView[i];
+            }
+            break;
+        }
+        case IOCTL_UNMAP_PHYSICAL:
+        {
+            UnmapPhysical();
+            break;
+        }
+        case IOCTL_CHECK_EXITED:
+        {
+            ULONG i;
+            ULONG Mismatches = 0;
+            PULONG Pattern = ExitBuffer;
+
+            if (skip(ExitMdl != NULL, "No mapping\n"))
+            {
+                break;
+            }
+            if (skip(ExitProcessHasExited(), "Helper process is still alive\n"))
+            {
+                break;
+            }
+
+            /* The helper process is gone; the pages must still be ours and unchanged */
+            for (i = 0; i < EXIT_BUFFER_LENGTH / sizeof(ULONG); i++)
+            {
+                if (Pattern[i] != WRITE_PATTERN)
+                    Mismatches++;
+            }
+            ok_eq_ulong(Mismatches, 0UL);
+
+            FreeExitBuffer(TRUE);
+            break;
+        }
         default:
             ok(0, "Got an unknown message! DeviceObject=%p, ControlCode=%lu, Buffer=%p, In=%lu, Out=%lu bytes\n",
                     DeviceObject, ControlCode, Buffer, InLength, *OutLength);
@@ -282,6 +579,8 @@ TestIrpHandler(
     if (IoStack->MajorFunction == IRP_MJ_CLEANUP)
     {
         TestCleanEverything();
+        UnmapView();
+        UnmapPhysical();
         Status = STATUS_SUCCESS;
     }
 

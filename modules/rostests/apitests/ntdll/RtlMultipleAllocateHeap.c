@@ -74,7 +74,7 @@ set_array(PVOID *array, PVOID p0, PVOID p1, PVOID p2)
 static void
 MultiHeapAllocTest()
 {
-    INT ret, threw, err;
+    INT ret, threw, err, i;
     HANDLE HeapHandle = GetProcessHeap();
     PVOID Array[3] = {NULL, NULL, NULL};
 
@@ -154,13 +154,20 @@ MultiHeapAllocTest()
     ok(Array[1] != NULL, "Array[1] is expected as non-NULL\n");
     ok(Array[2] != NULL, "Array[2] is expected as non-NULL\n");
 
-    // Array is non-NULL and too large to allocate
+    // Array is non-NULL and too large to allocate. A 64-bit system with
+    // enough commit can allocate some: free every block that was allocated
+    // (an exception leaves ret unset), or the process keeps them committed
+    // and the following tests run out
     set_array(Array, NULL, NULL, NULL);
+    ret = 0;
     TEST_ALLOC_NO_RET(ERROR_NOT_ENOUGH_MEMORY, 0, HeapHandle, 0, 0x5FFFFFFF, 3, Array);
     ok(ret != 3, "excepted not allocated");
+    for (i = 0; i < 3; i++) if (Array[i]) HeapFree(HeapHandle, 0, Array[i]);
     set_array(Array, NULL, NULL, NULL);
+    ret = 0;
     TEST_ALLOC_NO_RET(ERROR_NOT_ENOUGH_MEMORY, 0xC0000017, HeapHandle, HEAP_GENERATE_EXCEPTIONS, 0x5FFFFFFF, 3, Array);
     ok(ret != 3, "excepted not allocated");
+    for (i = 0; i < 3; i++) if (Array[i]) HeapFree(HeapHandle, 0, Array[i]);
 }
 
 static void

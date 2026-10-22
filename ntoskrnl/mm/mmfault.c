@@ -211,9 +211,111 @@ MmNotPresentFault(KPROCESSOR_MODE Mode,
 
 extern BOOLEAN Mmi386MakeKernelPageTableGlobal(PVOID Address);
 
-VOID
+BOOLEAN
 NTAPI
 MmRebalanceMemoryConsumersAndWait(VOID);
+
+/*
+ * Out of pages: let the balancer run and report whether a real, progress-making
+ * wait happened.
+ *
+ * A thread that holds its process's AddressCreationLock must not wait for the
+ * balancer, which may itself need that lock to page out (CORE-20761). In that
+ * state we can only nudge the balancer and briefly yield - a spin that
+ * guarantees no progress. Return FALSE for that case so the caller can bound the
+ * retries (see MiRetryOutOfMemoryFault); return TRUE when a genuine balancer
+ * wait ran and the caller may retry freely.
+ */
+static
+BOOLEAN
+MiWaitForFreePages(VOID)
+{
+    static LARGE_INTEGER TinyTime = {{-1L, -1L}};
+
+    if (PsGetCurrentProcess()->AddressCreationLock.Owner == KeGetCurrentThread())
+    {
+        MmRebalanceMemoryConsumers();
+        KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
+        return FALSE;
+    }
+
+    return MmRebalanceMemoryConsumersAndWait();
+}
+
+/*
+ * Maximum number of consecutive out-of-memory fault retries allowed while the
+ * faulting thread can only spin (it holds a lock the balancer may need, so no
+ * wait can free memory). Past this many no-progress spins the fault fails with
+ * STATUS_NO_MEMORY: the faulting operation then unwinds and releases its lock
+ * instead of spinning forever and freezing every thread blocked behind it (T16,
+ * defense-in-depth for the invariant "a lock holder's OOM wait is bounded").
+ * The common recovery path - a thread that holds no such lock and waits for a
+ * real balancer pass - is never capped, so success behaviour is unchanged.
+ * Writable so the kernel-mode robustness test can drive the bound.
+ */
+ULONG MiMaxOomSpinRetries = 1024;
+
+/*
+ * Decide how to handle STATUS_NO_MEMORY from a page fault. A real balancer wait
+ * (progress possible) resets the no-progress counter and always retries, exactly
+ * as the fault path always did. A no-progress spin (a lock we hold blocks the
+ * balancer) is counted and bounded. Returns TRUE to retry the fault, FALSE to
+ * give up and propagate STATUS_NO_MEMORY.
+ */
+static
+BOOLEAN
+MiRetryOutOfMemoryFault(PULONG NoProgressSpins)
+{
+    if (MiWaitForFreePages())
+    {
+        *NoProgressSpins = 0;
+        return TRUE;
+    }
+
+    return (++(*NoProgressSpins) < MiMaxOomSpinRetries);
+}
+
+/*
+ * Robustness test hook (T16). Drives the out-of-memory fault retry bound exactly
+ * as MmAccessFault does, while this thread owns its process AddressCreationLock -
+ * the no-progress, lock-held state the bound guards. SimulatedMax temporarily
+ * overrides the live cap (so a single build can show both the unbounded pre-fix
+ * spin and the bounded one); Ceiling caps the test's own loop so an unbounded
+ * case cannot hang the machine. Returns the number of retries performed: with the
+ * cap active this equals the cap (bounded, below Ceiling); with the cap disabled
+ * it equals Ceiling (would otherwise spin forever). The guarded mutex is always
+ * released before returning, so repeated calls prove the lock is never held
+ * across the bound.
+ */
+ULONG
+NTAPI
+MmDbgTestOomRetryBound(IN ULONG SimulatedMax,
+                       IN ULONG Ceiling)
+{
+    ULONG SavedMax = MiMaxOomSpinRetries;
+    ULONG NoProgressSpins = 0;
+    ULONG Iterations = 0;
+    PMMSUPPORT AddressSpace = &PsGetCurrentProcess()->Vm;
+    BOOLEAN KeepGoing;
+
+    MiMaxOomSpinRetries = SimulatedMax;
+
+    MmLockAddressSpace(AddressSpace);
+    ASSERT(PsGetCurrentProcess()->AddressCreationLock.Owner == KeGetCurrentThread());
+
+    do
+    {
+        KeepGoing = MiRetryOutOfMemoryFault(&NoProgressSpins);
+        Iterations++;
+    }
+    while (KeepGoing && (Iterations < Ceiling));
+
+    MmUnlockAddressSpace(AddressSpace);
+    ASSERT(PsGetCurrentProcess()->AddressCreationLock.Owner != KeGetCurrentThread());
+
+    MiMaxOomSpinRetries = SavedMax;
+    return Iterations;
+}
 
 NTSTATUS
 NTAPI
@@ -225,6 +327,17 @@ MmAccessFault(IN ULONG FaultCode,
     PMMVAD Vad = NULL;
     NTSTATUS Status;
     BOOLEAN IsArm3Fault = FALSE;
+    ULONG NoProgressSpins = 0;
+
+    /* Before any lock: the fault may come from DISPATCH_LEVEL or above. User mode keeps its access violation. */
+    if (MmSpecialPoolEnabled && (Mode == KernelMode) && ((ULONG_PTR)Address >= (ULONG_PTR)MmSystemRangeStart))
+    {
+        MmCheckSpecialPoolFault(FaultCode, Address, TrapInformation);
+    }
+
+Again:
+    Vad = NULL;
+    IsArm3Fault = FALSE;
 
     /* Cute little hack for ROS */
     if ((ULONG_PTR)Address >= (ULONG_PTR)MmSystemRangeStart)
@@ -245,7 +358,8 @@ MmAccessFault(IN ULONG FaultCode,
     {
         /* This is an ARM3 fault */
         DPRINT("ARM3 fault %p\n", Address);
-        return MmArmAccessFault(FaultCode, Address, Mode, TrapInformation);
+        Status = MmArmAccessFault(FaultCode, Address, Mode, TrapInformation);
+        goto Arm3Done;
     }
 
     /* Is there a ReactOS address space yet? */
@@ -288,10 +402,10 @@ MmAccessFault(IN ULONG FaultCode,
     {
         /* This is an ARM3 fault */
         DPRINT("ARM3 fault %p\n", Vad);
-        return MmArmAccessFault(FaultCode, Address, Mode, TrapInformation);
+        Status = MmArmAccessFault(FaultCode, Address, Mode, TrapInformation);
+        goto Arm3Done;
     }
 
-Retry:
     /* Keep same old ReactOS Behaviour */
     if (!MI_IS_NOT_PRESENT_FAULT(FaultCode))
     {
@@ -306,9 +420,28 @@ Retry:
 
     if (Status == STATUS_NO_MEMORY)
     {
-        MmRebalanceMemoryConsumersAndWait();
-        goto Retry;
+        if (MiRetryOutOfMemoryFault(&NoProgressSpins))
+            goto Again;
+        return Status;
     }
+
+    return Status;
+
+Arm3Done:
+    /*
+     * Out of pages: wait for the balancer, then start over. The mapping may
+     * have changed meanwhile, also to one the other memory manager owns.
+     */
+    if (Status == STATUS_NO_MEMORY)
+    {
+        if (MiRetryOutOfMemoryFault(&NoProgressSpins))
+            goto Again;
+        return Status;
+    }
+
+    /* The address became a ReactOS Mm view after the choice above */
+    if (Status == STATUS_MM_RESTART_OPERATION)
+        goto Again;
 
     return Status;
 }

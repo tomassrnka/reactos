@@ -176,7 +176,7 @@ KeBalanceSetManager(IN PVOID Context)
             case STATUS_WAIT_0:
 
                 /* Adjust lookaside lists */
-                //ExAdjustLookasideDepth();
+                ExAdjustLookasideDepth();
 
                 /* Call the working set manager */
                 //MmWorkingSetManager();

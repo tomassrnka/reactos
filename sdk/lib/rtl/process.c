@@ -175,6 +175,33 @@ RtlpInitEnvironment(HANDLE ProcessHandle,
     return STATUS_SUCCESS;
 }
 
+/* The kernel maps the image elsewhere when its preferred base is unusable, and
+ * the section's TransferAddress still points to the entry at the preferred base */
+static
+PVOID
+RtlpGetMappedEntryPoint(IN HANDLE ProcessHandle,
+                        IN PPEB RemotePeb,
+                        IN PVOID TransferAddress)
+{
+    PVOID ImageBase;
+    IMAGE_DOS_HEADER DosHeader;
+    ULONG EntryPoint;
+
+    if (!NT_SUCCESS(ZwReadVirtualMemory(ProcessHandle, &RemotePeb->ImageBaseAddress,
+                                        &ImageBase, sizeof(ImageBase), NULL)) ||
+        !NT_SUCCESS(ZwReadVirtualMemory(ProcessHandle, ImageBase,
+                                        &DosHeader, sizeof(DosHeader), NULL)) ||
+        !NT_SUCCESS(ZwReadVirtualMemory(ProcessHandle,
+                                        (PUCHAR)ImageBase + DosHeader.e_lfanew +
+                                        FIELD_OFFSET(IMAGE_NT_HEADERS, OptionalHeader.AddressOfEntryPoint),
+                                        &EntryPoint, sizeof(EntryPoint), NULL)))
+    {
+        return TransferAddress;
+    }
+
+    return (PUCHAR)ImageBase + EntryPoint;
+}
+
 /*
  * @implemented
  *
@@ -370,7 +397,9 @@ RtlCreateUserProcess(IN PUNICODE_STRING ImageFileName,
                                  ProcessInfo->ImageInformation.ZeroBits,
                                  ProcessInfo->ImageInformation.MaximumStackSize,
                                  ProcessInfo->ImageInformation.CommittedStackSize,
-                                 ProcessInfo->ImageInformation.TransferAddress,
+                                 RtlpGetMappedEntryPoint(ProcessInfo->ProcessHandle,
+                                                         ProcessBasicInfo.PebBaseAddress,
+                                                         ProcessInfo->ImageInformation.TransferAddress),
                                  ProcessBasicInfo.PebBaseAddress,
                                  &ProcessInfo->ThreadHandle,
                                  &ProcessInfo->ClientId);

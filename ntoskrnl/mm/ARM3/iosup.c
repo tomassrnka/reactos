@@ -143,10 +143,28 @@ MmMapIoSpace(IN PHYSICAL_ADDRESS PhysicalAddress,
 
         case MiWriteCombined:
 
-            //
-            // Enable write combining
-            //
-            MI_MAKE_PTE_WRITE_COMBINE(&TempPte);
+            /* Device memory only: RAM pages have no PFN cache type tracking
+               that would keep their other (cached) mappings consistent, so a
+               write-combined mapping of RAM stays uncached */
+            if (IsIoMapping)
+            {
+                PFN_COUNT i;
+
+                for (i = 1; i < PageCount; i++)
+                {
+                    if (MiGetPfnEntry(Pfn + i))
+                        break;
+                }
+                if (i == PageCount)
+                {
+                    //
+                    // Enable write combining
+                    //
+                    MI_MAKE_PTE_WRITE_COMBINE(&TempPte);
+                    break;
+                }
+            }
+            MI_MAKE_PTE_NON_CACHED(&TempPte);
             break;
 
         default:

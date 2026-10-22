@@ -1651,8 +1651,18 @@ VfatSetInformation(
                                                    SystemBuffer);
             break;
 
-        case FileAllocationInformation:
         case FileEndOfFileInformation:
+            /* The check above runs before the locks, and a write may have grown the file since:
+               ask again for a shrink (NtExtendSection must not cut off what the write added) */
+            if (((PLARGE_INTEGER)SystemBuffer)->QuadPart < FCB->RFCB.FileSize.QuadPart &&
+                !MmCanFileBeTruncated(IrpContext->FileObject->SectionObjectPointer,
+                                      (PLARGE_INTEGER)SystemBuffer))
+            {
+                Status = STATUS_USER_MAPPED_FILE;
+                break;
+            }
+            /* Fall through */
+        case FileAllocationInformation:
             Status = VfatSetAllocationSizeInformation(IrpContext->FileObject,
                                                       FCB,
                                                       IrpContext->DeviceExt,
