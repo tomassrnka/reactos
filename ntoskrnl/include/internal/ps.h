@@ -290,6 +290,12 @@ PspTerminateThreadByPointer(
     IN BOOLEAN bSelf
 );
 
+NTSTATUS
+NTAPI
+PspTerminateCurrentProcessDeferred(
+    IN NTSTATUS ExitStatus
+);
+
 VOID
 NTAPI
 PspExitProcess(
