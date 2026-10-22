@@ -16,7 +16,11 @@
  * along with WinBtrfs.  If not, see <http://www.gnu.org/licenses/>. */
 
 #include "btrfs_drv.h"
+#ifdef __REACTOS__
 #include "xxhash.h"
+#else
+#include "zstd/lib/common/xxhash.h"
+#endif
 #include "crc32c.h"
 
 void calc_thread_main(device_extension* Vcb, calc_job* cj) {
@@ -53,7 +57,7 @@ void calc_thread_main(device_extension* Vcb, calc_job* cj) {
             case calc_thread_xxhash:
             case calc_thread_sha256:
             case calc_thread_blake2:
-                cj2->in = (uint8_t*)cj2->in + Vcb->superblock.sector_size;
+                cj2->in = (uint8_t*)cj2->in + Vcb->superblock.sectorsize;
                 cj2->out = (uint8_t*)cj2->out + Vcb->csum_size;
             break;
 
@@ -72,19 +76,19 @@ void calc_thread_main(device_extension* Vcb, calc_job* cj) {
 
         switch (cj2->type) {
             case calc_thread_crc32c:
-                *(uint32_t*)dest = ~calc_crc32c(0xffffffff, src, Vcb->superblock.sector_size);
+                *(uint32_t*)dest = ~calc_crc32c(0xffffffff, src, Vcb->superblock.sectorsize);
             break;
 
             case calc_thread_xxhash:
-                *(uint64_t*)dest = XXH64(src, Vcb->superblock.sector_size, 0);
+                *(uint64_t*)dest = XXH64(src, Vcb->superblock.sectorsize, 0);
             break;
 
             case calc_thread_sha256:
-                calc_sha256(dest, src, Vcb->superblock.sector_size);
+                calc_sha256(dest, src, Vcb->superblock.sectorsize);
             break;
 
             case calc_thread_blake2:
-                blake2b(dest, BLAKE2_HASH_SIZE, src, Vcb->superblock.sector_size);
+                blake2b(dest, BLAKE2_HASH_SIZE, src, Vcb->superblock.sectorsize);
             break;
 
             case calc_thread_decomp_zlib:
@@ -147,19 +151,19 @@ void do_calc_job(device_extension* Vcb, uint8_t* data, uint32_t sectors, void* c
     cj.left = cj.not_started = sectors;
 
     switch (Vcb->superblock.csum_type) {
-        case CSUM_TYPE_CRC32C:
+        case BTRFS_CSUM_TYPE_CRC32:
             cj.type = calc_thread_crc32c;
         break;
 
-        case CSUM_TYPE_XXHASH:
+        case BTRFS_CSUM_TYPE_XXHASH:
             cj.type = calc_thread_xxhash;
         break;
 
-        case CSUM_TYPE_SHA256:
+        case BTRFS_CSUM_TYPE_SHA256:
             cj.type = calc_thread_sha256;
         break;
 
-        case CSUM_TYPE_BLAKE2:
+        case BTRFS_CSUM_TYPE_BLAKE2:
             cj.type = calc_thread_blake2;
         break;
     }
@@ -200,15 +204,15 @@ NTSTATUS add_calc_job_decomp(device_extension* Vcb, uint8_t compression, void* i
     cj->Status = STATUS_SUCCESS;
 
     switch (compression) {
-        case BTRFS_COMPRESSION_ZLIB:
+        case BTRFS_COMPRESS_ZLIB:
             cj->type = calc_thread_decomp_zlib;
         break;
 
-        case BTRFS_COMPRESSION_LZO:
+        case BTRFS_COMPRESS_LZO:
             cj->type = calc_thread_decomp_lzo;
         break;
 
-        case BTRFS_COMPRESSION_ZSTD:
+        case BTRFS_COMPRESS_ZSTD:
             cj->type = calc_thread_decomp_zstd;
         break;
 
@@ -253,15 +257,15 @@ NTSTATUS add_calc_job_comp(device_extension* Vcb, uint8_t compression, void* in,
     cj->Status = STATUS_SUCCESS;
 
     switch (compression) {
-        case BTRFS_COMPRESSION_ZLIB:
+        case BTRFS_COMPRESS_ZLIB:
             cj->type = calc_thread_comp_zlib;
         break;
 
-        case BTRFS_COMPRESSION_LZO:
+        case BTRFS_COMPRESS_LZO:
             cj->type = calc_thread_comp_lzo;
         break;
 
-        case BTRFS_COMPRESSION_ZSTD:
+        case BTRFS_COMPRESS_ZSTD:
             cj->type = calc_thread_comp_zstd;
         break;
 
@@ -294,7 +298,7 @@ void __stdcall calc_thread(void* context) {
 
     ObReferenceObject(thread->DeviceObject);
 
-    KeSetSystemAffinityThread((KAFFINITY)(1 << thread->number));
+    KeSetSystemAffinityThread((KAFFINITY)1 << thread->number);
 
     while (true) {
         KeWaitForSingleObject(&Vcb->calcthreads.event, Executive, KernelMode, false, NULL);

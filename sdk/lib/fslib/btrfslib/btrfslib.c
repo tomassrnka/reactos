@@ -138,46 +138,54 @@ ULONG NTAPI NtGetTickCount(VOID);
 #endif
 
 typedef struct {
-    KEY key;
+    struct btrfs_key key;
     uint16_t size;
     void* data;
     LIST_ENTRY list_entry;
-} btrfs_item;
+} pending_item;
+
+typedef struct {
+    uint64_t address;
+    uint64_t size;
+    LIST_ENTRY list_entry;
+} used_space_extent;
 
 typedef struct {
     uint64_t offset;
-    CHUNK_ITEM* chunk_item;
+    struct btrfs_chunk* chunk_item;
     uint64_t lastoff;
     uint64_t used;
+    LIST_ENTRY used_space;
     LIST_ENTRY list_entry;
 } btrfs_chunk;
 
 typedef struct {
     uint64_t id;
-    tree_header header;
+    struct btrfs_header header;
     btrfs_chunk* c;
     LIST_ENTRY items;
     LIST_ENTRY list_entry;
 } btrfs_root;
 
 typedef struct {
-    DEV_ITEM dev_item;
+    struct btrfs_dev_item dev_item;
     uint64_t last_alloc;
 } btrfs_dev;
 
 #define keycmp(key1, key2)\
-    ((key1.obj_id < key2.obj_id) ? -1 :\
-    ((key1.obj_id > key2.obj_id) ? 1 :\
-    ((key1.obj_type < key2.obj_type) ? -1 :\
-    ((key1.obj_type > key2.obj_type) ? 1 :\
+    ((key1.objectid < key2.objectid) ? -1 :\
+    ((key1.objectid > key2.objectid) ? 1 :\
+    ((key1.type < key2.type) ? -1 :\
+    ((key1.type > key2.type) ? 1 :\
     ((key1.offset < key2.offset) ? -1 :\
     ((key1.offset > key2.offset) ? 1 :\
     0))))))
 
 HMODULE module;
 ULONG def_sector_size = 0, def_node_size = 0;
-uint64_t def_incompat_flags = BTRFS_INCOMPAT_FLAGS_EXTENDED_IREF | BTRFS_INCOMPAT_FLAGS_SKINNY_METADATA;
-uint16_t def_csum_type = CSUM_TYPE_CRC32C;
+uint64_t def_incompat_flags = BTRFS_FEATURE_INCOMPAT_EXTENDED_IREF | BTRFS_FEATURE_INCOMPAT_SKINNY_METADATA;
+uint64_t def_compat_ro_flags = 0;
+uint16_t def_csum_type = BTRFS_CSUM_TYPE_CRC32;
 
 #ifndef __REACTOS__
 // the following definitions come from fmifs.h in ReactOS
@@ -287,7 +295,7 @@ static btrfs_root* add_root(LIST_ENTRY* roots, uint64_t id) {
     root = malloc(sizeof(btrfs_root));
 
     root->id = id;
-    RtlZeroMemory(&root->header, sizeof(tree_header));
+    RtlZeroMemory(&root->header, sizeof(struct btrfs_header));
     InitializeListHead(&root->items);
     InsertTailList(roots, &root->list_entry);
 
@@ -305,7 +313,7 @@ static void free_roots(LIST_ENTRY* roots) {
         le3 = r->items.Flink;
         while (le3 != &r->items) {
             LIST_ENTRY* le4 = le3->Flink;
-            btrfs_item* item = CONTAINING_RECORD(le3, btrfs_item, list_entry);
+            pending_item* item = CONTAINING_RECORD(le3, pending_item, list_entry);
 
             if (item->data)
                 free(item->data);
@@ -329,6 +337,12 @@ static void free_chunks(LIST_ENTRY* chunks) {
         LIST_ENTRY *le2 = le->Flink;
         btrfs_chunk* c = CONTAINING_RECORD(le, btrfs_chunk, list_entry);
 
+        while (!IsListEmpty(&c->used_space)) {
+            used_space_extent* use = CONTAINING_RECORD(RemoveHeadList(&c->used_space), used_space_extent, list_entry);
+
+            free(use);
+        }
+
         free(c->chunk_item);
         free(c);
 
@@ -336,14 +350,14 @@ static void free_chunks(LIST_ENTRY* chunks) {
     }
 }
 
-static void add_item(btrfs_root* r, uint64_t obj_id, uint8_t obj_type, uint64_t offset, void* data, uint16_t size) {
+static void add_item(btrfs_root* r, uint64_t objectid, uint8_t type, uint64_t offset, void* data, uint16_t size) {
     LIST_ENTRY* le;
-    btrfs_item* item;
+    pending_item* item;
 
-    item = malloc(sizeof(btrfs_item));
+    item = malloc(sizeof(pending_item));
 
-    item->key.obj_id = obj_id;
-    item->key.obj_type = obj_type;
+    item->key.objectid = objectid;
+    item->key.type = type;
     item->key.offset = offset;
     item->size = size;
 
@@ -356,7 +370,7 @@ static void add_item(btrfs_root* r, uint64_t obj_id, uint8_t obj_type, uint64_t 
 
     le = r->items.Flink;
     while (le != &r->items) {
-        btrfs_item* i2 = CONTAINING_RECORD(le, btrfs_item, list_entry);
+        pending_item* i2 = CONTAINING_RECORD(le, pending_item, list_entry);
 
         if (keycmp(item->key, i2->key) != 1) {
             InsertTailList(le, &item->list_entry);
@@ -369,86 +383,90 @@ static void add_item(btrfs_root* r, uint64_t obj_id, uint8_t obj_type, uint64_t 
     InsertTailList(&r->items, &item->list_entry);
 }
 
-static uint64_t find_chunk_offset(uint64_t size, uint64_t offset, btrfs_dev* dev, btrfs_root* dev_root, BTRFS_UUID* chunkuuid) {
+static uint64_t find_chunk_offset(uint64_t size, uint64_t offset, btrfs_dev* dev,
+                                  btrfs_root* dev_root, uint8_t* chunkuuid) {
     uint64_t off;
-    DEV_EXTENT de;
+    struct btrfs_dev_extent de;
 
     off = dev->last_alloc;
     dev->last_alloc += size;
 
     dev->dev_item.bytes_used += size;
 
-    de.chunktree = BTRFS_ROOT_CHUNK;
-    de.objid = 0x100;
-    de.address = offset;
+    de.chunk_tree = BTRFS_CHUNK_TREE_OBJECTID;
+    de.chunk_objectid = 0x100;
+    de.chunk_offset = offset;
     de.length = size;
-    de.chunktree_uuid = *chunkuuid;
+    memcpy(de.chunk_tree_uuid, chunkuuid, BTRFS_UUID_SIZE);
 
-    add_item(dev_root, dev->dev_item.dev_id, TYPE_DEV_EXTENT, off, &de, sizeof(DEV_EXTENT));
+    add_item(dev_root, dev->dev_item.devid, BTRFS_DEV_EXTENT_KEY, off, &de, sizeof(struct btrfs_dev_extent));
 
     return off;
 }
 
-static btrfs_chunk* add_chunk(LIST_ENTRY* chunks, uint64_t flags, btrfs_root* chunk_root, btrfs_dev* dev, btrfs_root* dev_root, BTRFS_UUID* chunkuuid, uint32_t sector_size) {
+static btrfs_chunk* add_chunk(LIST_ENTRY* chunks, uint64_t flags, btrfs_root* chunk_root,
+                              btrfs_dev* dev, btrfs_root* dev_root, uint8_t* chunkuuid,
+                              uint32_t sector_size) {
     uint64_t off, size;
     uint16_t stripes, i;
     btrfs_chunk* c;
     LIST_ENTRY* le;
-    CHUNK_ITEM_STRIPE* cis;
+    uint64_t stripe_length = max(sector_size, 0x10000);
 
     off = 0xc00000;
     le = chunks->Flink;
     while (le != chunks) {
         c = CONTAINING_RECORD(le, btrfs_chunk, list_entry);
 
-        if (c->offset + c->chunk_item->size > off)
-            off = c->offset + c->chunk_item->size;
+        if (c->offset + c->chunk_item->length > off)
+            off = c->offset + c->chunk_item->length;
 
         le = le->Flink;
     }
 
-    if (flags & BLOCK_FLAG_METADATA) {
-        if (dev->dev_item.num_bytes > 0xC80000000) // 50 GB
+    if (flags & BTRFS_BLOCK_GROUP_METADATA) {
+        if (dev->dev_item.total_bytes > 0xC80000000) // 50 GB
             size = 0x40000000; // 1 GB
         else
             size = 0x10000000; // 256 MB
-    } else if (flags & BLOCK_FLAG_SYSTEM)
+    } else // BTRFS_BLOCK_GROUP_SYSTEM
         size = 0x800000;
 
-    size = min(size, dev->dev_item.num_bytes / 10); // cap at 10%
-    size &= ~(UINT64)(sector_size - 1);
+    size = min(size, dev->dev_item.total_bytes / 10); // cap at 10%
+    size &= ~(stripe_length - 1);
 
-    stripes = flags & BLOCK_FLAG_DUPLICATE ? 2 : 1;
+    stripes = flags & BTRFS_BLOCK_GROUP_DUP ? 2 : 1;
 
-    if (dev->dev_item.num_bytes - dev->dev_item.bytes_used < stripes * size) // not enough space
+    if (dev->dev_item.total_bytes - dev->dev_item.bytes_used < stripes * size) // not enough space
         return NULL;
 
     c = malloc(sizeof(btrfs_chunk));
     c->offset = off;
     c->lastoff = off;
     c->used = 0;
+    InitializeListHead(&c->used_space);
 
-    c->chunk_item = malloc(sizeof(CHUNK_ITEM) + (stripes * sizeof(CHUNK_ITEM_STRIPE)));
+    c->chunk_item = malloc(offsetof(struct btrfs_chunk, stripe) + (stripes * sizeof(struct btrfs_stripe)));
 
-    c->chunk_item->size = size;
-    c->chunk_item->root_id = BTRFS_ROOT_EXTENT;
-    c->chunk_item->stripe_length = max(sector_size, 0x10000);
+    c->chunk_item->length = size;
+    c->chunk_item->owner = BTRFS_EXTENT_TREE_OBJECTID;
+    c->chunk_item->stripe_len = stripe_length;
     c->chunk_item->type = flags;
-    c->chunk_item->opt_io_alignment = max(sector_size, 0x10000);
-    c->chunk_item->opt_io_width = max(sector_size, 0x10000);
+    c->chunk_item->io_align = stripe_length;
+    c->chunk_item->io_width = stripe_length;
     c->chunk_item->sector_size = sector_size;
     c->chunk_item->num_stripes = stripes;
     c->chunk_item->sub_stripes = 0;
 
-    cis = (CHUNK_ITEM_STRIPE*)&c->chunk_item[1];
-
     for (i = 0; i < stripes; i++) {
-        cis[i].dev_id = dev->dev_item.dev_id;
-        cis[i].offset = find_chunk_offset(size, c->offset, dev, dev_root, chunkuuid);
-        cis[i].dev_uuid = dev->dev_item.device_uuid;
+        c->chunk_item->stripe[i].devid = dev->dev_item.devid;
+        c->chunk_item->stripe[i].offset = find_chunk_offset(size, c->offset, dev, dev_root, chunkuuid);
+
+        memcpy(c->chunk_item->stripe[i].dev_uuid, dev->dev_item.uuid,
+               BTRFS_UUID_SIZE);
     }
 
-    add_item(chunk_root, 0x100, TYPE_CHUNK_ITEM, c->offset, c->chunk_item, sizeof(CHUNK_ITEM) + (stripes * sizeof(CHUNK_ITEM_STRIPE)));
+    add_item(chunk_root, 0x100, BTRFS_CHUNK_ITEM_KEY, c->offset, c->chunk_item, offsetof(struct btrfs_chunk, stripe) + (stripes * sizeof(struct btrfs_stripe)));
 
     InsertTailList(chunks, &c->list_entry);
 
@@ -456,15 +474,14 @@ static btrfs_chunk* add_chunk(LIST_ENTRY* chunks, uint64_t flags, btrfs_root* ch
 }
 
 static bool superblock_collision(btrfs_chunk* c, uint64_t address) {
-    CHUNK_ITEM_STRIPE* cis = (CHUNK_ITEM_STRIPE*)&c->chunk_item[1];
-    uint64_t stripe = (address - c->offset) / c->chunk_item->stripe_length;
+    uint64_t stripe = (address - c->offset) / c->chunk_item->stripe_len;
     uint16_t i, j;
 
     for (i = 0; i < c->chunk_item->num_stripes; i++) {
         j = 0;
         while (superblock_addrs[j] != 0) {
-            if (superblock_addrs[j] >= cis[i].offset) {
-                uint64_t stripe2 = (superblock_addrs[j] - cis[i].offset) / c->chunk_item->stripe_length;
+            if (superblock_addrs[j] >= c->chunk_item->stripe[i].offset) {
+                uint64_t stripe2 = (superblock_addrs[j] - c->chunk_item->stripe[i].offset) / c->chunk_item->stripe_len;
 
                 if (stripe2 == stripe)
                     return true;
@@ -482,9 +499,9 @@ static uint64_t get_next_address(btrfs_chunk* c) {
     addr = c->lastoff;
 
     while (superblock_collision(c, addr)) {
-        addr = addr - ((addr - c->offset) % c->chunk_item->stripe_length) + c->chunk_item->stripe_length;
+        addr = addr - ((addr - c->offset) % c->chunk_item->stripe_len) + c->chunk_item->stripe_len;
 
-        if (addr >= c->offset + c->chunk_item->size) // chunk has been exhausted
+        if (addr >= c->offset + c->chunk_item->length) // chunk has been exhausted
             return 0;
     }
 
@@ -492,17 +509,23 @@ static uint64_t get_next_address(btrfs_chunk* c) {
 }
 
 typedef struct {
-    EXTENT_ITEM ei;
-    uint8_t type;
-    TREE_BLOCK_REF tbr;
+    struct btrfs_extent_item ei;
+    struct btrfs_extent_inline_ref eir;
 } EXTENT_ITEM_METADATA;
 
+#ifndef __REACTOS__
+static_assert(sizeof(EXTENT_ITEM_METADATA) == 33, "EXTENT_ITEM_METADATA has wrong size");
+#endif
+
 typedef struct {
-    EXTENT_ITEM ei;
-    EXTENT_ITEM2 ei2;
-    uint8_t type;
-    TREE_BLOCK_REF tbr;
+    struct btrfs_extent_item ei;
+    struct btrfs_tree_block_info ei2;
+    struct btrfs_extent_inline_ref eir;
 } EXTENT_ITEM_METADATA2;
+
+#ifndef __REACTOS__
+static_assert(sizeof(EXTENT_ITEM_METADATA2) == 51, "EXTENT_ITEM_METADATA2 has wrong size");
+#endif
 
 static void assign_addresses(LIST_ENTRY* roots, btrfs_chunk* sys_chunk, btrfs_chunk* metadata_chunk, uint32_t node_size,
                              btrfs_root* root_root, btrfs_root* extent_root, bool skinny) {
@@ -511,66 +534,84 @@ static void assign_addresses(LIST_ENTRY* roots, btrfs_chunk* sys_chunk, btrfs_ch
     le = roots->Flink;
     while (le != roots) {
         btrfs_root* r = CONTAINING_RECORD(le, btrfs_root, list_entry);
-        btrfs_chunk* c = r->id == BTRFS_ROOT_CHUNK ? sys_chunk : metadata_chunk;
+        btrfs_chunk* c = r->id == BTRFS_CHUNK_TREE_OBJECTID ? sys_chunk : metadata_chunk;
+        bool done_use = false;
 
-        r->header.address = get_next_address(c);
+        r->header.bytenr = get_next_address(c);
+
+        if (!IsListEmpty(&c->used_space)) {
+            used_space_extent* use = CONTAINING_RECORD(c->used_space.Blink, used_space_extent, list_entry);
+
+            if (use->address + use->size == r->header.bytenr) {
+                use->size += node_size;
+                done_use = true;
+            }
+        }
+
+        if (!done_use) {
+            used_space_extent* use = malloc(sizeof(used_space_extent));
+            use->address = r->header.bytenr;
+            use->size = node_size;
+            InsertTailList(&c->used_space, &use->list_entry);
+        }
+
         r->c = c;
-        c->lastoff = r->header.address + node_size;
+        c->lastoff = r->header.bytenr + node_size;
         c->used += node_size;
 
         if (skinny) {
             EXTENT_ITEM_METADATA eim;
 
-            eim.ei.refcount = 1;
+            eim.ei.refs = 1;
             eim.ei.generation = 1;
-            eim.ei.flags = EXTENT_ITEM_TREE_BLOCK;
-            eim.type = TYPE_TREE_BLOCK_REF;
-            eim.tbr.offset = r->id;
+            eim.ei.flags = BTRFS_EXTENT_FLAG_TREE_BLOCK;
+            eim.eir.type = BTRFS_TREE_BLOCK_REF_KEY;
+            eim.eir.offset = r->id;
 
-            add_item(extent_root, r->header.address, TYPE_METADATA_ITEM, 0, &eim, sizeof(EXTENT_ITEM_METADATA));
+            add_item(extent_root, r->header.bytenr, BTRFS_METADATA_ITEM_KEY, 0, &eim, sizeof(EXTENT_ITEM_METADATA));
         } else {
             EXTENT_ITEM_METADATA2 eim2;
-            KEY firstitem;
+            struct btrfs_key firstitem;
 
             if (r->items.Flink == &r->items) {
-                firstitem.obj_id = 0;
-                firstitem.obj_type = 0;
+                firstitem.objectid = 0;
+                firstitem.type = 0;
                 firstitem.offset = 0;
             } else {
-                btrfs_item* bi = CONTAINING_RECORD(r->items.Flink, btrfs_item, list_entry);
+                pending_item* bi = CONTAINING_RECORD(r->items.Flink, pending_item, list_entry);
 
                 firstitem = bi->key;
             }
 
-            eim2.ei.refcount = 1;
+            eim2.ei.refs = 1;
             eim2.ei.generation = 1;
-            eim2.ei.flags = EXTENT_ITEM_TREE_BLOCK;
-            eim2.ei2.firstitem = firstitem;
+            eim2.ei.flags = BTRFS_EXTENT_FLAG_TREE_BLOCK;
+            eim2.ei2.key = firstitem;
             eim2.ei2.level = 0;
-            eim2.type = TYPE_TREE_BLOCK_REF;
-            eim2.tbr.offset = r->id;
+            eim2.eir.type = BTRFS_TREE_BLOCK_REF_KEY;
+            eim2.eir.offset = r->id;
 
-            add_item(extent_root, r->header.address, TYPE_EXTENT_ITEM, node_size, &eim2, sizeof(EXTENT_ITEM_METADATA2));
+            add_item(extent_root, r->header.bytenr, BTRFS_EXTENT_ITEM_KEY, node_size, &eim2, sizeof(EXTENT_ITEM_METADATA2));
         }
 
-        if (r->id != BTRFS_ROOT_ROOT && r->id != BTRFS_ROOT_CHUNK) {
-            ROOT_ITEM ri;
+        if (r->id != BTRFS_ROOT_TREE_OBJECTID && r->id != BTRFS_CHUNK_TREE_OBJECTID) {
+            struct btrfs_root_item ri;
 
-            memset(&ri, 0, sizeof(ROOT_ITEM));
+            memset(&ri, 0, sizeof(struct btrfs_root_item));
 
             ri.inode.generation = 1;
-            ri.inode.st_size = 3;
-            ri.inode.st_blocks = node_size;
-            ri.inode.st_nlink = 1;
-            ri.inode.st_mode = 040755;
+            ri.inode.size = 3;
+            ri.inode.nbytes = node_size;
+            ri.inode.nlink = 1;
+            ri.inode.mode = 040755;
             ri.generation = 1;
-            ri.objid = r->id == 5 || r->id >= 0x100 ? SUBVOL_ROOT_INODE : 0;
-            ri.block_number = r->header.address;
+            ri.root_dirid = r->id == 5 || r->id >= 0x100 ? BTRFS_FIRST_FREE_OBJECTID : 0;
+            ri.bytenr = r->header.bytenr;
             ri.bytes_used = node_size;
-            ri.num_references = 1;
-            ri.generation2 = ri.generation;
+            ri.refs = 1;
+            ri.generation_v2 = ri.generation;
 
-            add_item(root_root, r->id, TYPE_ROOT_ITEM, 0, &ri, sizeof(ROOT_ITEM));
+            add_item(root_root, r->id, BTRFS_ROOT_ITEM_KEY, 0, &ri, sizeof(struct btrfs_root_item));
         }
 
         le = le->Flink;
@@ -582,12 +623,9 @@ static NTSTATUS write_data(HANDLE h, uint64_t address, btrfs_chunk* c, void* dat
     uint16_t i;
     IO_STATUS_BLOCK iosb;
     LARGE_INTEGER off;
-    CHUNK_ITEM_STRIPE* cis;
-
-    cis = (CHUNK_ITEM_STRIPE*)&c->chunk_item[1];
 
     for (i = 0; i < c->chunk_item->num_stripes; i++) {
-        off.QuadPart = cis[i].offset + address - c->offset;
+        off.QuadPart = c->chunk_item->stripe[i].offset + address - c->offset;
 
         Status = NtWriteFile(h, NULL, NULL, NULL, &iosb, data, size, &off, NULL);
         if (!NT_SUCCESS(Status))
@@ -597,27 +635,28 @@ static NTSTATUS write_data(HANDLE h, uint64_t address, btrfs_chunk* c, void* dat
     return STATUS_SUCCESS;
 }
 
-static void calc_tree_checksum(tree_header* th, uint32_t node_size) {
+static void calc_tree_checksum(struct btrfs_header* th, uint32_t node_size) {
     switch (def_csum_type) {
-        case CSUM_TYPE_CRC32C:
-            *(uint32_t*)th = ~calc_crc32c(0xffffffff, (uint8_t*)&th->fs_uuid, node_size - sizeof(th->csum));
+        case BTRFS_CSUM_TYPE_CRC32:
+            *(uint32_t*)th = ~calc_crc32c(0xffffffff, (uint8_t*)&th->fsid, node_size - sizeof(th->csum));
         break;
 
-        case CSUM_TYPE_XXHASH:
-            *(uint64_t*)th = XXH64((uint8_t*)&th->fs_uuid, node_size - sizeof(th->csum), 0);
+        case BTRFS_CSUM_TYPE_XXHASH:
+            *(uint64_t*)th = XXH64((uint8_t*)&th->fsid, node_size - sizeof(th->csum), 0);
         break;
 
-        case CSUM_TYPE_SHA256:
-            calc_sha256((uint8_t*)th, &th->fs_uuid, node_size - sizeof(th->csum));
+        case BTRFS_CSUM_TYPE_SHA256:
+            calc_sha256((uint8_t*)th, &th->fsid, node_size - sizeof(th->csum));
         break;
 
-        case CSUM_TYPE_BLAKE2:
-            blake2b((uint8_t*)th, BLAKE2_HASH_SIZE, &th->fs_uuid, node_size - sizeof(th->csum));
+        case BTRFS_CSUM_TYPE_BLAKE2:
+            blake2b((uint8_t*)th, BLAKE2_HASH_SIZE, &th->fsid, node_size - sizeof(th->csum));
         break;
     }
 }
 
-static NTSTATUS write_roots(HANDLE h, LIST_ENTRY* roots, uint32_t node_size, BTRFS_UUID* fsuuid, BTRFS_UUID* chunkuuid) {
+static NTSTATUS write_roots(HANDLE h, LIST_ENTRY* roots, uint32_t node_size,
+                            uint8_t* fsuuid, uint8_t* chunkuuid) {
     LIST_ENTRY *le, *le2;
     NTSTATUS Status;
     uint8_t* tree;
@@ -628,24 +667,24 @@ static NTSTATUS write_roots(HANDLE h, LIST_ENTRY* roots, uint32_t node_size, BTR
     while (le != roots) {
         btrfs_root* r = CONTAINING_RECORD(le, btrfs_root, list_entry);
         uint8_t* dp;
-        leaf_node* ln;
+        struct btrfs_item* ln;
 
         memset(tree, 0, node_size);
 
-        r->header.num_items = 0;
-        r->header.fs_uuid = *fsuuid;
-        r->header.flags = HEADER_FLAG_MIXED_BACKREF | HEADER_FLAG_WRITTEN;
-        r->header.chunk_tree_uuid = *chunkuuid;
+        r->header.nritems = 0;
+        memcpy(r->header.fsid, fsuuid, BTRFS_UUID_SIZE);
+        r->header.flags = (BTRFS_MIXED_BACKREF_REV << BTRFS_BACKREF_REV_SHIFT) | BTRFS_HEADER_FLAG_WRITTEN;
+        memcpy(r->header.chunk_tree_uuid, chunkuuid, BTRFS_UUID_SIZE);
         r->header.generation = 1;
-        r->header.tree_id = r->id;
+        r->header.owner = r->id;
 
-        ln = (leaf_node*)(tree + sizeof(tree_header));
+        ln = (struct btrfs_item*)(tree + sizeof(struct btrfs_header));
 
         dp = tree + node_size;
 
         le2 = r->items.Flink;
         while (le2 != &r->items) {
-            btrfs_item* item = CONTAINING_RECORD(le2, btrfs_item, list_entry);
+            pending_item* item = CONTAINING_RECORD(le2, pending_item, list_entry);
 
             ln->key = item->key;
             ln->size = item->size;
@@ -653,23 +692,22 @@ static NTSTATUS write_roots(HANDLE h, LIST_ENTRY* roots, uint32_t node_size, BTR
             if (item->size > 0) {
                 dp -= item->size;
                 memcpy(dp, item->data, item->size);
+            }
 
-                ln->offset = (uint32_t)(dp - tree - sizeof(tree_header));
-            } else
-                ln->offset = 0;
+            ln->offset = (uint32_t)(dp - tree - sizeof(struct btrfs_header));
 
             ln = &ln[1];
 
-            r->header.num_items++;
+            r->header.nritems++;
 
             le2 = le2->Flink;
         }
 
-        memcpy(tree, &r->header, sizeof(tree_header));
+        memcpy(tree, &r->header, sizeof(struct btrfs_header));
 
-        calc_tree_checksum((tree_header*)tree, node_size);
+        calc_tree_checksum((struct btrfs_header*)tree, node_size);
 
-        Status = write_data(h, r->header.address, r->c, tree, node_size);
+        Status = write_data(h, r->header.bytenr, r->c, tree, node_size);
         if (!NT_SUCCESS(Status)) {
             free(tree);
             return Status;
@@ -684,35 +722,36 @@ static NTSTATUS write_roots(HANDLE h, LIST_ENTRY* roots, uint32_t node_size, BTR
 }
 
 #ifndef __REACTOS__
-static void get_uuid(BTRFS_UUID* uuid) {
+static void get_uuid(uint8_t* uuid) {
 #else
-static void get_uuid(BTRFS_UUID* uuid, ULONG* seed) {
+static void get_uuid(uint8_t* uuid, ULONG* seed) {
 #endif
     uint8_t i;
 
-    for (i = 0; i < 16; i+=2) {
+    for (i = 0; i < BTRFS_UUID_SIZE; i += 2) {
 #ifndef __REACTOS__
         ULONG r = rand();
 #else
         ULONG r = RtlRandom(seed);
 #endif
 
-        uuid->uuid[i] = (r & 0xff00) >> 8;
-        uuid->uuid[i+1] = r & 0xff;
+        uuid[i] = (r & 0xff00) >> 8;
+        uuid[i + 1] = r & 0xff;
     }
 }
 
+static void init_device(btrfs_dev* dev, uint64_t id, uint64_t size, uint8_t* fsuuid,
 #ifndef __REACTOS__
-static void init_device(btrfs_dev* dev, uint64_t id, uint64_t size, BTRFS_UUID* fsuuid, uint32_t sector_size) {
+                        uint32_t sector_size) {
 #else
-static void init_device(btrfs_dev* dev, uint64_t id, uint64_t size, BTRFS_UUID* fsuuid, uint32_t sector_size, ULONG* seed) {
+                        uint32_t sector_size, ULONG* seed) {
 #endif
-    dev->dev_item.dev_id = id;
-    dev->dev_item.num_bytes = size;
+    dev->dev_item.devid = id;
+    dev->dev_item.total_bytes = size;
     dev->dev_item.bytes_used = 0;
-    dev->dev_item.optimal_io_align = sector_size;
-    dev->dev_item.optimal_io_width = sector_size;
-    dev->dev_item.minimal_io_size = sector_size;
+    dev->dev_item.io_align = sector_size;
+    dev->dev_item.io_width = sector_size;
+    dev->dev_item.sector_size = sector_size;
     dev->dev_item.type = 0;
     dev->dev_item.generation = 0;
     dev->dev_item.start_offset = 0;
@@ -720,43 +759,44 @@ static void init_device(btrfs_dev* dev, uint64_t id, uint64_t size, BTRFS_UUID* 
     dev->dev_item.seek_speed = 0;
     dev->dev_item.bandwidth = 0;
 #ifndef __REACTOS__
-    get_uuid(&dev->dev_item.device_uuid);
+    get_uuid(dev->dev_item.uuid);
 #else
-    get_uuid(&dev->dev_item.device_uuid, seed);
+    get_uuid(dev->dev_item.uuid, seed);
 #endif
-    dev->dev_item.fs_uuid = *fsuuid;
+    memcpy(dev->dev_item.fsid, fsuuid, BTRFS_UUID_SIZE);
 
     dev->last_alloc = 0x100000; // skip first megabyte
 }
 
-static void calc_superblock_checksum(superblock* sb) {
+static void calc_superblock_checksum(struct btrfs_super_block* sb) {
     switch (def_csum_type) {
-        case CSUM_TYPE_CRC32C:
-            *(uint32_t*)sb = ~calc_crc32c(0xffffffff, (uint8_t*)&sb->uuid, (ULONG)sizeof(superblock) - sizeof(sb->checksum));
+        case BTRFS_CSUM_TYPE_CRC32:
+            *(uint32_t*)sb = ~calc_crc32c(0xffffffff, (uint8_t*)&sb->fsid, (ULONG)sizeof(struct btrfs_super_block) - sizeof(sb->csum));
         break;
 
-        case CSUM_TYPE_XXHASH:
-            *(uint64_t*)sb = XXH64(&sb->uuid, sizeof(superblock) - sizeof(sb->checksum), 0);
+        case BTRFS_CSUM_TYPE_XXHASH:
+            *(uint64_t*)sb = XXH64(&sb->fsid, sizeof(struct btrfs_super_block) - sizeof(sb->csum), 0);
         break;
 
-        case CSUM_TYPE_SHA256:
-            calc_sha256((uint8_t*)sb, &sb->uuid, sizeof(superblock) - sizeof(sb->checksum));
+        case BTRFS_CSUM_TYPE_SHA256:
+            calc_sha256((uint8_t*)sb, &sb->fsid, sizeof(struct btrfs_super_block) - sizeof(sb->csum));
         break;
 
-        case CSUM_TYPE_BLAKE2:
-            blake2b((uint8_t*)sb, BLAKE2_HASH_SIZE, &sb->uuid, sizeof(superblock) - sizeof(sb->checksum));
+        case BTRFS_CSUM_TYPE_BLAKE2:
+            blake2b((uint8_t*)sb, BLAKE2_HASH_SIZE, &sb->fsid, sizeof(struct btrfs_super_block) - sizeof(sb->csum));
         break;
     }
 }
 
 static NTSTATUS write_superblocks(HANDLE h, btrfs_dev* dev, btrfs_root* chunk_root, btrfs_root* root_root, btrfs_root* extent_root,
-                                  btrfs_chunk* sys_chunk, uint32_t node_size, BTRFS_UUID* fsuuid, uint32_t sector_size, PUNICODE_STRING label, uint64_t incompat_flags) {
+                                  btrfs_chunk* sys_chunk, uint32_t node_size, uint8_t* fsuuid, uint32_t sector_size, PUNICODE_STRING label,
+                                  uint64_t incompat_flags, uint64_t compat_ro_flags) {
     NTSTATUS Status;
     IO_STATUS_BLOCK iosb;
     ULONG sblen;
     int i;
-    superblock* sb;
-    KEY* key;
+    struct btrfs_super_block* sb;
+    struct btrfs_key* key;
     uint64_t bytes_used;
     LIST_ENTRY* le;
 
@@ -768,11 +808,11 @@ static NTSTATUS write_superblocks(HANDLE h, btrfs_dev* dev, btrfs_root* chunk_ro
 
     le = extent_root->items.Flink;
     while (le != &extent_root->items) {
-        btrfs_item* item = CONTAINING_RECORD(le, btrfs_item, list_entry);
+        pending_item* item = CONTAINING_RECORD(le, pending_item, list_entry);
 
-        if (item->key.obj_type == TYPE_EXTENT_ITEM)
+        if (item->key.type == BTRFS_EXTENT_ITEM_KEY)
             bytes_used += item->key.offset;
-        else if (item->key.obj_type == TYPE_METADATA_ITEM)
+        else if (item->key.type == BTRFS_METADATA_ITEM_KEY)
             bytes_used += node_size;
 
         le = le->Flink;
@@ -781,25 +821,26 @@ static NTSTATUS write_superblocks(HANDLE h, btrfs_dev* dev, btrfs_root* chunk_ro
     sb = malloc(sblen);
     memset(sb, 0, sblen);
 
-    sb->uuid = *fsuuid;
+    memcpy(sb->fsid, fsuuid, BTRFS_UUID_SIZE);
     sb->flags = 1;
     sb->magic = BTRFS_MAGIC;
     sb->generation = 1;
-    sb->root_tree_addr = root_root->header.address;
-    sb->chunk_tree_addr = chunk_root->header.address;
-    sb->total_bytes = dev->dev_item.num_bytes;
+    sb->root = root_root->header.bytenr;
+    sb->chunk_root = chunk_root->header.bytenr;
+    sb->total_bytes = dev->dev_item.total_bytes;
     sb->bytes_used = bytes_used;
-    sb->root_dir_objectid = BTRFS_ROOT_TREEDIR;
+    sb->root_dir_objectid = BTRFS_ROOT_TREE_DIR_OBJECTID;
     sb->num_devices = 1;
-    sb->sector_size = sector_size;
-    sb->node_size = node_size;
-    sb->leaf_size = node_size;
-    sb->stripe_size = sector_size;
-    sb->n = sizeof(KEY) + sizeof(CHUNK_ITEM) + (sys_chunk->chunk_item->num_stripes * sizeof(CHUNK_ITEM_STRIPE));
+    sb->sectorsize = sector_size;
+    sb->nodesize = node_size;
+    sb->__unused_leafsize = node_size;
+    sb->stripesize = sector_size;
+    sb->sys_chunk_array_size = sizeof(struct btrfs_key) + offsetof(struct btrfs_chunk, stripe) + (sys_chunk->chunk_item->num_stripes * sizeof(struct btrfs_stripe));
     sb->chunk_root_generation = 1;
+    sb->compat_ro_flags = compat_ro_flags;
     sb->incompat_flags = incompat_flags;
     sb->csum_type = def_csum_type;
-    memcpy(&sb->dev_item, &dev->dev_item, sizeof(DEV_ITEM));
+    memcpy(&sb->dev_item, &dev->dev_item, sizeof(struct btrfs_dev_item));
 
     if (label->Length > 0) {
 #ifdef __REACTOS__
@@ -821,7 +862,7 @@ static NTSTATUS write_superblocks(HANDLE h, btrfs_dev* dev, btrfs_root* chunk_ro
 #ifndef __REACTOS__
         utf8len = WideCharToMultiByte(CP_UTF8, 0, label->Buffer, label->Length / sizeof(WCHAR), NULL, 0, NULL, NULL);
 
-        if (utf8len == 0 || utf8len > MAX_LABEL_SIZE) {
+        if (utf8len == 0 || utf8len > BTRFS_LABEL_SIZE) {
             free(sb);
             return STATUS_INVALID_VOLUME_LABEL;
         }
@@ -830,7 +871,7 @@ static NTSTATUS write_superblocks(HANDLE h, btrfs_dev* dev, btrfs_root* chunk_ro
 #else
         as.Buffer = sb->label;
         as.Length = 0;
-        as.MaximumLength = MAX_LABEL_SIZE;
+        as.MaximumLength = BTRFS_LABEL_SIZE;
 
         if (!NT_SUCCESS(RtlUnicodeStringToAnsiString(&as, label, FALSE)))
         {
@@ -841,20 +882,20 @@ static NTSTATUS write_superblocks(HANDLE h, btrfs_dev* dev, btrfs_root* chunk_ro
     }
     sb->cache_generation = 0xffffffffffffffff;
 
-    key = (KEY*)sb->sys_chunk_array;
-    key->obj_id = 0x100;
-    key->obj_type = TYPE_CHUNK_ITEM;
+    key = (struct btrfs_key*)sb->sys_chunk_array;
+    key->objectid = 0x100;
+    key->type = BTRFS_CHUNK_ITEM_KEY;
     key->offset = sys_chunk->offset;
-    memcpy(&key[1], sys_chunk->chunk_item, sizeof(CHUNK_ITEM) + (sys_chunk->chunk_item->num_stripes * sizeof(CHUNK_ITEM_STRIPE)));
+    memcpy(&key[1], sys_chunk->chunk_item, offsetof(struct btrfs_chunk, stripe) + (sys_chunk->chunk_item->num_stripes * sizeof(struct btrfs_stripe)));
 
     i = 0;
     while (superblock_addrs[i] != 0) {
         LARGE_INTEGER off;
 
-        if (superblock_addrs[i] > dev->dev_item.num_bytes)
+        if (superblock_addrs[i] > dev->dev_item.total_bytes)
             break;
 
-        sb->sb_phys_addr = superblock_addrs[i];
+        sb->bytenr = superblock_addrs[i];
 
         calc_superblock_checksum(sb);
 
@@ -874,11 +915,11 @@ static NTSTATUS write_superblocks(HANDLE h, btrfs_dev* dev, btrfs_root* chunk_ro
     return STATUS_SUCCESS;
 }
 
-static __inline void win_time_to_unix(LARGE_INTEGER t, BTRFS_TIME* out) {
+static __inline void win_time_to_unix(LARGE_INTEGER t, struct btrfs_timespec* out) {
     ULONGLONG l = t.QuadPart - 116444736000000000;
 
-    out->seconds = l / 10000000;
-    out->nanoseconds = (l % 10000000) * 100;
+    out->sec = l / 10000000;
+    out->nsec = (l % 10000000) * 100;
 }
 
 #ifdef __REACTOS__
@@ -902,53 +943,53 @@ GetSystemTimeAsFileTime(OUT PFILETIME lpFileTime)
 
 static void add_inode_ref(btrfs_root* r, uint64_t inode, uint64_t parent, uint64_t index, const char* name) {
     uint16_t name_len = (uint16_t)strlen(name);
-    INODE_REF* ir = malloc(offsetof(INODE_REF, name[0]) + name_len);
+    struct btrfs_inode_ref* ir = malloc(sizeof(struct btrfs_inode_ref) + name_len);
 
     ir->index = 0;
-    ir->n = name_len;
-    memcpy(ir->name, name, name_len);
+    ir->name_len = name_len;
+    memcpy(&ir[1], name, name_len);
 
-    add_item(r, inode, TYPE_INODE_REF, parent, ir, (uint16_t)offsetof(INODE_REF, name[0]) + ir->n);
+    add_item(r, inode, BTRFS_INODE_REF_KEY, parent, ir, (uint16_t)sizeof(struct btrfs_inode_ref) + ir->name_len);
 
     free(ir);
 }
 
 static void init_fs_tree(btrfs_root* r, uint32_t node_size) {
-    INODE_ITEM ii;
+    struct btrfs_inode_item ii;
     FILETIME filetime;
     LARGE_INTEGER time;
 
-    memset(&ii, 0, sizeof(INODE_ITEM));
+    memset(&ii, 0, sizeof(struct btrfs_inode_item));
 
     ii.generation = 1;
-    ii.st_blocks = node_size;
-    ii.st_nlink = 1;
-    ii.st_mode = 040755;
+    ii.nbytes = node_size;
+    ii.nlink = 1;
+    ii.mode = 040755;
 
     GetSystemTimeAsFileTime(&filetime);
     time.LowPart = filetime.dwLowDateTime;
     time.HighPart = filetime.dwHighDateTime;
 
-    win_time_to_unix(time, &ii.st_atime);
-    ii.st_ctime = ii.st_mtime = ii.st_atime;
+    win_time_to_unix(time, &ii.atime);
+    ii.ctime = ii.mtime = ii.atime;
 
-    add_item(r, SUBVOL_ROOT_INODE, TYPE_INODE_ITEM, 0, &ii, sizeof(INODE_ITEM));
+    add_item(r, BTRFS_FIRST_FREE_OBJECTID, BTRFS_INODE_ITEM_KEY, 0, &ii, sizeof(struct btrfs_inode_item));
 
-    add_inode_ref(r, SUBVOL_ROOT_INODE, SUBVOL_ROOT_INODE, 0, "..");
+    add_inode_ref(r, BTRFS_FIRST_FREE_OBJECTID, BTRFS_FIRST_FREE_OBJECTID, 0, "..");
 }
 
-static void add_block_group_items(LIST_ENTRY* chunks, btrfs_root* extent_root) {
+static void add_block_group_items(LIST_ENTRY* chunks, btrfs_root* root) {
     LIST_ENTRY* le;
 
     le = chunks->Flink;
     while (le != chunks) {
         btrfs_chunk* c = CONTAINING_RECORD(le, btrfs_chunk, list_entry);
-        BLOCK_GROUP_ITEM bgi;
+        struct btrfs_block_group_item bgi;
 
         bgi.used = c->used;
-        bgi.chunk_tree = 0x100;
+        bgi.chunk_objectid = 0x100;
         bgi.flags = c->chunk_item->type;
-        add_item(extent_root, c->offset, TYPE_BLOCK_GROUP_ITEM, c->chunk_item->size, &bgi, sizeof(BLOCK_GROUP_ITEM));
+        add_item(root, c->offset, BTRFS_BLOCK_GROUP_ITEM_KEY, c->chunk_item->length, &bgi, sizeof(struct btrfs_block_group_item));
 
         le = le->Flink;
     }
@@ -1010,61 +1051,103 @@ static bool is_ssd(HANDLE h) {
 static void add_dir_item(btrfs_root* root, uint64_t inode, uint32_t hash, uint64_t key_objid, uint8_t key_type,
                          uint64_t key_offset, uint64_t transid, uint8_t type, const char* name) {
     uint16_t name_len = (uint16_t)strlen(name);
-    DIR_ITEM* di = malloc(offsetof(DIR_ITEM, name[0]) + name_len);
+    struct btrfs_dir_item* di = malloc(sizeof(struct btrfs_dir_item) + name_len);
 
-    di->key.obj_id = key_objid;
-    di->key.obj_type = key_type;
-    di->key.offset = key_offset;
+    di->location.objectid = key_objid;
+    di->location.type = key_type;
+    di->location.offset = key_offset;
     di->transid = transid;
-    di->m = 0;
-    di->n = name_len;
+    di->data_len = 0;
+    di->name_len = name_len;
     di->type = type;
-    memcpy(di->name, name, name_len);
+    memcpy(&di[1], name, name_len);
 
-    add_item(root, inode, TYPE_DIR_ITEM, hash, di, (uint16_t)(offsetof(DIR_ITEM, name[0]) + di->m + di->n));
+    add_item(root, inode, BTRFS_DIR_ITEM_KEY, hash, di, (uint16_t)(sizeof(struct btrfs_dir_item) + di->data_len + di->name_len));
 
     free(di);
 }
 
 static void set_default_subvol(btrfs_root* root_root, uint32_t node_size) {
-    INODE_ITEM ii;
+    struct btrfs_inode_item ii;
     FILETIME filetime;
     LARGE_INTEGER time;
 
     static const char default_subvol[] = "default";
     static const uint32_t default_hash = 0x8dbfc2d2;
 
-    add_inode_ref(root_root, BTRFS_ROOT_FSTREE, BTRFS_ROOT_TREEDIR, 0, default_subvol);
+    add_inode_ref(root_root, BTRFS_FS_TREE_OBJECTID, BTRFS_ROOT_TREE_DIR_OBJECTID, 0, default_subvol);
 
-    memset(&ii, 0, sizeof(INODE_ITEM));
+    memset(&ii, 0, sizeof(struct btrfs_inode_item));
 
     ii.generation = 1;
-    ii.st_blocks = node_size;
-    ii.st_nlink = 1;
-    ii.st_mode = 040755;
+    ii.nbytes = node_size;
+    ii.nlink = 1;
+    ii.mode = 040755;
 
     GetSystemTimeAsFileTime(&filetime);
     time.LowPart = filetime.dwLowDateTime;
     time.HighPart = filetime.dwHighDateTime;
 
-    win_time_to_unix(time, &ii.st_atime);
-    ii.st_ctime = ii.st_mtime = ii.otime = ii.st_atime;
+    win_time_to_unix(time, &ii.atime);
+    ii.ctime = ii.mtime = ii.otime = ii.atime;
 
-    add_item(root_root, BTRFS_ROOT_TREEDIR, TYPE_INODE_ITEM, 0, &ii, sizeof(INODE_ITEM));
+    add_item(root_root, BTRFS_ROOT_TREE_DIR_OBJECTID, BTRFS_INODE_ITEM_KEY, 0, &ii, sizeof(struct btrfs_inode_item));
 
-    add_inode_ref(root_root, BTRFS_ROOT_TREEDIR, BTRFS_ROOT_TREEDIR, 0, "..");
+    add_inode_ref(root_root, BTRFS_ROOT_TREE_DIR_OBJECTID, BTRFS_ROOT_TREE_DIR_OBJECTID, 0, "..");
 
-    add_dir_item(root_root, BTRFS_ROOT_TREEDIR, default_hash, BTRFS_ROOT_FSTREE, TYPE_ROOT_ITEM,
-                 0xffffffffffffffff, 0, BTRFS_TYPE_DIRECTORY, default_subvol);
+    add_dir_item(root_root, BTRFS_ROOT_TREE_DIR_OBJECTID, default_hash, BTRFS_FS_TREE_OBJECTID, BTRFS_ROOT_ITEM_KEY,
+                 0xffffffffffffffff, 0, BTRFS_FT_DIR, default_subvol);
 }
 
-static NTSTATUS write_btrfs(HANDLE h, uint64_t size, PUNICODE_STRING label, uint32_t sector_size, uint32_t node_size, uint64_t incompat_flags) {
+static void populate_free_space_root(LIST_ENTRY* chunks, btrfs_root* free_space_root) {
+    LIST_ENTRY* le;
+
+    le = chunks->Flink;
+    while (le != chunks) {
+        btrfs_chunk* c = CONTAINING_RECORD(le, btrfs_chunk, list_entry);
+        uint64_t last_end = c->offset;
+        LIST_ENTRY* le2;
+        struct btrfs_free_space_info fsi;
+
+        fsi.extent_count = 0;
+        fsi.flags = 0;
+
+        le2 = c->used_space.Flink;
+        while (le2 != &c->used_space) {
+            used_space_extent* use = CONTAINING_RECORD(le2, used_space_extent, list_entry);
+
+            if (use->address > last_end) {
+                add_item(free_space_root, last_end, BTRFS_FREE_SPACE_EXTENT_KEY, use->address - last_end,
+                         NULL, 0);
+                fsi.extent_count++;
+            }
+
+            last_end = use->address + use->size;
+
+            le2 = le2->Flink;
+        }
+
+        if (c->offset + c->chunk_item->length > last_end) {
+            add_item(free_space_root, last_end, BTRFS_FREE_SPACE_EXTENT_KEY, c->offset + c->chunk_item->length - last_end,
+                     NULL, 0);
+            fsi.extent_count++;
+        }
+
+        add_item(free_space_root, c->offset, BTRFS_FREE_SPACE_INFO_KEY, c->chunk_item->length, &fsi, sizeof(fsi));
+
+        le = le->Flink;
+    }
+}
+
+static NTSTATUS write_btrfs(HANDLE h, uint64_t size, PUNICODE_STRING label, uint32_t sector_size, uint32_t node_size, uint64_t incompat_flags,
+                            uint64_t compat_ro_flags) {
     NTSTATUS Status;
     LIST_ENTRY roots, chunks;
-    btrfs_root *root_root, *chunk_root, *extent_root, *dev_root, *fs_root, *reloc_root;
+    btrfs_root *root_root, *chunk_root, *extent_root, *dev_root, *fs_root, *reloc_root,
+               *block_group_root, *free_space_root;
     btrfs_chunk *sys_chunk, *metadata_chunk;
     btrfs_dev dev;
-    BTRFS_UUID fsuuid, chunkuuid;
+    uint8_t fsuuid[BTRFS_UUID_SIZE], chunkuuid[BTRFS_UUID_SIZE];
     bool ssd;
     uint64_t metadata_flags;
 #ifdef __REACTOS__
@@ -1073,61 +1156,76 @@ static NTSTATUS write_btrfs(HANDLE h, uint64_t size, PUNICODE_STRING label, uint
 
 #ifndef __REACTOS__
     srand((unsigned int)time(0));
-    get_uuid(&fsuuid);
-    get_uuid(&chunkuuid);
+    get_uuid(fsuuid);
+    get_uuid(chunkuuid);
 #else
     seed = NtGetTickCount();
-    get_uuid(&fsuuid, &seed);
-    get_uuid(&chunkuuid, &seed);
+    get_uuid(fsuuid, &seed);
+    get_uuid(chunkuuid, &seed);
 #endif
 
     InitializeListHead(&roots);
     InitializeListHead(&chunks);
 
-    root_root = add_root(&roots, BTRFS_ROOT_ROOT);
-    chunk_root = add_root(&roots, BTRFS_ROOT_CHUNK);
-    extent_root = add_root(&roots, BTRFS_ROOT_EXTENT);
-    dev_root = add_root(&roots, BTRFS_ROOT_DEVTREE);
-    add_root(&roots, BTRFS_ROOT_CHECKSUM);
-    fs_root = add_root(&roots, BTRFS_ROOT_FSTREE);
-    reloc_root = add_root(&roots, BTRFS_ROOT_DATA_RELOC);
+    root_root = add_root(&roots, BTRFS_ROOT_TREE_OBJECTID);
+    chunk_root = add_root(&roots, BTRFS_CHUNK_TREE_OBJECTID);
+    extent_root = add_root(&roots, BTRFS_EXTENT_TREE_OBJECTID);
+    dev_root = add_root(&roots, BTRFS_DEV_TREE_OBJECTID);
+    add_root(&roots, BTRFS_CSUM_TREE_OBJECTID);
+    fs_root = add_root(&roots, BTRFS_FS_TREE_OBJECTID);
+    reloc_root = add_root(&roots, BTRFS_DATA_RELOC_TREE_OBJECTID);
+
+    if (compat_ro_flags & BTRFS_FEATURE_COMPAT_RO_FREE_SPACE_TREE)
+        free_space_root = add_root(&roots, BTRFS_FREE_SPACE_TREE_OBJECTID);
+    else
+        free_space_root = NULL;
+
+    if (compat_ro_flags & BTRFS_FEATURE_COMPAT_RO_BLOCK_GROUP_TREE)
+        block_group_root = add_root(&roots, BTRFS_BLOCK_GROUP_TREE_OBJECTID);
+    else
+        block_group_root = NULL;
 
 #ifndef __REACTOS__
-    init_device(&dev, 1, size, &fsuuid, sector_size);
+    init_device(&dev, 1, size, fsuuid, sector_size);
 #else
-    init_device(&dev, 1, size, &fsuuid, sector_size, &seed);
+    init_device(&dev, 1, size, fsuuid, sector_size, &seed);
 #endif
 
     ssd = is_ssd(h);
 
-    sys_chunk = add_chunk(&chunks, BLOCK_FLAG_SYSTEM | (ssd ? 0 : BLOCK_FLAG_DUPLICATE), chunk_root, &dev, dev_root, &chunkuuid, sector_size);
+    sys_chunk = add_chunk(&chunks, BTRFS_BLOCK_GROUP_SYSTEM | (ssd ? 0 : BTRFS_BLOCK_GROUP_DUP),
+                          chunk_root, &dev, dev_root, chunkuuid, sector_size);
     if (!sys_chunk)
         return STATUS_INTERNAL_ERROR;
 
-    metadata_flags = BLOCK_FLAG_METADATA;
+    metadata_flags = BTRFS_BLOCK_GROUP_METADATA;
 
-    if (!ssd && !(incompat_flags & BTRFS_INCOMPAT_FLAGS_MIXED_GROUPS))
-        metadata_flags |= BLOCK_FLAG_DUPLICATE;
+    if (!ssd && !(incompat_flags & BTRFS_FEATURE_INCOMPAT_MIXED_GROUPS))
+        metadata_flags |= BTRFS_BLOCK_GROUP_DUP;
 
-    if (incompat_flags & BTRFS_INCOMPAT_FLAGS_MIXED_GROUPS)
-        metadata_flags |= BLOCK_FLAG_DATA;
+    if (incompat_flags & BTRFS_FEATURE_INCOMPAT_MIXED_GROUPS)
+        metadata_flags |= BTRFS_BLOCK_GROUP_DATA;
 
-    metadata_chunk = add_chunk(&chunks, metadata_flags, chunk_root, &dev, dev_root, &chunkuuid, sector_size);
+    metadata_chunk = add_chunk(&chunks, metadata_flags, chunk_root, &dev, dev_root,
+                               chunkuuid, sector_size);
     if (!metadata_chunk)
         return STATUS_INTERNAL_ERROR;
 
-    add_item(chunk_root, 1, TYPE_DEV_ITEM, dev.dev_item.dev_id, &dev.dev_item, sizeof(DEV_ITEM));
+    add_item(chunk_root, 1, BTRFS_DEV_ITEM_KEY, dev.dev_item.devid, &dev.dev_item, sizeof(struct btrfs_dev_item));
 
     set_default_subvol(root_root, node_size);
 
     init_fs_tree(fs_root, node_size);
     init_fs_tree(reloc_root, node_size);
 
-    assign_addresses(&roots, sys_chunk, metadata_chunk, node_size, root_root, extent_root, incompat_flags & BTRFS_INCOMPAT_FLAGS_SKINNY_METADATA);
+    assign_addresses(&roots, sys_chunk, metadata_chunk, node_size, root_root, extent_root, incompat_flags & BTRFS_FEATURE_INCOMPAT_SKINNY_METADATA);
 
-    add_block_group_items(&chunks, extent_root);
+    add_block_group_items(&chunks, block_group_root ? block_group_root : extent_root);
 
-    Status = write_roots(h, &roots, node_size, &fsuuid, &chunkuuid);
+    if (free_space_root)
+        populate_free_space_root(&chunks, free_space_root);
+
+    Status = write_roots(h, &roots, node_size, fsuuid, chunkuuid);
     if (!NT_SUCCESS(Status))
         return Status;
 
@@ -1135,7 +1233,9 @@ static NTSTATUS write_btrfs(HANDLE h, uint64_t size, PUNICODE_STRING label, uint
     if (!NT_SUCCESS(Status))
         return Status;
 
-    Status = write_superblocks(h, &dev, chunk_root, root_root, extent_root, sys_chunk, node_size, &fsuuid, sector_size, label, incompat_flags);
+    Status = write_superblocks(h, &dev, chunk_root, root_root, extent_root, sys_chunk,
+                               node_size, fsuuid, sector_size, label,
+                               incompat_flags, compat_ro_flags);
     if (!NT_SUCCESS(Status))
         return Status;
 
@@ -1145,7 +1245,7 @@ static NTSTATUS write_btrfs(HANDLE h, uint64_t size, PUNICODE_STRING label, uint
     return STATUS_SUCCESS;
 }
 
-static bool look_for_device(btrfs_filesystem* bfs, BTRFS_UUID* devuuid) {
+static bool look_for_device(btrfs_filesystem* bfs, uint8_t* devuuid) {
     uint32_t i;
     btrfs_filesystem_device* dev;
 
@@ -1155,39 +1255,39 @@ static bool look_for_device(btrfs_filesystem* bfs, BTRFS_UUID* devuuid) {
         else
             dev = (btrfs_filesystem_device*)((uint8_t*)dev + offsetof(btrfs_filesystem_device, name[0]) + dev->name_length);
 
-        if (RtlCompareMemory(&dev->uuid, devuuid, sizeof(BTRFS_UUID)) == sizeof(BTRFS_UUID))
+        if (RtlCompareMemory(&dev->uuid, devuuid, BTRFS_UUID_SIZE) == BTRFS_UUID_SIZE)
             return true;
     }
 
     return false;
 }
 
-static bool check_superblock_checksum(superblock* sb) {
+static bool check_superblock_checksum(struct btrfs_super_block* sb) {
     switch (sb->csum_type) {
-        case CSUM_TYPE_CRC32C: {
-            uint32_t crc32 = ~calc_crc32c(0xffffffff, (uint8_t*)&sb->uuid, (ULONG)sizeof(superblock) - sizeof(sb->checksum));
+        case BTRFS_CSUM_TYPE_CRC32: {
+            uint32_t crc32 = ~calc_crc32c(0xffffffff, (uint8_t*)&sb->fsid, (ULONG)sizeof(struct btrfs_super_block) - sizeof(sb->csum));
 
             return crc32 == *(uint32_t*)sb;
         }
 
-        case CSUM_TYPE_XXHASH: {
-            uint64_t hash = XXH64(&sb->uuid, sizeof(superblock) - sizeof(sb->checksum), 0);
+        case BTRFS_CSUM_TYPE_XXHASH: {
+            uint64_t hash = XXH64(&sb->fsid, sizeof(struct btrfs_super_block) - sizeof(sb->csum), 0);
 
             return hash == *(uint64_t*)sb;
         }
 
-        case CSUM_TYPE_SHA256: {
+        case BTRFS_CSUM_TYPE_SHA256: {
             uint8_t hash[SHA256_HASH_SIZE];
 
-            calc_sha256(hash, &sb->uuid, sizeof(superblock) - sizeof(sb->checksum));
+            calc_sha256(hash, &sb->fsid, sizeof(struct btrfs_super_block) - sizeof(sb->csum));
 
             return !memcmp(hash, sb, SHA256_HASH_SIZE);
         }
 
-        case CSUM_TYPE_BLAKE2: {
+        case BTRFS_CSUM_TYPE_BLAKE2: {
             uint8_t hash[BLAKE2_HASH_SIZE];
 
-            blake2b(hash, sizeof(hash), &sb->uuid, sizeof(superblock) - sizeof(sb->checksum));
+            blake2b(hash, sizeof(hash), &sb->fsid, sizeof(struct btrfs_super_block) - sizeof(sb->csum));
 
             return !memcmp(hash, sb, BLAKE2_HASH_SIZE);
         }
@@ -1199,11 +1299,11 @@ static bool check_superblock_checksum(superblock* sb) {
 
 static bool is_mounted_multi_device(HANDLE h, uint32_t sector_size) {
     NTSTATUS Status;
-    superblock* sb;
+    struct btrfs_super_block* sb;
     ULONG sblen;
     IO_STATUS_BLOCK iosb;
     LARGE_INTEGER off;
-    BTRFS_UUID fsuuid, devuuid;
+    uint8_t fsuuid[BTRFS_UUID_SIZE], devuuid[BTRFS_UUID_SIZE];
     UNICODE_STRING us;
     OBJECT_ATTRIBUTES atts;
     HANDLE h2;
@@ -1237,8 +1337,8 @@ static bool is_mounted_multi_device(HANDLE h, uint32_t sector_size) {
         return false;
     }
 
-    fsuuid = sb->uuid;
-    devuuid = sb->dev_item.device_uuid;
+    memcpy(fsuuid, sb->fsid, BTRFS_UUID_SIZE);
+    memcpy(devuuid, sb->dev_item.uuid, BTRFS_UUID_SIZE);
 
     free(sb);
 
@@ -1269,11 +1369,11 @@ static bool is_mounted_multi_device(HANDLE h, uint32_t sector_size) {
     if (bfs->num_devices != 0) {
         bfs2 = bfs;
         while (true) {
-            if (RtlCompareMemory(&bfs2->uuid, &fsuuid, sizeof(BTRFS_UUID)) == sizeof(BTRFS_UUID)) {
+            if (RtlCompareMemory(&bfs2->uuid, &fsuuid, BTRFS_UUID_SIZE) == BTRFS_UUID_SIZE) {
                 if (bfs2->num_devices == 1)
                     ret = false;
                 else
-                    ret = look_for_device(bfs2, &devuuid);
+                    ret = look_for_device(bfs2, devuuid);
 
                 goto end;
             }
@@ -1315,7 +1415,8 @@ static bool is_power_of_two(ULONG i) {
     return ((i != 0) && !(i & (i - 1)));
 }
 
-#if !defined(__REACTOS__) && (defined(_X86_) || defined(_AMD64_))
+#ifndef __REACTOS__
+#if defined(_X86_) || defined(_AMD64_)
 static void check_cpu() {
     unsigned int cpuInfo[4];
     bool have_sse42;
@@ -1331,6 +1432,7 @@ static void check_cpu() {
     if (have_sse42)
         calc_crc32c = calc_crc32c_hw;
 }
+#endif
 #endif
 
 static NTSTATUS NTAPI FormatEx2(PUNICODE_STRING DriveRoot, FMIFS_MEDIA_FLAG MediaFlag, PUNICODE_STRING Label,
@@ -1349,7 +1451,7 @@ static NTSTATUS NTAPI FormatEx2(PUNICODE_STRING DriveRoot, FMIFS_MEDIA_FLAG Medi
     TOKEN_PRIVILEGES tp;
     LUID luid;
 #endif
-    uint64_t incompat_flags;
+    uint64_t incompat_flags, compat_ro_flags;
     UNICODE_STRING empty_label;
 
     static WCHAR btrfs[] = L"\\Btrfs";
@@ -1379,8 +1481,8 @@ static NTSTATUS NTAPI FormatEx2(PUNICODE_STRING DriveRoot, FMIFS_MEDIA_FLAG Medi
 #endif
 #endif
 
-    if (def_csum_type != CSUM_TYPE_CRC32C && def_csum_type != CSUM_TYPE_XXHASH && def_csum_type != CSUM_TYPE_SHA256 &&
-        def_csum_type != CSUM_TYPE_BLAKE2)
+    if (def_csum_type != BTRFS_CSUM_TYPE_CRC32 && def_csum_type != BTRFS_CSUM_TYPE_XXHASH && def_csum_type != BTRFS_CSUM_TYPE_SHA256 &&
+        def_csum_type != BTRFS_CSUM_TYPE_BLAKE2)
         return STATUS_INVALID_PARAMETER;
 
     InitializeObjectAttributes(&attr, DriveRoot, OBJ_CASE_INSENSITIVE, NULL, NULL);
@@ -1446,7 +1548,9 @@ static NTSTATUS NTAPI FormatEx2(PUNICODE_STRING DriveRoot, FMIFS_MEDIA_FLAG Medi
     do_full_trim(h);
 
     incompat_flags = def_incompat_flags;
-    incompat_flags |= BTRFS_INCOMPAT_FLAGS_MIXED_BACKREF | BTRFS_INCOMPAT_FLAGS_BIG_METADATA;
+    incompat_flags |= BTRFS_FEATURE_INCOMPAT_MIXED_BACKREF | BTRFS_FEATURE_INCOMPAT_BIG_METADATA;
+
+    compat_ro_flags = def_compat_ro_flags;
 
     if (!Label) {
         empty_label.Buffer = NULL;
@@ -1454,7 +1558,8 @@ static NTSTATUS NTAPI FormatEx2(PUNICODE_STRING DriveRoot, FMIFS_MEDIA_FLAG Medi
         Label = &empty_label;
     }
 
-    Status = write_btrfs(h, gli.Length.QuadPart, Label, sector_size, node_size, incompat_flags);
+    Status = write_btrfs(h, gli.Length.QuadPart, Label, sector_size, node_size, incompat_flags,
+                         compat_ro_flags);
 
     NtFsControlFile(h, NULL, NULL, NULL, &iosb, FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0);
 
@@ -1565,6 +1670,10 @@ void __stdcall SetSizes(ULONG sector, ULONG node) {
 
 void __stdcall SetIncompatFlags(uint64_t incompat_flags) {
     def_incompat_flags = incompat_flags;
+}
+
+void __stdcall SetCompatROFlags(uint64_t compat_ro_flags) {
+    def_compat_ro_flags = compat_ro_flags;
 }
 
 void __stdcall SetCsumType(uint16_t csum_type) {

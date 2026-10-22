@@ -23,8 +23,8 @@
 typedef struct {
     uint64_t address;
     uint64_t new_address;
-    tree_header* data;
-    EXTENT_ITEM* ei;
+    struct btrfs_header* data;
+    struct btrfs_extent_item* ei;
     tree* t;
     bool system;
     LIST_ENTRY refs;
@@ -34,12 +34,7 @@ typedef struct {
 typedef struct {
     uint8_t type;
     uint64_t hash;
-
-    union {
-        TREE_BLOCK_REF tbr;
-        SHARED_BLOCK_REF sbr;
-    };
-
+    uint64_t offset;
     metadata_reloc* parent;
     bool top;
     LIST_ENTRY list_entry;
@@ -50,7 +45,7 @@ typedef struct {
     uint64_t size;
     uint64_t new_address;
     chunk* newchunk;
-    EXTENT_ITEM* ei;
+    struct btrfs_extent_item* ei;
     LIST_ENTRY refs;
     LIST_ENTRY list_entry;
 } data_reloc;
@@ -60,8 +55,12 @@ typedef struct {
     uint64_t hash;
 
     union {
-        EXTENT_DATA_REF edr;
-        SHARED_DATA_REF sdr;
+        struct btrfs_extent_data_ref edr;
+
+        struct {
+            uint64_t offset;
+            struct btrfs_shared_data_ref sdr;
+        };
     };
 
     metadata_reloc* parent;
@@ -74,10 +73,17 @@ static NTSTATUS add_metadata_reloc(_Requires_exclusive_lock_held_(_Curr_->tree_l
                                    bool skinny, metadata_reloc** mr2, chunk* c, LIST_ENTRY* rollback) {
     NTSTATUS Status;
     metadata_reloc* mr;
-    EXTENT_ITEM* ei;
+    struct btrfs_extent_item* ei;
     uint16_t len;
     uint64_t inline_rc;
     uint8_t* ptr;
+
+    if (!skinny && tp->item->size < sizeof(struct btrfs_extent_item) + sizeof(struct btrfs_tree_block_info)) {
+        ERR("(%I64x,%x,%I64x) was %u bytes, expected at least %Iu\n",
+            tp->item->key.objectid, tp->item->key.type, tp->item->key.offset,
+            tp->item->size, sizeof(struct btrfs_extent_item) + sizeof(struct btrfs_tree_block_info));
+        return STATUS_INTERNAL_ERROR;
+    }
 
     mr = ExAllocatePoolWithTag(PagedPool, sizeof(metadata_reloc), ALLOC_TAG);
     if (!mr) {
@@ -85,129 +91,139 @@ static NTSTATUS add_metadata_reloc(_Requires_exclusive_lock_held_(_Curr_->tree_l
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    mr->address = tp->item->key.obj_id;
+    mr->address = tp->item->key.objectid;
     mr->data = NULL;
-    mr->ei = (EXTENT_ITEM*)tp->item->data;
+    mr->ei = (struct btrfs_extent_item*)tp->item->data;
     mr->system = false;
     InitializeListHead(&mr->refs);
 
     Status = delete_tree_item(Vcb, tp);
     if (!NT_SUCCESS(Status)) {
         ERR("delete_tree_item returned %08lx\n", Status);
-        ExFreePool(mr);
-        return Status;
+        goto fail;
     }
 
     if (!c)
-        c = get_chunk_from_address(Vcb, tp->item->key.obj_id);
+        c = get_chunk_from_address(Vcb, tp->item->key.objectid);
 
     if (c) {
         acquire_chunk_lock(c, Vcb);
 
-        c->used -= Vcb->superblock.node_size;
+        c->used -= Vcb->superblock.nodesize;
 
-        space_list_add(c, tp->item->key.obj_id, Vcb->superblock.node_size, rollback);
+        Status = space_list_add(c, tp->item->key.objectid,
+                                Vcb->superblock.nodesize, rollback);
+        if (!NT_SUCCESS(Status)) {
+            release_chunk_lock(c, Vcb);
+            goto fail;
+        }
 
         release_chunk_lock(c, Vcb);
     }
 
-    ei = (EXTENT_ITEM*)tp->item->data;
+    ei = (struct btrfs_extent_item*)tp->item->data;
     inline_rc = 0;
 
-    len = tp->item->size - sizeof(EXTENT_ITEM);
-    ptr = (uint8_t*)tp->item->data + sizeof(EXTENT_ITEM);
+    len = tp->item->size - sizeof(struct btrfs_extent_item);
+    ptr = (uint8_t*)tp->item->data + sizeof(struct btrfs_extent_item);
     if (!skinny) {
-        len -= sizeof(EXTENT_ITEM2);
-        ptr += sizeof(EXTENT_ITEM2);
+        len -= sizeof(struct btrfs_tree_block_info);
+        ptr += sizeof(struct btrfs_tree_block_info);
     }
 
     while (len > 0) {
-        uint8_t secttype = *ptr;
-        uint16_t sectlen = secttype == TYPE_TREE_BLOCK_REF ? sizeof(TREE_BLOCK_REF) : (secttype == TYPE_SHARED_BLOCK_REF ? sizeof(SHARED_BLOCK_REF) : 0);
+        struct btrfs_extent_inline_ref* eir = (struct btrfs_extent_inline_ref*)ptr;
         metadata_reloc_ref* ref;
 
-        len--;
-
-        if (sectlen > len) {
-            ERR("(%I64x,%x,%I64x): %x bytes left, expecting at least %x\n", tp->item->key.obj_id, tp->item->key.obj_type, tp->item->key.offset, len, sectlen);
-            return STATUS_INTERNAL_ERROR;
+        if (len < sizeof(struct btrfs_extent_inline_ref)) {
+            ERR("(%I64x,%x,%I64x) was truncated\n", tp->item->key.objectid,
+                tp->item->key.type, tp->item->key.offset);
+            Status = STATUS_INTERNAL_ERROR;
+            goto fail;
         }
 
-        if (sectlen == 0) {
-            ERR("(%I64x,%x,%I64x): unrecognized extent type %x\n", tp->item->key.obj_id, tp->item->key.obj_type, tp->item->key.offset, secttype);
-            return STATUS_INTERNAL_ERROR;
-        }
+        ptr += sizeof(struct btrfs_extent_inline_ref);
+        len -= sizeof(struct btrfs_extent_inline_ref);
 
         ref = ExAllocatePoolWithTag(PagedPool, sizeof(metadata_reloc_ref), ALLOC_TAG);
         if (!ref) {
             ERR("out of memory\n");
-            return STATUS_INSUFFICIENT_RESOURCES;
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            goto fail;
         }
 
-        if (secttype == TYPE_TREE_BLOCK_REF) {
-            ref->type = TYPE_TREE_BLOCK_REF;
-            RtlCopyMemory(&ref->tbr, ptr + sizeof(uint8_t), sizeof(TREE_BLOCK_REF));
-            inline_rc++;
-        } else if (secttype == TYPE_SHARED_BLOCK_REF) {
-            ref->type = TYPE_SHARED_BLOCK_REF;
-            RtlCopyMemory(&ref->sbr, ptr + sizeof(uint8_t), sizeof(SHARED_BLOCK_REF));
-            inline_rc++;
-        } else {
-            ERR("unexpected tree type %x\n", secttype);
-            ExFreePool(ref);
-            return STATUS_INTERNAL_ERROR;
+        switch (eir->type) {
+            case BTRFS_TREE_BLOCK_REF_KEY:
+            case BTRFS_SHARED_BLOCK_REF_KEY:
+                ref->type = eir->type;
+                ref->offset = eir->offset;
+                inline_rc++;
+                break;
+
+            default:
+                ERR("unexpected tree type %x\n", eir->type);
+                ExFreePool(ref);
+                Status = STATUS_INTERNAL_ERROR;
+                goto fail;
         }
 
         ref->parent = NULL;
         ref->top = false;
         InsertTailList(&mr->refs, &ref->list_entry);
-
-        len -= sectlen;
-        ptr += sizeof(uint8_t) + sectlen;
     }
 
-    if (inline_rc < ei->refcount) { // look for non-inline entries
+    if (inline_rc < ei->refs) { // look for non-inline entries
         traverse_ptr tp2 = *tp, next_tp;
 
         while (find_next_item(Vcb, &tp2, &next_tp, false, NULL)) {
             tp2 = next_tp;
 
-            if (tp2.item->key.obj_id == tp->item->key.obj_id) {
-                if (tp2.item->key.obj_type == TYPE_TREE_BLOCK_REF) {
-                    metadata_reloc_ref* ref = ExAllocatePoolWithTag(PagedPool, sizeof(metadata_reloc_ref), ALLOC_TAG);
-                    if (!ref) {
-                        ERR("out of memory\n");
-                        return STATUS_INSUFFICIENT_RESOURCES;
+            if (tp2.item->key.objectid == tp->item->key.objectid) {
+                switch (tp2.item->key.type) {
+                    case BTRFS_TREE_BLOCK_REF_KEY: {
+                        metadata_reloc_ref* ref = ExAllocatePoolWithTag(PagedPool, sizeof(metadata_reloc_ref), ALLOC_TAG);
+                        if (!ref) {
+                            ERR("out of memory\n");
+                            Status = STATUS_INSUFFICIENT_RESOURCES;
+                            goto fail;
+                        }
+
+                        ref->type = BTRFS_TREE_BLOCK_REF_KEY;
+                        ref->offset = tp2.item->key.offset;
+                        ref->parent = NULL;
+                        ref->top = false;
+                        InsertTailList(&mr->refs, &ref->list_entry);
+
+                        Status = delete_tree_item(Vcb, &tp2);
+                        if (!NT_SUCCESS(Status)) {
+                            ERR("delete_tree_item returned %08lx\n", Status);
+                            goto fail;
+                        }
+
+                        break;
                     }
 
-                    ref->type = TYPE_TREE_BLOCK_REF;
-                    ref->tbr.offset = tp2.item->key.offset;
-                    ref->parent = NULL;
-                    ref->top = false;
-                    InsertTailList(&mr->refs, &ref->list_entry);
+                    case BTRFS_SHARED_BLOCK_REF_KEY: {
+                        metadata_reloc_ref* ref = ExAllocatePoolWithTag(PagedPool, sizeof(metadata_reloc_ref), ALLOC_TAG);
+                        if (!ref) {
+                            ERR("out of memory\n");
+                            Status = STATUS_INSUFFICIENT_RESOURCES;
+                            goto fail;
+                        }
 
-                    Status = delete_tree_item(Vcb, &tp2);
-                    if (!NT_SUCCESS(Status)) {
-                        ERR("delete_tree_item returned %08lx\n", Status);
-                        return Status;
-                    }
-                } else if (tp2.item->key.obj_type == TYPE_SHARED_BLOCK_REF) {
-                    metadata_reloc_ref* ref = ExAllocatePoolWithTag(PagedPool, sizeof(metadata_reloc_ref), ALLOC_TAG);
-                    if (!ref) {
-                        ERR("out of memory\n");
-                        return STATUS_INSUFFICIENT_RESOURCES;
-                    }
+                        ref->type = BTRFS_SHARED_BLOCK_REF_KEY;
+                        ref->offset = tp2.item->key.offset;
+                        ref->parent = NULL;
+                        ref->top = false;
+                        InsertTailList(&mr->refs, &ref->list_entry);
 
-                    ref->type = TYPE_SHARED_BLOCK_REF;
-                    ref->sbr.offset = tp2.item->key.offset;
-                    ref->parent = NULL;
-                    ref->top = false;
-                    InsertTailList(&mr->refs, &ref->list_entry);
+                        Status = delete_tree_item(Vcb, &tp2);
+                        if (!NT_SUCCESS(Status)) {
+                            ERR("delete_tree_item returned %08lx\n", Status);
+                            goto fail;
+                        }
 
-                    Status = delete_tree_item(Vcb, &tp2);
-                    if (!NT_SUCCESS(Status)) {
-                        ERR("delete_tree_item returned %08lx\n", Status);
-                        return Status;
+                        break;
                     }
                 }
             } else
@@ -221,12 +237,24 @@ static NTSTATUS add_metadata_reloc(_Requires_exclusive_lock_held_(_Curr_->tree_l
         *mr2 = mr;
 
     return STATUS_SUCCESS;
+
+fail:
+    while (!IsListEmpty(&mr->refs)) {
+        metadata_reloc_ref* ref = CONTAINING_RECORD(RemoveHeadList(&mr->refs),
+                                                    metadata_reloc_ref, list_entry);
+
+        ExFreePool(ref);
+    }
+
+    ExFreePool(mr);
+
+    return Status;
 }
 
 static NTSTATUS add_metadata_reloc_parent(_Requires_exclusive_lock_held_(_Curr_->tree_lock) device_extension* Vcb, LIST_ENTRY* items,
                                           uint64_t address, metadata_reloc** mr2, LIST_ENTRY* rollback) {
     LIST_ENTRY* le;
-    KEY searchkey;
+    struct btrfs_key searchkey;
     traverse_ptr tp;
     bool skinny = false;
     NTSTATUS Status;
@@ -243,8 +271,8 @@ static NTSTATUS add_metadata_reloc_parent(_Requires_exclusive_lock_held_(_Curr_-
         le = le->Flink;
     }
 
-    searchkey.obj_id = address;
-    searchkey.obj_type = TYPE_METADATA_ITEM;
+    searchkey.objectid = address;
+    searchkey.type = BTRFS_METADATA_ITEM_KEY;
     searchkey.offset = 0xffffffffffffffff;
 
     Status = find_item(Vcb, Vcb->extent_root, &tp, &searchkey, false, NULL);
@@ -253,13 +281,13 @@ static NTSTATUS add_metadata_reloc_parent(_Requires_exclusive_lock_held_(_Curr_-
         return Status;
     }
 
-    if (tp.item->key.obj_id == address && tp.item->key.obj_type == TYPE_METADATA_ITEM && tp.item->size >= sizeof(EXTENT_ITEM))
+    if (tp.item->key.objectid == address && tp.item->key.type == BTRFS_METADATA_ITEM_KEY && tp.item->size >= sizeof(struct btrfs_extent_item))
         skinny = true;
-    else if (tp.item->key.obj_id == address && tp.item->key.obj_type == TYPE_EXTENT_ITEM && tp.item->key.offset == Vcb->superblock.node_size &&
-             tp.item->size >= sizeof(EXTENT_ITEM)) {
-        EXTENT_ITEM* ei = (EXTENT_ITEM*)tp.item->data;
+    else if (tp.item->key.objectid == address && tp.item->key.type == BTRFS_EXTENT_ITEM_KEY && tp.item->key.offset == Vcb->superblock.nodesize &&
+             tp.item->size >= sizeof(struct btrfs_extent_item)) {
+        struct btrfs_extent_item* ei = (struct btrfs_extent_item*)tp.item->data;
 
-        if (!(ei->flags & EXTENT_ITEM_TREE_BLOCK)) {
+        if (!(ei->flags & BTRFS_EXTENT_FLAG_TREE_BLOCK)) {
             ERR("EXTENT_ITEM for %I64x found, but tree flag not set\n", address);
             return STATUS_INTERNAL_ERROR;
         }
@@ -291,9 +319,9 @@ static void sort_metadata_reloc_refs(metadata_reloc* mr) {
         metadata_reloc_ref* ref = CONTAINING_RECORD(RemoveHeadList(&mr->refs), metadata_reloc_ref, list_entry);
         bool inserted = false;
 
-        if (ref->type == TYPE_TREE_BLOCK_REF)
-            ref->hash = ref->tbr.offset;
-        else if (ref->type == TYPE_SHARED_BLOCK_REF)
+        if (ref->type == BTRFS_TREE_BLOCK_REF_KEY)
+            ref->hash = ref->offset;
+        else if (ref->type == BTRFS_SHARED_BLOCK_REF_KEY)
             ref->hash = ref->parent->new_address;
 
         le = newlist.Flink;
@@ -326,33 +354,27 @@ static NTSTATUS add_metadata_reloc_extent_item(_Requires_exclusive_lock_held_(_C
     uint16_t inline_len;
     bool all_inline = true;
     metadata_reloc_ref* first_noninline = NULL;
-    EXTENT_ITEM* ei;
+    struct btrfs_extent_item* ei;
     uint8_t* ptr;
 
-    inline_len = sizeof(EXTENT_ITEM);
-    if (!(Vcb->superblock.incompat_flags & BTRFS_INCOMPAT_FLAGS_SKINNY_METADATA))
-        inline_len += sizeof(EXTENT_ITEM2);
+    inline_len = sizeof(struct btrfs_extent_item);
+    if (!(Vcb->superblock.incompat_flags & BTRFS_FEATURE_INCOMPAT_SKINNY_METADATA))
+        inline_len += sizeof(struct btrfs_tree_block_info);
 
     sort_metadata_reloc_refs(mr);
 
     le = mr->refs.Flink;
     while (le != &mr->refs) {
         metadata_reloc_ref* ref = CONTAINING_RECORD(le, metadata_reloc_ref, list_entry);
-        uint16_t extlen = 0;
 
         rc++;
 
-        if (ref->type == TYPE_TREE_BLOCK_REF)
-            extlen += sizeof(TREE_BLOCK_REF);
-        else if (ref->type == TYPE_SHARED_BLOCK_REF)
-            extlen += sizeof(SHARED_BLOCK_REF);
-
         if (all_inline) {
-            if ((ULONG)(inline_len + 1 + extlen) > (Vcb->superblock.node_size >> 2)) {
+            if ((ULONG)(inline_len + sizeof(struct btrfs_extent_inline_ref)) > (Vcb->superblock.nodesize >> 2)) {
                 all_inline = false;
                 first_noninline = ref;
             } else
-                inline_len += extlen + 1;
+                inline_len += sizeof(struct btrfs_extent_inline_ref);
         }
 
         le = le->Flink;
@@ -364,51 +386,46 @@ static NTSTATUS add_metadata_reloc_extent_item(_Requires_exclusive_lock_held_(_C
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    ei->refcount = rc;
+    ei->refs = rc;
     ei->generation = mr->ei->generation;
     ei->flags = mr->ei->flags;
     ptr = (uint8_t*)&ei[1];
 
-    if (!(Vcb->superblock.incompat_flags & BTRFS_INCOMPAT_FLAGS_SKINNY_METADATA)) {
-        EXTENT_ITEM2* ei2 = (EXTENT_ITEM2*)ptr;
+    if (!(Vcb->superblock.incompat_flags & BTRFS_FEATURE_INCOMPAT_SKINNY_METADATA)) {
+        struct btrfs_tree_block_info* ei2 = (struct btrfs_tree_block_info*)ptr;
 
-        ei2->firstitem = *(KEY*)&mr->data[1];
+        ei2->key = *(struct btrfs_key*)&mr->data[1];
         ei2->level = mr->data->level;
 
-        ptr += sizeof(EXTENT_ITEM2);
+        ptr += sizeof(struct btrfs_tree_block_info);
     }
 
     le = mr->refs.Flink;
     while (le != &mr->refs) {
+        struct btrfs_extent_inline_ref* eir;
+
         metadata_reloc_ref* ref = CONTAINING_RECORD(le, metadata_reloc_ref, list_entry);
 
         if (ref == first_noninline)
             break;
 
-        *ptr = ref->type;
-        ptr++;
+        eir = (struct btrfs_extent_inline_ref*)ptr;
+        ptr += sizeof(struct btrfs_extent_inline_ref);
 
-        if (ref->type == TYPE_TREE_BLOCK_REF) {
-            TREE_BLOCK_REF* tbr = (TREE_BLOCK_REF*)ptr;
+        eir->type = ref->type;
 
-            tbr->offset = ref->tbr.offset;
-
-            ptr += sizeof(TREE_BLOCK_REF);
-        } else if (ref->type == TYPE_SHARED_BLOCK_REF) {
-            SHARED_BLOCK_REF* sbr = (SHARED_BLOCK_REF*)ptr;
-
-            sbr->offset = ref->parent->new_address;
-
-            ptr += sizeof(SHARED_BLOCK_REF);
-        }
+        if (ref->type == BTRFS_TREE_BLOCK_REF_KEY)
+            eir->offset = ref->offset;
+        else if (ref->type == BTRFS_SHARED_BLOCK_REF_KEY)
+            eir->offset = ref->parent->new_address;
 
         le = le->Flink;
     }
 
-    if (Vcb->superblock.incompat_flags & BTRFS_INCOMPAT_FLAGS_SKINNY_METADATA)
-        Status = insert_tree_item(Vcb, Vcb->extent_root, mr->new_address, TYPE_METADATA_ITEM, mr->data->level, ei, inline_len, NULL, NULL);
+    if (Vcb->superblock.incompat_flags & BTRFS_FEATURE_INCOMPAT_SKINNY_METADATA)
+        Status = insert_tree_item(Vcb, Vcb->extent_root, mr->new_address, BTRFS_METADATA_ITEM_KEY, mr->data->level, ei, inline_len, NULL, NULL);
     else
-        Status = insert_tree_item(Vcb, Vcb->extent_root, mr->new_address, TYPE_EXTENT_ITEM, Vcb->superblock.node_size, ei, inline_len, NULL, NULL);
+        Status = insert_tree_item(Vcb, Vcb->extent_root, mr->new_address, BTRFS_EXTENT_ITEM_KEY, Vcb->superblock.nodesize, ei, inline_len, NULL, NULL);
 
     if (!NT_SUCCESS(Status)) {
         ERR("insert_tree_item returned %08lx\n", Status);
@@ -422,14 +439,18 @@ static NTSTATUS add_metadata_reloc_extent_item(_Requires_exclusive_lock_held_(_C
         while (le != &mr->refs) {
             metadata_reloc_ref* ref = CONTAINING_RECORD(le, metadata_reloc_ref, list_entry);
 
-            if (ref->type == TYPE_TREE_BLOCK_REF) {
-                Status = insert_tree_item(Vcb, Vcb->extent_root, mr->new_address, TYPE_TREE_BLOCK_REF, ref->tbr.offset, NULL, 0, NULL, NULL);
+            if (ref->type == BTRFS_TREE_BLOCK_REF_KEY) {
+                Status = insert_tree_item(Vcb, Vcb->extent_root, mr->new_address,
+                                          BTRFS_TREE_BLOCK_REF_KEY, ref->offset, NULL,
+                                          0, NULL, NULL);
                 if (!NT_SUCCESS(Status)) {
                     ERR("insert_tree_item returned %08lx\n", Status);
                     return Status;
                 }
-            } else if (ref->type == TYPE_SHARED_BLOCK_REF) {
-                Status = insert_tree_item(Vcb, Vcb->extent_root, mr->new_address, TYPE_SHARED_BLOCK_REF, ref->parent->new_address, NULL, 0, NULL, NULL);
+            } else if (ref->type == BTRFS_SHARED_BLOCK_REF_KEY) {
+                Status = insert_tree_item(Vcb, Vcb->extent_root, mr->new_address,
+                                          BTRFS_SHARED_BLOCK_REF_KEY, ref->parent->new_address,
+                                          NULL, 0, NULL, NULL);
                 if (!NT_SUCCESS(Status)) {
                     ERR("insert_tree_item returned %08lx\n", Status);
                     return Status;
@@ -440,72 +461,63 @@ static NTSTATUS add_metadata_reloc_extent_item(_Requires_exclusive_lock_held_(_C
         }
     }
 
-    if (ei->flags & EXTENT_ITEM_SHARED_BACKREFS || mr->data->flags & HEADER_FLAG_SHARED_BACKREF || !(mr->data->flags & HEADER_FLAG_MIXED_BACKREF)) {
+    if (ei->flags & BTRFS_BLOCK_FLAG_FULL_BACKREF || mr->data->flags & BTRFS_HEADER_FLAG_RELOC || !(mr->data->flags & BTRFS_BACKREF_REV_MASK)) {
         if (mr->data->level > 0) {
             uint16_t i;
-            internal_node* in = (internal_node*)&mr->data[1];
+            struct btrfs_key_ptr* in = (struct btrfs_key_ptr*)&mr->data[1];
 
-            for (i = 0; i < mr->data->num_items; i++) {
-                uint64_t sbrrc = find_extent_shared_tree_refcount(Vcb, in[i].address, mr->address, NULL);
+            for (i = 0; i < mr->data->nritems; i++) {
+                uint64_t sbrrc = find_extent_shared_tree_refcount(Vcb, in[i].blockptr, mr->address, NULL);
 
                 if (sbrrc > 0) {
-                    SHARED_BLOCK_REF sbr;
-
-                    sbr.offset = mr->new_address;
-
-                    Status = increase_extent_refcount(Vcb, in[i].address, Vcb->superblock.node_size, TYPE_SHARED_BLOCK_REF, &sbr, NULL, 0, NULL);
+                    Status = increase_extent_refcount_shared_block(Vcb, in[i].blockptr, mr->new_address,
+                                                                   &in[i].key, mr->data->level - 1, NULL);
                     if (!NT_SUCCESS(Status)) {
-                        ERR("increase_extent_refcount returned %08lx\n", Status);
+                        ERR("increase_extent_refcount_shared_block returned %08lx\n", Status);
                         return Status;
                     }
 
-                    sbr.offset = mr->address;
-
-                    Status = decrease_extent_refcount(Vcb, in[i].address, Vcb->superblock.node_size, TYPE_SHARED_BLOCK_REF, &sbr, NULL, 0,
-                                                      sbr.offset, false, NULL);
+                    Status = decrease_extent_refcount_shared_block(Vcb, in[i].blockptr, mr->address,
+                                                                   NULL);
                     if (!NT_SUCCESS(Status)) {
-                        ERR("decrease_extent_refcount returned %08lx\n", Status);
+                        ERR("decrease_extent_refcount_shared_block returned %08lx\n", Status);
                         return Status;
                     }
                 }
             }
         } else {
             uint16_t i;
-            leaf_node* ln = (leaf_node*)&mr->data[1];
+            struct btrfs_item* ln = (struct btrfs_item*)&mr->data[1];
 
-            for (i = 0; i < mr->data->num_items; i++) {
-                if (ln[i].key.obj_type == TYPE_EXTENT_DATA && ln[i].size >= sizeof(EXTENT_DATA) - 1 + sizeof(EXTENT_DATA2)) {
-                    EXTENT_DATA* ed = (EXTENT_DATA*)((uint8_t*)mr->data + sizeof(tree_header) + ln[i].offset);
+            for (i = 0; i < mr->data->nritems; i++) {
+                if (ln[i].key.type == BTRFS_EXTENT_DATA_KEY && ln[i].size >= sizeof(struct btrfs_file_extent_item)) {
+                    struct btrfs_file_extent_item* ed = (struct btrfs_file_extent_item*)((uint8_t*)mr->data + sizeof(struct btrfs_header) + ln[i].offset);
 
-                    if (ed->type == EXTENT_TYPE_REGULAR || ed->type == EXTENT_TYPE_PREALLOC) {
-                        EXTENT_DATA2* ed2 = (EXTENT_DATA2*)ed->data;
-
-                        if (ed2->size > 0) { // not sparse
-                            uint32_t sdrrc = find_extent_shared_data_refcount(Vcb, ed2->address, mr->address, NULL);
+                    if (ed->type == BTRFS_FILE_EXTENT_REG || ed->type == BTRFS_FILE_EXTENT_PREALLOC) {
+                        if (ed->disk_num_bytes > 0) { // not sparse
+                            uint32_t sdrrc = find_extent_shared_data_refcount(Vcb, ed->disk_bytenr, mr->address, NULL);
 
                             if (sdrrc > 0) {
-                                SHARED_DATA_REF sdr;
                                 chunk* c;
 
-                                sdr.offset = mr->new_address;
-                                sdr.count = sdrrc;
-
-                                Status = increase_extent_refcount(Vcb, ed2->address, ed2->size, TYPE_SHARED_DATA_REF, &sdr, NULL, 0, NULL);
+                                Status = increase_extent_refcount_shared_data(Vcb, ed->disk_bytenr,
+                                                                              ed->disk_num_bytes, mr->new_address,
+                                                                              sdrrc, NULL);
                                 if (!NT_SUCCESS(Status)) {
-                                    ERR("increase_extent_refcount returned %08lx\n", Status);
+                                    ERR("increase_extent_refcount_shared_data returned %08lx\n", Status);
                                     return Status;
                                 }
 
-                                sdr.offset = mr->address;
-
-                                Status = decrease_extent_refcount(Vcb, ed2->address, ed2->size, TYPE_SHARED_DATA_REF, &sdr, NULL, 0,
-                                                                  sdr.offset, false, NULL);
+                                Status = decrease_extent_refcount_shared_data(Vcb, ed->disk_bytenr,
+                                                                              ed->disk_num_bytes,
+                                                                              mr->address, sdrrc,
+                                                                              false, NULL);
                                 if (!NT_SUCCESS(Status)) {
-                                    ERR("decrease_extent_refcount returned %08lx\n", Status);
+                                    ERR("decrease_extent_refcount_shared_data returned %08lx\n", Status);
                                     return Status;
                                 }
 
-                                c = get_chunk_from_address(Vcb, ed2->address);
+                                c = get_chunk_from_address(Vcb, ed->disk_bytenr);
 
                                 if (c) {
                                     // check changed_extents
@@ -517,15 +529,15 @@ static NTSTATUS add_metadata_reloc_extent_item(_Requires_exclusive_lock_held_(_C
                                     while (le != &c->changed_extents) {
                                         changed_extent* ce = CONTAINING_RECORD(le, changed_extent, list_entry);
 
-                                        if (ce->address == ed2->address) {
+                                        if (ce->address == ed->disk_bytenr) {
                                             LIST_ENTRY* le2;
 
                                             le2 = ce->refs.Flink;
                                             while (le2 != &ce->refs) {
                                                 changed_extent_ref* cer = CONTAINING_RECORD(le2, changed_extent_ref, list_entry);
 
-                                                if (cer->type == TYPE_SHARED_DATA_REF && cer->sdr.offset == mr->address) {
-                                                    cer->sdr.offset = mr->new_address;
+                                                if (cer->type == BTRFS_SHARED_DATA_REF_KEY && cer->offset == mr->address) {
+                                                    cer->offset = mr->new_address;
                                                     break;
                                                 }
 
@@ -536,8 +548,8 @@ static NTSTATUS add_metadata_reloc_extent_item(_Requires_exclusive_lock_held_(_C
                                             while (le2 != &ce->old_refs) {
                                                 changed_extent_ref* cer = CONTAINING_RECORD(le2, changed_extent_ref, list_entry);
 
-                                                if (cer->type == TYPE_SHARED_DATA_REF && cer->sdr.offset == mr->address) {
-                                                    cer->sdr.offset = mr->new_address;
+                                                if (cer->type == BTRFS_SHARED_DATA_REF_KEY && cer->offset == mr->address) {
+                                                    cer->offset = mr->new_address;
                                                     break;
                                                 }
 
@@ -579,38 +591,36 @@ static NTSTATUS write_metadata_items(_Requires_exclusive_lock_held_(_Curr_->tree
         LIST_ENTRY* le2;
         chunk* pc;
 
-        mr->data = ExAllocatePoolWithTag(PagedPool, Vcb->superblock.node_size, ALLOC_TAG);
+        mr->data = ExAllocatePoolWithTag(PagedPool, Vcb->superblock.nodesize, ALLOC_TAG);
         if (!mr->data) {
             ERR("out of memory\n");
             return STATUS_INSUFFICIENT_RESOURCES;
         }
 
-        Status = read_data(Vcb, mr->address, Vcb->superblock.node_size, NULL, true, (uint8_t*)mr->data,
-                           c && mr->address >= c->offset && mr->address < c->offset + c->chunk_item->size ? c : NULL, &pc, NULL, 0, false, NormalPagePriority);
+        Status = read_data(Vcb, mr->address, Vcb->superblock.nodesize, NULL, true, (uint8_t*)mr->data,
+                           c && mr->address >= c->offset && mr->address < c->offset + c->chunk_item->length ? c : NULL, &pc, NULL, 0, false, NormalPagePriority);
         if (!NT_SUCCESS(Status)) {
             ERR("read_data returned %08lx\n", Status);
             return Status;
         }
 
-        if (pc->chunk_item->type & BLOCK_FLAG_SYSTEM)
+        if (pc->chunk_item->type & BTRFS_BLOCK_GROUP_SYSTEM)
             mr->system = true;
 
         if (data_items && mr->data->level == 0) {
             le2 = data_items->Flink;
             while (le2 != data_items) {
                 data_reloc* dr = CONTAINING_RECORD(le2, data_reloc, list_entry);
-                leaf_node* ln = (leaf_node*)&mr->data[1];
+                struct btrfs_item* ln = (struct btrfs_item*)&mr->data[1];
                 uint16_t i;
 
-                for (i = 0; i < mr->data->num_items; i++) {
-                    if (ln[i].key.obj_type == TYPE_EXTENT_DATA && ln[i].size >= sizeof(EXTENT_DATA) - 1 + sizeof(EXTENT_DATA2)) {
-                        EXTENT_DATA* ed = (EXTENT_DATA*)((uint8_t*)mr->data + sizeof(tree_header) + ln[i].offset);
+                for (i = 0; i < mr->data->nritems; i++) {
+                    if (ln[i].key.type == BTRFS_EXTENT_DATA_KEY && ln[i].size >= sizeof(struct btrfs_file_extent_item)) {
+                        struct btrfs_file_extent_item* ed = (struct btrfs_file_extent_item*)((uint8_t*)mr->data + sizeof(struct btrfs_header) + ln[i].offset);
 
-                        if (ed->type == EXTENT_TYPE_REGULAR || ed->type == EXTENT_TYPE_PREALLOC) {
-                            EXTENT_DATA2* ed2 = (EXTENT_DATA2*)ed->data;
-
-                            if (ed2->address == dr->address)
-                                ed2->address = dr->new_address;
+                        if (ed->type == BTRFS_FILE_EXTENT_REG || ed->type == BTRFS_FILE_EXTENT_PREALLOC) {
+                            if (ed->disk_bytenr == dr->address)
+                                ed->disk_bytenr = dr->new_address;
                         }
                     }
                 }
@@ -626,65 +636,73 @@ static NTSTATUS write_metadata_items(_Requires_exclusive_lock_held_(_Curr_->tree
         while (le2 != &mr->refs) {
             metadata_reloc_ref* ref = CONTAINING_RECORD(le2, metadata_reloc_ref, list_entry);
 
-            if (ref->type == TYPE_TREE_BLOCK_REF) {
-                KEY* firstitem;
-                root* r = NULL;
-                LIST_ENTRY* le3;
-                tree* t;
+            switch (ref->type) {
+                case BTRFS_TREE_BLOCK_REF_KEY: {
+                    struct btrfs_key* firstitem;
+                    root* r = NULL;
+                    LIST_ENTRY* le3;
+                    tree* t;
 
-                firstitem = (KEY*)&mr->data[1];
+                    firstitem = (struct btrfs_key*)&mr->data[1];
 
-                le3 = Vcb->roots.Flink;
-                while (le3 != &Vcb->roots) {
-                    root* r2 = CONTAINING_RECORD(le3, root, list_entry);
+                    le3 = Vcb->roots.Flink;
+                    while (le3 != &Vcb->roots) {
+                        root* r2 = CONTAINING_RECORD(le3, root, list_entry);
 
-                    if (r2->id == ref->tbr.offset) {
-                        r = r2;
-                        break;
+                        if (r2->id == ref->offset) {
+                            r = r2;
+                            break;
+                        }
+
+                        le3 = le3->Flink;
                     }
 
-                    le3 = le3->Flink;
+                    if (!r) {
+                        ERR("could not find subvol with id %I64x\n", ref->offset);
+                        return STATUS_INTERNAL_ERROR;
+                    }
+
+                    Status = find_item_to_level(Vcb, r, &tp, firstitem, false, mr->data->level + 1, NULL);
+                    if (!NT_SUCCESS(Status) && Status != STATUS_NOT_FOUND) {
+                        ERR("find_item_to_level returned %08lx\n", Status);
+                        return Status;
+                    }
+
+                    t = tp.tree;
+                    while (t && t->header.level < mr->data->level + 1) {
+                        t = t->parent;
+                    }
+
+                    if (!t)
+                        ref->top = true;
+                    else {
+                        metadata_reloc* mr2;
+
+                        Status = add_metadata_reloc_parent(Vcb, items, t->header.bytenr, &mr2, rollback);
+                        if (!NT_SUCCESS(Status)) {
+                            ERR("add_metadata_reloc_parent returned %08lx\n", Status);
+                            return Status;
+                        }
+
+                        ref->parent = mr2;
+                    }
+
+                    break;
                 }
 
-                if (!r) {
-                    ERR("could not find subvol with id %I64x\n", ref->tbr.offset);
-                    return STATUS_INTERNAL_ERROR;
-                }
-
-                Status = find_item_to_level(Vcb, r, &tp, firstitem, false, mr->data->level + 1, NULL);
-                if (!NT_SUCCESS(Status) && Status != STATUS_NOT_FOUND) {
-                    ERR("find_item_to_level returned %08lx\n", Status);
-                    return Status;
-                }
-
-                t = tp.tree;
-                while (t && t->header.level < mr->data->level + 1) {
-                    t = t->parent;
-                }
-
-                if (!t)
-                    ref->top = true;
-                else {
+                case BTRFS_SHARED_BLOCK_REF_KEY: {
                     metadata_reloc* mr2;
 
-                    Status = add_metadata_reloc_parent(Vcb, items, t->header.address, &mr2, rollback);
+                    Status = add_metadata_reloc_parent(Vcb, items, ref->offset, &mr2, rollback);
                     if (!NT_SUCCESS(Status)) {
                         ERR("add_metadata_reloc_parent returned %08lx\n", Status);
                         return Status;
                     }
 
                     ref->parent = mr2;
-                }
-            } else if (ref->type == TYPE_SHARED_BLOCK_REF) {
-                metadata_reloc* mr2;
 
-                Status = add_metadata_reloc_parent(Vcb, items, ref->sbr.offset, &mr2, rollback);
-                if (!NT_SUCCESS(Status)) {
-                    ERR("add_metadata_reloc_parent returned %08lx\n", Status);
-                    return Status;
+                    break;
                 }
-
-                ref->parent = mr2;
             }
 
             le2 = le2->Flink;
@@ -709,7 +727,7 @@ static NTSTATUS write_metadata_items(_Requires_exclusive_lock_held_(_Curr_->tree
             while (le2 != &Vcb->trees_hash) {
                 tree* t = CONTAINING_RECORD(le2, tree, list_entry_hash);
 
-                if (t->header.address == mr->address) {
+                if (t->header.bytenr == mr->address) {
                     mr->t = t;
                     break;
                 } else if (t->hash > hash)
@@ -736,7 +754,7 @@ static NTSTATUS write_metadata_items(_Requires_exclusive_lock_held_(_Curr_->tree
 
                 if (mr->system)
                     flags = Vcb->system_flags;
-                else if (Vcb->superblock.incompat_flags & BTRFS_INCOMPAT_FLAGS_MIXED_GROUPS)
+                else if (Vcb->superblock.incompat_flags & BTRFS_FEATURE_INCOMPAT_MIXED_GROUPS)
                     flags = Vcb->data_flags;
                 else
                     flags = Vcb->metadata_flags;
@@ -745,8 +763,16 @@ static NTSTATUS write_metadata_items(_Requires_exclusive_lock_held_(_Curr_->tree
                     acquire_chunk_lock(newchunk, Vcb);
 
                     if (newchunk->chunk_item->type == flags && find_metadata_address_in_chunk(Vcb, newchunk, &mr->new_address)) {
-                        newchunk->used += Vcb->superblock.node_size;
-                        space_list_subtract(newchunk, mr->new_address, Vcb->superblock.node_size, rollback);
+                        newchunk->used += Vcb->superblock.nodesize;
+
+                        Status = space_list_subtract(newchunk, mr->new_address,
+                                                     Vcb->superblock.nodesize,
+                                                     rollback);
+                        if (!NT_SUCCESS(Status)) {
+                            release_chunk_lock(newchunk, Vcb);
+                            return Status;
+                        }
+
                         done = true;
                     }
 
@@ -763,11 +789,18 @@ static NTSTATUS write_metadata_items(_Requires_exclusive_lock_held_(_Curr_->tree
                         if (!c2->readonly && !c2->reloc && c2 != newchunk && c2->chunk_item->type == flags) {
                             acquire_chunk_lock(c2, Vcb);
 
-                            if ((c2->chunk_item->size - c2->used) >= Vcb->superblock.node_size) {
+                            if ((c2->chunk_item->length - c2->used) >= Vcb->superblock.nodesize) {
                                 if (find_metadata_address_in_chunk(Vcb, c2, &mr->new_address)) {
-                                    c2->used += Vcb->superblock.node_size;
-                                    space_list_subtract(c2, mr->new_address, Vcb->superblock.node_size, rollback);
+                                    c2->used += Vcb->superblock.nodesize;
+
+                                    Status = space_list_subtract(c2, mr->new_address,
+                                                                 Vcb->superblock.nodesize,
+                                                                 rollback);
                                     release_chunk_lock(c2, Vcb);
+
+                                    if (!NT_SUCCESS(Status))
+                                        return Status;
+
                                     newchunk = c2;
                                     done = true;
                                     break;
@@ -801,8 +834,15 @@ static NTSTATUS write_metadata_items(_Requires_exclusive_lock_held_(_Curr_->tree
                             Status = STATUS_DISK_FULL;
                             goto end;
                         } else {
-                            newchunk->used += Vcb->superblock.node_size;
-                            space_list_subtract(newchunk, mr->new_address, Vcb->superblock.node_size, rollback);
+                            newchunk->used += Vcb->superblock.nodesize;
+
+                            Status = space_list_subtract(newchunk, mr->new_address,
+                                                         Vcb->superblock.nodesize,
+                                                         rollback);
+                            if (!NT_SUCCESS(Status)) {
+                                release_chunk_lock(newchunk, Vcb);
+                                goto end;
+                            }
                         }
 
                         release_chunk_lock(newchunk, Vcb);
@@ -818,11 +858,11 @@ static NTSTATUS write_metadata_items(_Requires_exclusive_lock_held_(_Curr_->tree
 
                     if (ref->parent) {
                         uint16_t i;
-                        internal_node* in = (internal_node*)&ref->parent->data[1];
+                        struct btrfs_key_ptr* in = (struct btrfs_key_ptr*)&ref->parent->data[1];
 
-                        for (i = 0; i < ref->parent->data->num_items; i++) {
-                            if (in[i].address == mr->address) {
-                                in[i].address = mr->new_address;
+                        for (i = 0; i < ref->parent->data->nritems; i++) {
+                            if (in[i].blockptr == mr->address) {
+                                in[i].blockptr = mr->new_address;
                                 break;
                             }
                         }
@@ -840,7 +880,7 @@ static NTSTATUS write_metadata_items(_Requires_exclusive_lock_held_(_Curr_->tree
                                 le3 = le3->Flink;
                             }
                         }
-                    } else if (ref->top && ref->type == TYPE_TREE_BLOCK_REF) {
+                    } else if (ref->top && ref->type == BTRFS_TREE_BLOCK_REF_KEY) {
                         LIST_ENTRY* le3;
                         root* r = NULL;
 
@@ -850,7 +890,7 @@ static NTSTATUS write_metadata_items(_Requires_exclusive_lock_held_(_Curr_->tree
                         while (le3 != &Vcb->roots) {
                             root* r2 = CONTAINING_RECORD(le3, root, list_entry);
 
-                            if (r2->id == ref->tbr.offset) {
+                            if (r2->id == ref->offset) {
                                 r = r2;
                                 break;
                             }
@@ -862,17 +902,17 @@ static NTSTATUS write_metadata_items(_Requires_exclusive_lock_held_(_Curr_->tree
                             r->treeholder.address = mr->new_address;
 
                             if (r == Vcb->root_root)
-                                Vcb->superblock.root_tree_addr = mr->new_address;
+                                Vcb->superblock.root = mr->new_address;
                             else if (r == Vcb->chunk_root)
-                                Vcb->superblock.chunk_tree_addr = mr->new_address;
-                            else if (r->root_item.block_number == mr->address) {
-                                KEY searchkey;
-                                ROOT_ITEM* ri;
+                                Vcb->superblock.chunk_root = mr->new_address;
+                            else if (r->root_item.bytenr == mr->address) {
+                                struct btrfs_key searchkey;
+                                struct btrfs_root_item* ri;
 
-                                r->root_item.block_number = mr->new_address;
+                                r->root_item.bytenr = mr->new_address;
 
-                                searchkey.obj_id = r->id;
-                                searchkey.obj_type = TYPE_ROOT_ITEM;
+                                searchkey.objectid = r->id;
+                                searchkey.type = BTRFS_ROOT_ITEM_KEY;
                                 searchkey.offset = 0xffffffffffffffff;
 
                                 Status = find_item(Vcb, Vcb->root_root, &tp, &searchkey, false, NULL);
@@ -881,20 +921,20 @@ static NTSTATUS write_metadata_items(_Requires_exclusive_lock_held_(_Curr_->tree
                                     goto end;
                                 }
 
-                                if (tp.item->key.obj_id != searchkey.obj_id || tp.item->key.obj_type != searchkey.obj_type) {
-                                    ERR("could not find ROOT_ITEM for tree %I64x\n", searchkey.obj_id);
+                                if (tp.item->key.objectid != searchkey.objectid || tp.item->key.type != searchkey.type) {
+                                    ERR("could not find ROOT_ITEM for tree %I64x\n", searchkey.objectid);
                                     Status = STATUS_INTERNAL_ERROR;
                                     goto end;
                                 }
 
-                                ri = ExAllocatePoolWithTag(PagedPool, sizeof(ROOT_ITEM), ALLOC_TAG);
+                                ri = ExAllocatePoolWithTag(PagedPool, sizeof(struct btrfs_root_item), ALLOC_TAG);
                                 if (!ri) {
                                     ERR("out of memory\n");
                                     Status = STATUS_INSUFFICIENT_RESOURCES;
                                     goto end;
                                 }
 
-                                RtlCopyMemory(ri, &r->root_item, sizeof(ROOT_ITEM));
+                                RtlCopyMemory(ri, &r->root_item, sizeof(struct btrfs_root_item));
 
                                 Status = delete_tree_item(Vcb, &tp);
                                 if (!NT_SUCCESS(Status)) {
@@ -902,7 +942,7 @@ static NTSTATUS write_metadata_items(_Requires_exclusive_lock_held_(_Curr_->tree
                                     goto end;
                                 }
 
-                                Status = insert_tree_item(Vcb, Vcb->root_root, tp.item->key.obj_id, tp.item->key.obj_type, tp.item->key.offset, ri, sizeof(ROOT_ITEM), NULL, NULL);
+                                Status = insert_tree_item(Vcb, Vcb->root_root, tp.item->key.objectid, tp.item->key.type, tp.item->key.offset, ri, sizeof(struct btrfs_root_item), NULL, NULL);
                                 if (!NT_SUCCESS(Status)) {
                                     ERR("insert_tree_item returned %08lx\n", Status);
                                     goto end;
@@ -914,7 +954,7 @@ static NTSTATUS write_metadata_items(_Requires_exclusive_lock_held_(_Curr_->tree
                     le2 = le2->Flink;
                 }
 
-                mr->data->address = mr->new_address;
+                mr->data->bytenr = mr->new_address;
 
                 t3 = mr->t;
 
@@ -927,11 +967,11 @@ static NTSTATUS write_metadata_items(_Requires_exclusive_lock_held_(_Curr_->tree
                     if (t3->list_entry.Flink != &Vcb->trees_hash) {
                         tree* nt = CONTAINING_RECORD(t3->list_entry_hash.Flink, tree, list_entry_hash);
 
-                        if (nt->header.address == t3->header.address)
+                        if (nt->header.bytenr == t3->header.bytenr)
                             t4 = nt;
                     }
 
-                    t3->header.address = mr->new_address;
+                    t3->header.bytenr = mr->new_address;
 
                     h = t3->hash >> 24;
 
@@ -950,7 +990,7 @@ static NTSTATUS write_metadata_items(_Requires_exclusive_lock_held_(_Curr_->tree
 
                     RemoveEntryList(&t3->list_entry_hash);
 
-                    t3->hash = calc_crc32c(0xffffffff, (uint8_t*)&t3->header.address, sizeof(uint64_t));
+                    t3->hash = calc_crc32c(0xffffffff, (uint8_t*)&t3->header.bytenr, sizeof(uint64_t));
                     h = t3->hash >> 24;
 
                     if (!Vcb->trees_ptrs[h]) {
@@ -1001,14 +1041,12 @@ static NTSTATUS write_metadata_items(_Requires_exclusive_lock_held_(_Curr_->tree
                             while (le3 != &t3->itemlist) {
                                 tree_data* td = CONTAINING_RECORD(le3, tree_data, list_entry);
 
-                                if (!td->inserted && td->key.obj_type == TYPE_EXTENT_DATA && td->size >= sizeof(EXTENT_DATA) - 1 + sizeof(EXTENT_DATA2)) {
-                                    EXTENT_DATA* ed = (EXTENT_DATA*)td->data;
+                                if (!td->inserted && td->key.type == BTRFS_EXTENT_DATA_KEY && td->size >= sizeof(struct btrfs_file_extent_item)) {
+                                    struct btrfs_file_extent_item* ed = (struct btrfs_file_extent_item*)td->data;
 
-                                    if (ed->type == EXTENT_TYPE_REGULAR || ed->type == EXTENT_TYPE_PREALLOC) {
-                                        EXTENT_DATA2* ed2 = (EXTENT_DATA2*)ed->data;
-
-                                        if (ed2->address == dr->address)
-                                            ed2->address = dr->new_address;
+                                    if (ed->type == BTRFS_FILE_EXTENT_REG || ed->type == BTRFS_FILE_EXTENT_PREALLOC) {
+                                        if (ed->disk_bytenr == dr->address)
+                                            ed->disk_bytenr = dr->new_address;
                                     }
                                 }
 
@@ -1032,7 +1070,7 @@ static NTSTATUS write_metadata_items(_Requires_exclusive_lock_held_(_Curr_->tree
                 }
 
                 tw->address = mr->new_address;
-                tw->length = Vcb->superblock.node_size;
+                tw->length = Vcb->superblock.nodesize;
                 tw->data = (uint8_t*)mr->data;
                 tw->allocated = false;
 
@@ -1098,7 +1136,7 @@ end:
 }
 
 static NTSTATUS balance_metadata_chunk(device_extension* Vcb, chunk* c, bool* changed) {
-    KEY searchkey;
+    struct btrfs_key searchkey;
     traverse_ptr tp;
     NTSTATUS Status;
     bool b;
@@ -1112,8 +1150,8 @@ static NTSTATUS balance_metadata_chunk(device_extension* Vcb, chunk* c, bool* ch
 
     ExAcquireResourceExclusiveLite(&Vcb->tree_lock, true);
 
-    searchkey.obj_id = c->offset;
-    searchkey.obj_type = TYPE_METADATA_ITEM;
+    searchkey.objectid = c->offset;
+    searchkey.type = BTRFS_METADATA_ITEM_KEY;
     searchkey.offset = 0xffffffffffffffff;
 
     Status = find_item(Vcb, Vcb->extent_root, &tp, &searchkey, false, NULL);
@@ -1125,20 +1163,20 @@ static NTSTATUS balance_metadata_chunk(device_extension* Vcb, chunk* c, bool* ch
     do {
         traverse_ptr next_tp;
 
-        if (tp.item->key.obj_id >= c->offset + c->chunk_item->size)
+        if (tp.item->key.objectid >= c->offset + c->chunk_item->length)
             break;
 
-        if (tp.item->key.obj_id >= c->offset && (tp.item->key.obj_type == TYPE_EXTENT_ITEM || tp.item->key.obj_type == TYPE_METADATA_ITEM)) {
+        if (tp.item->key.objectid >= c->offset && (tp.item->key.type == BTRFS_EXTENT_ITEM_KEY || tp.item->key.type == BTRFS_METADATA_ITEM_KEY)) {
             bool tree = false, skinny = false;
 
-            if (tp.item->key.obj_type == TYPE_METADATA_ITEM && tp.item->size >= sizeof(EXTENT_ITEM)) {
+            if (tp.item->key.type == BTRFS_METADATA_ITEM_KEY && tp.item->size >= sizeof(struct btrfs_extent_item)) {
                 tree = true;
                 skinny = true;
-            } else if (tp.item->key.obj_type == TYPE_EXTENT_ITEM && tp.item->key.offset == Vcb->superblock.node_size &&
-                       tp.item->size >= sizeof(EXTENT_ITEM)) {
-                EXTENT_ITEM* ei = (EXTENT_ITEM*)tp.item->data;
+            } else if (tp.item->key.type == BTRFS_EXTENT_ITEM_KEY && tp.item->key.offset == Vcb->superblock.nodesize &&
+                       tp.item->size >= sizeof(struct btrfs_extent_item)) {
+                struct btrfs_extent_item* ei = (struct btrfs_extent_item*)tp.item->data;
 
-                if (ei->flags & EXTENT_ITEM_TREE_BLOCK)
+                if (ei->flags & BTRFS_EXTENT_FLAG_TREE_BLOCK)
                     tree = true;
             }
 
@@ -1215,10 +1253,10 @@ end:
 }
 
 static NTSTATUS data_reloc_add_tree_edr(_Requires_lock_held_(_Curr_->tree_lock) device_extension* Vcb, LIST_ENTRY* metadata_items,
-                                        data_reloc* dr, EXTENT_DATA_REF* edr, LIST_ENTRY* rollback) {
+                                        data_reloc* dr, struct btrfs_extent_data_ref* edr, LIST_ENTRY* rollback) {
     NTSTATUS Status;
     LIST_ENTRY* le;
-    KEY searchkey;
+    struct btrfs_key searchkey;
     traverse_ptr tp;
     root* r = NULL;
     metadata_reloc* mr;
@@ -1242,8 +1280,8 @@ static NTSTATUS data_reloc_add_tree_edr(_Requires_lock_held_(_Curr_->tree_lock) 
         return STATUS_INTERNAL_ERROR;
     }
 
-    searchkey.obj_id = edr->objid;
-    searchkey.obj_type = TYPE_EXTENT_DATA;
+    searchkey.objectid = edr->objectid;
+    searchkey.type = BTRFS_EXTENT_DATA_KEY;
     searchkey.offset = 0;
 
     Status = find_item(Vcb, r, &tp, &searchkey, false, NULL);
@@ -1252,30 +1290,28 @@ static NTSTATUS data_reloc_add_tree_edr(_Requires_lock_held_(_Curr_->tree_lock) 
         return Status;
     }
 
-    if (tp.item->key.obj_id < searchkey.obj_id || (tp.item->key.obj_id == searchkey.obj_id && tp.item->key.obj_type < searchkey.obj_type)) {
+    if (tp.item->key.objectid < searchkey.objectid || (tp.item->key.objectid == searchkey.objectid && tp.item->key.type < searchkey.type)) {
         traverse_ptr tp2;
 
         if (find_next_item(Vcb, &tp, &tp2, false, NULL))
             tp = tp2;
         else {
-            ERR("could not find EXTENT_DATA for inode %I64x in root %I64x\n", searchkey.obj_id, r->id);
+            ERR("could not find EXTENT_DATA for inode %I64x in root %I64x\n", searchkey.objectid, r->id);
             return STATUS_INTERNAL_ERROR;
         }
     }
 
     ref = NULL;
 
-    while (tp.item->key.obj_id == searchkey.obj_id && tp.item->key.obj_type == searchkey.obj_type) {
+    while (tp.item->key.objectid == searchkey.objectid && tp.item->key.type == searchkey.type) {
         traverse_ptr tp2;
 
-        if (tp.item->size >= sizeof(EXTENT_DATA)) {
-            EXTENT_DATA* ed = (EXTENT_DATA*)tp.item->data;
+        if (tp.item->size >= offsetof(struct btrfs_file_extent_item, disk_bytenr)) {
+            struct btrfs_file_extent_item* ed = (struct btrfs_file_extent_item*)tp.item->data;
 
-            if ((ed->type == EXTENT_TYPE_PREALLOC || ed->type == EXTENT_TYPE_REGULAR) && tp.item->size >= offsetof(EXTENT_DATA, data[0]) + sizeof(EXTENT_DATA2)) {
-                EXTENT_DATA2* ed2 = (EXTENT_DATA2*)ed->data;
-
-                if (ed2->address == dr->address && ed2->size == dr->size && tp.item->key.offset - ed2->offset == edr->offset) {
-                    if (ref && last_tree == tp.tree->header.address)
+            if ((ed->type == BTRFS_FILE_EXTENT_PREALLOC || ed->type == BTRFS_FILE_EXTENT_REG) && tp.item->size >= sizeof(struct btrfs_file_extent_item)) {
+                if (ed->disk_bytenr == dr->address && ed->disk_num_bytes == dr->size && tp.item->key.offset - ed->offset == edr->offset) {
+                    if (ref && last_tree == tp.tree->header.bytenr)
                         ref->edr.count++;
                     else {
                         ref = ExAllocatePoolWithTag(PagedPool, sizeof(data_reloc_ref), ALLOC_TAG);
@@ -1284,18 +1320,18 @@ static NTSTATUS data_reloc_add_tree_edr(_Requires_lock_held_(_Curr_->tree_lock) 
                             return STATUS_INSUFFICIENT_RESOURCES;
                         }
 
-                        ref->type = TYPE_EXTENT_DATA_REF;
-                        RtlCopyMemory(&ref->edr, edr, sizeof(EXTENT_DATA_REF));
+                        ref->type = BTRFS_EXTENT_DATA_REF_KEY;
+                        RtlCopyMemory(&ref->edr, edr, sizeof(struct btrfs_extent_data_ref));
                         ref->edr.count = 1;
 
-                        Status = add_metadata_reloc_parent(Vcb, metadata_items, tp.tree->header.address, &mr, rollback);
+                        Status = add_metadata_reloc_parent(Vcb, metadata_items, tp.tree->header.bytenr, &mr, rollback);
                         if (!NT_SUCCESS(Status)) {
                             ERR("add_metadata_reloc_parent returned %08lx\n", Status);
                             ExFreePool(ref);
                             return Status;
                         }
 
-                        last_tree = tp.tree->header.address;
+                        last_tree = tp.tree->header.bytenr;
                         ref->parent = mr;
 
                         InsertTailList(&dr->refs, &ref->list_entry);
@@ -1317,7 +1353,7 @@ static NTSTATUS add_data_reloc(_Requires_exclusive_lock_held_(_Curr_->tree_lock)
                                traverse_ptr* tp, chunk* c, LIST_ENTRY* rollback) {
     NTSTATUS Status;
     data_reloc* dr;
-    EXTENT_ITEM* ei;
+    struct btrfs_extent_item* ei;
     uint16_t len;
     uint64_t inline_rc;
     uint8_t* ptr;
@@ -1328,134 +1364,172 @@ static NTSTATUS add_data_reloc(_Requires_exclusive_lock_held_(_Curr_->tree_lock)
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    dr->address = tp->item->key.obj_id;
+    dr->address = tp->item->key.objectid;
     dr->size = tp->item->key.offset;
-    dr->ei = (EXTENT_ITEM*)tp->item->data;
+    dr->ei = (struct btrfs_extent_item*)tp->item->data;
     InitializeListHead(&dr->refs);
 
     Status = delete_tree_item(Vcb, tp);
     if (!NT_SUCCESS(Status)) {
         ERR("delete_tree_item returned %08lx\n", Status);
-        return Status;
+        goto fail;
     }
 
     if (!c)
-        c = get_chunk_from_address(Vcb, tp->item->key.obj_id);
+        c = get_chunk_from_address(Vcb, tp->item->key.objectid);
 
     if (c) {
         acquire_chunk_lock(c, Vcb);
 
         c->used -= tp->item->key.offset;
 
-        space_list_add(c, tp->item->key.obj_id, tp->item->key.offset, rollback);
+        Status = space_list_add(c, tp->item->key.objectid, tp->item->key.offset,
+                                rollback);
+        if (!NT_SUCCESS(Status)) {
+            release_chunk_lock(c, Vcb);
+            goto fail;
+        }
 
         release_chunk_lock(c, Vcb);
     }
 
-    ei = (EXTENT_ITEM*)tp->item->data;
+    ei = (struct btrfs_extent_item*)tp->item->data;
     inline_rc = 0;
 
-    len = tp->item->size - sizeof(EXTENT_ITEM);
-    ptr = (uint8_t*)tp->item->data + sizeof(EXTENT_ITEM);
+    len = tp->item->size - sizeof(struct btrfs_extent_item);
+    ptr = (uint8_t*)tp->item->data + sizeof(struct btrfs_extent_item);
 
     while (len > 0) {
-        uint8_t secttype = *ptr;
-        uint16_t sectlen = secttype == TYPE_EXTENT_DATA_REF ? sizeof(EXTENT_DATA_REF) : (secttype == TYPE_SHARED_DATA_REF ? sizeof(SHARED_DATA_REF) : 0);
+        struct btrfs_extent_inline_ref* eir;
 
-        len--;
+        eir = (struct btrfs_extent_inline_ref*)ptr;
 
-        if (sectlen > len) {
-            ERR("(%I64x,%x,%I64x): %x bytes left, expecting at least %x\n", tp->item->key.obj_id, tp->item->key.obj_type, tp->item->key.offset, len, sectlen);
-            return STATUS_INTERNAL_ERROR;
+        if (len < sizeof(struct btrfs_extent_inline_ref)) {
+            ERR("(%I64x,%x,%I64x) was truncated\n", tp->item->key.objectid,
+                tp->item->key.type, tp->item->key.offset);
+            Status = STATUS_INTERNAL_ERROR;
+            goto fail;
         }
 
-        if (sectlen == 0) {
-            ERR("(%I64x,%x,%I64x): unrecognized extent type %x\n", tp->item->key.obj_id, tp->item->key.obj_type, tp->item->key.offset, secttype);
-            return STATUS_INTERNAL_ERROR;
+        ptr += sizeof(struct btrfs_extent_inline_ref);
+        len -= sizeof(struct btrfs_extent_inline_ref);
+
+        switch (eir->type) {
+            case BTRFS_EXTENT_DATA_REF_KEY: {
+                struct btrfs_extent_data_ref* edr = (struct btrfs_extent_data_ref*)(ptr - sizeof(uint64_t));
+
+                if (len < sizeof(struct btrfs_extent_data_ref) - sizeof(uint64_t)) {
+                    ERR("(%I64x,%x,%I64x) was truncated\n", tp->item->key.objectid,
+                        tp->item->key.type, tp->item->key.offset);
+                    Status = STATUS_INTERNAL_ERROR;
+                    goto fail;
+                }
+
+                ptr += sizeof(struct btrfs_extent_data_ref) - sizeof(uint64_t);
+                len -= sizeof(struct btrfs_extent_data_ref) - sizeof(uint64_t);
+
+                inline_rc += edr->count;
+
+                Status = data_reloc_add_tree_edr(Vcb, metadata_items, dr, edr, rollback);
+                if (!NT_SUCCESS(Status)) {
+                    ERR("data_reloc_add_tree_edr returned %08lx\n", Status);
+                    goto fail;
+                }
+
+                break;
+            }
+
+            case BTRFS_SHARED_DATA_REF_KEY: {
+                struct btrfs_shared_data_ref* sdr = (struct btrfs_shared_data_ref*)ptr;
+                metadata_reloc* mr;
+                data_reloc_ref* ref;
+
+                if (len < sizeof(struct btrfs_shared_data_ref)) {
+                    ERR("(%I64x,%x,%I64x) was truncated\n", tp->item->key.objectid,
+                        tp->item->key.type, tp->item->key.offset);
+                    Status = STATUS_INTERNAL_ERROR;
+                    goto fail;
+                }
+
+                ptr += sizeof(struct btrfs_shared_data_ref);
+                len -= sizeof(struct btrfs_shared_data_ref);
+
+                ref = ExAllocatePoolWithTag(PagedPool, sizeof(data_reloc_ref), ALLOC_TAG);
+                if (!ref) {
+                    ERR("out of memory\n");
+                    Status = STATUS_INSUFFICIENT_RESOURCES;
+                    goto fail;
+                }
+
+                ref->type = BTRFS_SHARED_DATA_REF_KEY;
+                ref->offset = eir->offset;
+                ref->sdr.count = sdr->count;
+
+                inline_rc += ref->sdr.count;
+
+                Status = add_metadata_reloc_parent(Vcb, metadata_items, ref->offset, &mr, rollback);
+                if (!NT_SUCCESS(Status)) {
+                    ERR("add_metadata_reloc_parent returned %08lx\n", Status);
+                    ExFreePool(ref);
+                    goto fail;
+                }
+
+                ref->parent = mr;
+
+                InsertTailList(&dr->refs, &ref->list_entry);
+
+                break;
+            }
+
+            default:
+                ERR("unexpected tree type %x\n", eir->type);
+                Status = STATUS_INTERNAL_ERROR;
+                goto fail;
         }
-
-        if (secttype == TYPE_EXTENT_DATA_REF) {
-            EXTENT_DATA_REF* edr = (EXTENT_DATA_REF*)(ptr + sizeof(uint8_t));
-
-            inline_rc += edr->count;
-
-            Status = data_reloc_add_tree_edr(Vcb, metadata_items, dr, edr, rollback);
-            if (!NT_SUCCESS(Status)) {
-                ERR("data_reloc_add_tree_edr returned %08lx\n", Status);
-                return Status;
-            }
-        } else if (secttype == TYPE_SHARED_DATA_REF) {
-            metadata_reloc* mr;
-            data_reloc_ref* ref;
-
-            ref = ExAllocatePoolWithTag(PagedPool, sizeof(data_reloc_ref), ALLOC_TAG);
-            if (!ref) {
-                ERR("out of memory\n");
-                return STATUS_INSUFFICIENT_RESOURCES;
-            }
-
-            ref->type = TYPE_SHARED_DATA_REF;
-            RtlCopyMemory(&ref->sdr, ptr + sizeof(uint8_t), sizeof(SHARED_DATA_REF));
-            inline_rc += ref->sdr.count;
-
-            Status = add_metadata_reloc_parent(Vcb, metadata_items, ref->sdr.offset, &mr, rollback);
-            if (!NT_SUCCESS(Status)) {
-                ERR("add_metadata_reloc_parent returned %08lx\n", Status);
-                ExFreePool(ref);
-                return Status;
-            }
-
-            ref->parent = mr;
-
-            InsertTailList(&dr->refs, &ref->list_entry);
-        } else {
-            ERR("unexpected tree type %x\n", secttype);
-            return STATUS_INTERNAL_ERROR;
-        }
-
-
-        len -= sectlen;
-        ptr += sizeof(uint8_t) + sectlen;
     }
 
-    if (inline_rc < ei->refcount) { // look for non-inline entries
+    if (inline_rc < ei->refs) { // look for non-inline entries
         traverse_ptr tp2 = *tp, next_tp;
 
         while (find_next_item(Vcb, &tp2, &next_tp, false, NULL)) {
             tp2 = next_tp;
 
-            if (tp2.item->key.obj_id == tp->item->key.obj_id) {
-                if (tp2.item->key.obj_type == TYPE_EXTENT_DATA_REF && tp2.item->size >= sizeof(EXTENT_DATA_REF)) {
-                    Status = data_reloc_add_tree_edr(Vcb, metadata_items, dr, (EXTENT_DATA_REF*)tp2.item->data, rollback);
+            if (tp2.item->key.objectid == tp->item->key.objectid) {
+                if (tp2.item->key.type == BTRFS_EXTENT_DATA_REF_KEY && tp2.item->size >= sizeof(struct btrfs_extent_data_ref)) {
+                    Status = data_reloc_add_tree_edr(Vcb, metadata_items, dr,
+                                                     (struct btrfs_extent_data_ref*)tp2.item->data,
+                                                     rollback);
                     if (!NT_SUCCESS(Status)) {
                         ERR("data_reloc_add_tree_edr returned %08lx\n", Status);
-                        return Status;
+                        goto fail;
                     }
 
                     Status = delete_tree_item(Vcb, &tp2);
                     if (!NT_SUCCESS(Status)) {
                         ERR("delete_tree_item returned %08lx\n", Status);
-                        return Status;
+                        goto fail;
                     }
-                } else if (tp2.item->key.obj_type == TYPE_SHARED_DATA_REF && tp2.item->size >= sizeof(uint32_t)) {
+                } else if (tp2.item->key.type == BTRFS_SHARED_DATA_REF_KEY && tp2.item->size >= sizeof(struct btrfs_shared_data_ref)) {
                     metadata_reloc* mr;
                     data_reloc_ref* ref;
 
                     ref = ExAllocatePoolWithTag(PagedPool, sizeof(data_reloc_ref), ALLOC_TAG);
                     if (!ref) {
                         ERR("out of memory\n");
-                        return STATUS_INSUFFICIENT_RESOURCES;
+                        Status = STATUS_INSUFFICIENT_RESOURCES;
+                        goto fail;
                     }
 
-                    ref->type = TYPE_SHARED_DATA_REF;
-                    ref->sdr.offset = tp2.item->key.offset;
+                    ref->type = BTRFS_SHARED_DATA_REF_KEY;
+                    ref->offset = tp2.item->key.offset;
                     ref->sdr.count = *((uint32_t*)tp2.item->data);
 
-                    Status = add_metadata_reloc_parent(Vcb, metadata_items, ref->sdr.offset, &mr, rollback);
+                    Status = add_metadata_reloc_parent(Vcb, metadata_items,
+                                                       ref->offset, &mr, rollback);
                     if (!NT_SUCCESS(Status)) {
                         ERR("add_metadata_reloc_parent returned %08lx\n", Status);
                         ExFreePool(ref);
-                        return Status;
+                        goto fail;
                     }
 
                     ref->parent = mr;
@@ -1464,7 +1538,7 @@ static NTSTATUS add_data_reloc(_Requires_exclusive_lock_held_(_Curr_->tree_lock)
                     Status = delete_tree_item(Vcb, &tp2);
                     if (!NT_SUCCESS(Status)) {
                         ERR("delete_tree_item returned %08lx\n", Status);
-                        return Status;
+                        goto fail;
                     }
                 }
             } else
@@ -1475,6 +1549,18 @@ static NTSTATUS add_data_reloc(_Requires_exclusive_lock_held_(_Curr_->tree_lock)
     InsertTailList(items, &dr->list_entry);
 
     return STATUS_SUCCESS;
+
+fail:
+    while (!IsListEmpty(&dr->refs)) {
+        data_reloc_ref* ref = CONTAINING_RECORD(RemoveHeadList(&dr->refs),
+                                                data_reloc_ref, list_entry);
+
+        ExFreePool(ref);
+    }
+
+    ExFreePool(dr);
+
+    return Status;
 }
 
 static void sort_data_reloc_refs(data_reloc* dr) {
@@ -1491,9 +1577,9 @@ static void sort_data_reloc_refs(data_reloc* dr) {
         data_reloc_ref* ref = CONTAINING_RECORD(RemoveHeadList(&dr->refs), data_reloc_ref, list_entry);
         bool inserted = false;
 
-        if (ref->type == TYPE_EXTENT_DATA_REF)
-            ref->hash = get_extent_data_ref_hash2(ref->edr.root, ref->edr.objid, ref->edr.offset);
-        else if (ref->type == TYPE_SHARED_DATA_REF)
+        if (ref->type == BTRFS_EXTENT_DATA_REF_KEY)
+            ref->hash = get_extent_data_ref_hash2(ref->edr.root, ref->edr.objectid, ref->edr.offset);
+        else if (ref->type == BTRFS_SHARED_DATA_REF_KEY)
             ref->hash = ref->parent->new_address;
 
         le = newlist.Flink;
@@ -1520,8 +1606,8 @@ static void sort_data_reloc_refs(data_reloc* dr) {
         if (le->Flink != &newlist) {
             data_reloc_ref* ref2 = CONTAINING_RECORD(le->Flink, data_reloc_ref, list_entry);
 
-            if (ref->type == TYPE_EXTENT_DATA_REF && ref2->type == TYPE_EXTENT_DATA_REF && ref->edr.root == ref2->edr.root &&
-                ref->edr.objid == ref2->edr.objid && ref->edr.offset == ref2->edr.offset) {
+            if (ref->type == BTRFS_EXTENT_DATA_REF_KEY && ref2->type == BTRFS_EXTENT_DATA_REF_KEY && ref->edr.root == ref2->edr.root &&
+                ref->edr.objectid == ref2->edr.objectid && ref->edr.offset == ref2->edr.offset) {
                 RemoveEntryList(&ref2->list_entry);
                 ref->edr.count += ref2->edr.count;
                 ExFreePool(ref2);
@@ -1545,32 +1631,36 @@ static NTSTATUS add_data_reloc_extent_item(_Requires_exclusive_lock_held_(_Curr_
     uint16_t inline_len;
     bool all_inline = true;
     data_reloc_ref* first_noninline = NULL;
-    EXTENT_ITEM* ei;
+    struct btrfs_extent_item* ei;
     uint8_t* ptr;
 
-    inline_len = sizeof(EXTENT_ITEM);
+    inline_len = sizeof(struct btrfs_extent_item);
 
     sort_data_reloc_refs(dr);
 
     le = dr->refs.Flink;
     while (le != &dr->refs) {
         data_reloc_ref* ref = CONTAINING_RECORD(le, data_reloc_ref, list_entry);
-        uint16_t extlen = 0;
+        uint16_t extlen = sizeof(struct btrfs_extent_inline_ref);
 
-        if (ref->type == TYPE_EXTENT_DATA_REF) {
-            extlen += sizeof(EXTENT_DATA_REF);
-            rc += ref->edr.count;
-        } else if (ref->type == TYPE_SHARED_DATA_REF) {
-            extlen += sizeof(SHARED_DATA_REF);
-            rc++;
+        switch (ref->type) {
+            case BTRFS_EXTENT_DATA_REF_KEY:
+                extlen += sizeof(struct btrfs_extent_data_ref) - sizeof(uint64_t);
+                rc += ref->edr.count;
+                break;
+
+            case BTRFS_SHARED_DATA_REF_KEY:
+                extlen += sizeof(struct btrfs_shared_data_ref);
+                rc++;
+                break;
         }
 
         if (all_inline) {
-            if ((ULONG)(inline_len + 1 + extlen) > (Vcb->superblock.node_size >> 2)) {
+            if ((ULONG)(inline_len + extlen) > (Vcb->superblock.nodesize >> 2)) {
                 all_inline = false;
                 first_noninline = ref;
             } else
-                inline_len += extlen + 1;
+                inline_len += extlen;
         }
 
         le = le->Flink;
@@ -1582,40 +1672,52 @@ static NTSTATUS add_data_reloc_extent_item(_Requires_exclusive_lock_held_(_Curr_
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    ei->refcount = rc;
+    ei->refs = rc;
     ei->generation = dr->ei->generation;
     ei->flags = dr->ei->flags;
     ptr = (uint8_t*)&ei[1];
 
     le = dr->refs.Flink;
     while (le != &dr->refs) {
+        struct btrfs_extent_inline_ref* eir;
+
         data_reloc_ref* ref = CONTAINING_RECORD(le, data_reloc_ref, list_entry);
 
         if (ref == first_noninline)
             break;
 
-        *ptr = ref->type;
-        ptr++;
+        eir = (struct btrfs_extent_inline_ref*)ptr;
+        eir->type = ref->type;
 
-        if (ref->type == TYPE_EXTENT_DATA_REF) {
-            EXTENT_DATA_REF* edr = (EXTENT_DATA_REF*)ptr;
+        ptr += sizeof(struct btrfs_extent_inline_ref);
 
-            RtlCopyMemory(edr, &ref->edr, sizeof(EXTENT_DATA_REF));
+        switch (ref->type) {
+            case BTRFS_EXTENT_DATA_REF_KEY: {
+                struct btrfs_extent_data_ref* edr = (struct btrfs_extent_data_ref*)(ptr - sizeof(uint64_t));
 
-            ptr += sizeof(EXTENT_DATA_REF);
-        } else if (ref->type == TYPE_SHARED_DATA_REF) {
-            SHARED_DATA_REF* sdr = (SHARED_DATA_REF*)ptr;
+                RtlCopyMemory(edr, &ref->edr, sizeof(struct btrfs_extent_data_ref));
 
-            sdr->offset = ref->parent->new_address;
-            sdr->count = ref->sdr.count;
+                ptr += sizeof(struct btrfs_extent_data_ref) - sizeof(uint64_t);
 
-            ptr += sizeof(SHARED_DATA_REF);
+                break;
+            }
+
+            case BTRFS_SHARED_DATA_REF_KEY: {
+                struct btrfs_shared_data_ref* sdr = (struct btrfs_shared_data_ref*)ptr;
+
+                eir->offset = ref->parent->new_address;
+                sdr->count = ref->sdr.count;
+
+                ptr += sizeof(struct btrfs_shared_data_ref);
+
+                break;
+            }
         }
 
         le = le->Flink;
     }
 
-    Status = insert_tree_item(Vcb, Vcb->extent_root, dr->new_address, TYPE_EXTENT_ITEM, dr->size, ei, inline_len, NULL, NULL);
+    Status = insert_tree_item(Vcb, Vcb->extent_root, dr->new_address, BTRFS_EXTENT_ITEM_KEY, dr->size, ei, inline_len, NULL, NULL);
     if (!NT_SUCCESS(Status)) {
         ERR("insert_tree_item returned %08lx\n", Status);
         return Status;
@@ -1627,37 +1729,52 @@ static NTSTATUS add_data_reloc_extent_item(_Requires_exclusive_lock_held_(_Curr_
         while (le != &dr->refs) {
             data_reloc_ref* ref = CONTAINING_RECORD(le, data_reloc_ref, list_entry);
 
-            if (ref->type == TYPE_EXTENT_DATA_REF) {
-                EXTENT_DATA_REF* edr;
+            switch (ref->type) {
+                case BTRFS_EXTENT_DATA_REF_KEY: {
+                    struct btrfs_extent_data_ref* edr;
 
-                edr = ExAllocatePoolWithTag(PagedPool, sizeof(EXTENT_DATA_REF), ALLOC_TAG);
-                if (!edr) {
-                    ERR("out of memory\n");
-                    return STATUS_INSUFFICIENT_RESOURCES;
+                    edr = ExAllocatePoolWithTag(PagedPool, sizeof(struct btrfs_extent_data_ref), ALLOC_TAG);
+                    if (!edr) {
+                        ERR("out of memory\n");
+                        return STATUS_INSUFFICIENT_RESOURCES;
+                    }
+
+                    RtlCopyMemory(edr, &ref->edr, sizeof(struct btrfs_extent_data_ref));
+
+                    Status = insert_tree_item(Vcb, Vcb->extent_root, dr->new_address,
+                                              BTRFS_EXTENT_DATA_REF_KEY, ref->hash, edr,
+                                              sizeof(struct btrfs_extent_data_ref),
+                                              NULL, NULL);
+                    if (!NT_SUCCESS(Status)) {
+                        ERR("insert_tree_item returned %08lx\n", Status);
+                        return Status;
+                    }
+
+                    break;
                 }
 
-                RtlCopyMemory(edr, &ref->edr, sizeof(EXTENT_DATA_REF));
+                case BTRFS_SHARED_DATA_REF_KEY: {
+                    struct btrfs_shared_data_ref* sdr;
 
-                Status = insert_tree_item(Vcb, Vcb->extent_root, dr->new_address, TYPE_EXTENT_DATA_REF, ref->hash, edr, sizeof(EXTENT_DATA_REF), NULL, NULL);
-                if (!NT_SUCCESS(Status)) {
-                    ERR("insert_tree_item returned %08lx\n", Status);
-                    return Status;
-                }
-            } else if (ref->type == TYPE_SHARED_DATA_REF) {
-                uint32_t* sdr;
+                    sdr = ExAllocatePoolWithTag(PagedPool, sizeof(struct btrfs_shared_data_ref),
+                                                ALLOC_TAG);
+                    if (!sdr) {
+                        ERR("out of memory\n");
+                        return STATUS_INSUFFICIENT_RESOURCES;
+                    }
 
-                sdr = ExAllocatePoolWithTag(PagedPool, sizeof(uint32_t), ALLOC_TAG);
-                if (!sdr) {
-                    ERR("out of memory\n");
-                    return STATUS_INSUFFICIENT_RESOURCES;
-                }
+                    sdr->count = ref->sdr.count;
 
-                *sdr = ref->sdr.count;
+                    Status = insert_tree_item(Vcb, Vcb->extent_root, dr->new_address,
+                                              BTRFS_SHARED_DATA_REF_KEY, ref->parent->new_address,
+                                              sdr, sizeof(struct btrfs_shared_data_ref),
+                                              NULL, NULL);
+                    if (!NT_SUCCESS(Status)) {
+                        ERR("insert_tree_item returned %08lx\n", Status);
+                        return Status;
+                    }
 
-                Status = insert_tree_item(Vcb, Vcb->extent_root, dr->new_address, TYPE_SHARED_DATA_REF, ref->parent->new_address, sdr, sizeof(uint32_t), NULL, NULL);
-                if (!NT_SUCCESS(Status)) {
-                    ERR("insert_tree_item returned %08lx\n", Status);
-                    return Status;
+                    break;
                 }
             }
 
@@ -1669,7 +1786,7 @@ static NTSTATUS add_data_reloc_extent_item(_Requires_exclusive_lock_held_(_Curr_
 }
 
 static NTSTATUS balance_data_chunk(device_extension* Vcb, chunk* c, bool* changed) {
-    KEY searchkey;
+    struct btrfs_key searchkey;
     traverse_ptr tp;
     NTSTATUS Status;
     bool b;
@@ -1686,8 +1803,8 @@ static NTSTATUS balance_data_chunk(device_extension* Vcb, chunk* c, bool* change
 
     ExAcquireResourceExclusiveLite(&Vcb->tree_lock, true);
 
-    searchkey.obj_id = c->offset;
-    searchkey.obj_type = TYPE_EXTENT_ITEM;
+    searchkey.objectid = c->offset;
+    searchkey.type = BTRFS_EXTENT_ITEM_KEY;
     searchkey.offset = 0xffffffffffffffff;
 
     Status = find_item(Vcb, Vcb->extent_root, &tp, &searchkey, false, NULL);
@@ -1699,16 +1816,16 @@ static NTSTATUS balance_data_chunk(device_extension* Vcb, chunk* c, bool* change
     do {
         traverse_ptr next_tp;
 
-        if (tp.item->key.obj_id >= c->offset + c->chunk_item->size)
+        if (tp.item->key.objectid >= c->offset + c->chunk_item->length)
             break;
 
-        if (tp.item->key.obj_id >= c->offset && tp.item->key.obj_type == TYPE_EXTENT_ITEM) {
+        if (tp.item->key.objectid >= c->offset && tp.item->key.type == BTRFS_EXTENT_ITEM_KEY) {
             bool tree = false;
 
-            if (tp.item->key.obj_type == TYPE_EXTENT_ITEM && tp.item->size >= sizeof(EXTENT_ITEM)) {
-                EXTENT_ITEM* ei = (EXTENT_ITEM*)tp.item->data;
+            if (tp.item->key.type == BTRFS_EXTENT_ITEM_KEY && tp.item->size >= sizeof(struct btrfs_extent_item)) {
+                struct btrfs_extent_item* ei = (struct btrfs_extent_item*)tp.item->data;
 
-                if (ei->flags & EXTENT_ITEM_TREE_BLOCK)
+                if (ei->flags & BTRFS_EXTENT_FLAG_TREE_BLOCK)
                     tree = true;
             }
 
@@ -1763,7 +1880,14 @@ static NTSTATUS balance_data_chunk(device_extension* Vcb, chunk* c, bool* change
 
             if (find_data_address_in_chunk(Vcb, newchunk, dr->size, &dr->new_address)) {
                 newchunk->used += dr->size;
-                space_list_subtract(newchunk, dr->new_address, dr->size, &rollback);
+
+                Status = space_list_subtract(newchunk, dr->new_address,
+                                             dr->size, &rollback);
+                if (!NT_SUCCESS(Status)) {
+                    release_chunk_lock(newchunk, Vcb);
+                    goto end;
+                }
+
                 done = true;
             }
 
@@ -1780,11 +1904,19 @@ static NTSTATUS balance_data_chunk(device_extension* Vcb, chunk* c, bool* change
                 if (!c2->readonly && !c2->reloc && c2 != newchunk && c2->chunk_item->type == Vcb->data_flags) {
                     acquire_chunk_lock(c2, Vcb);
 
-                    if ((c2->chunk_item->size - c2->used) >= dr->size) {
+                    if ((c2->chunk_item->length - c2->used) >= dr->size) {
                         if (find_data_address_in_chunk(Vcb, c2, dr->size, &dr->new_address)) {
                             c2->used += dr->size;
-                            space_list_subtract(c2, dr->new_address, dr->size, &rollback);
+
+                            Status = space_list_subtract(c2, dr->new_address,
+                                                         dr->size, &rollback);
                             release_chunk_lock(c2, Vcb);
+
+                            if (!NT_SUCCESS(Status)) {
+                                ExReleaseResourceLite(&Vcb->chunk_lock);
+                                goto end;
+                            }
+
                             newchunk = c2;
                             done = true;
                             break;
@@ -1819,7 +1951,13 @@ static NTSTATUS balance_data_chunk(device_extension* Vcb, chunk* c, bool* change
                     goto end;
                 } else {
                     newchunk->used += dr->size;
-                    space_list_subtract(newchunk, dr->new_address, dr->size, &rollback);
+
+                    Status = space_list_subtract(newchunk, dr->new_address,
+                                                 dr->size, &rollback);
+                    if (!NT_SUCCESS(Status)) {
+                        release_chunk_lock(newchunk, Vcb);
+                        goto end;
+                    }
                 }
 
                 release_chunk_lock(newchunk, Vcb);
@@ -1850,8 +1988,8 @@ static NTSTATUS balance_data_chunk(device_extension* Vcb, chunk* c, bool* change
         RtlInitializeBitMap(&bmp, bmparr, bmplen);
         RtlSetAllBits(&bmp); // 1 = no csum, 0 = csum
 
-        searchkey.obj_id = EXTENT_CSUM_ID;
-        searchkey.obj_type = TYPE_EXTENT_CSUM;
+        searchkey.objectid = BTRFS_EXTENT_CSUM_OBJECTID;
+        searchkey.type = BTRFS_EXTENT_CSUM_KEY;
         searchkey.offset = dr->address;
 
         Status = find_item(Vcb, Vcb->checksum_root, &tp, &searchkey, false, NULL);
@@ -1866,7 +2004,7 @@ static NTSTATUS balance_data_chunk(device_extension* Vcb, chunk* c, bool* change
             do {
                 traverse_ptr next_tp;
 
-                if (tp.item->key.obj_type == TYPE_EXTENT_CSUM) {
+                if (tp.item->key.type == BTRFS_EXTENT_CSUM_KEY) {
                     if (tp.item->key.offset >= dr->address + dr->size)
                         break;
                     else if (tp.item->size >= Vcb->csum_size && tp.item->key.offset + (((unsigned int)tp.item->size << Vcb->sector_shift) / Vcb->csum_size) >= dr->address) {
@@ -1941,8 +2079,22 @@ static NTSTATUS balance_data_chunk(device_extension* Vcb, chunk* c, bool* change
                 } while (size > 0);
             }
 
-            add_checksum_entry(Vcb, dr->new_address + (index << Vcb->sector_shift), runlength, (uint8_t*)csum + (index * Vcb->csum_size), NULL);
-            add_checksum_entry(Vcb, dr->address + (index << Vcb->sector_shift), runlength, NULL, NULL);
+            Status = add_checksum_entry(Vcb, dr->new_address + (index << Vcb->sector_shift),
+                                        runlength, (uint8_t*)csum + (index * Vcb->csum_size),
+                                        NULL);
+            if (!NT_SUCCESS(Status)) {
+                ExFreePool(csum);
+                ExFreePool(bmparr);
+                goto end;
+            }
+
+            Status = add_checksum_entry(Vcb, dr->address + (index << Vcb->sector_shift),
+                                        runlength, NULL, NULL);
+            if (!NT_SUCCESS(Status)) {
+                ExFreePool(csum);
+                ExFreePool(bmparr);
+                goto end;
+            }
 
             // handle csum run
             do {
@@ -2084,16 +2236,14 @@ end:
                     extent* ext = CONTAINING_RECORD(le2, extent, list_entry);
 
                     if (!ext->ignore) {
-                        if (ext->extent_data.type == EXTENT_TYPE_REGULAR || ext->extent_data.type == EXTENT_TYPE_PREALLOC) {
-                            EXTENT_DATA2* ed2 = (EXTENT_DATA2*)ext->extent_data.data;
-
-                            if (ed2->size > 0 && ed2->address >= c->offset && ed2->address < c->offset + c->chunk_item->size) {
+                        if (ext->extent_data.type == BTRFS_FILE_EXTENT_REG || ext->extent_data.type == BTRFS_FILE_EXTENT_PREALLOC) {
+                            if (ext->extent_data.disk_num_bytes > 0 && ext->extent_data.disk_bytenr >= c->offset && ext->extent_data.disk_bytenr < c->offset + c->chunk_item->length) {
                                 LIST_ENTRY* le3 = items.Flink;
                                 while (le3 != &items) {
                                     data_reloc* dr = CONTAINING_RECORD(le3, data_reloc, list_entry);
 
-                                    if (ed2->address == dr->address) {
-                                        ed2->address = dr->new_address;
+                                    if (ext->extent_data.disk_bytenr == dr->address) {
+                                        ext->extent_data.disk_bytenr = dr->new_address;
                                         break;
                                     }
 
@@ -2135,16 +2285,14 @@ end:
                 extent* ext = CONTAINING_RECORD(le2, extent, list_entry);
 
                 if (!ext->ignore) {
-                    if (ext->extent_data.type == EXTENT_TYPE_REGULAR || ext->extent_data.type == EXTENT_TYPE_PREALLOC) {
-                        EXTENT_DATA2* ed2 = (EXTENT_DATA2*)ext->extent_data.data;
-
-                        if (ed2->size > 0 && ed2->address >= c->offset && ed2->address < c->offset + c->chunk_item->size) {
+                    if (ext->extent_data.type == BTRFS_FILE_EXTENT_REG || ext->extent_data.type == BTRFS_FILE_EXTENT_PREALLOC) {
+                        if (ext->extent_data.disk_num_bytes > 0 && ext->extent_data.disk_bytenr >= c->offset && ext->extent_data.disk_bytenr < c->offset + c->chunk_item->length) {
                             LIST_ENTRY* le3 = items.Flink;
                             while (le3 != &items) {
                                 data_reloc* dr = CONTAINING_RECORD(le3, data_reloc, list_entry);
 
-                                if (ed2->address == dr->address) {
-                                    ed2->address = dr->new_address;
+                                if (ext->extent_data.disk_bytenr == dr->address) {
+                                    ext->extent_data.disk_bytenr = dr->new_address;
                                     break;
                                 }
 
@@ -2202,24 +2350,37 @@ end:
 }
 
 static __inline uint64_t get_chunk_dup_type(chunk* c) {
-    if (c->chunk_item->type & BLOCK_FLAG_RAID0)
-        return BLOCK_FLAG_RAID0;
-    else if (c->chunk_item->type & BLOCK_FLAG_RAID1)
-        return BLOCK_FLAG_RAID1;
-    else if (c->chunk_item->type & BLOCK_FLAG_DUPLICATE)
-        return BLOCK_FLAG_DUPLICATE;
-    else if (c->chunk_item->type & BLOCK_FLAG_RAID10)
-        return BLOCK_FLAG_RAID10;
-    else if (c->chunk_item->type & BLOCK_FLAG_RAID5)
-        return BLOCK_FLAG_RAID5;
-    else if (c->chunk_item->type & BLOCK_FLAG_RAID6)
-        return BLOCK_FLAG_RAID6;
-    else if (c->chunk_item->type & BLOCK_FLAG_RAID1C3)
-        return BLOCK_FLAG_RAID1C3;
-    else if (c->chunk_item->type & BLOCK_FLAG_RAID1C4)
-        return BLOCK_FLAG_RAID1C4;
+    if (c->chunk_item->type & BTRFS_BLOCK_GROUP_RAID0)
+        return BTRFS_BLOCK_GROUP_RAID0;
+    else if (c->chunk_item->type & BTRFS_BLOCK_GROUP_RAID1)
+        return BTRFS_BLOCK_GROUP_RAID1;
+    else if (c->chunk_item->type & BTRFS_BLOCK_GROUP_DUP)
+        return BTRFS_BLOCK_GROUP_DUP;
+    else if (c->chunk_item->type & BTRFS_BLOCK_GROUP_RAID10)
+        return BTRFS_BLOCK_GROUP_RAID10;
+    else if (c->chunk_item->type & BTRFS_BLOCK_GROUP_RAID5)
+        return BTRFS_BLOCK_GROUP_RAID5;
+    else if (c->chunk_item->type & BTRFS_BLOCK_GROUP_RAID6)
+        return BTRFS_BLOCK_GROUP_RAID6;
+    else if (c->chunk_item->type & BTRFS_BLOCK_GROUP_RAID1C3)
+        return BTRFS_BLOCK_GROUP_RAID1C3;
+    else if (c->chunk_item->type & BTRFS_BLOCK_GROUP_RAID1C4)
+        return BTRFS_BLOCK_GROUP_RAID1C4;
     else
-        return BLOCK_FLAG_SINGLE;
+        return BTRFS_AVAIL_ALLOC_BIT_SINGLE;
+}
+
+static uint16_t get_chunk_size_factor(chunk* c) {
+    if (c->chunk_item->type & BTRFS_BLOCK_GROUP_RAID0)
+        return c->chunk_item->num_stripes;
+    else if (c->chunk_item->type & BTRFS_BLOCK_GROUP_RAID10)
+        return c->chunk_item->num_stripes / c->chunk_item->sub_stripes;
+    else if (c->chunk_item->type & BTRFS_BLOCK_GROUP_RAID5)
+        return c->chunk_item->num_stripes - 1;
+    else if (c->chunk_item->type & BTRFS_BLOCK_GROUP_RAID6)
+        return c->chunk_item->num_stripes - 2;
+    else // SINGLE, DUPLICATE, RAID1, RAID1C3, RAID1C4
+        return 1;
 }
 
 static bool should_balance_chunk(device_extension* Vcb, uint8_t sort, chunk* c) {
@@ -2239,11 +2400,10 @@ static bool should_balance_chunk(device_extension* Vcb, uint8_t sort, chunk* c) 
 
     if (opts->flags & BTRFS_BALANCE_OPTS_DEVID) {
         uint16_t i;
-        CHUNK_ITEM_STRIPE* cis = (CHUNK_ITEM_STRIPE*)&c->chunk_item[1];
         bool b = false;
 
         for (i = 0; i < c->chunk_item->num_stripes; i++) {
-            if (cis[i].dev_id == opts->devid) {
+            if (c->chunk_item->stripe[i].devid == opts->devid) {
                 b = true;
                 break;
             }
@@ -2254,27 +2414,15 @@ static bool should_balance_chunk(device_extension* Vcb, uint8_t sort, chunk* c) 
     }
 
     if (opts->flags & BTRFS_BALANCE_OPTS_DRANGE) {
-        uint16_t i, factor;
+        uint16_t i;
         uint64_t physsize;
-        CHUNK_ITEM_STRIPE* cis = (CHUNK_ITEM_STRIPE*)&c->chunk_item[1];
         bool b = false;
 
-        if (c->chunk_item->type & BLOCK_FLAG_RAID0)
-            factor = c->chunk_item->num_stripes;
-        else if (c->chunk_item->type & BLOCK_FLAG_RAID10)
-            factor = c->chunk_item->num_stripes / c->chunk_item->sub_stripes;
-        else if (c->chunk_item->type & BLOCK_FLAG_RAID5)
-            factor = c->chunk_item->num_stripes - 1;
-        else if (c->chunk_item->type & BLOCK_FLAG_RAID6)
-            factor = c->chunk_item->num_stripes - 2;
-        else // SINGLE, DUPLICATE, RAID1, RAID1C3, RAID1C4
-            factor = 1;
-
-        physsize = c->chunk_item->size / factor;
+        physsize = c->chunk_item->length / get_chunk_size_factor(c);
 
         for (i = 0; i < c->chunk_item->num_stripes; i++) {
-            if (cis[i].offset < opts->drange_end && cis[i].offset + physsize >= opts->drange_start &&
-                (!(opts->flags & BTRFS_BALANCE_OPTS_DEVID) || cis[i].dev_id == opts->devid)) {
+            if (c->chunk_item->stripe[i].offset < opts->drange_end && c->chunk_item->stripe[i].offset + physsize >= opts->drange_start &&
+                (!(opts->flags & BTRFS_BALANCE_OPTS_DEVID) || c->chunk_item->stripe[i].devid == opts->devid)) {
                 b = true;
                 break;
             }
@@ -2285,7 +2433,7 @@ static bool should_balance_chunk(device_extension* Vcb, uint8_t sort, chunk* c) 
     }
 
     if (opts->flags & BTRFS_BALANCE_OPTS_VRANGE) {
-        if (c->offset + c->chunk_item->size <= opts->vrange_start || c->offset > opts->vrange_end)
+        if (c->offset + c->chunk_item->length <= opts->vrange_start || c->offset > opts->vrange_end)
             return false;
     }
 
@@ -2295,7 +2443,7 @@ static bool should_balance_chunk(device_extension* Vcb, uint8_t sort, chunk* c) 
     }
 
     if (opts->flags & BTRFS_BALANCE_OPTS_USAGE) {
-        uint64_t usage = c->used * 100 / c->chunk_item->size;
+        uint64_t usage = c->used * 100 / c->chunk_item->length;
 
         // usage == 0 should mean completely empty, not just that usage rounds to 0%
         if (c->used > 0 && usage == 0)
@@ -2315,74 +2463,74 @@ static bool should_balance_chunk(device_extension* Vcb, uint8_t sort, chunk* c) 
     return true;
 }
 
-static void copy_balance_args(btrfs_balance_opts* opts, BALANCE_ARGS* args) {
+static void copy_balance_args(btrfs_balance_opts* opts, struct btrfs_disk_balance_args* args) {
     if (opts->flags & BTRFS_BALANCE_OPTS_PROFILES) {
         args->profiles = opts->profiles;
-        args->flags |= BALANCE_ARGS_FLAGS_PROFILES;
+        args->flags |= BTRFS_BALANCE_ARGS_PROFILES;
     }
 
     if (opts->flags & BTRFS_BALANCE_OPTS_USAGE) {
-        if (args->usage_start == 0) {
-            args->flags |= BALANCE_ARGS_FLAGS_USAGE_RANGE;
-            args->usage_start = opts->usage_start;
-            args->usage_end = opts->usage_end;
+        if (args->usage_min == 0) {
+            args->flags |= BTRFS_BALANCE_ARGS_USAGE_RANGE;
+            args->usage_min = opts->usage_start;
+            args->usage_max = opts->usage_end;
         } else {
-            args->flags |= BALANCE_ARGS_FLAGS_USAGE;
+            args->flags |= BTRFS_BALANCE_ARGS_USAGE;
             args->usage = opts->usage_end;
         }
     }
 
     if (opts->flags & BTRFS_BALANCE_OPTS_DEVID) {
         args->devid = opts->devid;
-        args->flags |= BALANCE_ARGS_FLAGS_DEVID;
+        args->flags |= BTRFS_BALANCE_ARGS_DEVID;
     }
 
     if (opts->flags & BTRFS_BALANCE_OPTS_DRANGE) {
-        args->drange_start = opts->drange_start;
-        args->drange_end = opts->drange_end;
-        args->flags |= BALANCE_ARGS_FLAGS_DRANGE;
+        args->pstart = opts->drange_start;
+        args->pend = opts->drange_end;
+        args->flags |= BTRFS_BALANCE_ARGS_DRANGE;
     }
 
     if (opts->flags & BTRFS_BALANCE_OPTS_VRANGE) {
-        args->vrange_start = opts->vrange_start;
-        args->vrange_end = opts->vrange_end;
-        args->flags |= BALANCE_ARGS_FLAGS_VRANGE;
+        args->vstart = opts->vrange_start;
+        args->vend = opts->vrange_end;
+        args->flags |= BTRFS_BALANCE_ARGS_VRANGE;
     }
 
     if (opts->flags & BTRFS_BALANCE_OPTS_CONVERT) {
-        args->convert = opts->convert;
-        args->flags |= BALANCE_ARGS_FLAGS_CONVERT;
+        args->target = opts->convert;
+        args->flags |= BTRFS_BALANCE_ARGS_CONVERT;
 
         if (opts->flags & BTRFS_BALANCE_OPTS_SOFT)
-            args->flags |= BALANCE_ARGS_FLAGS_SOFT;
+            args->flags |= BTRFS_BALANCE_ARGS_SOFT;
     }
 
     if (opts->flags & BTRFS_BALANCE_OPTS_LIMIT) {
-        if (args->limit_start == 0) {
-            args->flags |= BALANCE_ARGS_FLAGS_LIMIT_RANGE;
-            args->limit_start = (uint32_t)opts->limit_start;
-            args->limit_end = (uint32_t)opts->limit_end;
+        if (args->limit_min == 0) {
+            args->flags |= BTRFS_BALANCE_ARGS_LIMIT_RANGE;
+            args->limit_min = (uint32_t)opts->limit_start;
+            args->limit_max = (uint32_t)opts->limit_end;
         } else {
-            args->flags |= BALANCE_ARGS_FLAGS_LIMIT;
+            args->flags |= BTRFS_BALANCE_ARGS_LIMIT;
             args->limit = opts->limit_end;
         }
     }
 
     if (opts->flags & BTRFS_BALANCE_OPTS_STRIPES) {
-        args->stripes_start = opts->stripes_start;
-        args->stripes_end = opts->stripes_end;
-        args->flags |= BALANCE_ARGS_FLAGS_STRIPES_RANGE;
+        args->stripes_min = opts->stripes_start;
+        args->stripes_max = opts->stripes_end;
+        args->flags |= BTRFS_BALANCE_ARGS_STRIPES_RANGE;
     }
 }
 
 static NTSTATUS add_balance_item(device_extension* Vcb) {
-    KEY searchkey;
+    struct btrfs_key searchkey;
     traverse_ptr tp;
     NTSTATUS Status;
-    BALANCE_ITEM* bi;
+    struct btrfs_balance_item* bi;
 
-    searchkey.obj_id = BALANCE_ITEM_ID;
-    searchkey.obj_type = TYPE_TEMP_ITEM;
+    searchkey.objectid = BTRFS_BALANCE_OBJECTID;
+    searchkey.type = BTRFS_TEMPORARY_ITEM_KEY;
     searchkey.offset = 0;
 
     ExAcquireResourceExclusiveLite(&Vcb->tree_lock, true);
@@ -2401,31 +2549,31 @@ static NTSTATUS add_balance_item(device_extension* Vcb) {
         }
     }
 
-    bi = ExAllocatePoolWithTag(PagedPool, sizeof(BALANCE_ITEM), ALLOC_TAG);
+    bi = ExAllocatePoolWithTag(PagedPool, sizeof(struct btrfs_balance_item), ALLOC_TAG);
     if (!bi) {
         ERR("out of memory\n");
         Status = STATUS_INSUFFICIENT_RESOURCES;
         goto end;
     }
 
-    RtlZeroMemory(bi, sizeof(BALANCE_ITEM));
+    RtlZeroMemory(bi, sizeof(struct btrfs_balance_item));
 
     if (Vcb->balance.opts[BALANCE_OPTS_DATA].flags & BTRFS_BALANCE_OPTS_ENABLED) {
-        bi->flags |= BALANCE_FLAGS_DATA;
+        bi->flags |= BTRFS_BALANCE_DATA;
         copy_balance_args(&Vcb->balance.opts[BALANCE_OPTS_DATA], &bi->data);
     }
 
     if (Vcb->balance.opts[BALANCE_OPTS_METADATA].flags & BTRFS_BALANCE_OPTS_ENABLED) {
-        bi->flags |= BALANCE_FLAGS_METADATA;
-        copy_balance_args(&Vcb->balance.opts[BALANCE_OPTS_METADATA], &bi->metadata);
+        bi->flags |= BTRFS_BALANCE_METADATA;
+        copy_balance_args(&Vcb->balance.opts[BALANCE_OPTS_METADATA], &bi->meta);
     }
 
     if (Vcb->balance.opts[BALANCE_OPTS_SYSTEM].flags & BTRFS_BALANCE_OPTS_ENABLED) {
-        bi->flags |= BALANCE_FLAGS_SYSTEM;
-        copy_balance_args(&Vcb->balance.opts[BALANCE_OPTS_SYSTEM], &bi->system);
+        bi->flags |= BTRFS_BALANCE_SYSTEM;
+        copy_balance_args(&Vcb->balance.opts[BALANCE_OPTS_SYSTEM], &bi->sys);
     }
 
-    Status = insert_tree_item(Vcb, Vcb->root_root, BALANCE_ITEM_ID, TYPE_TEMP_ITEM, 0, bi, sizeof(BALANCE_ITEM), NULL, NULL);
+    Status = insert_tree_item(Vcb, Vcb->root_root, BTRFS_BALANCE_OBJECTID, BTRFS_TEMPORARY_ITEM_KEY, 0, bi, sizeof(struct btrfs_balance_item), NULL, NULL);
     if (!NT_SUCCESS(Status)) {
         ERR("insert_tree_item returned %08lx\n", Status);
         ExFreePool(bi);
@@ -2449,12 +2597,12 @@ end:
 }
 
 static NTSTATUS remove_balance_item(device_extension* Vcb) {
-    KEY searchkey;
+    struct btrfs_key searchkey;
     traverse_ptr tp;
     NTSTATUS Status;
 
-    searchkey.obj_id = BALANCE_ITEM_ID;
-    searchkey.obj_type = TYPE_TEMP_ITEM;
+    searchkey.objectid = BTRFS_BALANCE_OBJECTID;
+    searchkey.type = BTRFS_TEMPORARY_ITEM_KEY;
     searchkey.offset = 0;
 
     ExAcquireResourceExclusiveLite(&Vcb->tree_lock, true);
@@ -2489,86 +2637,86 @@ end:
     return Status;
 }
 
-static void load_balance_args(btrfs_balance_opts* opts, BALANCE_ARGS* args) {
+static void load_balance_args(btrfs_balance_opts* opts, struct btrfs_disk_balance_args* args) {
     opts->flags = BTRFS_BALANCE_OPTS_ENABLED;
 
-    if (args->flags & BALANCE_ARGS_FLAGS_PROFILES) {
+    if (args->flags & BTRFS_BALANCE_ARGS_PROFILES) {
         opts->flags |= BTRFS_BALANCE_OPTS_PROFILES;
         opts->profiles = args->profiles;
     }
 
-    if (args->flags & BALANCE_ARGS_FLAGS_USAGE) {
+    if (args->flags & BTRFS_BALANCE_ARGS_USAGE) {
         opts->flags |= BTRFS_BALANCE_OPTS_USAGE;
 
         opts->usage_start = 0;
         opts->usage_end = (uint8_t)args->usage;
-    } else if (args->flags & BALANCE_ARGS_FLAGS_USAGE_RANGE) {
+    } else if (args->flags & BTRFS_BALANCE_ARGS_USAGE_RANGE) {
         opts->flags |= BTRFS_BALANCE_OPTS_USAGE;
 
-        opts->usage_start = (uint8_t)args->usage_start;
-        opts->usage_end = (uint8_t)args->usage_end;
+        opts->usage_start = (uint8_t)args->usage_min;
+        opts->usage_end = (uint8_t)args->usage_max;
     }
 
-    if (args->flags & BALANCE_ARGS_FLAGS_DEVID) {
+    if (args->flags & BTRFS_BALANCE_ARGS_DEVID) {
         opts->flags |= BTRFS_BALANCE_OPTS_DEVID;
         opts->devid = args->devid;
     }
 
-    if (args->flags & BALANCE_ARGS_FLAGS_DRANGE) {
+    if (args->flags & BTRFS_BALANCE_ARGS_DRANGE) {
         opts->flags |= BTRFS_BALANCE_OPTS_DRANGE;
-        opts->drange_start = args->drange_start;
-        opts->drange_end = args->drange_end;
+        opts->drange_start = args->pstart;
+        opts->drange_end = args->pend;
     }
 
-    if (args->flags & BALANCE_ARGS_FLAGS_VRANGE) {
+    if (args->flags & BTRFS_BALANCE_ARGS_VRANGE) {
         opts->flags |= BTRFS_BALANCE_OPTS_VRANGE;
-        opts->vrange_start = args->vrange_start;
-        opts->vrange_end = args->vrange_end;
+        opts->vrange_start = args->vstart;
+        opts->vrange_end = args->vend;
     }
 
-    if (args->flags & BALANCE_ARGS_FLAGS_LIMIT) {
+    if (args->flags & BTRFS_BALANCE_ARGS_LIMIT) {
         opts->flags |= BTRFS_BALANCE_OPTS_LIMIT;
 
         opts->limit_start = 0;
         opts->limit_end = args->limit;
-    } else if (args->flags & BALANCE_ARGS_FLAGS_LIMIT_RANGE) {
+    } else if (args->flags & BTRFS_BALANCE_ARGS_LIMIT_RANGE) {
         opts->flags |= BTRFS_BALANCE_OPTS_LIMIT;
 
-        opts->limit_start = args->limit_start;
-        opts->limit_end = args->limit_end;
+        opts->limit_start = args->limit_min;
+        opts->limit_end = args->limit_max;
     }
 
-    if (args->flags & BALANCE_ARGS_FLAGS_STRIPES_RANGE) {
+    if (args->flags & BTRFS_BALANCE_ARGS_STRIPES_RANGE) {
         opts->flags |= BTRFS_BALANCE_OPTS_STRIPES;
 
-        opts->stripes_start = (uint16_t)args->stripes_start;
-        opts->stripes_end = (uint16_t)args->stripes_end;
+        opts->stripes_start = (uint16_t)args->stripes_min;
+        opts->stripes_end = (uint16_t)args->stripes_max;
     }
 
-    if (args->flags & BALANCE_ARGS_FLAGS_CONVERT) {
+    if (args->flags & BTRFS_BALANCE_ARGS_CONVERT) {
         opts->flags |= BTRFS_BALANCE_OPTS_CONVERT;
-        opts->convert = args->convert;
+        opts->convert = args->target;
 
-        if (args->flags & BALANCE_ARGS_FLAGS_SOFT)
+        if (args->flags & BTRFS_BALANCE_ARGS_SOFT)
             opts->flags |= BTRFS_BALANCE_OPTS_SOFT;
     }
 }
 
 static NTSTATUS remove_superblocks(device* dev) {
     NTSTATUS Status;
-    superblock* sb;
+    struct btrfs_super_block* sb;
     int i = 0;
 
-    sb = ExAllocatePoolWithTag(PagedPool, sizeof(superblock), ALLOC_TAG);
+    sb = ExAllocatePoolWithTag(PagedPool, sizeof(struct btrfs_super_block), ALLOC_TAG);
     if (!sb) {
         ERR("out of memory\n");
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    RtlZeroMemory(sb, sizeof(superblock));
+    RtlZeroMemory(sb, sizeof(struct btrfs_super_block));
 
-    while (superblock_addrs[i] > 0 && dev->devitem.num_bytes >= superblock_addrs[i] + sizeof(superblock)) {
-        Status = write_data_phys(dev->devobj, dev->fileobj, superblock_addrs[i], sb, sizeof(superblock));
+    while (superblock_addrs[i] > 0 && dev->devitem.total_bytes >= superblock_addrs[i] + sizeof(struct btrfs_super_block)) {
+        Status = write_data_phys(dev->devobj, dev->fileobj, superblock_addrs[i], sb, sizeof(struct btrfs_super_block));
 
         if (!NT_SUCCESS(Status)) {
             ExFreePool(sb);
@@ -2584,7 +2732,7 @@ static NTSTATUS remove_superblocks(device* dev) {
 }
 
 static NTSTATUS finish_removing_device(_Requires_exclusive_lock_held_(_Curr_->tree_lock) device_extension* Vcb, device* dev) {
-    KEY searchkey;
+    struct btrfs_key searchkey;
     traverse_ptr tp;
     NTSTATUS Status;
     LIST_ENTRY* le;
@@ -2605,9 +2753,9 @@ static NTSTATUS finish_removing_device(_Requires_exclusive_lock_held_(_Curr_->tr
 
     // remove entry in chunk tree
 
-    searchkey.obj_id = 1;
-    searchkey.obj_type = TYPE_DEV_ITEM;
-    searchkey.offset = dev->devitem.dev_id;
+    searchkey.objectid = 1;
+    searchkey.type = BTRFS_DEV_ITEM_KEY;
+    searchkey.offset = dev->devitem.devid;
 
     Status = find_item(Vcb, Vcb->chunk_root, &tp, &searchkey, false, NULL);
     if (!NT_SUCCESS(Status)) {
@@ -2626,9 +2774,9 @@ static NTSTATUS finish_removing_device(_Requires_exclusive_lock_held_(_Curr_->tr
 
     // remove stats entry in device tree
 
-    searchkey.obj_id = 0;
-    searchkey.obj_type = TYPE_DEV_STATS;
-    searchkey.offset = dev->devitem.dev_id;
+    searchkey.objectid = 0;
+    searchkey.type = BTRFS_PERSISTENT_ITEM_KEY;
+    searchkey.offset = dev->devitem.devid;
 
     Status = find_item(Vcb, Vcb->dev_root, &tp, &searchkey, false, NULL);
     if (!NT_SUCCESS(Status)) {
@@ -2648,7 +2796,7 @@ static NTSTATUS finish_removing_device(_Requires_exclusive_lock_held_(_Curr_->tr
     // update superblock
 
     Vcb->superblock.num_devices--;
-    Vcb->superblock.total_bytes -= dev->devitem.num_bytes;
+    Vcb->superblock.total_bytes -= dev->devitem.total_bytes;
     Vcb->devices_loaded--;
 
     RemoveEntryList(&dev->list_entry);
@@ -2683,7 +2831,7 @@ static NTSTATUS finish_removing_device(_Requires_exclusive_lock_held_(_Curr_->tr
         while (le != &pdode->children) {
             volume_child* vc = CONTAINING_RECORD(le, volume_child, list_entry);
 
-            if (RtlCompareMemory(&dev->devitem.device_uuid, &vc->uuid, sizeof(BTRFS_UUID)) == sizeof(BTRFS_UUID)) {
+            if (RtlCompareMemory(&dev->devitem.uuid, &vc->uuid, BTRFS_UUID_SIZE) == BTRFS_UUID_SIZE) {
                 PFILE_OBJECT FileObject;
                 PDEVICE_OBJECT mountmgr;
                 UNICODE_STRING mmdevpath;
@@ -2733,9 +2881,9 @@ static NTSTATUS finish_removing_device(_Requires_exclusive_lock_held_(_Curr_->tr
 
                 ExFreePool(vc->pnp_name.Buffer);
                 RemoveEntryList(&vc->list_entry);
-                ExFreePool(vc);
 
                 ObDereferenceObject(vc->fileobj);
+                ExFreePool(vc);
 
                 break;
             }
@@ -2803,7 +2951,7 @@ static void trim_unalloc_space(_Requires_lock_held_(_Curr_->tree_lock) device_ex
     DEVICE_MANAGE_DATA_SET_ATTRIBUTES* dmdsa;
     DEVICE_DATA_SET_RANGE* ranges;
     ULONG datalen, i;
-    KEY searchkey;
+    struct btrfs_key searchkey;
     traverse_ptr tp;
     NTSTATUS Status;
     bool b;
@@ -2812,8 +2960,8 @@ static void trim_unalloc_space(_Requires_lock_held_(_Curr_->tree_lock) device_ex
 
     dev->num_trim_entries = 0;
 
-    searchkey.obj_id = dev->devitem.dev_id;
-    searchkey.obj_type = TYPE_DEV_EXTENT;
+    searchkey.objectid = dev->devitem.devid;
+    searchkey.type = BTRFS_DEV_EXTENT_KEY;
     searchkey.offset = 0;
 
     Status = find_item(Vcb, Vcb->dev_root, &tp, &searchkey, false, NULL);
@@ -2825,16 +2973,16 @@ static void trim_unalloc_space(_Requires_lock_held_(_Curr_->tree_lock) device_ex
     do {
         traverse_ptr next_tp;
 
-        if (tp.item->key.obj_id == dev->devitem.dev_id && tp.item->key.obj_type == TYPE_DEV_EXTENT) {
-            if (tp.item->size >= sizeof(DEV_EXTENT)) {
-                DEV_EXTENT* de = (DEV_EXTENT*)tp.item->data;
+        if (tp.item->key.objectid == dev->devitem.devid && tp.item->key.type == BTRFS_DEV_EXTENT_KEY) {
+            if (tp.item->size >= sizeof(struct btrfs_dev_extent)) {
+                struct btrfs_dev_extent* de = (struct btrfs_dev_extent*)tp.item->data;
 
                 if (tp.item->key.offset > lastoff)
                     add_trim_entry_avoid_sb(Vcb, dev, lastoff, tp.item->key.offset - lastoff);
 
                 lastoff = tp.item->key.offset + de->length;
             } else {
-                ERR("(%I64x,%x,%I64x) was %u bytes, expected %Iu\n", tp.item->key.obj_id, tp.item->key.obj_type, tp.item->key.offset, tp.item->size, sizeof(DEV_EXTENT));
+                ERR("(%I64x,%x,%I64x) was %u bytes, expected %Iu\n", tp.item->key.objectid, tp.item->key.type, tp.item->key.offset, tp.item->size, sizeof(struct btrfs_dev_extent));
                 return;
             }
         }
@@ -2843,13 +2991,13 @@ static void trim_unalloc_space(_Requires_lock_held_(_Curr_->tree_lock) device_ex
 
         if (b) {
             tp = next_tp;
-            if (tp.item->key.obj_id > searchkey.obj_id || (tp.item->key.obj_id == searchkey.obj_id && tp.item->key.obj_type > searchkey.obj_type))
+            if (tp.item->key.objectid > searchkey.objectid || (tp.item->key.objectid == searchkey.objectid && tp.item->key.type > searchkey.type))
                 break;
         }
     } while (b);
 
-    if (lastoff < dev->devitem.num_bytes)
-        add_trim_entry_avoid_sb(Vcb, dev, lastoff, dev->devitem.num_bytes - lastoff);
+    if (lastoff < dev->devitem.total_bytes)
+        add_trim_entry_avoid_sb(Vcb, dev, lastoff, dev->devitem.total_bytes - lastoff);
 
     if (dev->num_trim_entries == 0)
         return;
@@ -2920,7 +3068,7 @@ static NTSTATUS try_consolidation(device_extension* Vcb, uint64_t flags, chunk**
             chunk* c = CONTAINING_RECORD(le, chunk, list_entry);
 
             // FIXME - skip full-size chunks over e.g. 90% full?
-            if (c->chunk_item->type & BLOCK_FLAG_DATA && !c->readonly && c->balance_num != Vcb->balance.balance_num && (!rc || c->used < rc->used))
+            if (c->chunk_item->type & BTRFS_BLOCK_GROUP_DATA && !c->readonly && c->balance_num != Vcb->balance.balance_num && (!rc || c->used < rc->used))
                 rc = c;
 
             le = le->Flink;
@@ -2970,13 +3118,18 @@ static NTSTATUS try_consolidation(device_extension* Vcb, uint64_t flags, chunk**
         rc->space_changed = true;
         rc->balance_num = Vcb->balance.balance_num;
 
+        ExAcquireResourceExclusiveLite(&Vcb->tree_lock, true);
+
         Status = do_write(Vcb, NULL);
         if (!NT_SUCCESS(Status)) {
             ERR("do_write returned %08lx\n", Status);
+            ExReleaseResourceLite(&Vcb->tree_lock);
             return Status;
         }
 
         free_trees(Vcb);
+
+        ExReleaseResourceLite(&Vcb->tree_lock);
     }
 
     ExAcquireResourceExclusiveLite(&Vcb->chunk_lock, true);
@@ -2995,6 +3148,7 @@ static NTSTATUS try_consolidation(device_extension* Vcb, uint64_t flags, chunk**
 }
 
 static NTSTATUS regenerate_space_list(device_extension* Vcb, device* dev) {
+    NTSTATUS Status;
     LIST_ENTRY* le;
 
     while (!IsListEmpty(&dev->space)) {
@@ -3005,36 +3159,42 @@ static NTSTATUS regenerate_space_list(device_extension* Vcb, device* dev) {
 
     // The Linux driver doesn't like to allocate chunks within the first megabyte of a device.
 
-    space_list_add2(&dev->space, NULL, 0x100000, dev->devitem.num_bytes - 0x100000, NULL, NULL);
+    Status = space_list_add2(&dev->space, NULL, 0x100000,
+                             dev->devitem.total_bytes - 0x100000, NULL, NULL);
+    if (!NT_SUCCESS(Status))
+        return Status;
 
     le = Vcb->chunks.Flink;
     while (le != &Vcb->chunks) {
         uint16_t n;
         chunk* c = CONTAINING_RECORD(le, chunk, list_entry);
-        CHUNK_ITEM_STRIPE* cis = (CHUNK_ITEM_STRIPE*)&c->chunk_item[1];
 
         for (n = 0; n < c->chunk_item->num_stripes; n++) {
             uint64_t stripe_size = 0;
 
-            if (cis[n].dev_id == dev->devitem.dev_id) {
+            if (c->chunk_item->stripe[n].devid == dev->devitem.devid) {
                 if (stripe_size == 0) {
                     uint16_t factor;
 
-                    if (c->chunk_item->type & BLOCK_FLAG_RAID0)
+                    if (c->chunk_item->type & BTRFS_BLOCK_GROUP_RAID0)
                         factor = c->chunk_item->num_stripes;
-                    else if (c->chunk_item->type & BLOCK_FLAG_RAID10)
+                    else if (c->chunk_item->type & BTRFS_BLOCK_GROUP_RAID10)
                         factor = c->chunk_item->num_stripes / c->chunk_item->sub_stripes;
-                    else if (c->chunk_item->type & BLOCK_FLAG_RAID5)
+                    else if (c->chunk_item->type & BTRFS_BLOCK_GROUP_RAID5)
                         factor = c->chunk_item->num_stripes - 1;
-                    else if (c->chunk_item->type & BLOCK_FLAG_RAID6)
+                    else if (c->chunk_item->type & BTRFS_BLOCK_GROUP_RAID6)
                         factor = c->chunk_item->num_stripes - 2;
                     else // SINGLE, DUP, RAID1, RAID1C3, RAID1C4
                         factor = 1;
 
-                    stripe_size = c->chunk_item->size / factor;
+                    stripe_size = c->chunk_item->length / factor;
                 }
 
-                space_list_subtract2(&dev->space, NULL, cis[n].offset, stripe_size, NULL, NULL);
+                Status = space_list_subtract2(&dev->space, NULL,
+                                              c->chunk_item->stripe[n].offset,
+                                              stripe_size, NULL, NULL);
+                if (!NT_SUCCESS(Status))
+                    return Status;
             }
         }
 
@@ -3055,27 +3215,24 @@ void __stdcall balance_thread(void* context) {
 
     Vcb->balance.balance_num++;
 
-    Vcb->balance.stopping = false;
-    KeInitializeEvent(&Vcb->balance.finished, NotificationEvent, false);
-
     if (Vcb->balance.opts[BALANCE_OPTS_DATA].flags & BTRFS_BALANCE_OPTS_ENABLED && Vcb->balance.opts[BALANCE_OPTS_DATA].flags & BTRFS_BALANCE_OPTS_CONVERT) {
         old_data_flags = Vcb->data_flags;
-        Vcb->data_flags = BLOCK_FLAG_DATA | (Vcb->balance.opts[BALANCE_OPTS_DATA].convert == BLOCK_FLAG_SINGLE ? 0 : Vcb->balance.opts[BALANCE_OPTS_DATA].convert);
+        Vcb->data_flags = BTRFS_BLOCK_GROUP_DATA | (Vcb->balance.opts[BALANCE_OPTS_DATA].convert == BTRFS_AVAIL_ALLOC_BIT_SINGLE ? 0 : Vcb->balance.opts[BALANCE_OPTS_DATA].convert);
 
         FsRtlNotifyVolumeEvent(Vcb->root_file, FSRTL_VOLUME_CHANGE_SIZE);
     }
 
     if (Vcb->balance.opts[BALANCE_OPTS_METADATA].flags & BTRFS_BALANCE_OPTS_ENABLED && Vcb->balance.opts[BALANCE_OPTS_METADATA].flags & BTRFS_BALANCE_OPTS_CONVERT) {
         old_metadata_flags = Vcb->metadata_flags;
-        Vcb->metadata_flags = BLOCK_FLAG_METADATA | (Vcb->balance.opts[BALANCE_OPTS_METADATA].convert == BLOCK_FLAG_SINGLE ? 0 : Vcb->balance.opts[BALANCE_OPTS_METADATA].convert);
+        Vcb->metadata_flags = BTRFS_BLOCK_GROUP_METADATA | (Vcb->balance.opts[BALANCE_OPTS_METADATA].convert == BTRFS_AVAIL_ALLOC_BIT_SINGLE ? 0 : Vcb->balance.opts[BALANCE_OPTS_METADATA].convert);
     }
 
     if (Vcb->balance.opts[BALANCE_OPTS_SYSTEM].flags & BTRFS_BALANCE_OPTS_ENABLED && Vcb->balance.opts[BALANCE_OPTS_SYSTEM].flags & BTRFS_BALANCE_OPTS_CONVERT) {
         old_system_flags = Vcb->system_flags;
-        Vcb->system_flags = BLOCK_FLAG_SYSTEM | (Vcb->balance.opts[BALANCE_OPTS_SYSTEM].convert == BLOCK_FLAG_SINGLE ? 0 : Vcb->balance.opts[BALANCE_OPTS_SYSTEM].convert);
+        Vcb->system_flags = BTRFS_BLOCK_GROUP_SYSTEM | (Vcb->balance.opts[BALANCE_OPTS_SYSTEM].convert == BTRFS_AVAIL_ALLOC_BIT_SINGLE ? 0 : Vcb->balance.opts[BALANCE_OPTS_SYSTEM].convert);
     }
 
-    if (Vcb->superblock.incompat_flags & BTRFS_INCOMPAT_FLAGS_MIXED_GROUPS) {
+    if (Vcb->superblock.incompat_flags & BTRFS_FEATURE_INCOMPAT_MIXED_GROUPS) {
         if (Vcb->balance.opts[BALANCE_OPTS_DATA].flags & BTRFS_BALANCE_OPTS_ENABLED)
             RtlCopyMemory(&Vcb->balance.opts[BALANCE_OPTS_METADATA], &Vcb->balance.opts[BALANCE_OPTS_DATA], sizeof(btrfs_balance_opts));
         else if (Vcb->balance.opts[BALANCE_OPTS_METADATA].flags & BTRFS_BALANCE_OPTS_ENABLED)
@@ -3098,6 +3255,8 @@ void __stdcall balance_thread(void* context) {
                 goto end;
             }
         } else {
+            ExAcquireResourceExclusiveLite(&Vcb->tree_lock, true);
+
             if (Vcb->need_write) {
                 Status = do_write(Vcb, NULL);
 
@@ -3106,9 +3265,12 @@ void __stdcall balance_thread(void* context) {
                 if (!NT_SUCCESS(Status)) {
                     ERR("do_write returned %08lx\n", Status);
                     Vcb->balance.status = Status;
+                    ExReleaseResourceLite(&Vcb->tree_lock);
                     goto end;
                 }
             }
+
+            ExReleaseResourceLite(&Vcb->tree_lock);
         }
     }
 
@@ -3126,11 +3288,11 @@ void __stdcall balance_thread(void* context) {
 
         acquire_chunk_lock(c, Vcb);
 
-        if (c->chunk_item->type & BLOCK_FLAG_DATA)
+        if (c->chunk_item->type & BTRFS_BLOCK_GROUP_DATA)
             sort = BALANCE_OPTS_DATA;
-        else if (c->chunk_item->type & BLOCK_FLAG_METADATA)
+        else if (c->chunk_item->type & BTRFS_BLOCK_GROUP_METADATA)
             sort = BALANCE_OPTS_METADATA;
-        else if (c->chunk_item->type & BLOCK_FLAG_SYSTEM)
+        else if (c->chunk_item->type & BTRFS_BLOCK_GROUP_SYSTEM)
             sort = BALANCE_OPTS_SYSTEM;
         else {
             ERR("unexpected chunk type %I64x\n", c->chunk_item->type);
@@ -3289,7 +3451,7 @@ void __stdcall balance_thread(void* context) {
         chunk* c = CONTAINING_RECORD(le, chunk, list_entry_balance);
         LIST_ENTRY* le2 = le->Flink;
 
-        if (c->chunk_item->type & BLOCK_FLAG_DATA) {
+        if (c->chunk_item->type & BTRFS_BLOCK_GROUP_DATA) {
             bool changed;
 
             do {
@@ -3318,8 +3480,8 @@ void __stdcall balance_thread(void* context) {
         if (Vcb->balance.stopping)
             goto end;
 
-        if (c->chunk_item->type & BLOCK_FLAG_DATA &&
-            (!(Vcb->balance.opts[BALANCE_OPTS_METADATA].flags & BTRFS_BALANCE_OPTS_ENABLED) || !(c->chunk_item->type & BLOCK_FLAG_METADATA))) {
+        if (c->chunk_item->type & BTRFS_BLOCK_GROUP_DATA &&
+            (!(Vcb->balance.opts[BALANCE_OPTS_METADATA].flags & BTRFS_BALANCE_OPTS_ENABLED) || !(c->chunk_item->type & BTRFS_BLOCK_GROUP_METADATA))) {
             RemoveEntryList(&c->list_entry_balance);
             c->list_entry_balance.Flink = NULL;
 
@@ -3337,7 +3499,7 @@ void __stdcall balance_thread(void* context) {
         le = RemoveHeadList(&chunks);
         c = CONTAINING_RECORD(le, chunk, list_entry_balance);
 
-        if (c->chunk_item->type & BLOCK_FLAG_METADATA || c->chunk_item->type & BLOCK_FLAG_SYSTEM) {
+        if (c->chunk_item->type & BTRFS_BLOCK_GROUP_METADATA || c->chunk_item->type & BTRFS_BLOCK_GROUP_SYSTEM) {
             do {
                 Status = balance_metadata_chunk(Vcb, c, &changed);
                 if (!NT_SUCCESS(Status)) {
@@ -3398,7 +3560,7 @@ end:
             while (le != &Vcb->devices) {
                 device* dev2 = CONTAINING_RECORD(le, device, list_entry);
 
-                if (dev2->devitem.dev_id == Vcb->balance.opts[0].devid) {
+                if (dev2->devitem.devid == Vcb->balance.opts[0].devid) {
                     dev = dev2;
                     break;
                 }
@@ -3428,7 +3590,7 @@ end:
             while (le != &Vcb->devices) {
                 device* dev2 = CONTAINING_RECORD(le, device, list_entry);
 
-                if (dev2->devitem.dev_id == Vcb->balance.opts[0].devid) {
+                if (dev2->devitem.devid == Vcb->balance.opts[0].devid) {
                     dev = dev2;
                     break;
                 }
@@ -3449,27 +3611,59 @@ end:
                 }
             } else {
                 uint64_t old_size;
+                bool failed = false;
 
-                old_size = dev->devitem.num_bytes;
-                dev->devitem.num_bytes = Vcb->balance.opts[0].drange_start;
+                ExAcquireResourceSharedLite(&Vcb->chunk_lock, true);
 
-                Status = update_dev_item(Vcb, dev, NULL);
-                if (!NT_SUCCESS(Status)) {
-                    ERR("update_dev_item returned %08lx\n", Status);
-                    dev->devitem.num_bytes = old_size;
-                    Vcb->balance.status = Status;
+                for (LIST_ENTRY* le = Vcb->chunks.Flink; le != &Vcb->chunks; le = le->Flink) {
+                    chunk* c = CONTAINING_RECORD(le, chunk, list_entry);
+
+                    uint16_t factor = get_chunk_size_factor(c);
+
+                    for (uint16_t i = 0; i < c->chunk_item->num_stripes; i++) {
+                        if (c->chunk_item->stripe[i].devid != dev->devitem.devid)
+                            continue;
+
+                        if (c->chunk_item->stripe[i].offset + (c->chunk_item->length / factor) > Vcb->balance.opts[0].drange_start) {
+                            failed = true;
+                            break;
+                        }
+                    }
+
+                    if (failed)
+                        break;
+                }
+
+                ExReleaseResourceLite(&Vcb->chunk_lock);
+
+                if (failed) {
+                    Vcb->balance.status = STATUS_DISK_FULL;
 
                     Status = regenerate_space_list(Vcb, dev);
                     if (!NT_SUCCESS(Status))
                         WARN("regenerate_space_list returned %08lx\n", Status);
                 } else {
-                    Vcb->superblock.total_bytes -= old_size - dev->devitem.num_bytes;
+                    old_size = dev->devitem.total_bytes;
+                    dev->devitem.total_bytes = Vcb->balance.opts[0].drange_start;
 
-                    Status = do_write(Vcb, NULL);
-                    if (!NT_SUCCESS(Status))
-                        ERR("do_write returned %08lx\n", Status);
+                    Status = update_dev_item(Vcb, dev, NULL);
+                    if (!NT_SUCCESS(Status)) {
+                        ERR("update_dev_item returned %08lx\n", Status);
+                        dev->devitem.total_bytes = old_size;
+                        Vcb->balance.status = Status;
 
-                    free_trees(Vcb);
+                        Status = regenerate_space_list(Vcb, dev);
+                        if (!NT_SUCCESS(Status))
+                            WARN("regenerate_space_list returned %08lx\n", Status);
+                    } else {
+                        Vcb->superblock.total_bytes -= old_size - dev->devitem.total_bytes;
+
+                        Status = do_write(Vcb, NULL);
+                        if (!NT_SUCCESS(Status))
+                            ERR("do_write returned %08lx\n", Status);
+
+                        free_trees(Vcb);
+                    }
                 }
             }
 
@@ -3546,9 +3740,9 @@ NTSTATUS start_balance(device_extension* Vcb, void* data, ULONG length, KPROCESS
     for (i = 0; i < 3; i++) {
         if (bsb->opts[i].flags & BTRFS_BALANCE_OPTS_ENABLED) {
             if (bsb->opts[i].flags & BTRFS_BALANCE_OPTS_PROFILES) {
-                bsb->opts[i].profiles &= BLOCK_FLAG_RAID0 | BLOCK_FLAG_RAID1 | BLOCK_FLAG_DUPLICATE | BLOCK_FLAG_RAID10 |
-                                         BLOCK_FLAG_RAID5 | BLOCK_FLAG_RAID6 | BLOCK_FLAG_SINGLE | BLOCK_FLAG_RAID1C3 |
-                                         BLOCK_FLAG_RAID1C4;
+                bsb->opts[i].profiles &= BTRFS_BLOCK_GROUP_RAID0 | BTRFS_BLOCK_GROUP_RAID1 | BTRFS_BLOCK_GROUP_DUP | BTRFS_BLOCK_GROUP_RAID10 |
+                                         BTRFS_BLOCK_GROUP_RAID5 | BTRFS_BLOCK_GROUP_RAID6 | BTRFS_AVAIL_ALLOC_BIT_SINGLE | BTRFS_BLOCK_GROUP_RAID1C3 |
+                                         BTRFS_BLOCK_GROUP_RAID1C4;
 
                 if (bsb->opts[i].profiles == 0)
                     return STATUS_INVALID_PARAMETER;
@@ -3594,11 +3788,11 @@ NTSTATUS start_balance(device_extension* Vcb, void* data, ULONG length, KPROCESS
             }
 
             if (bsb->opts[i].flags & BTRFS_BALANCE_OPTS_CONVERT) {
-                if (bsb->opts[i].convert != BLOCK_FLAG_RAID0 && bsb->opts[i].convert != BLOCK_FLAG_RAID1 &&
-                    bsb->opts[i].convert != BLOCK_FLAG_DUPLICATE && bsb->opts[i].convert != BLOCK_FLAG_RAID10 &&
-                    bsb->opts[i].convert != BLOCK_FLAG_RAID5 && bsb->opts[i].convert != BLOCK_FLAG_RAID6 &&
-                    bsb->opts[i].convert != BLOCK_FLAG_SINGLE && bsb->opts[i].convert != BLOCK_FLAG_RAID1C3 &&
-                    bsb->opts[i].convert != BLOCK_FLAG_RAID1C4)
+                if (bsb->opts[i].convert != BTRFS_BLOCK_GROUP_RAID0 && bsb->opts[i].convert != BTRFS_BLOCK_GROUP_RAID1 &&
+                    bsb->opts[i].convert != BTRFS_BLOCK_GROUP_DUP && bsb->opts[i].convert != BTRFS_BLOCK_GROUP_RAID10 &&
+                    bsb->opts[i].convert != BTRFS_BLOCK_GROUP_RAID5 && bsb->opts[i].convert != BTRFS_BLOCK_GROUP_RAID6 &&
+                    bsb->opts[i].convert != BTRFS_AVAIL_ALLOC_BIT_SINGLE && bsb->opts[i].convert != BTRFS_BLOCK_GROUP_RAID1C3 &&
+                    bsb->opts[i].convert != BTRFS_BLOCK_GROUP_RAID1C4)
                     return STATUS_INVALID_PARAMETER;
             }
         }
@@ -3611,8 +3805,10 @@ NTSTATUS start_balance(device_extension* Vcb, void* data, ULONG length, KPROCESS
     Vcb->balance.paused = false;
     Vcb->balance.removing = false;
     Vcb->balance.shrinking = false;
+    Vcb->balance.stopping = false;
     Vcb->balance.status = STATUS_SUCCESS;
     KeInitializeEvent(&Vcb->balance.event, NotificationEvent, !Vcb->balance.paused);
+    KeInitializeEvent(&Vcb->balance.finished, NotificationEvent, false);
 
     InitializeObjectAttributes(&oa, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
 
@@ -3626,15 +3822,15 @@ NTSTATUS start_balance(device_extension* Vcb, void* data, ULONG length, KPROCESS
 }
 
 NTSTATUS look_for_balance_item(_Requires_lock_held_(_Curr_->tree_lock) device_extension* Vcb) {
-    KEY searchkey;
+    struct btrfs_key searchkey;
     traverse_ptr tp;
     NTSTATUS Status;
-    BALANCE_ITEM* bi;
+    struct btrfs_balance_item* bi;
     OBJECT_ATTRIBUTES oa;
     int i;
 
-    searchkey.obj_id = BALANCE_ITEM_ID;
-    searchkey.obj_type = TYPE_TEMP_ITEM;
+    searchkey.objectid = BTRFS_BALANCE_OBJECTID;
+    searchkey.type = BTRFS_TEMPORARY_ITEM_KEY;
     searchkey.offset = 0;
 
     Status = find_item(Vcb, Vcb->root_root, &tp, &searchkey, false, NULL);
@@ -3648,22 +3844,22 @@ NTSTATUS look_for_balance_item(_Requires_lock_held_(_Curr_->tree_lock) device_ex
         return STATUS_NOT_FOUND;
     }
 
-    if (tp.item->size < sizeof(BALANCE_ITEM)) {
-        WARN("(%I64x,%x,%I64x) was %u bytes, expected %Iu\n", tp.item->key.obj_id, tp.item->key.obj_type, tp.item->key.offset,
-             tp.item->size, sizeof(BALANCE_ITEM));
+    if (tp.item->size < sizeof(struct btrfs_balance_item)) {
+        WARN("(%I64x,%x,%I64x) was %u bytes, expected %Iu\n", tp.item->key.objectid, tp.item->key.type, tp.item->key.offset,
+             tp.item->size, sizeof(struct btrfs_balance_item));
         return STATUS_INTERNAL_ERROR;
     }
 
-    bi = (BALANCE_ITEM*)tp.item->data;
+    bi = (struct btrfs_balance_item*)tp.item->data;
 
-    if (bi->flags & BALANCE_FLAGS_DATA)
+    if (bi->flags & BTRFS_BALANCE_DATA)
         load_balance_args(&Vcb->balance.opts[BALANCE_OPTS_DATA], &bi->data);
 
-    if (bi->flags & BALANCE_FLAGS_METADATA)
-        load_balance_args(&Vcb->balance.opts[BALANCE_OPTS_METADATA], &bi->metadata);
+    if (bi->flags & BTRFS_BALANCE_METADATA)
+        load_balance_args(&Vcb->balance.opts[BALANCE_OPTS_METADATA], &bi->meta);
 
-    if (bi->flags & BALANCE_FLAGS_SYSTEM)
-        load_balance_args(&Vcb->balance.opts[BALANCE_OPTS_SYSTEM], &bi->system);
+    if (bi->flags & BTRFS_BALANCE_SYSTEM)
+        load_balance_args(&Vcb->balance.opts[BALANCE_OPTS_SYSTEM], &bi->sys);
 
     // do the heuristics that Linux driver does
 
@@ -3694,8 +3890,10 @@ NTSTATUS look_for_balance_item(_Requires_lock_held_(_Curr_->tree_lock) device_ex
 
     Vcb->balance.removing = false;
     Vcb->balance.shrinking = false;
+    Vcb->balance.stopping = false;
     Vcb->balance.status = STATUS_SUCCESS;
     KeInitializeEvent(&Vcb->balance.event, NotificationEvent, !Vcb->balance.paused);
+    KeInitializeEvent(&Vcb->balance.finished, NotificationEvent, false);
 
     InitializeObjectAttributes(&oa, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
 
@@ -3828,7 +4026,7 @@ NTSTATUS remove_device(device_extension* Vcb, void* data, ULONG length, KPROCESS
     while (le != &Vcb->devices) {
         device* dev2 = CONTAINING_RECORD(le, device, list_entry);
 
-        if (dev2->devitem.dev_id == devid)
+        if (dev2->devitem.devid == devid)
             dev = dev2;
 
         if (!dev2->readonly)
@@ -3851,9 +4049,9 @@ NTSTATUS remove_device(device_extension* Vcb, void* data, ULONG length, KPROCESS
         }
 
         if (num_rw_devices == 4 &&
-            ((Vcb->data_flags & BLOCK_FLAG_RAID10 || Vcb->metadata_flags & BLOCK_FLAG_RAID10 || Vcb->system_flags & BLOCK_FLAG_RAID10) ||
-             (Vcb->data_flags & BLOCK_FLAG_RAID6 || Vcb->metadata_flags & BLOCK_FLAG_RAID6 || Vcb->system_flags & BLOCK_FLAG_RAID6) ||
-             (Vcb->data_flags & BLOCK_FLAG_RAID1C4 || Vcb->metadata_flags & BLOCK_FLAG_RAID1C4 || Vcb->system_flags & BLOCK_FLAG_RAID1C4)
+            ((Vcb->data_flags & BTRFS_BLOCK_GROUP_RAID10 || Vcb->metadata_flags & BTRFS_BLOCK_GROUP_RAID10 || Vcb->system_flags & BTRFS_BLOCK_GROUP_RAID10) ||
+             (Vcb->data_flags & BTRFS_BLOCK_GROUP_RAID6 || Vcb->metadata_flags & BTRFS_BLOCK_GROUP_RAID6 || Vcb->system_flags & BTRFS_BLOCK_GROUP_RAID6) ||
+             (Vcb->data_flags & BTRFS_BLOCK_GROUP_RAID1C4 || Vcb->metadata_flags & BTRFS_BLOCK_GROUP_RAID1C4 || Vcb->system_flags & BTRFS_BLOCK_GROUP_RAID1C4)
             )
         ) {
             ExReleaseResourceLite(&Vcb->tree_lock);
@@ -3862,8 +4060,8 @@ NTSTATUS remove_device(device_extension* Vcb, void* data, ULONG length, KPROCESS
         }
 
         if (num_rw_devices == 3 &&
-            ((Vcb->data_flags & BLOCK_FLAG_RAID5 || Vcb->metadata_flags & BLOCK_FLAG_RAID5 || Vcb->system_flags & BLOCK_FLAG_RAID5) ||
-            (Vcb->data_flags & BLOCK_FLAG_RAID1C3 || Vcb->metadata_flags & BLOCK_FLAG_RAID1C3 || Vcb->system_flags & BLOCK_FLAG_RAID1C3))
+            ((Vcb->data_flags & BTRFS_BLOCK_GROUP_RAID5 || Vcb->metadata_flags & BTRFS_BLOCK_GROUP_RAID5 || Vcb->system_flags & BTRFS_BLOCK_GROUP_RAID5) ||
+            (Vcb->data_flags & BTRFS_BLOCK_GROUP_RAID1C3 || Vcb->metadata_flags & BTRFS_BLOCK_GROUP_RAID1C3 || Vcb->system_flags & BTRFS_BLOCK_GROUP_RAID1C3))
             ) {
             ExReleaseResourceLite(&Vcb->tree_lock);
             ERR("would not be enough devices to satisfy RAID requirement (RAID5/1C3)\n");
@@ -3871,8 +4069,8 @@ NTSTATUS remove_device(device_extension* Vcb, void* data, ULONG length, KPROCESS
         }
 
         if (num_rw_devices == 2 &&
-            ((Vcb->data_flags & BLOCK_FLAG_RAID0 || Vcb->metadata_flags & BLOCK_FLAG_RAID0 || Vcb->system_flags & BLOCK_FLAG_RAID0) ||
-             (Vcb->data_flags & BLOCK_FLAG_RAID1 || Vcb->metadata_flags & BLOCK_FLAG_RAID1 || Vcb->system_flags & BLOCK_FLAG_RAID1))
+            ((Vcb->data_flags & BTRFS_BLOCK_GROUP_RAID0 || Vcb->metadata_flags & BTRFS_BLOCK_GROUP_RAID0 || Vcb->system_flags & BTRFS_BLOCK_GROUP_RAID0) ||
+             (Vcb->data_flags & BTRFS_BLOCK_GROUP_RAID1 || Vcb->metadata_flags & BTRFS_BLOCK_GROUP_RAID1 || Vcb->system_flags & BTRFS_BLOCK_GROUP_RAID1))
         ) {
             ExReleaseResourceLite(&Vcb->tree_lock);
             ERR("would not be enough devices to satisfy RAID requirement (RAID0/1)\n");
@@ -3899,8 +4097,10 @@ NTSTATUS remove_device(device_extension* Vcb, void* data, ULONG length, KPROCESS
     Vcb->balance.paused = false;
     Vcb->balance.removing = true;
     Vcb->balance.shrinking = false;
+    Vcb->balance.stopping = false;
     Vcb->balance.status = STATUS_SUCCESS;
     KeInitializeEvent(&Vcb->balance.event, NotificationEvent, !Vcb->balance.paused);
+    KeInitializeEvent(&Vcb->balance.finished, NotificationEvent, false);
 
     InitializeObjectAttributes(&oa, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
 
