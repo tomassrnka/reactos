@@ -196,7 +196,21 @@
 
 #define __HRESULT_FROM_WIN32(x)   ((HRESULT)(x) > 0 ? ((HRESULT) (((x) & 0x0000FFFF) | (FACILITY_WIN32 << 16) | 0x80000000)) : (HRESULT)(x) )
 #ifdef __REACTOS__
+/* As in the Windows SDK, the macro is the default, so that it stays a constant expression for code that
+   needs one; the macro repeats its argument, so an argument with side effects must be evaluated first.
+   INLINE_HRESULT_FROM_WIN32 selects an inline function that evaluates its argument once. */
+#if defined(INLINE_HRESULT_FROM_WIN32) && !defined(RC_INVOKED) && !defined(__ASM__) && !defined(__midl)
+#ifdef __cplusplus
+static constexpr long HRESULT_FROM_WIN32(unsigned long x)
+#else
+static __inline long HRESULT_FROM_WIN32(unsigned long x)
+#endif
+{
+    return (long)x > 0 ? (long)((x & 0x0000FFFF) | (FACILITY_WIN32 << 16) | 0x80000000) : (long)x;
+}
+#else
 #define HRESULT_FROM_WIN32(x) __HRESULT_FROM_WIN32(x)
+#endif
 #endif
 #ifndef __REACTOS__
 #ifndef _HRESULT_DEFINED

@@ -97,6 +97,7 @@ extern void func_RtlDosPathNameToNtPathName_U(void);
 extern void func_RtlDosSearchPath_U(void);
 extern void func_RtlDosSearchPath_Ustr(void);
 extern void func_RtlFirstFreeAce(void);
+extern void func_RtlFindMessage(void);
 extern void func_RtlGenerate8dot3Name(void);
 extern void func_RtlGetFullPathName_U(void);
 extern void func_RtlGetFullPathName_Ustr(void);
@@ -138,6 +139,7 @@ extern void func_RtlVirtualUnwind(void);
 extern void func_RtlxUnicodeStringToAnsiSize(void);
 extern void func_RtlxUnicodeStringToOemSize(void);
 extern void func_StackOverflow(void);
+extern void func_SystemCallStubs(void);
 extern void func_TimerResolution(void);
 extern void func_UserModeException(void);
 
@@ -238,6 +240,7 @@ const struct test winetest_testlist[] =
     { "RtlDosSearchPath_U",             func_RtlDosSearchPath_U },
     { "RtlDosSearchPath_Ustr",          func_RtlDosSearchPath_Ustr },
     { "RtlFirstFreeAce",                func_RtlFirstFreeAce },
+    { "RtlFindMessage",                 func_RtlFindMessage },
     { "RtlGenerate8dot3Name",           func_RtlGenerate8dot3Name },
     { "RtlGetFullPathName_U",           func_RtlGetFullPathName_U },
     { "RtlGetFullPathName_Ustr",        func_RtlGetFullPathName_Ustr },
@@ -277,6 +280,7 @@ const struct test winetest_testlist[] =
     { "RtlUpcaseUnicodeStringToCountedOemString", func_RtlUpcaseUnicodeStringToCountedOemString },
     { "RtlValidateUnicodeString",       func_RtlValidateUnicodeString },
     { "StackOverflow",                  func_StackOverflow },
+    { "SystemCallStubs",                func_SystemCallStubs },
     { "TimerResolution",                func_TimerResolution },
     { "UserModeException",              func_UserModeException },
 #ifdef _M_IX86

@@ -116,6 +116,7 @@ add_library(msvcrt_shared
 )
 
 target_compile_definitions(msvcrt_shared PRIVATE _MSVCR_VER=0 __UCRTSUPPORT__)
+target_link_libraries(msvcrt_shared ${PSEH_LIB})
 add_dependencies(msvcrt_shared psdk asm)
 
 ###############################################################################
@@ -160,6 +161,7 @@ add_library(msvcrt_static
 )
 
 target_compile_definitions(msvcrt_static PRIVATE _MSVCR_VER=0)
+target_link_libraries(msvcrt_static ${PSEH_LIB})
 add_dependencies(msvcrt_static psdk asm)
 
 ###############################################################################

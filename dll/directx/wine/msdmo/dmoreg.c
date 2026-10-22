@@ -114,8 +114,14 @@ static BOOL IsMediaTypeEqual(const DMO_PARTIAL_MEDIATYPE* mt1, const DMO_PARTIAL
 
 static HRESULT write_types(HKEY hkey, LPCWSTR name, const DMO_PARTIAL_MEDIATYPE* types, DWORD count)
 {
+#ifdef __REACTOS__
+    /* HRESULT_FROM_WIN32 repeats its argument: the value was written up to three times */
+    LONG err = RegSetValueExW(hkey, name, 0, REG_BINARY, (const BYTE *)types, count * sizeof(DMO_PARTIAL_MEDIATYPE));
+    return HRESULT_FROM_WIN32(err);
+#else
     return HRESULT_FROM_WIN32(RegSetValueExW(hkey, name, 0, REG_BINARY,
             (const BYTE *)types, count * sizeof(DMO_PARTIAL_MEDIATYPE)));
+#endif
 }
 
 /***************************************************************

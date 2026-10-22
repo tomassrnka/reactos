@@ -15,7 +15,7 @@ list(APPEND SOURCE
     ldr/ldrnotify.c)
 
 add_library(ntdll_vista_static ${SOURCE})
-target_link_libraries(ntdll_vista_static)
+target_link_libraries(ntdll_vista_static ${PSEH_LIB})
 add_dependencies(ntdll_vista_static psdk)
 add_library(ntdll_vista MODULE DllMain.c ${CMAKE_CURRENT_BINARY_DIR}/ntdll_vista.def ntdll_vista.rc)
 set_module_type(ntdll_vista win32dll ENTRYPOINT DllMain 12)

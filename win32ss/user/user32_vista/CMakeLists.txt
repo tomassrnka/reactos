@@ -18,7 +18,7 @@ list(APPEND SOURCE
 # These are just for Vista+ support
 add_library(user32_optional_vista
             ${VISTA_SOURCE})
-target_link_libraries(user32_optional_vista wine win32ksys)
+target_link_libraries(user32_optional_vista wine win32ksys ${PSEH_LIB})
 add_dependencies(user32_optional_vista wine psdk)
 if(MSVC)
     # Disable warning C4312: 'type cast': conversion from 'unsigned int' to 'HANDLE' of greater size

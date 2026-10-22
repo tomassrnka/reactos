@@ -35,6 +35,7 @@ add_library(rtl_test_lib
 )
 
 target_compile_definitions(rtl_test_lib PRIVATE _RTL_TEST _NTSYSTEM_)
+target_link_libraries(rtl_test_lib ${PSEH_LIB})
 
 add_dependencies(rtl_test_lib asm)
 

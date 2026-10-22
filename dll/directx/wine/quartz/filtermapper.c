@@ -579,7 +579,15 @@ static HRESULT WINAPI FilterMapper3_UnregisterFilter(IFilterMapper3 *iface,
     else
         StringFromGUID2(clsid, keypath + wcslen(keypath), ARRAY_SIZE(keypath) - wcslen(keypath));
 
+#ifdef __REACTOS__
+    {
+        /* HRESULT_FROM_WIN32 repeats its argument: the key was deleted by the first call and the result came from the second */
+        LONG err = RegDeleteKeyW(HKEY_CLASSES_ROOT, keypath);
+        return HRESULT_FROM_WIN32(err);
+    }
+#else
     return HRESULT_FROM_WIN32(RegDeleteKeyW(HKEY_CLASSES_ROOT, keypath));
+#endif
 }
 
 static HRESULT FM2_WriteFilterData(const REGFILTER2 * prf2, BYTE **ppData, ULONG *pcbData)

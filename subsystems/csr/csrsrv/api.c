@@ -338,7 +338,7 @@ CsrApiRequestThread(
     PTEB Teb = NtCurrentTeb();
     LARGE_INTEGER TimeOut;
     PCSR_THREAD CurrentThread, CsrThread;
-    NTSTATUS Status;
+    NTSTATUS Status, ExitStatus;
     CSR_REPLY_CODE ReplyCode;
     PCSR_API_MESSAGE ReplyMsg;
     CSR_API_MESSAGE ReceiveMsg;
@@ -665,14 +665,24 @@ CsrApiRequestThread(
             /* Check if this was an exception */
             if (MessageType == LPC_EXCEPTION)
             {
+                /* Nobody handled it: the process exits with the exception code */
+                DebugMessage = (PDBGKM_MSG)&ReceiveMsg;
+                ExitStatus = STATUS_ABANDONED;
+                if ((ReceiveMsg.Header.u1.s1.DataLength >= FIELD_OFFSET(DBGKM_MSG, Exception) -
+                                                          sizeof(PORT_MESSAGE) +
+                                                          sizeof(DBGKM_EXCEPTION)) &&
+                    (DebugMessage->ApiNumber == DbgKmExceptionApi))
+                {
+                    ExitStatus = DebugMessage->Exception.ExceptionRecord.ExceptionCode;
+                }
+
                 /* Kill the process */
-                NtTerminateProcess(CsrProcess->ProcessHandle, STATUS_ABANDONED);
+                NtTerminateProcess(CsrProcess->ProcessHandle, ExitStatus);
 
                 /* Destroy it from CSR */
-                CsrDestroyProcess(&ReceiveMsg.Header.ClientId, STATUS_ABANDONED);
+                CsrDestroyProcess(&ReceiveMsg.Header.ClientId, ExitStatus);
 
                 /* Return a Debug Message */
-                DebugMessage = (PDBGKM_MSG)&ReceiveMsg;
                 DebugMessage->ReturnedStatus = DBG_CONTINUE;
                 ReplyMsg = &ReceiveMsg;
                 ReplyPort = CsrApiPort;

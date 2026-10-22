@@ -23,6 +23,7 @@ static PDEVICE_OBJECT TestDeviceObject;
 static KMT_IRP_HANDLER TestIrpHandler;
 static FAST_IO_DISPATCH TestFastIoDispatch;
 static BOOLEAN InBehaviourTest;
+static BOOLEAN InUserBufferTest;
 
 BOOLEAN ReadCalledNonCached;
 LARGE_INTEGER ReadOffset;
@@ -274,6 +275,47 @@ Test_CcCopyRead(PFILE_OBJECT FileObject)
     ok_eq_char(Ret, 'x');
 }
 
+/* A user buffer whose second page is not committed: the copy faults after
+   the first page and CcCopyRead raises */
+static
+VOID
+Test_CcCopyReadUserBuffer(PFILE_OBJECT FileObject)
+{
+    NTSTATUS Status;
+    BOOLEAN Ret;
+    LARGE_INTEGER Offset;
+    IO_STATUS_BLOCK IoStatus;
+    PUCHAR UserBuffer = NULL;
+    SIZE_T UserBufferSize = 2 * PAGE_SIZE;
+
+    Status = ZwAllocateVirtualMemory(ZwCurrentProcess(), (PVOID *)&UserBuffer, 0, &UserBufferSize, MEM_RESERVE, PAGE_READWRITE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (skip(NT_SUCCESS(Status), "No user buffer\n"))
+        return;
+
+    UserBufferSize = PAGE_SIZE;
+    Status = ZwAllocateVirtualMemory(ZwCurrentProcess(), (PVOID *)&UserBuffer, 0, &UserBufferSize, MEM_COMMIT, PAGE_READWRITE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!skip(NT_SUCCESS(Status), "First page not committed\n"))
+    {
+        RtlFillMemory(UserBuffer, PAGE_SIZE, 0x55);
+        Ret = 'x';
+        Offset.QuadPart = 0;
+        memset(&IoStatus, 0xAB, sizeof(IoStatus));
+        KmtStartSeh()
+            Ret = CcCopyRead(FileObject, &Offset, 2 * PAGE_SIZE, TRUE, UserBuffer, &IoStatus);
+        KmtEndSeh(STATUS_INVALID_USER_BUFFER);
+        ok_eq_char(Ret, 'x');
+        ok_eq_hex(IoStatus.Status, 0xABABABAB);
+        /* The first page was copied before the fault */
+        ok_eq_hex(UserBuffer[0], 0xBA);
+        ok_eq_hex(UserBuffer[PAGE_SIZE - 1], 0xBA);
+    }
+
+    UserBufferSize = 0;
+    Status = ZwFreeVirtualMemory(ZwCurrentProcess(), (PVOID *)&UserBuffer, &UserBufferSize, MEM_RELEASE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+}
 
 static
 NTSTATUS
@@ -364,6 +406,8 @@ TestIrpHandler(
         PVOID Buffer;
         LARGE_INTEGER Offset;
         static const UNICODE_STRING BehaviourTestFileName = RTL_CONSTANT_STRING(L"\\BehaviourTestFile");
+        /* Starts with 'B': the file has 1000000 bytes */
+        static const UNICODE_STRING UserBufferTestFileName = RTL_CONSTANT_STRING(L"\\BufferTestFile");
 
         Offset = IoStack->Parameters.Read.ByteOffset;
         Length = IoStack->Parameters.Read.Length;
@@ -374,6 +418,7 @@ TestIrpHandler(
 
         /* Check special file name */
         InBehaviourTest = RtlCompareUnicodeString(&IoStack->FileObject->FileName, &BehaviourTestFileName, TRUE) == 0;
+        InUserBufferTest = RtlCompareUnicodeString(&IoStack->FileObject->FileName, &UserBufferTestFileName, TRUE) == 0;
 
         if (!FlagOn(Irp->Flags, IRP_NOCACHE))
         {
@@ -382,6 +427,11 @@ TestIrpHandler(
             if (InBehaviourTest)
             {
                 Test_CcCopyRead(IoStack->FileObject);
+                Status = Irp->IoStatus.Status = STATUS_SUCCESS;
+            }
+            else if (InUserBufferTest)
+            {
+                Test_CcCopyReadUserBuffer(IoStack->FileObject);
                 Status = Irp->IoStatus.Status = STATUS_SUCCESS;
             }
             else
@@ -461,6 +511,7 @@ TestIrpHandler(
         }
 
         InBehaviourTest = FALSE;
+        InUserBufferTest = FALSE;
     }
     else if (IoStack->MajorFunction == IRP_MJ_CLEANUP)
     {
