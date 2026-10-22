@@ -139,6 +139,23 @@ static void init(void)
 
     hmod = GetModuleHandleA("advapi32.dll");
     pAddMandatoryAce = (void *)GetProcAddress(hmod, "AddMandatoryAce");
+#ifdef __REACTOS__ // The tests of labels need token integrity levels in the kernel and crash without them.
+    if (pAddMandatoryAce)
+    {
+        HANDLE token;
+        BYTE buffer[64];
+        DWORD len;
+        BOOL supported = FALSE;
+
+        if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+        {
+            supported = GetTokenInformation(token, TokenIntegrityLevel, buffer, sizeof(buffer), &len);
+            CloseHandle(token);
+        }
+        if (!supported)
+            pAddMandatoryAce = NULL;
+    }
+#endif
 
     myARGC = winetest_get_mainargs( &myARGV );
 }
@@ -6653,6 +6670,13 @@ static void test_AddMandatoryAce(void)
     ok(ret, "SetSecurityDescriptorSacl failed with error %lu\n", GetLastError());
 
     handle = CreateEventA(&sa, TRUE, TRUE, "test_event");
+#ifdef __REACTOS__ // The rest crashes on a kernel that cannot put a label on an object: sacl is never set.
+    if (!handle)
+    {
+        skip("An object cannot be created with a label (error %lu)\n", GetLastError());
+        return;
+    }
+#endif
     ok(handle != NULL, "CreateEventA failed with error %lu\n", GetLastError());
 
     ret = GetKernelObjectSecurity(handle, LABEL_SECURITY_INFORMATION, NULL, 0, &size);

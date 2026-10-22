@@ -1056,6 +1056,35 @@ AddAccessAllowedAce(PACL pAcl,
     return TRUE;
 }
 
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA)
+/*
+ * @implemented
+ */
+BOOL WINAPI
+AddMandatoryAce(PACL pAcl,
+                DWORD dwAceRevision,
+                DWORD dwAceFlags,
+                DWORD dwMandatoryPolicy,
+                PSID pLabelSid)
+{
+    NTSTATUS Status;
+
+    Status = RtlAddMandatoryAce(pAcl,
+                                dwAceRevision,
+                                dwAceFlags,
+                                pLabelSid,
+                                SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+                                dwMandatoryPolicy);
+    if (!NT_SUCCESS(Status))
+    {
+        SetLastError(RtlNtStatusToDosError(Status));
+        return FALSE;
+    }
+
+    return TRUE;
+}
+#endif
+
 /*
  * @implemented
  */
@@ -2713,40 +2742,67 @@ static DWORD ParseAceStringRights(LPCWSTR* StringAcl)
     while (*szAcl == ' ')
         szAcl++;
 
-    if ((*szAcl == '0') && (*(szAcl + 1) == 'x'))
+    while (*szAcl != ';')
     {
-        LPCWSTR p = szAcl;
+        const ACEFLAG *lpaf = AceRights;
 
-	while (*p && *p != ';')
-            p++;
-
-	if (p - szAcl <= 10 /* 8 hex digits + "0x" */ )
-	{
-	    rights = strtoulW(szAcl, NULL, 16);
-	    szAcl = p;
-	}
-	else
-            WARN("Invalid rights string format: %s\n", debugstr_wn(szAcl, p - szAcl));
-    }
-    else
-    {
-        while (*szAcl != ';')
+        if (*szAcl >= '0' && *szAcl <= '9')
         {
-            const ACEFLAG *lpaf = AceRights;
+            /*
+             * A number as strtoul reads it with base 0: hexadecimal after 0x, octal after a leading zero,
+             * otherwise decimal; it ends at the first character that is not a digit of its base, and a
+             * value above 32 bits is 0xffffffff. What follows is read as the next name or number.
+             */
+            LPCWSTR digit = szAcl;
+            ULONGLONG number = 0;
+            UINT base = 10, value;
 
-            while (lpaf->wstr &&
+            if (digit[0] == '0' && (digit[1] == 'x' || digit[1] == 'X') &&
+                ((digit[2] >= '0' && digit[2] <= '9') || (digit[2] >= 'a' && digit[2] <= 'f') ||
+                 (digit[2] >= 'A' && digit[2] <= 'F')))
+            {
+                base = 16;
+                digit += 2;
+            }
+            else if (digit[0] == '0')
+                base = 8;
+
+            while (TRUE)
+            {
+                if (*digit >= '0' && *digit <= '9')
+                    value = *digit - '0';
+                else if (base == 16 && *digit >= 'a' && *digit <= 'f')
+                    value = *digit - 'a' + 10;
+                else if (base == 16 && *digit >= 'A' && *digit <= 'F')
+                    value = *digit - 'A' + 10;
+                else
+                    break;
+
+                if (value >= base)
+                    break;
+
+                if (number <= 0xffffffff)
+                    number = number * base + value;
+                digit++;
+            }
+
+            rights |= (number > 0xffffffff) ? 0xffffffff : (DWORD)number;
+            szAcl = digit;
+            continue;
+        }
+
+        while (lpaf->wstr &&
                (len = strlenW(lpaf->wstr)) &&
                strncmpW(lpaf->wstr, szAcl, len))
-	    {
-               lpaf++;
-	    }
-
-            if (!lpaf->wstr)
-                return 0;
-
-	    rights |= lpaf->value;
-            szAcl += len;
+        {
+            lpaf++;
         }
+
+        if (!lpaf->wstr)
+            return 0;
+
+        rights |= lpaf->value;
+        szAcl += len;
     }
 
     *StringAcl = szAcl;
@@ -3530,6 +3586,91 @@ BOOL WINAPI ConvertSecurityDescriptorToStringSecurityDescriptorA(PSECURITY_DESCR
     }
 }
 
+/* Reads a number the way ConvertStringSidToSid does: decimal, or hexadecimal
+ * after 0x or 0X. A value that does not fit in 64 bits is the largest one. */
+static BOOL ParseSidNumber(LPCWSTR *pStr, ULONGLONG *pValue)
+{
+    LPCWSTR str = *pStr;
+    ULONGLONG value = 0;
+    DWORD base = 10;
+    BOOL bAny = FALSE, bOverflow = FALSE;
+
+    if (str[0] == '0' && (str[1] == 'x' || str[1] == 'X'))
+    {
+        base = 16;
+        str += 2;
+    }
+
+    for (;; str++)
+    {
+        DWORD digit;
+
+        if (*str >= '0' && *str <= '9')
+            digit = *str - '0';
+        else if (base == 16 && *str >= 'a' && *str <= 'f')
+            digit = *str - 'a' + 10;
+        else if (base == 16 && *str >= 'A' && *str <= 'F')
+            digit = *str - 'A' + 10;
+        else
+            break;
+
+        bAny = TRUE;
+        if (value > (~(ULONGLONG)0 - digit) / base)
+            bOverflow = TRUE;
+        else
+            value = value * base + digit;
+    }
+
+    if (!bAny)
+        return FALSE;
+
+    *pValue = bOverflow ? ~(ULONGLONG)0 : value;
+    *pStr = str;
+    return TRUE;
+}
+
+/* Converts the S-R-I-S... form of a SID. The whole string must be the SID.
+ * Returns ERROR_SUCCESS, ERROR_INVALID_SID or ERROR_NOT_ENOUGH_MEMORY. */
+static DWORD ParseNumericStringSid(LPCWSTR str, PSID *pSid)
+{
+    ULONGLONG revision, authority, value;
+    DWORD subAuthority[SID_MAX_SUB_AUTHORITIES], count = 0, i;
+    SID *sid;
+
+    if ((str[0] != 'S' && str[0] != 's') || str[1] != '-')
+        return ERROR_INVALID_SID;
+    str += 2;
+
+    if (!ParseSidNumber(&str, &revision) || revision > 0xff || *str++ != '-')
+        return ERROR_INVALID_SID;
+    if (!ParseSidNumber(&str, &authority) || authority > 0xffffffffffffULL)
+        return ERROR_INVALID_SID;
+
+    while (*str == '-')
+    {
+        str++;
+        if (count == SID_MAX_SUB_AUTHORITIES || !ParseSidNumber(&str, &value))
+            return ERROR_INVALID_SID;
+        subAuthority[count++] = value > 0xffffffffULL ? 0xffffffff : (DWORD)value;
+    }
+    if (*str || !count)
+        return ERROR_INVALID_SID;
+
+    sid = LocalAlloc(0, GetSidLengthRequired(count));
+    if (!sid)
+        return ERROR_NOT_ENOUGH_MEMORY;
+
+    sid->Revision = (BYTE)revision;
+    sid->SubAuthorityCount = (BYTE)count;
+    for (i = 0; i < 6; i++)
+        sid->IdentifierAuthority.Value[i] = (BYTE)(authority >> (8 * (5 - i)));
+    for (i = 0; i < count; i++)
+        sid->SubAuthority[i] = subAuthority[i];
+
+    *pSid = sid;
+    return ERROR_SUCCESS;
+}
+
 /******************************************************************************
  * ConvertStringSidToSidW [ADVAPI32.@]
  */
@@ -3543,13 +3684,36 @@ BOOL WINAPI ConvertStringSidToSidW(LPCWSTR StringSid, PSID* Sid)
         SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
     else if (!StringSid || !Sid)
         SetLastError(ERROR_INVALID_PARAMETER);
-    else if (ParseStringSidToSid(StringSid, NULL, &cBytes))
+    else if ((StringSid[0] == 'S' || StringSid[0] == 's') && StringSid[1] == '-')
     {
-        PSID pSid = *Sid = LocalAlloc(0, cBytes);
+        DWORD dwError = ParseNumericStringSid(StringSid, Sid);
 
-        bret = ParseStringSidToSid(StringSid, pSid, &cBytes);
+        bret = dwError == ERROR_SUCCESS;
         if (!bret)
-            LocalFree(*Sid);
+            SetLastError(dwError);
+    }
+    else
+    {
+        WCHAR constant[3];
+
+        /* A two-letter constant, in any case, and nothing else */
+        if (StringSid[0] && StringSid[1] && !StringSid[2])
+        {
+            constant[0] = toupperW(StringSid[0]);
+            constant[1] = toupperW(StringSid[1]);
+            constant[2] = 0;
+            if (ParseStringSidToSid(constant, NULL, &cBytes))
+            {
+                PSID pSid = *Sid = LocalAlloc(0, cBytes);
+
+                if (!pSid)
+                    SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+                else if (!(bret = ParseStringSidToSid(constant, pSid, &cBytes)))
+                    LocalFree(pSid);
+                return bret;
+            }
+        }
+        SetLastError(ERROR_INVALID_SID);
     }
     return bret;
 }
@@ -4176,16 +4340,63 @@ BOOL WINAPI GetWindowsAccountDomainSid( PSID sid, PSID domain_sid, DWORD *size )
     return TRUE;
 }
 
-/*
- * @unimplemented
+/******************************************************************************
+ * EqualDomainSid   [ADVAPI32.@]
+ *
+ * Taken from Wine's dlls/kernelbase/security.c (LGPL).
  */
-BOOL
-WINAPI
-EqualDomainSid(IN PSID pSid1,
-               IN PSID pSid2,
-               OUT BOOL* pfEqual)
+BOOL WINAPI EqualDomainSid( PSID sid1, PSID sid2, BOOL *equal )
 {
-    UNIMPLEMENTED;
+    MAX_SID builtin_sid, domain_sid1, domain_sid2;
+    DWORD size;
+
+    TRACE( "(%p,%p,%p)\n", sid1, sid2, equal );
+
+    /* RtlValidSid accepts NULL */
+    if (!sid1 || !sid2 || !IsValidSid( sid1 ) || !IsValidSid( sid2 ))
+    {
+        SetLastError( ERROR_INVALID_SID );
+        return FALSE;
+    }
+
+    if (!equal)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+
+    size = sizeof(domain_sid1);
+    if (GetWindowsAccountDomainSid( sid1, &domain_sid1, &size ))
+    {
+        size = sizeof(domain_sid2);
+        if (GetWindowsAccountDomainSid( sid2, &domain_sid2, &size ))
+        {
+            *equal = EqualSid( &domain_sid1, &domain_sid2 );
+            SetLastError( 0 );
+            return TRUE;
+        }
+    }
+
+    size = sizeof(builtin_sid);
+    if (!CreateWellKnownSid( WinBuiltinDomainSid, NULL, &builtin_sid, &size ))
+        return FALSE;
+
+    if (!memcmp( GetSidIdentifierAuthority( sid1 )->Value, builtin_sid.IdentifierAuthority.Value,
+                 sizeof(builtin_sid.IdentifierAuthority.Value) ) &&
+        !memcmp( GetSidIdentifierAuthority( sid2 )->Value, builtin_sid.IdentifierAuthority.Value,
+                 sizeof(builtin_sid.IdentifierAuthority.Value) ))
+    {
+        if (*GetSidSubAuthorityCount( sid1 ) != 0 && *GetSidSubAuthorityCount( sid2 ) != 0 &&
+            (*GetSidSubAuthority( sid1, 0 ) == SECURITY_BUILTIN_DOMAIN_RID ||
+             *GetSidSubAuthority( sid2, 0 ) == SECURITY_BUILTIN_DOMAIN_RID))
+        {
+            *equal = EqualSid( sid1, sid2 );
+            SetLastError( 0 );
+            return TRUE;
+        }
+    }
+
+    SetLastError( ERROR_NON_DOMAIN_SID );
     return FALSE;
 }
 

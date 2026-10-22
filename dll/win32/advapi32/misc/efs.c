@@ -49,13 +49,42 @@ DecryptFileA(LPCSTR lpFileName,
 
 
 /*
+ * There is no Encrypted File System. As on a file system without encryption
+ * support on Windows, nothing gets encrypted, and a call that would have to
+ * encrypt or decrypt fails instead of reporting success. The error codes are
+ * not all the ones Windows gives (see EncryptFileW and FileEncryptionStatusW).
+ */
+static BOOL
+EfsGetAttributes(LPCWSTR lpFileName,
+                 LPDWORD lpAttributes)
+{
+    *lpAttributes = GetFileAttributesW(lpFileName);
+    return (*lpAttributes != INVALID_FILE_ATTRIBUTES);
+}
+
+
+/*
  * @unimplemented
  */
 BOOL WINAPI
 DecryptFileW(LPCWSTR lpFileName,
              DWORD dwReserved)
 {
+    DWORD Attributes;
+
     FIXME("%s(%S) not implemented!\n", __FUNCTION__, lpFileName);
+
+    if (!EfsGetAttributes(lpFileName, &Attributes))
+        return FALSE;
+
+    /* A file encrypted elsewhere cannot be decrypted here */
+    if (Attributes & FILE_ATTRIBUTE_ENCRYPTED)
+    {
+        SetLastError(ERROR_NOT_SUPPORTED);
+        return FALSE;
+    }
+
+    /* Not encrypted: nothing to do */
     return TRUE;
 }
 
@@ -89,8 +118,24 @@ EncryptFileA(LPCSTR lpFileName)
 BOOL WINAPI
 EncryptFileW(LPCWSTR lpFileName)
 {
-    FIXME("%s() not implemented!\n", __FUNCTION__);
-    return TRUE;
+    DWORD Attributes;
+
+    FIXME("%s(%S) not implemented!\n", __FUNCTION__, lpFileName);
+
+    if (!EfsGetAttributes(lpFileName, &Attributes))
+        return FALSE;
+
+    /* Windows checks this first, on file systems with and without encryption */
+    if (Attributes & FILE_ATTRIBUTE_READONLY)
+    {
+        SetLastError(ERROR_FILE_READ_ONLY);
+        return FALSE;
+    }
+
+    /* Windows without encryption support gives ERROR_ACCESS_DENIED or
+     * ERROR_INVALID_PARAMETER, which point at the caller; this one does not */
+    SetLastError(ERROR_NOT_SUPPORTED);
+    return FALSE;
 }
 
 
@@ -143,12 +188,18 @@ BOOL WINAPI
 FileEncryptionStatusW(LPCWSTR lpFileName,
                       LPDWORD lpStatus)
 {
+    DWORD Attributes;
+
     FIXME("%s(%S) not implemented!\n", __FUNCTION__, lpFileName);
 
     if (!lpStatus)
         return FALSE;
 
-    *lpStatus = FILE_SYSTEM_NOT_SUPPORT;
+    if (!EfsGetAttributes(lpFileName, &Attributes))
+        return FALSE;
+
+    /* Windows reports FILE_ENCRYPTABLE even where EncryptFile then fails */
+    *lpStatus = (Attributes & FILE_ATTRIBUTE_ENCRYPTED) ? FILE_IS_ENCRYPTED : FILE_SYSTEM_NOT_SUPPORT;
 
     return TRUE;
 }

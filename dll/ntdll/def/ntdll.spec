@@ -259,7 +259,7 @@
 @ stdcall NtCloseObjectAuditAlarm(ptr ptr long)
 @ stdcall -stub -version=0x600+ NtCommitComplete(ptr ptr)
 @ stdcall -stub -version=0x600+ NtCommitEnlistment(ptr ptr)
-@ stdcall -stub -version=0x600+ NtCommitTransaction(ptr long)
+@ stdcall -version=0x600+ NtCommitTransaction(ptr long)
 @ stdcall NtCompactKeys(long ptr)
 @ stdcall NtCompareTokens(ptr ptr ptr)
 @ stdcall NtCompleteConnectPort(ptr)
@@ -296,7 +296,7 @@
 @ stub -version=0x600+ NtCreateThreadEx
 @ stdcall NtCreateTimer(ptr long ptr long)
 @ stdcall NtCreateToken(ptr long ptr long ptr ptr ptr ptr ptr ptr ptr ptr ptr)
-@ stdcall -stub -version=0x600+ NtCreateTransaction(ptr long ptr ptr ptr long long long ptr wstr)
+@ stdcall -version=0x600+ NtCreateTransaction(ptr long ptr ptr ptr long long long ptr wstr)
 @ stdcall -stub -version=0x600+ NtCreateTransactionManager(ptr long ptr wstr long long)
 @ stdcall -stub -version=0x600+ NtCreateUserProcess(ptr ptr long long ptr ptr long long ptr long long)
 @ stdcall NtCreateWaitablePort(ptr ptr long long long)
@@ -404,7 +404,7 @@
 @ stdcall NtOpenThreadToken(long long long ptr)
 @ stdcall NtOpenThreadTokenEx(long long long long ptr)
 @ stdcall NtOpenTimer(ptr long ptr)
-@ stdcall -stub -version=0x600+ NtOpenTransaction(ptr long ptr ptr ptr)
+@ stdcall -version=0x600+ NtOpenTransaction(ptr long ptr ptr ptr)
 @ stdcall -stub -version=0x600+ NtOpenTransactionManager(ptr long ptr ptr ptr long)
 @ stdcall NtPlugPlayControl(ptr ptr long)
 @ stdcall NtPowerInformation(long ptr long ptr long)
@@ -510,7 +510,7 @@
 @ stdcall NtResumeThread(long long)
 @ stdcall -stub -version=0x600+ NtRollbackComplete(ptr ptr)
 @ stdcall -stub -version=0x600+ NtRollbackEnlistment(ptr long ptr long)
-@ stdcall -stub -version=0x600+ NtRollbackTransaction(ptr long)
+@ stdcall -version=0x600+ NtRollbackTransaction(ptr long)
 @ stdcall -stub -version=0x600+ NtRollforwardTransactionManager(ptr ptr)
 @ stdcall NtSaveKey(long long)
 @ stdcall NtSaveKeyEx(ptr ptr long)
@@ -634,7 +634,7 @@
 @ stdcall RtlAddAuditAccessObjectAce(ptr long long long ptr ptr ptr long long)
 @ stdcall -stub RtlAddCompoundAce(ptr long long long ptr ptr)
 @ stdcall -arch=x86_64 RtlAddFunctionTable(ptr long long)
-@ stdcall -stub -version=0x600+ RtlAddMandatoryAce(ptr long long long long ptr) ; not present in Win11
+@ stdcall -version=0x600+ RtlAddMandatoryAce(ptr long long ptr long long) ; not present in Win11
 @ stdcall RtlAddRefActivationContext(ptr)
 @ stdcall RtlAddRefMemoryStream(ptr)
 @ stdcall -stub -version=0x600+ RtlAddSIDToBoundaryDescriptor(ptr ptr) ; not present in Win11
@@ -1442,7 +1442,7 @@
 @ stdcall ZwCloseObjectAuditAlarm(ptr ptr long)
 @ stdcall -stub -version=0x600+ ZwCommitComplete(ptr ptr)
 @ stdcall -stub -version=0x600+ ZwCommitEnlistment(ptr ptr)
-@ stdcall -stub -version=0x600+ ZwCommitTransaction(ptr long)
+@ stdcall -version=0x600+ ZwCommitTransaction(ptr long) NtCommitTransaction
 @ stdcall ZwCompactKeys(long ptr)
 @ stdcall ZwCompareTokens(ptr ptr ptr)
 @ stdcall ZwCompleteConnectPort(ptr)
@@ -1477,7 +1477,7 @@
 @ stdcall -stub -version=0x600+ ZwCreateThreadEx(ptr long ptr ptr ptr ptr long long long long ptr)
 @ stdcall ZwCreateTimer(ptr long ptr long)
 @ stdcall ZwCreateToken(ptr long ptr long ptr ptr ptr ptr ptr ptr ptr ptr ptr)
-@ stdcall -stub -version=0x600+ ZwCreateTransaction(ptr long ptr ptr ptr long long long ptr wstr)
+@ stdcall -version=0x600+ ZwCreateTransaction(ptr long ptr ptr ptr long long long ptr wstr) NtCreateTransaction
 @ stdcall -stub -version=0x600+ ZwCreateTransactionManager(ptr long ptr ptr long long)
 @ stdcall -stub -version=0x600+ ZwCreateUserProcess(ptr ptr long long ptr ptr long long ptr ptr ptr)
 @ stdcall ZwCreateWaitablePort(ptr ptr long long long)
@@ -1583,7 +1583,7 @@
 @ stdcall ZwOpenThreadToken(long long long ptr)
 @ stdcall ZwOpenThreadTokenEx(long long long long ptr)
 @ stdcall ZwOpenTimer(ptr long ptr)
-@ stdcall -stub -version=0x600+ ZwOpenTransaction(ptr long ptr ptr ptr)
+@ stdcall -version=0x600+ ZwOpenTransaction(ptr long ptr ptr ptr) NtOpenTransaction
 @ stdcall -stub -version=0x600+ ZwOpenTransactionManager(ptr long ptr wstr ptr long)
 @ stdcall ZwPlugPlayControl(ptr ptr long)
 @ stdcall ZwPowerInformation(long ptr long ptr long)
@@ -1688,7 +1688,7 @@
 @ stdcall ZwResumeThread(long long)
 @ stdcall -stub -version=0x600+ ZwRollbackComplete(ptr ptr)
 @ stdcall -stub -version=0x600+ ZwRollbackEnlistment(ptr ptr)
-@ stdcall -stub -version=0x600+ ZwRollbackTransaction(ptr long)
+@ stdcall -version=0x600+ ZwRollbackTransaction(ptr long) NtRollbackTransaction
 @ stdcall -stub -version=0x600+ ZwRollforwardTransactionManager(ptr ptr)
 @ stdcall ZwSaveKey(long long)
 @ stdcall ZwSaveKeyEx(ptr ptr long)

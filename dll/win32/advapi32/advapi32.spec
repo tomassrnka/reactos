@@ -28,6 +28,7 @@
 @ stdcall AddAuditAccessAce(ptr long long ptr long long)
 @ stdcall AddAuditAccessAceEx(ptr long long long ptr long long)
 @ stdcall AddAuditAccessObjectAce(ptr long long long ptr ptr ptr long long)
+@ stdcall -version=0x600+ AddMandatoryAce(ptr long long long ptr)
 @ stdcall AddUsersToEncryptedFile(wstr ptr)
 @ stdcall AdjustTokenGroups(long long ptr long ptr ptr)
 @ stdcall AdjustTokenPrivileges(long long ptr long ptr ptr)
@@ -65,7 +66,7 @@
 @ stdcall CloseEncryptedFileRaw(ptr)
 @ stdcall CloseEventLog(long)
 @ stdcall CloseServiceHandle(long)
-@ stub CloseTrace
+@ stdcall CloseTrace(int64)
 @ stdcall CommandLineFromMsiDescriptor(wstr ptr ptr)
 @ stub ComputeAccessTokenFromCodeAuthzLevel
 @ stdcall ControlService(long long ptr)
@@ -235,6 +236,9 @@
 @ stdcall FileEncryptionStatusW(wstr ptr)
 @ stdcall FindFirstFreeAce(ptr ptr)
 @ stdcall -version=0x502 FlushTraceA(double str ptr) ntdll.EtwFlushTraceA
+@ stdcall -version=0x600+ EventActivityIdControl(long ptr)
+@ stdcall -version=0x602+ EventSetInformation(int64 long ptr long)
+@ stdcall -version=0x601+ EventWriteEx(int64 ptr int64 long ptr ptr long ptr)
 @ stdcall -version=0x600+ FlushTraceA(double str ptr) EtwFlushTraceA
 @ stdcall -version=0x502 FlushTraceW(double wstr ptr) ntdll.EtwFlushTraceW
 @ stdcall -version=0x600+ FlushTraceW(double wstr ptr) EtwFlushTraceW
@@ -495,10 +499,14 @@
 @ stdcall RegCreateKeyA(long str ptr)
 @ stdcall RegCreateKeyExA(long str long ptr long long ptr ptr ptr)
 @ stdcall RegCreateKeyExW(long wstr long ptr long long ptr ptr ptr)
+@ stdcall -version=0x600+ RegCreateKeyTransactedA(long str long ptr long long ptr ptr ptr ptr ptr)
+@ stdcall -version=0x600+ RegCreateKeyTransactedW(long wstr long ptr long long ptr ptr ptr ptr ptr)
 @ stdcall RegCreateKeyW(long wstr ptr)
 @ stdcall RegDeleteKeyA(long str)
 @ stdcall RegDeleteKeyExA(long str long long)
 @ stdcall RegDeleteKeyExW(long wstr long long)
+@ stdcall -version=0x600+ RegDeleteKeyTransactedA(long str long long ptr ptr)
+@ stdcall -version=0x600+ RegDeleteKeyTransactedW(long wstr long long ptr ptr)
 @ stdcall RegDeleteKeyW(long wstr)
 @ stdcall -version=0x600+ RegDeleteTreeA(long str)
 @ stdcall -version=0x600+ RegDeleteTreeW(long wstr)
@@ -528,6 +536,8 @@
 @ stdcall RegOpenKeyA(long str ptr)
 @ stdcall RegOpenKeyExA(long str long long ptr)
 @ stdcall RegOpenKeyExW(long wstr long long ptr)
+@ stdcall -version=0x600+ RegOpenKeyTransactedA(long str long long ptr ptr ptr)
+@ stdcall -version=0x600+ RegOpenKeyTransactedW(long wstr long long ptr ptr ptr)
 @ stdcall RegOpenKeyW(long wstr ptr)
 @ stdcall RegOpenUserClassesRoot(ptr long long ptr)
 @ stdcall RegOverridePredefKey(long long)

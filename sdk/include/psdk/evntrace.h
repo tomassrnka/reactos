@@ -389,8 +389,13 @@ typedef struct _TRACE_GUID_PROPERTIES {
 } TRACE_GUID_PROPERTIES, *PTRACE_GUID_PROPERTIES;
 
 typedef struct _ETW_BUFFER_CONTEXT {
-  UCHAR ProcessorNumber;
-  UCHAR Alignment;
+  _ANONYMOUS_UNION union {
+    _ANONYMOUS_STRUCT struct {
+      UCHAR ProcessorNumber;
+      UCHAR Alignment;
+    } DUMMYSTRUCTNAME;
+    USHORT ProcessorIndex;
+  } DUMMYUNIONNAME;
   USHORT LoggerId;
 } ETW_BUFFER_CONTEXT, *PETW_BUFFER_CONTEXT;
 
