@@ -2100,7 +2100,7 @@ Manages RX path, calling NDIS-specific procedure for packet indication
 Parameters:
     context
 ***********************************************************/
-static UINT ParaNdis_ProcessRxPath(PARANDIS_ADAPTER *pContext, ULONG ulMaxPacketsToIndicate)
+static UINT ParaNdis_ProcessRxPath(PARANDIS_ADAPTER *pContext, ULONG ulMaxPacketsToIndicate, LARGE_INTEGER RxDpcDeadline)
 {
     pIONetDescriptor pBuffersDescriptor;
     UINT len, headerSize = pContext->nVirtioHeaderSize;
@@ -2194,6 +2194,17 @@ static UINT ParaNdis_ProcessRxPath(PARANDIS_ADAPTER *pContext, ULONG ulMaxPacket
             // reuse packet, there is no data or the RX is suppressed
             pContext->ReuseBufferProc(pContext, pBuffersDescriptor);
         }
+
+        // Time-bound the pass: when this slice has held DISPATCH_LEVEL for its
+        // budget, stop draining and let the caller re-queue the DPC. The clock
+        // is sampled only every few indications to keep the per-packet cost low.
+        if (RxDpcDeadline.QuadPart &&
+            (nRetrieved & RX_DPC_TIME_CHECK_MASK) == 0 &&
+            KeQueryPerformanceCounter(NULL).QuadPart >= RxDpcDeadline.QuadPart)
+        {
+            DPrintf(1, ("[%s] RX time budget spent after %d retrieved, yielding", __FUNCTION__, nRetrieved));
+            break;
+        }
     }
     ParaNdis_DebugHistory(pContext, hopReceiveStat, NULL, nRetrieved, nReported, pContext->NetNofReceiveBuffers);
     NdisReleaseSpinLock(&pContext->ReceiveLock);
@@ -2244,8 +2255,15 @@ ULONG ParaNdis_DPCWorkBody(PARANDIS_ADAPTER *pContext, ULONG ulMaxPacketsToIndic
     ULONG interruptSources;
     UINT uIndicatedRXPackets = 0;
     UINT numOfPacketsToIndicate = min(ulMaxPacketsToIndicate, pContext->uNumberOfHandledRXPacketsInDPC);
+    LARGE_INTEGER PerfFreq;
+    LARGE_INTEGER RxDpcDeadline;
 
     DEBUG_ENTRY(5);
+
+    // Compute the deadline for this DPC's receive slice. KeQueryPerformanceCounter
+    // is callable at DISPATCH_LEVEL and gives a monotonic high-resolution clock.
+    RxDpcDeadline = KeQueryPerformanceCounter(&PerfFreq);
+    RxDpcDeadline.QuadPart += (PerfFreq.QuadPart * RX_DPC_TIME_LIMIT_US) / 1000000;
     if (pContext->bEnableInterruptHandlingDPC)
     {
         InterlockedIncrement(&pContext->counterDPCInside);
@@ -2273,7 +2291,7 @@ ULONG ParaNdis_DPCWorkBody(PARANDIS_ADAPTER *pContext, ULONG ulMaxPacketsToIndic
                     LONG rxActive = InterlockedIncrement(&pContext->dpcReceiveActive);
                     if (rxActive == 1)
                     {
-                        uIndicatedRXPackets += ParaNdis_ProcessRxPath(pContext, numOfPacketsToIndicate - uIndicatedRXPackets);
+                        uIndicatedRXPackets += ParaNdis_ProcessRxPath(pContext, numOfPacketsToIndicate - uIndicatedRXPackets, RxDpcDeadline);
                         InterlockedDecrement(&pContext->dpcReceiveActive);
                         NdisAcquireSpinLock(&pContext->ReceiveLock);
                         nRestartResult = ParaNdis_SynchronizeWithInterrupt(
@@ -2296,6 +2314,17 @@ ULONG ParaNdis_DPCWorkBody(PARANDIS_ADAPTER *pContext, ULONG ulMaxPacketsToIndic
                         {
                             DPrintf(0, ("[%s] Glitch found: %d allowed, %d indicated", __FUNCTION__, numOfPacketsToIndicate, uIndicatedRXPackets));
                             ParaNdis_DebugHistory(pContext, hopDPC, (PVOID)6, nRestartResult, 0, 0);
+                        }
+
+                        // Time budget for this DPC slice spent: stop draining and
+                        // let the caller re-queue the DPC (see the post-loop
+                        // stillRequiresProcessing handling), so other DPCs and the
+                        // scheduler run instead of holding DISPATCH_LEVEL further.
+                        if (KeQueryPerformanceCounter(NULL).QuadPart >= RxDpcDeadline.QuadPart)
+                        {
+                            DPrintf(1, ("[%s] RX DPC slice budget spent (%d indicated), re-queueing", __FUNCTION__, uIndicatedRXPackets));
+                            ParaNdis_DebugHistory(pContext, hopDPC, (PVOID)7, nRestartResult, 0, 0);
+                            break;
                         }
                     }
                     else

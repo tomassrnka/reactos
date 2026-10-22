@@ -761,7 +761,7 @@ WSPSend(SOCKET Handle,
             {
                 ERR("Not enough memory for APC Context\n");
                 NtClose(SockEvent);
-                return MsafdReturnWithErrno(STATUS_INSUFFICIENT_RESOURCES, lpErrno, 0, lpNumberOfBytesSent);
+                return MsafdReturnWithErrno(STATUS_INSUFFICIENT_RESOURCES, lpErrno, 0, NULL);
             }
             APCContext->lpCompletionRoutine = lpCompletionRoutine;
             APCContext->lpOverlapped = lpOverlapped;
@@ -835,7 +835,10 @@ WSPSend(SOCKET Handle,
     SockReenableAsyncSelectEvent(Socket, FD_WRITE);
 
     TRACE("Leaving (%lx %ld)\n", Status, NumberOfBytesSent);
-    return MsafdReturnWithErrno(Status, lpErrno, NumberOfBytesSent, lpNumberOfBytesSent);
+
+    /* A failed send leaves the caller's byte count unchanged */
+    return MsafdReturnWithErrno(Status, lpErrno, NumberOfBytesSent,
+                                (Status == STATUS_SUCCESS) ? lpNumberOfBytesSent : NULL);
 }
 
 int

@@ -234,6 +234,27 @@ AfdSetConnectDataSize(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 }
 
 
+/* A failed or cancelled connect leaves its connection endpoint behind; the
+   next connect opens a new one, so close the old one first. Called with the
+   state lock held and no transport request on the connection */
+VOID
+AfdCloseConnectionEndpoint(PAFD_FCB FCB)
+{
+    ASSERT(!FCB->ConnectIrp.InFlightRequest);
+
+    if (FCB->Connection.Object)
+    {
+        TdiDisassociateAddressFile(FCB->Connection.Object);
+        ObDereferenceObject(FCB->Connection.Object);
+        FCB->Connection.Object = NULL;
+    }
+    if (FCB->Connection.Handle != INVALID_HANDLE_VALUE)
+    {
+        ZwClose(FCB->Connection.Handle);
+        FCB->Connection.Handle = INVALID_HANDLE_VALUE;
+    }
+}
+
 NTSTATUS
 WarmSocketForConnection(PAFD_FCB FCB) {
     NTSTATUS Status;
@@ -367,6 +388,32 @@ StreamSocketConnectSendComplete(
     return STATUS_SUCCESS;
 }
 
+/* A queued ConnectEx was cancelled while its transport connect completed */
+static BOOLEAN AfdConnectExCancelled(PAFD_FCB FCB)
+{
+    PLIST_ENTRY Entry;
+
+    for (Entry = FCB->PendingIrpList[FUNCTION_CONNECTEX].Flink;
+         Entry != &FCB->PendingIrpList[FUNCTION_CONNECTEX];
+         Entry = Entry->Flink)
+    {
+        if (CONTAINING_RECORD(Entry, IRP, Tail.Overlay.ListEntry)->Cancel)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/* The ConnectEx initial-send buffer, on paths where no send owns it */
+static VOID FreeConnectSendBuffer(PAFD_FCB FCB)
+{
+    if (FCB->OnConnectSendBuffer)
+    {
+        ExFreePoolWithTag(FCB->OnConnectSendBuffer, TAG_AFD_SUPER_CONNECT_BUFFER);
+        FCB->OnConnectSendBuffer = NULL;
+        FCB->OnConnectSendBufferSize = 0;
+    }
+}
+
 static IO_COMPLETION_ROUTINE StreamSocketConnectComplete;
 static
 NTSTATUS
@@ -476,26 +523,35 @@ StreamSocketConnectComplete(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         if( Status == STATUS_PENDING )
             Status = STATUS_SUCCESS;
 
+        if (FCB->OnConnectSendBuffer && AfdConnectExCancelled(FCB))
+        {
+            /* Its cancel routine is spent, so a stalled initial send could never be cancelled */
+            Status = STATUS_CANCELLED;
+            goto end;
+        }
+
         if (FCB->OnConnectSendBuffer)
         {
-            PFILE_OBJECT object = FCB->Connection.Object;
-            PVOID sendBuffer = FCB->OnConnectSendBuffer;
-            UINT sendBufferLength = FCB->OnConnectSendBufferSize;
-            SocketStateUnlock(FCB);
-
+            /* Issued with the lock held, so a close cannot pass its in-flight wait first */
             Status = TdiSend(&FCB->SendIrp.InFlightRequest,
-                             object,
+                             FCB->Connection.Object,
                              AFD_OVERLAPPED,
-                             sendBuffer,
-                             sendBufferLength,
+                             FCB->OnConnectSendBuffer,
+                             FCB->OnConnectSendBufferSize,
                              StreamSocketConnectSendComplete,
                              FCB);
 
+            /* TdiSend failed before the transport got the request, so no completion frees the buffer */
+            if (!NT_SUCCESS(Status) && FCB->OnConnectSendBuffer)
+                goto end;
+
+            SocketStateUnlock(FCB);
             return Status == STATUS_PENDING ? STATUS_SUCCESS : Status;
         }
     }
 
 end:
+    FreeConnectSendBuffer(FCB);
     while (!IsListEmpty(&FCB->PendingIrpList[FUNCTION_CONNECTEX]))
     {
         NextIrpEntry = RemoveHeadList(&FCB->PendingIrpList[FUNCTION_CONNECTEX]);
@@ -514,6 +570,54 @@ end:
     AFD_DbgPrint(MID_TRACE,("Returning %x\n", Status));
 
     return Status;
+}
+
+/* Issue the transport connect for a connect request queued (pending) on
+   Function. Called with the state lock held and the socket CONNECTING. */
+static VOID
+SubmitConnect(PAFD_FCB FCB, PIRP Irp, UINT Function)
+{
+    NTSTATUS Status;
+    PLIST_ENTRY Entry;
+
+    Status = TdiConnect(&FCB->ConnectIrp.InFlightRequest,
+                        FCB->Connection.Object,
+                        FCB->ConnectCallInfo,
+                        FCB->ConnectReturnInfo,
+                        StreamSocketConnectComplete,
+                        FCB);
+    if (Status == STATUS_PENDING)
+        return;
+
+    /* If the transport completed the request inside TdiConnect (the state mutex
+       is recursive), StreamSocketConnectComplete has run: it moved the socket out
+       of CONNECTING or completed this request. tcpip itself always pends. */
+    if (FCB->SharedData.State != SOCKET_STATE_CONNECTING)
+        return;
+    for (Entry = FCB->PendingIrpList[Function].Flink;
+         Entry != &FCB->PendingIrpList[Function];
+         Entry = Entry->Flink)
+    {
+        if (CONTAINING_RECORD(Entry, IRP, Tail.Overlay.ListEntry) == Irp)
+            break;
+    }
+    if (Entry == &FCB->PendingIrpList[Function])
+        return;
+
+    /* TdiConnect failed before the transport got the request */
+    FCB->SharedData.State = SOCKET_STATE_BOUND;
+    FCB->PollState |= AFD_EVENT_CONNECT_FAIL;
+    FCB->PollStatus[FD_CONNECT_BIT] = Status;
+    PollReeval(FCB->DeviceExt, FCB->FileObject);
+    FreeConnectSendBuffer(FCB);
+
+    RemoveEntryList(&Irp->Tail.Overlay.ListEntry);
+    Irp->IoStatus.Status = Status;
+    Irp->IoStatus.Information = 0;
+    if (Irp->MdlAddress)
+        UnlockRequest(Irp, IoGetCurrentIrpStackLocation(Irp));
+    AfdClearCancelRoutine(Irp);
+    IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
 }
 
 /* Return the socket object for ths request only if it is a connected or
@@ -535,6 +639,13 @@ AfdStreamSocketConnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY, Irp,
                                        0 );
 
+    /* ConnectReq is the captured user IOCTL buffer. Validate that the declared
+     * RemoteAddress header is within the supplied input before we read its
+     * AddressType/AddressLength or copy it, so nothing runs off the pool copy. */
+    if (IrpSp->Parameters.DeviceIoControl.InputBufferLength <
+            FIELD_OFFSET(AFD_CONNECT_INFO, RemoteAddress) + sizeof(ULONG) + 2 * sizeof(USHORT))
+        return UnlockAndMaybeComplete( FCB, STATUS_INVALID_PARAMETER, Irp, 0 );
+
     AFD_DbgPrint(MID_TRACE,("Connect request:\n"));
 #if 0
     OskitDumpBuffer
@@ -550,7 +661,8 @@ AfdStreamSocketConnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         }
 
         FCB->RemoteAddress =
-            TaCopyTransportAddress( &ConnectReq->RemoteAddress );
+            TaCopyTransportAddressBounded( &ConnectReq->RemoteAddress,
+                IrpSp->Parameters.DeviceIoControl.InputBufferLength - FIELD_OFFSET(AFD_CONNECT_INFO, RemoteAddress) );
 
         if( !FCB->RemoteAddress )
             Status = STATUS_NO_MEMORY;
@@ -567,6 +679,12 @@ AfdStreamSocketConnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         break;
 
     case SOCKET_STATE_CONNECTING:
+        /* WSAEINVAL while a ConnectEx connects, as on Windows */
+        if (!IsListEmpty(&FCB->PendingIrpList[FUNCTION_CONNECTEX]))
+        {
+            Status = STATUS_INVALID_PARAMETER;
+            break;
+        }
         return LeaveIrpUntilLater( FCB, Irp, FUNCTION_CONNECT );
 
     case SOCKET_STATE_CREATED:
@@ -598,13 +716,15 @@ AfdStreamSocketConnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         }
 
         FCB->RemoteAddress =
-            TaCopyTransportAddress( &ConnectReq->RemoteAddress );
+            TaCopyTransportAddressBounded( &ConnectReq->RemoteAddress,
+                IrpSp->Parameters.DeviceIoControl.InputBufferLength - FIELD_OFFSET(AFD_CONNECT_INFO, RemoteAddress) );
 
         if( !FCB->RemoteAddress ) {
             Status = STATUS_NO_MEMORY;
             break;
         }
 
+        AfdCloseConnectionEndpoint( FCB );
         Status = WarmSocketForConnection( FCB );
 
         if( !NT_SUCCESS(Status) )
@@ -639,20 +759,14 @@ AfdStreamSocketConnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
             FCB->ConnectCallInfo->OptionsLength = FCB->ConnectOptionsSize;
 
             FCB->SharedData.State = SOCKET_STATE_CONNECTING;
+            /* An earlier connect's failure does not belong to this one */
+            FCB->PollState &= ~AFD_EVENT_CONNECT_FAIL;
 
             AFD_DbgPrint(MID_TRACE,("Queueing IRP %p\n", Irp));
             Status = QueueUserModeIrp(FCB, Irp, FUNCTION_CONNECT);
             if (Status == STATUS_PENDING)
-            {
-                Status = TdiConnect(&FCB->ConnectIrp.InFlightRequest,
-                                    FCB->Connection.Object,
-                                    FCB->ConnectCallInfo,
-                                    FCB->ConnectReturnInfo,
-                                    StreamSocketConnectComplete,
-                                    FCB);
-            }
-
-            if (Status != STATUS_PENDING)
+                SubmitConnect(FCB, Irp, FUNCTION_CONNECT);
+            else
                 FCB->SharedData.State = SOCKET_STATE_BOUND;
 
             SocketStateUnlock(FCB);
@@ -701,25 +815,11 @@ AfdStreamSocketSuperConnect(
                     IrpSp->Parameters.DeviceIoControl.InputBufferLength);
 #endif
 
-    if (FCB->OnConnectSendBuffer)
-    {
-        ExFreePoolWithTag(FCB->OnConnectSendBuffer, TAG_AFD_SUPER_CONNECT_BUFFER);
-        FCB->OnConnectSendBuffer = NULL;
-        FCB->OnConnectSendBufferSize = 0;
-    }
-
-    if (Irp->UserBuffer)
-    {
-         FCB->OnConnectSendBufferSize = BufferSize;
-         FCB->OnConnectSendBuffer = ExAllocatePoolWithTag(PagedPool,
-                                                        BufferSize,
-                                                        TAG_AFD_SUPER_CONNECT_BUFFER);
-
-         if (!FCB->OnConnectSendBuffer)
-             return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
-
-         RtlCopyMemory(FCB->OnConnectSendBuffer, Irp->UserBuffer, BufferSize);
-    }
+    /* Validate that the declared RemoteAddress header fits in the captured user
+     * input before we read or copy it (bounds the address copies below). */
+    if (IrpSp->Parameters.DeviceIoControl.InputBufferLength <
+            FIELD_OFFSET(AFD_SUPER_CONNECT_INFO, RemoteAddress) + sizeof(ULONG) + 2 * sizeof(USHORT))
+        return UnlockAndMaybeComplete(FCB, STATUS_INVALID_PARAMETER, Irp, 0);
 
     if (FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS)
     {
@@ -731,7 +831,8 @@ AfdStreamSocketSuperConnect(
          }
 
          FCB->RemoteAddress =
-             TaCopyTransportAddress(&ConnectReq->RemoteAddress);
+             TaCopyTransportAddressBounded(&ConnectReq->RemoteAddress,
+                IrpSp->Parameters.DeviceIoControl.InputBufferLength - FIELD_OFFSET(AFD_SUPER_CONNECT_INFO, RemoteAddress));
 
          if(!FCB->RemoteAddress)
              Status = STATUS_NO_MEMORY;
@@ -741,29 +842,67 @@ AfdStreamSocketSuperConnect(
          return UnlockAndMaybeComplete( FCB, Status, Irp, 0 );
     }
 
+    /* The state is checked before the buffer is touched: a pending connect or
+       initial send owns the buffer */
     switch (FCB->SharedData.State)
     {
     case SOCKET_STATE_CONNECTED:
-        Status = STATUS_SUCCESS;
-        break;
+        /* WSAEISCONN, as on Windows */
+        return UnlockAndMaybeComplete(FCB, STATUS_CONNECTION_ACTIVE, Irp, 0);
 
     case SOCKET_STATE_CONNECTING:
-        return LeaveIrpUntilLater( FCB, Irp, FUNCTION_CONNECTEX );
+        /* WSAEINVAL, as on Windows */
+        return UnlockAndMaybeComplete(FCB, STATUS_INVALID_PARAMETER, Irp, 0);
 
     case SOCKET_STATE_BOUND:
+        /* No request owns a buffer on a bound socket */
+        FreeConnectSendBuffer(FCB);
+
+        if (Irp->UserBuffer && BufferSize)
+        {
+            FCB->OnConnectSendBuffer = ExAllocatePoolWithTag(PagedPool,
+                                                             BufferSize,
+                                                             TAG_AFD_SUPER_CONNECT_BUFFER);
+            if (!FCB->OnConnectSendBuffer)
+                return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
+
+            FCB->OnConnectSendBufferSize = BufferSize;
+            Status = STATUS_SUCCESS;
+            /* METHOD_NEITHER: the send buffer is the caller's raw pointer */
+            _SEH2_TRY
+            {
+                if (Irp->RequestorMode != KernelMode)
+                    ProbeForRead(Irp->UserBuffer, BufferSize, 1);
+                RtlCopyMemory(FCB->OnConnectSendBuffer, Irp->UserBuffer, BufferSize);
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+
+            if (!NT_SUCCESS(Status))
+            {
+                FreeConnectSendBuffer(FCB);
+                return UnlockAndMaybeComplete(FCB, Status, Irp, 0);
+            }
+        }
+
         if (FCB->RemoteAddress)
         {
             ExFreePoolWithTag(FCB->RemoteAddress, TAG_AFD_TRANSPORT_ADDRESS);
         }
 
         FCB->RemoteAddress =
-            TaCopyTransportAddress(&ConnectReq->RemoteAddress);
+            TaCopyTransportAddressBounded(&ConnectReq->RemoteAddress,
+                IrpSp->Parameters.DeviceIoControl.InputBufferLength - FIELD_OFFSET(AFD_SUPER_CONNECT_INFO, RemoteAddress));
         if (!FCB->RemoteAddress)
         {
             Status = STATUS_NO_MEMORY;
             break;
         }
 
+        AfdCloseConnectionEndpoint(FCB);
         Status = WarmSocketForConnection(FCB);
         if (!NT_SUCCESS(Status))
             break;
@@ -795,21 +934,21 @@ AfdStreamSocketSuperConnect(
         FCB->ConnectCallInfo->Options = FCB->ConnectOptions;
         FCB->ConnectCallInfo->OptionsLength = FCB->ConnectOptionsSize;
         FCB->SharedData.State = SOCKET_STATE_CONNECTING;
+        /* An earlier connect's failure does not belong to this one */
+        FCB->PollState &= ~AFD_EVENT_CONNECT_FAIL;
 
         AFD_DbgPrint(MID_TRACE,("Queueing IRP %p\n", Irp));
         Status = QueueUserModeIrp( FCB, Irp, FUNCTION_CONNECTEX );
         if (Status == STATUS_PENDING)
         {
-            Status = TdiConnect(&FCB->ConnectIrp.InFlightRequest,
-                                FCB->Connection.Object,
-                                FCB->ConnectCallInfo,
-                                FCB->ConnectReturnInfo,
-                                StreamSocketConnectComplete,
-                                FCB );
+            SubmitConnect(FCB, Irp, FUNCTION_CONNECTEX);
         }
-
-        if (Status != STATUS_PENDING)
+        else
+        {
+            /* Cancelled before it was queued, and completed */
             FCB->SharedData.State = SOCKET_STATE_BOUND;
+            FreeConnectSendBuffer(FCB);
+        }
 
         SocketStateUnlock(FCB);
 
@@ -821,5 +960,7 @@ AfdStreamSocketSuperConnect(
         break;
     }
 
+    /* No connect request carries the buffer on these paths */
+    FreeConnectSendBuffer(FCB);
     return UnlockAndMaybeComplete( FCB, Status, Irp, 0 );
 }

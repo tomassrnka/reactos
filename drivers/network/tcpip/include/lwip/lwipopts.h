@@ -25,6 +25,12 @@
    only called from those workers, at PASSIVE_LEVEL with no lock held */
 #define LWIP_TCPIP_CORE_LOCKING_INPUT   1
 
+/* A SYN can reopen a connection in TIME-WAIT (ip/lwip_glue/tcp.c) */
+#define LWIP_HOOK_FILENAME              "lwip_hooks.h"
+#define LWIP_HOOK_IP4_INPUT(p, inp)     LibTCPReopenTimeWait(p, inp)
+#define LWIP_HOOK_TCP_ISN(local_ip, local_port, remote_ip, remote_port) \
+    LibTCPNextIss(local_ip, local_port, remote_ip, remote_port)
+
 #define LWIP_ARP                        0
 
 #define ETH_PAD_SIZE                    2

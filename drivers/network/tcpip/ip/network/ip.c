@@ -235,7 +235,14 @@ PIP_INTERFACE IPCreateInterface(
 
     TCPRegisterInterface(IF);
 
-    InsertTDIInterfaceEntity( IF );
+    /* An adapter without its TDI entities would be missing from the
+       interface tables for good: fail the creation instead */
+    if (!NT_SUCCESS(InsertTDIInterfaceEntity( IF ))) {
+        TCPUnregisterInterface(IF);
+        ExFreePool(IF->TCPContext);
+        ExFreePoolWithTag(IF, IP_INTERFACE_TAG);
+        return NULL;
+    }
 
     return IF;
 }

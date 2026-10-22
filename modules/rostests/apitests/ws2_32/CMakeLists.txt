@@ -3,9 +3,12 @@ list(APPEND SOURCE
     bind.c
     broadcast.c
     close.c
+    closerace.c
+    connectex.c
     getaddrinfo.c
     gethostname.c
     getnameinfo.c
+    getpeername.c
     getservbyname.c
     getservbyport.c
     helpers.c
@@ -17,9 +20,14 @@ list(APPEND SOURCE
     open_osfhandle.c
     recv.c
     send.c
+    udpbindretry.c
+    udpcancel.c
+    udprecv.c
+    timewait.c
     WSAAsync.c
     WSAIoctl.c
     WSARecv.c
+    WSARecvFrom.c
     WSAStartup.c)
 
 list(APPEND PCH_SKIP_SOURCE

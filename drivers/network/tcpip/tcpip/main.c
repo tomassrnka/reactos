@@ -27,6 +27,7 @@ KSPIN_LOCK EntityListLock;
 TDIEntityInfo *EntityList        = NULL;
 ULONG EntityCount                = 0;
 ULONG EntityMax                  = 0;
+PUCHAR EntityInstanceUsed        = NULL;
 UDP_STATISTICS UDPStats;
 
 /* Network timers */
@@ -477,6 +478,51 @@ TiDispatchInternal(
 }
 
 
+/* Admin-only SD (System/Administrators/NetworkService). It is no longer applied
+ * to a device; it is the reference SD used by TiCheckControlAccess() to gate
+ * privileged control requests (route/ARP/IP address writes). */
+static PSECURITY_DESCRIPTOR TiControlSD;
+
+/**
+ * @brief Gate privileged control requests (route/ARP/IP address writes).
+ *
+ * Opening the device is allowed for everyone (sockets), so privileged requests
+ * must be authorized per request against the admin-only TiControlSD, using the
+ * caller's effective (impersonation) token. Kernel-mode callers are trusted.
+ */
+static
+NTSTATUS TiCheckControlAccess(
+    _In_ PIRP Irp)
+{
+    SECURITY_SUBJECT_CONTEXT SubjectContext;
+    ACCESS_MASK Granted;
+    NTSTATUS AccessStatus;
+    BOOLEAN Allowed;
+
+    if (Irp->RequestorMode == KernelMode)
+        return STATUS_SUCCESS;
+
+    if (TiControlSD == NULL)
+        return STATUS_ACCESS_DENIED;
+
+    SeCaptureSubjectContext(&SubjectContext);
+    SeLockSubjectContext(&SubjectContext);
+    Allowed = SeAccessCheck(TiControlSD,
+                            &SubjectContext,
+                            TRUE,
+                            FILE_WRITE_DATA,
+                            0,
+                            NULL,
+                            IoGetFileObjectGenericMapping(),
+                            UserMode,
+                            &Granted,
+                            &AccessStatus);
+    SeUnlockSubjectContext(&SubjectContext);
+    SeReleaseSubjectContext(&SubjectContext);
+
+    return Allowed ? STATUS_SUCCESS : STATUS_ACCESS_DENIED;
+}
+
 /**
  * @brief Dispatch routine for IRP_MJ_DEVICE_CONTROL requests
  *
@@ -524,17 +570,38 @@ TiDispatch(
 
             case IOCTL_TCP_SET_INFORMATION_EX:
                 TI_DbgPrint(MIN_TRACE, ("TCP_SET_INFORMATION_EX\n"));
+                /* Provider-class (ARP table / route) writes are privileged.
+                 * Per-socket address-object/connection options are not. */
+                if (IrpSp->Parameters.DeviceIoControl.InputBufferLength <
+                    FIELD_OFFSET(TCP_REQUEST_SET_INFORMATION_EX, Buffer))
+                {
+                    Status = STATUS_INVALID_PARAMETER;
+                    break;
+                }
+                if (((PTCP_REQUEST_SET_INFORMATION_EX)Irp->AssociatedIrp.SystemBuffer)->ID.toi_type !=
+                    INFO_TYPE_ADDRESS_OBJECT &&
+                    ((PTCP_REQUEST_SET_INFORMATION_EX)Irp->AssociatedIrp.SystemBuffer)->ID.toi_type !=
+                    INFO_TYPE_CONNECTION)
+                {
+                    Status = TiCheckControlAccess(Irp);
+                    if (!NT_SUCCESS(Status))
+                        break;
+                }
                 Status = DispTdiSetInformationEx(Irp, IrpSp);
                 break;
 
             case IOCTL_SET_IP_ADDRESS:
                 TI_DbgPrint(MIN_TRACE, ("SET_IP_ADDRESS\n"));
-                Status = DispTdiSetIPAddress(Irp, IrpSp);
+                Status = TiCheckControlAccess(Irp);
+                if (NT_SUCCESS(Status))
+                    Status = DispTdiSetIPAddress(Irp, IrpSp);
                 break;
 
             case IOCTL_DELETE_IP_ADDRESS:
                 TI_DbgPrint(MIN_TRACE, ("DELETE_IP_ADDRESS\n"));
-                Status = DispTdiDeleteIPAddress(Irp, IrpSp);
+                Status = TiCheckControlAccess(Irp);
+                if (NT_SUCCESS(Status))
+                    Status = DispTdiDeleteIPAddress(Irp, IrpSp);
                 break;
 
             case IOCTL_QUERY_IP_HW_ADDRESS:
@@ -562,6 +629,7 @@ TiDispatch(
 
 static
 NTSTATUS TiCreateSecurityDescriptor(
+    _In_ BOOLEAN AllowEveryone,
     _Out_ PSECURITY_DESCRIPTOR *SecurityDescriptor)
 {
     NTSTATUS Status;
@@ -583,7 +651,8 @@ NTSTATUS TiCreateSecurityDescriptor(
     DaclSize = sizeof(ACL) +
                sizeof(ACCESS_ALLOWED_ACE) + RtlLengthSid(SeExports->SeLocalSystemSid) +
                sizeof(ACCESS_ALLOWED_ACE) + RtlLengthSid(SeExports->SeAliasAdminsSid) +
-               sizeof(ACCESS_ALLOWED_ACE) + RtlLengthSid(SeExports->SeNetworkServiceSid);
+               sizeof(ACCESS_ALLOWED_ACE) + RtlLengthSid(SeExports->SeNetworkServiceSid) +
+               sizeof(ACCESS_ALLOWED_ACE) + RtlLengthSid(SeExports->SeWorldSid);
     Dacl = ExAllocatePoolWithTag(PagedPool,
                                  DaclSize,
                                  DEVICE_OBJ_SECURITY_TAG);
@@ -632,6 +701,22 @@ NTSTATUS TiCreateSecurityDescriptor(
     {
         TI_DbgPrint(MIN_TRACE, ("Failed to add access allowed ACE for Network Service SID (0x%X)\n", Status));
         goto Quit;
+    }
+
+    if (AllowEveryone)
+    {
+        /* Everyone may open the device and use sockets (create/bind/connect/
+         * send/recv), as on Windows. Privileged control requests are checked
+         * separately against TiControlSD. */
+        Status = RtlAddAccessAllowedAce(Dacl,
+                                        ACL_REVISION,
+                                        FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+                                        SeExports->SeWorldSid);
+        if (!NT_SUCCESS(Status))
+        {
+            TI_DbgPrint(MIN_TRACE, ("Failed to add access allowed ACE for World SID (0x%X)\n", Status));
+            goto Quit;
+        }
     }
 
     /* Assign security data to SD */
@@ -722,7 +807,7 @@ NTSTATUS TiSetupTcpDeviceSD(
     SECURITY_INFORMATION Info = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
 
     /* Obtain a security descriptor */
-    Status = TiCreateSecurityDescriptor(&Sd);
+    Status = TiCreateSecurityDescriptor(TRUE, &Sd);
     if (!NT_SUCCESS(Status))
     {
         TI_DbgPrint(MIN_TRACE, ("Failed to create a security descriptor for the device object\n"));
@@ -747,6 +832,14 @@ NTSTATUS TiSecurityStartup(
     VOID)
 {
     NTSTATUS Status;
+
+    /* Reference SD for privileged control requests */
+    Status = TiCreateSecurityDescriptor(FALSE, &TiControlSD);
+    if (!NT_SUCCESS(Status))
+    {
+        TI_DbgPrint(MIN_TRACE, ("Failed to create the control security descriptor\n"));
+        return Status;
+    }
 
     /* Set security data for the TCP and IP device objects */
     Status = TiSetupTcpDeviceSD(TCPDeviceObject);
@@ -786,6 +879,12 @@ VOID NTAPI TiUnload(
 #endif
     /* Cancel timer */
     KeCancelTimer(&IPTimer);
+
+    if (TiControlSD)
+    {
+        ExFreePoolWithTag(TiControlSD, DEVICE_OBJ_SECURITY_TAG);
+        TiControlSD = NULL;
+    }
 
     /* Unregister loopback adapter */
     LoopUnregisterAdapter(NULL);
@@ -828,6 +927,9 @@ VOID NTAPI TiUnload(
 
     if (EntityList)
         ExFreePoolWithTag(EntityList, TDI_ENTITY_TAG);
+
+    if (EntityInstanceUsed)
+        ExFreePoolWithTag(EntityInstanceUsed, TDI_ENTITY_TAG);
 
     TI_DbgPrint(MAX_TRACE, ("[TCPIP, TiUnload] Leaving.\n"));
 }
@@ -874,7 +976,12 @@ DriverEntry(
         return Status;
     }
 
-    ChewInit( IPDeviceObject );
+    Status = ChewInit( IPDeviceObject );
+    if (!NT_SUCCESS(Status)) {
+        TI_DbgPrint(MIN_TRACE, ("Failed to initialize the work queue. Status (0x%X).\n", Status));
+        TiUnload(DriverObject);
+        return Status;
+    }
 
     /* Create RawIP device object */
     Status = IoCreateDevice(DriverObject, 0, &strRawDeviceName,
@@ -905,17 +1012,21 @@ DriverEntry(
 
     /* Setup network layer and transport layer entities */
     KeInitializeSpinLock(&EntityListLock);
+    /* AddEntity grows both as needed */
     EntityList = ExAllocatePoolWithTag(NonPagedPool,
-                                       sizeof(TDIEntityID) * MAX_TDI_ENTITIES,
+                                       sizeof(TDIEntityInfo) * TDI_ENTITIES_INITIAL,
                                        TDI_ENTITY_TAG );
-    if (!EntityList) {
+    EntityInstanceUsed = ExAllocatePoolWithTag(NonPagedPool,
+                                               TDI_ENTITIES_INITIAL + 1,
+                                               TDI_ENTITY_TAG );
+    if (!EntityList || !EntityInstanceUsed) {
         TI_DbgPrint(MIN_TRACE, ("Insufficient resources.\n"));
         TiUnload(DriverObject);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     EntityCount = 0;
-    EntityMax   = MAX_TDI_ENTITIES;
+    EntityMax   = TDI_ENTITIES_INITIAL;
 
     /* Allocate NDIS packet descriptors */
     NdisAllocatePacketPoolEx(&NdisStatus, &GlobalPacketPool, 500, 1500, sizeof(PACKET_CONTEXT));

@@ -22,21 +22,33 @@ AfdGetContext( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     if( !SocketAcquireStateLock( FCB ) ) return LostSocket( Irp );
 
-    if (ContextSize == sizeof(FCB->SharedData))
-    {
-        RtlCopyMemory(Irp->UserBuffer,
-                      &FCB->SharedData,
-                      ContextSize);
-        Status = STATUS_SUCCESS;
-    }
-    else if (FCB->Context)
-    {
-        ContextSize = min(ContextSize, FCB->ContextSize);
-        RtlCopyMemory( Irp->UserBuffer,
-                       FCB->Context,
-                       ContextSize );
-        Status = STATUS_SUCCESS;
-    }
+    /* METHOD_NEITHER: Irp->UserBuffer is the raw user output pointer. Probe it
+     * for the write (user-mode requests) and copy under SEH so a kernel address
+     * or a concurrently-unmapped buffer cannot become a controlled kernel write. */
+    _SEH2_TRY {
+        if (Irp->RequestorMode != KernelMode && ContextSize != 0)
+            ProbeForWrite(Irp->UserBuffer, ContextSize, sizeof(CHAR));
+
+        if (ContextSize == sizeof(FCB->SharedData))
+        {
+            RtlCopyMemory(Irp->UserBuffer,
+                          &FCB->SharedData,
+                          ContextSize);
+            Status = STATUS_SUCCESS;
+        }
+        else if (FCB->Context)
+        {
+            ContextSize = min(ContextSize, FCB->ContextSize);
+            RtlCopyMemory( Irp->UserBuffer,
+                           FCB->Context,
+                           ContextSize );
+            Status = STATUS_SUCCESS;
+        }
+    } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
+        AFD_DbgPrint(MIN_TRACE,("Exception writing context\n"));
+        Status = STATUS_INVALID_PARAMETER;
+        ContextSize = 0;
+    } _SEH2_END;
 
     AFD_DbgPrint(MID_TRACE,("Returning %x\n", Status));
 
@@ -49,6 +61,7 @@ AfdGetContextSize( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 {
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
+    NTSTATUS Status = STATUS_SUCCESS;
 
     UNREFERENCED_PARAMETER(DeviceObject);
 
@@ -60,11 +73,19 @@ AfdGetContextSize( PDEVICE_OBJECT DeviceObject, PIRP Irp,
         return UnlockAndMaybeComplete(FCB, STATUS_BUFFER_TOO_SMALL, Irp, sizeof(ULONG));
     }
 
-    RtlCopyMemory(Irp->UserBuffer,
-                  &FCB->ContextSize,
-                  sizeof(ULONG));
+    /* METHOD_NEITHER: probe the raw user output pointer and copy under SEH. */
+    _SEH2_TRY {
+        if (Irp->RequestorMode != KernelMode)
+            ProbeForWrite(Irp->UserBuffer, sizeof(ULONG), sizeof(ULONG));
+        RtlCopyMemory(Irp->UserBuffer,
+                      &FCB->ContextSize,
+                      sizeof(ULONG));
+    } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
+        AFD_DbgPrint(MIN_TRACE,("Exception writing context size\n"));
+        Status = STATUS_INVALID_PARAMETER;
+    } _SEH2_END;
 
-    return UnlockAndMaybeComplete(FCB, STATUS_SUCCESS, Irp, sizeof(ULONG));
+    return UnlockAndMaybeComplete(FCB, Status, Irp, NT_SUCCESS(Status) ? sizeof(ULONG) : 0);
 }
 
 NTSTATUS NTAPI

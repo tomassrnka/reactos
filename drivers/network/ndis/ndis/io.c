@@ -38,13 +38,14 @@ VOID NTAPI HandleDeferredProcessing(
   if (Serialized)
   {
       KeAcquireSpinLockAtDpcLevel(&Adapter->NdisMiniportBlock.Lock);
-      if (Adapter->MiniportBusy)
+      if (Adapter->MiniportBusy || Adapter->WorkerTurn)
       {
           Adapter->DpcDeferred = TRUE;
           KeReleaseSpinLockFromDpcLevel(&Adapter->NdisMiniportBlock.Lock);
           return;
       }
       Adapter->MiniportBusy = TRUE;
+      Adapter->BusyByDpc = TRUE;
       KeReleaseSpinLockFromDpcLevel(&Adapter->NdisMiniportBlock.Lock);
   }
 
@@ -59,7 +60,7 @@ VOID NTAPI HandleDeferredProcessing(
         Adapter->NdisMiniportBlock.MiniportAdapterContext);
 
   if (Serialized)
-      MiniLeaveSerialized(Adapter);
+      MiniLeaveSerialized(Adapter, MiniLeaveInterruptDpc);
 
   NDIS_DbgPrint(MAX_TRACE, ("Leaving.\n"));
 }

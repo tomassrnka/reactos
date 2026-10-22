@@ -62,7 +62,22 @@ static NTSTATUS SatisfyAccept(PAFD_DEVICE_EXTENSION DeviceExt,
 static NTSTATUS SatisfyPreAccept( PIRP Irp, PAFD_TDI_OBJECT_QELT Qelt ) {
     PAFD_RECEIVED_ACCEPT_DATA ListenReceive =
         (PAFD_RECEIVED_ACCEPT_DATA)Irp->AssociatedIrp.SystemBuffer;
+    PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation( Irp );
     PTA_IP_ADDRESS IPAddr;
+    /* METHOD_BUFFERED: the system buffer must hold both the address we copy and the
+     * length we report back, else the I/O manager overruns the user buffer. */
+    ULONG CopyLen = TaLengthOfTransportAddress( Qelt->ConnInfo->RemoteAddress );
+    ULONG RequiredSize = FIELD_OFFSET(AFD_RECEIVED_ACCEPT_DATA, Address) +
+                         (CopyLen > sizeof(TA_IP_ADDRESS) ? CopyLen : sizeof(TA_IP_ADDRESS));
+
+    if( IrpSp->Parameters.DeviceIoControl.OutputBufferLength < RequiredSize ) {
+        if( Irp->MdlAddress ) UnlockRequest( Irp, IoGetCurrentIrpStackLocation( Irp ) );
+        Irp->IoStatus.Information = 0;
+        Irp->IoStatus.Status = STATUS_BUFFER_TOO_SMALL;
+        AfdClearCancelRoutine( Irp );
+        IoCompleteRequest( Irp, IO_NETWORK_INCREMENT );
+        return STATUS_BUFFER_TOO_SMALL;
+    }
 
     ListenReceive->SequenceNumber = Qelt->Seq;
 
@@ -119,6 +134,9 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
     if (!BufferPtr)
         goto end;
 
+    /* The initial data goes first, then the local and the remote address */
+    PCHAR ReceiveData = (PCHAR)BufferPtr;
+
     /* Query TCPIP to find the local address of the socket */
     LONG RequestSize = (FIELD_OFFSET(TDI_ADDRESS_INFO, Address.Address[0].Address) + FCB->LocalAddress->Address[0].AddressLength);
     PTRANSPORT_ADDRESS RemoteAddress = (PTRANSPORT_ADDRESS)Qelt->ConnInfo->RemoteAddress;
@@ -155,19 +173,27 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
     if (!NT_SUCCESS(Status))
         goto end;
 
-    /* Write the local address */
-    LONG LocalAddressLength = min(AcceptInfo->LocalAddressLength, Buffer->Address.Address->AddressLength);
+    /* Each address area holds a sockaddr (the address type and the address) and
+     * ends in a USHORT with its length; an area too small for that gets nothing */
     BufferPtr += AcceptInfo->ReceiveDataLength;
-    RtlCopyMemory(BufferPtr, &Buffer->Address.Address->AddressType, LocalAddressLength);
-    *(USHORT *)(BufferPtr + AcceptInfo->LocalAddressLength - sizeof(USHORT)) = LocalAddressLength;
+    if (AcceptInfo->LocalAddressLength >= sizeof(USHORT))
+    {
+        LONG LocalAddressLength = min(AcceptInfo->LocalAddressLength - sizeof(USHORT),
+                                      sizeof(USHORT) + min(Buffer->Address.Address->AddressLength,
+                                                           FCB->LocalAddress->Address[0].AddressLength));
+        RtlCopyMemory(BufferPtr, &Buffer->Address.Address->AddressType, LocalAddressLength);
+        *(USHORT *)(BufferPtr + AcceptInfo->LocalAddressLength - sizeof(USHORT)) = LocalAddressLength;
+    }
     ExFreePool(Buffer);
 
-    /* Write the remote address*/
-    LONG RemoteAddressLength = min(AcceptInfo->RemoteAddressLength, RemoteAddress->Address[0].AddressLength);
     BufferPtr += AcceptInfo->LocalAddressLength;
-    RtlCopyMemory(BufferPtr, &RemoteAddress->Address[0].AddressType, RemoteAddressLength);
-
-    *(USHORT *)(BufferPtr + AcceptInfo->RemoteAddressLength - sizeof(USHORT)) = RemoteAddressLength;
+    if (AcceptInfo->RemoteAddressLength >= sizeof(USHORT))
+    {
+        LONG RemoteAddressLength = min(AcceptInfo->RemoteAddressLength - sizeof(USHORT),
+                                       sizeof(USHORT) + RemoteAddress->Address[0].AddressLength);
+        RtlCopyMemory(BufferPtr, &RemoteAddress->Address[0].AddressType, RemoteAddressLength);
+        *(USHORT *)(BufferPtr + AcceptInfo->RemoteAddressLength - sizeof(USHORT)) = RemoteAddressLength;
+    }
 
     if (AcceptInfo->ReceiveDataLength)
     {
@@ -176,14 +202,22 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
 
         Status = TdiReceive(&FCB2->ReceiveIrp.InFlightRequest,
                             FCB2->Connection.Object, TDI_RECEIVE_NORMAL,
-                            (PCHAR)BufferPtr,
+                            ReceiveData,
                             AcceptInfo->ReceiveDataLength,
                             AcceptExReceiveComplete,
                             FCB2);
 
+        /* The completion routine never runs for a receive that was not sent */
+        if (Status != STATUS_PENDING)
+        {
+            FCB2->AcceptIrp = NULL;
+            goto end;
+        }
+
         if (Status == STATUS_PENDING)
             Status = STATUS_SUCCESS;
-        ObDereferenceObject(NewFileObject);
+        /* See the end of this function */
+        ObDereferenceObjectDeferDelete(NewFileObject);
         return Status;
     }
     else
@@ -210,7 +244,9 @@ end:
     }
     else
     {
-        FCB2->SharedData.State = SOCKET_STATE_CREATED;
+        /* A socket made into a connection (windows allocated) keeps it and cannot accept again */
+        if (FCB2->SharedData.State != SOCKET_STATE_CONNECTED)
+            FCB2->SharedData.State = SOCKET_STATE_CREATED;
     }
     
     MmUnlockPages((PMDL)Irp->Tail.Overlay.DriverContext[3]);
@@ -220,12 +256,31 @@ end:
     if( Irp->MdlAddress ) UnlockRequest( Irp, IoGetCurrentIrpStackLocation( Irp ) );
     AfdClearCancelRoutine(Irp);
     IoCompleteRequest( Irp, IO_NETWORK_INCREMENT );
-    ObDereferenceObject(NewFileObject);
+
+    /* This runs on a delayed worker or in a transport completion. If the
+     * application closed the accepted socket, this is its last reference, and
+     * its close waits for transport completions that may need this very
+     * worker; the object manager's reaper runs that close instead */
+    ObDereferenceObjectDeferDelete(NewFileObject);
 
     return STATUS_SUCCESS;
 }
 
 static IO_COMPLETION_ROUTINE ListenComplete;
+
+/* Connections waiting for an accept count against the listen backlog */
+static ULONG CountPendingConnections(PAFD_FCB FCB)
+{
+    PLIST_ENTRY Entry;
+    ULONG Count = 0;
+
+    for (Entry = FCB->PendingConnections.Flink;
+         Entry != &FCB->PendingConnections;
+         Entry = Entry->Flink)
+        Count++;
+
+    return Count;
+}
 
 static NTSTATUS IssueListen(PAFD_FCB FCB)
 {
@@ -414,6 +469,7 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
     NTSTATUS Status = STATUS_SUCCESS;
     PAFD_FCB FCB = (PAFD_FCB)Context;
     PAFD_TDI_OBJECT_QELT Qelt;
+    BOOLEAN Queued = FALSE;
     PLIST_ENTRY NextIrpEntry;
     PIRP NextIrp;
 
@@ -465,9 +521,15 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
         return Irp->IoStatus.Status;
     }
 
-    Qelt = ExAllocatePoolWithTag(NonPagedPool,
-                                 sizeof(*Qelt),
-                                 TAG_AFD_ACCEPT_QUEUE);
+    /* A full queue takes no more connections. Drop this one, which the peer
+     * sees closed, and listen again: a listener that stopped listening would
+     * have tcpip park the next connections beyond the backlog. */
+    if (CountPendingConnections(FCB) >= FCB->Backlog)
+        Qelt = NULL;
+    else
+        Qelt = ExAllocatePoolWithTag(NonPagedPool,
+                                     sizeof(*Qelt),
+                                     TAG_AFD_ACCEPT_QUEUE);
 
     if( !Qelt ) {
         Status = STATUS_NO_MEMORY;
@@ -490,14 +552,17 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
                ( Qelt->ConnInfo->RemoteAddress,
                  FCB->ListenIrp.ConnectionReturnInfo->RemoteAddress );
             InsertTailList( &FCB->PendingConnections, &Qelt->ListEntry );
+            Queued = TRUE;
         } else {
             FCB->Connection = Qelt->Object;
             ExFreePoolWithTag(Qelt, TAG_AFD_ACCEPT_QUEUE);
         }
     }
 
-    /* Satisfy a pre-accept request if one is available */
-    if( !IsListEmpty( &FCB->PendingIrpList[FUNCTION_PREACCEPT] ) &&
+    /* Satisfy a pre-accept request if one is available; a dropped connection
+     * satisfies none, the queued ones were offered already */
+    if( Queued &&
+        !IsListEmpty( &FCB->PendingIrpList[FUNCTION_PREACCEPT] ) &&
         !IsListEmpty( &FCB->PendingConnections ) ) {
         PLIST_ENTRY PendingIrp  =
             RemoveHeadList( &FCB->PendingIrpList[FUNCTION_PREACCEPT] );
@@ -579,8 +644,17 @@ NTSTATUS AfdListenSocket( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     FCB->DelayedAccept = ListenReq->UseDelayedAcceptance;
 
+    /* A backlog of 0 still queues one connection */
+    FCB->Backlog = ListenReq->Backlog;
+    if (FCB->Backlog == 0)
+        FCB->Backlog = 1;
+    else if (FCB->Backlog > AFD_MAX_BACKLOG)
+        FCB->Backlog = AFD_MAX_BACKLOG;
+
     AFD_DbgPrint(MID_TRACE,("ADDRESSFILE: %p\n", FCB->AddressFile.Handle));
 
+    /* A failed or cancelled connect left its endpoint on the bound socket */
+    AfdCloseConnectionEndpoint( FCB );
     Status = WarmSocketForConnection( FCB );
 
     AFD_DbgPrint(MID_TRACE,("Status from warmsocket %x\n", Status));
@@ -689,6 +763,15 @@ NTSTATUS AfdAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     if( !SocketAcquireStateLock( FCB ) ) return LostSocket( Irp );
 
+    /* IOCTL_AFD_ACCEPT is METHOD_BUFFERED: a zero-length input leaves
+     * SystemBuffer NULL and a short buffer would be a pool over-read, so
+     * reject anything that cannot hold an AFD_ACCEPT_DATA before we touch it. */
+    if( !AcceptData ||
+        IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(AFD_ACCEPT_DATA) )
+    {
+        return UnlockAndMaybeComplete( FCB, STATUS_INVALID_PARAMETER, Irp, 0 );
+    }
+
     FCB->EventSelectDisabled &= ~AFD_EVENT_ACCEPT;
 
     for( PendingConn = FCB->PendingConnections.Flink;
@@ -705,15 +788,27 @@ NTSTATUS AfdAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
             PFILE_OBJECT NewFileObject = NULL;
 
             /* A bad accept handle leaves the connection queued for a retry */
+            /* Reference with the requestor mode so the handle is resolved
+             * against the caller's own handle table and its granted access is
+             * checked (KernelMode skipped both, letting a caller pass a handle
+             * -- even a kernel handle -- it should not be able to). A socket is
+             * opened with GENERIC_READ|GENERIC_WRITE, so require only that much
+             * rather than FILE_ALL_ACCESS, which a valid socket handle lacks. */
             Status = ObReferenceObjectByHandle
                 ( AcceptData->ListenHandle,
-                  FILE_ALL_ACCESS,
-                  NULL,
-                  KernelMode,
+                  GENERIC_READ | GENERIC_WRITE,
+                  *IoFileObjectType,
+                  Irp->RequestorMode,
                   (PVOID *)&NewFileObject,
                   NULL );
 
             if( !NT_SUCCESS(Status) ) return UnlockAndMaybeComplete( FCB, Status, Irp, 0 );
+
+            /* Target must be an AFD socket, else FsContext is not an AFD_FCB */
+            if( NewFileObject->DeviceObject != DeviceObject ) {
+                ObDereferenceObject( NewFileObject );
+                return UnlockAndMaybeComplete( FCB, STATUS_INVALID_HANDLE, Irp, 0 );
+            }
 
             RemoveEntryList( PendingConn );
 
@@ -753,6 +848,7 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB Fcb = FileObject->FsContext;
     PAFD_SUPER_ACCEPT_INFO AcceptRequest;
+    ULONG OutputLength;
 
     PFILE_OBJECT NewFileObject = NULL;
 
@@ -764,10 +860,27 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
         return UnlockAndMaybeComplete( Fcb, STATUS_NO_MEMORY, Irp,
                                        0 );
 
+    /* The locked METHOD_NEITHER input must be large enough to hold the
+     * request struct we are about to read, or it is a pool over-read. */
+    if( IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(AFD_SUPER_ACCEPT_INFO) )
+        return UnlockAndMaybeComplete( Fcb, STATUS_INVALID_PARAMETER, Irp, 0 );
+
     Fcb->EventSelectDisabled &= ~AFD_EVENT_ACCEPT;
 
+    /* The output buffer holds the initial data, the local and the remote address area */
+    OutputLength = IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
+    if (AcceptRequest->ReceiveDataLength > OutputLength ||
+        AcceptRequest->LocalAddressLength > OutputLength - AcceptRequest->ReceiveDataLength ||
+        AcceptRequest->RemoteAddressLength > OutputLength - AcceptRequest->ReceiveDataLength -
+                                             AcceptRequest->LocalAddressLength)
+    {
+        return UnlockAndMaybeComplete(Fcb, STATUS_INVALID_PARAMETER, Irp, 0);
+    }
+
     /* Allow the IRP to access UserBuffer later */
-    Irp->Tail.Overlay.DriverContext[3] = IoAllocateMdl(Irp->UserBuffer, IrpSp->Parameters.DeviceIoControl.OutputBufferLength, FALSE, FALSE, NULL);
+    Irp->Tail.Overlay.DriverContext[3] = IoAllocateMdl(Irp->UserBuffer, OutputLength, FALSE, FALSE, NULL);
+    if (!Irp->Tail.Overlay.DriverContext[3])
+        return UnlockAndMaybeComplete(Fcb, STATUS_INSUFFICIENT_RESOURCES, Irp, 0);
     _SEH2_TRY
     {
         MmProbeAndLockPages((PMDL)Irp->Tail.Overlay.DriverContext[3], Irp->RequestorMode, IoWriteAccess);
@@ -780,13 +893,27 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     _SEH2_END;
 
     /* Validate that accepting socket is valid, and has not been bound or connected */
+    /* User-supplied handle: resolve it in the caller's handle table under the
+     * requestor mode (KernelMode skipped that check). Require only the access a
+     * socket is actually opened with, not FILE_ALL_ACCESS. */
     Status = ObReferenceObjectByHandle(
-        AcceptRequest->AcceptHandle, FILE_ALL_ACCESS, NULL, KernelMode, (PVOID *)&NewFileObject, NULL);
+        AcceptRequest->AcceptHandle, GENERIC_READ | GENERIC_WRITE, *IoFileObjectType, Irp->RequestorMode, (PVOID *)&NewFileObject, NULL);
     if (!NT_SUCCESS(Status))
     {
         IoFreeMdl((PMDL)Irp->Tail.Overlay.DriverContext[3]);
         Irp->Tail.Overlay.DriverContext[3] = NULL;
         return UnlockAndMaybeComplete(Fcb, Status, Irp, 0);
+    }
+
+    /* Target must be an AFD socket, else FsContext is not an AFD_FCB */
+    if (NewFileObject->DeviceObject != DeviceObject)
+    {
+        ObDereferenceObject(NewFileObject);
+        /* The output pages were probed and locked above; unlock before freeing the MDL */
+        MmUnlockPages((PMDL)Irp->Tail.Overlay.DriverContext[3]);
+        IoFreeMdl((PMDL)Irp->Tail.Overlay.DriverContext[3]);
+        Irp->Tail.Overlay.DriverContext[3] = NULL;
+        return UnlockAndMaybeComplete(Fcb, STATUS_INVALID_HANDLE, Irp, 0);
     }
 
     PAFD_FCB Fcb2 = NewFileObject->FsContext;

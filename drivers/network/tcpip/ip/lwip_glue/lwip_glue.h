@@ -11,6 +11,7 @@
     #define LWIP_MESSAGE_TAG 'sMwl'
     #define LWIP_QUEUE_TAG   'uQwl'
     #define LWIP_ACCEPT_TAG  'cAwl'
+    #define LWIP_REOPEN_TAG  'oRwl'
 #endif
 
 typedef struct tcp_pcb* PTCP_PCB;
@@ -73,6 +74,7 @@ struct lwip_callback_msg
         } Socket;
         struct {
             err_t Error;
+            u16_t Port;
         } Bind;
         struct {
             struct tcp_pcb *NewPcb;
@@ -102,15 +104,21 @@ extern void TCPSendEventHandler(void *arg, const u16_t space);
 extern void TCPFinEventHandler(void *arg, const err_t err);
 extern void TCPRecvEventHandler(void *arg);
 
+/* Port bitmap (transport/tcp/tcp.c) */
+extern UINT TCPAllocateEphemeralPort(BOOLEAN (*InUse)(ULONG Port));
+extern VOID TCPFreePort(const UINT Port);
+
 /* TCP functions */
 PTCP_PCB    LibTCPSocket(void *arg);
 VOID        LibTCPFreeSocket(PTCP_PCB pcb);
-err_t       LibTCPBind(PCONNECTION_ENDPOINT Connection, ip4_addr_t *const ipaddr, const u16_t port);
+err_t       LibTCPBind(PCONNECTION_ENDPOINT Connection, ip4_addr_t *const ipaddr, const u16_t port, u16_t *const BoundPort);
+UINT        LibTCPAllocateEphemeralPort(VOID);
 PTCP_PCB    LibTCPListen(PCONNECTION_ENDPOINT Connection, UINT Backlog);
 VOID        LibTCPClaimPendingAccept(PCONNECTION_ENDPOINT Listener);
 err_t       LibTCPSend(PCONNECTION_ENDPOINT Connection, void *const dataptr, const u16_t len, ULONG *sent, const int safe, PTDI_BUCKET Bucket);
 err_t       LibTCPConnect(PCONNECTION_ENDPOINT Connection, ip4_addr_t *const ipaddr, const u16_t port);
 err_t       LibTCPShutdown(PCONNECTION_ENDPOINT Connection, const int shut_rx, const int shut_tx);
+err_t       LibTCPAbort(PCONNECTION_ENDPOINT Connection);
 err_t       LibTCPClose(PCONNECTION_ENDPOINT Connection, const int safe, const int callback);
 
 err_t       LibTCPGetPeerName(PTCP_PCB pcb, ip4_addr_t *const ipaddr, u16_t *const port);

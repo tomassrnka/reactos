@@ -331,6 +331,20 @@ AfdCreateSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
         //EaLength = sizeof(FILE_FULL_EA_INFORMATION) + EaInfo->EaNameLength + EaInfo->EaValueLength;
 
+        /* The EA value must span the create-packet header and the transport
+         * name it declares; without this, reading SizeOfTransportName and then
+         * copying that many bytes from TransportName over-reads the EA pool
+         * block (the declared name length is a DWORD, up to 64KB-1). */
+        if( EaInfo->EaValueLength < FIELD_OFFSET(AFD_CREATE_PACKET, TransportName) ||
+            ConnectInfo->SizeOfTransportName >
+                EaInfo->EaValueLength - FIELD_OFFSET(AFD_CREATE_PACKET, TransportName) )
+        {
+            AFD_DbgPrint(MIN_TRACE,("Invalid AFD_CREATE_PACKET EA length\n"));
+            Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
+            IoCompleteRequest( Irp, IO_NO_INCREMENT );
+            return STATUS_INVALID_PARAMETER;
+        }
+
         AFD_DbgPrint(MID_TRACE,("EaInfo: %p, EaInfoValue: %p\n",
                                 EaInfo, EaInfoValue));
     }
@@ -363,6 +377,7 @@ AfdCreateSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     KeInitializeMutex( &FCB->Mutex, 0 );
     KeInitializeEvent( &FCB->RelistenIdle, NotificationEvent, TRUE );
     KeInitializeEvent( &FCB->AcceptWorkIdle, NotificationEvent, TRUE );
+    KeInitializeEvent( &FCB->InFlightIdle, NotificationEvent, FALSE );
 
     for( i = 0; i < MAX_FUNCTIONS; i++ ) {
         InitializeListHead( &FCB->PendingIrpList[i] );
@@ -459,6 +474,34 @@ AfdCleanupSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     return UnlockAndMaybeComplete(FCB, STATUS_SUCCESS, Irp, 0);
 }
 
+/* Called with the state lock held. A cancel does not dequeue a request the
+ * transport already took and completes from a work item, and a worker or a
+ * completion may issue a request after the first cancel; their completions
+ * still use the FCB. Every unlock of the closed socket wakes the wait */
+static VOID
+WaitForInFlightRequests(PAFD_FCB FCB, PAFD_IN_FLIGHT_REQUEST *InFlightRequest)
+{
+    UINT i;
+
+    while (AfdHasInFlightRequest(FCB))
+    {
+        for (i = 0; i < IN_FLIGHT_REQUESTS; i++)
+        {
+            if (InFlightRequest[i]->InFlightRequest)
+                IoCancelIrp(InFlightRequest[i]->InFlightRequest);
+        }
+
+        if (!AfdHasInFlightRequest(FCB))
+            break;
+
+        /* Not SocketStateUnlock, which would wake this wait at once */
+        KeClearEvent(&FCB->InFlightIdle);
+        KeReleaseMutex(&FCB->Mutex, FALSE);
+        KeWaitForSingleObject(&FCB->InFlightIdle, Executive, KernelMode, FALSE, NULL);
+        SocketAcquireStateLock(FCB);
+    }
+}
+
 static NTSTATUS NTAPI
 AfdCloseSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                PIO_STACK_LOCATION IrpSp)
@@ -525,10 +568,10 @@ AfdCloseSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     if (FCB->AcceptWorkItem)
         KeWaitForSingleObject(&FCB->AcceptWorkIdle, Executive, KernelMode, FALSE, NULL);
 
-    /* Taking the lock waits for the worker; a listen in flight frees these when it completes */
+    /* Taking the lock waits for the worker */
     SocketAcquireStateLock(FCB);
-    if (!FCB->ListenIrp.InFlightRequest)
-        FreeListenConnectionInfo(FCB);
+    WaitForInFlightRequests(FCB, InFlightRequest);
+    FreeListenConnectionInfo(FCB);
     SocketStateUnlock(FCB);
 
     if (FCB->RelistenWorkItem)
@@ -545,6 +588,9 @@ AfdCloseSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     if (FCB->Recv.Window)
         ExFreePoolWithTag(FCB->Recv.Window, TAG_AFD_DATA_BUFFER);
+
+    if (FCB->RecvRelaunchWorkItem)
+        IoFreeWorkItem(FCB->RecvRelaunchWorkItem);
 
     if (FCB->Send.Window)
         ExFreePoolWithTag(FCB->Send.Window, TAG_AFD_DATA_BUFFER);
@@ -786,15 +832,21 @@ AfdDisconnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
         /* Receive direction only */
         if ((DisReq->DisconnectType & AFD_DISCONNECT_RECV) &&
-            !(DisReq->DisconnectType & AFD_DISCONNECT_SEND))
+            !(DisReq->DisconnectType & (AFD_DISCONNECT_SEND | AFD_DISCONNECT_ABORT)))
         {
             /* No need to tell the transport driver for receive direction only */
             return UnlockAndMaybeComplete( FCB, STATUS_SUCCESS, Irp, 0 );
         }
-        else
+        else if ((DisReq->DisconnectType & AFD_DISCONNECT_ABORT) ||
+                 (FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS))
         {
             /* Perform an abortive disconnect */
             Flags = TDI_DISCONNECT_ABORT;
+        }
+        else
+        {
+            /* Both directions: the send direction still closes gracefully */
+            Flags = TDI_DISCONNECT_RELEASE;
         }
     }
 
@@ -1188,7 +1240,9 @@ CleanupPendingIrp(PAFD_FCB FCB, PIRP Irp, PIO_STACK_LOCATION IrpSp, PAFD_ACTIVE_
     {
         ASSERT(IrpSp->MajorFunction == IRP_MJ_DEVICE_CONTROL);
 
-        if (IrpSp->Parameters.DeviceIoControl.IoControlCode == IOCTL_AFD_RECV)
+        /* AFD_RECV_INFO_UDP starts like AFD_RECV_INFO */
+        if (IrpSp->Parameters.DeviceIoControl.IoControlCode == IOCTL_AFD_RECV ||
+            IrpSp->Parameters.DeviceIoControl.IoControlCode == IOCTL_AFD_RECV_DATAGRAM)
         {
             RecvReq = GetLockedData(Irp, IrpSp);
             UnlockBuffers(RecvReq->BufferArray, RecvReq->BufferCount, CheckUnlockExtraBuffers(FCB, IrpSp));
@@ -1207,6 +1261,22 @@ CleanupPendingIrp(PAFD_FCB FCB, PIRP Irp, PIO_STACK_LOCATION IrpSp, PAFD_ACTIVE_
             SignalSocket(Poll, NULL, PollReq, STATUS_CANCELLED);
         }
     }
+}
+
+/* Irp is the only request on the connect and ConnectEx queues */
+static
+BOOLEAN
+AfdIsOnlyConnectRequest(PAFD_FCB FCB, PIRP Irp)
+{
+    PLIST_ENTRY Connect = &FCB->PendingIrpList[FUNCTION_CONNECT];
+    PLIST_ENTRY ConnectEx = &FCB->PendingIrpList[FUNCTION_CONNECTEX];
+    PLIST_ENTRY Entry = &Irp->Tail.Overlay.ListEntry;
+
+    if (Connect->Flink == Entry && Entry->Flink == Connect && IsListEmpty(ConnectEx))
+        return TRUE;
+    if (ConnectEx->Flink == Entry && Entry->Flink == ConnectEx && IsListEmpty(Connect))
+        return TRUE;
+    return FALSE;
 }
 
 static
@@ -1351,6 +1421,21 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
 
         if (CurrentIrp == Irp)
         {
+            /* The last connect request of a socket whose transport connect runs: stop the
+               transport connect and leave this request queued. Its completion completes the
+               request with the transport's result once the socket is bound or connected
+               again, so the caller never sees a cancel while the socket still connects */
+            if ((Function == FUNCTION_CONNECT || Function == FUNCTION_CONNECTEX) &&
+                FCB->SharedData.State == SOCKET_STATE_CONNECTING &&
+                FCB->ConnectIrp.InFlightRequest &&
+                AfdIsOnlyConnectRequest(FCB, Irp))
+            {
+                IoCancelIrp(FCB->ConnectIrp.InFlightRequest);
+                SocketStateUnlock(FCB);
+                ObDereferenceObject(FileObject);
+                return;
+            }
+
             RemoveEntryList(CurrentEntry);
             CleanupPendingIrp(FCB, Irp, IrpSp, NULL);
             if (Function == FUNCTION_PREACCEPT)
@@ -1361,8 +1446,9 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
                 {
                     PAFD_FCB FCB2 = NewFileObject->FsContext;
                     FCB2->SharedData.State = SOCKET_STATE_CREATED;
-                    
-                    ObfDereferenceObject(NewFileObject);
+
+                    /* With the listener locked, never close the accept socket here */
+                    ObDereferenceObjectDeferDelete(NewFileObject);
                     Irp->Tail.Overlay.DriverContext[2] = NULL;
                 }
 

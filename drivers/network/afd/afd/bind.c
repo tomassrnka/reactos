@@ -25,6 +25,15 @@ NTSTATUS WarmSocketForBind( PAFD_FCB FCB, ULONG ShareType ) {
         return STATUS_INVALID_PARAMETER;
     }
 
+    /* Used to restart the receive from a system thread (read.c). Allocated
+     * before the address is opened, so that its failure leaves nothing open */
+    if ((FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS) && !FCB->RecvRelaunchWorkItem)
+    {
+        FCB->RecvRelaunchWorkItem = IoAllocateWorkItem(FCB->FileObject->DeviceObject);
+        if (!FCB->RecvRelaunchWorkItem)
+            return STATUS_NO_MEMORY;
+    }
+
     Status = TdiOpenAddressFile(&FCB->TdiDeviceName,
                                 FCB->LocalAddress,
                                 ShareType,
@@ -98,7 +107,14 @@ AfdBindSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         ExFreePoolWithTag(FCB->LocalAddress, TAG_AFD_TRANSPORT_ADDRESS);
     }
 
-    FCB->LocalAddress = TaCopyTransportAddress( &BindReq->Address );
+    /* BindReq is the captured user IOCTL buffer; bound the copy to the bytes
+     * actually supplied so a lying Address[0].AddressLength cannot over-read
+     * adjacent pool into LocalAddress (which getsockname later returns). */
+    FCB->LocalAddress =
+        (IrpSp->Parameters.DeviceIoControl.InputBufferLength >= FIELD_OFFSET(AFD_BIND_DATA, Address))
+            ? TaCopyTransportAddressBounded( &BindReq->Address,
+                  IrpSp->Parameters.DeviceIoControl.InputBufferLength - FIELD_OFFSET(AFD_BIND_DATA, Address))
+            : NULL;
 
     if( FCB->LocalAddress )
         Status = TdiBuildConnectionInfo( &FCB->AddressFrom,

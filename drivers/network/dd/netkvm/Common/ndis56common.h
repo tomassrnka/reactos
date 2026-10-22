@@ -89,6 +89,17 @@
 // to be set to real limit later
 #define MAX_RX_LOOPS    1000
 
+// Time-bound for a single receive DPC slice. ParaNdis_DPCWorkBody drains the
+// receive queue at DISPATCH_LEVEL; bounding it only by a packet count
+// (MAX_RX_LOOPS) lets one DPC hold DISPATCH_LEVEL for a long time when each
+// indication is slow (e.g. pool-lock contention during an RX flood), which
+// starves other DPCs and the scheduler and can trip the DPC watchdog. Once the
+// slice budget is spent with work still pending, the DPC yields and is
+// re-queued so the rest of the system gets a turn. This mirrors how NDIS
+// miniports bound a single receive-indication pass.
+#define RX_DPC_TIME_LIMIT_US    500         // max DISPATCH_LEVEL hold per RX DPC slice
+#define RX_DPC_TIME_CHECK_MASK  0x07        // sample the clock every 8 indications
+
 // maximum number of virtio queues used by the driver
 #define MAX_NUM_OF_QUEUES 3
 

@@ -10,6 +10,10 @@
 
 #include "afd.h"
 
+/* Upper bound on the LockBuffers pool block: well above any legitimate WSABUF
+ * scatter/gather while keeping the size math clear of a 32-bit wrap. */
+#define AFD_MAX_WSA_BUFFER_SIZE (16 * 1024 * 1024)
+
 PVOID GetLockedData(PIRP Irp, PIO_STACK_LOCATION IrpSp)
 {
     ASSERT(Irp->MdlAddress);
@@ -209,10 +213,18 @@ PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
     UINT i;
     /* Copy the buffer array so we don't lose it */
     UINT Lock = LockAddress ? 2 : 0;
-    UINT Size = (sizeof(AFD_WSABUF) + sizeof(AFD_MAPBUF)) * (Count + Lock);
-    PAFD_WSABUF NewBuf = ExAllocatePoolWithTag(PagedPool, Size, TAG_AFD_WSA_BUFFER);
+    /* Count is user-supplied: size the block in 64-bit and cap it so a large Count
+     * cannot wrap the 32-bit product and undersize the pool block we then fill. */
+    ULONGLONG Size64 = (ULONGLONG)(sizeof(AFD_WSABUF) + sizeof(AFD_MAPBUF)) *
+                       ((ULONGLONG)Count + Lock);
+    SIZE_T Size = (SIZE_T)Size64;
+    PAFD_WSABUF NewBuf;
     BOOLEAN LockFailed = FALSE;
     PAFD_MAPBUF MapBuf;
+
+    if( Size64 > AFD_MAX_WSA_BUFFER_SIZE )
+        return NULL;
+    NewBuf = ExAllocatePoolWithTag(PagedPool, Size, TAG_AFD_WSA_BUFFER);
 
     AFD_DbgPrint(MID_TRACE,("Called(%p)\n", NewBuf));
 
@@ -222,6 +234,17 @@ PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
         MapBuf = (PAFD_MAPBUF)(NewBuf + Count + Lock);
 
         _SEH2_TRY {
+            /* Buf and AddressLen are user-supplied pointers for user-mode
+             * requests. Probe them so a kernel-mode pointer is rejected rather
+             * than read outright: SEH traps faults but not a valid kernel read,
+             * which would otherwise be an information-disclosure oracle. Kernel
+             * callers (LockMode == KernelMode) pass legitimate kernel buffers. */
+            if( LockMode == UserMode ) {
+                if( Count )
+                    ProbeForRead( Buf, sizeof(AFD_WSABUF) * Count, 1 );
+                if( LockAddress && AddressBuf && AddressLen )
+                    ProbeForRead( AddressLen, sizeof(*AddressLen), 1 );
+            }
             RtlCopyMemory( NewBuf, Buf, sizeof(AFD_WSABUF) * Count );
             if( LockAddress ) {
                 if (AddressBuf && AddressLen) {
@@ -306,43 +329,54 @@ VOID UnlockBuffers( PAFD_WSABUF Buf, UINT Count, BOOL Address ) {
 }
 
 /* Produce a kernel-land handle array with handles replaced by object
- * pointers.  This will allow the system to do proper alerting */
-PAFD_HANDLE LockHandles( PAFD_HANDLE HandleArray, UINT HandleCount ) {
+ * pointers.  This will allow the system to do proper alerting.
+ * Every handle must name a socket of this device */
+NTSTATUS LockHandles( PAFD_HANDLE HandleArray, UINT HandleCount,
+                      PDEVICE_OBJECT DeviceObject, KPROCESSOR_MODE AccessMode,
+                      PAFD_HANDLE *LockedHandles ) {
     UINT i;
     NTSTATUS Status = STATUS_SUCCESS;
+    PFILE_OBJECT FileObject;
+    PAFD_HANDLE FileObjects;
 
-    PAFD_HANDLE FileObjects = ExAllocatePoolWithTag(NonPagedPool,
-                                                    HandleCount * sizeof(AFD_HANDLE),
-                                                    TAG_AFD_POLL_HANDLE);
+    *LockedHandles = NULL;
 
-    for( i = 0; FileObjects && i < HandleCount; i++ ) {
-        FileObjects[i].Status = 0;
+    FileObjects = ExAllocatePoolZero(NonPagedPool,
+                                     HandleCount * sizeof(AFD_HANDLE),
+                                     TAG_AFD_POLL_HANDLE);
+    if( !FileObjects ) return STATUS_NO_MEMORY;
+
+    for( i = 0; i < HandleCount; i++ ) {
         FileObjects[i].Events = HandleArray[i].Events;
-        FileObjects[i].Handle = 0;
-        if( !HandleArray[i].Handle ) continue;
-        if( NT_SUCCESS(Status) ) {
-                Status = ObReferenceObjectByHandle
-                    ( (PVOID)HandleArray[i].Handle,
-                      FILE_ALL_ACCESS,
-                      NULL,
-                       KernelMode,
-                       (PVOID*)&FileObjects[i].Handle,
-                       NULL );
+
+        Status = ObReferenceObjectByHandle( (HANDLE)HandleArray[i].Handle,
+                                            0,
+                                            *IoFileObjectType,
+                                            AccessMode,
+                                            (PVOID*)&FileObject,
+                                            NULL );
+        if( !NT_SUCCESS(Status) ) {
+            AFD_DbgPrint(MIN_TRACE,("Failed to reference handle %u (0x%x)\n", i, Status));
+            break;
         }
 
-        if( !NT_SUCCESS(Status) )
-        {
-            AFD_DbgPrint(MIN_TRACE,("Failed to reference handles (0x%x)\n", Status));
-            FileObjects[i].Handle = 0;
+        if( FileObject->DeviceObject != DeviceObject || !FileObject->FsContext ) {
+            AFD_DbgPrint(MIN_TRACE,("Handle %u is not a socket\n", i));
+            ObDereferenceObject( FileObject );
+            Status = STATUS_INVALID_HANDLE;
+            break;
         }
+
+        FileObjects[i].Handle = (SOCKET)FileObject;
     }
 
     if( !NT_SUCCESS(Status) ) {
         UnlockHandles( FileObjects, HandleCount );
-        return NULL;
+        return Status;
     }
 
-    return FileObjects;
+    *LockedHandles = FileObjects;
+    return STATUS_SUCCESS;
 }
 
 VOID UnlockHandles( PAFD_HANDLE HandleArray, UINT HandleCount ) {
@@ -367,7 +401,16 @@ BOOLEAN SocketAcquireStateLock( PAFD_FCB FCB ) {
                                  NULL);
 }
 
+BOOLEAN AfdHasInFlightRequest( PAFD_FCB FCB ) {
+    return FCB->ConnectIrp.InFlightRequest || FCB->ListenIrp.InFlightRequest ||
+           FCB->ReceiveIrp.InFlightRequest || FCB->SendIrp.InFlightRequest ||
+           FCB->DisconnectIrp.InFlightRequest;
+}
+
 VOID SocketStateUnlock( PAFD_FCB FCB ) {
+    /* Wakes AfdCloseSocket, which waits for the transport requests of a closed socket */
+    if (FCB->SharedData.State == SOCKET_STATE_CLOSED)
+        KeSetEvent(&FCB->InFlightIdle, IO_NO_INCREMENT, FALSE);
     KeReleaseMutex(&FCB->Mutex, FALSE);
 }
 

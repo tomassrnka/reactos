@@ -213,12 +213,24 @@ ReassembleDatagram(
   PLIST_ENTRY CurrentEntry;
   PIP_FRAGMENT Fragment;
   PCHAR Data;
+  ULONG BytesCopied;
 
   PAGED_CODE();
 
   TI_DbgPrint(DEBUG_IP, ("Reassembling datagram from IPDR at (0x%X).\n", IPDR));
   TI_DbgPrint(DEBUG_IP, ("IPDR->HeaderSize = %d\n", IPDR->HeaderSize));
   TI_DbgPrint(DEBUG_IP, ("IPDR->DataSize = %d\n", IPDR->DataSize));
+
+  /* The admission check bounds the payload alone to 65535 octets; with the
+     header the datagram can exceed the maximum IP datagram size. The upper
+     layers take 16-bit lengths (lwIP's pbuf_alloc() would truncate 65536 to
+     0), so drop such a datagram, as Windows does. */
+  if (IPDR->HeaderSize + IPDR->DataSize > 0xFFFF)
+  {
+    TI_DbgPrint(MIN_TRACE, ("Reassembled datagram exceeds 65535 octets; dropping.\n"));
+    (*IPPacket->Free)(IPPacket);
+    return FALSE;
+  }
 
   IPPacket->TotalSize  = IPDR->HeaderSize + IPDR->DataSize;
   IPPacket->HeaderSize = IPDR->HeaderSize;
@@ -246,11 +258,33 @@ ReassembleDatagram(
   while (CurrentEntry != &IPDR->FragmentListHead) {
     Fragment = CONTAINING_RECORD(CurrentEntry, IP_FRAGMENT, ListEntry);
 
-    /* Copy fragment data into datagram buffer */
-    CopyPacketToBuffer(Data + Fragment->Offset,
-                       Fragment->Packet,
-                       Fragment->PacketOffset,
-                       Fragment->Size);
+    /* Never copy past the datagram buffer. It is sized from IPDR->DataSize
+       (the last fragment end); a fragment ending beyond it (a later fragment
+       shrank the total, or fragments overlap past the end) would overrun the
+       heap block. Fail closed. */
+    if (Fragment->Offset > IPDR->DataSize ||
+        Fragment->Size > IPDR->DataSize - Fragment->Offset)
+    {
+      TI_DbgPrint(MIN_TRACE, ("Fragment exceeds datagram size; dropping.\n"));
+      (*IPPacket->Free)(IPPacket);
+      return FALSE;
+    }
+
+    /* Copy fragment data into datagram buffer, honoring the actual byte
+       count: a short physical frame copies fewer bytes than the fragment
+       claims and would leave the gap uninitialized. Fail closed rather than
+       deliver uninitialized heap. */
+    BytesCopied = CopyPacketToBuffer(Data + Fragment->Offset,
+                                     Fragment->Packet,
+                                     Fragment->PacketOffset,
+                                     Fragment->Size);
+    if (BytesCopied != Fragment->Size)
+    {
+      TI_DbgPrint(MIN_TRACE, ("Short fragment copy (%u of %u octets); dropping.\n",
+                              BytesCopied, Fragment->Size));
+      (*IPPacket->Free)(IPPacket);
+      return FALSE;
+    }
 
     CurrentEntry = CurrentEntry->Flink;
   }
@@ -298,17 +332,37 @@ VOID ProcessFragment(
   PIPDATAGRAM_REASSEMBLY IPDR;
   PLIST_ENTRY CurrentEntry;
   PIPDATAGRAM_HOLE Hole, NewHole;
-  USHORT FragFirst;
-  USHORT FragLast;
+  ULONG FragFirst;
+  ULONG FragLast;
   BOOLEAN MoreFragments;
   PIPv4_HEADER IPv4Header;
   IP_PACKET Datagram;
   PIP_FRAGMENT Fragment;
   BOOLEAN Success;
+  BOOLEAN Found;
+  BOOLEAN Covered;
 
   /* FIXME: Assume IPv4 */
 
   IPv4Header = (PIPv4_HEADER)IPPacket->Header;
+
+  /* Fragment offset in octets from the 13-bit field; <<3 fits in 16 bits */
+  FragFirst = (WN2H(IPv4Header->FlagsFragOfs) & IPv4_FRAGOFS_MASK) << 3;
+  MoreFragments = (WN2H(IPv4Header->FlagsFragOfs) & IPv4_MF_MASK) > 0;
+
+  /* Drop a malformed or oversized fragment before taking any reassembly state.
+     The payload must be non-empty and fit wholly within the 65535-octet maximum
+     IP datagram (else ReassembleDatagram() sizes the buffer from one fragment
+     and copies another past it), and a non-last fragment must be an 8-octet
+     multiple (RFC 791) so later fragments align and no partially-covered octet
+     can leak. Fail closed. */
+  if (IPPacket->TotalSize <= IPPacket->HeaderSize ||
+      (ULONG)FragFirst + (IPPacket->TotalSize - IPPacket->HeaderSize) > 0xFFFF ||
+      (MoreFragments && ((IPPacket->TotalSize - IPPacket->HeaderSize) & 7) != 0))
+  {
+    TI_DbgPrint(MIN_TRACE, ("Dropping malformed, oversized or misaligned IP fragment.\n"));
+    return;
+  }
 
   /* Check if we already have an reassembly structure for this datagram */
   IPDR = GetReassemblyInfo(IPPacket, &OldIrql);
@@ -334,7 +388,7 @@ VOID ProcessFragment(
     /* Create a descriptor spanning from zero to infinity.
        Actually, we use a value slightly greater than the
        maximum number of octets an IP datagram can contain */
-    Hole = CreateHoleDescriptor(0, 65536);
+    Hole = CreateHoleDescriptor(0, 65535);
     if (!Hole) {
       /* We don't have the resources to process this packet, discard it */
       ExFreeToNPagedLookasideList(&IPDRList, IPDR);
@@ -360,31 +414,45 @@ VOID ProcessFragment(
 	&ReassemblyListLock);
   }
 
-  FragFirst     = (WN2H(IPv4Header->FlagsFragOfs) & IPv4_FRAGOFS_MASK) << 3;
-  FragLast      = FragFirst + WN2H(IPv4Header->TotalLength);
-  MoreFragments = (WN2H(IPv4Header->FlagsFragOfs) & IPv4_MF_MASK) > 0;
+  /* Inclusive last octet (the RFC 815 hole algorithm is inclusive): the
+     payload extent minus one. The payload is guaranteed non-empty above, so
+     this does not underflow. */
+  FragLast      = FragFirst + (IPPacket->TotalSize - IPPacket->HeaderSize) - 1;
 
+  /* The first last fragment (MF=0) fixes the datagram terminal, the index of its
+     final octet. Once fixed, drop any fragment that would extend past it and any
+     second last fragment that disagrees, so a contradictory MF=0 cannot shrink
+     the datagram and leave the octets above the new end uninitialized. */
+  if (IPDR->TerminalSet &&
+      (FragLast > IPDR->Terminal ||
+       (!MoreFragments && FragLast != IPDR->Terminal)))
+  {
+    TcpipReleaseSpinLock(&IPDR->Lock, OldIrql);
+    return;
+  }
+
+  /* Walk every hole the fragment overlaps and split each one (RFC 815). After
+     overlapping fragments a single fragment can span more than one hole;
+     handling only the first would leave the rest and stall the datagram. */
+  Found = FALSE;
   CurrentEntry = IPDR->HoleListHead.Flink;
-  for (;;) {
-    if (CurrentEntry == &IPDR->HoleListHead)
-        break;
-
+  while (CurrentEntry != &IPDR->HoleListHead) {
     Hole = CONTAINING_RECORD(CurrentEntry, IPDATAGRAM_HOLE, ListEntry);
+    /* Advance before the current hole may be unlinked below */
+    CurrentEntry = CurrentEntry->Flink;
 
     TI_DbgPrint(DEBUG_IP, ("Comparing Fragment (%d,%d) to Hole (%d,%d).\n",
       FragFirst, FragLast, Hole->First, Hole->Last));
 
     if ((FragFirst > Hole->Last) || (FragLast < Hole->First)) {
       TI_DbgPrint(MID_TRACE, ("No overlap.\n"));
-      /* The fragment does not overlap with the hole, try next
-         descriptor in the list */
-
-      CurrentEntry = CurrentEntry->Flink;
+      /* The fragment does not overlap with this hole, try the next */
       continue;
     }
 
-    /* The fragment overlap with the hole, unlink the descriptor */
-    RemoveEntryList(CurrentEntry);
+    /* The fragment overlaps the hole, unlink the descriptor */
+    Found = TRUE;
+    RemoveEntryList(&Hole->ListEntry);
 
     if (FragFirst > Hole->First) {
       NewHole = CreateHoleDescriptor(Hole->First, FragFirst - 1);
@@ -413,7 +481,11 @@ VOID ProcessFragment(
     }
 
     ExFreeToNPagedLookasideList(&IPHoleList, Hole);
+  }
 
+  /* Only queue the fragment if it filled part of a hole; a fully duplicate or
+     already-covered fragment overlaps no hole and is dropped. */
+  if (Found) {
     /* If this is the first fragment, save the IP header */
     if (FragFirst == 0) {
         IPDR->IPv4Header = ExAllocatePoolWithTag(NonPagedPool,
@@ -454,18 +526,34 @@ VOID ProcessFragment(
     /* Disassociate the NDIS packet so it isn't freed upon return from IPReceive() */
     IPPacket->NdisPacket = NULL;
 
-    /* If this is the last fragment, compute and save the datagram data size */
+    /* If this is the last fragment, fix the datagram terminal and data size */
     if (!MoreFragments)
+    {
       IPDR->DataSize = FragFirst + Fragment->Size;
+      IPDR->Terminal = FragLast;
+      IPDR->TerminalSet = TRUE;
+    }
 
     /* Put the fragment in the list */
     InsertTailList(&IPDR->FragmentListHead, &Fragment->ListEntry);
-    break;
   }
 
   TI_DbgPrint(DEBUG_IP, ("Done searching for hole descriptor.\n"));
 
-  if (IsListEmpty(&IPDR->HoleListHead)) {
+  /* The datagram is complete only when a last fragment has fixed the terminal
+     and every octet up to it is covered. IsListEmpty alone is unsafe: a last
+     fragment discards the hole suffix above its end, which can empty the list
+     while a gap remains below the terminal. */
+  Covered = IPDR->TerminalSet;
+  for (CurrentEntry = IPDR->HoleListHead.Flink;
+       Covered && CurrentEntry != &IPDR->HoleListHead;
+       CurrentEntry = CurrentEntry->Flink) {
+    Hole = CONTAINING_RECORD(CurrentEntry, IPDATAGRAM_HOLE, ListEntry);
+    if (Hole->First <= IPDR->Terminal)
+      Covered = FALSE;
+  }
+
+  if (Covered) {
     /* Hole list is empty which means a complete datagram can be assembled.
        Assemble the datagram and pass it to an upper layer protocol */
 
@@ -585,6 +673,7 @@ VOID IPv4Receive(PIP_INTERFACE IF, PIP_PACKET IPPacket)
 {
     UCHAR FirstByte;
     ULONG BytesCopied;
+    UINT AvailableBytes;
 
     TI_DbgPrint(DEBUG_IP, ("Received IPv4 datagram.\n"));
 
@@ -603,7 +692,8 @@ VOID IPv4Receive(PIP_INTERFACE IF, PIP_PACKET IPPacket)
     IPPacket->HeaderSize = (FirstByte & 0x0F) << 2;
     TI_DbgPrint(DEBUG_IP, ("IPPacket->HeaderSize = %d\n", IPPacket->HeaderSize));
 
-    if (IPPacket->HeaderSize > IPv4_MAX_HEADER_SIZE) {
+    if (IPPacket->HeaderSize < sizeof(IPv4_HEADER) ||
+        IPPacket->HeaderSize > IPv4_MAX_HEADER_SIZE) {
         TI_DbgPrint(MIN_TRACE, ("Datagram received with incorrect header size (%d).\n",
 	      IPPacket->HeaderSize));
         /* Discard packet */
@@ -642,7 +732,26 @@ VOID IPv4Receive(PIP_INTERFACE IF, PIP_PACKET IPPacket)
         return;
     }
 
+    /* Bytes the link actually delivered from this position. The caller sets
+       TotalSize from the real transferred count (legacy receive) or the NDIS
+       packet length (packet-mode and loopback); querying the NDIS packet here
+       instead would return the (possibly larger) allocated buffer length and
+       let a short legacy transfer pass, copying its uninitialized tail. */
+    AvailableBytes = IPPacket->TotalSize;
+
     IPPacket->TotalSize = WN2H(((PIPv4_HEADER)IPPacket->Header)->TotalLength);
+
+    /* The IP total length must cover the header and must not claim more than
+       the link actually delivered, or reassembly would advertise and copy
+       bytes the frame never carried (uninitialized-heap disclosure). */
+    if (IPPacket->TotalSize < IPPacket->HeaderSize ||
+        IPPacket->Position > AvailableBytes ||
+        IPPacket->TotalSize > AvailableBytes - IPPacket->Position) {
+        TI_DbgPrint(MIN_TRACE, ("IP total length (%d) exceeds delivered length; discarding.\n",
+                                IPPacket->TotalSize));
+        /* Discard packet */
+        return;
+    }
 
     AddrInitIPv4(&IPPacket->SrcAddr, ((PIPv4_HEADER)IPPacket->Header)->SrcAddr);
     AddrInitIPv4(&IPPacket->DstAddr, ((PIPv4_HEADER)IPPacket->Header)->DstAddr);

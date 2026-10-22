@@ -48,7 +48,7 @@ NTSTATUS TCPListen(PCONNECTION_ENDPOINT Connection, UINT Backlog)
 {
     NTSTATUS Status = STATUS_SUCCESS;
     ip_addr_t AddressToBind;
-    TA_IP_ADDRESS LocalAddress;
+    u16_t BoundPort;
 
     ASSERT(Connection);
 
@@ -65,29 +65,14 @@ NTSTATUS TCPListen(PCONNECTION_ENDPOINT Connection, UINT Backlog)
 
     Status = TCPTranslateError(LibTCPBind(Connection,
                                           &AddressToBind,
-                                          Connection->AddressFile->Port));
+                                          Connection->AddressFile->Port,
+                                          &BoundPort));
 
-    if (NT_SUCCESS(Status))
+    /* Check if we had an unspecified port */
+    if (NT_SUCCESS(Status) && !Connection->AddressFile->Port)
     {
-        /* Check if we had an unspecified port */
-        if (!Connection->AddressFile->Port)
-        {
-            /* We did, so we need to copy back the port */
-            Status = TCPGetSockAddress(Connection, (PTRANSPORT_ADDRESS)&LocalAddress, FALSE);
-            if (NT_SUCCESS(Status))
-            {
-                /* Allocate the port in the port bitmap */
-                UINT AllocatedPort = TCPAllocatePort(LocalAddress.Address[0].Address[0].sin_port);
-                /* This should never fail unless all ports are in use */
-                if (AllocatedPort == (UINT) -1)
-                {
-                    DbgPrint("ERR: No more ports available.\n");
-                    UnlockObject(Connection);
-                    return STATUS_TOO_MANY_ADDRESSES;
-                }
-                Connection->AddressFile->Port = AllocatedPort;
-            }
-        }
+        /* LibTCPBind reserved an ephemeral port in the port bitmap */
+        Connection->AddressFile->Port = BoundPort;
     }
 
     if (NT_SUCCESS(Status))
@@ -106,7 +91,8 @@ NTSTATUS TCPListen(PCONNECTION_ENDPOINT Connection, UINT Backlog)
 
 BOOLEAN TCPAbortListenForSocket
 (   PCONNECTION_ENDPOINT Listener,
-    PCONNECTION_ENDPOINT Connection)
+    PCONNECTION_ENDPOINT Connection,
+    PIRP Irp)
 {
     PLIST_ENTRY ListEntry;
     PTDI_BUCKET Bucket;
@@ -119,7 +105,8 @@ BOOLEAN TCPAbortListenForSocket
     {
         Bucket = CONTAINING_RECORD(ListEntry, TDI_BUCKET, Entry);
 
-        if (Bucket->AssociatedEndpoint == Connection)
+        if (Bucket->AssociatedEndpoint == Connection &&
+            Bucket->Request.RequestContext == Irp)
         {
             DereferenceObject(Bucket->AssociatedEndpoint);
             RemoveEntryList( &Bucket->Entry );

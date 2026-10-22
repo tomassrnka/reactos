@@ -15,6 +15,7 @@ typedef struct _PORT_SET {
     PVOID ProtoBitBuffer;
     UINT StartingPort;
     UINT PortsToOversee;
+    UINT NextPort;
     KSPIN_LOCK Lock;
 } PORT_SET, *PPORT_SET;
 
@@ -26,3 +27,6 @@ VOID DeallocatePort( PPORT_SET PortSet, ULONG Port );
 BOOLEAN AllocatePort( PPORT_SET PortSet, ULONG Port );
 ULONG AllocateAnyPort( PPORT_SET PortSet );
 ULONG AllocatePortFromRange( PPORT_SET PortSet, ULONG Lowest, ULONG Highest );
+typedef BOOLEAN (*PPORT_IN_USE_ROUTINE)( ULONG Port );
+ULONG AllocatePortFromRangeUnless( PPORT_SET PortSet, ULONG Lowest, ULONG Highest,
+                                   PPORT_IN_USE_ROUTINE InUse );

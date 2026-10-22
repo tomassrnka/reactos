@@ -29,6 +29,12 @@ AfdGetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     if (!InfoReq)
         return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
 
+    /* The captured METHOD_NEITHER input is only as large as the user-supplied
+     * InputBufferLength (lock.c). Reading/writing the AFD_INFO fields below with
+     * a short buffer would run off the pool copy, so reject undersized input. */
+    if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(AFD_INFO))
+        return UnlockAndMaybeComplete(FCB, STATUS_INVALID_PARAMETER, Irp, 0);
+
     _SEH2_TRY {
         switch( InfoReq->InformationClass ) {
         case AFD_INFO_RECEIVE_WINDOW_SIZE:
@@ -114,6 +120,10 @@ AfdSetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     if (!InfoReq)
         return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
 
+    /* See AfdGetInfo: reject input too small to hold the AFD_INFO we read. */
+    if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(AFD_INFO))
+        return UnlockAndMaybeComplete(FCB, STATUS_INVALID_PARAMETER, Irp, 0);
+
     _SEH2_TRY {
         switch (InfoReq->InformationClass) {
             case AFD_INFO_BLOCKING_MODE:
@@ -131,6 +141,24 @@ AfdSetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                     if (InfoReq->Information.Ulong > 0 && InfoReq->Information.Ulong < 0xFFFF &&
                         InfoReq->Information.Ulong != FCB->Recv.Size)
                     {
+                        /* Once a transport object is attached, Recv.Window is
+                         * handed to TDI by raw pointer (read.c RefillSocketBuffer
+                         * / RelaunchPacketReceive) and such a request outlives
+                         * the FCB state lock we hold here. Freeing/reallocating
+                         * the window would then leave the in-flight request
+                         * writing incoming data into freed pool (use-after-free).
+                         * Match Windows (and the AFD window-size apitest): the
+                         * size is advisory (SO_RCVBUF) once the socket is
+                         * bound/connected, so report success without touching the
+                         * live buffer. Resizing is still allowed before any
+                         * transport is attached (e.g. a fresh datagram socket),
+                         * where nothing can reference the buffer. */
+                        if (FCB->Connection.Object || FCB->AddressFile.Object)
+                        {
+                            Status = STATUS_SUCCESS;
+                            break;
+                        }
+
                         NewBuffer = ExAllocatePoolWithTag(PagedPool,
                                                           InfoReq->Information.Ulong,
                                                           TAG_AFD_DATA_BUFFER);
@@ -139,6 +167,13 @@ AfdSetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                         {
                             if (FCB->Recv.Content > InfoReq->Information.Ulong)
                                 FCB->Recv.Content = InfoReq->Information.Ulong;
+
+                            /* Keep the read cursor within the (possibly shrunk)
+                             * content so later Content - BytesUsed arithmetic
+                             * (info.c AFD_INFO_RECEIVE_CONTENT_SIZE, read.c)
+                             * cannot underflow into a huge length */
+                            if (FCB->Recv.BytesUsed > FCB->Recv.Content)
+                                FCB->Recv.BytesUsed = FCB->Recv.Content;
 
                             if (FCB->Recv.Window)
                             {
@@ -176,6 +211,17 @@ AfdSetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                     if (InfoReq->Information.Ulong > 0 && InfoReq->Information.Ulong < 0xFFFF &&
                         InfoReq->Information.Ulong != FCB->Send.Size)
                     {
+                        /* As for the receive window above: once a transport is
+                         * attached, TdiSend (write.c) may hold a raw pointer into
+                         * Send.Window past the FCB lock, so freeing/reallocating
+                         * it would be a use-after-free. Report success without
+                         * resizing the live buffer, matching Windows. */
+                        if (FCB->Connection.Object || FCB->AddressFile.Object)
+                        {
+                            Status = STATUS_SUCCESS;
+                            break;
+                        }
+
                         NewBuffer = ExAllocatePoolWithTag(PagedPool,
                                                           InfoReq->Information.Ulong,
                                                           TAG_AFD_DATA_BUFFER);
@@ -295,8 +341,22 @@ AfdGetPeerName( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     if (IrpSp->Parameters.DeviceIoControl.OutputBufferLength >= TaLengthOfTransportAddress(FCB->RemoteAddress))
     {
-        RtlCopyMemory(Irp->UserBuffer, FCB->RemoteAddress, TaLengthOfTransportAddress(FCB->RemoteAddress));
-        Status = STATUS_SUCCESS;
+        /* This is a METHOD_NEITHER IOCTL, so Irp->UserBuffer is the raw,
+         * unvalidated user output pointer. Probe it for the write (when the
+         * request came from user mode) and copy under SEH so a bad or
+         * concurrently-unmapped address cannot turn into a kernel-mode write to
+         * an arbitrary address. */
+        _SEH2_TRY {
+            if (Irp->RequestorMode != KernelMode)
+                ProbeForWrite(Irp->UserBuffer,
+                              TaLengthOfTransportAddress(FCB->RemoteAddress),
+                              sizeof(CHAR));
+            RtlCopyMemory(Irp->UserBuffer, FCB->RemoteAddress, TaLengthOfTransportAddress(FCB->RemoteAddress));
+            Status = STATUS_SUCCESS;
+        } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
+            AFD_DbgPrint(MIN_TRACE,("Exception writing peer name\n"));
+            Status = STATUS_INVALID_PARAMETER;
+        } _SEH2_END;
     }
     else
     {
