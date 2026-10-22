@@ -199,6 +199,8 @@ BEGIN
     IDS_INFORMATION "信息"
     IDS_UNABLE_TO_DOWNLOAD "无法下载该软件包！找不到网络的地址！"
     IDS_UNABLE_TO_DOWNLOAD2 "无法下载该软件包！请检查网络连接！"
+    IDS_UNABLE_TO_DOWNLOAD_HTTP "Unable to download the package! The server answered: %u %s"
+    IDS_DL_RETRY "The server is busy. Trying again (attempt %u of %u)…"
     IDS_UNABLE_TO_REMOVE "无法从注册表删除该程序的数据！"
     IDS_UNABLE_TO_INSTALL "无法打开安装程序！"
     IDS_UNABLE_TO_QUERY_CERT "无法获取证书信息。\n\n您是否仍然想继续？"
@@ -218,6 +220,9 @@ BEGIN
     IDS_CFG_UPDATE_AVLIST "启动时更新可获得的程序列表"
     IDS_CFG_LOG_ENABLED "将程序的安装和卸载记录到日志"
     IDS_CFG_SMALL_ICONS "小图标"
+    IDS_UNABLE_TO_RUN_32BIT "%s cannot be installed: its installer is a 32-bit program, and 32-bit programs cannot run on this 64-bit system yet."
+    IDS_DL_INSTALLER_FAILED "The installer of %s did not finish successfully (exit code %lu).\n\nThe program may not be installed."
+    IDS_DL_INSTALLER_CRASHED "The installer of %s stopped unexpectedly (error 0x%08lX).\n\nThe program may not be installed."
 END
 
 STRINGTABLE
@@ -230,6 +235,8 @@ BEGIN
     IDS_STATUS_INSTALLING "正在安装…"
     IDS_STATUS_WAITING "正在等待安装…"
     IDS_STATUS_FINISHED "完成"
+    IDS_STATUS_FAILED "Failed"
+    IDS_STATUS_CANCELLED "Cancelled"
 END
 
 STRINGTABLE
@@ -272,4 +279,6 @@ STRINGTABLE
 BEGIN
     IDS_INSTGEN_CONFIRMUNINST "确定要卸载 %s 吗？"
     IDS_INSTGEN_CONFIRMINSTRUNAPP "安装完成。是否立即运行 %s？"
+    IDS_DL_STANDALONE_PROGRAM "%s may be a stand-alone program that does not need to be installed. It was saved to:\n\n%s\n\nRun it now?"
+    IDS_DL_DEPENDENCY_FAILED "%s was not installed because %s, which it needs, could not be installed."
 END

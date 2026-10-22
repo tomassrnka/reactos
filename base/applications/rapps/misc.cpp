@@ -199,6 +199,34 @@ WaitForProcess(HANDLE hProcess)
     return code;
 }
 
+InstallerOutcome
+ClassifyInstallerExitCode(DWORD ExitCode, InstallerType Type)
+{
+    switch (ExitCode)
+    {
+        case ERROR_SUCCESS:
+        case ERROR_SUCCESS_REBOOT_INITIATED:
+        case ERROR_SUCCESS_REBOOT_REQUIRED:
+        case ERROR_SUCCESS_RESTART_REQUIRED:
+            return INSTALLER_OUTCOME_OK;
+        case ERROR_CANCELLED:
+        case ERROR_INSTALL_USEREXIT:
+        case 0xC000013A: // STATUS_CONTROL_C_EXIT
+            return INSTALLER_OUTCOME_CANCELLED;
+    }
+
+    // Exit codes of Inno Setup (2 and 5 are Cancel) and NSIS (1 is Cancel)
+    if (Type == INSTALLER_INNO && (ExitCode == 2 || ExitCode == 5))
+        return INSTALLER_OUTCOME_CANCELLED;
+    if (Type == INSTALLER_NSIS && ExitCode == 1)
+        return INSTALLER_OUTCOME_CANCELLED;
+
+    // An unhandled exception ends the process with its NTSTATUS code
+    if ((ExitCode & 0xF0000000) == 0xC0000000)
+        return INSTALLER_OUTCOME_CRASHED;
+    return INSTALLER_OUTCOME_FAILED;
+}
+
 BOOL
 StartProcess(const CStringW &Path, BOOL Wait)
 {
@@ -594,6 +622,9 @@ HRESULT
 GetKnownPath(REFKNOWNFOLDERID kfid, CStringW &Path, DWORD Flags)
 {
     PWSTR p;
+    // An NT6 shell32 export can be a stub that raises when called on a system reporting NT5
+    if (LOBYTE(GetVersion()) < 6)
+        return HRESULT_FROM_WIN32(ERROR_OLD_WIN_VERSION);
     FARPROC f = GetProcAddress(LoadLibraryW(L"SHELL32"), "SHGetKnownFolderPath");
     if (!f)
         return HRESULT_FROM_WIN32(ERROR_OLD_WIN_VERSION);
@@ -631,6 +662,30 @@ ReadAt(HANDLE Handle, UINT Offset, LPVOID Buffer, UINT Size)
     ol.Offset = Offset;
     DWORD cb;
     return ReadFile(Handle, Buffer, Size, &cb, &ol) && cb == Size;
+}
+
+BOOL
+IsConsoleProgram(LPCWSTR Path)
+{
+    BOOL bConsole = FALSE;
+    HANDLE hFile = CreateFileW(Path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, 0, NULL);
+    if (hFile == INVALID_HANDLE_VALUE)
+        return FALSE;
+
+    IMAGE_DOS_HEADER dos;
+    DWORD sig;
+    WORD subsystem;
+    const UINT SubsystemOffset = sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER) +
+                                 FIELD_OFFSET(IMAGE_OPTIONAL_HEADER32, Subsystem);
+    C_ASSERT(FIELD_OFFSET(IMAGE_OPTIONAL_HEADER32, Subsystem) == FIELD_OFFSET(IMAGE_OPTIONAL_HEADER64, Subsystem));
+    if (ReadAt(hFile, 0, &dos, sizeof(dos)) && dos.e_magic == IMAGE_DOS_SIGNATURE &&
+        ReadAt(hFile, dos.e_lfanew, &sig, sizeof(sig)) && sig == IMAGE_NT_SIGNATURE &&
+        ReadAt(hFile, dos.e_lfanew + SubsystemOffset, &subsystem, sizeof(subsystem)))
+    {
+        bConsole = subsystem == IMAGE_SUBSYSTEM_WINDOWS_CUI;
+    }
+    CloseHandle(hFile);
+    return bConsole;
 }
 
 InstallerType

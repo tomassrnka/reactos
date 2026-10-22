@@ -197,6 +197,8 @@ BEGIN
     IDS_INFORMATION "Informazioni"
     IDS_UNABLE_TO_DOWNLOAD "Impossibile scaricare il pacchetto! Indirizzo non trovato!"
     IDS_UNABLE_TO_DOWNLOAD2 "Impossibile scaricare il pacchetto! Controlla la tua connessione internet!"
+    IDS_UNABLE_TO_DOWNLOAD_HTTP "Unable to download the package! The server answered: %u %s"
+    IDS_DL_RETRY "The server is busy. Trying again (attempt %u of %u)…"
     IDS_UNABLE_TO_REMOVE "Impossibile cancellare i dati dal registro!"
     IDS_UNABLE_TO_INSTALL "Impossibile aprire l'installer!"
     IDS_UNABLE_TO_QUERY_CERT "Impossibile recuperare le informazioni del certificato.\n\nVuoi continuare comunque?"
@@ -216,6 +218,9 @@ BEGIN
     IDS_CFG_UPDATE_AVLIST "Aggiorna la lista dei programmi accessibili"
     IDS_CFG_LOG_ENABLED "Registra la installazione o disinstallazione dei programmi"
     IDS_CFG_SMALL_ICONS "Icone Piccole"
+    IDS_UNABLE_TO_RUN_32BIT "%s cannot be installed: its installer is a 32-bit program, and 32-bit programs cannot run on this 64-bit system yet."
+    IDS_DL_INSTALLER_FAILED "The installer of %s did not finish successfully (exit code %lu).\n\nThe program may not be installed."
+    IDS_DL_INSTALLER_CRASHED "The installer of %s stopped unexpectedly (error 0x%08lX).\n\nThe program may not be installed."
 END
 
 STRINGTABLE
@@ -228,6 +233,8 @@ BEGIN
     IDS_STATUS_INSTALLING "Installazione…"
     IDS_STATUS_WAITING "In attesa di installare…"
     IDS_STATUS_FINISHED "Finito"
+    IDS_STATUS_FAILED "Failed"
+    IDS_STATUS_CANCELLED "Cancelled"
 END
 
 STRINGTABLE
@@ -270,4 +277,6 @@ STRINGTABLE
 BEGIN
     IDS_INSTGEN_CONFIRMUNINST "Are you sure you want to uninstall %s?"
     IDS_INSTGEN_CONFIRMINSTRUNAPP "Installation complete, run %s now?"
+    IDS_DL_STANDALONE_PROGRAM "%s may be a stand-alone program that does not need to be installed. It was saved to:\n\n%s\n\nRun it now?"
+    IDS_DL_DEPENDENCY_FAILED "%s was not installed because %s, which it needs, could not be installed."
 END

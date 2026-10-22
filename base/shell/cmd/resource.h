@@ -229,6 +229,9 @@
 #define STRING_MORE              741
 #define STRING_CANCEL_BATCH_FILE 742
 
+#define STRING_FTYPE_HELP  743
+#define STRING_FTYPE_ERROR 744
+
 /* These strings are language independent (cmd.rc) */
 #define STRING_FREEDOS_DEV 800
 #define STRING_REACTOS_DEV 801

@@ -92,7 +92,8 @@ NetrJobAdd(
     TRACE("NetrJobAdd(%S %p %p)\n",
           ServerName, pAtInfo, pJobId);
 
-    if (!IsValidSchedule(pAtInfo->JobTime, pAtInfo->DaysOfMonth, pAtInfo->DaysOfWeek))
+    if (pAtInfo->Command == NULL ||
+        !IsValidSchedule(pAtInfo->JobTime, pAtInfo->DaysOfMonth, pAtInfo->DaysOfWeek))
         return ERROR_INVALID_PARAMETER;
 
     /* Allocate a new job object */
@@ -106,7 +107,7 @@ NetrJobAdd(
     pJob->JobTime = pAtInfo->JobTime;
     pJob->DaysOfMonth = pAtInfo->DaysOfMonth;
     pJob->DaysOfWeek = pAtInfo->DaysOfWeek;
-    pJob->Flags = pAtInfo->Flags;
+    pJob->Flags = pAtInfo->Flags & JOB_INPUT_FLAGS;
     wcscpy(pJob->Command, pAtInfo->Command);
 
     /* Acquire the job list lock exclusively */

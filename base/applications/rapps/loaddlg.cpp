@@ -133,7 +133,9 @@ enum DownloadStatus
     DLSTATUS_WAITING_INSTALL = IDS_STATUS_DOWNLOADED,
     DLSTATUS_INSTALLING = IDS_STATUS_INSTALLING,
     DLSTATUS_INSTALLED = IDS_STATUS_INSTALLED,
-    DLSTATUS_FINISHED = IDS_STATUS_FINISHED
+    DLSTATUS_FINISHED = IDS_STATUS_FINISHED,
+    DLSTATUS_FAILED = IDS_STATUS_FAILED,
+    DLSTATUS_CANCELLED = IDS_STATUS_CANCELLED
 };
 
 CStringW
@@ -199,8 +201,10 @@ struct DownloadInfo
         CConfigParser *cfg = static_cast<const CAvailableApplicationInfo&>(AppInfo).GetConfigParser();
         if (cfg)
         {
+            CStringW szArgs;
             cfg->GetString(DB_SAVEAS, szFileName);
             cfg->GetString(DB_DEPENDENCIES, szDependencies);
+            bHasInstallerArgs = cfg->GetString(DB_SILENTARGS, szArgs) && !szArgs.IsEmpty();
         }
     }
 
@@ -212,6 +216,7 @@ struct DownloadInfo
     DownloadType DLType;
     InstallerType IType;
     InstallerType IExecType = INSTALLER_UNKNOWN;
+    BOOL bHasInstallerArgs = FALSE;
     UINT Flags = 0;
     CStringW szUrl;
     CStringW szName;
@@ -560,7 +565,7 @@ MessageBox_LoadString(HWND hOwnerWnd, INT StringID)
 }
 
 static BOOL
-ShowLastError(HWND hWndOwner, BOOL bInetError, DWORD dwLastError)
+ShowLastError(HWND hWndOwner, BOOL bInetError, DWORD dwLastError, LPCWSTR pszInsert = NULL)
 {
     CLocalPtr<WCHAR> lpMsg;
 
@@ -574,10 +579,101 @@ ShowLastError(HWND hWndOwner, BOOL bInetError, DWORD dwLastError)
         return FALSE;
     }
 
+    CStringW szMsg(static_cast<LPWSTR>(lpMsg));
+    if (pszInsert)
+        szMsg.Replace(L"%1", pszInsert);
+
     if (hWndOwner && !IsWindowVisible(hWndOwner))
         hWndOwner = NULL;
-    MessageBoxW(hWndOwner, lpMsg, NULL, MB_OK | MB_ICONERROR);
+    MessageBoxW(hWndOwner, szMsg, NULL, MB_OK | MB_ICONERROR);
     return TRUE;
+}
+
+#define MAX_DOWNLOAD_ATTEMPTS 3
+#define DOWNLOAD_RETRY_DELAY_MS 1500
+
+static BOOL
+IsTransientDownloadFailure(BOOL bGotResponse, DWORD dwStatus, DWORD dwError)
+{
+    if (bGotResponse)
+    {
+        return dwStatus == HTTP_STATUS_REQUEST_TIMEOUT || dwStatus == 429 || dwStatus == HTTP_STATUS_SERVER_ERROR ||
+               dwStatus == HTTP_STATUS_BAD_GATEWAY || dwStatus == HTTP_STATUS_SERVICE_UNAVAIL ||
+               dwStatus == HTTP_STATUS_GATEWAY_TIMEOUT;
+    }
+    return dwError == ERROR_INTERNET_TIMEOUT || dwError == ERROR_INTERNET_CONNECTION_ABORTED ||
+           dwError == ERROR_INTERNET_CONNECTION_RESET;
+}
+
+static VOID
+ShowHttpStatusError(HWND hWndOwner, HINTERNET hFile, DWORD dwStatus)
+{
+    WCHAR szText[256] = L"";
+    DWORD cbText = sizeof(szText) - sizeof(WCHAR);
+    if (!HttpQueryInfoW(hFile, HTTP_QUERY_STATUS_TEXT, szText, &cbText, NULL))
+        szText[0] = UNICODE_NULL;
+
+    CStringW szMsgText, szFormat;
+    if (szFormat.LoadStringW(IDS_UNABLE_TO_DOWNLOAD_HTTP))
+    {
+        szMsgText.Format(szFormat, dwStatus, szText);
+        szMsgText.TrimRight();
+        MessageBoxW(hWndOwner, szMsgText, NULL, MB_OK | MB_ICONERROR);
+    }
+}
+
+#ifdef _WIN64
+static BOOL
+IsUnrunnable32BitProgram(LPCWSTR Path)
+{
+    // Without a WoW64 layer GetSystemWow64DirectoryW fails and the loader refuses i386 images
+    WCHAR szWow64Dir[MAX_PATH];
+    if (GetSystemWow64DirectoryW(szWow64Dir, _countof(szWow64Dir)))
+        return FALSE;
+
+    HANDLE hFile = CreateFileW(Path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, 0, NULL);
+    if (hFile == INVALID_HANDLE_VALUE)
+        return FALSE;
+
+    BOOL bResult = FALSE;
+    IMAGE_DOS_HEADER DosHeader;
+    struct
+    {
+        DWORD Signature;
+        IMAGE_FILE_HEADER FileHeader;
+    } NtHeader;
+    DWORD cbRead;
+    if (ReadFile(hFile, &DosHeader, sizeof(DosHeader), &cbRead, NULL) && cbRead == sizeof(DosHeader) &&
+        DosHeader.e_magic == IMAGE_DOS_SIGNATURE && DosHeader.e_lfanew > 0 &&
+        SetFilePointer(hFile, DosHeader.e_lfanew, NULL, FILE_BEGIN) != INVALID_SET_FILE_POINTER &&
+        ReadFile(hFile, &NtHeader, sizeof(NtHeader), &cbRead, NULL) && cbRead == sizeof(NtHeader) &&
+        NtHeader.Signature == IMAGE_NT_SIGNATURE)
+    {
+        bResult = (NtHeader.FileHeader.Machine == IMAGE_FILE_MACHINE_I386);
+    }
+    CloseHandle(hFile);
+    return bResult;
+}
+#endif
+
+static void
+SplitDependencies(const CStringW &Dependencies, CAtlList<CStringW> &Names)
+{
+    CStringW deps = Dependencies;
+    for (int pos = 1; pos > 0; deps = deps.Mid(pos + 1))
+    {
+        pos = deps.Find(L'|');
+        CStringW pkg = (pos > 0 ? deps.Left(pos) : deps).Trim();
+
+        // In the future a package might need to specify dependency version or WoW64
+        // information ("vcredist*x64" etc), for now, just remove possible modifiers.
+        int suffix = pkg.FindOneOf(L"*<=>:/\\?");
+        if (suffix > 0)
+            pkg = pkg.Left(suffix);
+
+        if (!pkg.IsEmpty())
+            Names.AddTail(pkg);
+    }
 }
 
 // Download dialog (loaddlg.cpp)
@@ -596,7 +692,7 @@ public:
         WM_GETNEXT, // Return DownloadInfo* or NULL
     };
 
-    CDownloadManager() : m_hDlg(NULL), m_Threads(0), m_Index(0), m_bCancelled(FALSE) {}
+    CDownloadManager() : m_hDlg(NULL), m_Threads(0), m_Index(0), m_bCancelled(FALSE), m_FailedCount(0) {}
 
     static CDownloadManager*
     CreateInstanceHelper(UINT Flags)
@@ -648,6 +744,12 @@ public:
         return m_fDaf & DAF_SILENT;
     }
 
+    BOOL
+    HasFailures()
+    {
+        return m_FailedCount != 0;
+    }
+
     void StartWorkerThread();
     void Add(const DownloadInfo &Info);
     void Show();
@@ -669,6 +771,9 @@ protected:
     BOOL m_bCancelled;
     BOOL m_bModal;
     UINT m_fDaf = 0;
+    volatile LONG m_FailedCount;
+    CAtlList<CStringW> m_FailedIds;
+    CAtlList<CStringW> m_FailedNames;
     WCHAR m_szCaptionFmt[100];
     ATL::CSimpleArray<DownloadInfo> m_List;
     CDowloadingAppsListView m_ListView;
@@ -699,18 +804,11 @@ CDownloadManager::Add(const DownloadInfo &Info)
 
     if (!Info.szDependencies.IsEmpty())
     {
-        CStringW deps = Info.szDependencies;
-        for (int pos = 1; pos > 0; deps = deps.Mid(pos + 1))
+        CAtlList<CStringW> Names;
+        SplitDependencies(Info.szDependencies, Names);
+        for (POSITION it = Names.GetHeadPosition(); it;)
         {
-            pos = deps.Find(L'|');
-            CStringW pkg = (pos > 0 ? deps.Left(pos) : deps).Trim();
-
-            // In the future a package might need to specify dependency version or WoW64
-            // information ("vcredist*x64" etc), for now, just remove possible modifiers.
-            int suffix = pkg.FindOneOf(L"*<=>:/\\?");
-            if (suffix > 0)
-                pkg = pkg.Left(suffix);
-
+            const CStringW &pkg = Names.GetNext(it);
             CAvailableApplicationInfo *pApp = CAppDB::CreateAvailableAppInstance(pkg);
             Deleter <CAvailableApplicationInfo*>del(pApp);
             if (!pApp || pApp->IsInstalled())
@@ -893,7 +991,7 @@ CDownloadManager::PerformDownloadAndInstall(const DownloadInfo &Info)
 
     ULONG dwContentLen, dwBytesWritten, dwBytesRead, dwStatus, dwStatusLen;
     ULONG dwCurrentBytesRead = 0;
-    BOOL bTempfile = FALSE, bCancelled = FALSE;
+    BOOL bTempfile = FALSE, bCancelled = FALSE, bKeepFile = FALSE, bSucceeded = FALSE, bAborted = FALSE, bSkipped = FALSE;
 
     HINTERNET hOpen = NULL;
     HINTERNET hFile = NULL;
@@ -906,6 +1004,36 @@ CDownloadManager::PerformDownloadAndInstall(const DownloadInfo &Info)
     URL_COMPONENTSW urlComponents;
     size_t urlLength;
     unsigned char lpBuffer[4096];
+
+    // A package whose dependency failed is not downloaded or installed
+    if (Info.DLType == DLTYPE_APPLICATION && !Info.szDependencies.IsEmpty())
+    {
+        CAtlList<CStringW> Needs;
+        SplitDependencies(Info.szDependencies, Needs);
+        for (POSITION it = Needs.GetHeadPosition(); it && !bSkipped;)
+        {
+            const CStringW &pkg = Needs.GetNext(it);
+            POSITION idPos = m_FailedIds.GetHeadPosition(), namePos = m_FailedNames.GetHeadPosition();
+            while (idPos && namePos)
+            {
+                const CStringW &id = m_FailedIds.GetNext(idPos);
+                const CStringW &name = m_FailedNames.GetNext(namePos);
+                if (!id.CompareNoCase(pkg))
+                {
+                    bSkipped = TRUE;
+                    if (!IsSilentDialog())
+                    {
+                        CStringW szMsgText;
+                        szMsgText.Format(IDS_DL_DEPENDENCY_FAILED, Info.szName.GetString(), name.GetString());
+                        MessageBoxW(hDlg, szMsgText, Info.szName, MB_OK | MB_ICONERROR);
+                    }
+                    break;
+                }
+            }
+        }
+        if (bSkipped)
+            goto end;
+    }
 
     // Change caption to show the currently downloaded app
     switch (Info.DLType)
@@ -1023,28 +1151,71 @@ CDownloadManager::PerformDownloadAndInstall(const DownloadInfo &Info)
 
     if (urlComponents.nScheme == INTERNET_SCHEME_HTTP || urlComponents.nScheme == INTERNET_SCHEME_HTTPS)
     {
-        hFile = InternetOpenUrlW(hOpen, Info.szUrl, NULL, 0, dwUrlConnectFlags, 0);
-        if (!hFile)
+        for (UINT attempt = 1;; ++attempt)
         {
-            if (!ShowLastError(hMainWnd, TRUE, GetLastError()))
+            DWORD dwError = ERROR_SUCCESS;
+            dwStatus = 0;
+            hFile = InternetOpenUrlW(hOpen, Info.szUrl, NULL, 0, dwUrlConnectFlags, 0);
+            if (hFile)
             {
-                /* Workaround for CORE-17377 */
-                MessageBox_LoadString(hMainWnd, IDS_UNABLE_TO_DOWNLOAD2);
+                // query connection
+                dwStatusLen = sizeof(dwStatus);
+                if (!HttpQueryInfoW(hFile, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &dwStatus, &dwStatusLen, NULL))
+                {
+                    ShowLastError(hMainWnd, TRUE, GetLastError());
+                    goto end;
+                }
+                if (dwStatus == HTTP_STATUS_OK)
+                    break;
             }
-            goto end;
-        }
+            else
+            {
+                dwError = GetLastError();
+            }
 
-        // query connection
-        if (!HttpQueryInfoW(hFile, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &dwStatus, &dwStatusLen, NULL))
-        {
-            ShowLastError(hMainWnd, TRUE, GetLastError());
-            goto end;
-        }
+            if (IsCancelled())
+            {
+                bCancelled = TRUE;
+                bTempfile = FALSE; // nothing was written yet, a file of an earlier download stays
+                goto end;
+            }
 
-        if (dwStatus != HTTP_STATUS_OK)
-        {
-            MessageBox_LoadString(hMainWnd, IDS_UNABLE_TO_DOWNLOAD);
-            goto end;
+            // A busy or restarting server often answers on the next try
+            if (attempt >= MAX_DOWNLOAD_ATTEMPTS || !IsTransientDownloadFailure(hFile != NULL, dwStatus, dwError))
+            {
+                if (!hFile)
+                {
+                    if (!ShowLastError(hMainWnd, TRUE, dwError))
+                    {
+                        /* Workaround for CORE-17377 */
+                        MessageBox_LoadString(hMainWnd, IDS_UNABLE_TO_DOWNLOAD2);
+                    }
+                }
+                else
+                {
+                    ShowHttpStatusError(hMainWnd, hFile, dwStatus);
+                }
+                goto end;
+            }
+
+            if (hFile)
+            {
+                InternetCloseHandle(hFile);
+                hFile = NULL;
+            }
+
+            CStringW szRetry;
+            szRetry.Format(IDS_DL_RETRY, attempt + 1, (UINT)MAX_DOWNLOAD_ATTEMPTS);
+            SetWindowTextW(hStatus, szRetry);
+            for (UINT waited = 0; waited < attempt * DOWNLOAD_RETRY_DELAY_MS && !IsCancelled(); waited += 100)
+                Sleep(100);
+            if (IsCancelled())
+            {
+                bCancelled = TRUE;
+                bTempfile = FALSE;
+                goto end;
+            }
+            SetFriendlyUrl(hStatus, Info.szUrl);
         }
 
         // query content length
@@ -1224,6 +1395,7 @@ CDownloadManager::PerformDownloadAndInstall(const DownloadInfo &Info)
     }
 
 run:
+    bSucceeded = TRUE;
     SendMessageW(hDlg, WM_SETSTATUS, DLSTATUS_WAITING_INSTALL, 0);
 
     // run it
@@ -1231,11 +1403,22 @@ run:
     {
         BOOL bSilentInstall = Info.Flags & DAF_SILENT;
         CStringW app, params, tempdir;
-        SHELLEXECUTEINFOW shExInfo = { sizeof(shExInfo), SEE_MASK_NOCLOSEPROCESS, hDlg };
+        SHELLEXECUTEINFOW shExInfo = { sizeof(shExInfo), SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI, hDlg };
         shExInfo.lpVerb = L"open";
         shExInfo.lpFile = Path;
         shExInfo.lpParameters = L"";
         shExInfo.nShow = SW_SHOW;
+
+        if (!bSilentInstall && Info.IType == INSTALLER_UNKNOWN && !Info.bHasInstallerArgs &&
+            IsConsoleProgram(Path))
+        {
+            // A console program is usually the application itself, and running it only flashes a console
+            CStringW szMsgText;
+            bKeepFile = TRUE;
+            szMsgText.Format(IDS_DL_STANDALONE_PROGRAM, Info.szName.GetString(), (PCWSTR)Path);
+            if (MessageBoxW(hDlg, szMsgText, Info.szName, MB_YESNO | MB_ICONQUESTION) != IDYES)
+                goto end;
+        }
 
         if (Info.IType == INSTALLER_GENERATE)
         {
@@ -1252,10 +1435,24 @@ run:
             if (FAILED(hr))
             {
                 ShowLastError(hDlg, FALSE, hr);
+                bSucceeded = FALSE;
                 goto end;
             }
             shExInfo.lpFile = app;
         }
+
+#ifdef _WIN64
+        if (Info.IType != INSTALLER_GENERATE && IsUnrunnable32BitProgram(shExInfo.lpFile))
+        {
+            CStringW szMsgText;
+            szMsgText.Format(IDS_UNABLE_TO_RUN_32BIT, Info.szName.GetString());
+            MessageBoxW(hDlg, szMsgText, NULL, MB_OK | MB_ICONERROR);
+            if (!tempdir.IsEmpty())
+                DeleteDirectoryTree(tempdir, hDlg);
+            bSucceeded = FALSE;
+            goto end;
+        }
+#endif
 
         if (bSilentInstall)
         {
@@ -1284,7 +1481,16 @@ run:
         /* FIXME: Do we want to log installer status? */
         WriteLogMessage(EVENTLOG_SUCCESS, MSG_SUCCESS_INSTALL, Info.szName);
 
-        if (ShellExecuteExW(&shExInfo))
+        BOOL bLaunched = ShellExecuteExW(&shExInfo), bShellReported = FALSE;
+        if (!bLaunched && !bSilentInstall && shExInfo.hInstApp == (HINSTANCE)SE_ERR_NOASSOC)
+        {
+            // Let the shell offer Open With; it reports its own errors
+            shExInfo.fMask &= ~SEE_MASK_FLAG_NO_UI;
+            bLaunched = ShellExecuteExW(&shExInfo);
+            bShellReported = TRUE;
+        }
+
+        if (bLaunched)
         {
             // reflect installation progress in the titlebar
             // TODO: make a separate string with a placeholder to include app name?
@@ -1296,14 +1502,61 @@ run:
             // TODO: issue an install operation separately so that the apps could be downloaded in the background
             if (shExInfo.hProcess)
             {
-                WaitForSingleObject(shExInfo.hProcess, INFINITE);
+                DWORD dwExitCode = 0, dwQueryError = ERROR_SUCCESS;
+                BOOL bHasExitCode = WaitForSingleObject(shExInfo.hProcess, INFINITE) == WAIT_OBJECT_0 &&
+                                    GetExitCodeProcess(shExInfo.hProcess, &dwExitCode);
+                if (!bHasExitCode)
+                    dwQueryError = GetLastError();
                 CloseHandle(shExInfo.hProcess);
                 SendMessageW(hMainWnd, WM_NOTIFY_INSTALLERFINISHED, 0, (LPARAM)(PCWSTR)Info.szPackageName);
+
+                if (!bHasExitCode)
+                {
+                    // Nothing says that the installer finished its work
+                    bSucceeded = FALSE;
+                    if (!IsSilentDialog())
+                        ShowLastError(hDlg, FALSE, dwQueryError);
+                }
+                else if (dwExitCode != ERROR_SUCCESS)
+                {
+                    InstallerType it = Info.IExecType != INSTALLER_UNKNOWN ? Info.IExecType : Info.IType;
+                    if (it == INSTALLER_UNKNOWN || it == INSTALLER_EXEINZIP)
+                    {
+                        UINT extrainfo = 0;
+                        it = GuessInstallerType(shExInfo.lpFile, extrainfo);
+                    }
+                    InstallerOutcome outcome = ClassifyInstallerExitCode(dwExitCode, it);
+                    if (outcome == INSTALLER_OUTCOME_CANCELLED)
+                    {
+                        // Not an error, but the program was not installed
+                        bAborted = TRUE;
+                    }
+                    else if (outcome == INSTALLER_OUTCOME_FAILED || outcome == INSTALLER_OUTCOME_CRASHED)
+                    {
+                        bSucceeded = FALSE;
+                        if (!IsSilentDialog())
+                        {
+                            CStringW szMsgText;
+                            if (outcome == INSTALLER_OUTCOME_CRASHED)
+                                szMsgText.Format(IDS_DL_INSTALLER_CRASHED, Info.szName.GetString(), dwExitCode);
+                            else
+                                szMsgText.Format(IDS_DL_INSTALLER_FAILED, Info.szName.GetString(), dwExitCode);
+                            MessageBoxW(hDlg, szMsgText, Info.szName, MB_OK | MB_ICONERROR);
+                        }
+                    }
+                }
             }
+        }
+        else if (!bShellReported)
+        {
+            // shell32 does not always set the last error for a missing association
+            DWORD dwError = (shExInfo.hInstApp == (HINSTANCE)SE_ERR_NOASSOC) ? ERROR_NO_ASSOCIATION : GetLastError();
+            ShowLastError(hMainWnd, FALSE, dwError, shExInfo.lpFile);
+            bSucceeded = FALSE;
         }
         else
         {
-            ShowLastError(hMainWnd, FALSE, GetLastError());
+            bSucceeded = FALSE;
         }
 
         if (!tempdir.IsEmpty())
@@ -1322,7 +1575,7 @@ end:
 
     if (bTempfile)
     {
-        if (bCancelled || (SettingsInfo.bDelInstaller && Info.DLType == DLTYPE_APPLICATION))
+        if (bCancelled || (SettingsInfo.bDelInstaller && Info.DLType == DLTYPE_APPLICATION && !bKeepFile))
         {
             // Don't delete .zip/.cab files so the user can extract from them
             if (bCancelled || Info.IType == INSTALLER_GENERATE || Info.IType == INSTALLER_EXEINZIP ||
@@ -1333,7 +1586,20 @@ end:
         }
     }
 
-    SendMessageW(hDlg, WM_SETSTATUS, DLSTATUS_FINISHED, 0);
+    if ((!bSucceeded && !bCancelled) || bAborted)
+        InterlockedIncrement(&m_FailedCount);
+    if (((!bSucceeded && !bCancelled) || bAborted) && Info.DLType == DLTYPE_APPLICATION)
+    {
+        // Packages later in the list that need this one are skipped
+        m_FailedIds.AddTail(Info.szPackageName);
+        m_FailedNames.AddTail(Info.szName);
+    }
+    DownloadStatus FinalStatus = DLSTATUS_FINISHED;
+    if (bAborted)
+        FinalStatus = DLSTATUS_CANCELLED;
+    else if (!bSucceeded && !bCancelled)
+        FinalStatus = DLSTATUS_FAILED;
+    SendMessageW(hDlg, WM_SETSTATUS, FinalStatus, 0);
 }
 
 BOOL
@@ -1352,7 +1618,8 @@ DownloadListOfApplications(const CAtlList<CAppInfo *> &AppsList, UINT Flags)
         pDM->Add(DownloadInfo(*Info, Flags));
     }
     pDM->Show();
-    return TRUE;
+    // A modal download is complete when Show returns; a modeless one runs on after it
+    return !((Flags & DAF_MODAL) && pDM->HasFailures());
 }
 
 BOOL

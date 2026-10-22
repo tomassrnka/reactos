@@ -197,6 +197,8 @@ BEGIN
     IDS_INFORMATION "Información"
     IDS_UNABLE_TO_DOWNLOAD "No se pudo descargar el paquete. No se ha encontrado la dirección de Internet."
     IDS_UNABLE_TO_DOWNLOAD2 "¡Imposible descargar el paquete! Compruebe que está conectado a Internet."
+    IDS_UNABLE_TO_DOWNLOAD_HTTP "Unable to download the package! The server answered: %u %s"
+    IDS_DL_RETRY "The server is busy. Trying again (attempt %u of %u)…"
     IDS_UNABLE_TO_REMOVE "No se pudieron borrar del Registro los datos de instalación del programa."
     IDS_UNABLE_TO_INSTALL "No se pudo abrir el instalador"
     IDS_UNABLE_TO_QUERY_CERT "No se pudo recabar la información de certificado.\n\n¿Quiere continuar a pesar de esto?"
@@ -216,6 +218,9 @@ BEGIN
     IDS_CFG_UPDATE_AVLIST "Actualizar la lista de programas accesibles al comenzar"
     IDS_CFG_LOG_ENABLED "Registro de programas instalados y desinstalados"
     IDS_CFG_SMALL_ICONS "Iconos pequeños"
+    IDS_UNABLE_TO_RUN_32BIT "%s cannot be installed: its installer is a 32-bit program, and 32-bit programs cannot run on this 64-bit system yet."
+    IDS_DL_INSTALLER_FAILED "The installer of %s did not finish successfully (exit code %lu).\n\nThe program may not be installed."
+    IDS_DL_INSTALLER_CRASHED "The installer of %s stopped unexpectedly (error 0x%08lX).\n\nThe program may not be installed."
 END
 
 STRINGTABLE
@@ -228,6 +233,8 @@ BEGIN
     IDS_STATUS_INSTALLING "Instalando…"
     IDS_STATUS_WAITING "Esperando para instalar…"
     IDS_STATUS_FINISHED "Finalizado"
+    IDS_STATUS_FAILED "Failed"
+    IDS_STATUS_CANCELLED "Cancelled"
 END
 
 STRINGTABLE
@@ -270,4 +277,6 @@ STRINGTABLE
 BEGIN
     IDS_INSTGEN_CONFIRMUNINST "Are you sure you want to uninstall %s?"
     IDS_INSTGEN_CONFIRMINSTRUNAPP "Installation complete, run %s now?"
+    IDS_DL_STANDALONE_PROGRAM "%s may be a stand-alone program that does not need to be installed. It was saved to:\n\n%s\n\nRun it now?"
+    IDS_DL_DEPENDENCY_FAILED "%s was not installed because %s, which it needs, could not be installed."
 END

@@ -438,6 +438,7 @@ tittel        ny tittel\n"
     STRING_COPY_OPTION "YNA"
     STRING_ALIAS_ERROR "Kommandorad för lång efter alias utvidelse!\n"
     STRING_ASSOC_ERROR "Fil-association ble inte funnet for utvidelsen %s\n"
+    STRING_FTYPE_ERROR "File type '%s' not found or no open command associated with it.\n"
     STRING_BATCH_ERROR "Fel vid öppning av batch-fil\n"
     STRING_CHOICE_ERROR "Ogiltigt val. Förväntet format: /C[:]val\n"
     STRING_CHOICE_ERROR_TXT "Ogiltigt val. Förväntet format: /T[:]c,nn\n"
@@ -518,4 +519,20 @@ tittel        ny tittel\n"
     STRING_EXPECTED_CLOSE_PAREN "Forväntat ')'.\n"
     STRING_EXPECTED_NUMBER_OR_VARIABLE "Förväntat nummer eller variabelnamn.\n"
     STRING_SYNTAX_COMMAND_INCORRECT "Syntaxen för kommandot är fel.\n"
+END
+
+STRINGTABLE
+BEGIN
+    STRING_FTYPE_HELP "Shows or changes the open command of a file type.\n\n\
+ftype [fileType[=[openCommand]]]\n\
+\n\
+ftype (shows every file type that has an open command)\n\
+ftype fileType (shows the open command of one file type)\n\
+ftype fileType= (removes the open command of the file type)\n\
+ftype fileType=openCommand (sets the open command)\n\
+\n\
+In an open command, %1 stands for the name of the file that is opened and\n\
+%* for the arguments that follow it. The command is stored in the registry\n\
+as an expandable string. Use it with ASSOC, which connects an extension\n\
+to a file type.\n"
 END

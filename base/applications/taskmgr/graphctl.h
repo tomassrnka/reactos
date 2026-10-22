@@ -60,7 +60,7 @@ INT_PTR CALLBACK GraphCtrl_WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARA
 BOOL GraphCtrl_Create(PTM_GRAPH_CONTROL inst, HWND hWnd, HWND hParentWnd, PTM_FORMAT fmt);
 void GraphCtrl_Dispose(PTM_GRAPH_CONTROL inst);
 void GraphCtrl_AddPoint(PTM_GRAPH_CONTROL inst, BYTE val0, BYTE val1);
-void GraphCtrl_RedrawOnHeightChange(PTM_GRAPH_CONTROL inst, INT nh);
+void GraphCtrl_Resize(PTM_GRAPH_CONTROL inst, INT nw, INT nh);
 void GraphCtrl_RedrawBitmap(PTM_GRAPH_CONTROL inst, INT h);
 
 #ifdef __cplusplus

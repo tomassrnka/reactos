@@ -1,0 +1,8 @@
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+
+STRINGTABLE
+BEGIN
+    IDS_NOT_AVAILABLE "ERROR: SCHTASKS is not supported: the Task Scheduler 2.0 interface is not\n\
+available on this system, so tasks cannot be listed, created, run, changed\n\
+or deleted. Use the AT command to schedule commands.\n"
+END
