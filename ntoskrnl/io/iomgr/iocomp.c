@@ -130,8 +130,8 @@ IopUnpackCompletionEntry(IN PLIST_ENTRY ListEntry,
         /* Save values */
         Entry->KeyContext = Packet->KeyContext;
         Entry->ApcContext = Packet->ApcContext;
-        /* Status fills only part of the union on 64-bit */
-        Entry->IoStatusBlock.Pointer = NULL;
+        /* All of it: Status fills only part of the union on 64-bit */
+        RtlZeroMemory(&Entry->IoStatusBlock, sizeof(Entry->IoStatusBlock));
         Entry->IoStatusBlock.Status = Packet->IoStatus;
         Entry->IoStatusBlock.Information = Packet->IoStatusInformation;
 
@@ -512,8 +512,6 @@ NtRemoveIoCompletion(IN HANDLE IoCompletionHandle,
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
     NTSTATUS Status;
     PAGED_CODE();
-
-    RtlZeroMemory(&IoStatus, sizeof(IoStatus));
 
     /* Check if the call was from user mode */
     if (PreviousMode != KernelMode)
