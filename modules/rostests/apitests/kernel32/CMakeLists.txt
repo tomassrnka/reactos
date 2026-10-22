@@ -32,6 +32,7 @@ list(APPEND SOURCE
     CreateProcess.c
     CreateProcessRace.c
     CreateWaitableTimerEx.c
+    DefaultDllDirectories.c
     ThreadImpersonationToken.c
     DebugTrapInterrupts.c
     DefaultActCtx.c
@@ -104,6 +105,7 @@ list(APPEND SOURCE
     PrefetchVirtualMemory.c
     PrivMoveFileIdentityW.c
     ProcessAffinity.c
+    ProcessInformation.c
     ProcessMitigationPolicy.c
     ProcThreadMitigation.c
     QueryCycleTime.c

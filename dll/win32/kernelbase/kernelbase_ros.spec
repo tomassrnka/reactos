@@ -21,7 +21,7 @@
 #@ stdcall AddAuditAccessObjectAce(ptr long long long ptr ptr ptr long long)
 #@ stdcall AddConsoleAliasA(str str str)
 #@ stdcall AddConsoleAliasW(wstr wstr wstr)
-#@ stdcall AddDllDirectory(wstr)
+@ stdcall AddDllDirectory(wstr) kernel32.AddDllDirectory
 #@ stdcall AddMandatoryAce(ptr long long long ptr)
 #@ stdcall AddRefActCtx(ptr)
 # #@ stub AddResourceAttributeAce
@@ -660,7 +660,7 @@
 #@ stdcall GetProcessIdOfThread(long)
 #@ stdcall GetProcessImageFileNameA(long ptr long)
 #@ stdcall GetProcessImageFileNameW(long ptr long)
-#@ stdcall GetProcessInformation(long long ptr long)
+@ stdcall GetProcessInformation(long long ptr long) kernel32.GetProcessInformation
 #@ stdcall GetProcessMemoryInfo(long ptr long)
 #@ stdcall GetProcessMitigationPolicy(long long ptr long)
 #@ stdcall GetProcessPreferredUILanguages(long ptr ptr ptr)
@@ -1371,7 +1371,7 @@
 #@ stdcall RemapPredefinedHandleInternal(long long)
 #@ stdcall RemoveDirectoryA(str)
 #@ stdcall RemoveDirectoryW(wstr)
-#@ stdcall RemoveDllDirectory(ptr)
+@ stdcall RemoveDllDirectory(ptr) kernel32.RemoveDllDirectory
 # #@ stub RemovePackageStatus
 # #@ stub RemovePackageStatusForUser
 #@ stdcall RemoveVectoredContinueHandler(ptr) ntdll.RtlRemoveVectoredContinueHandler
@@ -1461,7 +1461,7 @@
 #@ stdcall SetCurrentConsoleFontEx(long long ptr)
 #@ stdcall SetCurrentDirectoryA(str)
 #@ stdcall SetCurrentDirectoryW(wstr)
-#@ stdcall SetDefaultDllDirectories(long)
+@ stdcall SetDefaultDllDirectories(long) kernel32.SetDefaultDllDirectories
 # #@ stub SetDynamicTimeZoneInformation
 #@ stdcall SetEndOfFile(long)
 #@ stdcall SetEnvironmentStringsA(str)
@@ -1498,7 +1498,7 @@
 #@ stdcall SetProcessAffinityUpdateMode(long long)
 #@ stdcall SetProcessDefaultCpuSets(ptr ptr long)
 #@ stdcall SetProcessGroupAffinity(long ptr ptr)
-#@ stdcall SetProcessInformation(long long ptr long)
+@ stdcall SetProcessInformation(long long ptr long) kernel32.SetProcessInformation
 #@ stdcall SetProcessMitigationPolicy(long ptr long)
 #@ stdcall SetProcessPreferredUILanguages(long ptr ptr)
 #@ stdcall SetProcessPriorityBoost(long long)
