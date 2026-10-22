@@ -97,6 +97,18 @@ DisplayDeviceAdvancedProperties(IN HWND hWndParent,
 
 /* DEVPRBLM.C */
 
+typedef enum _DEVPROBLEM_ACTION
+{
+    DevProblemNoAction,
+    DevProblemInstallDriver,
+    DevProblemEnableDevice,
+    DevProblemRestart
+} DEVPROBLEM_ACTION;
+
+UINT
+GetDeviceProblemAction(IN ULONG ProblemNumber,
+                       OUT DEVPROBLEM_ACTION *Action);
+
 BOOL
 ShowDeviceProblemWizard(IN HWND hWndParent  OPTIONAL,
                         IN HDEVINFO hDevInfo,

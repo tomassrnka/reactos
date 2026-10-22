@@ -10,7 +10,6 @@ BEGIN
     LTEXT "Welcome to the Add Hardware Wizard", IDC_FINISHTITLE, 114, 8, 203, 24
     LTEXT "This wizard helps you:", -1, 114, 40, 182, 8
     LTEXT "1) Install software to support the hardware you add to your computer.", -1, 121, 56, 184, 16
-    LTEXT "2) Troubleshoot problems you may be having with your hardware.", -1, 121, 78, 185, 16
     ICON IDI_WARNINGICON, IDC_WARNINGICON, 124, 109, 20, 20
     LTEXT "If your hardware came with an installation CD, it is recommended that you click Cancel to close this wizard and use the manufacturer's CD to install this hardware.", 503, 150, 106, 155, 50
     LTEXT "To continue, click Next.", -1, 114, 166, 193, 8
@@ -146,4 +145,11 @@ BEGIN
     IDS_ADDNEWDEVICE "Add a new hardware device"
     IDS_SELECTWAYTITLE "The wizard can help you install other hardware"
     IDS_HDTYPESTITLE "From the list below, select the type of hardware you are installing"
+    IDS_NOTFOUNDTITLE "The wizard did not find any new hardware on your computer"
+    IDS_NOTFOUNDTEXT "If you know the specific hardware model you want to install, click Next to select it from a list."
+    IDS_FOUNDTITLE "The wizard found new hardware on your computer"
+    IDS_FOUNDTEXT "The wizard found the following new hardware. ReactOS installs it the same way as hardware that is plugged in."
+    IDS_SEARCHFAILEDTITLE "The wizard could not search for new hardware"
+    IDS_SEARCHFAILEDTEXT "The list of devices could not be scanned. If you know the specific hardware model you want to install, click Next to select it from a list."
+    IDS_HWTYPESNOTAVAIL "Installing hardware selected from this list is not available yet. Click Back, or click Cancel to close this wizard."
 END

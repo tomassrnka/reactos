@@ -918,7 +918,36 @@ CDeviceView::EnableSelectedDevice(
         }
     }
 
-    return Node->EnableDevice(Enable, NeedsReboot);
+    if (!Node->EnableDevice(Enable, NeedsReboot))
+    {
+        DWORD Error = GetLastError();
+        WCHAR szFormat[256];
+        LPWSTR pszError = NULL;
+        CAtlStringW strError, strMessage;
+
+        if (LoadStringW(g_hThisInstance,
+                        Enable ? IDS_ENABLEDEVICE_FAILED : IDS_DISABLEDEVICE_FAILED,
+                        szFormat,
+                        _countof(szFormat)))
+        {
+            if (FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_IGNORE_INSERTS,
+                               NULL,
+                               Error,
+                               0,
+                               (LPWSTR)&pszError,
+                               0,
+                               NULL))
+            {
+                strError = pszError;
+                LocalFree(pszError);
+            }
+            strMessage.FormatMessage(szFormat, (LPCWSTR)strError);
+            MessageBoxW(m_hMainWnd, strMessage, Node->GetDisplayName(), MB_OK | MB_ICONERROR);
+        }
+        return false;
+    }
+
+    return true;
 }
 
 bool

@@ -15,6 +15,8 @@ BEGIN
     IDS_DEVCODE2 " (קוד %2!u!)"
     IDS_ENABLEDEVICE "התשמש בהתקן זה (אפשר)"
     IDS_DISABLEDEVICE "אל תשתמש בהתקן זה (הפסק)"
+    IDS_DISABLEDEVICE_FAILED "The device could not be disabled.\n\n%1"
+    IDS_ENABLEDEVICE_FAILED "The device could not be enabled.\n\n%1"
     IDS_UNKNOWNDEVICE "התקן לא ידוע"
     IDS_NODRIVERLOADED "לא מותקנים מנהלי התקנים עבור התקן זה."
     IDS_DEVONPARENT "על %1"

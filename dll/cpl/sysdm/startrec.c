@@ -26,8 +26,15 @@ typedef struct _STARTINFO
     WCHAR szDumpFile[MAX_PATH];
     WCHAR szMinidumpDir[MAX_PATH];
     DWORD dwCrashDumpEnabled;
+    BOOL bCrashDumpChanged;
     INT iFreeLdrIni;
 } STARTINFO, *PSTARTINFO;
+
+/* The debugging information choices, in the order of the combo box: the index is the registry value */
+#define DUMP_NONE       0
+#define DUMP_COMPLETE   1
+#define DUMP_KERNEL     2
+#define DUMP_SMALL      3
 
 BOOL SaveRecoveryOptions;
 
@@ -528,6 +535,7 @@ SetCrashDlgItems(HWND hwnd, PSTARTINFO pStartInfo)
         /* No crash information required */
         EnableWindow(GetDlgItem(hwnd, IDC_STRRECDUMPFILE), FALSE);
         EnableWindow(GetDlgItem(hwnd, IDC_STRRECOVERWRITE), FALSE);
+        SendMessageW(GetDlgItem(hwnd, IDC_STRRECDUMPFILE), WM_SETTEXT, (WPARAM)0, (LPARAM)pStartInfo->szDumpFile);
     }
     else if (pStartInfo->dwCrashDumpEnabled == 3)
     {
@@ -594,7 +602,9 @@ WriteStartupRecoveryOptions(HWND hwndDlg, PSTARTINFO pStartInfo)
         RegSetValueExW(hKey, L"MinidumpDir", 0, REG_EXPAND_SZ, (LPBYTE)pStartInfo->szDumpFile, (wcslen(pStartInfo->szDumpFile) + 1) * sizeof(WCHAR));
     }
 
-    RegSetValueExW(hKey, L"CrashDumpEnabled", 0, REG_DWORD, (LPBYTE)&pStartInfo->dwCrashDumpEnabled, sizeof(pStartInfo->dwCrashDumpEnabled));
+    /* A value this dialog does not know (Windows 8 and later write others) stays as it is until the choice is changed */
+    if (pStartInfo->bCrashDumpChanged)
+        RegSetValueExW(hKey, L"CrashDumpEnabled", 0, REG_DWORD, (LPBYTE)&pStartInfo->dwCrashDumpEnabled, sizeof(pStartInfo->dwCrashDumpEnabled));
     RegCloseKey(hKey);
 }
 
@@ -647,8 +657,11 @@ LoadRecoveryOptions(HWND hwndDlg, PSTARTINFO pStartInfo)
     if (RegQueryValueExW(hKey, L"Overwrite", NULL, &dwType, (LPBYTE)&dwValue, &dwValueLength) == ERROR_SUCCESS && dwType == REG_DWORD && dwValue)
         SendDlgItemMessageW(hwndDlg, IDC_STRRECOVERWRITE, BM_SETCHECK, (WPARAM)BST_CHECKED, (LPARAM)0);
 
+    /* Windows 7 shows the small dump for a missing value and for every value above the three it knows */
+    pStartInfo->dwCrashDumpEnabled = DUMP_SMALL;
     dwValueLength = sizeof(DWORD);
-    if (RegQueryValueExW(hKey, L"CrashDumpEnabled", NULL, &dwType, (LPBYTE)&dwValue, &dwValueLength) == ERROR_SUCCESS && dwType == REG_DWORD && dwValue)
+    if (RegQueryValueExW(hKey, L"CrashDumpEnabled", NULL, &dwType, (LPBYTE)&dwValue, &dwValueLength) == ERROR_SUCCESS && dwType == REG_DWORD &&
+        dwValue <= DUMP_SMALL)
         pStartInfo->dwCrashDumpEnabled = dwValue;
 
    dwValueLength = sizeof(pStartInfo->szDumpFile);
@@ -816,6 +829,8 @@ StartRecDlgProc(HWND hwndDlg,
                         LRESULT lResult;
 
                         lResult = SendDlgItemMessage(hwndDlg, IDC_STRRECDEBUGCOMBO, CB_GETCURSEL, (WPARAM)0, (LPARAM)0);
+                        if (lResult != CB_ERR)
+                            pStartInfo->bCrashDumpChanged = TRUE;
                         if (lResult != CB_ERR && lResult != (LRESULT)pStartInfo->dwCrashDumpEnabled)
                         {
                             if (pStartInfo->dwCrashDumpEnabled == 1 || pStartInfo->dwCrashDumpEnabled == 2)

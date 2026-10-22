@@ -21,6 +21,8 @@ BEGIN
     IDS_DEVCODE2 " (程式碼 %2!u!)"
     IDS_ENABLEDEVICE "使用這個裝置 (啟用)"
     IDS_DISABLEDEVICE "不要使用這個裝置 (停用)"
+    IDS_DISABLEDEVICE_FAILED "The device could not be disabled.\n\n%1"
+    IDS_ENABLEDEVICE_FAILED "The device could not be enabled.\n\n%1"
     IDS_UNKNOWNDEVICE "不明的裝置"
     IDS_NODRIVERLOADED "這個裝置沒有安裝任何驅動程式。"
     IDS_DEVONPARENT "on %1"

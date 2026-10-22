@@ -68,6 +68,7 @@ ReadSettings(PGLOBAL_DATA pGlobalData)
                          sizeof(HIGHCONTRAST),
                          &pGlobalData->highContrast,
                          0);
+    LoadHighContrastScheme(pGlobalData);
 
     SystemParametersInfo(SPI_GETCARETWIDTH,
                          0,
