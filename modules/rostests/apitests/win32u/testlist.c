@@ -84,6 +84,7 @@ extern void func_NtUserSelectPalette(void);
 extern void func_NtUserSetTimer(void);
 extern void func_NtUserSetWindowsHookExModule(void);
 extern void func_NtUserSystemParametersInfo(void);
+extern void func_NtUserThunkedMenuInfo(void);
 extern void func_NtUserToUnicodeEx(void);
 extern void func_NtUserUpdatePerUserSystemParameters(void);
 
@@ -174,6 +175,7 @@ const struct test winetest_testlist[] =
     { "NtUserSetTimer", func_NtUserSetTimer },
     { "NtUserSetWindowsHookExModule", func_NtUserSetWindowsHookExModule },
     { "NtUserSystemParametersInfo", func_NtUserSystemParametersInfo },
+    { "NtUserThunkedMenuInfo", func_NtUserThunkedMenuInfo },
     { "NtUserToUnicodeEx", func_NtUserToUnicodeEx },
     { "NtUserUpdatePerUserSystemParameters", func_NtUserUpdatePerUserSystemParameters },
 

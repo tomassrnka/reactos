@@ -84,6 +84,7 @@ list(APPEND SOURCE
     ntuser/NtUserSetTimer.c
     ntuser/NtUserSetWindowsHookExModule.c
     ntuser/NtUserSystemParametersInfo.c
+    ntuser/NtUserThunkedMenuInfo.c
     ntuser/NtUserToUnicodeEx.c
     ntuser/NtUserUpdatePerUserSystemParameters.c
 
