@@ -254,3 +254,65 @@ START_TEST(ExHardErrorInteractive)
 {
     TestHardError(TRUE, TRUE, TRUE, TRUE);
 }
+
+typedef struct _SYSTEM_THREAD_HARD_ERROR
+{
+    NTSTATUS Status;
+    ULONG Response;
+} SYSTEM_THREAD_HARD_ERROR, *PSYSTEM_THREAD_HARD_ERROR;
+
+static KSTART_ROUTINE SystemThreadHardError;
+static
+VOID
+NTAPI
+SystemThreadHardError(
+    IN PVOID Context)
+{
+    PSYSTEM_THREAD_HARD_ERROR HardError = Context;
+    WCHAR TextBuffer[] = L"Hard error from a system thread (kmtest). This message box closes by itself.";
+    WCHAR CaptionBuffer[] = L"ExHardErrorSystemThread";
+    UNICODE_STRING Text = RTL_CONSTANT_STRING(TextBuffer);
+    UNICODE_STRING Caption = RTL_CONSTANT_STRING(CaptionBuffer);
+    ULONG_PTR Parameters[4];
+
+    /* Text, caption, message box type (MB_OK), message box timeout in milliseconds */
+    Parameters[0] = (ULONG_PTR)&Text;
+    Parameters[1] = (ULONG_PTR)&Caption;
+    Parameters[2] = 0;
+    Parameters[3] = 3000;
+
+    HardError->Status = ExRaiseHardError(STATUS_SERVICE_NOTIFICATION,
+                                         RTL_NUMBER_OF(Parameters),
+                                         0x3,
+                                         Parameters,
+                                         OptionOk,
+                                         &HardError->Response);
+    PsTerminateSystemThread(STATUS_SUCCESS);
+}
+
+/* A system thread is not a CSR thread, so CSRSRV passes its hard errors
+ * to the server DLLs without a CSR thread. Debug builds of csrss crashed
+ * on those. The response does not show whether the message box appeared. */
+START_TEST(ExHardErrorSystemThread)
+{
+    PSYSTEM_THREAD_HARD_ERROR HardError;
+    PKTHREAD Thread;
+
+    HardError = ExAllocatePoolWithTag(NonPagedPool, sizeof(*HardError), 'EHmK');
+    if (skip(HardError != NULL, "Out of memory\n"))
+        return;
+    HardError->Status = STATUS_PENDING;
+    HardError->Response = NoResponse;
+
+    /* The message box timeout bounds the wait */
+    Thread = KmtStartThread(SystemThreadHardError, HardError);
+    KmtFinishThread(Thread, NULL);
+    if (Thread)
+    {
+        ok_eq_hex(HardError->Status, STATUS_SUCCESS);
+        /* ResponseNotHandled when the message box times out, ResponseOk when someone presses OK */
+        ok(HardError->Response == ResponseNotHandled || HardError->Response == ResponseOk,
+           "Response = %lu\n", HardError->Response);
+    }
+    ExFreePoolWithTag(HardError, 'EHmK');
+}

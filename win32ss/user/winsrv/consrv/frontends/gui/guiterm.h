@@ -61,8 +61,14 @@ SmallRectToRect(PGUI_CONSOLE_DATA GuiData, PRECT Rect, PSMALL_RECT SmallRect)
 VOID
 GuiConsoleMoveWindow(PGUI_CONSOLE_DATA GuiData);
 
+VOID
+GuiRequestWork(PGUI_CONSOLE_DATA GuiData, LONG Work);
+
 
 /* conwnd.c */
+
+VOID
+GuiProcessWork(PGUI_CONSOLE_DATA GuiData, BOOLEAN BlinkTick);
 
 BOOL
 InitFonts(
@@ -89,17 +95,19 @@ VOID
 SwitchFullScreen(PGUI_CONSOLE_DATA GuiData, BOOL FullScreen);
 VOID
 GuiConsoleSwitchFullScreen(PGUI_CONSOLE_DATA GuiData);
+VOID
+GuiConsoleSetFullScreen(PGUI_CONSOLE_DATA GuiData, BOOL FullScreen);
 
 
 /* graphics.c */
 
-VOID
+HBITMAP
 GuiCopyFromGraphicsBuffer(PGRAPHICS_SCREEN_BUFFER Buffer,
                           PGUI_CONSOLE_DATA GuiData);
 VOID
 GuiPasteToGraphicsBuffer(PGRAPHICS_SCREEN_BUFFER Buffer,
                          PGUI_CONSOLE_DATA GuiData);
-VOID
+BOOL
 GuiPaintGraphicsBuffer(PGRAPHICS_SCREEN_BUFFER Buffer,
                        PGUI_CONSOLE_DATA GuiData,
                        PRECT rcView,
@@ -114,13 +122,10 @@ PasteText(
     IN PWCHAR Buffer,
     IN SIZE_T cchSize);
 
-VOID
+HANDLE
 GuiCopyFromTextModeBuffer(PTEXTMODE_SCREEN_BUFFER Buffer,
                           PGUI_CONSOLE_DATA GuiData);
-VOID
-GuiPasteToTextModeBuffer(PTEXTMODE_SCREEN_BUFFER Buffer,
-                         PGUI_CONSOLE_DATA GuiData);
-VOID
+BOOL
 GuiPaintTextModeBuffer(PTEXTMODE_SCREEN_BUFFER Buffer,
                        PGUI_CONSOLE_DATA GuiData,
                        PRECT rcView,

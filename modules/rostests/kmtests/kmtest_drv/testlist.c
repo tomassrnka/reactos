@@ -15,6 +15,7 @@ KMT_TESTFUNC Test_ExDoubleList;
 KMT_TESTFUNC Test_ExFastMutex;
 KMT_TESTFUNC Test_ExHardError;
 KMT_TESTFUNC Test_ExHardErrorInteractive;
+KMT_TESTFUNC Test_ExHardErrorSystemThread;
 KMT_TESTFUNC Test_ExInterlocked;
 KMT_TESTFUNC Test_ExPools;
 KMT_TESTFUNC Test_ProbeCapture;
@@ -131,6 +132,7 @@ const KMT_TEST TestList[] =
     { "ExFastMutex",                        Test_ExFastMutex },
     { "ExHardError",                        Test_ExHardError },
     { "-ExHardErrorInteractive",            Test_ExHardErrorInteractive },
+    { "ExHardErrorSystemThread",            Test_ExHardErrorSystemThread },
     { "ExInterlocked",                      Test_ExInterlocked },
     { "ExPools",                            Test_ExPools },
     { "ProbeCapture",                       Test_ProbeCapture },

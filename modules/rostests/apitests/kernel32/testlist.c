@@ -9,6 +9,15 @@ extern void func_ApplicationRestart(void);
 extern void func_ConsoleCP(void);
 extern void func_CopyFile2(void);
 extern void func_CopyFile2Identity(void);
+extern void func_ConsoleBufferSwitch(void);
+extern void func_ConsoleCaret(void);
+extern void func_ConsoleCreateRace(void);
+extern void func_ConsoleCtrlEventRace(void);
+extern void func_ConsoleDisplayMode(void);
+extern void func_ConsoleViewFollow(void);
+extern void func_ConsoleWriteLatency(void);
+extern void func_CopyFile2(void);
+extern void func_CopyFile2Identity(void);
 extern void func_CreateEventMutexEx(void);
 extern void func_CreateRemoteThreadEx(void);
 extern void func_CreateProcess(void);
@@ -103,6 +112,15 @@ const struct test winetest_testlist[] =
     { "CancelIoEx",                  func_CancelIoEx },
     { "ApplicationRestart",          func_ApplicationRestart },
     { "ConsoleCP",                   func_ConsoleCP },
+    { "CopyFile2",                   func_CopyFile2 },
+    { "CopyFile2Identity",           func_CopyFile2Identity },
+    { "ConsoleBufferSwitch",         func_ConsoleBufferSwitch },
+    { "ConsoleCaret",                func_ConsoleCaret },
+    { "ConsoleCreateRace",           func_ConsoleCreateRace },
+    { "ConsoleCtrlEventRace",        func_ConsoleCtrlEventRace },
+    { "ConsoleDisplayMode",          func_ConsoleDisplayMode },
+    { "ConsoleViewFollow",           func_ConsoleViewFollow },
+    { "ConsoleWriteLatency",         func_ConsoleWriteLatency },
     { "CopyFile2",                   func_CopyFile2 },
     { "CopyFile2Identity",           func_CopyFile2Identity },
     { "CreateEventMutexEx",          func_CreateEventMutexEx },
