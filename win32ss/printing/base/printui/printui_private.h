@@ -63,4 +63,10 @@ typedef struct tag_context {
     LPWSTR  options[OPT_MAX];
     BOOL    flags[FLAG_MAX];
 } context_t;
+
+/* queue.c */
+BOOL printui_is_quiet(int argc, LPWSTR *argv);
+void printui_show_error(context_t *cx, DWORD error);
+BOOL printui_open_queue(context_t *cx);
+BOOL printui_printer_properties(context_t *cx);
 #endif

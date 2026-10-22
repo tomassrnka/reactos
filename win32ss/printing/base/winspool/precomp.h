@@ -46,6 +46,7 @@ typedef struct _SPOOLER_HANDLE
     BOOL bNoColorProfile : 1;
     BOOL bShared : 1;
     BOOL bClosed : 1;
+    BOOL bAbortSpooled : 1;
     DWORD dwJobID;
     HANDLE hPrinter;
     HANDLE hSPLFile;

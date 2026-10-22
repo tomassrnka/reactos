@@ -166,23 +166,34 @@ AbortPrinter(HANDLE hPrinter)
         goto Cleanup;
     }
 
-    pHandle->bTrayIcon = pHandle->bStartedDoc = FALSE;
-
-    if ( pHandle->hSPLFile != INVALID_HANDLE_VALUE && pHandle->bJob )
+    if (pHandle->hSPLFile != INVALID_HANDLE_VALUE || pHandle->bAbortSpooled)
     {
-        // Close any open file handle.
-        CloseHandle( pHandle->hSPLFile );
-        pHandle->hSPLFile = INVALID_HANDLE_VALUE;
+        // A spooled document was started with AddJob: delete its job, and end the document so that the spooler discards it.
+        if (pHandle->hSPLFile != INVALID_HANDLE_VALUE)
+        {
+            CloseHandle(pHandle->hSPLFile);
+            pHandle->hSPLFile = INVALID_HANDLE_VALUE;
+        }
 
-        SetJobW( hPrinter, pHandle->dwJobID, 0, NULL, JOB_CONTROL_DELETE );
-
-        return ScheduleJob( hPrinter, pHandle->dwJobID );
+        if (SetJobW(hPrinter, pHandle->dwJobID, 0, NULL, JOB_CONTROL_DELETE) && ScheduleJob(hPrinter, pHandle->dwJobID))
+        {
+            dwErrorCode = ERROR_SUCCESS;
+            pHandle->bAbortSpooled = FALSE;
+            pHandle->bTrayIcon = pHandle->bJob = pHandle->bStartedDoc = FALSE;
+        }
+        else
+        {
+            // The spooler still has the job: the document stays started, so that AbortPrinter or EndDocPrinter can try again.
+            dwErrorCode = GetLastError();
+            pHandle->bAbortSpooled = TRUE;
+        }
+        goto Cleanup;
     }
 
     // Do the RPC call.
     RpcTryExcept
     {
-        dwErrorCode = _RpcAbortPrinter(&pHandle->hPrinter);
+        dwErrorCode = _RpcAbortPrinter(pHandle->hPrinter);
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -190,6 +201,10 @@ AbortPrinter(HANDLE hPrinter)
         ERR("_RpcAbortPrinter failed with exception code %lu!\n", dwErrorCode);
     }
     RpcEndExcept;
+
+    // A new document can now be started again.
+    if (dwErrorCode == ERROR_SUCCESS)
+        pHandle->bTrayIcon = pHandle->bJob = pHandle->bStartedDoc = FALSE;
 
 Cleanup:
     SetLastError(dwErrorCode);
@@ -448,10 +463,51 @@ Cleanup:
     return (dwErrorCode == ERROR_SUCCESS);
 }
 
+/*
+ * Removes a deleted printer from the printer lists of the current user.
+ * If it was the default printer, the user has no default printer afterwards (as on Windows).
+ */
+static VOID
+_RemovePrinterFromUserProfile(PCWSTR pwszPrinter)
+{
+    static const PCWSTR pwszUserKeys[] =
+    {
+        L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Devices",
+        L"Software\\Microsoft\\Windows NT\\CurrentVersion\\PrinterPorts",
+    };
+    DWORD cchDefault, i;
+    HKEY hKey;
+    WCHAR wszDefault[MAX_PRINTER_NAME + 1];
+    BOOL bWasDefault;
+
+    cchDefault = _countof(wszDefault);
+    bWasDefault = GetDefaultPrinterW(wszDefault, &cchDefault) && !_wcsicmp(wszDefault, pwszPrinter);
+
+    for (i = 0; i < _countof(pwszUserKeys); i++)
+    {
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, pwszUserKeys[i], 0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS)
+        {
+            RegDeleteValueW(hKey, pwszPrinter);
+            RegCloseKey(hKey);
+        }
+    }
+
+    if (bWasDefault)
+    {
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, wszWindowsKey, 0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS)
+        {
+            RegDeleteValueW(hKey, wszDeviceValue);
+            RegCloseKey(hKey);
+        }
+    }
+}
+
 BOOL WINAPI
 DeletePrinter(HANDLE hPrinter)
 {
+    DWORD cbNeeded = 0;
     DWORD dwErrorCode;
+    PPRINTER_INFO_4W pInfo4 = NULL;
     PSPOOLER_HANDLE pHandle = (PSPOOLER_HANDLE)hPrinter;
 
     TRACE("DeletePrinter(%p)\n", hPrinter);
@@ -463,10 +519,22 @@ DeletePrinter(HANDLE hPrinter)
         goto Cleanup;
     }
 
+    // Remember the name of the printer for cleaning up the user profile.
+    GetPrinterW(hPrinter, 4, NULL, 0, &cbNeeded);
+    if (cbNeeded)
+    {
+        pInfo4 = HeapAlloc(hProcessHeap, 0, cbNeeded);
+        if (pInfo4 && !GetPrinterW(hPrinter, 4, (PBYTE)pInfo4, cbNeeded, &cbNeeded))
+        {
+            HeapFree(hProcessHeap, 0, pInfo4);
+            pInfo4 = NULL;
+        }
+    }
+
     // Do the RPC call.
     RpcTryExcept
     {
-        dwErrorCode = _RpcDeletePrinter(&pHandle->hPrinter);
+        dwErrorCode = _RpcDeletePrinter(pHandle->hPrinter);
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -475,7 +543,13 @@ DeletePrinter(HANDLE hPrinter)
     }
     RpcEndExcept;
 
+    if (dwErrorCode == ERROR_SUCCESS && pInfo4 && pInfo4->pPrinterName)
+        _RemovePrinterFromUserProfile(pInfo4->pPrinterName);
+
 Cleanup:
+    if (pInfo4)
+        HeapFree(hProcessHeap, 0, pInfo4);
+
     SetLastError(dwErrorCode);
     return (dwErrorCode == ERROR_SUCCESS);
 }
@@ -1331,8 +1405,16 @@ EndDocPrinter(HANDLE hPrinter)
         goto Cleanup;
     }
 
+    // The document was aborted, but its job could not be discarded: try again instead of printing it.
+    if (pHandle->bAbortSpooled)
+        return AbortPrinter(hPrinter);
+
     if (pHandle->hSPLFile != INVALID_HANDLE_VALUE)
     {
+        // Close the spool file handle first: the spooler prints the file, or deletes it with a deleted job.
+        CloseHandle(pHandle->hSPLFile);
+        pHandle->hSPLFile = INVALID_HANDLE_VALUE;
+
         // For spooled jobs, the document is finished by calling _RpcScheduleJob.
         RpcTryExcept
         {
@@ -1344,9 +1426,6 @@ EndDocPrinter(HANDLE hPrinter)
             ERR("_RpcScheduleJob failed with exception code %lu!\n", dwErrorCode);
         }
         RpcEndExcept;
-
-        // Close the spool file handle.
-        CloseHandle(pHandle->hSPLFile);
     }
     else
     {
@@ -3956,6 +4035,13 @@ WritePrinter(HANDLE hPrinter, PVOID pBuf, DWORD cbBuf, PDWORD pcWritten)
     if (!pHandle->bStartedDoc)
     {
         dwErrorCode = ERROR_SPL_NO_STARTDOC;
+        goto Cleanup;
+    }
+
+    // An aborted document takes no more data, even if its job could not be discarded yet.
+    if (pHandle->bAbortSpooled)
+    {
+        dwErrorCode = ERROR_PRINT_CANCELLED;
         goto Cleanup;
     }
 

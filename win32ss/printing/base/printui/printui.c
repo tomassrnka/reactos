@@ -155,6 +155,11 @@ static BOOL parse_rundll(context_t * cx)
                     index = ptr - optionsW;
                     cx->options[index] = get_next_wstr(cx);
                     TRACE(" opt: %s  %s\n", debugstr_w(txtW), debugstr_w(cx->options[index]));
+#ifdef __REACTOS__
+                    /* An option needs a value */
+                    if (!cx->options[index])
+                        return FALSE;
+#endif
                     c = 0;
                 }
                 else
@@ -167,6 +172,11 @@ static BOOL parse_rundll(context_t * cx)
                     }
                     else
                     {
+#ifdef __REACTOS__
+                        /* Only one operation per call */
+                        if (cx->command)
+                            return FALSE;
+#endif
                         cx->command = c;
                         cx->subcommand = '\0';
                         TRACE(" cmd: %s\n", debugstr_w(txtW));
@@ -207,6 +217,11 @@ static BOOL parse_rundll(context_t * cx)
         }
 
     }
+#ifdef __REACTOS__
+    /* An empty argument ends the loop above; anything after it was not parsed */
+    if (cx->next_arg < cx->argc)
+        return FALSE;
+#endif
     return TRUE;
 }
 
@@ -231,12 +246,25 @@ void WINAPI PrintUIEntryW(HWND hWnd, HINSTANCE hInst, LPCWSTR pCommand, DWORD nC
         cx.argv = CommandLineToArgvW(pCommand, &cx.argc);
         TRACE("got %d args at %p\n", cx.argc, cx.argv);
 
+#ifdef __REACTOS__
+        /* Honor /q also when parsing stops before reaching it */
+        cx.flags[FLAG_Q] = printui_is_quiet(cx.argc, cx.argv);
+#endif
         res = parse_rundll(&cx);
     }
 
     if (res && cx.command) {
         switch (cx.command)
         {
+#ifdef __REACTOS__
+            case 'o':
+                printui_open_queue(&cx);
+                break;
+
+            case 'p':
+                printui_printer_properties(&cx);
+                break;
+#endif
 
             default:
             {
@@ -245,12 +273,18 @@ void WINAPI PrintUIEntryW(HWND hWnd, HINSTANCE hInst, LPCWSTR pCommand, DWORD nC
                 txtW[1] = cx.subcommand;
                 txtW[2] = '\0';
                 FIXME("command not implemented: %s\n", debugstr_w(txtW));
+#ifdef __REACTOS__
+                printui_show_error(&cx, ERROR_NOT_SUPPORTED);
+#endif
             }
         }
     }
 
     if ((res == FALSE) || (cx.command == '\0')) {
         FIXME("dialog: Printer / The operation was not successful\n");
+#ifdef __REACTOS__
+        printui_show_error(&cx, ERROR_INVALID_PARAMETER);
+#endif
     }
 
     LocalFree(cx.argv);

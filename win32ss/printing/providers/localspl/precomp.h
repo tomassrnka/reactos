@@ -90,6 +90,8 @@ struct _LOCAL_PORT
     PWSTR pwszName;                             /** The name of the port (including the trailing colon). */
     PLOCAL_PRINT_MONITOR pPrintMonitor;         /** The Print Monitor handling this port. */
     PLOCAL_JOB pNextJobToProcess;               /** The Print Job that will be processed by the next created Port handle. */
+    CRITICAL_SECTION PrintingSection;           /** Hands one job at a time over to this port and prints it. */
+    DWORD dwPrintingThreadId;                   /** The printing thread that may claim pNextJobToProcess. */
 };
 
 /**
@@ -128,6 +130,7 @@ struct _LOCAL_PRINTER
     PLOCAL_PRINT_PROCESSOR pPrintProcessor;
     PLOCAL_PORT pPort;
     SKIPLIST JobList;
+    LONG lJobCount;                             /** Jobs of this printer in the GlobalJobList, also those missing from JobList after a failed reinsertion. */
 };
 
 /**
@@ -159,6 +162,7 @@ struct _LOCAL_JOB
     DWORD dwStatus;                             /** JOB_STATUS_* flags of the Job */
     PWSTR pwszMachineName;                      /** Name of the machine that submitted the Job (prepended with two backslashes) */
     PDEVMODEW pDevMode;                         /** Associated Device Mode to this Job */
+    HANDLE hToken;                              /** Optional; impersonation token of the submitter, for opening pwszOutputFile */
 };
 
 /**
@@ -168,10 +172,12 @@ struct _LOCAL_PRINTER_HANDLE
 {
     BOOL bStartedDoc : 1;                       /** Whether StartDocPrinter has already been called. */
     HANDLE hSPLFile;                            /** Handle to an opened SPL file for Printer Job handles. */
+    HANDLE hSPLWriteFile;                       /** SPL file of a spooled job started through StartDocPrinter; WritePrinter writes into it. */
     PLOCAL_PRINTER pPrinter;                    /** Printer associated with this handle. */
     PLOCAL_JOB pJob;                            /** Print Job associated with this handle. This can be the specified Job if this is a Print Job handle or the started job through LocalStartDocPrinter. */
     PWSTR pwszDatatype;                         /** Datatype used for newly started jobs. */
     PDEVMODEW pDevMode;                         /** DevMode used for newly started jobs. */
+    ACCESS_MASK DesiredAccess;                  /** Access requested in OpenPrinter. */
 };
 
 /**
@@ -256,6 +262,8 @@ BOOL WINAPI LocalSetForm(HANDLE hPrinter, PWSTR pFormName, DWORD Level, PBYTE pF
 // jobs.c
 extern SKIPLIST GlobalJobList;
 DWORD WINAPI CreateJob(PLOCAL_PRINTER_HANDLE pPrinterHandle);
+BOOL EndJobSpooling(PLOCAL_JOB pJob);
+DWORD StartJobPrinting(PLOCAL_JOB pJob);
 void FreeJob(PLOCAL_JOB pJob);
 DWORD GetJobFilePath(PCWSTR pwszExtension, DWORD dwJobID, PWSTR pwszOutput);
 BOOL InitializeGlobalJobList(VOID);
@@ -331,6 +339,8 @@ PPRINTENV_T validate_envW(LPCWSTR env);
 // printers.c
 extern SKIPLIST PrinterList;
 BOOL InitializePrinterList(void);
+extern CRITICAL_SECTION PrinterDeletionSection;
+BOOL WINAPI LocalDeletePrinter(HANDLE hPrinter);
 BOOL WINAPI LocalEnumPrinters(DWORD Flags, LPWSTR Name, DWORD Level, LPBYTE pPrinterEnum, DWORD cbBuf, LPDWORD pcbNeeded, LPDWORD pcReturned);
 BOOL WINAPI LocalGetPrinter(HANDLE hPrinter, DWORD Level, LPBYTE pPrinter, DWORD cbBuf, LPDWORD pcbNeeded);
 BOOL WINAPI LocalOpenPrinter(PWSTR lpPrinterName, HANDLE* phPrinter, PPRINTER_DEFAULTSW pDefault);
@@ -341,6 +351,7 @@ BOOL WINAPI LocalStartPagePrinter(HANDLE hPrinter);
 BOOL WINAPI LocalWritePrinter(HANDLE hPrinter, LPVOID pBuf, DWORD cbBuf, LPDWORD pcWritten);
 BOOL WINAPI LocalEndPagePrinter(HANDLE hPrinter);
 BOOL WINAPI LocalEndDocPrinter(HANDLE hPrinter);
+BOOL WINAPI LocalAbortPrinter(HANDLE hPrinter);
 BOOL WINAPI LocalClosePrinter(HANDLE hPrinter);
 VOID BroadcastChange(PLOCAL_HANDLE pHandle);
 

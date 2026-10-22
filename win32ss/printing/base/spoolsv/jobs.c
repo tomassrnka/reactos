@@ -138,8 +138,14 @@ _RpcSetJob(WINSPOOL_PRINTER_HANDLE hPrinter, DWORD JobId, WINSPOOL_JOB_CONTAINER
     }
 
     // pJobContainer->JobInfo is a union of pointers, so we can just convert any element to our BYTE pointer.
-    if (!SetJobW(hPrinter, JobId, pJobContainer->Level, (PBYTE)pJobContainer->JobInfo.Level1, Command))
+    // Without a container only the command is carried out.
+    if (!SetJobW(hPrinter, JobId,
+                 pJobContainer ? pJobContainer->Level : 0,
+                 pJobContainer ? (PBYTE)pJobContainer->JobInfo.Level1 : NULL,
+                 Command))
+    {
         dwErrorCode = GetLastError();
+    }
 
     RpcRevertToSelf();
     return dwErrorCode;

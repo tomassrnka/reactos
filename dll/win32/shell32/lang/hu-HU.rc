@@ -844,6 +844,9 @@ BEGIN
     IDS_COPYERRORSUBFOLDER "'%s' nem másolható: a célmappa a forrásmappa egyik almappája."
     IDS_MOVEERROR "'%s' nem mozgatható: %s"
     IDS_COPYERROR "'%s' nem másolható: %s"
+    IDS_PRINTER_SETDEFAULT "Set as De&fault Printer"
+    IDS_PRINTER_DELETE_TEXT "Are you sure you want to delete the printer '%s'?"
+    IDS_PRINTER_OP_FAILED "Operation could not be completed.\n\n%s"
 
     IDS_CREATEFILE_DENIED "Nem sikerült a(z) %1 fájl létrehozása"
     IDS_CREATEFILE_CAPTION "Hiba a fájl létrehozásakor"

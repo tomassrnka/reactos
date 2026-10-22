@@ -262,6 +262,9 @@
 #define IDS_COPYERRORSUBFOLDER   350
 #define IDS_MOVEERROR            351
 #define IDS_COPYERROR            352
+#define IDS_PRINTER_SETDEFAULT   353
+#define IDS_PRINTER_DELETE_TEXT  354
+#define IDS_PRINTER_OP_FAILED    355
 
 /* Shortcut property sheet */
 #define IDS_SHORTCUT_RUN_NORMAL  4167
