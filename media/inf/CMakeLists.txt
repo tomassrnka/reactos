@@ -44,4 +44,22 @@ foreach(item ${UTF8_INF_FILES})
     add_cd_file(FILE "${CMAKE_CURRENT_SOURCE_DIR}/${item}" DESTINATION reactos/inf FOR all)
 endforeach(item)
 
-add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/syssetup.inf DESTINATION reactos/inf FOR all)
+set(SYSSETUP_INF ${CMAKE_CURRENT_SOURCE_DIR}/syssetup.inf)
+
+if(DLL_EXPORT_VERSION GREATER_EQUAL 0x601)
+    # The Media Foundation DLLs and explorerframe are only built at this level, and setup shows an
+    # error box for every DLL on the registration list that is missing, so they are listed only here.
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/syssetup.inf)
+    file(READ ${CMAKE_CURRENT_SOURCE_DIR}/syssetup.inf SYSSETUP_CONTENT)
+    # file(READ) turns the CRLF line ends into LF; they are restored when the file is written
+    string(REPLACE "11,,fontext.dll,1\n" "11,,evr.dll,1\n11,,explorerframe.dll,1\n11,,fontext.dll,1\n" SYSSETUP_CONTENT "${SYSSETUP_CONTENT}")
+    string(REPLACE "11,,mlang.dll,1\n" "11,,mf.dll,1\n11,,mfreadwrite.dll,1\n11,,mlang.dll,1\n" SYSSETUP_CONTENT "${SYSSETUP_CONTENT}")
+    if(NOT SYSSETUP_CONTENT MATCHES "11,,explorerframe.dll,1" OR NOT SYSSETUP_CONTENT MATCHES "11,,evr.dll,1" OR NOT SYSSETUP_CONTENT MATCHES "11,,mfreadwrite.dll,1")
+        message(FATAL_ERROR "syssetup.inf lost the anchors for the Media Foundation DLLs and explorerframe")
+    endif()
+    set(SYSSETUP_INF ${CMAKE_CURRENT_BINARY_DIR}/syssetup.inf)
+    string(REPLACE "\n" "\r\n" SYSSETUP_CONTENT "${SYSSETUP_CONTENT}")
+    file(WRITE ${SYSSETUP_INF} "${SYSSETUP_CONTENT}")
+endif()
+
+add_cd_file(FILE ${SYSSETUP_INF} DESTINATION reactos/inf FOR all)

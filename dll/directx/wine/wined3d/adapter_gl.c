@@ -5002,32 +5002,6 @@ static float wined3d_adapter_find_fill_offset(struct wined3d_caps_gl_ctx *ctx)
     return -1.0f / 64.0f;
 }
 
-#ifdef __REACTOS__
-static DWORD WINAPI wined3d_no_3d_warning_proc(void *param)
-{
-    MessageBoxW(NULL,
-            L"ReactOS DirectX Needs at least OpenGL 2.0 or better\n\n"
-            L"Install a display driver that provides an OpenGL ICD to enable 3D "
-            L"acceleration. Or install Mesa3D from RAPPS",
-            L"ReactOS - no 3D acceleration",
-            MB_OK | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST);
-    return 0;
-}
-
-static void wined3d_warn_no_3d(void)
-{
-    static LONG warned;
-    HANDLE thread;
-
-    /* Only warn once per process */
-    if (InterlockedCompareExchange(&warned, 1, 0))
-        return;
-
-    if ((thread = CreateThread(NULL, 0, wined3d_no_3d_warning_proc, NULL, 0, NULL)))
-        CloseHandle(thread);
-}
-#endif /* __REACTOS__ */
-
 static BOOL wined3d_adapter_gl_init(struct wined3d_adapter_gl *adapter_gl,
         unsigned int ordinal, unsigned int wined3d_creation_flags)
 {
@@ -5081,7 +5055,7 @@ static BOOL wined3d_adapter_gl_init(struct wined3d_adapter_gl *adapter_gl,
     if (!wined3d_caps_gl_ctx_create(adapter_gl, &caps_gl_ctx))
     {
         ERR("Failed to get a GL context for adapter %p.\n", adapter_gl);
-        return FALSE;
+        goto fail;
     }
 
     for (i = 0; i < ARRAY_SIZE(supported_gl_versions); ++i)
@@ -5111,7 +5085,7 @@ static BOOL wined3d_adapter_gl_init(struct wined3d_adapter_gl *adapter_gl,
     {
         ERR("Failed to initialize GL caps for adapter %p.\n", adapter_gl);
         wined3d_caps_gl_ctx_destroy(&caps_gl_ctx);
-        return FALSE;
+        goto fail;
     }
 
     for (unsigned int i = 0; i < ARRAY_SIZE(required_extensions); ++i)
@@ -5119,33 +5093,24 @@ static BOOL wined3d_adapter_gl_init(struct wined3d_adapter_gl *adapter_gl,
         if (!gl_info->supported[required_extensions[i].extension])
         {
             ERR("Required extension %s is not supported.\n", required_extensions[i].string);
-#ifdef __REACTOS__
-            wined3d_warn_no_3d();
-#endif
             wined3d_caps_gl_ctx_destroy(&caps_gl_ctx);
-            return FALSE;
+            goto fail;
         }
     }
 
     if (!gl_info->supported[ARB_TEXTURE_NON_POWER_OF_TWO] && !gl_info->supported[WINED3D_GL_NORMALIZED_TEXRECT])
     {
         ERR("Required extension ARB_texture_non_power_of_two is not supported.\n");
-#ifdef __REACTOS__
-        wined3d_warn_no_3d();
-#endif
         wined3d_caps_gl_ctx_destroy(&caps_gl_ctx);
-        return FALSE;
+        goto fail;
     }
 
     if (gl_info->glsl_version < MAKEDWORD_VERSION(1, 20))
     {
         ERR("GLSL version %s is too low; 1.20 is required.\n",
                 (const char *)gl_info->gl_ops.gl.p_glGetString(GL_SHADING_LANGUAGE_VERSION_ARB));
-#ifdef __REACTOS__
-        wined3d_warn_no_3d();
-#endif
         wined3d_caps_gl_ctx_destroy(&caps_gl_ctx);
-        return FALSE;
+        goto fail;
     }
 
     gl_info->filling_convention_offset = wined3d_adapter_find_fill_offset(&caps_gl_ctx);
@@ -5156,7 +5121,7 @@ static BOOL wined3d_adapter_gl_init(struct wined3d_adapter_gl *adapter_gl,
             caps_gl_ctx.vram_bytes, 0))
     {
         wined3d_caps_gl_ctx_destroy(&caps_gl_ctx);
-        return FALSE;
+        goto fail;
     }
     TRACE("Reporting (fake) driver version 0x%08x-0x%08x.\n",
             driver_info->version_high, driver_info->version_low);
@@ -5169,7 +5134,7 @@ static BOOL wined3d_adapter_gl_init(struct wined3d_adapter_gl *adapter_gl,
         WARN("No suitable pixel formats found.\n");
         wined3d_caps_gl_ctx_destroy(&caps_gl_ctx);
         free(adapter_gl->pixel_formats);
-        return FALSE;
+        goto fail;
     }
 
     if (!wined3d_adapter_gl_init_format_info(&adapter_gl->a, &caps_gl_ctx))
@@ -5177,7 +5142,7 @@ static BOOL wined3d_adapter_gl_init(struct wined3d_adapter_gl *adapter_gl,
         ERR("Failed to initialize GL format info.\n");
         wined3d_caps_gl_ctx_destroy(&caps_gl_ctx);
         free(adapter_gl->pixel_formats);
-        return FALSE;
+        goto fail;
     }
 
     wined3d_caps_gl_ctx_destroy(&caps_gl_ctx);
@@ -5185,6 +5150,10 @@ static BOOL wined3d_adapter_gl_init(struct wined3d_adapter_gl *adapter_gl,
     wined3d_adapter_init_ffp_attrib_ops(adapter_gl);
 
     return TRUE;
+
+fail:
+    wined3d_adapter_cleanup(&adapter_gl->a);
+    return FALSE;
 }
 
 struct wined3d_adapter *wined3d_adapter_gl_create(unsigned int ordinal, unsigned int wined3d_creation_flags)

@@ -23,6 +23,21 @@ sdk/tools/wpp                   # Synced to Wine-10.0 (Module was moved into wrc
 
 The following headers are shared with Wine.
 sdk/include/psdk/rpcproxy.h     # Synced to Wine-10.0
+sdk/include/psdk/codecapi.h     # Synced to Wine-11.19
+sdk/include/psdk/evr.idl        # Synced to Wine-11.19
+sdk/include/psdk/evr9.idl       # Synced to Wine-11.19
+sdk/include/psdk/icodecapi.idl  # Synced to Wine-11.19
+sdk/include/psdk/mfapi.h        # Synced to Wine-11.19
+sdk/include/psdk/mfd3d12.idl    # Synced to Wine-11.19
+sdk/include/psdk/mferror.h      # Synced to Wine-11.19
+sdk/include/psdk/mfidl.idl      # Synced to Wine-11.19
+sdk/include/psdk/mfmediaengine.idl       # Synced to Wine-11.19
+sdk/include/psdk/mfobjects.idl  # Synced to Wine-11.19
+sdk/include/psdk/mfplay.idl     # Synced to Wine-11.19
+sdk/include/psdk/mfreadwrite.idl         # Synced to Wine-11.19
+sdk/include/psdk/mftransform.idl         # Synced to Wine-11.19
+sdk/include/psdk/netlistmgr.idl          # Synced to Wine-11.19
+sdk/include/wine/mfinternal.idl   # Synced to Wine-11.19
 
 The following libraries are shared with Wine.
 
@@ -80,6 +95,9 @@ dll/directx/wine/qedit          # Synced to wine-10.1-dev (b00c7619f1b)
 dll/directx/wine/quartz         # Synced to wine-10.1-dev (b00c7619f1b)
 dll/directx/wine/wined3d        # Synced to wine-10.1-dev (b00c7619f1b). Built as d3dwine.dll.
 sdk/lib/vkd3d                   # Wine bundled vkd3d 1.14, synced to wine-10.1-dev (b00c7619f1b)
+sdk/lib/mfuuid                  # Synced to Wine-11.19
+sdk/lib/strmiids/evr.c          # Synced to Wine-11.19
+sdk/lib/wmcodecdspuuid          # Synced to Wine-11.19
 
 dll/win32/activeds            # Synced to Wine-10.0
 dll/win32/activeds.tlb        # Synced to Wine-10.0
@@ -101,6 +119,7 @@ dll/win32/comcat              # Synced to Wine-10.0
 dll/win32/comdlg32            # Synced to Wine-10.0
 dll/win32/coml2               # Synced to Wine-10.0
 dll/win32/compstui            # Synced to Wine-10.0
+dll/win32/concrt140           # Synced to Wine-10.0 (with dll/win32/msvcrt, compiles its concurrency.c and exception_ptr.c)
 dll/win32/credui              # Synced to Wine-10.0
 dll/win32/crypt32             # Synced to Wine-10.0
 dll/win32/cryptdlg            # Synced to Wine-10.0
@@ -112,6 +131,8 @@ dll/win32/dbghelp             # Synced to WineStaging-5.16
 dll/win32/dciman32            # Synced to Wine-10.1-dev (b00c7619f1b)
 dll/win32/dcomp               # Synced to Wine-10.0
 dll/win32/dwmapi              # Synced to Wine-8.14
+dll/win32/evr                 # Synced to Wine-11.19
+dll/win32/explorerframe        # Synced to Wine-11.19 (ebrowser.c is shell32/ebrowser.c of Wine; Wine's taskbarlist.c is not used, browseui provides it; the ReactOS changes are under __REACTOS__)
 dll/win32/faultrep            # Synced to Wine-10.0
 dll/win32/feclient            # Synced to Wine-10.0
 dll/win32/fontsub             # Synced to Wine-10.0
@@ -144,6 +165,9 @@ dll/win32/mcicda              # Synced to Wine-10.0
 dll/win32/mciqtz32            # Synced to Wine-10.0
 dll/win32/mciseq              # Synced to Wine-10.0
 dll/win32/mciwave             # Synced to Wine-10.0
+dll/win32/mf                  # Synced to Wine-11.19
+dll/win32/mfplat              # Synced to Wine-11.19. Below 0x603 the Rtwq queue code of rtworkq is linked in.
+dll/win32/mfreadwrite         # Synced to Wine-11.19
 dll/win32/mgmtapi             # Synced to Wine-10.0
 dll/win32/mlang               # Synced to Wine-10.0
 dll/win32/mmdevapi            # Synced to WineStaging-4.18
@@ -171,6 +195,10 @@ dll/win32/msrle32             # Synced to Wine-10.0
 dll/win32/mssign32            # Synced to Wine-10.0
 dll/win32/mssip32             # Synced to Wine-10.0
 dll/win32/mstask              # Synced to WineStaging-3.3
+dll/win32/msvcp140            # Synced to Wine-11.19, builds the sources of dll/win32/msvcp90
+dll/win32/msvcp140_1          # Synced to Wine-11.19
+dll/win32/msvcp140_2          # Synced to Wine-11.19
+dll/win32/msvcp90             # Synced to Wine-11.19, shared sources only: msvcp90.dll is not built
 dll/win32/msvcrt              # Synced to Wine-10.0
 dll/win32/msvcrt20            # Out of sync
 dll/win32/msvcrt40            # Out of sync
@@ -215,7 +243,7 @@ dll/win32/riched32            # Synced to Wine-10.0
 dll/win32/rpcrt4              # Synced to Wine-10.0
 dll/win32/rsabase             # Synced to Wine-10.0
 dll/win32/rsaenh              # Synced to Wine-11.19
-dll/win32/rtworkq             # Synced to Wine-10.0
+dll/win32/rtworkq             # Synced to Wine-11.19
 dll/win32/sccbase             # Synced to Wine-10.0
 dll/win32/schannel            # Synced to WineStaging-3.3
 dll/win32/scrrun              # Synced to Wine-10.0
@@ -239,6 +267,7 @@ dll/win32/sxs                 # Synced to Wine-10.0
 dll/win32/t2embed             # Synced to Wine-10.0
 dll/win32/tapi32              # Synced to Wine-10.0
 dll/win32/tbs                 # Synced to Wine-10.0
+dll/win32/tdh                 # Synced to Wine-11.19 (the stubs are implemented)
 dll/win32/traffic             # Synced to Wine-10.0
 dll/win32/twain_32            # Synced to Wine-10.0
 dll/win32/uiautomationcore    # Synced to Wine-10.0
@@ -248,6 +277,8 @@ dll/win32/urlmon              # Synced to Wine-10.0
 dll/win32/usp10               # Synced to Wine-11.17
 dll/win32/uxtheme             # Forked
 dll/win32/vbscript            # Synced to Wine-10.0
+dll/win32/vcruntime140        # Synced to Wine-11.19
+dll/win32/vcruntime140_1      # Synced to Wine-10.0 (with dll/win32/msvcrt, compiles its handler4.c and except_x86_64.c)
 dll/win32/version             # Synced to WineStaging-4.18 (Requires kernelbase)
 dll/win32/vssapi              # Synced to WineStaging-4.18
 dll/win32/wevtapi             # Synced to Wine-10.0

@@ -40,7 +40,16 @@ RETARGET_HOSTS = {
     ),
     'shcore.dll': (
         'api-ms-win-core-featurestaging-l1-1',
+        'api-ms-win-shcore-comhelpers-l1-1',
+        'api-ms-win-shcore-obsolete-l1-1',
         'api-ms-win-shcore-scaling-l1-1',
+        'api-ms-win-shcore-stream-winrt-l1-1',
+        'api-ms-win-shcore-sysinfo-l1-1',
+        'api-ms-win-shcore-thread-l1-1',
+    ),
+    'kernelbase_ros.dll': (
+        'api-ms-win-core-path-l1-1',
+        'api-ms-win-core-synch-l1-2',
     ),
     'shell32.dll': (
         'api-ms-win-shell-namespace-l1-1',
@@ -77,6 +86,11 @@ RETARGET_BY_FAMILY = {family: module for module, families in RETARGET_HOSTS.item
 EXTRA_APISETS = (
     ('api-ms-win-core-processthreads-l1-1-3.dll', 'kernel32.dll', ('APISET_WIN10',)),
 )
+
+# The Universal CRT contracts are available at every compatibility level: Windows 7 to 8.1 get them with the
+# Universal CRT update, which the Visual C++ runtime installers carry, and this system ships ucrtbase for all of them.
+UCRT_CONTRACT_PREFIX = 'api-ms-win-crt-'
+ALL_VERSIONS = ['APISET_WIN7', 'APISET_WIN8', 'APISET_WIN81', 'APISET_WIN10']
 
 def contract_family(name):
     return re.sub(r'-\d+$', '', name.lower())
@@ -125,7 +139,8 @@ class Apiset:
             self.versions.append(version)
 
     def __str__(self):
-        version_str = ' | '.join(self.versions)
+        versions = ALL_VERSIONS if self.name.lower().startswith(UCRT_CONTRACT_PREFIX) else self.versions
+        version_str = ' | '.join(versions)
         name = self.name
         assert name[-4:].lower() == '.dll'
         name = name[:-4]
