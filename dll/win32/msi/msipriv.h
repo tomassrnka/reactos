@@ -405,6 +405,10 @@ typedef struct tagMSIPACKAGE
 {
     MSIOBJECTHDR hdr;
     MSIDATABASE *db;
+#ifdef __REACTOS__
+    BOOL folders_chosen;    /* the ALLUSERS folders were set, for the all-users ones if folders_common */
+    BOOL folders_common;
+#endif
     INT version;
     enum platform platform;
     UINT num_langids;
@@ -484,6 +488,9 @@ typedef struct tagMSIPACKAGE
     unsigned char need_reboot_now : 1;
     unsigned char need_rollback : 1;
     unsigned char rpc_server_started : 1;
+#ifdef __REACTOS__
+    unsigned char warned_32bit_custom_action : 1;
+#endif
 } MSIPACKAGE;
 
 typedef struct tagMSIPREVIEW
@@ -921,6 +928,9 @@ extern UINT msi_package_add_media_disk(MSIPACKAGE *, DWORD, DWORD, DWORD, LPWSTR
 extern UINT msi_clone_properties(MSIDATABASE *);
 extern UINT msi_set_context(MSIPACKAGE *);
 extern void msi_adjust_privilege_properties(MSIPACKAGE *);
+#ifdef __REACTOS__
+extern void msi_set_context_folders(MSIPACKAGE *);
+#endif
 extern UINT MSI_GetFeatureCost(MSIPACKAGE *, MSIFEATURE *, MSICOSTTREE, INSTALLSTATE, LPINT);
 
 /* for deformating */
@@ -984,6 +994,9 @@ extern LONG msi_reg_set_subkey_val( HKEY hkey, LPCWSTR path, LPCWSTR name, LPCWS
 extern void msi_dialog_check_messages( HANDLE );
 extern void msi_dialog_destroy( msi_dialog* );
 extern void msi_dialog_unregister_class( void );
+#ifdef __REACTOS__
+extern DWORD msi_dialog_get_ui_thread( void );
+#endif
 
 /* summary information */
 extern UINT msi_get_suminfo( IStorage *stg, UINT uiUpdateCount, MSISUMMARYINFO **si );
@@ -1017,6 +1030,9 @@ extern DWORD gUIFilterRecord;
 extern LPVOID gUIContext;
 extern LPVOID gUIContextRecord;
 extern WCHAR *gszLogFile;
+#ifdef __REACTOS__
+extern DWORD gdwLogMode;
+#endif
 extern HINSTANCE msi_hInstance;
 
 /* action related functions */

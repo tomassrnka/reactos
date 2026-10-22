@@ -659,6 +659,56 @@ static BOOL msi_has_server2003_layer(void)
     return FALSE;
 }
 
+#ifdef __REACTOS__
+static const struct { const WCHAR *name; int user, common; } context_folders[] =
+{
+    { L"StartMenuFolder", CSIDL_STARTMENU, CSIDL_COMMON_STARTMENU },
+    { L"StartupFolder", CSIDL_STARTUP, CSIDL_COMMON_STARTUP },
+    { L"TemplateFolder", CSIDL_TEMPLATES, CSIDL_COMMON_TEMPLATES },
+    { L"DesktopFolder", CSIDL_DESKTOPDIRECTORY, CSIDL_COMMON_DESKTOPDIRECTORY },
+    { L"ProgramMenuFolder", CSIDL_PROGRAMS, CSIDL_COMMON_PROGRAMS },
+    { L"AdminToolsFolder", CSIDL_ADMINTOOLS, CSIDL_COMMON_ADMINTOOLS },
+};
+
+static void get_context_folder( int csidl, WCHAR *path )
+{
+    path[0] = 0;
+    SHGetFolderPathW( NULL, csidl, NULL, 0, path );
+    lstrcatW( path, L"\\" );
+}
+
+/* The folders that follow ALLUSERS. Windows picks them when the package is opened. When the command line of an
+   installation has changed ALLUSERS since, the ones that still hold the default of the old choice follow it;
+   a folder that a transform, the command line or the UI set to something else is left alone. */
+void msi_set_context_folders( MSIPACKAGE *package )
+{
+    BOOL common = msi_get_property_int( package->db, L"ALLUSERS", 0 ) == 1;
+    WCHAR path[MAX_PATH], old[MAX_PATH], *cur;
+    unsigned int i;
+
+    if (package->folders_chosen && package->folders_common == common) return;
+
+    for (i = 0; i < ARRAY_SIZE(context_folders); i++)
+    {
+        if (package->folders_chosen)
+        {
+            get_context_folder( package->folders_common ? context_folders[i].common : context_folders[i].user, old );
+            cur = msi_dup_property( package->db, context_folders[i].name );
+            if (cur && wcsicmp( cur, old ))
+            {
+                free( cur );
+                continue;
+            }
+            free( cur );
+        }
+        get_context_folder( common ? context_folders[i].common : context_folders[i].user, path );
+        msi_set_property( package->db, context_folders[i].name, path, -1 );
+    }
+    package->folders_chosen = TRUE;
+    package->folders_common = common;
+}
+#endif
+
 static VOID set_installer_properties(MSIPACKAGE *package)
 {
     WCHAR *ptr;
@@ -695,30 +745,7 @@ static VOID set_installer_properties(MSIPACKAGE *package)
     lstrcatW(pth, L"\\");
     msi_set_property( package->db, L"SendToFolder", pth, -1 );
 
-    SHGetFolderPathW(NULL, CSIDL_STARTMENU, NULL, 0, pth);
-    lstrcatW(pth, L"\\");
-    msi_set_property( package->db, L"StartMenuFolder", pth, -1 );
-
-    SHGetFolderPathW(NULL, CSIDL_STARTUP, NULL, 0, pth);
-    lstrcatW(pth, L"\\");
-    msi_set_property( package->db, L"StartupFolder", pth, -1 );
-
-    SHGetFolderPathW(NULL, CSIDL_TEMPLATES, NULL, 0, pth);
-    lstrcatW(pth, L"\\");
-    msi_set_property( package->db, L"TemplateFolder", pth, -1 );
-
-    SHGetFolderPathW(NULL, CSIDL_DESKTOP, NULL, 0, pth);
-    lstrcatW(pth, L"\\");
-    msi_set_property( package->db, L"DesktopFolder", pth, -1 );
-
-    /* FIXME: set to AllUsers profile path if ALLUSERS is set */
-    SHGetFolderPathW(NULL, CSIDL_PROGRAMS, NULL, 0, pth);
-    lstrcatW(pth, L"\\");
-    msi_set_property( package->db, L"ProgramMenuFolder", pth, -1 );
-
-    SHGetFolderPathW(NULL, CSIDL_ADMINTOOLS, NULL, 0, pth);
-    lstrcatW(pth, L"\\");
-    msi_set_property( package->db, L"AdminToolsFolder", pth, -1 );
+    msi_set_context_folders( package );
 
     SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, pth);
     lstrcatW(pth, L"\\");
@@ -1001,12 +1028,29 @@ static UINT load_admin_properties(MSIPACKAGE *package)
 
 void msi_adjust_privilege_properties( MSIPACKAGE *package )
 {
+#ifdef __REACTOS__
+    /* Measured on Windows: ALLUSERS 2 with MSIINSTALLPERUSER 1 empties ALLUSERS (a per-user installation), and
+       MSIINSTALLPERUSER only survives next to ALLUSERS 2 */
+    int allusers = msi_get_property_int( package->db, L"ALLUSERS", 0 );
+
+    if (allusers == 2 && msi_get_property_int( package->db, L"MSIINSTALLPERUSER", 0 ) == 1)
+    {
+        TRACE("ALLUSERS 2 with MSIINSTALLPERUSER, installing per user\n");
+        msi_set_property( package->db, L"ALLUSERS", L"", -1 );
+    }
+    else
+    {
+        if (allusers != 2) msi_set_property( package->db, L"MSIINSTALLPERUSER", L"", -1 );
+#endif
     /* FIXME: this should depend on the user's privileges */
     if (msi_get_property_int( package->db, L"ALLUSERS", 0 ) == 2)
     {
         TRACE("resetting ALLUSERS property from 2 to 1\n");
         msi_set_property( package->db, L"ALLUSERS", L"1", -1 );
     }
+#ifdef __REACTOS__
+    }
+#endif
     msi_set_property( package->db, L"AdminUser", L"1", -1 );
     msi_set_property( package->db, L"Privileged", L"1", -1 );
     msi_set_property( package->db, L"MsiRunningElevated", L"1", -1 );
@@ -1397,6 +1441,27 @@ UINT msi_set_original_database_property( MSIDATABASE *db, const WCHAR *package )
 }
 
 #ifdef __REACTOS__
+/* Tells a package that cannot be reached or read from a file that is no package */
+static UINT get_package_open_error( const WCHAR *file )
+{
+    DWORD attrs = GetFileAttributesW( file );
+    HANDLE handle;
+
+    if (attrs == INVALID_FILE_ATTRIBUTES)
+        return GetLastError() == ERROR_PATH_NOT_FOUND ? ERROR_PATH_NOT_FOUND : ERROR_FILE_NOT_FOUND;
+    if (attrs & FILE_ATTRIBUTE_DIRECTORY)
+        return ERROR_INSTALL_PACKAGE_OPEN_FAILED;
+
+    /* same access and sharing as the read-only storage open */
+    handle = CreateFileW( file, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL );
+    if (handle == INVALID_HANDLE_VALUE)
+        return ERROR_INSTALL_PACKAGE_OPEN_FAILED;
+    CloseHandle( handle );
+    return ERROR_INSTALL_PACKAGE_INVALID;
+}
+#endif
+
+#ifdef __REACTOS__
 BOOL WINAPI ApphelpCheckRunAppEx(HANDLE FileHandle, PVOID Unk1, PVOID Unk2, PCWSTR ApplicationName, PVOID Environment, USHORT ExeType, PULONG Reason, PVOID *SdbQueryAppCompatData, PULONG SdbQueryAppCompatDataSize,
     PVOID *SxsData, PULONG SxsDataSize, PULONG FusionFlags, PULONG64 SomeFlag1, PULONG SomeFlag2);
 BOOL WINAPI SE_DynamicShim(LPCWSTR ProcessImage, PVOID hsdb, PVOID pQueryResult, LPCSTR Module, LPDWORD lpdwDynamicToken);
@@ -1448,6 +1513,51 @@ AppHelpCheckPackage(LPCWSTR szPackage)
 }
 #endif
 
+#ifdef __REACTOS__
+/* The package log is not open yet when a package is refused; record why, and which package */
+static void log_refused_package( const WCHAR *path, UINT error )
+{
+    WCHAR *text = NULL;
+    char *msg;
+    HANDLE file;
+    DWORD len, written;
+    LARGE_INTEGER zero = {{ 0 }};
+    int size;
+
+    /* Windows logs this as an information message */
+    if (!gszLogFile || !(gdwLogMode & INSTALLLOGMODE_INFO)) return;
+    if (!FormatMessageW( FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                         NULL, error, 0, (WCHAR *)&text, 0, NULL ))
+        return;
+    len = lstrlenW( text );
+    while (len && (text[len - 1] == '\r' || text[len - 1] == '\n')) text[--len] = 0;
+
+    file = CreateFileW( gszLogFile, GENERIC_WRITE, FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
+    if (file != INVALID_HANDLE_VALUE)
+    {
+        SetFilePointerEx( file, zero, NULL, FILE_END );
+        size = WideCharToMultiByte( CP_ACP, 0, text, -1, NULL, 0, NULL, NULL );
+        if (size > 0 && (msg = malloc( size )))
+        {
+            WideCharToMultiByte( CP_ACP, 0, text, -1, msg, size, NULL, NULL );
+            WriteFile( file, msg, size - 1, &written, NULL );
+            WriteFile( file, "\n", 1, &written, NULL );
+            free( msg );
+        }
+        size = WideCharToMultiByte( CP_ACP, 0, path, -1, NULL, 0, NULL, NULL );
+        if (size > 0 && (msg = malloc( size )))
+        {
+            WideCharToMultiByte( CP_ACP, 0, path, -1, msg, size, NULL, NULL );
+            WriteFile( file, msg, size - 1, &written, NULL );
+            WriteFile( file, "\n", 1, &written, NULL );
+            free( msg );
+        }
+        CloseHandle( file );
+    }
+    LocalFree( text );
+}
+#endif
+
 UINT MSI_OpenPackageW(LPCWSTR szPackage, DWORD dwOptions, MSIPACKAGE **pPackage)
 {
     MSIDATABASE *db;
@@ -1493,9 +1603,13 @@ UINT MSI_OpenPackageW(LPCWSTR szPackage, DWORD dwOptions, MSIPACKAGE **pPackage)
         r = MSI_OpenDatabaseW( file, MSIDBOPEN_READONLY, &db );
         if (r != ERROR_SUCCESS)
         {
+#ifdef __REACTOS__
+            return get_package_open_error( file );
+#else
             if (GetFileAttributesW( file ) == INVALID_FILE_ATTRIBUTES)
                 return ERROR_FILE_NOT_FOUND;
             return r;
+#endif
         }
         r = get_local_package( db, localfile );
         if (r != ERROR_SUCCESS || GetFileAttributesW( localfile ) == INVALID_FILE_ATTRIBUTES)
@@ -1582,12 +1696,18 @@ UINT MSI_OpenPackageW(LPCWSTR szPackage, DWORD dwOptions, MSIPACKAGE **pPackage)
     if (r != ERROR_SUCCESS)
     {
         WARN("failed to parse summary info %u\n", r);
+#ifdef __REACTOS__
+        log_refused_package( szPackage[0] == '#' ? package->db->path : szPackage, r );
+#endif
         msiobj_release( &package->hdr );
         return r;
     }
     r = validate_package( package );
     if (r != ERROR_SUCCESS)
     {
+#ifdef __REACTOS__
+        log_refused_package( szPackage[0] == '#' ? package->db->path : szPackage, r );
+#endif
         msiobj_release( &package->hdr );
         return r;
     }
@@ -1964,6 +2084,11 @@ INT MSI_ProcessMessageVerbatim(MSIPACKAGE *package, INSTALLMESSAGE eMessageType,
         (eMessageType & 0xff000000) != INSTALLMESSAGE_PROGRESS)
     {
         DWORD written;
+#ifdef __REACTOS__
+        LARGE_INTEGER zero = {{ 0 }};
+        /* Write at the end, so that no handle overwrites what another one wrote */
+        SetFilePointerEx( package->log_file, zero, NULL, FILE_END );
+#endif
         WriteFile( package->log_file, msg, len - 1, &written, NULL );
         WriteFile( package->log_file, "\n", 1, &written, NULL );
     }

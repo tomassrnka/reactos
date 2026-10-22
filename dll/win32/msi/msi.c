@@ -1903,6 +1903,9 @@ UINT WINAPI MsiEnableLogW( DWORD dwLogMode, const WCHAR *szLogFile, DWORD attrib
 
     free(gszLogFile);
     gszLogFile = NULL;
+#ifdef __REACTOS__
+    gdwLogMode = dwLogMode;
+#endif
     if (szLogFile)
     {
         HANDLE file;
