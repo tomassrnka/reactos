@@ -59,6 +59,7 @@ struct timer_queue
     BOOL quit;                  /* queue should be deleted; once set, never unset */
     HANDLE event;
     HANDLE thread;
+    HANDLE completion_event;    /* set when the queue thread is done */
 };
 
 #define EXPIRE_NEVER (~(ULONGLONG) 0)
@@ -216,6 +217,7 @@ static DWORD WINAPI timer_queue_thread_proc(LPVOID p)
 {
     struct timer_queue *q = p;
     ULONG timeout_ms;
+    HANDLE completion_event;
 
     timeout_ms = INFINITE;
     for (;;)
@@ -247,10 +249,13 @@ static DWORD WINAPI timer_queue_thread_proc(LPVOID p)
         timeout_ms = queue_get_timeout(q);
     }
 
+    completion_event = q->completion_event;
     NtClose(q->event);
     RtlDeleteCriticalSection(&q->cs);
     q->magic = 0;
     RtlFreeHeap(RtlGetProcessHeap(), 0, q);
+    if (completion_event)
+        NtSetEvent(completion_event, NULL);
     RtlpExitThreadFunc(STATUS_SUCCESS);
     return 0;
 }
@@ -292,6 +297,7 @@ NTSTATUS WINAPI RtlCreateTimerQueue(PHANDLE NewTimerQueue)
     RtlInitializeCriticalSection(&q->cs);
     list_init(&q->timers);
     q->quit = FALSE;
+    q->completion_event = NULL;
     q->magic = TIMER_QUEUE_MAGIC;
     status = NtCreateEvent(&q->event, EVENT_ALL_ACCESS, NULL, SynchronizationEvent, FALSE);
     if (status != STATUS_SUCCESS)
@@ -341,6 +347,8 @@ NTSTATUS WINAPI RtlDeleteTimerQueueEx(HANDLE TimerQueue, HANDLE CompletionEvent)
     thread = q->thread;
 
     RtlEnterCriticalSection(&q->cs);
+    if (CompletionEvent != INVALID_HANDLE_VALUE)
+        q->completion_event = CompletionEvent;
     q->quit = TRUE;
     if (list_head(&q->timers))
         /* When the last timer is removed, it will signal the timer thread to
@@ -359,12 +367,8 @@ NTSTATUS WINAPI RtlDeleteTimerQueueEx(HANDLE TimerQueue, HANDLE CompletionEvent)
     }
     else
     {
-        if (CompletionEvent)
-        {
-            DPRINT1("asynchronous return on completion event unimplemented\n");
-            NtWaitForSingleObject(thread, FALSE, NULL);
-            NtSetEvent(CompletionEvent, NULL);
-        }
+        /* The queue thread sets the completion event, if any, when it exits.
+           Waiting here would deadlock when called from a timer callback. */
         status = STATUS_PENDING;
     }
 

@@ -22,19 +22,18 @@
 
 /* INTERNAL DEFINITIONS *******************************************************/
 
-typedef struct _RTLP_HEAP_ENTRY
-{
-    ULONG Size;
-    USHORT Flags;
-    USHORT Unknown1; /* FIXME */
-    ULONG Unknown2; /* FIXME */
-    PVOID Address;
-} RTLP_HEAP_ENTRY, *PRTLP_HEAP_ENTRY;
-
 #define CHECK_PARAM_SIZE(ptr, siz)                                             \
   if((ptr) == NULL || (ptr)->dwSize != (siz))                                  \
   {                                                                            \
     SetLastError(ERROR_INVALID_PARAMETER);                                     \
+    return FALSE;                                                              \
+  }
+
+/* The heap functions answer a wrong size, a missing structure included, with ERROR_BAD_LENGTH */
+#define CHECK_HEAP_PARAM_SIZE(ptr, siz)                                        \
+  if((ptr) == NULL || (ptr)->dwSize != (siz))                                  \
+  {                                                                            \
+    SetLastError(ERROR_BAD_LENGTH);                                            \
     return FALSE;                                                              \
   }
 
@@ -337,7 +336,7 @@ TH32CreateSnapshotSectionInitialize(DWORD dwFlags,
       HeapListEntry->dwSize = sizeof(HEAPLIST32);
       HeapListEntry->th32ProcessID = th32ProcessID;
       HeapListEntry->th32HeapID = (ULONG_PTR)hi->Heaps[i].BaseAddress;
-      HeapListEntry->dwFlags = hi->Heaps[i].Flags;
+      HeapListEntry->dwFlags = (hi->Heaps[i].BaseAddress == HeapDebug->ProcessHeap) ? HF32_DEFAULT : 0;
 
       HeapListEntry++;
     }
@@ -479,6 +478,9 @@ TH32CreateSnapshotSectionInitialize(DWORD dwFlags,
   return Status;
 }
 
+/* The blocks of every heap of a process are listed in one buffer, of which only the part in use is committed */
+#define HEAP_BLOCKS_BUFFER_SIZE 0x4000000
+
 /* PUBLIC FUNCTIONS ***********************************************************/
 
 /*
@@ -486,17 +488,18 @@ TH32CreateSnapshotSectionInitialize(DWORD dwFlags,
  */
 BOOL
 WINAPI
-Heap32First(LPHEAPENTRY32 lphe, DWORD th32ProcessID, DWORD th32HeapID)
+Heap32First(LPHEAPENTRY32 lphe, DWORD th32ProcessID, ULONG_PTR th32HeapID)
 {
   PRTL_DEBUG_INFORMATION DebugInfo;
   PRTL_HEAP_INFORMATION Heap;
-  PRTLP_HEAP_ENTRY Block, LastBlock;
+  PRTL_HEAP_ENTRY Block, LastBlock;
+  BOOL Ret = FALSE;
   ULONG i;
   NTSTATUS Status;
 
-  CHECK_PARAM_SIZE(lphe, sizeof(HEAPENTRY32));
+  CHECK_HEAP_PARAM_SIZE(lphe, sizeof(HEAPENTRY32));
 
-  DebugInfo = RtlCreateQueryDebugBuffer(0,
+  DebugInfo = RtlCreateQueryDebugBuffer(HEAP_BLOCKS_BUFFER_SIZE,
                                         FALSE);
   if (DebugInfo == NULL)
   {
@@ -510,7 +513,8 @@ Heap32First(LPHEAPENTRY32 lphe, DWORD th32ProcessID, DWORD th32HeapID)
 
   if (NT_SUCCESS(Status))
   {
-    Status = STATUS_NO_MORE_FILES;
+    /* A heap that is not in the process fails without an error */
+    Status = STATUS_SUCCESS;
 
     for (i = 0;
          i != DebugInfo->Heaps->NumberOfHeaps;
@@ -520,6 +524,7 @@ Heap32First(LPHEAPENTRY32 lphe, DWORD th32ProcessID, DWORD th32HeapID)
 
       if ((ULONG_PTR)Heap->BaseAddress == th32HeapID)
       {
+        Status = STATUS_NO_MORE_FILES;
         lphe->hHandle = (HANDLE)Heap->BaseAddress;
         lphe->dwAddress = 0;
         lphe->dwBlockSize = 0;
@@ -529,13 +534,13 @@ Heap32First(LPHEAPENTRY32 lphe, DWORD th32ProcessID, DWORD th32HeapID)
         lphe->th32ProcessID = th32ProcessID;
         lphe->th32HeapID = (ULONG_PTR)Heap->BaseAddress;
 
-        Block = (PRTLP_HEAP_ENTRY)Heap->Entries;
+        Block = (PRTL_HEAP_ENTRY)Heap->Entries;
         LastBlock = Block + Heap->NumberOfEntries;
 
         while (Block != LastBlock && (Block->Flags & PROCESS_HEAP_UNCOMMITTED_RANGE))
         {
           lphe->dwResvd++;
-          lphe->dwAddress = (ULONG_PTR)((ULONG_PTR)Block->Address + Heap->EntryOverhead);
+          lphe->dwAddress = (ULONG_PTR)((ULONG_PTR)Block->u.s2.FirstBlock + Heap->EntryOverhead);
           Block++;
         }
 
@@ -551,6 +556,7 @@ Heap32First(LPHEAPENTRY32 lphe, DWORD th32ProcessID, DWORD th32HeapID)
             lphe->dwFlags = LF32_FREE;
 
           Status = STATUS_SUCCESS;
+          Ret = TRUE;
         }
 
         break;
@@ -566,7 +572,7 @@ Heap32First(LPHEAPENTRY32 lphe, DWORD th32ProcessID, DWORD th32HeapID)
     return FALSE;
   }
 
-  return TRUE;
+  return Ret;
 }
 
 
@@ -579,14 +585,15 @@ Heap32Next(LPHEAPENTRY32 lphe)
 {
   PRTL_DEBUG_INFORMATION DebugInfo;
   PRTL_HEAP_INFORMATION Heap;
-  PRTLP_HEAP_ENTRY Block, LastBlock;
+  PRTL_HEAP_ENTRY Block, LastBlock;
   BOOLEAN FoundUncommitted = FALSE;
+  BOOL Ret = FALSE;
   ULONG i;
   NTSTATUS Status;
 
-  CHECK_PARAM_SIZE(lphe, sizeof(HEAPENTRY32));
+  CHECK_HEAP_PARAM_SIZE(lphe, sizeof(HEAPENTRY32));
 
-  DebugInfo = RtlCreateQueryDebugBuffer(0,
+  DebugInfo = RtlCreateQueryDebugBuffer(HEAP_BLOCKS_BUFFER_SIZE,
                                         FALSE);
   if (DebugInfo == NULL)
   {
@@ -600,7 +607,8 @@ Heap32Next(LPHEAPENTRY32 lphe)
 
   if (NT_SUCCESS(Status))
   {
-    Status = STATUS_NO_MORE_FILES;
+    /* A heap that is not in the process fails without an error */
+    Status = STATUS_SUCCESS;
 
     for (i = 0;
          i != DebugInfo->Heaps->NumberOfHeaps;
@@ -610,17 +618,18 @@ Heap32Next(LPHEAPENTRY32 lphe)
 
       if ((ULONG_PTR)Heap->BaseAddress == lphe->th32HeapID)
       {
+        Status = STATUS_NO_MORE_FILES;
         if (++lphe->dwResvd < Heap->NumberOfEntries)
         {
           lphe->dwFlags = 0;
 
-          Block = (PRTLP_HEAP_ENTRY)Heap->Entries + lphe->dwResvd;
-          LastBlock = (PRTLP_HEAP_ENTRY)Heap->Entries + Heap->NumberOfEntries;
+          Block = (PRTL_HEAP_ENTRY)Heap->Entries + lphe->dwResvd;
+          LastBlock = (PRTL_HEAP_ENTRY)Heap->Entries + Heap->NumberOfEntries;
 
           while (Block < LastBlock && (Block->Flags & PROCESS_HEAP_UNCOMMITTED_RANGE))
           {
             lphe->dwResvd++;
-            lphe->dwAddress = (ULONG_PTR)((ULONG_PTR)Block->Address + Heap->EntryOverhead);
+            lphe->dwAddress = (ULONG_PTR)((ULONG_PTR)Block->u.s2.FirstBlock + Heap->EntryOverhead);
             FoundUncommitted = TRUE;
             Block++;
           }
@@ -640,6 +649,7 @@ Heap32Next(LPHEAPENTRY32 lphe)
               lphe->dwFlags = LF32_FREE;
 
             Status = STATUS_SUCCESS;
+            Ret = TRUE;
           }
         }
 
@@ -656,8 +666,7 @@ Heap32Next(LPHEAPENTRY32 lphe)
     return FALSE;
   }
 
-  return TRUE;
-
+  return Ret;
 }
 
 
@@ -673,7 +682,7 @@ Heap32ListFirst(HANDLE hSnapshot, LPHEAPLIST32 lphl)
   SIZE_T ViewSize;
   NTSTATUS Status;
 
-  CHECK_PARAM_SIZE(lphl, sizeof(HEAPLIST32));
+  CHECK_HEAP_PARAM_SIZE(lphl, sizeof(HEAPLIST32));
 
   SOffset.QuadPart = 0;
   ViewSize = 0;
@@ -727,7 +736,7 @@ Heap32ListNext(HANDLE hSnapshot, LPHEAPLIST32 lphl)
   SIZE_T ViewSize;
   NTSTATUS Status;
 
-  CHECK_PARAM_SIZE(lphl, sizeof(HEAPLIST32));
+  CHECK_HEAP_PARAM_SIZE(lphl, sizeof(HEAPLIST32));
 
   SOffset.QuadPart = 0;
   ViewSize = 0;
@@ -1277,7 +1286,7 @@ CreateToolhelp32Snapshot(DWORD dwFlags, DWORD th32ProcessID)
   if(!NT_SUCCESS(Status))
   {
     BaseSetLastNTError(Status);
-    return NULL;
+    return INVALID_HANDLE_VALUE;
   }
 
   /*
@@ -1301,7 +1310,7 @@ CreateToolhelp32Snapshot(DWORD dwFlags, DWORD th32ProcessID)
   if(!NT_SUCCESS(Status))
   {
     BaseSetLastNTError(Status);
-    return NULL;
+    return INVALID_HANDLE_VALUE;
   }
 
   return hSnapShotSection;

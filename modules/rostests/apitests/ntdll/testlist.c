@@ -32,6 +32,7 @@ extern void func_EmptyPxeProtect(void);
 extern void func_LdrEnumResources(void);
 extern void func_LdrFindResource_U(void);
 extern void func_LdrLoadDll(void);
+extern void func_LdrShutdownThread(void);
 extern void func_load_notifications(void);
 extern void func_LpcCallbackRequest(void);
 extern void func_NtAcceptConnectPort(void);
@@ -105,12 +106,15 @@ extern void func_RtlAllocateHeap(void);
 extern void func_RtlBitmapApi(void);
 extern void func_RtlCaptureContext(void);
 extern void func_RtlComputePrivatizedDllName_U(void);
+extern void func_RtlConditionVariable(void);
 extern void func_RtlCopyMappedMemory(void);
 extern void func_RtlCriticalSection(void);
+extern void func_RtlCriticalSectionRace(void);
 extern void func_RtlDebugInformation(void);
 extern void func_RtlDeleteAce(void);
 extern void func_RtlDetermineDosPathNameType(void);
 extern void func_RtlDosApplyFileIsolationRedirection_Ustr(void);
+extern void func_RtlDosApplyFileIsolationRedirection_LoadFrom(void);
 extern void func_RtlDoesFileExists(void);
 extern void func_RtlDosPathNameToNtPathName_U(void);
 extern void func_RtlDosSearchPath_U(void);
@@ -119,6 +123,7 @@ extern void func_RtlFailFast(void);
 extern void func_RtlFirstFreeAce(void);
 extern void func_RtlFindMessage(void);
 extern void func_RtlGenerate8dot3Name(void);
+extern void func_RtlGenericTable(void);
 extern void func_RtlGetFullPathName_U(void);
 extern void func_RtlGetFullPathName_Ustr(void);
 extern void func_RtlGetFullPathName_UstrEx(void);
@@ -127,9 +132,11 @@ extern void func_RtlGetLengthWithoutTrailingPathSeperators(void);
 extern void func_RtlGetLongestNtPathLength(void);
 extern void func_RtlGetNtProductType(void);
 extern void func_RtlGetProcessHeaps(void);
+extern void func_RtlGrowableFunctionTable(void);
 extern void func_RtlGetProductInfo(void);
 extern void func_RtlGetUnloadEventTrace(void);
 extern void func_RtlHandle(void);
+extern void func_RtlHeapTailCheck(void);
 extern void func_RtlImageDirectoryEntryToData(void);
 extern void func_RtlImageRvaToVa(void);
 extern void func_RtlIntSafe(void);
@@ -144,22 +151,30 @@ extern void func_RtlpApplyLengthFunction(void);
 extern void func_RtlpEnsureBufferSize(void);
 extern void func_RtlQueryEnvironmentVariable(void);
 extern void func_RtlQueryEnvironmentVariable_U(void);
+extern void func_RtlQueryRegistryValues(void);
+extern void func_RtlQueryPerformanceCounter(void);
 extern void func_RtlQueryTimeZoneInformation(void);
 extern void func_RtlReAllocateHeap(void);
 extern void func_RtlRemovePrivileges(void);
 extern void func_RtlSRWLock(void);
+extern void func_RtlSRWLockStress(void);
+extern void func_RtlSRWLockThroughput(void);
+extern void func_RtlSRWLockWait(void);
 extern void func_RtlUnhandledExceptionFilter(void);
 extern void func_RtlUnicodeStringToAnsiString(void);
 extern void func_RtlUnicodeStringToCountedOemString(void);
 extern void func_RtlUnicodeToOemN(void);
 extern void func_RtlUnwind(void);
+extern void func_RtlUnwindEx(void);
 extern void func_RtlUpcaseUnicodeStringToCountedOemString(void);
 extern void func_RtlValidateUnicodeString(void);
+extern void func_RtlWaitOnAddress(void);
 extern void func_RtlVirtualUnwind(void);
 extern void func_RtlxUnicodeStringToAnsiSize(void);
 extern void func_RtlxUnicodeStringToOemSize(void);
 extern void func_StackOverflow(void);
 extern void func_SystemCallStubs(void);
+extern void func_SystemDllTls(void);
 extern void func_TimerResolution(void);
 extern void func_UserModeException(void);
 extern void func_StackOverflowDispatch(void);
@@ -197,6 +212,7 @@ const struct test winetest_testlist[] =
     { "LdrEnumResources",               func_LdrEnumResources },
     { "LdrFindResource_U",              func_LdrFindResource_U },
     { "LdrLoadDll",                     func_LdrLoadDll },
+    { "LdrShutdownThread",              func_LdrShutdownThread },
     { "load_notifications",             func_load_notifications },
     { "LpcCallbackRequest",             func_LpcCallbackRequest },
     { "NtAcceptConnectPort",            func_NtAcceptConnectPort },
@@ -269,11 +285,15 @@ const struct test winetest_testlist[] =
     { "RtlAllocateHeap",                func_RtlAllocateHeap },
     { "RtlBitmapApi",                   func_RtlBitmapApi },
     { "RtlComputePrivatizedDllName_U",  func_RtlComputePrivatizedDllName_U },
+    { "RtlConditionVariable",           func_RtlConditionVariable },
     { "RtlCopyMappedMemory",            func_RtlCopyMappedMemory },
     { "RtlCriticalSection",             func_RtlCriticalSection },
+    { "RtlCriticalSectionRace",         func_RtlCriticalSectionRace },
     { "RtlDebugInformation",            func_RtlDebugInformation },
     { "RtlDeleteAce",                   func_RtlDeleteAce },
     { "RtlDetermineDosPathNameType",    func_RtlDetermineDosPathNameType },
+    { "RtlDosApplyFileIsolationRedirection_LoadFrom",
+      func_RtlDosApplyFileIsolationRedirection_LoadFrom },
     { "RtlDosApplyFileIsolationRedirection_Ustr", func_RtlDosApplyFileIsolationRedirection_Ustr },
     { "RtlDoesFileExists",              func_RtlDoesFileExists },
     { "RtlDosPathNameToNtPathName_U",   func_RtlDosPathNameToNtPathName_U },
@@ -283,6 +303,7 @@ const struct test winetest_testlist[] =
     { "RtlFirstFreeAce",                func_RtlFirstFreeAce },
     { "RtlFindMessage",                 func_RtlFindMessage },
     { "RtlGenerate8dot3Name",           func_RtlGenerate8dot3Name },
+    { "RtlGenericTable",                func_RtlGenericTable },
     { "RtlGetFullPathName_U",           func_RtlGetFullPathName_U },
     { "RtlGetFullPathName_Ustr",        func_RtlGetFullPathName_Ustr },
     { "RtlGetFullPathName_UstrEx",      func_RtlGetFullPathName_UstrEx },
@@ -291,9 +312,11 @@ const struct test winetest_testlist[] =
     { "RtlGetLongestNtPathLength",      func_RtlGetLongestNtPathLength },
     { "RtlGetNtProductType",            func_RtlGetNtProductType },
     { "RtlGetProcessHeaps",             func_RtlGetProcessHeaps },
+    { "RtlGrowableFunctionTable",       func_RtlGrowableFunctionTable },
     { "RtlGetProductInfo",              func_RtlGetProductInfo },
     { "RtlGetUnloadEventTrace",         func_RtlGetUnloadEventTrace },
     { "RtlHandle",                      func_RtlHandle },
+    { "RtlHeapTailCheck",               func_RtlHeapTailCheck },
     { "RtlImageDirectoryEntryToData",   func_RtlImageDirectoryEntryToData },
     { "RtlImageRvaToVa",                func_RtlImageRvaToVa },
     { "RtlIntSafe",                     func_RtlIntSafe },
@@ -308,10 +331,15 @@ const struct test winetest_testlist[] =
     { "RtlpEnsureBufferSize",           func_RtlpEnsureBufferSize },
     { "RtlQueryEnvironmentVariable",    func_RtlQueryEnvironmentVariable },
     { "RtlQueryEnvironmentVariable_U",  func_RtlQueryEnvironmentVariable_U },
+    { "RtlQueryRegistryValues",         func_RtlQueryRegistryValues },
+    { "RtlQueryPerformanceCounter",     func_RtlQueryPerformanceCounter },
     { "RtlQueryTimeZoneInformation",    func_RtlQueryTimeZoneInformation },
     { "RtlReAllocateHeap",              func_RtlReAllocateHeap },
     { "RtlRemovePrivileges",            func_RtlRemovePrivileges },
     { "RtlSRWLock",                     func_RtlSRWLock },
+    { "RtlSRWLockStress",               func_RtlSRWLockStress },
+    { "RtlSRWLockThroughput",          func_RtlSRWLockThroughput },
+    { "RtlSRWLockWait",                 func_RtlSRWLockWait },
     { "RtlUnhandledExceptionFilter",    func_RtlUnhandledExceptionFilter },
     { "RtlUnicodeStringToAnsiSize",     func_RtlxUnicodeStringToAnsiSize }, /* For some reason, starting test name with Rtlx hides it */
     { "RtlUnicodeStringToAnsiString",   func_RtlUnicodeStringToAnsiString },
@@ -320,8 +348,10 @@ const struct test winetest_testlist[] =
     { "RtlUnicodeToOemN",               func_RtlUnicodeToOemN },
     { "RtlUpcaseUnicodeStringToCountedOemString", func_RtlUpcaseUnicodeStringToCountedOemString },
     { "RtlValidateUnicodeString",       func_RtlValidateUnicodeString },
+    { "RtlWaitOnAddress",               func_RtlWaitOnAddress },
     { "StackOverflow",                  func_StackOverflow },
     { "SystemCallStubs",                func_SystemCallStubs },
+    { "SystemDllTls",                   func_SystemDllTls },
     { "TimerResolution",                func_TimerResolution },
     { "UserModeException",              func_UserModeException },
     { "StackOverflowDispatch",          func_StackOverflowDispatch },
@@ -330,6 +360,7 @@ const struct test winetest_testlist[] =
 #endif
 #ifdef _M_AMD64
     { "RtlCaptureContext",              func_RtlCaptureContext },
+    { "RtlUnwindEx",                    func_RtlUnwindEx },
     { "RtlVirtualUnwind",               func_RtlVirtualUnwind },
 #endif
 

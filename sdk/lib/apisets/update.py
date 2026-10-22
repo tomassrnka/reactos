@@ -7,6 +7,7 @@ COPYRIGHT:   Copyright 2024 Mark Jansen <mark.jansen@reactos.org>
 
 from pathlib import Path
 from dataclasses import dataclass, field
+import re
 import sys
 import json
 
@@ -15,11 +16,60 @@ REDIRECT_HOSTS = {
     'kernelbase.dll': 'kernel32.dll',
     'kernel.appcore.dll': 'kernel32.dll',
     'combase.dll': 'ole32.dll',
-    'ucrtbase.dll': 'msvcrt.dll',
+    'sechost.dll': 'advapi32.dll',
+    'cryptsp.dll': 'advapi32.dll',
+    'dbgcore.dll': 'dbghelp.dll',
     'shcore.dll': 'shell32.dll',
     'winmmbase.dll': 'winmm.dll',
     'gdi32full.dll': 'gdi32.dll'
 }
+
+# The module that hosts these contracts on Windows is not one we have, or the module we send them to by default does not
+# have their functions. They go to the module that has them (and exports them at the export level of the build). A
+# family is the contract name without its trailing minor version, because Windows ignores the minor version.
+RETARGET_HOSTS = {
+    'advapi32.dll': (
+        'api-ms-win-core-localregistry-l1-1',
+        'api-ms-win-core-registry-l1-1',
+        'api-ms-win-eventing-classicprovider-l1-1',
+        'api-ms-win-eventing-consumer-l1-1',
+        'api-ms-win-eventing-controller-l1-1',
+        'api-ms-win-eventing-obsolete-l1-1',
+        'api-ms-win-eventing-provider-l1-1',
+        'api-ms-win-security-base-l1-1',
+    ),
+    'shell32.dll': (
+        'api-ms-win-shell-namespace-l1-1',
+        'ext-ms-win-shell32-shellfolders-l1-1',
+    ),
+    'shlwapi.dll': (
+        'api-ms-win-core-shlwapi-legacy-l1-1',
+        'api-ms-win-core-shlwapi-obsolete-l1-1',
+        'api-ms-win-core-url-l1-1',
+        'api-ms-win-shcore-registry-l1-1',
+        'api-ms-win-shcore-stream-l1-1',
+        'api-ms-win-shcore-unicodeansi-l1-1',
+    ),
+    'user32.dll': (
+        'api-ms-win-core-string-l2-1',
+        'api-ms-win-core-stringansi-l1-1',
+        'api-ms-win-core-stringloader-l1-1',
+    ),
+    'usp10.dll': (
+        'ext-ms-win-usp10-l1-1',
+    ),
+    'version.dll': (
+        'api-ms-win-core-version-l1-1',
+        'api-ms-win-core-versionansi-l1-1',
+    ),
+    'winmm.dll': (
+        'api-ms-win-mm-time-l1-1',
+    ),
+}
+RETARGET_BY_FAMILY = {family: module for module, families in RETARGET_HOSTS.items() for family in families}
+
+def contract_family(name):
+    return re.sub(r'-\d+$', '', name.lower())
 
 OUTPUT_HEADER = """/*
  * PROJECT:     ReactOS apisets
@@ -77,9 +127,13 @@ class Apiset:
         else:
             # Check to see if there is any dll we want to swap (kernelbase -> kernel32)
             replace = REDIRECT_HOSTS.get(host.lower(), None)
+            # combase exists and is the only module with the WinRT functions; keep it for those
+            if host.lower() == 'combase.dll' and '-winrt-' in name.lower():
+                replace = None
             if replace:
                 postfix = ' // ' + host
                 host = replace
+            host = RETARGET_BY_FAMILY.get(contract_family(name), host)
         return f'    {prefix}{{ RTL_CONSTANT_STRING(L"{name}"), RTL_CONSTANT_STRING(L"{host}"), {version_str} }},{postfix}'
 
 

@@ -51,6 +51,8 @@ typedef struct _DYNAMIC_FUNCTION_TABLE
     PWCHAR OutOfProcessCallbackDll;
     FUNCTION_TABLE_TYPE Type;
     ULONG EntryCount;
+    ULONG MaximumEntryCount;
+    BOOLEAN Growable;
 #if (NTDDI_VERSION <= NTDDI_WIN10)
     // FIXME: RTL_BALANCED_NODE is defined in ntdef.h, it's impossible to get included here due to precompiled header
     //RTL_BALANCED_NODE TreeNode;
@@ -139,6 +141,8 @@ RtlAddFunctionTable(
     dynamicTable->FunctionTable = FunctionTable;
     dynamicTable->EntryCount = EntryCount;
     dynamicTable->BaseAddress = BaseAddress;
+    dynamicTable->MaximumEntryCount = 0;
+    dynamicTable->Growable = FALSE;
     dynamicTable->Callback = NULL;
     dynamicTable->Context = NULL;
     dynamicTable->Type = RF_UNSORTED;
@@ -207,6 +211,8 @@ RtlInstallFunctionTableCallback(
     /* Initialize fields */
     dynamicTable->FunctionTable = (PRUNTIME_FUNCTION)TableIdentifier;
     dynamicTable->EntryCount = 0;
+    dynamicTable->MaximumEntryCount = 0;
+    dynamicTable->Growable = FALSE;
     dynamicTable->BaseAddress = BaseAddress;
     dynamicTable->Callback = Callback;
     dynamicTable->Context = Context;
@@ -268,6 +274,116 @@ RtlDeleteFunctionTable(
     }
 
     return removed;
+}
+
+/* The growable table of a JIT compiler: the entries are relative to RangeBase, only the first EntryCount are live */
+DWORD
+NTAPI
+RtlAddGrowableFunctionTable(
+    _Out_ PVOID *DynamicTable,
+    _In_ PRUNTIME_FUNCTION FunctionTable,
+    _In_ DWORD EntryCount,
+    _In_ DWORD MaximumEntryCount,
+    _In_ ULONG_PTR RangeBase,
+    _In_ ULONG_PTR RangeEnd)
+{
+    PDYNAMIC_FUNCTION_TABLE dynamicTable;
+
+    if ((EntryCount > MaximumEntryCount) || (RangeEnd <= RangeBase))
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    dynamicTable = RtlpAllocateMemory(sizeof(*dynamicTable), TAG_RTLDYNFNTBL);
+    if (dynamicTable == NULL)
+    {
+        DPRINT1("Failed to allocate dynamic function table\n");
+        return STATUS_NO_MEMORY;
+    }
+
+    dynamicTable->FunctionTable = FunctionTable;
+    dynamicTable->EntryCount = EntryCount;
+    dynamicTable->MaximumEntryCount = MaximumEntryCount;
+    dynamicTable->Growable = TRUE;
+    dynamicTable->BaseAddress = RangeBase;
+    dynamicTable->MinimumAddress = RangeBase;
+    dynamicTable->MaximumAddress = RangeEnd;
+    dynamicTable->Callback = NULL;
+    dynamicTable->Context = NULL;
+    dynamicTable->OutOfProcessCallbackDll = NULL;
+    dynamicTable->Type = RF_SORTED;
+
+    RtlpInsertDynamicFunctionTable(dynamicTable);
+
+    *DynamicTable = dynamicTable;
+    return STATUS_SUCCESS;
+}
+
+static
+PDYNAMIC_FUNCTION_TABLE
+RtlpFindGrowableTable(
+    _In_ PVOID DynamicTable)
+{
+    PLIST_ENTRY listLink;
+
+    for (listLink = RtlpDynamicFunctionTableList.Flink;
+         listLink != &RtlpDynamicFunctionTableList;
+         listLink = listLink->Flink)
+    {
+        if ((PVOID)listLink == DynamicTable)
+        {
+            PDYNAMIC_FUNCTION_TABLE dynamicTable;
+
+            dynamicTable = CONTAINING_RECORD(listLink, DYNAMIC_FUNCTION_TABLE, ListEntry);
+            return dynamicTable->Growable ? dynamicTable : NULL;
+        }
+    }
+
+    return NULL;
+}
+
+VOID
+NTAPI
+RtlGrowFunctionTable(
+    _In_ PVOID DynamicTable,
+    _In_ DWORD NewEntryCount)
+{
+    PDYNAMIC_FUNCTION_TABLE dynamicTable;
+
+    AcquireDynamicFunctionTableLockExclusive();
+
+    dynamicTable = RtlpFindGrowableTable(DynamicTable);
+    if ((dynamicTable != NULL) &&
+        (NewEntryCount > dynamicTable->EntryCount) &&
+        (NewEntryCount <= dynamicTable->MaximumEntryCount))
+    {
+        dynamicTable->EntryCount = NewEntryCount;
+    }
+
+    ReleaseDynamicFunctionTableLockExclusive();
+}
+
+VOID
+NTAPI
+RtlDeleteGrowableFunctionTable(
+    _In_ PVOID DynamicTable)
+{
+    PDYNAMIC_FUNCTION_TABLE dynamicTable;
+
+    AcquireDynamicFunctionTableLockExclusive();
+
+    dynamicTable = RtlpFindGrowableTable(DynamicTable);
+    if (dynamicTable != NULL)
+    {
+        RemoveEntryList(&dynamicTable->ListEntry);
+    }
+
+    ReleaseDynamicFunctionTableLockExclusive();
+
+    if (dynamicTable != NULL)
+    {
+        RtlpFreeMemory(dynamicTable, TAG_RTLDYNFNTBL);
+    }
 }
 
 PRUNTIME_FUNCTION

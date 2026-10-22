@@ -22,6 +22,7 @@ Author:
 //
 // Dependencies
 //
+#include <stdarg.h>
 #include <umtypes.h>
 #include <ntnls.h>
 #include <rtltypes.h>
@@ -3948,6 +3949,21 @@ RtlFindMessage(
 );
 
 NTSYSAPI
+NTSTATUS
+NTAPI
+RtlFormatMessage(
+    _In_ PWSTR Message,
+    _In_ ULONG MaxWidth,
+    _In_ BOOLEAN IgnoreInserts,
+    _In_ BOOLEAN ArgumentsAreAnsi,
+    _In_ BOOLEAN ArgumentsAreAnArray,
+    _In_ va_list *Arguments,
+    _Out_writes_bytes_(BufferSize) PWSTR Buffer,
+    _In_ ULONG BufferSize,
+    _Out_opt_ PULONG ReturnLength
+);
+
+NTSYSAPI
 ULONG
 NTAPI
 RtlGetNtGlobalFlags(VOID);
@@ -4754,6 +4770,27 @@ RtlSleepConditionVariableSRW(
     _Inout_ PRTL_SRWLOCK SRWLock,
     _In_opt_ PLARGE_INTEGER TimeOut,
     _In_ ULONG Flags);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlWaitOnAddress(
+    _In_ const volatile VOID *Address,
+    _In_ PVOID CompareAddress,
+    _In_ SIZE_T AddressSize,
+    _In_opt_ PLARGE_INTEGER Timeout);
+
+NTSYSAPI
+VOID
+NTAPI
+RtlWakeAddressAll(
+    _In_ const volatile VOID *Address);
+
+NTSYSAPI
+VOID
+NTAPI
+RtlWakeAddressSingle(
+    _In_ const volatile VOID *Address);
 #endif
 
 //
@@ -5241,6 +5278,24 @@ RtlTryAcquireSRWLockShared(PRTL_SRWLOCK SRWLock);
 BOOLEAN
 NTAPI
 RtlTryAcquireSRWLockExclusive(PRTL_SRWLOCK SRWLock);
+
+NTSYSAPI
+BOOL
+NTAPI
+RtlQueryPerformanceCounter(
+    _Out_ PLARGE_INTEGER PerformanceCounter);
+
+NTSYSAPI
+BOOL
+NTAPI
+RtlQueryPerformanceFrequency(
+    _Out_ PLARGE_INTEGER PerformanceFrequency);
+
+NTSYSAPI
+BOOL
+NTAPI
+RtlQueryUnbiasedInterruptTime(
+    _Out_ PULONGLONG UnbiasedTime);
 
 #endif /* Win7 or ReactOS Ntdll build */
 
