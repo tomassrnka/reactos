@@ -50,8 +50,9 @@ Test_strlen(PFN_STRLEN pstrlen)
     len = pstrlen(teststr + 4);
     eflags2 = __readeflags();
     MemoryBarrier();
-    ok((eflags2 & EFLAGS_DF) != 0, "Direction flag in ELFAGS was changed: 0x%Ix -> 0x%Ix.\n", eflags | EFLAGS_DF, eflags2);
+    /* Clear DF before calling ok(), its string functions break with DF set */
     __writeeflags(eflags);
+    ok((eflags2 & EFLAGS_DF) != 0, "Direction flag in ELFAGS was changed: 0x%Ix -> 0x%Ix.\n", eflags | EFLAGS_DF, eflags2);
 
     /* Only test this for the exported versions, intrinsics might do it
        differently. It's up to us to not do fishy stuff! Also crtdll does

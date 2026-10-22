@@ -98,6 +98,240 @@ Test_ThreadStackLimits(void)
     RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
 }
 
+static
+PSYSTEM_PROCESS_INFORMATION
+FindProcessEntry(
+    _In_ PVOID Buffer,
+    _In_ HANDLE ProcessId)
+{
+    PSYSTEM_PROCESS_INFORMATION Entry = Buffer;
+
+    for (;;)
+    {
+        if (Entry->UniqueProcessId == ProcessId)
+            return Entry;
+        if (!Entry->NextEntryOffset)
+            return NULL;
+        Entry = (PSYSTEM_PROCESS_INFORMATION)((PUCHAR)Entry + Entry->NextEntryOffset);
+    }
+}
+
+static
+void
+Test_ProcessImageNames(void)
+{
+    NTSTATUS Status;
+    PUCHAR Buffer, End;
+    SIZE_T BufferSize = 0x40000;
+    ULONG Length, Entries = 0;
+    PSYSTEM_PROCESS_INFORMATION Entry, Self;
+    WCHAR Path[MAX_PATH];
+    PWCHAR Name;
+
+    Buffer = VirtualAlloc(NULL, BufferSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!Buffer)
+    {
+        skip("VirtualAlloc failed\n");
+        return;
+    }
+    End = Buffer + BufferSize;
+
+    /* Garbage in the output buffer, including where the image name headers
+     * will go, must not influence the names the kernel composes. */
+    memset(Buffer, 0xA5, BufferSize);
+    Status = NtQuerySystemInformation(SystemProcessInformation, Buffer, BufferSize, &Length);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+    {
+        VirtualFree(Buffer, 0, MEM_RELEASE);
+        return;
+    }
+
+    Entry = (PSYSTEM_PROCESS_INFORMATION)Buffer;
+    for (;;)
+    {
+        Entries++;
+        ok((PUCHAR)Entry >= Buffer && (PUCHAR)(Entry + 1) <= End, "Entry %p out of buffer\n", Entry);
+        ok(Entry->ImageName.Length % sizeof(WCHAR) == 0, "Length %u is odd\n", Entry->ImageName.Length);
+        ok(Entry->ImageName.Length <= Entry->ImageName.MaximumLength,
+           "Length %u > MaximumLength %u\n", Entry->ImageName.Length, Entry->ImageName.MaximumLength);
+        if (Entry->ImageName.Buffer)
+        {
+            ok((PUCHAR)Entry->ImageName.Buffer >= (PUCHAR)(Entry + 1) &&
+               (PUCHAR)Entry->ImageName.Buffer + Entry->ImageName.MaximumLength <= End,
+               "Name buffer %p (%u) outside the output buffer\n",
+               Entry->ImageName.Buffer, Entry->ImageName.MaximumLength);
+        }
+        else
+        {
+            ok(Entry->ImageName.Length == 0 && Entry->ImageName.MaximumLength == 0,
+               "NULL name with lengths %u/%u\n",
+               Entry->ImageName.Length, Entry->ImageName.MaximumLength);
+        }
+        if (!Entry->NextEntryOffset)
+            break;
+        Entry = (PSYSTEM_PROCESS_INFORMATION)((PUCHAR)Entry + Entry->NextEntryOffset);
+    }
+    ok(Entries > 1, "Only %lu entries\n", Entries);
+
+    /* This process: the name comes from the image section */
+    Self = FindProcessEntry(Buffer, (HANDLE)(ULONG_PTR)GetCurrentProcessId());
+    ok(Self != NULL, "Own process not found\n");
+    if (Self && GetModuleFileNameW(NULL, Path, RTL_NUMBER_OF(Path)))
+    {
+        Name = wcsrchr(Path, L'\\');
+        Name = Name ? Name + 1 : Path;
+        ok(Self->ImageName.Length == wcslen(Name) * sizeof(WCHAR) &&
+           Self->ImageName.Buffer &&
+           !_wcsnicmp(Self->ImageName.Buffer, Name, Self->ImageName.Length / sizeof(WCHAR)),
+           "Own name is '%.*ls', expected '%ls'\n",
+           Self->ImageName.Length / sizeof(WCHAR), Self->ImageName.Buffer, Name);
+    }
+
+    /* The System process has no image section: its name is converted from
+     * EPROCESS::ImageFileName in the kernel. */
+    Entry = FindProcessEntry(Buffer, (HANDLE)(ULONG_PTR)4);
+    if (Entry)
+    {
+        ok(Entry->ImageName.Length == 6 * sizeof(WCHAR) &&
+           Entry->ImageName.Buffer &&
+           !_wcsnicmp(Entry->ImageName.Buffer, L"System", 6),
+           "System name is '%.*ls' (%u)\n",
+           Entry->ImageName.Length / sizeof(WCHAR), Entry->ImageName.Buffer, Entry->ImageName.Length);
+    }
+
+    /* A buffer that is too short fails cleanly and never writes past its
+     * end: put it right in front of an inaccessible page. */
+    {
+        ULONG Old;
+        PUCHAR Guard = Buffer + BufferSize - 0x1000;
+
+        if (Length > 16 && Length - 8 <= BufferSize - 0x1000 &&
+            VirtualProtect(Guard, 0x1000, PAGE_NOACCESS, &Old))
+        {
+            Status = NtQuerySystemInformation(SystemProcessInformation,
+                                              Guard - (Length - 8), Length - 8, &Length);
+            ok_hex(Status, STATUS_INFO_LENGTH_MISMATCH);
+            VirtualProtect(Guard, 0x1000, Old, &Old);
+        }
+    }
+
+    VirtualFree(Buffer, 0, MEM_RELEASE);
+}
+
+typedef struct _FLIP_CONTEXT
+{
+    PVOID Address;
+    volatile LONG Stop;
+} FLIP_CONTEXT;
+
+static
+DWORD
+WINAPI
+FlipThread(PVOID Param)
+{
+    FLIP_CONTEXT *Flip = Param;
+    DWORD Old;
+
+    while (!Flip->Stop)
+    {
+        VirtualProtect(Flip->Address, 0x1000, PAGE_NOACCESS, &Old);
+        Sleep(1);
+        VirtualProtect(Flip->Address, 0x1000, PAGE_READWRITE, &Old);
+        Sleep(1);
+    }
+    return 0;
+}
+
+static
+DWORD
+WINAPI
+NopThread(PVOID Param)
+{
+    return 0;
+}
+
+static
+void
+Test_FaultReleasesProcessLock(void)
+{
+    NTSTATUS Status;
+    PUCHAR Buffer, Tail;
+    ULONG Needed, Length, Attempt, Faults = 0, Old;
+    HANDLE Flipper, Thread;
+    FLIP_CONTEXT Flip;
+    DWORD Wait, Deadline;
+
+    Status = NtQuerySystemInformation(SystemProcessInformation, NULL, 0, &Needed);
+    ok_hex(Status, STATUS_INFO_LENGTH_MISMATCH);
+    Needed = (Needed + 0x1000) & ~0xFFF;
+
+    /* The buffer ends in a page the flipper thread keeps making
+     * inaccessible and accessible again. The kernel touches the whole
+     * buffer when it starts, so most calls fail before any lock is taken;
+     * a few are preempted later, with the entry for the newest process,
+     * which is normally this one, half written and its lock held. */
+    Buffer = VirtualAlloc(NULL, Needed + 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!Buffer)
+    {
+        skip("VirtualAlloc failed\n");
+        return;
+    }
+    Tail = Buffer + Needed - 0x1000;
+
+    Flip.Address = Tail;
+    Flip.Stop = 0;
+    Flipper = CreateThread(NULL, 0, FlipThread, &Flip, 0, NULL);
+    if (!Flipper)
+    {
+        skip("CreateThread failed\n");
+        VirtualFree(Buffer, 0, MEM_RELEASE);
+        return;
+    }
+    SetThreadPriority(Flipper, THREAD_PRIORITY_TIME_CRITICAL);
+
+    Deadline = GetTickCount() + 5000;
+    for (Attempt = 0; (LONG)(Deadline - GetTickCount()) > 0; Attempt++)
+    {
+        Status = NtQuerySystemInformation(SystemProcessInformation, Buffer, Needed, &Length);
+        if (Status == STATUS_ACCESS_VIOLATION)
+            Faults++;
+        else if (Status != STATUS_SUCCESS && Status != STATUS_INFO_LENGTH_MISMATCH)
+            ok(0, "Unexpected status %08lx\n", Status);
+    }
+
+    Flip.Stop = 1;
+    WaitForSingleObject(Flipper, INFINITE);
+    CloseHandle(Flipper);
+    VirtualProtect(Tail, 0x1000, PAGE_READWRITE, &Old);
+
+    trace("%lu faulting calls out of %lu\n", Faults, Attempt);
+    if (!Faults)
+    {
+        skip("Could not make a call fault\n");
+    }
+    else
+    {
+        /* The fault is reported, the caller is still usable... */
+        Status = NtQuerySystemInformation(SystemProcessInformation, Buffer, Needed, &Length);
+        ok(Status == STATUS_SUCCESS || Status == STATUS_INFO_LENGTH_MISMATCH,
+           "Status %08lx after the faults\n", Status);
+
+        /* ...and no process lock is left held: creating a thread takes the
+         * lock of this process exclusively and would wait forever. */
+        Thread = CreateThread(NULL, 0, NopThread, NULL, 0, NULL);
+        ok(Thread != NULL, "CreateThread failed after the faults: %lu\n", GetLastError());
+        if (Thread)
+        {
+            Wait = WaitForSingleObject(Thread, 10000);
+            ok_dec(Wait, WAIT_OBJECT_0);
+            CloseHandle(Thread);
+        }
+    }
+
+    VirtualFree(Buffer, 0, MEM_RELEASE);
+}
+
 START_TEST(NtQuerySystemInformation)
 {
     NTSTATUS Status;
@@ -109,4 +343,6 @@ START_TEST(NtQuerySystemInformation)
     ok_hex(Status, STATUS_INVALID_INFO_CLASS);
 
     Test_ThreadStackLimits();
+    Test_ProcessImageNames();
+    Test_FaultReleasesProcessLock();
 }

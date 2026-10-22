@@ -403,7 +403,8 @@ GetSystemVersionString(OUT PWSTR pwszzVersion,
         /* String for Safe Mode */
         Status = RtlStringCchPrintfW(pwszzVersion,
                                      cchDest,
-                                     L"ReactOS Version %S %wZ (NT %u.%u Build %u%s)\n",
+                                     L"%S (Version %S) %wZ (NT %u.%u Build %u%s)\n",
+                                     NITRO_TITLE_STR,
                                      KERNEL_VERSION_STR,
                                      &BuildLabString,
                                      SharedUserData->NtMajorVersion,
@@ -443,9 +444,10 @@ GetSystemVersionString(OUT PWSTR pwszzVersion,
         /* Multi-string for Normal Mode */
         Status = RtlStringCchPrintfW(pwszzVersion,
                                      cchDest,
-                                     L"ReactOS Version %S\n"
-                                     L"Build %wZ\n"
+                                     L"%S\n"
+                                     L"Version %S Build %wZ\n"
                                      L"Reporting NT %u.%u (Build %u%s)\n",
+                                     NITRO_TITLE_STR,
                                      KERNEL_VERSION_STR,
                                      &BuildLabString,
                                      SharedUserData->NtMajorVersion,
@@ -476,7 +478,8 @@ GetSystemVersionString(OUT PWSTR pwszzVersion,
         /* Fall-back string */
         Status = RtlStringCchPrintfW(pwszzVersion,
                                      cchDest,
-                                     L"ReactOS Version %S %wZ\n",
+                                     L"%S (Version %S) %wZ\n",
+                                     NITRO_TITLE_STR,
                                      KERNEL_VERSION_STR,
                                      &BuildLabString);
         if (!NT_SUCCESS(Status))

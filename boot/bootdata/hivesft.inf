@@ -598,7 +598,7 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion","SoftwareType",2,"System"
 ; Auto-Execute (AE) Debugger: none by default, as on Windows 7; the crash dialog offers Debug only when one is set
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\AeDebug","UserDebuggerHotKey",0x00010001,0x00000000
 
-; Local crash dumps of unhandled exceptions (OrielOS writes them by default)
+; Local crash dumps of unhandled exceptions (written by default in this build)
 HKLM,"SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps",,0x00000010
 
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Accessibility",,0x00000012

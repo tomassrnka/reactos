@@ -110,6 +110,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ke/KeIrql.c
     ntos_ke/KeMutex.c
     ntos_ke/KePriority.c
+    ntos_ke/KeProfile.c
     ntos_ke/KeProcessor.c
     ntos_ke/KeQpc.c
     ntos_ke/KeSpinLock.c
@@ -134,6 +135,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ob/ObWait.c
     ntos_ps/PsNotify.c
     ntos_ps/PsQuota.c
+    ntos_ps/PsQuotaLimited.c
     ntos_se/SeAutoInherit.c
     ntos_se/SeHelpers.c
     ntos_se/SeInheritance.c
@@ -194,6 +196,7 @@ list(APPEND KMTEST_SOURCE
     kernel32/FindFile_user.c
     ntos_cc/CcCopyRead_user.c
     ntos_cc/CcCopyWrite_user.c
+    ntos_cc/CcZeroData_user.c
     ntos_cc/CcLazyWriteDelete_user.c
     ntos_cc/CcMapData_user.c
     ntos_cc/CcPinMappedData_user.c
@@ -205,6 +208,7 @@ list(APPEND KMTEST_SOURCE
     ntos_io/IoReadWrite_user.c
     ntos_kd/NtSystemDebugControl.c
     ntos_ke/KeSystemCall32_user.c
+    ntos_ke/KeProfile_user.c
     ntos_ke/KeTrapFrame/KeTrapFrame_user.c
     ntos_mm/MmMapLockedPagesSpecifyCache_user.c
     ntos_mm/MmSpecialPool_user.c
@@ -252,6 +256,7 @@ add_dependencies(kmtest_drivers
     poirp_drv
     tcpip_drv
     cccopyread_drv
+    cczerodata_drv
     cmflush_drv
     ccmapdata_drv)
 

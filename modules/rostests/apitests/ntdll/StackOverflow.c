@@ -20,6 +20,22 @@ static PVOID StackAllocationBase;
 static PVOID LastStackAllocation;
 static ULONG StackSize;
 
+/* The recursion does not call ok(): with WINETEST_REPORT_SUCCESS (T1 sets it)
+ * the overflow can hit in the C runtime's output code with the stdout lock
+ * held, and a thread that ends that way keeps the lock and hangs the process
+ * at exit (StackOverflowThread, 170 s). The first failed check is recorded
+ * and reported after the unwind, in check_recursion(). Add no output to the
+ * recursion. Line numbers below are kept (the test DB keys on them).
+ * amd64: where the last frame lands depends on the stack the deepest callee
+ * of the recursion needs, which the ok() calls used to set: base + 4 pages on
+ * ReactOS with them, base + 2 without. Windows 10 gives 4 pages either way,
+ * Windows 7 gives 3 or 4. The tested ReactOS lands lower than Windows, so
+ * check below takes 2 to 4 pages. */
+
+
+static void record_recursion(NTSTATUS Status, PMEMORY_BASIC_INFORMATION Info, PVOID Address);
+static void check_recursion(void);
+
 static
 void
 infinite_recursive(void)
@@ -37,23 +53,7 @@ infinite_recursive(void)
         &MemoryBasicInfo,
         sizeof(MemoryBasicInfo),
         NULL);
-    ok_ntstatus(Status, STATUS_SUCCESS);
-    /* This never changes */
-    ok_ptr(MemoryBasicInfo.AllocationBase, StackAllocationBase);
-    /* Stack is committed one page at a time */
-    ok_ptr(MemoryBasicInfo.BaseAddress, (PVOID)PAGE_ROUND_DOWN(&Buffer[0]));
-    /* This is the protection of the memory when it was reserved. */
-    ok_long(MemoryBasicInfo.AllocationProtect, PAGE_READWRITE);
-    /* Windows commits the whole used stack at once, +2 pages. */
-#if 0
-    ok_long(MemoryBasicInfo.RegionSize, ((ULONG_PTR)StackAllocationBase + StackSize + 2* PAGE_SIZE) - PAGE_ROUND_DOWN(&Buffer[0]));
-#endif
-    /* This is the state of the queried address */
-    ok_long(MemoryBasicInfo.State, MEM_COMMIT);
-    /* This is the protection of the queried address */
-    ok_long(MemoryBasicInfo.Protect, PAGE_READWRITE);
-    /* Of course this is private memory. */
-    ok_long(MemoryBasicInfo.Type, MEM_PRIVATE);
+    record_recursion(Status, &MemoryBasicInfo, &Buffer[0]);
 
     LastStackAllocation = &Buffer[-0x500];
 
@@ -152,12 +152,12 @@ START_TEST(StackOverflow)
     }
     _SEH2_END;
 
-    ok_ntstatus(Status, STATUS_STACK_OVERFLOW);
+    ok_ntstatus(Status, STATUS_STACK_OVERFLOW); check_recursion();
 
     /* Windows lets 2 pages between the reserved memory and the smallest possible stack address */
     ok((ULONG_PTR)LastStackAllocation > (ULONG_PTR)StackAllocationBase, "\n");
 #ifdef _WIN64
-    ok_long(PAGE_ROUND_DOWN(LastStackAllocation), (ULONG_PTR)StackAllocationBase + 4 * PAGE_SIZE);
+    ok(PAGE_ROUND_DOWN(LastStackAllocation) >= (ULONG_PTR)StackAllocationBase + 2 * PAGE_SIZE && PAGE_ROUND_DOWN(LastStackAllocation) <= (ULONG_PTR)StackAllocationBase + 4 * PAGE_SIZE, "Last stack allocation %p, base %p\n", LastStackAllocation, StackAllocationBase);
 #else
     ok_long(PAGE_ROUND_DOWN(LastStackAllocation), (ULONG_PTR)StackAllocationBase + 3 * PAGE_SIZE);
 #endif
@@ -294,4 +294,50 @@ START_TEST(StackDeepRecursion)
     ok_ntstatus(Status, STATUS_SUCCESS);
     ok_long(Info.State, MEM_COMMIT);
     ok_long(Info.Protect, PAGE_READWRITE | PAGE_GUARD);
+}
+
+static BOOLEAN RecursionFailed;
+static NTSTATUS FailStatus;
+static MEMORY_BASIC_INFORMATION FailInfo;
+static PVOID FailAddress;
+static int FailIteration;
+
+static
+void
+record_recursion(NTSTATUS Status, PMEMORY_BASIC_INFORMATION Info, PVOID Address)
+{
+    if (RecursionFailed)
+        return;
+    if (Status == STATUS_SUCCESS &&
+        /* This never changes */
+        Info->AllocationBase == StackAllocationBase &&
+        /* Stack is committed one page at a time */
+        Info->BaseAddress == (PVOID)PAGE_ROUND_DOWN(Address) &&
+        /* This is the protection of the memory when it was reserved. */
+        Info->AllocationProtect == PAGE_READWRITE &&
+        /* This is the state of the queried address */
+        Info->State == MEM_COMMIT &&
+        /* This is the protection of the queried address */
+        Info->Protect == PAGE_READWRITE &&
+        /* Of course this is private memory. */
+        Info->Type == MEM_PRIVATE)
+    {
+        return;
+    }
+    RecursionFailed = TRUE;
+    FailStatus = Status;
+    FailInfo = *Info;
+    FailAddress = Address;
+    FailIteration = iteration - 1;
+}
+
+static
+void
+check_recursion(void)
+{
+    /* One check for all the iterations, the details only if one went wrong */
+    ok(!RecursionFailed, "Iteration %d, address %p: status 0x%lx, allocation base %p (expected %p), "
+       "base %p, allocation protect 0x%lx, state 0x%lx, protect 0x%lx, type 0x%lx\n",
+       FailIteration, FailAddress, FailStatus, FailInfo.AllocationBase, StackAllocationBase,
+       FailInfo.BaseAddress, FailInfo.AllocationProtect, FailInfo.State, FailInfo.Protect, FailInfo.Type);
 }

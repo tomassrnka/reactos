@@ -5972,6 +5972,10 @@ static void test_selectiontree_events(void)
         ok(!lstrcmpiA(state.texts[1], target), "path after the selection: '%s', expected '%s'\n", state.texts[1], target);
     }
 
+    MsiCloseHandle(hpkg);
+    DeleteFileA(msifile);
+}
+
 static void check_folder_properties(MSIHANDLE hpkg, BOOL common, const char *context)
 {
     static const struct { const char *name; int user, common; } folders[] =
