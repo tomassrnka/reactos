@@ -127,6 +127,62 @@ SOFTWARE.
 #include <debug.h>
 
 PREGION prgnDefault = NULL;
+
+#if DBG
+INT
+FASTCALL
+REGION_iDbgArmAllocFailure(
+    _In_reads_bytes_opt_(cjIn) PVOID pvIn,
+    _In_ INT cjIn)
+{
+    PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
+    LONG lAllowed;
+    INT iRet;
+
+    if (!pti || !pvIn || cjIn != sizeof(LONG))
+        return -1;
+
+    _SEH2_TRY
+    {
+        ProbeForRead(pvIn, sizeof(LONG), 1);
+        lAllowed = *(LONG *)pvIn;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        _SEH2_YIELD(return -1);
+    }
+    _SEH2_END;
+
+    /* Returns 2 when a failure was injected since the previous arming, else 1 */
+    iRet = pti->bDbgRgnFailFired ? 2 : 1;
+    pti->bDbgRgnFailFired = FALSE;
+    pti->bDbgRgnFailArmed = (lAllowed >= 0);
+    pti->lDbgRgnFailCountdown = lAllowed;
+    return iRet;
+}
+
+static
+BOOL
+REGION_bDbgFailAlloc(VOID)
+{
+    PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
+
+    if (!pti || !pti->bDbgRgnFailArmed)
+        return FALSE;
+
+    if (pti->lDbgRgnFailCountdown > 0)
+    {
+        pti->lDbgRgnFailCountdown--;
+        return FALSE;
+    }
+
+    /* One failure per arming */
+    pti->bDbgRgnFailArmed = FALSE;
+    pti->bDbgRgnFailFired = TRUE;
+    DPRINT1("Injected region allocation failure\n");
+    return TRUE;
+}
+#endif
 HRGN    hrgnDefault = NULL;
 
 // Internal Functions
@@ -2207,6 +2263,18 @@ REGION_AllocRgnWithHandle(
     //HRGN hReg;
     PREGION pReg;
 
+#if DBG
+    if (REGION_bDbgFailAlloc())
+        return NULL;
+#endif
+
+    /* Reject counts for which nReg * sizeof(RECT) does not fit into an INT */
+    if ((nReg < 0) || (nReg > (INT)(MAXLONG / sizeof(RECT))))
+    {
+        DPRINT1("Invalid region rect count %d\n", nReg);
+        return NULL;
+    }
+
     pReg = (PREGION)GDIOBJ_AllocateObject(GDIObjType_RGN_TYPE,
                                           sizeof(REGION),
                                           BASEFLAG_LOOKASIDE);
@@ -2217,6 +2285,9 @@ REGION_AllocRgnWithHandle(
     }
 
     //hReg = pReg->BaseObject.hHmgr;
+
+    /* REGION_vCleanup needs the attribute pointer if the buffer allocation fails */
+    pReg->prgnattr = &pReg->rgnattr;
 
     if ((nReg == 0) || (nReg == 1))
     {
@@ -2415,6 +2486,11 @@ IntSysCreateRectpRgn(
 {
     PREGION prgn;
 
+#if DBG
+    if (REGION_bDbgFailAlloc())
+        return NULL;
+#endif
+
     /* Allocate a region, without a handle */
     prgn = (PREGION)GDIOBJ_AllocateObject(GDIObjType_RGN_TYPE, sizeof(REGION), BASEFLAG_LOOKASIDE);
     if (prgn == NULL)
@@ -2451,7 +2527,8 @@ VOID
 FASTCALL
 REGION_Delete(PREGION pRgn)
 {
-    if (pRgn == prgnDefault)
+    /* A failed allocation leaves callers with a NULL region */
+    if (!pRgn || pRgn == prgnDefault)
         return;
 
     GDIOBJ_vDeleteObject(&pRgn->BaseObject);
@@ -3819,11 +3896,25 @@ NtGdiExtCreateRegion(
     NTSTATUS Status = STATUS_SUCCESS;
     MATRIX matrix;
     XFORMOBJ xo;
+    XFORM SafeXform;
+    ULONG cjRects, cjRequired;
 
     DPRINT("NtGdiExtCreateRegion\n");
+
+    /* We must be able to read the whole header, a zero length probe is a no-op */
+    if (Count < sizeof(RGNDATAHEADER))
+    {
+        return NULL;
+    }
+
     _SEH2_TRY
     {
         ProbeForRead(RgnData, Count, 1);
+        if (Xform != NULL)
+        {
+            ProbeForRead(Xform, sizeof(XFORM), 1);
+            SafeXform = *Xform;
+        }
         nCount = RgnData->rdh.nCount;
         iType = RgnData->rdh.iType;
         dwSize = RgnData->rdh.dwSize;
@@ -3842,9 +3933,12 @@ NtGdiExtCreateRegion(
     }
 
     /* Check parameters, but don't set last error here */
-    if ((Count < sizeof(RGNDATAHEADER) + nCount * sizeof(RECT)) ||
-        (iType != RDH_RECTANGLES) ||
-        (dwSize != sizeof(RGNDATAHEADER)))
+    if ((iType != RDH_RECTANGLES) ||
+        (dwSize != sizeof(RGNDATAHEADER)) ||
+        !NT_SUCCESS(RtlULongMult(nCount, sizeof(RECT), &cjRects)) ||
+        !NT_SUCCESS(RtlULongAdd(sizeof(RGNDATAHEADER), cjRects, &cjRequired)) ||
+        (Count < cjRequired) ||
+        (nCount > (ULONG)(MAXLONG / sizeof(RECT))))
     {
         return NULL;
     }
@@ -3882,7 +3976,7 @@ NtGdiExtCreateRegion(
             /* Init the XFORMOBJ from the Xform struct */
             Status = STATUS_INVALID_PARAMETER;
             XFORMOBJ_vInit(&xo, &matrix);
-            ret = XFORMOBJ_iSetXform(&xo, (XFORML*)Xform);
+            ret = XFORMOBJ_iSetXform(&xo, (XFORML*)&SafeXform);
 
             /* Check for error */
             if (ret != DDI_ERROR)

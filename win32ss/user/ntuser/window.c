@@ -1677,8 +1677,17 @@ NtUserBuildHwndList(
       ObDereferenceObject(Thread);
    }
 
-   *pcHwndNeeded = dwCount;
-   Status = STATUS_SUCCESS;
+   _SEH2_TRY
+   {
+      ProbeForWrite(pcHwndNeeded, sizeof(*pcHwndNeeded), 1);
+      *pcHwndNeeded = dwCount;
+      Status = STATUS_SUCCESS;
+   }
+   _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+   {
+      Status = _SEH2_GetExceptionCode();
+   }
+   _SEH2_END;
 
 Quit:
    SetLastNtError(Status);
@@ -4156,7 +4165,8 @@ NtUserSetWindowWord(HWND hWnd, INT Index, WORD NewValue)
          }
    }
 
-   if ((ULONG)Index > (Window->cbwndExtra - sizeof(WORD)))
+   /* Do not subtract: cbwndExtra < sizeof(WORD) would wrap and accept any Index */
+   if (((ULONG)Index + sizeof(WORD)) > Window->cbwndExtra)
    {
       EngSetLastError(ERROR_INVALID_INDEX);
       goto Exit; // Return 0

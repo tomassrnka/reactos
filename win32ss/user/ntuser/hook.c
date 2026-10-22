@@ -39,8 +39,16 @@ IntLoadHookModule(int iHookID, HHOOK hHook, BOOL Unload)
     /* Check if this is the api hook */
     if(iHookID == WH_APIHOOK)
     {
+        /* An unload callback of this process is running: no load or second unload until it returns */
+        if (ppi->W32PF_flags & W32PF_APIHOOKUNLOADING)
+            return Unload;
+
         if(!Unload && !(ppi->W32PF_flags & W32PF_APIHOOKLOADED))
         {
+            /* A load message sent at registration can arrive after the hook was unregistered */
+            if (!(gpsi->dwSRVIFlags & SRVINFO_APIHOOK))
+                return FALSE;
+
             /* A callback in user mode can trigger UserLoadApiHook to be called and
                as a result IntLoadHookModule will be called recursively.
                To solve this we set the flag that means that the application has
@@ -59,11 +67,18 @@ IntLoadHookModule(int iHookID, HHOOK hHook, BOOL Unload)
         }
         else if(Unload && (ppi->W32PF_flags & W32PF_APIHOOKLOADED))
         {
+            /* Every thread of the process gets its own unload message, and the callback
+               leaves the user lock: clear the flag first, so that only one thread unloads */
+            ppi->W32PF_flags &= ~W32PF_APIHOOKLOADED;
+            ppi->W32PF_flags |= W32PF_APIHOOKUNLOADING;
+
             /* Call ClientLoadLibrary in user32 */
             bResult = co_IntClientLoadLibrary(NULL, NULL, Unload, TRUE);
-            if (bResult)
+            ppi->W32PF_flags &= ~W32PF_APIHOOKUNLOADING;
+            if (!bResult)
             {
-                ppi->W32PF_flags &= ~W32PF_APIHOOKLOADED;
+                /* The module was not unloaded: keep the process marked as loaded */
+                ppi->W32PF_flags |= W32PF_APIHOOKLOADED;
             }
             return bResult;
         }
@@ -278,7 +293,7 @@ co_IntCallLowLevelHook(PHOOK Hook,
        case WH_MOUSE:
           uTimeout = 200;
           Block = TRUE;
-          Size = sizeof(MOUSEHOOKSTRUCT);
+          Size = sizeof(MOUSEHOOKSTRUCTEX);
           break;
        case WH_KEYBOARD:
           uTimeout = 200;
@@ -289,7 +304,14 @@ co_IntCallLowLevelHook(PHOOK Hook,
     if (Size)
     {
        pHP->pHookStructs = ExAllocatePoolWithTag(NonPagedPool, Size, TAG_HOOK);
-       if (pHP->pHookStructs) RtlCopyMemory(pHP->pHookStructs, (PVOID)lParam, Size);
+       if (!pHP->pHookStructs)
+       {
+          ExFreePoolWithTag(pHP, TAG_HOOK);
+          return 0;
+       }
+       /* the buffer goes to user mode: padding included, nothing stale */
+       RtlZeroMemory(pHP->pHookStructs, Size);
+       RtlCopyMemory(pHP->pHookStructs, (PVOID)lParam, Size);
     }
 
     /* FIXME: Should get timeout from
@@ -532,8 +554,11 @@ co_UserCallNextHookEx(PHOOK Hook,
         (Hook->HookId == WH_CBT && Code == HCBT_CLICKSKIPPED))
     {
         MOUSEHOOKSTRUCTEX Mouse;
+
+        RtlZeroMemory(&Mouse, sizeof(Mouse));
         if (lParam)
         {
+            /* A hook procedure may pass the plain structure; mouseData stays zero then */
             _SEH2_TRY
             {
                 ProbeForRead((PVOID)lParam,
@@ -546,7 +571,21 @@ co_UserCallNextHookEx(PHOOK Hook,
             }
             _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
             {
-                BadChk = TRUE;
+                _SEH2_TRY
+                {
+                    ProbeForRead((PVOID)lParam,
+                                 sizeof(MOUSEHOOKSTRUCT),
+                                 1);
+
+                    RtlCopyMemory(&Mouse,
+                                  (PVOID)lParam,
+                                  sizeof(MOUSEHOOKSTRUCT));
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    BadChk = TRUE;
+                }
+                _SEH2_END;
             }
             _SEH2_END;
 
@@ -1639,6 +1678,18 @@ NtUserSetWindowsHookEx( HINSTANCE Mod,
        {
           IntRemoveHook(Hook);
           SetLastNtError(Status);
+          goto Cleanup; // Return NULL
+       }
+
+       /* The captured counted string is fully caller-controlled. We allocate
+        * and copy exactly MaximumLength bytes below, so a Length greater than
+        * MaximumLength would make Hook->ModuleName.Length exceed its backing
+        * buffer and cause later counted-string uses to over-read kernel pool
+        * (up to ~64KB). Reject such a descriptor. */
+       if (ModuleName.Length > ModuleName.MaximumLength)
+       {
+          IntRemoveHook(Hook);
+          EngSetLastError(ERROR_INVALID_PARAMETER);
           goto Cleanup; // Return NULL
        }
 

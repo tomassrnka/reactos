@@ -899,6 +899,7 @@
 @ stdcall NtTraceEvent(long long long ptr)
 @ stdcall NtUnlockFile(ptr ptr ptr ptr long)
 @ stdcall NtVdmControl(long ptr)
+@ stdcall NtWaitForMultipleObjects(long ptr long long ptr)
 @ stdcall NtWaitForSingleObject(ptr long ptr)
 @ stdcall NtWriteFile(ptr ptr ptr ptr ptr ptr long ptr ptr)
 @ stdcall ObAssignSecurity(ptr ptr ptr ptr)

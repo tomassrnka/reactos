@@ -120,6 +120,7 @@ VOID NTAPI UserProcessMouseInput(PINPUT_DEVICE_INFO pDeviceInfo, PMOUSE_INPUT_DA
 BOOL NTAPI UserSendMouseInput(MOUSEINPUT *pMouseInput, BOOL bInjected);
 
 /* Raw input */
+typedef struct _RAWINPUT_REGTABLE RAWINPUT_REGTABLE, *PRAWINPUT_REGTABLE;
 extern BOOLEAN RawInputEnabled;
 HRAWINPUT FASTCALL UserCreateRawInput(PTHREADINFO pti,
                                       DWORD dwType,
@@ -127,13 +128,24 @@ HRAWINPUT FASTCALL UserCreateRawInput(PTHREADINFO pti,
                                       WPARAM wParam,
                                       CONST VOID *pData,
                                       UINT cbData);
-BOOL FASTCALL UserGetRawInputTarget(DWORD dwType,
-                                    PTHREADINFO *ppti,
-                                    HWND *phwndTarget,
-                                    WPARAM *pwParam);
+VOID FASTCALL UserRawInputDeliver(DWORD dwType,
+                                  HANDLE hDevice,
+                                  CONST VOID *pData,
+                                  UINT cbData);
+BOOL FASTCALL UserRawInputNoLegacy(PPROCESSINFO ppi, DWORD dwType);
+BOOL FASTCALL UserRawInputQueueNoLegacy(PUSER_MESSAGE_QUEUE pFocusQueue, DWORD dwType);
+VOID FASTCALL UserRawInputProcessDestroy(PPROCESSINFO ppi);
+#if DBG
+ULONG FASTCALL UserRawInputSetSerial(ULONG Serial);
+#endif
+VOID FASTCALL UserRawInputThreadCleanup(PTHREADINFO pti);
 BOOL FASTCALL UserFreeRawInput(PUSER_MESSAGE_QUEUE MessageQueue, HRAWINPUT hRawInput);
 VOID FASTCALL UserUpdatePrevRawInput(PTHREADINFO pti, CONST MSG *pMsg);
 VOID FASTCALL UserCleanupRawInput(PUSER_MESSAGE_QUEUE MessageQueue);
+VOID FASTCALL UserRawInputSendMouse(MOUSEINPUT *pmi);
+DWORD FASTCALL UserStripMouseDataFlags(DWORD dwFlags);
+SHORT FASTCALL UserClampWheelDelta(DWORD mouseData);
+VOID FASTCALL UserRawInputSendKeyboard(WORD wScan, WORD wVk, BOOL bUp, BOOL bExt, ULONG_PTR dwExtraInfo, UINT Message);
 
 /* IMM */
 UINT FASTCALL IntImmProcessKey(

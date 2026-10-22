@@ -578,6 +578,11 @@ EXTINLINE BOOL NtUserxUnInitMessagePump(VOID)
     return NtUserCallNoParam(NOPARAM_ROUTINE_UNINIT_MESSAGE_PUMP);
 }
 
+EXTINLINE NTSTATUS NtUserxMsgWait(PMSGWAITINFO pInfo)
+{
+    return (NTSTATUS)NtUserCallOneParam((DWORD_PTR)pInfo, ONEPARAM_ROUTINE_ROS_MSGWAIT);
+}
+
 EXTINLINE HANDLE NtUserxMsqSetWakeMask(DWORD_PTR dwWaitMask)
 {
     return (HANDLE)NtUserCallOneParam(dwWaitMask, ONEPARAM_ROUTINE_GETINPUTEVENT);

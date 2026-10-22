@@ -359,36 +359,161 @@ DefWndHandleSetCursor(PWND pWnd, WPARAM wParam, LPARAM lParam)
    return FALSE;
 }
 
-VOID FASTCALL DefWndPrint( PWND pwnd, HDC hdc, ULONG uFlags)
+typedef struct _PRINTSTATE
 {
-  /*
-   * Visibility flag.
-   */
-  if ( (uFlags & PRF_CHECKVISIBLE) &&
-       !IntIsWindowVisible(pwnd) )
-      return;
+    POINTL ptlWindowOrg;
+    POINTL ptlViewportOrg;
+    HRGN hrgnClip;
+    BOOL bHasClip;
+} PRINTSTATE, *PPRINTSTATE;
 
-  /*
-   * Unimplemented flags.
-   */
-  if ( (uFlags & PRF_CHILDREN) ||
-       (uFlags & PRF_OWNED)    ||
-       (uFlags & PRF_NONCLIENT) )
-  {
-    FIXME("WM_PRINT message with unsupported flags\n");
-  }
+static BOOL
+DefWndPrintSaveState(HDC hdc, PPRINTSTATE pState)
+{
+    if (!GreGetDCPoint(hdc, GdiGetWindowOrg, &pState->ptlWindowOrg) ||
+        !GreGetDCPoint(hdc, GdiGetViewPortOrg, &pState->ptlViewportOrg))
+    {
+        return FALSE;
+    }
 
-  /*
-   * Background
-   */
-  if ( uFlags & PRF_ERASEBKGND)
-    co_IntSendMessage(UserHMGetHandle(pwnd), WM_ERASEBKGND, (WPARAM)hdc, 0);
+    pState->hrgnClip = NtGdiCreateRectRgn(0, 0, 0, 0);
+    if (!pState->hrgnClip)
+        return FALSE;
 
-  /*
-   * Client area
-   */
-  if ( uFlags & PRF_CLIENT)
-    co_IntSendMessage(UserHMGetHandle(pwnd), WM_PRINTCLIENT, (WPARAM)hdc, uFlags);
+    pState->bHasClip = (NtGdiGetRandomRgn(hdc, pState->hrgnClip, CLIPRGN) == 1);
+    return TRUE;
+}
+
+/* Back to the caller's state: the window procedures may have changed it too */
+static VOID
+DefWndPrintRestoreState(HDC hdc, PPRINTSTATE pState)
+{
+    NtGdiSetWindowOrgEx(hdc, pState->ptlWindowOrg.x, pState->ptlWindowOrg.y, NULL);
+    GreSetViewportOrgEx(hdc, pState->ptlViewportOrg.x, pState->ptlViewportOrg.y, NULL);
+    NtGdiExtSelectClipRgn(hdc, pState->bHasClip ? pState->hrgnClip : NULL, RGN_COPY);
+}
+
+/* Print one window at its offset from the printing window; clip to its window rectangle when bClip. */
+static VOID
+DefWndPrintRelated(HDC hdc, PPRINTSTATE pState, PWND pwndFrom, HWND hwnd, ULONG uFlags, BOOL bClip)
+{
+    PWND pwnd;
+    INT x, y;
+
+    pwnd = ValidateHwndNoErr(hwnd);
+    if (!pwnd || !(pwnd->style & WS_VISIBLE))
+        return;
+
+    x = pwnd->rcWindow.left - pwndFrom->rcWindow.left;
+    y = pwnd->rcWindow.top - pwndFrom->rcWindow.top;
+
+    NtGdiOffsetWindowOrgEx(hdc, -x, -y, NULL);
+    if (bClip)
+    {
+        NtGdiIntersectClipRect(hdc, 0, 0,
+                               pwnd->rcWindow.right - pwnd->rcWindow.left,
+                               pwnd->rcWindow.bottom - pwnd->rcWindow.top);
+    }
+    co_IntSendMessage(hwnd, WM_PRINT, (WPARAM)hdc, uFlags);
+    DefWndPrintRestoreState(hdc, pState);
+}
+
+LRESULT FASTCALL
+DefWndPrint(PWND pwnd, HDC hdc, ULONG uFlags)
+{
+    HWND hwnd = UserHMGetHandle(pwnd);
+    PWINDOWLIST pwl;
+    HWND *phwnd;
+    PWND pwndDesktop, pwndOwned;
+    PRINTSTATE State;
+    PRINT_TEMPS Temps = { 0 };
+    BOOL bState;
+
+    if ((uFlags & PRF_CHECKVISIBLE) && !IntIsWindowVisible(pwnd))
+        return 0;
+
+    /* Not a DC we can transform: the window still draws, without placing or clipping */
+    bState = DefWndPrintSaveState(hdc, &State);
+    if (bState)
+    {
+        Temps.hrgn = State.hrgnClip;
+        IntPushPrintTemps(&Temps);
+    }
+
+    /*
+     * The frame is drawn at the window origin, also for a hidden window (see the WM_NCUAHDRAWFRAME
+     * handler). Windows 10 sends WM_NCUAHDRAWFRAME; Windows 7 draws the frame without a message.
+     */
+    if (uFlags & PRF_NONCLIENT)
+    {
+        co_IntSendMessage(hwnd, WM_NCUAHDRAWFRAME, (WPARAM)hdc,
+                          (pwnd->state & WNDS_ACTIVEFRAME) ? DC_ACTIVE : 0);
+        if (bState)
+            DefWndPrintRestoreState(hdc, &State);
+    }
+
+    /* Without PRF_CLIENT, Windows draws neither the background nor the children nor the owned windows */
+    if (uFlags & PRF_CLIENT)
+    {
+        /* The client area sits at its offset in the window only when the frame is printed too */
+        if (bState && (uFlags & PRF_NONCLIENT))
+        {
+            NtGdiOffsetWindowOrgEx(hdc,
+                                   pwnd->rcWindow.left - pwnd->rcClient.left,
+                                   pwnd->rcWindow.top - pwnd->rcClient.top,
+                                   NULL);
+        }
+        if (bState)
+        {
+            NtGdiIntersectClipRect(hdc, 0, 0,
+                                   pwnd->rcClient.right - pwnd->rcClient.left,
+                                   pwnd->rcClient.bottom - pwnd->rcClient.top);
+        }
+
+        if (uFlags & PRF_ERASEBKGND)
+            co_IntSendMessage(hwnd, WM_ERASEBKGND, (WPARAM)hdc, 0);
+
+        co_IntSendMessage(hwnd, WM_PRINTCLIENT, (WPARAM)hdc, uFlags);
+
+        if (bState)
+        {
+            DefWndPrintRestoreState(hdc, &State);
+
+            /*
+             * Children are placed by their offset from the window origin, even without PRF_NONCLIENT,
+             * are clipped only to their own window rectangle, and go from the top of the Z order down,
+             * as on Windows.
+             */
+            if ((uFlags & PRF_CHILDREN) && pwnd->spwndChild &&
+                (pwl = IntBuildHwndList(pwnd->spwndChild, IACE_LIST, NULL)))
+            {
+                for (phwnd = pwl->ahwnd; *phwnd != HWND_TERMINATOR; phwnd++)
+                {
+                    DefWndPrintRelated(hdc, &State, pwnd, *phwnd,
+                                       (uFlags | PRF_NONCLIENT | PRF_ERASEBKGND) & ~PRF_CHECKVISIBLE, TRUE);
+                }
+                IntFreeHwndList(pwl);
+            }
+
+            /* Owned windows get the same flags and no clipping of their own */
+            pwndDesktop = co_GetDesktopWindow(pwnd);
+            if ((uFlags & PRF_OWNED) && pwndDesktop && pwndDesktop->spwndChild &&
+                (pwl = IntBuildHwndList(pwndDesktop->spwndChild, IACE_LIST, NULL)))
+            {
+                for (phwnd = pwl->ahwnd; *phwnd != HWND_TERMINATOR; phwnd++)
+                {
+                    pwndOwned = ValidateHwndNoErr(*phwnd);
+                    if (pwndOwned && pwndOwned->spwndOwner == pwnd)
+                        DefWndPrintRelated(hdc, &State, pwnd, *phwnd, uFlags, FALSE);
+                }
+                IntFreeHwndList(pwl);
+            }
+        }
+    }
+
+    if (bState)
+        IntPopPrintTemps(&Temps);
+    return 1;
 }
 
 BOOL
@@ -1123,12 +1248,13 @@ IntDefWindowProc(
          break;
 
       case WM_MOUSEWHEEL:
+      case WM_MOUSEHWHEEL:
          if (Wnd->style & WS_CHILD)
          {
             HWND hwndParent;
             PWND pwndParent = IntGetParent(Wnd);
             hwndParent = pwndParent ? UserHMGetHandle(pwndParent) : NULL;
-            return co_IntSendMessage( hwndParent, WM_MOUSEWHEEL, wParam, lParam);
+            return co_IntSendMessage( hwndParent, Msg, wParam, lParam);
          }
          break;
 
@@ -1173,8 +1299,7 @@ IntDefWindowProc(
 
       case WM_PRINT:
       {
-         DefWndPrint(Wnd, (HDC)wParam, lParam);
-         return (0);
+         return DefWndPrint(Wnd, (HDC)wParam, lParam);
       }
 
       case WM_SYSCOLORCHANGE:
@@ -1317,7 +1442,7 @@ IntDefWindowProc(
       case WM_NCUAHDRAWFRAME:
       {
           TRACE("WM_NCUAHDRAWFRAME: wParam hDC %p lParam DC_ flags %08x\n",wParam,lParam);
-          NC_DoNCPaint(Wnd, (HDC)wParam, lParam|DC_NC);
+          NC_DoNCPaint(Wnd, (HDC)wParam, lParam | DC_NC | DC_NOVISIBLE);
           return 0;
       }
 

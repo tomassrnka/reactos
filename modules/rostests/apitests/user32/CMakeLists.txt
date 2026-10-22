@@ -1,4 +1,6 @@
 add_subdirectory(makeimg)
+add_subdirectory(mousehook)
+add_subdirectory(wevhook)
 
 list(APPEND SOURCE
     AttachThreadInput.c
@@ -15,8 +17,11 @@ list(APPEND SOURCE
     DrawIconEx.c
     DrawText.c
     desktop.c
+    ClipboardSynthBitmap.c
     EmptyClipboard.c
     EnumDisplaySettings.c
+    FrameChangedClient.c
+    FrameMetrics.c
     GetClassInfo.c
     GetDCEx.c
     GetIconInfo.c
@@ -29,17 +34,29 @@ list(APPEND SOURCE
     GetWindowPlacement.c
     GW_ENABLEDPOPUP.c
     InitializeLpkHooks.c
+    IsDialogMessage.c
     IsServerSideWindow.c
     KbdLayout.c
     keybd_event.c
+    MouseHookTransport.c
+    MouseWheel.c
+    KeyboardLLHook.c
     LoadImage.c
     LoadImageGCC.c
+    LoadImagePngIcon.c
     LookupIconIdFromDirectoryEx.c
+    MenuItemData.c
     MenuUI.c
     MessageStateAnalyzer.c
+    MsgWaitForMultipleObjectsEx.c
+    NCRButtonDown.c
+    NcPaintActive.c
+    NcPaintClient.c
     NcPaintRgn.c
     NextDlgItem.c
     PrivateExtractIcons.c
+    ProcessConnectTerminate.c
+    RawInput.c
     RealGetWindowClass.c
     RedrawWindow.c
     RegisterClassEx.c
@@ -58,13 +75,19 @@ list(APPEND SOURCE
     SetScrollRange.c
     SetWindowPlacement.c
     ShowWindow.c
+    ShowWindowFrame.c
+    SwitchDesktop.c
     SwitchToThisWindow.c
     SystemMenu.c
     SystemParametersInfo.c
     TrackMouseEvent.c
     TrackPopupMenuEx.c
+    UnicodeToAnsiMessage.c
+    UpdateLayeredWindow.c
     UserHandleGrantAccess.c
     VirtualKey.c
+    WinEventHook.c
+    WmPrint.c
     WndProc.c
     wsprintf.c)
 
@@ -81,13 +104,21 @@ target_link_libraries(user32_apitest wine ${PSEH_LIB})
 set_module_type(user32_apitest win32cui)
 add_importlibs(user32_apitest advapi32 imm32 gdi32 user32 msvcrt kernel32 ntdll)
 add_pch(user32_apitest precomp.h "${PCH_SKIP_SOURCE}")
+add_dependencies(user32_apitest user32_wevhook1 user32_wevhook2)
 add_rostests_file(TARGET user32_apitest)
+add_dependencies(user32_apitest user32_mousehook)
 
 add_executable(user32_apitest_menuui user32_apitest_menuui.c)
 set_module_type(user32_apitest_menuui win32gui UNICODE)
 add_importlibs(user32_apitest_menuui user32 msvcrt kernel32)
 add_rostests_file(TARGET user32_apitest_menuui)
 add_dependencies(user32_apitest user32_apitest_menuui)
+
+add_executable(user32_apitest_connect user32_apitest_connect.c)
+set_module_type(user32_apitest_connect win32cui UNICODE)
+add_importlibs(user32_apitest_connect msvcrt kernel32)
+add_rostests_file(TARGET user32_apitest_connect)
+add_dependencies(user32_apitest user32_apitest_connect)
 
 add_rostests_file(FILE "${CMAKE_CURRENT_SOURCE_DIR}/verclasstest1.manifest")
 add_rostests_file(FILE "${CMAKE_CURRENT_SOURCE_DIR}/verclasstest2.manifest")

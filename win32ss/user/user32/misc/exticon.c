@@ -310,6 +310,7 @@ static UINT ICO_ExtractIconExW(
 	DWORD		fsizeh,fsizel;
 #ifdef __REACTOS__
     WCHAR		szExpandedExePath[MAX_PATH];
+    UINT		*pIconIdBuffer = NULL;
 #endif
         WCHAR		szExePath[MAX_PATH];
         DWORD		dwSearchReturn;
@@ -424,8 +425,27 @@ static UINT ICO_ExtractIconExW(
 	if (pIconId) /* Invalidate first icon identifier */
 		*pIconId = 0xFFFFFFFF;
 
+#ifdef __REACTOS__
+	if (!pIconId && RetPtr)
+	{
+	    /* An HICON is wider than a UINT on 64-bit, so storing a handle in the
+	     * handle array would overwrite identifiers that are not yet used. */
+	    if (sizeof(HICON) == sizeof(UINT))
+	    {
+	        pIconId = (UINT*)RetPtr;
+	    }
+	    else
+	    {
+	        pIconIdBuffer = HeapAlloc(GetProcessHeap(), 0, (min(nIcons, 0x10000) + 1) * sizeof(UINT));
+	        if (!pIconIdBuffer)
+	            goto end;
+	        pIconId = pIconIdBuffer;
+	    }
+	}
+#else
 	if (!pIconId) /* if no icon identifier array present use the icon handle array as intermediate storage */
 	  pIconId = (UINT*)RetPtr;
+#endif
 
 	sig = USER32_GetResourceTable(peimage, fsizel, &pData);
 
@@ -842,6 +862,10 @@ static UINT ICO_ExtractIconExW(
 	}			/* if(sig == IMAGE_NT_SIGNATURE) */
 
 end:
+#ifdef __REACTOS__
+	if (pIconIdBuffer)
+	    HeapFree(GetProcessHeap(), 0, pIconIdBuffer);
+#endif
 	UnmapViewOfFile(peimage);	/* success */
 	return ret;
 }

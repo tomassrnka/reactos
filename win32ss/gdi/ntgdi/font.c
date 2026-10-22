@@ -1054,7 +1054,7 @@ NtGdiGetFontResourceInfoInternalW(
     UNICODE_STRING SafeFileNames;
     BOOL bRet = FALSE;
     ULONG cbStringSize;
-    LPVOID Buffer;
+    LPVOID Buffer = NULL;
 
     /* FIXME: Handle cFiles > 0 */
 
@@ -1065,9 +1065,19 @@ NtGdiGetFontResourceInfoInternalW(
         return FALSE;
     }
 
+    /* The string must at least have a terminator (we subtract it below), and
+       its size must fit into a UNICODE_STRING (also rules out ULONG overflow
+       of cwc * sizeof(WCHAR)) */
+    if ((cwc == 0) || (cwc > (MAXUSHORT / sizeof(WCHAR))))
+    {
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
     /* Allocate a safe unicode string buffer */
     cbStringSize = cwc * sizeof(WCHAR);
-    SafeFileNames.MaximumLength = SafeFileNames.Length = (USHORT)cbStringSize - sizeof(WCHAR);
+    SafeFileNames.Length = (USHORT)(cbStringSize - sizeof(WCHAR));
+    SafeFileNames.MaximumLength = (USHORT)cbStringSize;
     SafeFileNames.Buffer = ExAllocatePoolWithTag(PagedPool,
                                                  cbStringSize,
                                                  TAG_USTR);
@@ -1076,28 +1086,25 @@ NtGdiGetFontResourceInfoInternalW(
         EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
         return FALSE;
     }
-    RtlZeroMemory(SafeFileNames.Buffer, SafeFileNames.MaximumLength);
+    RtlZeroMemory(SafeFileNames.Buffer, cbStringSize);
 
     /* Check buffers and copy pwszFiles to safe unicode string */
     _SEH2_TRY
     {
         ProbeForRead(pwszFiles, cbStringSize, 1);
         ProbeForWrite(pdwBytes, sizeof(DWORD), 1);
-        if (pvBuf)
-            ProbeForWrite(pvBuf, cjIn, 1);
 
+        /* Capture the size once. It is used for the probe, the allocation
+           and the copy back, and may never exceed the caller's buffer size. */
         dwBytes = *pdwBytes;
+        if (pvBuf)
+        {
+            dwBytes = min(dwBytes, cjIn);
+            ProbeForWrite(pvBuf, dwBytes, 1);
+        }
         dwBytesRequested = dwBytes;
 
         RtlCopyMemory(SafeFileNames.Buffer, pwszFiles, cbStringSize);
-        if (dwBytes > 0)
-        {
-            Buffer = ExAllocatePoolWithTag(PagedPool, dwBytes, TAG_FINF);
-        }
-        else
-        {
-            Buffer = ExAllocatePoolWithTag(PagedPool, sizeof(DWORD), TAG_FINF);
-        }
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -1113,6 +1120,16 @@ NtGdiGetFontResourceInfoInternalW(
         return FALSE;
     }
 
+    Buffer = ExAllocatePoolWithTag(PagedPool,
+                                   (dwBytes > 0) ? dwBytes : sizeof(DWORD),
+                                   TAG_FINF);
+    if (!Buffer)
+    {
+        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        ExFreePoolWithTag(SafeFileNames.Buffer, TAG_USTR);
+        return FALSE;
+    }
+
     /* Do the actual call */
     bRet = IntGdiGetFontResourceInfo(&SafeFileNames,
                                      (pvBuf ? Buffer : NULL),
@@ -1124,7 +1141,7 @@ NtGdiGetFontResourceInfoInternalW(
         /* Copy the data back to caller */
         _SEH2_TRY
         {
-            /* Buffers are already probed */
+            /* Buffers are already probed, with the same size we copy here */
             if (pvBuf && dwBytesRequested > 0)
                 RtlCopyMemory(pvBuf, Buffer, min(dwBytesRequested, dwBytes));
             *pdwBytes = dwBytes;

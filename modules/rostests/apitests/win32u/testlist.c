@@ -14,17 +14,24 @@ extern void func_NtGdiCreateBitmap(void);
 extern void func_NtGdiCreateCompatibleBitmap(void);
 extern void func_NtGdiCreateCompatibleDC(void);
 extern void func_NtGdiCreateDIBSection(void);
+extern void func_NtGdiCreateDIBSectionCaptureValid(void);
+extern void func_NtGdiCreateDIBSectionCaptureInvalid(void);
+extern void func_NtGdiCreateDIBSectionCaptureStraddle(void);
+extern void func_NtGdiCreateDIBSectionCaptureBitsPtr(void);
+extern void func_NtGdiCreateDIBitmapInternal(void);
 extern void func_NtGdiDeleteObjectApp(void);
 extern void func_NtGdiDoPalette(void);
 extern void func_NtGdiEngCreatePalette(void);
 extern void func_NtGdiEnumFontOpen(void);
 extern void func_NtGdiExcludeClipRect(void);
+extern void func_NtGdiExtCreateRegion(void);
 extern void func_NtGdiExtSelectClipRgn(void);
 extern void func_NtGdiExtTextOutW(void);
 //extern void func_NtGdiFlushUserBatch(void);
 extern void func_NtGdiGetBitmapBits(void);
 extern void func_NtGdiGetDIBitsInternal(void);
 extern void func_NtGdiGetFontResourceInfoInternalW(void);
+extern void func_NtGdiGetFontResourceInfoLength(void);
 extern void func_NtGdiGetRandomRgn(void);
 extern void func_NtGdiGetStockObject(void);
 extern void func_NtGdiIntersectClipRect(void);
@@ -40,7 +47,9 @@ extern void func_NtGdiSelectPen(void);
 extern void func_NtGdiSetBitmapBits(void);
 extern void func_NtGdiSetDIBitsToDeviceInternal(void);
 extern void func_NtGdiSetPixel(void);
+extern void func_NtGdiStretchDIBitsInternal(void);
 extern void func_NtGdiTransformPoints(void);
+extern void func_NtUserBuildHwndList(void);
 //extern void func_NtUserCallHwnd(void);
 //extern void func_NtUserCallHwndLock(void);
 //extern void func_NtUserCallHwndOpt(void);
@@ -56,9 +65,13 @@ extern void func_NtUserCreateWindowEx(void);
 extern void func_NtUserEnumDisplaySettings(void);
 extern void func_NtUserFindExistingCursorIcon(void);
 extern void func_NtUserGetAsyncKeyState(void);
+extern void func_NtUserGetAtomNameValid(void);
+extern void func_NtUserGetAtomNameInvalid(void);
+extern void func_NtUserGetAtomNameConcurrent(void);
 extern void func_NtUserGetClassInfo(void);
 extern void func_NtUserGetCursorInfo(void);
 //extern void func_NtUserGetIconInfo(void);
+extern void func_NtUserGetIconInfoProbe(void);
 extern void func_NtUserGetKeyboardLayoutName(void);
 extern void func_NtUserGetThreadState(void);
 extern void func_NtUserGetTitleBarInfo(void);
@@ -68,7 +81,9 @@ extern void func_NtUserSBGetParms(void);
 extern void func_NtUserScrollDC(void);
 extern void func_NtUserSelectPalette(void);
 extern void func_NtUserSetTimer(void);
+extern void func_NtUserSetWindowsHookExModule(void);
 extern void func_NtUserSystemParametersInfo(void);
+extern void func_NtUserThunkedMenuInfo(void);
 extern void func_NtUserToUnicodeEx(void);
 extern void func_NtUserUpdatePerUserSystemParameters(void);
 
@@ -87,17 +102,24 @@ const struct test winetest_testlist[] =
     { "NtGdiCreateCompatibleBitmap", func_NtGdiCreateCompatibleBitmap },
     { "NtGdiCreateCompatibleDC", func_NtGdiCreateCompatibleDC },
     { "NtGdiCreateDIBSection", func_NtGdiCreateDIBSection },
+    { "NtGdiCreateDIBSectionCaptureValid", func_NtGdiCreateDIBSectionCaptureValid },
+    { "NtGdiCreateDIBSectionCaptureInvalid", func_NtGdiCreateDIBSectionCaptureInvalid },
+    { "NtGdiCreateDIBSectionCaptureStraddle", func_NtGdiCreateDIBSectionCaptureStraddle },
+    { "NtGdiCreateDIBSectionCaptureBitsPtr", func_NtGdiCreateDIBSectionCaptureBitsPtr },
+    { "NtGdiCreateDIBitmapInternal", func_NtGdiCreateDIBitmapInternal },
     { "NtGdiDeleteObjectApp", func_NtGdiDeleteObjectApp },
     { "NtGdiDoPalette", func_NtGdiDoPalette },
     { "NtGdiEngCreatePalette", func_NtGdiEngCreatePalette },
     { "NtGdiEnumFontOpen", func_NtGdiEnumFontOpen },
     { "NtGdiExcludeClipRect", func_NtGdiExcludeClipRect },
+    { "NtGdiExtCreateRegion", func_NtGdiExtCreateRegion },
     { "NtGdiExtSelectClipRgn", func_NtGdiExtSelectClipRgn },
     { "NtGdiExtTextOutW", func_NtGdiExtTextOutW },
     //{ "NtGdiFlushUserBatch", func_NtGdiFlushUserBatch },
     { "NtGdiGetBitmapBits", func_NtGdiGetBitmapBits },
     { "NtGdiGetDIBitsInternal", func_NtGdiGetDIBitsInternal },
     //{ "NtGdiGetFontResourceInfoInternalW", func_NtGdiGetFontResourceInfoInternalW },
+    { "NtGdiGetFontResourceInfoLength", func_NtGdiGetFontResourceInfoLength },
     { "NtGdiGetRandomRgn", func_NtGdiGetRandomRgn },
     { "NtGdiGetStockObject", func_NtGdiGetStockObject },
     { "NtGdiIntersectClipRect", func_NtGdiIntersectClipRect },
@@ -113,9 +135,11 @@ const struct test winetest_testlist[] =
     { "NtGdiSetBitmapBits", func_NtGdiSetBitmapBits },
     { "NtGdiSetDIBitsToDeviceInternal", func_NtGdiSetDIBitsToDeviceInternal },
     { "NtGdiSetPixel", func_NtGdiSetPixel },
+    { "NtGdiStretchDIBitsInternal", func_NtGdiStretchDIBitsInternal },
     { "NtGdiTransformPoints", func_NtGdiTransformPoints },
 
     /* ntuser */
+    { "NtUserBuildHwndList", func_NtUserBuildHwndList },
     //{ "NtUserCallHwnd", func_NtUserCallHwnd },
     //{ "NtUserCallHwndLock", func_NtUserCallHwndLock },
     //{ "NtUserCallHwndOpt", func_NtUserCallHwndOpt },
@@ -131,9 +155,13 @@ const struct test winetest_testlist[] =
     { "NtUserEnumDisplaySettings", func_NtUserEnumDisplaySettings },
     { "NtUserFindExistingCursorIcon", func_NtUserFindExistingCursorIcon },
     { "NtUserGetAsyncKeyState", func_NtUserGetAsyncKeyState },
+    { "NtUserGetAtomNameValid", func_NtUserGetAtomNameValid },
+    { "NtUserGetAtomNameInvalid", func_NtUserGetAtomNameInvalid },
+    { "NtUserGetAtomNameConcurrent", func_NtUserGetAtomNameConcurrent },
     { "NtUserGetClassInfo", func_NtUserGetClassInfo },
     { "NtUserGetCursorInfo", func_NtUserGetCursorInfo },
     //{ "NtUserGetIconInfo", func_NtUserGetIconInfo },
+    { "NtUserGetIconInfoProbe", func_NtUserGetIconInfoProbe },
     { "NtUserGetKeyboardLayoutName", func_NtUserGetKeyboardLayoutName },
     { "NtUserGetThreadState", func_NtUserGetThreadState },
     { "NtUserGetTitleBarInfo", func_NtUserGetTitleBarInfo },
@@ -143,7 +171,9 @@ const struct test winetest_testlist[] =
     { "NtUserScrollDC", func_NtUserScrollDC },
     { "NtUserSelectPalette", func_NtUserSelectPalette },
     { "NtUserSetTimer", func_NtUserSetTimer },
+    { "NtUserSetWindowsHookExModule", func_NtUserSetWindowsHookExModule },
     { "NtUserSystemParametersInfo", func_NtUserSystemParametersInfo },
+    { "NtUserThunkedMenuInfo", func_NtUserThunkedMenuInfo },
     { "NtUserToUnicodeEx", func_NtUserToUnicodeEx },
     { "NtUserUpdatePerUserSystemParameters", func_NtUserUpdatePerUserSystemParameters },
 

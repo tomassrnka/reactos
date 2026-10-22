@@ -18,17 +18,21 @@ list(APPEND SOURCE
     ntgdi/NtGdiCreateCompatibleBitmap.c
     ntgdi/NtGdiCreateCompatibleDC.c
     ntgdi/NtGdiCreateDIBSection.c
+    ntgdi/NtGdiCreateDIBSectionCapture.c
+    ntgdi/NtGdiCreateDIBitmapInternal.c
     ntgdi/NtGdiDeleteObjectApp.c
     ntgdi/NtGdiDoPalette.c
     ntgdi/NtGdiEngCreatePalette.c
     ntgdi/NtGdiEnumFontOpen.c
     ntgdi/NtGdiExcludeClipRect.c
+    ntgdi/NtGdiExtCreateRegion.c
     ntgdi/NtGdiExtSelectClipRgn.c
     ntgdi/NtGdiExtTextOutW.c
     #ntgdi/NtGdiFlushUserBatch.c
     ntgdi/NtGdiGetBitmapBits.c
     ntgdi/NtGdiGetDIBitsInternal.c
     #ntgdi/NtGdiGetFontResourceInfoInternalW.c
+    ntgdi/NtGdiGetFontResourceInfoLength.c
     ntgdi/NtGdiGetRandomRgn.c
     ntgdi/NtGdiGetStockObject.c
     ntgdi/NtGdiIntersectClipRect.c
@@ -44,8 +48,10 @@ list(APPEND SOURCE
     ntgdi/NtGdiSetBitmapBits.c
     ntgdi/NtGdiSetDIBitsToDeviceInternal.c
     ntgdi/NtGdiSetPixel.c
+    ntgdi/NtGdiStretchDIBitsInternal.c
     ntgdi/NtGdiTransformPoints.c
 
+    ntuser/NtUserBuildHwndList.c
 #    ntuser/NtUserCallHwnd.c
 #    ntuser/NtUserCallHwndLock.c
 #    ntuser/NtUserCallHwndOpt.c
@@ -61,9 +67,11 @@ list(APPEND SOURCE
     ntuser/NtUserEnumDisplaySettings.c
     ntuser/NtUserFindExistingCursorIcon.c
     ntuser/NtUserGetAsyncKeyState.c
+    ntuser/NtUserGetAtomName.c
     ntuser/NtUserGetClassInfo.c
     ntuser/NtUserGetCursorInfo.c
 #    ntuser/NtUserGetIconInfo.c
+    ntuser/NtUserGetIconInfoProbe.c
     ntuser/NtUserGetKeyboardLayoutName.c
     ntuser/NtUserGetThreadState.c
     ntuser/NtUserGetTitleBarInfo.c
@@ -73,7 +81,9 @@ list(APPEND SOURCE
     ntuser/NtUserScrollDC.c
     ntuser/NtUserSelectPalette.c
     ntuser/NtUserSetTimer.c
+    ntuser/NtUserSetWindowsHookExModule.c
     ntuser/NtUserSystemParametersInfo.c
+    ntuser/NtUserThunkedMenuInfo.c
     ntuser/NtUserToUnicodeEx.c
     ntuser/NtUserUpdatePerUserSystemParameters.c
 

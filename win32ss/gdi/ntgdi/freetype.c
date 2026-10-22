@@ -6114,7 +6114,7 @@ IntGdiGetFontResourceInfo(
     ULONG Size, i, Count;
     LPBYTE pbBuffer;
     BOOL IsEqual;
-    FONTFAMILYINFO *FamInfo;
+    FONTFAMILYINFO *FamInfo = NULL;
     const ULONG MaxFamInfo = 64;
     const ULONG MAX_FAM_INFO_BYTES = sizeof(FONTFAMILYINFO) * MaxFamInfo;
     BOOL bSuccess;

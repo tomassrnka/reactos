@@ -100,6 +100,7 @@ NtUserGetAtomName(
     _Inout_ PUNICODE_STRING pustrName)
 {
     WCHAR awcBuffer[256];
+    UNICODE_STRING ustrName;
     ULONG cjLength;
 
     /* Retrieve the atom name into a local buffer (max length is 255 chars) */
@@ -108,20 +109,33 @@ NtUserGetAtomName(
     {
         _SEH2_TRY
         {
-            /* Probe the unicode string and the buffer */
+            /* Probe and capture the UNICODE_STRING descriptor exactly once.
+             * Everything below operates on the captured copy (ustrName), never
+             * on user memory, so a concurrent user-mode thread cannot change
+             * Buffer or MaximumLength between the probe and the copy. Re-reading
+             * them from user memory (the previous code did so for the length
+             * check and for the copy destination) is a double-fetch / TOCTOU:
+             * the probed buffer would no longer be the buffer written to, which
+             * allows a kernel write past the probed bounds or to an un-probed
+             * address. This matches the capture idiom used elsewhere in ntuser
+             * (e.g. class.c, kbdlayout.c). */
             ProbeForRead(pustrName, sizeof(*pustrName), 1);
-            ProbeForWrite(pustrName->Buffer, pustrName->MaximumLength, 1);
+            ustrName = *pustrName;
+
+            /* Probe the output buffer using the captured values */
+            ProbeForWrite(ustrName.Buffer, ustrName.MaximumLength, 1);
 
             /* Check if we have enough space to write the NULL termination */
-            if (pustrName->MaximumLength >= sizeof(UNICODE_NULL))
+            if (ustrName.MaximumLength >= sizeof(UNICODE_NULL))
             {
                 /* Limit the length to the buffer size */
-                cjLength = min(pustrName->MaximumLength - sizeof(UNICODE_NULL),
+                cjLength = min(ustrName.MaximumLength - sizeof(UNICODE_NULL),
                                cjLength);
 
-                /* Copy the string and NULL terminate it */
-                RtlCopyMemory(pustrName->Buffer, awcBuffer, cjLength);
-                pustrName->Buffer[cjLength / sizeof(WCHAR)] = L'\0';
+                /* Copy the string and NULL terminate it, using the captured
+                 * (and probed) destination pointer */
+                RtlCopyMemory(ustrName.Buffer, awcBuffer, cjLength);
+                ustrName.Buffer[cjLength / sizeof(WCHAR)] = L'\0';
             }
             else
             {

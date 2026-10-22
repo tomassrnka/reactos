@@ -422,7 +422,8 @@ WORD APIENTRY
 IntGdiSetHookFlags(HDC hDC, WORD Flags)
 {
     WORD wRet;
-    DC *dc = DC_LockDc(hDC);
+    /* Only the window manager calls this, for the DCs it handed out */
+    DC *dc = DC_LockDcAnyOwner(hDC);
 
     if (NULL == dc)
     {

@@ -108,7 +108,8 @@ BeginIfHookedUserApiHook(VOID)
   InterlockedIncrement(&gcCallUserApiHook);
   if (IsInsideUserApiHook()) return TRUE;
 
-  InterlockedDecrement(&gcCallUserApiHook);
+  /* Through EndUserApiHook: this may be the last call a pending teardown waits for */
+  EndUserApiHook();
   return FALSE;
 }
 
@@ -169,9 +170,16 @@ EndUserApiHook(VOID)
 
   if ( !InterlockedDecrement(&gcCallUserApiHook) )
   {
-     if ( !gcLoadUserApiHook )
+     if ( !gcLoadUserApiHook && gpfnInitUserApi )
      {
         RtlEnterCriticalSection(&gcsUserApiHook);
+
+        /* ClearUserApiHook may have set it again meanwhile and run the shutdown callback itself */
+        if ( gcLoadUserApiHook )
+        {
+           RtlLeaveCriticalSection(&gcsUserApiHook);
+           return FALSE;
+        }
 
         pfn = gpfnInitUserApi;
         hModule = ghmodUserApiHook;

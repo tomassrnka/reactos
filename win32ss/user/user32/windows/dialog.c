@@ -388,6 +388,7 @@ static BOOL DIALOG_IsAccelerator( HWND hwnd, HWND hwndDlg, WPARAM wParam )
     HWND hwndNext;
     INT dlgCode;
     WCHAR buffer[128];
+    BOOL bWrapped = FALSE;
 
     do
     {
@@ -441,6 +442,10 @@ static BOOL DIALOG_IsAccelerator( HWND hwnd, HWND hwndDlg, WPARAM wParam )
                     hwndNext=hwnd;
                     break;
                 }
+                /* hwnd is never reached again if a parent of it is hidden or disabled */
+                if (bWrapped)
+                    return FALSE;
+                bWrapped = TRUE;
                 hwndNext = GetWindow( hwndDlg, GW_CHILD );
             }
             else

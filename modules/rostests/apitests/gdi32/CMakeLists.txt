@@ -64,6 +64,7 @@ list(APPEND SOURCE
     PaintRgn.c
     PatBlt.c
     Rectangle.c
+    RegionAllocFailure.c
     RealizePalette.c
     SelectObject.c
     SetBoundsRect.c

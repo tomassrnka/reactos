@@ -778,6 +778,14 @@ co_IntSetForegroundMessageQueue(
       return FALSE;
    }
 
+   // A queue still active on a desktop that is no longer the input desktop cannot become the foreground queue:
+   // IntSetFocusMessageQueue refuses it, and activating anyway re-enters here through co_WinPosSetWindowPos.
+   if (Wnd && Wnd->head.pti->MessageQueue->Desktop &&
+       Wnd->head.pti->MessageQueue->Desktop != IntGetActiveDesktop())
+   {
+      return FALSE;
+   }
+
    if ( !gptiForeground || gptiForeground->TIF_flags & TIF_INCLEANUP )
       ptiPrev = NULL;
    else
@@ -1675,6 +1683,9 @@ NtUserSetActiveWindow(HWND hWnd)
       }
    }
 
+   if (Window)
+      UserEndAppStarting(Window);
+
    if (!Window ||
         Window->head.pti->MessageQueue == gptiCurrent->MessageQueue)
    {
@@ -1731,6 +1742,7 @@ NtUserSetFocus(HWND hWnd)
          goto Exit; // Return NULL
       }
 
+      UserEndAppStarting(Window);
       UserRefObjectCo(Window, &Ref);
       ret = co_UserSetFocus(Window);
       UserDerefObjectCo(Window);

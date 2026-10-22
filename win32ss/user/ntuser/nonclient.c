@@ -962,6 +962,37 @@ NC_DrawFrame( HDC hDC, RECT *CurrentRect, BOOL Active, DWORD Style, DWORD ExStyl
    }
 }
 
+/* The client area is not part of the frame, also where a program made it cover the caption or the border
+   (WM_NCCALCSIZE): drawing the frame must not paint over what the program shows there. Returns the state
+   to give to NC_RestoreClip, 0 when the clip region is unchanged */
+static
+INT NC_ClipOutClient(PWND pWnd, HDC hDC)
+{
+   RECT ClientRect = pWnd->rcClient;
+   LONG Width = pWnd->rcWindow.right - pWnd->rcWindow.left;
+   INT SavedDC;
+
+   /* The frame of an iconic window is the whole window */
+   if (pWnd->style & WS_MINIMIZE)
+      return 0;
+
+   RECTL_vOffsetRect(&ClientRect, -pWnd->rcWindow.left, -pWnd->rcWindow.top);
+   if (pWnd->ExStyle & WS_EX_LAYOUTRTL)
+   {
+      LONG Left = Width - ClientRect.right;
+
+      ClientRect.right = Width - ClientRect.left;
+      ClientRect.left = Left;
+   }
+   if (ClientRect.right <= ClientRect.left || ClientRect.bottom <= ClientRect.top)
+      return 0;
+
+   SavedDC = NtGdiSaveDC(hDC);
+   if (SavedDC)
+      NtGdiExcludeClipRect(hDC, ClientRect.left, ClientRect.top, ClientRect.right, ClientRect.bottom);
+   return SavedDC;
+}
+
 VOID UserDrawCaptionBar(
    PWND pWnd,
    HDC hDC,
@@ -972,6 +1003,7 @@ VOID UserDrawCaptionBar(
    HPEN PreviousPen;
    BOOL Gradient = FALSE;
    PCURICON_OBJECT pIcon = NULL;
+   INT SavedDC;
 
    if (!(Flags & DC_NOVISIBLE) && !IntIsWindowVisible(pWnd)) return;
 
@@ -985,6 +1017,8 @@ VOID UserDrawCaptionBar(
    CurrentRect.top = CurrentRect.left = 0;
    CurrentRect.right = WindowRect.right - WindowRect.left;
    CurrentRect.bottom = WindowRect.bottom - WindowRect.top;
+
+   SavedDC = NC_ClipOutClient(pWnd, hDC);
 
    /* Draw outer edge */
    if (UserHasWindowEdge(Style, ExStyle))
@@ -1089,6 +1123,9 @@ VOID UserDrawCaptionBar(
           DrawEdge(hDC, &CurrentRect, EDGE_SUNKEN, BF_RECT | BF_ADJUST);
       }
    }
+
+   if (SavedDC)
+      NtGdiRestoreDC(hDC, SavedDC);
 }
 
 // Note from Wine:
@@ -1103,6 +1140,16 @@ VOID UserDrawCaptionBar(
  * - Drawing of WS_BORDER after scrollbars
  * - Correct drawing of size-box
  */
+/* A window flashed active by FlashWindowEx carries a FlashWState property whose FLASHW_ACTIVE
+   phase bit is the authoritative flashing-to-active signal, distinct from the queue-active
+   WNDS_ACTIVEFRAME that IntSendNCPaint also sets for a background-queue-active window. */
+static BOOL FASTCALL
+IntWndIsFlashingActive(PWND pWnd)
+{
+   DWORD_PTR FlashState = (DWORD_PTR)UserGetProp(pWnd, AtomFlashWndState, TRUE);
+   return FlashState != 0 && (FlashState & FLASHW_ACTIVE) != 0;
+}
+
 LRESULT
 NC_DoNCPaint(PWND pWnd, HDC hDC, INT Flags)
 {
@@ -1110,9 +1157,13 @@ NC_DoNCPaint(PWND pWnd, HDC hDC, INT Flags)
    PWND Parent;
    RECT WindowRect, CurrentRect, TempRect;
    BOOL Active = FALSE;
+   INT SavedDC;
 
-   if (!IntIsWindowVisible(pWnd) ||
-       (pWnd->state & WNDS_NONCPAINT && !(pWnd->state & WNDS_FORCEMENUDRAW)) ||
+   /* DC_NOVISIBLE: print the frame of a hidden window too (WM_PRINT) */
+   if ((Flags == -1 || !(Flags & DC_NOVISIBLE)) && !IntIsWindowVisible(pWnd))
+      return 0;
+
+   if ((pWnd->state & WNDS_NONCPAINT && !(pWnd->state & WNDS_FORCEMENUDRAW)) ||
         IntEqualRect(&pWnd->rcWindow, &pWnd->rcClient) )
       return 0;
 
@@ -1134,7 +1185,13 @@ NC_DoNCPaint(PWND pWnd, HDC hDC, INT Flags)
       }
       else
       {
-         Active = (gpqForeground == pWnd->head.pti->MessageQueue);
+         /* The active window of the foreground queue draws the active frame. A window flashed
+            active by FlashWindowEx also does while its flash state reports the active phase;
+            WNDS_ACTIVEFRAME alone is too broad, as IntSendNCPaint sets it for any queue-active
+            window, including one activated on a background queue. */
+         Active = ((gpqForeground == pWnd->head.pti->MessageQueue &&
+                    (gpqForeground->spwndActive == pWnd || (Style & WS_CHILD))) ||
+                   (IntWndIsFlashingActive(pWnd) && (pWnd->state & WNDS_ACTIVEFRAME)));
       }
       Flags = DC_NC; // Redraw everything!
    }
@@ -1147,6 +1204,8 @@ NC_DoNCPaint(PWND pWnd, HDC hDC, INT Flags)
    CurrentRect.top = CurrentRect.left = 0;
    CurrentRect.right = WindowRect.right - WindowRect.left;
    CurrentRect.bottom = WindowRect.bottom - WindowRect.top;
+
+   SavedDC = NC_ClipOutClient(pWnd, hDC);
 
    /* Draw outer edge */
    if (UserHasWindowEdge(pWnd->style, pWnd->ExStyle))
@@ -1307,6 +1366,10 @@ NC_DoNCPaint(PWND pWnd, HDC hDC, INT Flags)
         }
      }
    }
+
+   if (SavedDC)
+      NtGdiRestoreDC(hDC, SavedDC);
+
    return 0; // For WM_NCPAINT message, return 0.
 }
 
@@ -1735,12 +1798,17 @@ LRESULT NC_HandleNCRButtonDown(PWND pwnd, WPARAM wParam, LPARAM lParam)
 {
   MSG msg;
   INT hittest = wParam;
+  POINT pt;
 
   switch (hittest)
   {
   case HTCAPTION:
   case HTSYSMENU:
-      if (!IntGetSystemMenu( pwnd, FALSE )) break;
+      /* Like Windows, track only a press on the frame's own caption; other windows get the button-up */
+      pt.x = GET_X_LPARAM(lParam);
+      pt.y = GET_Y_LPARAM(lParam);
+      hittest = GetNCHitEx(pwnd, pt);
+      if (hittest != HTCAPTION && hittest != HTSYSMENU) break;
 
       co_UserSetCapture( UserHMGetHandle(pwnd) );
       for (;;)

@@ -33,6 +33,7 @@
 #define W32PF_MANUALGUICHECK         (0x02000000)
 #define W32PF_CREATEDWINORDC         (0x04000000)
 #define W32PF_APIHOOKLOADED          (0x08000000)
+#define W32PF_APIHOOKUNLOADING       (0x80000000)
 #define W32PF_JOBRESTRICTED          (0x40000000)
 
 #define QSIDCOUNTS 7
@@ -162,6 +163,10 @@ typedef struct _THREADINFO
 #if DBG
     USHORT acExclusiveLockCount[GDIObjTypeTotal + 1];
     UINT cRefObjectCo;
+    /* Region allocation failure injection, see REGION_iDbgArmAllocFailure */
+    BOOLEAN bDbgRgnFailArmed;
+    BOOLEAN bDbgRgnFailFired;
+    LONG lDbgRgnFailCountdown;
 #endif
 #endif // __cplusplus
 } THREADINFO;
@@ -295,6 +300,9 @@ typedef struct _PROCESSINFO
     struct _GDI_POOL* pPoolDcAttr;
     struct _GDI_POOL* pPoolBrushAttr;
     struct _GDI_POOL* pPoolRgnAttr;
+
+    /* Tick count of the process creation, for the startup time of W32PF_APPSTARTING */
+    DWORD AppStartTick;
 
 #if DBG
     BYTE DbgChannelLevel[DbgChCount];

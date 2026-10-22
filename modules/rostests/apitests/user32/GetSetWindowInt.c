@@ -7,6 +7,61 @@
 
 #include "precomp.h"
 
+/* UF-57: windows with fewer extra bytes than the access size must reject every
+ * index. NtUserSetWindowWord used to compute cbwndExtra - sizeof(WORD) unsigned,
+ * which wraps for cbwndExtra < 2 and let any index through (OOB write). */
+static void
+Test_SmallWndExtra(int cbWndExtra, PCWSTR pszClass)
+{
+    static const int Indexes[] = { 0, 1, 2, 4, 0x100, 0x1000 };
+    WNDCLASSEXW wcex = { 0 };
+    HWND hwnd;
+    ATOM atom;
+    UINT i;
+
+    wcex.cbSize = sizeof(WNDCLASSEXW);
+    wcex.lpfnWndProc = DefWindowProcW;
+    wcex.cbWndExtra = cbWndExtra;
+    wcex.hInstance = GetModuleHandle(NULL);
+    wcex.lpszClassName = pszClass;
+    atom = RegisterClassExW(&wcex);
+    ok(atom != 0, "Failed to register class!\n");
+    if (!atom)
+        return;
+
+    hwnd = CreateWindowW(pszClass, L"Small", WS_POPUP, 0, 0, 10, 10,
+                         NULL, NULL, GetModuleHandle(NULL), NULL);
+    ok(hwnd != NULL, "CreateWindow failed\n");
+
+    if (hwnd)
+    {
+        for (i = 0; i < ARRAYSIZE(Indexes); i++)
+        {
+            SetLastError(0xdeadbeef);
+            ok_hex(SetWindowWord(hwnd, Indexes[i], 0x5678), 0);
+            ok(GetLastError() == ERROR_INVALID_INDEX,
+               "cbWndExtra %d: SetWindowWord(%d) error %lu\n",
+               cbWndExtra, Indexes[i], GetLastError());
+
+            SetLastError(0xdeadbeef);
+            ok_hex(SetWindowLong(hwnd, Indexes[i], 0x12345678), 0);
+            ok(GetLastError() == ERROR_INVALID_INDEX,
+               "cbWndExtra %d: SetWindowLong(%d) error %lu\n",
+               cbWndExtra, Indexes[i], GetLastError());
+
+#ifdef _WIN64
+            SetLastError(0xdeadbeef);
+            ok_hex(SetWindowLongPtr(hwnd, Indexes[i], 123), 0);
+            ok(GetLastError() == ERROR_INVALID_INDEX,
+               "cbWndExtra %d: SetWindowLongPtr(%d) error %lu\n",
+               cbWndExtra, Indexes[i], GetLastError());
+#endif
+        }
+        DestroyWindow(hwnd);
+    }
+    UnregisterClassW(pszClass, GetModuleHandle(NULL));
+}
+
 START_TEST(GetSetWindowInt)
 {
     WNDCLASSEXW wcex = { 0 };
@@ -74,4 +129,7 @@ START_TEST(GetSetWindowInt)
     ok_err(ERROR_INVALID_INDEX);
 #endif
 
+
+    Test_SmallWndExtra(0, L"UF57Extra0");
+    Test_SmallWndExtra(1, L"UF57Extra1");
 }

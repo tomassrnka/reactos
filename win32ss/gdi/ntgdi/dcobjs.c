@@ -465,11 +465,21 @@ NtGdiSelectBitmap(
     pdc->fs |= DC_DIRTY_RAO;
 
     /* Update the system region */
-    REGION_SetRectRgn(pdc->prgnVis,
-                      0,
-                      0,
-                      pdc->dclevel.sizl.cx,
-                      pdc->dclevel.sizl.cy);
+    if (!pdc->prgnVis || pdc->prgnVis == prgnDefault)
+    {
+        /* The shared default region must not be overwritten */
+        PREGION prgnVis = IntSysCreateRectpRgn(0, 0, pdc->dclevel.sizl.cx, pdc->dclevel.sizl.cy);
+        if (prgnVis)
+            pdc->prgnVis = prgnVis;
+    }
+    else
+    {
+        REGION_SetRectRgn(pdc->prgnVis,
+                          0,
+                          0,
+                          pdc->dclevel.sizl.cx,
+                          pdc->dclevel.sizl.cy);
+    }
 
     /* Unlock the DC */
     DC_UnlockDc(pdc);
@@ -519,11 +529,19 @@ NtGdiSelectClipPath(
     if (!RgnPath)
     {
         EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        PATH_UnlockPath(pPath);
         DC_UnlockDc(pdc);
         return FALSE;
     }
 
     pNewPath = PATH_FlattenPath(pPath);
+    if (!pNewPath)
+    {
+        REGION_Delete(RgnPath);
+        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        success = FALSE;
+        goto Exit;
+    }
 
     success = PATH_PathToRegion(pNewPath, pdcattr->jFillMode, RgnPath);
 

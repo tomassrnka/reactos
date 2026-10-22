@@ -293,6 +293,13 @@ NtUserCallOneParam(
             break;
         }
 
+#if DBG
+        case ONEPARAM_ROUTINE_SETRAWINPUTSERIAL:
+            /* Test hook of checked builds only: puts the raw input handle counter near its wrap */
+            Result = UserRawInputSetSerial((ULONG)Param);
+            break;
+#endif
+
         case ONEPARAM_ROUTINE_ENABLEPROCWNDGHSTING:
         {
             BOOL Enable;
@@ -321,6 +328,10 @@ NtUserCallOneParam(
 
         case ONEPARAM_ROUTINE_GETINPUTEVENT:
             Result = (DWORD_PTR)IntMsqSetWakeMask(Param);
+            break;
+
+        case ONEPARAM_ROUTINE_ROS_MSGWAIT:
+            Result = (DWORD_PTR)co_MsqMsgWait((PMSGWAITINFO)Param);
             break;
 
         case ONEPARAM_ROUTINE_GETKEYBOARDTYPE:
@@ -680,6 +691,7 @@ NtUserCallHwndLock(
 
         case HWNDLOCK_ROUTINE_SETFOREGROUNDWINDOW:
             TRACE("co_IntSetForegroundWindow 1 0x%p\n", hWnd);
+            UserEndAppStarting(Window);
             Ret = co_IntSetForegroundWindow(Window);
             TRACE("co_IntSetForegroundWindow 2 0x%p\n", hWnd);
             break;

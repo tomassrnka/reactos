@@ -673,11 +673,43 @@ IntSetWindowPlacement(PWND Wnd, WINDOWPLACEMENT *wpl, UINT Flags)
    BOOL sAsync;
    UINT SWP_Flags;
 
+   if (!Wnd || Wnd == Wnd->head.rpdesk->pDeskInfo->spwnd) return FALSE;
+
+   /* The icon position and the normal rectangle of a top-level window come relative to the work area, as
+      IntGetWindowPlacement gives them: back to screen coordinates, the ones of InternalPos and of the window */
+   if ((Flags & (PLACE_MIN | PLACE_RECT)) &&
+       Wnd->spwndParent == Wnd->head.rpdesk->pDeskInfo->spwnd && !(Wnd->ExStyle & WS_EX_TOOLWINDOW))
+   {
+      PMONITOR pmonitor;
+
+      /* The monitor of the normal rectangle, brought up to date as IntGetWindowPlacement does before it picks one */
+      WinPosInitInternalPos(Wnd, &Wnd->rcWindow);
+      pmonitor = UserMonitorFromRect(&Wnd->InternalPos.NormalRect, MONITOR_DEFAULTTOPRIMARY);
+
+      /* rcNormalPosition is only valid with PLACE_RECT (NtUserSetInternalWindowPos may pass the icon position
+         alone). It is relative to the work area of the monitor IntGetWindowPlacement took the offset from: the
+         window's own one when it fits, which a placement that GetWindowPlacement gave back always does */
+      if (Flags & PLACE_RECT)
+         pmonitor = UserMonitorFromWorkAreaRect(&wpl->rcNormalPosition, pmonitor);
+
+      if (pmonitor)
+      {
+         LONG dx = pmonitor->rcWork.left - pmonitor->rcMonitor.left;
+         LONG dy = pmonitor->rcWork.top - pmonitor->rcMonitor.top;
+
+         if (Flags & PLACE_MIN)
+         {
+            wpl->ptMinPosition.x += dx;
+            wpl->ptMinPosition.y += dy;
+         }
+         if (Flags & PLACE_RECT)
+            RECTL_vOffsetRect(&wpl->rcNormalPosition, dx, dy);
+      }
+   }
+
    if ( Flags & PLACE_MIN) make_point_onscreen( &wpl->ptMinPosition );
    if ( Flags & PLACE_MAX) make_point_onscreen( &wpl->ptMaxPosition );
    if ( Flags & PLACE_RECT) make_rect_onscreen( &wpl->rcNormalPosition );
-
-   if (!Wnd || Wnd == Wnd->head.rpdesk->pDeskInfo->spwnd) return FALSE;
 
    if ( Flags & PLACE_MIN ) Wnd->InternalPos.IconPos = wpl->ptMinPosition;
    if ( Flags & PLACE_MAX ) Wnd->InternalPos.MaxPos = wpl->ptMaxPosition;
@@ -1799,6 +1831,28 @@ co_WinPosSetWindowPos(
    UINT flags
    )
 {
+   return co_WinPosSetWindowPosEx(Window, WndInsertAfter, x, y, cx, cy, flags, FALSE);
+}
+
+/*
+ * NoMessages: apply the new geometry with no callback into user mode at all
+ * (no window procedure, hook or WinEvent), as UpdateLayeredWindow needs. The
+ * client area keeps its offsets from the window edges. The caller passes
+ * SWP_NOACTIVATE and SWP_DEFERERASE, and afterwards calls
+ * co_WinPosNoMessagesNotify for the notifications that are left out.
+ */
+BOOLEAN FASTCALL
+co_WinPosSetWindowPosEx(
+   PWND Window,
+   HWND WndInsertAfter,
+   INT x,
+   INT y,
+   INT cx,
+   INT cy,
+   UINT flags,
+   BOOL NoMessages
+   )
+{
    WINDOWPOS WinPos;
    RECTL NewWindowRect;
    RECTL NewClientRect;
@@ -1820,6 +1874,11 @@ co_WinPosSetWindowPos(
 
    TRACE("pwnd %p, after %p, %d,%d (%dx%d), flags 0x%x\n",
          Window, WndInsertAfter, x, y, cx, cy, flags);
+
+   /* A request to activate a top-level window ends the startup of its process. This
+      must see the flags as given: WinPosFixupFlags drops SWP_SHOWWINDOW for a visible window. */
+   if (!(flags & (SWP_NOACTIVATE | SWP_HIDEWINDOW)) && !(Window->style & WS_CHILD))
+      UserEndAppStarting(Window);
 #if DBG
    dump_winpos_flags(flags);
 #endif
@@ -1855,6 +1914,12 @@ co_WinPosSetWindowPos(
          return TRUE;
       }
       return FALSE;
+   }
+
+   if (NoMessages)
+   {
+      ASSERT((flags & (SWP_NOACTIVATE | SWP_DEFERERASE)) == (SWP_NOACTIVATE | SWP_DEFERERASE));
+      WinPos.flags |= SWP_NOSENDCHANGING;
    }
 
    co_WinPosDoWinPosChanging(Window, &WinPos, &NewWindowRect, &NewClientRect);
@@ -1930,7 +1995,22 @@ co_WinPosSetWindowPos(
        Window->hrgnNewFrame = NULL;
    }
 
-   WvrFlags = co_WinPosDoNCCALCSize(Window, &WinPos, &NewWindowRect, &NewClientRect, valid_rects);
+   if (NoMessages)
+   {
+      /* NewClientRect already moved with the window; follow a resize too */
+      NewClientRect.right  += (NewWindowRect.right - NewWindowRect.left) - (Window->rcWindow.right - Window->rcWindow.left);
+      NewClientRect.bottom += (NewWindowRect.bottom - NewWindowRect.top) - (Window->rcWindow.bottom - Window->rcWindow.top);
+      FixClientRect(&NewClientRect, &NewWindowRect);
+      if (NewClientRect.left != Window->rcClient.left || NewClientRect.top != Window->rcClient.top)
+         WinPos.flags &= ~SWP_NOCLIENTMOVE;
+      if (NewClientRect.right - NewClientRect.left != Window->rcClient.right - Window->rcClient.left ||
+          NewClientRect.bottom - NewClientRect.top != Window->rcClient.bottom - Window->rcClient.top)
+         WinPos.flags &= ~SWP_NOCLIENTSIZE;
+      RECTL_vSetEmptyRect(&valid_rects[0]);
+      RECTL_vSetEmptyRect(&valid_rects[1]);
+   }
+   else
+      WvrFlags = co_WinPosDoNCCALCSize(Window, &WinPos, &NewWindowRect, &NewClientRect, valid_rects);
 
 //   ERR("co_WinPosDoNCCALCSize returned 0x%x\n valid dest: %d %d %d %d\n valid src : %d %d %d %d\n", WvrFlags,
 //      valid_rects[0].left,valid_rects[0].top,valid_rects[0].right,valid_rects[0].bottom,
@@ -1999,9 +2079,10 @@ co_WinPosSetWindowPos(
 
       Window->style |= WS_VISIBLE; //IntSetStyle( Window, WS_VISIBLE, 0 );
       Window->head.pti->cVisWindows++;
+
       IntNotifyWinEvent(EVENT_OBJECT_SHOW, Window, OBJID_WINDOW, CHILDID_SELF, WEF_SETBYWNDPTI);
    }
-   else
+   else if (!NoMessages)
    {
       IntCheckFullscreen(Window);
    }
@@ -2075,7 +2156,8 @@ co_WinPosSetWindowPos(
           VisAfter != NULL &&
           !(WvrFlags & WVR_REDRAW) &&
           !(WinPos.flags & SWP_NOCOPYBITS) &&
-          !(Window->ExStyle & WS_EX_TRANSPARENT))
+          !(Window->ExStyle & WS_EX_TRANSPARENT) &&
+          (CopyRgn = IntSysCreateRectpRgn(0, 0, 0, 0)) != NULL)
       {
 
          /*
@@ -2087,7 +2169,6 @@ co_WinPosSetWindowPos(
           * region...)
           */
 
-         CopyRgn = IntSysCreateRectpRgn(0, 0, 0, 0);
          if ((WinPos.flags & SWP_NOSIZE) && (WinPos.flags & SWP_NOCLIENTSIZE))
             RgnType = IntGdiCombineRgn(CopyRgn, VisAfter, VisBefore, RGN_AND);
          else if (VisBeforeJustClient != NULL)
@@ -2124,8 +2205,10 @@ co_WinPosSetWindowPos(
                   (WinPos.flags & SWP_FRAMECHANGED) )
          {
              HRGN DcRgn = NtGdiCreateRectRgn(0, 0, 0, 0);
-             PREGION DcRgnObj = REGION_LockRgn(DcRgn);
+             PREGION DcRgnObj = DcRgn ? REGION_LockRgn(DcRgn) : NULL;
 
+             if (DcRgnObj)
+             {
           /*
            * Small trick here: there is no function to bitblt a region. So
            * we set the region as the clipping region, take the bounding box
@@ -2154,7 +2237,15 @@ co_WinPosSetWindowPos(
 
             UserReleaseDC(Window, Dc, FALSE);
             IntValidateParent(Window, CopyRgn);
-            GreDeleteObject(DcRgn);
+             }
+             else
+             {
+                /* Nothing was copied: the whole visible region is redrawn */
+                REGION_Delete(CopyRgn);
+                CopyRgn = NULL;
+             }
+             if (DcRgn)
+                GreDeleteObject(DcRgn);
          }
       }
       else
@@ -2228,12 +2319,20 @@ co_WinPosSetWindowPos(
                         else  // Use region handling
                         {
                             HRGN DcRgn = NtGdiCreateRectRgn(0, 0, 0, 0);
-                            PREGION DcRgnObj = REGION_LockRgn(DcRgn);
+                            PREGION DcRgnObj = DcRgn ? REGION_LockRgn(DcRgn) : NULL;
                             TRACE("SWP_FRAMECHANGED win %p hRgn %p\n",pwnd, DcRgn);
-                            IntGdiCombineRgn(DcRgnObj, VisBefore, NULL, RGN_COPY);
-                            REGION_UnlockRgn(DcRgnObj);
-                            ForceNCPaintErase(pwnd, DcRgn, DcRgnObj);
-                            GreDeleteObject(DcRgn);
+                            if (DcRgnObj)
+                            {
+                                IntGdiCombineRgn(DcRgnObj, VisBefore, NULL, RGN_COPY);
+                                REGION_UnlockRgn(DcRgnObj);
+                                ForceNCPaintErase(pwnd, DcRgn, DcRgnObj);
+                            }
+                            else
+                            {
+                                IntSendNCPaint(pwnd, HRGN_WINDOW);
+                            }
+                            if (DcRgn)
+                                GreDeleteObject(DcRgn);
                         }
                     }
                 }
@@ -2280,7 +2379,11 @@ co_WinPosSetWindowPos(
             //ERR("WPSWP : set active window\n");
             if (!(Window->state & WNDS_BEINGACTIVATED)) // Inside SAW?
             {
-               co_IntSetForegroundWindow(Window); // Fixes SW_HIDE issues. Wine win test_SetActiveWindow & test_SetForegroundWindow.
+               // A window on a desktop that is not the input desktop is only activated in its own queue.
+               if (IntGetActiveDesktop() && Window->head.rpdesk != IntGetActiveDesktop())
+                  co_IntSetActiveWindow(Window, FALSE, TRUE, FALSE);
+               else
+                  co_IntSetForegroundWindow(Window); // Fixes SW_HIDE issues. Wine win test_SetActiveWindow & test_SetForegroundWindow.
             }
          }
       }
@@ -2354,7 +2457,8 @@ co_WinPosSetWindowPos(
 
    TRACE("\tstatus hwnd %p flags = %04x\n", Window ? UserHMGetHandle(Window) : NULL, WinPos.flags & SWP_AGG_STATUSFLAGS);
 
-   if (((WinPos.flags & SWP_AGG_STATUSFLAGS) != SWP_AGG_NOPOSCHANGE)
+   if (!NoMessages &&
+       ((WinPos.flags & SWP_AGG_STATUSFLAGS) != SWP_AGG_NOPOSCHANGE)
             && !((flags & SWP_AGG_NOCLIENTCHANGE) && (flags & SWP_SHOWWINDOW)))
    {
       /* WM_WINDOWPOSCHANGED is sent even if SWP_NOSENDCHANGING is set
@@ -2367,6 +2471,11 @@ co_WinPosSetWindowPos(
       TRACE("WM_WINDOWPOSCHANGED hwnd %p Flags %04x\n",WinPos.hwnd,WinPos.flags);
       co_IntSendMessageNoWait(WinPos.hwnd, WM_WINDOWPOSCHANGED, 0, (LPARAM) &WinPos);
    }
+
+   /* The caller of the NoMessages mode sends the notifications below with
+      co_WinPosNoMessagesNotify once its own work is done: each can call back */
+   if (NoMessages)
+      return TRUE;
 
    if ( WinPos.flags & SWP_FRAMECHANGED  || WinPos.flags & SWP_STATECHANGED ||
       !(WinPos.flags & SWP_NOCLIENTSIZE) || !(WinPos.flags & SWP_NOCLIENTMOVE) )
@@ -2395,6 +2504,37 @@ co_WinPosSetWindowPos(
    }
 
    return TRUE;
+}
+
+/* The notifications co_WinPosSetWindowPosEx leaves out in its NoMessages mode.
+   Window is referenced by the caller; any of these can call back and destroy it */
+VOID FASTCALL
+co_WinPosNoMessagesNotify(PWND Window, BOOL PointerCrossed)
+{
+   ASSERT_REFS_CO(Window);
+
+#define WINDOW_ALIVE(w) (!((w)->state & WNDS_DESTROYED) && !((w)->state2 & WNDS2_INDESTROY))
+   if (WINDOW_ALIVE(Window))
+      IntCheckFullscreen(Window);
+
+   /* Raised by the calling thread, which did the change (it may not own the window) */
+   if (WINDOW_ALIVE(Window))
+      IntNotifyWinEvent(EVENT_OBJECT_LOCATIONCHANGE, Window, OBJID_WINDOW, CHILDID_SELF, 0);
+
+   if (IS_IMM_MODE())
+      IntImeWindowPosChanged();
+
+   if (PointerCrossed)
+   {
+      /* Generate mouse move message */
+      MSG msg;
+      msg.message = WM_MOUSEMOVE;
+      msg.wParam = UserGetMouseButtonsState();
+      msg.lParam = MAKELPARAM(gpsi->ptCursor.x, gpsi->ptCursor.y);
+      msg.pt = gpsi->ptCursor;
+      co_MsqInsertMouseMessage(&msg, 0, 0, TRUE);
+   }
+#undef WINDOW_ALIVE
 }
 
 LRESULT FASTCALL
@@ -2458,6 +2598,17 @@ co_WinPosMinMaximize(PWND Wnd, UINT ShowFlag, RECT* NewPos)
 
    wpl.length = sizeof(wpl);
    IntGetWindowPlacement( Wnd, &wpl );
+
+   /* IntGetWindowPlacement gives the work area relative values of WINDOWPLACEMENT for a top-level window;
+      the rectangles below are screen coordinates */
+   wpl.rcNormalPosition = Wnd->InternalPos.NormalRect;
+   if (Wnd->InternalPos.flags & WPF_MININIT)
+   {
+      wpl.ptMinPosition.x = Wnd->InternalPos.IconPos.x;
+      wpl.ptMinPosition.y = Wnd->InternalPos.IconPos.y;
+   }
+   else
+      wpl.ptMinPosition.x = wpl.ptMinPosition.y = -1;
 
    if (co_HOOK_CallHooks(WH_CBT, HCBT_MINMAX, (WPARAM)UserHMGetHandle(Wnd), ShowFlag))
    {
@@ -2570,6 +2721,7 @@ co_WinPosMinMaximize(PWND Wnd, UINT ShowFlag, RECT* NewPos)
                   }
                   else
                   {
+                     SwpFlags |= SWP_STATECHANGED;
                      *NewPos = wpl.rcNormalPosition;
                      if (ShowFlag != SW_SHOWNORMAL && ShowFlag != SW_SHOWDEFAULT)
                      {
@@ -2618,10 +2770,14 @@ void IntForceMinimizeWindow(PWND pWnd)
 
     // Invalidate and redraw the window region
     hRgn = GreCreateRectRgnIndirect(&pWnd->rcWindow);
-    pRgn = REGION_LockRgn(hRgn);
-    co_UserRedrawWindow(UserGetDesktopWindow(), NULL, pRgn, RDW_ALLCHILDREN | RDW_ERASE | RDW_INVALIDATE);
-    REGION_UnlockRgn(pRgn);
-    GreDeleteObject(hRgn);
+    pRgn = hRgn ? REGION_LockRgn(hRgn) : NULL;
+    if (pRgn)
+    {
+        co_UserRedrawWindow(UserGetDesktopWindow(), NULL, pRgn, RDW_ALLCHILDREN | RDW_ERASE | RDW_INVALIDATE);
+        REGION_UnlockRgn(pRgn);
+    }
+    if (hRgn)
+        GreDeleteObject(hRgn);
 
     // Activate the other window if necessary
     if (pWnd->spwndParent == pWnd->head.rpdesk->pDeskInfo->spwnd)
@@ -2629,7 +2785,8 @@ void IntForceMinimizeWindow(PWND pWnd)
 }
 
 /*
-   ShowWindow does not set SWP_FRAMECHANGED!!! Fix wine msg test_SetParent:WmSetParentSeq_2:23 wParam bits!
+   ShowWindow does not set SWP_FRAMECHANGED, except when the minimized, maximized or normal state changes.
+   Fix wine msg test_SetParent:WmSetParentSeq_2:23 wParam bits!
  */
 BOOLEAN FASTCALL
 co_WinPosShowWindow(PWND Wnd, INT Cmd)
@@ -2808,6 +2965,19 @@ co_WinPosShowWindow(PWND Wnd, INT Cmd)
          //ERR("co_WinPosShowWindow Exit Good 4\n");
          return FALSE;
    }
+
+   /* The commands that activate a top-level window end the startup of its process
+      (the ones that return above changed nothing) */
+   if (!(style & WS_CHILD) &&
+       (Cmd == SW_SHOW || Cmd == SW_SHOWNORMAL || Cmd == SW_SHOWDEFAULT || Cmd == SW_RESTORE ||
+        Cmd == SW_SHOWMAXIMIZED || Cmd == SW_SHOWMINIMIZED))
+   {
+      UserEndAppStarting(Wnd);
+   }
+
+   /* A change between minimized, maximized and normal changes the frame: applications recalculate it on SWP_FRAMECHANGED */
+   if (Swp & SWP_STATECHANGED)
+      Swp |= SWP_FRAMECHANGED;
 
    ShowFlag = (Cmd != SW_HIDE);
 

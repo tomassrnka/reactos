@@ -12,6 +12,13 @@
 // - Save appropriate text metrics.
 
 #include <win32k.h>
+
+/* Actions of Windows Vista and later, which the winuser.h of this build leaves out */
+#ifndef SPI_GETWHEELSCROLLCHARS
+#define SPI_GETWHEELSCROLLCHARS 0x006C
+#define SPI_SETWHEELSCROLLCHARS 0x006D
+#endif
+
 DBG_DEFAULT_CHANNEL(UserSysparams);
 
 SPIVALUES gspv;
@@ -75,9 +82,7 @@ static const WCHAR* VAL_CLICKLOCKTIME = L"ClickLockTime";
 static const WCHAR* VAL_PAINTDESKVER = L"PaintDesktopVersion";
 static const WCHAR* VAL_CARETRATE = L"CursorBlinkRate";
 static const WCHAR* VAL_CARETWIDTH = L"CaretWidth";
-#if (_WIN32_WINNT >= 0x0600)
 static const WCHAR* VAL_SCRLLCHARS = L"WheelScrollChars";
-#endif
 static const WCHAR* VAL_USERPREFMASK = L"UserPreferencesMask";
 static const WCHAR* VAL_SNAP_ENABLED = L"WindowArrangementActive";
 static const WCHAR* VAL_SNAP_DOCKMOVING = L"DockMoving";
@@ -307,9 +312,7 @@ SpiUpdatePerUserSystemParameters(VOID)
     gspv.uiFontSmoothingType = SpiLoadDWord(KEY_DESKTOP, VAL_FONTSMOOTHINGTYPE, 1);
     gspv.uiFontSmoothingContrast = SpiLoadDWord(KEY_DESKTOP, VAL_FONTSMOOTHINGCONTRAST, 1400);
     gspv.uiFontSmoothingOrientation = SpiLoadDWord(KEY_DESKTOP, VAL_FONTSMOOTHINGORIENTATION, 1);
-#if (_WIN32_WINNT >= 0x0600)
     gspv.uiWheelScrollChars = SpiLoadInt(KEY_DESKTOP, VAL_SCRLLCHARS, 3);
-#endif
 
     /* Some hardcoded values for now */
 
@@ -1550,13 +1553,12 @@ SpiGetSet(UINT uiAction, UINT uiParam, PVOID pvParam, FLONG fl)
         case SPI_SETMENUSHOWDELAY:
             return SpiSetInt(&gspv.dwMenuShowDelay, uiParam, KEY_DESKTOP, L"MenuShowDelay", fl);
 
-#if (_WIN32_WINNT >= 0x0600)
         case SPI_GETWHEELSCROLLCHARS:
             return SpiGetInt(pvParam, &gspv.uiWheelScrollChars, fl);
 
         case SPI_SETWHEELSCROLLCHARS:
             return SpiSetInt(&gspv.uiWheelScrollChars, uiParam, KEY_DESKTOP, VAL_SCRLLCHARS, fl);
-#endif
+
         case SPI_GETSHOWIMEUI:
             return SpiGetInt(pvParam, &gspv.bShowImeUi, fl);
 
@@ -1693,10 +1695,10 @@ SpiGetSet(UINT uiAction, UINT uiParam, PVOID pvParam, FLONG fl)
             return SpiSetUserPref(UPM_UIEFFECTS, pvParam, fl);
 
         case SPI_GETMOUSESONAR:
-            return SpiGetInt(pvParam, &gspv.bMouseSonar, fl);
+            return SpiGetUserPref(UPM_MOUSESONAR, pvParam, fl);
 
         case SPI_SETMOUSESONAR:
-            return SpiSetBool(&gspv.bMouseSonar, uiParam, KEY_MOUSE, L"", fl);
+            return SpiSetUserPref(UPM_MOUSESONAR, pvParam, fl);
 
         case SPI_GETMOUSECLICKLOCK:
             return SpiGetUserPref(UPM_CLICKLOCK, pvParam, fl);
@@ -1706,10 +1708,10 @@ SpiGetSet(UINT uiAction, UINT uiParam, PVOID pvParam, FLONG fl)
             return SpiSetUserPref(UPM_CLICKLOCK, pvParam, fl);
 
         case SPI_GETMOUSEVANISH:
-            return SpiGetInt(pvParam, &gspv.bMouseVanish, fl);
+            return SpiGetUserPref(UPM_MOUSEVANISH, pvParam, fl);
 
         case SPI_SETMOUSEVANISH:
-            return SpiSetBool(&gspv.bMouseVanish, uiParam, KEY_MOUSE, L"", fl);
+            return SpiSetUserPref(UPM_MOUSEVANISH, pvParam, fl);
 
         case SPI_GETFLATMENU:
             return SpiGetUserPref(UPM_FLATMENU, pvParam, fl);
@@ -1896,9 +1898,7 @@ SpiGetSetProbeBuffer(UINT uiAction, UINT uiParam, PVOID pvParam)
         case SPI_GETMOUSEHOVERTIME:
         case SPI_GETWHEELSCROLLLINES:
         case SPI_GETMENUSHOWDELAY:
-#if (_WIN32_WINNT >= 0x0600)
         case SPI_GETWHEELSCROLLCHARS:
-#endif
         case SPI_GETSHOWIMEUI:
         case SPI_GETMOUSESPEED:
         case SPI_GETSCREENSAVERRUNNING:

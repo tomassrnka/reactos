@@ -233,6 +233,28 @@ DC_LockDc(HDC hdc)
     return pdc;
 }
 
+/* Lock a DC whatever process owns it. Only for the window manager's own
+ * bookkeeping of the DCs it hands out: a DC that is in use by another process
+ * is owned by that process, and DC_LockDc cannot reach it. Such a DC is not
+ * waited for (see GDIOBJ_LockObjectEx): the result is NULL if it stays locked. */
+FORCEINLINE
+PDC
+DC_LockDcAnyOwner(HDC hdc)
+{
+    PDC pdc;
+
+    pdc = (PDC)GDIOBJ_LockObjectEx(hdc, GDIObjType_DC_TYPE, GDIOBJFLAG_IGNOREPID);
+    if (pdc)
+    {
+        ASSERT((GDI_HANDLE_GET_TYPE(pdc->BaseObject.hHmgr) == GDILoObjType_LO_DC_TYPE) ||
+               (GDI_HANDLE_GET_TYPE(pdc->BaseObject.hHmgr) == GDILoObjType_LO_ALTDC_TYPE));
+        ASSERT(pdc->dclevel.plfnt != NULL);
+        ASSERT(GDI_HANDLE_GET_TYPE(((POBJ)pdc->dclevel.plfnt)->hHmgr) == GDILoObjType_LO_FONT_TYPE);
+    }
+
+    return pdc;
+}
+
 FORCEINLINE
 VOID
 DC_UnlockDc(PDC pdc)

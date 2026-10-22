@@ -1,5 +1,6 @@
 
 #define IDI_TEST 1000
+#define IDI_TEST_PNG 1001
 
 #define IDR_ICONS_PNG 2000
 #define IDR_ICONS_NORMAL 2001

@@ -249,7 +249,9 @@ IntSynthesizeBitmap(PWINSTATION_OBJECT pWinStaObj, PCLIP pBmEl)
 
     pBmi = (BITMAPINFO*)pMemObj->Data;
 
-    if (pMemObj->cbData < sizeof(DWORD) && pMemObj->cbData < pBmi->bmiHeader.biSize)
+    /* The data is user-controlled: it must hold the size field AND the whole header
+       it announces (reject if EITHER check fails). */
+    if (pMemObj->cbData < sizeof(DWORD) || pMemObj->cbData < pBmi->bmiHeader.biSize)
         goto cleanup;
 
     pConvertedBmi = DIB_ConvertBitmapInfo(pBmi, DIB_RGB_COLORS);
@@ -257,6 +259,8 @@ IntSynthesizeBitmap(PWINSTATION_OBJECT pWinStaObj, PCLIP pBmEl)
         goto cleanup;
 
     Offset = DIB_BitmapInfoSize(pBmi, DIB_RGB_COLORS);
+    if (Offset > pMemObj->cbData)
+        goto cleanup;
 
     hdc = UserGetDCEx(NULL, NULL, DCX_USESTYLE);
     if (!hdc)
