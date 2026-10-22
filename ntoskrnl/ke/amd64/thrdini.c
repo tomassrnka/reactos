@@ -200,9 +200,13 @@ KiInitializeContextThread(IN PKTHREAD Thread,
     StartFrame->Reserved = 0;
 }
 
-BOOLEAN
-KiSwapContextResume(
-    _In_ BOOLEAN ApcBypass,
+/*
+ * Called by KiSwapContextInternal on the outgoing thread's stack. Finishes
+ * everything that needs the outgoing thread: once its SwapBusy flag is
+ * clear, another processor may resume it.
+ */
+VOID
+KiSwapContextSuspend(
     _In_ PKTHREAD OldThread,
     _In_ PKTHREAD NewThread)
 {
@@ -210,9 +214,16 @@ KiSwapContextResume(
     PKPROCESS OldProcess, NewProcess;
     ULONG64 CurrentCycleTime, ElapsedCycles;
 
-    /* Setup ring 0 stack pointer */
-    Pcr->TssBase->Rsp0 = (ULONG64)NewThread->InitialStack;
-    Pcr->Prcb.RspBase = Pcr->TssBase->Rsp0;
+    /* DPCs shouldn't be active */
+    if (Pcr->Prcb.DpcRoutineActive)
+    {
+        /* Crash the machine */
+        KeBugCheckEx(ATTEMPTED_SWITCH_FROM_DPC,
+                     (ULONG_PTR)OldThread,
+                     (ULONG_PTR)NewThread,
+                     (ULONG_PTR)OldThread->InitialStack,
+                     0);
+    }
 
     /* Save old thread's extended state */
     if (OldThread->NpxState != 0)
@@ -220,13 +231,7 @@ KiSwapContextResume(
         KiSaveXState(OldThread->StateSaveArea, OldThread->NpxState);
     }
 
-    /* Load new thread's extended state */
-    if (NewThread->NpxState != 0)
-    {
-        KiRestoreXState(NewThread->StateSaveArea, NewThread->NpxState);
-    }
-
-    /* Now we are the new thread. Check if it's in a new process */
+    /* Switch to the new thread's address space while still on the old stack */
     OldProcess = OldThread->ApcState.Process;
     NewProcess = NewThread->ApcState.Process;
     if (OldProcess != NewProcess)
@@ -240,6 +245,32 @@ KiSwapContextResume(
     ((PETHREAD)OldThread)->CycleTime += ElapsedCycles;
     InterlockedAdd64((PLONG64)&((PEPROCESS)OldProcess)->CycleTime, ElapsedCycles);
     Pcr->Prcb.StartCycles = CurrentCycleTime;
+}
+
+/*
+ * Called by KiSwapContextInternal on the incoming thread's stack, with
+ * interrupts disabled, once no other processor uses that stack any more.
+ */
+BOOLEAN
+KiSwapContextResume(
+    _In_ BOOLEAN ApcBypass,
+    _In_ PKTHREAD OldThread,
+    _In_ PKTHREAD NewThread)
+{
+    PKIPCR Pcr = (PKIPCR)KeGetPcr();
+
+    /* Load new thread's extended state, final now that it was saved */
+    if (NewThread->NpxState != 0)
+    {
+        KiRestoreXState(NewThread->StateSaveArea, NewThread->NpxState);
+    }
+
+    /* ISRs may run again */
+    _enable();
+
+    /* Setup ring 0 stack pointer */
+    Pcr->TssBase->Rsp0 = (ULONG64)NewThread->InitialStack;
+    Pcr->Prcb.RspBase = Pcr->TssBase->Rsp0;
 
     /* Set TEB pointer and GS base */
     Pcr->NtTib.Self = (PVOID)NewThread->Teb;
@@ -249,7 +280,7 @@ KiSwapContextResume(
        __writemsr(MSR_GS_SWAP, (ULONG64)NewThread->Teb);
 
 #if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
-       PEPROCESS ENewProcess = (PEPROCESS)NewProcess;
+       PEPROCESS ENewProcess = (PEPROCESS)NewThread->ApcState.Process;
 
        if (ENewProcess->Wow64Process != NULL)
        {
@@ -271,20 +302,6 @@ KiSwapContextResume(
     /* Increase context switch count */
     Pcr->ContextSwitches++;
     NewThread->ContextSwitches++;
-
-    /* DPCs shouldn't be active */
-    if (Pcr->Prcb.DpcRoutineActive)
-    {
-        /* Crash the machine */
-        KeBugCheckEx(ATTEMPTED_SWITCH_FROM_DPC,
-                     (ULONG_PTR)OldThread,
-                     (ULONG_PTR)NewThread,
-                     (ULONG_PTR)OldThread->InitialStack,
-                     0);
-    }
-
-    /* Old thread os no longer busy */
-    OldThread->SwapBusy = FALSE;
 
     /* Kernel APCs may be pending */
     if (NewThread->ApcState.KernelApcPending)

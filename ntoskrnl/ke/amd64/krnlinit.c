@@ -131,8 +131,6 @@ KiInitializeHandBuiltThread(
     Thread->State = Running;
     Thread->Affinity = (ULONG_PTR)1 << Prcb->Number;
     Thread->WaitIrql = DISPATCH_LEVEL;
-    Process->ActiveProcessors |= (ULONG_PTR)1 << Prcb->Number;
-
 }
 
 CODE_SEG("INIT")
@@ -197,11 +195,20 @@ KiSystemStartupBootStack(VOID)
 
     /* If there's no thread scheduled, put this CPU in the Idle summary */
     KiAcquirePrcbLock(Prcb);
-    if (!Prcb->NextThread) KiIdleSummary |= (ULONG_PTR)1 << Prcb->Number;
+    if (!Prcb->NextThread) InterlockedOr64((PLONG64)&KiIdleSummary, (LONG64)Prcb->SetMember);
     KiReleasePrcbLock(Prcb);
 
     /* Raise back to HIGH_LEVEL and clear the PRCB for the loader block */
     KfRaiseIrql(HIGH_LEVEL);
+    if (Prcb->Number != 0)
+    {
+        /* Become a target of all requests right before taking interrupts. Flushes
+           sent above SYNCH_LEVEL meanwhile were local only, so flush once more */
+        InterlockedOr64((PLONG64)&KeActiveProcessors, (LONG64)Prcb->SetMember);
+        InterlockedOr64((PLONG64)&Process->ActiveProcessors, (LONG64)Prcb->SetMember);
+        InterlockedAnd64((PLONG64)&KiStartingProcessors, ~(LONG64)Prcb->SetMember);
+        KxFlushEntireCurrentTb();
+    }
     LoaderBlock->Prcb = 0;
 
     /* Set the priority of this thread to 0 */

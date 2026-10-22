@@ -37,7 +37,7 @@ KeFlushSingleTb(
     /* A processor that joins the process after this point sees the new PTEs */
     KeMemoryBarrier();
     TargetSet = AllProcessors ?
-        KeActiveProcessors : KeGetCurrentProcess()->ActiveProcessors;
+        KiGetTbFlushProcessors() : KeGetCurrentProcess()->ActiveProcessors;
     KiIpiSendRequest(TargetSet,
                      KiFlushSingleTbIpiWorker,
                      Address,
@@ -96,7 +96,7 @@ KeFlushRangeTb(
     /* A processor that joins the process after this point sees the new PTEs */
     KeMemoryBarrier();
     TargetSet = Global ?
-        KeActiveProcessors : KeGetCurrentProcess()->ActiveProcessors;
+        KiGetTbFlushProcessors() : KeGetCurrentProcess()->ActiveProcessors;
     KiIpiSendRequest(TargetSet,
                      KiFlushRangeTbIpiWorker,
                      Address,
@@ -165,7 +165,7 @@ KeFlushEntireTb(
     /* A processor that joins the process after this point sees the new PTEs */
     KeMemoryBarrier();
     TargetSet = AllProcessors ?
-        KeActiveProcessors : KeGetCurrentProcess()->ActiveProcessors;
+        KiGetTbFlushProcessors() : KeGetCurrentProcess()->ActiveProcessors;
     KiIpiSendRequest(TargetSet,
                      KiFlushEntireTbIpiWorker,
                      NULL,

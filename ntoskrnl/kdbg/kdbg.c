@@ -177,6 +177,10 @@ KdReceivePacket(
     {
         PDBGKD_MANIPULATE_STATE64 ManipulateState = (PDBGKD_MANIPULATE_STATE64)MessageHeader->Buffer;
         RtlZeroMemory(MessageHeader->Buffer, MessageHeader->MaximumLength);
+
+        /* The context requests are for the processor that entered KDBG */
+        ManipulateState->Processor = KeGetCurrentPrcb()->Number;
+
         if (KdbgNextApiNumber == DbgKdGetContextApi)
         {
             ManipulateState->ApiNumber = DbgKdGetContextApi;

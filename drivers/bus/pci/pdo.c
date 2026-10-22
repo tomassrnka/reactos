@@ -373,6 +373,299 @@ PdoGetRangeLength(PPDO_DEVICE_EXTENSION DeviceExtension,
 }
 
 
+/* MSI-X capability (PCI Local Bus Specification 3.0, 6.8.2) */
+#define PCI_MSIX_MESSAGE_CONTROL  2
+#define PCI_MSIX_TABLE            4
+#define PCI_MSIX_ENABLE           0x8000
+#define PCI_MSIX_FUNCTION_MASK    0x4000
+#define PCI_MSIX_TABLE_BIR_MASK   0x7
+#define PCI_MSIX_ENTRY_SIZE       16
+#define PCI_MSIX_ENTRY_ADDRESS_LO 0
+#define PCI_MSIX_ENTRY_ADDRESS_HI 4
+#define PCI_MSIX_ENTRY_DATA       8
+#define PCI_MSIX_ENTRY_CONTROL    12
+#define PCI_MSIX_ENTRY_MASKED     1
+#define PCI_MSIX_TABLE_SIZE_MASK  0x7FF
+
+/* Message address of the x86 local APICs (Intel SDM, "Message Signalled Interrupts") */
+#define PCI_MSI_ADDRESS_BASE      0xFEE00000
+#define PCI_MSI_DESTINATION_SHIFT 12
+
+static
+UCHAR
+PdoFindCapability(
+    IN PPCI_DEVICE PciDevice,
+    IN UCHAR CapabilityId)
+{
+    USHORT Status;
+    UCHAR Offset, Header[2];
+    ULONG Count;
+
+    if (HalGetBusDataByOffset(PCIConfiguration, PciDevice->BusNumber, PciDevice->SlotNumber.u.AsULONG,
+                              &Status, FIELD_OFFSET(PCI_COMMON_CONFIG, Status), sizeof(Status)) != sizeof(Status) ||
+        !(Status & PCI_STATUS_CAPABILITIES_LIST))
+    {
+        return 0;
+    }
+
+    if (HalGetBusDataByOffset(PCIConfiguration, PciDevice->BusNumber, PciDevice->SlotNumber.u.AsULONG,
+                              &Offset, FIELD_OFFSET(PCI_COMMON_CONFIG, u.type0.CapabilitiesPtr), sizeof(Offset)) != sizeof(Offset))
+    {
+        return 0;
+    }
+
+    /* The list lives above the common header; the count stops a looping list */
+    for (Count = 0; (Offset >= PCI_COMMON_HDR_LENGTH) && (Count < 48); Count++)
+    {
+        Offset &= ~3;
+        if (HalGetBusDataByOffset(PCIConfiguration, PciDevice->BusNumber, PciDevice->SlotNumber.u.AsULONG,
+                                  Header, Offset, sizeof(Header)) != sizeof(Header))
+        {
+            return 0;
+        }
+        if (Header[0] == CapabilityId)
+            return Offset;
+        Offset = Header[1];
+    }
+
+    return 0;
+}
+
+/* Finds the MSI-X table: in the memory BAR the capability names, which must be assigned */
+static
+NTSTATUS
+PdoGetMsixTable(
+    IN PPCI_DEVICE PciDevice,
+    OUT PUSHORT OutControl,
+    OUT PPHYSICAL_ADDRESS OutTableAddress,
+    OUT PULONG OutEntries)
+{
+    USHORT Control;
+    ULONG Table, Bar[2], BarOffset;
+    PHYSICAL_ADDRESS TableAddress;
+
+    if ((HalGetBusDataByOffset(PCIConfiguration, PciDevice->BusNumber, PciDevice->SlotNumber.u.AsULONG,
+                               &Control, PciDevice->MsixCapability + PCI_MSIX_MESSAGE_CONTROL,
+                               sizeof(Control)) != sizeof(Control)) ||
+        (HalGetBusDataByOffset(PCIConfiguration, PciDevice->BusNumber, PciDevice->SlotNumber.u.AsULONG,
+                               &Table, PciDevice->MsixCapability + PCI_MSIX_TABLE,
+                               sizeof(Table)) != sizeof(Table)))
+    {
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    }
+
+    BarOffset = (Table & PCI_MSIX_TABLE_BIR_MASK);
+    if (BarOffset >= PCI_TYPE0_ADDRESSES)
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    if ((HalGetBusDataByOffset(PCIConfiguration, PciDevice->BusNumber, PciDevice->SlotNumber.u.AsULONG,
+                               &Bar[0], FIELD_OFFSET(PCI_COMMON_CONFIG, u.type0.BaseAddresses) +
+                               BarOffset * sizeof(ULONG), sizeof(ULONG)) != sizeof(ULONG)) ||
+        (Bar[0] & PCI_ADDRESS_IO_SPACE))
+    {
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    }
+    TableAddress.QuadPart = Bar[0] & PCI_ADDRESS_MEMORY_ADDRESS_MASK;
+    if ((Bar[0] & PCI_ADDRESS_MEMORY_TYPE_MASK) == PCI_TYPE_64BIT)
+    {
+        /* The upper half is the next register */
+        if ((BarOffset + 1 >= PCI_TYPE0_ADDRESSES) ||
+            (HalGetBusDataByOffset(PCIConfiguration, PciDevice->BusNumber, PciDevice->SlotNumber.u.AsULONG,
+                                   &Bar[1], FIELD_OFFSET(PCI_COMMON_CONFIG, u.type0.BaseAddresses) +
+                                   (BarOffset + 1) * sizeof(ULONG), sizeof(ULONG)) != sizeof(ULONG)))
+        {
+            return STATUS_DEVICE_CONFIGURATION_ERROR;
+        }
+        TableAddress.HighPart = Bar[1];
+    }
+    if (TableAddress.QuadPart == 0)
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    TableAddress.QuadPart += Table & ~PCI_MSIX_TABLE_BIR_MASK;
+
+    *OutControl = Control;
+    *OutTableAddress = TableAddress;
+    *OutEntries = (Control & PCI_MSIX_TABLE_SIZE_MASK) + 1;
+    return STATUS_SUCCESS;
+}
+
+/* A device with an interrupt pin and MSI-X offers one message, with its line interrupt as the alternative.
+   The PnP manager takes the message only when the device opted in (MSISupported) */
+static
+BOOLEAN
+PdoOffersMessageInterrupt(
+    IN PPDO_DEVICE_EXTENSION DeviceExtension,
+    IN PPCI_COMMON_CONFIG PciConfig)
+{
+    PPCI_DEVICE PciDevice = DeviceExtension->PciDevice;
+
+    if ((PCI_CONFIGURATION_TYPE(PciConfig) != PCI_DEVICE_TYPE) ||
+        (PciConfig->u.type0.InterruptPin == 0) ||
+        PciDevice->IsDebuggingDevice)
+    {
+        return FALSE;
+    }
+
+    USHORT Control;
+    PHYSICAL_ADDRESS TableAddress;
+    ULONG Entries;
+
+    /* Offer a message only when its table can be reached */
+    PciDevice->MsixCapability = PdoFindCapability(PciDevice, PCI_CAPABILITY_ID_MSIX);
+    if (PciDevice->MsixCapability &&
+        !NT_SUCCESS(PdoGetMsixTable(PciDevice, &Control, &TableAddress, &Entries)))
+    {
+        PciDevice->MsixCapability = 0;
+    }
+    return (PciDevice->MsixCapability != 0);
+}
+
+static
+NTSTATUS
+PdoGetProcessorApicId(
+    IN ULONG Processor,
+    OUT PULONG ApicId)
+{
+    INT CpuInfo[4];
+    ULONG Id;
+    BOOLEAN HaveTopology = FALSE;
+
+    if (Processor >= (ULONG)KeNumberProcessors)
+        return STATUS_INVALID_PARAMETER;
+
+    /* CPUID reports the APIC ID of the processor that executes it:
+       leaf 0Bh the x2APIC ID, leaf 1 the 8-bit initial APIC ID */
+    KeSetSystemAffinityThread((KAFFINITY)1 << Processor);
+    __cpuid(CpuInfo, 0);
+    if (CpuInfo[0] >= 0xB)
+    {
+        __cpuidex(CpuInfo, 0xB, 0);
+        if (CpuInfo[1] != 0)
+        {
+            Id = (ULONG)CpuInfo[3];
+            HaveTopology = TRUE;
+        }
+    }
+    if (!HaveTopology)
+    {
+        __cpuid(CpuInfo, 1);
+        Id = ((ULONG)CpuInfo[1] >> 24) & 0xFF;
+    }
+    KeRevertToUserAffinityThread();
+
+    /* The message address holds an 8-bit destination */
+    if (Id > 0xFF)
+        return STATUS_NOT_SUPPORTED;
+
+    *ApicId = Id;
+    return STATUS_SUCCESS;
+}
+
+static
+VOID
+PdoWriteMsixControl(
+    IN PPCI_DEVICE PciDevice,
+    IN USHORT Control)
+{
+    HalSetBusDataByOffset(PCIConfiguration, PciDevice->BusNumber, PciDevice->SlotNumber.u.AsULONG,
+                          &Control, PciDevice->MsixCapability + PCI_MSIX_MESSAGE_CONTROL, sizeof(Control));
+}
+
+/* Program table entry 0 with the message the HAL allocated and enable MSI-X */
+static
+NTSTATUS
+PdoEnableMsix(
+    IN PPCI_DEVICE PciDevice,
+    IN PCM_PARTIAL_RESOURCE_DESCRIPTOR Translated,
+    IN PCM_RESOURCE_LIST RawResList)
+{
+    USHORT Control, Command;
+    ULONG ApicId, Processor, Entries, i;
+    PHYSICAL_ADDRESS TableAddress;
+    PUCHAR Entry;
+    NTSTATUS Status;
+    KAFFINITY Affinity = Translated->u.Interrupt.Affinity;
+
+    if (!PciDevice->MsixCapability || !Affinity)
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+
+    /* The HAL sends each message to one processor */
+    for (Processor = 0; !(Affinity & ((KAFFINITY)1 << Processor)); Processor++);
+    Status = PdoGetProcessorApicId(Processor, &ApicId);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = PdoGetMsixTable(PciDevice, &Control, &TableAddress, &Entries);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    /* The table must lie in a memory range assigned to the device */
+    Status = STATUS_DEVICE_CONFIGURATION_ERROR;
+    for (i = 0; i < RawResList->List[0].PartialResourceList.Count; i++)
+    {
+        PCM_PARTIAL_RESOURCE_DESCRIPTOR Desc = &RawResList->List[0].PartialResourceList.PartialDescriptors[i];
+
+        if ((Desc->Type == CmResourceTypeMemory) &&
+            (TableAddress.QuadPart >= Desc->u.Memory.Start.QuadPart) &&
+            (TableAddress.QuadPart + Entries * PCI_MSIX_ENTRY_SIZE <=
+             Desc->u.Memory.Start.QuadPart + Desc->u.Memory.Length))
+        {
+            Status = STATUS_SUCCESS;
+            break;
+        }
+    }
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Entry = MmMapIoSpace(TableAddress, Entries * PCI_MSIX_ENTRY_SIZE, MmNonCached);
+    if (!Entry)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    /* Hold all messages while the table changes; only entry 0 is used, mask the others */
+    PdoWriteMsixControl(PciDevice, (Control | PCI_MSIX_ENABLE | PCI_MSIX_FUNCTION_MASK));
+    for (i = 1; i < Entries; i++)
+    {
+        WRITE_REGISTER_ULONG((PULONG)(Entry + i * PCI_MSIX_ENTRY_SIZE + PCI_MSIX_ENTRY_CONTROL),
+                             PCI_MSIX_ENTRY_MASKED);
+    }
+    WRITE_REGISTER_ULONG((PULONG)(Entry + PCI_MSIX_ENTRY_ADDRESS_LO),
+                         PCI_MSI_ADDRESS_BASE | (ApicId << PCI_MSI_DESTINATION_SHIFT));
+    WRITE_REGISTER_ULONG((PULONG)(Entry + PCI_MSIX_ENTRY_ADDRESS_HI), 0);
+    /* Fixed delivery, edge triggered: the data is the vector */
+    WRITE_REGISTER_ULONG((PULONG)(Entry + PCI_MSIX_ENTRY_DATA), Translated->u.Interrupt.Vector & 0xFF);
+    WRITE_REGISTER_ULONG((PULONG)(Entry + PCI_MSIX_ENTRY_CONTROL), 0);
+    PdoWriteMsixControl(PciDevice, (Control | PCI_MSIX_ENABLE) & ~PCI_MSIX_FUNCTION_MASK);
+    MmUnmapIoSpace(Entry, Entries * PCI_MSIX_ENTRY_SIZE);
+
+    /* The device has no line interrupt now; keep INTx off also after MSI-X is disabled */
+    if (HalGetBusDataByOffset(PCIConfiguration, PciDevice->BusNumber, PciDevice->SlotNumber.u.AsULONG,
+                              &Command, FIELD_OFFSET(PCI_COMMON_CONFIG, Command), sizeof(Command)) == sizeof(Command))
+    {
+        Command |= PCI_DISABLE_LEVEL_INTERRUPT;
+        HalSetBusDataByOffset(PCIConfiguration, PciDevice->BusNumber, PciDevice->SlotNumber.u.AsULONG,
+                              &Command, FIELD_OFFSET(PCI_COMMON_CONFIG, Command), sizeof(Command));
+    }
+
+    PciDevice->MsixEnabled = TRUE;
+    DPRINT1("MSI-X enabled for PCI device 0x%x on bus 0x%x: vector 0x%lx, APIC ID %lu\n",
+            PciDevice->SlotNumber.u.AsULONG, PciDevice->BusNumber, Translated->u.Interrupt.Vector, ApicId);
+    return STATUS_SUCCESS;
+}
+
+static
+VOID
+PdoDisableMsix(
+    IN PPCI_DEVICE PciDevice)
+{
+    USHORT Control;
+
+    if (!PciDevice->MsixEnabled)
+        return;
+
+    HalGetBusDataByOffset(PCIConfiguration, PciDevice->BusNumber, PciDevice->SlotNumber.u.AsULONG,
+                          &Control, PciDevice->MsixCapability + PCI_MSIX_MESSAGE_CONTROL, sizeof(Control));
+    PdoWriteMsixControl(PciDevice, Control & ~PCI_MSIX_ENABLE);
+    PciDevice->MsixEnabled = FALSE;
+}
+
 static NTSTATUS
 PdoQueryResourceRequirements(
     IN PDEVICE_OBJECT DeviceObject,
@@ -391,6 +684,7 @@ PdoQueryResourceRequirements(
     ULONGLONG Length;
     ULONG Flags;
     ULONGLONG MaximumAddress;
+    BOOLEAN MessageInterrupt;
 
     UNREFERENCED_PARAMETER(IrpSp);
     DPRINT("PdoQueryResourceRequirements() called\n");
@@ -411,6 +705,8 @@ PdoQueryResourceRequirements(
     }
 
     DPRINT("Command register: 0x%04hx\n", PciConfig.Command);
+
+    MessageInterrupt = PdoOffersMessageInterrupt(DeviceExtension, &PciConfig);
 
     /* Count required resource descriptors */
     ResCount = 0;
@@ -434,6 +730,8 @@ PdoQueryResourceRequirements(
         /* FIXME: Check ROM address */
 
         if (PciConfig.u.type0.InterruptPin != 0)
+            ResCount++;
+        if (MessageInterrupt)
             ResCount++;
     }
     else if (PCI_CONFIGURATION_TYPE(&PciConfig) == PCI_BRIDGE_TYPE)
@@ -582,15 +880,38 @@ PdoQueryResourceRequirements(
 
         /* FIXME: Check ROM address */
 
+        if (MessageInterrupt)
+        {
+            /* One MSI-X message, preferred over the line interrupt */
+            Descriptor->Option = IO_RESOURCE_PREFERRED;
+            Descriptor->Type = CmResourceTypeInterrupt;
+            Descriptor->ShareDisposition = CmResourceShareDeviceExclusive;
+            Descriptor->Flags = CM_RESOURCE_INTERRUPT_LATCHED | CM_RESOURCE_INTERRUPT_MESSAGE;
+            Descriptor->u.Interrupt.MinimumVector = CM_RESOURCE_INTERRUPT_MESSAGE_TOKEN;
+            Descriptor->u.Interrupt.MaximumVector = CM_RESOURCE_INTERRUPT_MESSAGE_TOKEN;
+            Descriptor++;
+        }
+
         if (PciConfig.u.type0.InterruptPin != 0)
         {
-            Descriptor->Option = 0; /* Required */
+            Descriptor->Option = MessageInterrupt ? IO_RESOURCE_ALTERNATIVE : 0; /* Required */
             Descriptor->Type = CmResourceTypeInterrupt;
             Descriptor->ShareDisposition = CmResourceShareShared;
             Descriptor->Flags = CM_RESOURCE_INTERRUPT_LEVEL_SENSITIVE;
 
-            Descriptor->u.Interrupt.MinimumVector = 0;
-            Descriptor->u.Interrupt.MaximumVector = 0xFF;
+            /* With a message offered, the boot configuration has no line interrupt to start from */
+            if (MessageInterrupt &&
+                (PciConfig.u.type0.InterruptLine != 0) &&
+                (PciConfig.u.type0.InterruptLine != 0xFF))
+            {
+                Descriptor->u.Interrupt.MinimumVector = PciConfig.u.type0.InterruptLine;
+                Descriptor->u.Interrupt.MaximumVector = PciConfig.u.type0.InterruptLine;
+            }
+            else
+            {
+                Descriptor->u.Interrupt.MinimumVector = 0;
+                Descriptor->u.Interrupt.MaximumVector = 0xFF;
+            }
         }
     }
     else if (PCI_CONFIGURATION_TYPE(&PciConfig) == PCI_BRIDGE_TYPE)
@@ -716,6 +1037,7 @@ PdoQueryResources(
     ULONGLONG Base;
     ULONGLONG Length;
     ULONG Flags;
+    BOOLEAN MessageInterrupt;
 
     DPRINT("PdoQueryResources() called\n");
 
@@ -737,6 +1059,9 @@ PdoQueryResources(
 
     DPRINT("Command register: 0x%04hx\n", PciConfig.Command);
 
+    /* The line interrupt is then only the alternative of a message, see PdoQueryResourceRequirements */
+    MessageInterrupt = PdoOffersMessageInterrupt(DeviceExtension, &PciConfig);
+
     /* Count required resource descriptors */
     ResCount = 0;
     if (PCI_CONFIGURATION_TYPE(&PciConfig) == PCI_DEVICE_TYPE)
@@ -757,6 +1082,7 @@ PdoQueryResources(
         }
 
         if ((PciConfig.u.type0.InterruptPin != 0) &&
+            !MessageInterrupt &&
             (PciConfig.u.type0.InterruptLine != 0) &&
             (PciConfig.u.type0.InterruptLine != 0xFF))
             ResCount++;
@@ -868,6 +1194,7 @@ PdoQueryResources(
 
         /* Add interrupt resource */
         if ((PciConfig.u.type0.InterruptPin != 0) &&
+            !MessageInterrupt &&
             (PciConfig.u.type0.InterruptLine != 0) &&
             (PciConfig.u.type0.InterruptLine != 0xFF))
         {
@@ -1323,12 +1650,15 @@ PdoStartDevice(
     PIO_STACK_LOCATION IrpSp)
 {
     PCM_RESOURCE_LIST RawResList = IrpSp->Parameters.StartDevice.AllocatedResources;
+    PCM_RESOURCE_LIST TranslatedResList = IrpSp->Parameters.StartDevice.AllocatedResourcesTranslated;
     PCM_FULL_RESOURCE_DESCRIPTOR RawFullDesc;
     PCM_PARTIAL_RESOURCE_DESCRIPTOR RawPartialDesc;
+    PCM_PARTIAL_RESOURCE_DESCRIPTOR MessageDesc = NULL;
     ULONG i, ii;
     PPDO_DEVICE_EXTENSION DeviceExtension = DeviceObject->DeviceExtension;
     UCHAR Irq;
     USHORT Command;
+    NTSTATUS Status;
 
     UNREFERENCED_PARAMETER(Irp);
 
@@ -1346,7 +1676,14 @@ PdoStartDevice(
                but only one is allowed and it must be the last one in the list! */
             RawPartialDesc = &RawFullDesc->PartialResourceList.PartialDescriptors[ii];
 
-            if (RawPartialDesc->Type == CmResourceTypeInterrupt)
+            /* A message is programmed into the MSI-X table, below */
+            if ((RawPartialDesc->Type == CmResourceTypeInterrupt) &&
+                (RawPartialDesc->Flags & CM_RESOURCE_INTERRUPT_MESSAGE))
+            {
+                if (TranslatedResList && (i == 0) && (ii < TranslatedResList->List[0].PartialResourceList.Count))
+                    MessageDesc = &TranslatedResList->List[0].PartialResourceList.PartialDescriptors[ii];
+            }
+            else if (RawPartialDesc->Type == CmResourceTypeInterrupt)
             {
                 DPRINT("Assigning IRQ %u to PCI device 0x%x on bus 0x%x\n",
                         RawPartialDesc->u.Interrupt.Vector,
@@ -1394,6 +1731,10 @@ PdoStartDevice(
         /* OR with the previous value */
         Command |= DeviceExtension->PciDevice->PciConfig.Command;
 
+        /* A line interrupt needs INTx, which an earlier MSI-X start turned off */
+        if (!MessageDesc)
+            Command &= ~PCI_DISABLE_LEVEL_INTERRUPT;
+
         HalSetBusDataByOffset(PCIConfiguration,
                               DeviceExtension->PciDevice->BusNumber,
                               DeviceExtension->PciDevice->SlotNumber.u.AsULONG,
@@ -1404,6 +1745,18 @@ PdoStartDevice(
     else
     {
         DBGPRINT("None\n");
+    }
+
+    if (MessageDesc)
+    {
+        Status = PdoEnableMsix(DeviceExtension->PciDevice, MessageDesc, RawResList);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("Failed to enable MSI-X for PCI device 0x%x on bus 0x%x (Status 0x%lx)\n",
+                    DeviceExtension->PciDevice->SlotNumber.u.AsULONG,
+                    DeviceExtension->PciDevice->BusNumber, Status);
+            return Status;
+        }
     }
 
     return STATUS_SUCCESS;
@@ -1574,13 +1927,18 @@ PdoPnpControl(
             Status = PdoStartDevice(DeviceObject, Irp, IrpSp);
             break;
 
-        case IRP_MN_QUERY_STOP_DEVICE:
-        case IRP_MN_CANCEL_STOP_DEVICE:
         case IRP_MN_STOP_DEVICE:
-        case IRP_MN_QUERY_REMOVE_DEVICE:
-        case IRP_MN_CANCEL_REMOVE_DEVICE:
         case IRP_MN_REMOVE_DEVICE:
         case IRP_MN_SURPRISE_REMOVAL:
+            /* The function driver disconnected its interrupt already */
+            PdoDisableMsix(((PPDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension)->PciDevice);
+            Status = STATUS_SUCCESS;
+            break;
+
+        case IRP_MN_QUERY_STOP_DEVICE:
+        case IRP_MN_CANCEL_STOP_DEVICE:
+        case IRP_MN_QUERY_REMOVE_DEVICE:
+        case IRP_MN_CANCEL_REMOVE_DEVICE:
             Status = STATUS_SUCCESS;
             break;
 

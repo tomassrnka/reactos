@@ -85,6 +85,9 @@ extern "C" {
 #define AMD64_TSS 9
 
 #define APIC_EOI_REGISTER 0xFFFFFFFFFFFE00B0ULL
+#define MSR_APIC_BASE 0x0000001B
+#define MSR_APIC_BASE_X2APIC_ENABLE 0x400
+#define X2APIC_MSR_EOI 0x80B
 
 #ifndef __ASM__
 
@@ -332,12 +335,17 @@ KeQueryInterruptHandler(IN ULONG Vector)
                    (ULONG64)Idt->OffsetLow);
 }
 
+extern BOOLEAN KiX2ApicMode;
+
 FORCEINLINE
 VOID
 KiSendEOI(VOID)
 {
     /* Write 0 to the apic EOI register */
-    *((volatile ULONG*)APIC_EOI_REGISTER) = 0;
+    if (KiX2ApicMode)
+        __writemsr(X2APIC_MSR_EOI, 0);
+    else
+        *((volatile ULONG*)APIC_EOI_REGISTER) = 0;
 }
 
 FORCEINLINE

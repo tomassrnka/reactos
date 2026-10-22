@@ -305,7 +305,8 @@ KiIdleLoop(VOID)
                 /* Set new thread data */
                 Prcb->NextThread = NULL;
                 Prcb->CurrentThread = NewThread;
-                InterlockedAnd((PLONG)&KiIdleSummary, ~(LONG)Prcb->SetMember);
+                if (NewThread != Prcb->IdleThread)
+                    InterlockedAnd((PLONG)&KiIdleSummary, ~(LONG)Prcb->SetMember);
 
                 /* The thread is now running */
                 NewThread->State = Running;
@@ -326,6 +327,13 @@ KiIdleLoop(VOID)
         }
         else
         {
+#ifdef CONFIG_SMP
+            /* Take a ready thread that waits behind a busy processor */
+            if (KiIdleTakeReadyThread(Prcb)) continue;
+
+            /* Poll for a while before halting (see KiIdlePollForWork) */
+            if (KiIdlePollMicroseconds && KiIdlePollForWork(Prcb)) continue;
+#endif
             /* Continue staying idle. Note the HAL returns with interrupts on */
             Prcb->PowerState.IdleFunction(&Prcb->PowerState);
         }

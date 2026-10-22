@@ -183,16 +183,63 @@ IopFindDmaResource(
     return FALSE;
 }
 
+/* The raw message count of a message-signaled interrupt (u.MessageInterrupt.Raw.MessageCount)
+   is the high word of u.Interrupt.Level */
+#define IOP_MESSAGE_COUNT_SHIFT 16
+
+static
+BOOLEAN
+IopFindMessageInterruptResource(
+    IN PIO_RESOURCE_DESCRIPTOR IoDesc,
+    OUT PCM_PARTIAL_RESOURCE_DESCRIPTOR CmDesc)
+{
+    ULONG Vector;
+    KIRQL Irql;
+    KAFFINITY Affinity;
+
+    /* One message per descriptor, as for MSI-X */
+    if ((IoDesc->u.Interrupt.MinimumVector != CM_RESOURCE_INTERRUPT_MESSAGE_TOKEN) ||
+        (IoDesc->u.Interrupt.MaximumVector != CM_RESOURCE_INTERRUPT_MESSAGE_TOKEN))
+    {
+        return FALSE;
+    }
+
+    /* The HAL gives the message its own vector; a HAL without message support fails it */
+    Vector = HalGetInterruptVector(Internal,
+                                   0,
+                                   1 << IOP_MESSAGE_COUNT_SHIFT,
+                                   CM_RESOURCE_INTERRUPT_MESSAGE_TOKEN,
+                                   &Irql,
+                                   &Affinity);
+    if (!Vector)
+        return FALSE;
+
+    CmDesc->u.Interrupt.Level = 1 << IOP_MESSAGE_COUNT_SHIFT;
+    CmDesc->u.Interrupt.Vector = Vector;
+    CmDesc->u.Interrupt.Affinity = Affinity;
+    DPRINT1("Satisfying message interrupt requirement with vector 0x%lx\n", Vector);
+    return TRUE;
+}
+
 static
 BOOLEAN
 IopFindInterruptResource(
     IN PIO_RESOURCE_DESCRIPTOR IoDesc,
-    OUT PCM_PARTIAL_RESOURCE_DESCRIPTOR CmDesc)
+    OUT PCM_PARTIAL_RESOURCE_DESCRIPTOR CmDesc,
+    IN BOOLEAN AllowMessageInterrupts)
 {
     ULONG Vector;
 
     ASSERT(IoDesc->Type == CmDesc->Type);
     ASSERT(IoDesc->Type == CmResourceTypeInterrupt);
+
+    if (IoDesc->Flags & CM_RESOURCE_INTERRUPT_MESSAGE)
+    {
+        /* Without the device's opt-in, the bus driver's line interrupt alternative is used */
+        if (!AllowMessageInterrupts)
+            return FALSE;
+        return IopFindMessageInterruptResource(IoDesc, CmDesc);
+    }
 
     for (Vector = IoDesc->u.Interrupt.MinimumVector;
          Vector <= IoDesc->u.Interrupt.MaximumVector;
@@ -218,7 +265,8 @@ IopFindInterruptResource(
 NTSTATUS NTAPI
 IopFixupResourceListWithRequirements(
     IN PIO_RESOURCE_REQUIREMENTS_LIST RequirementsList,
-    OUT PCM_RESOURCE_LIST *ResourceList)
+    OUT PCM_RESOURCE_LIST *ResourceList,
+    IN BOOLEAN AllowMessageInterrupts)
 {
     ULONG i, OldCount;
     BOOLEAN AlternateRequired = FALSE;
@@ -300,6 +348,10 @@ IopFixupResourceListWithRequirements(
                 switch (IoDesc->Type)
                 {
                     case CmResourceTypeInterrupt:
+                        /* A message interrupt only satisfies a message requirement */
+                        if ((CmDesc->Flags ^ IoDesc->Flags) & CM_RESOURCE_INTERRUPT_MESSAGE)
+                            break;
+
                         /* Make sure it satisfies our vector range */
                         if (CmDesc->u.Interrupt.Vector >= IoDesc->u.Interrupt.MinimumVector &&
                             CmDesc->u.Interrupt.Vector <= IoDesc->u.Interrupt.MaximumVector)
@@ -399,7 +451,7 @@ IopFixupResourceListWithRequirements(
                 {
                     case CmResourceTypeInterrupt:
                         /* Find an available interrupt */
-                        if (!IopFindInterruptResource(IoDesc, &NewDesc))
+                        if (!IopFindInterruptResource(IoDesc, &NewDesc, AllowMessageInterrupts))
                         {
                             DPRINT1("Failed to find an available interrupt resource (0x%x to 0x%x)\n",
                                     IoDesc->u.Interrupt.MinimumVector, IoDesc->u.Interrupt.MaximumVector);
@@ -639,6 +691,10 @@ IopCheckResourceDescriptor(
                 }
                 case CmResourceTypeInterrupt:
                 {
+                    /* A message interrupt has a vector of its own and no interrupt line */
+                    if ((ResDesc->Flags | ResDesc2->Flags) & CM_RESOURCE_INTERRUPT_MESSAGE)
+                        break;
+
                     if (ResDesc->u.Interrupt.Vector == ResDesc2->u.Interrupt.Vector)
                     {
                         if (!Silent)
@@ -1042,9 +1098,12 @@ IopTranslateDeviceResources(
             case CmResourceTypeInterrupt:
             {
                KIRQL Irql;
+               /* The HAL translates the vector it allocated for a message again */
                DescriptorTranslated->u.Interrupt.Vector = HalGetInterruptVector(
-                  DeviceNode->ResourceList->List[i].InterfaceType,
-                  DeviceNode->ResourceList->List[i].BusNumber,
+                  (DescriptorRaw->Flags & CM_RESOURCE_INTERRUPT_MESSAGE) ?
+                     Internal : DeviceNode->ResourceList->List[i].InterfaceType,
+                  (DescriptorRaw->Flags & CM_RESOURCE_INTERRUPT_MESSAGE) ?
+                     0 : DeviceNode->ResourceList->List[i].BusNumber,
                   DescriptorRaw->u.Interrupt.Level,
                   DescriptorRaw->u.Interrupt.Vector,
                   &Irql,
@@ -1111,6 +1170,58 @@ cleanup:
    return Status;
 }
 
+/* MSISupported in the Interrupt Management\MessageSignaledInterruptProperties
+   subkey of the device's hardware key lets the device use message interrupts.
+   setupapi writes an INF's .HW section into the instance key; also look under
+   its Device Parameters subkey, which IoOpenDeviceRegistryKey gives drivers */
+static
+BOOLEAN
+IopDeviceSupportsMessageInterrupts(
+   IN PDEVICE_NODE DeviceNode)
+{
+   static const PCWSTR MsiKeyNames[] =
+   {
+      L"Device Parameters\\Interrupt Management\\MessageSignaledInterruptProperties",
+      L"Interrupt Management\\MessageSignaledInterruptProperties",
+   };
+   UNICODE_STRING EnumRoot = RTL_CONSTANT_STRING(ENUM_ROOT);
+   UNICODE_STRING MsiKeyName;
+   HANDLE EnumKey, InstanceKey, MsiKey;
+   PKEY_VALUE_FULL_INFORMATION Information;
+   BOOLEAN Supported = FALSE;
+   NTSTATUS Status;
+   ULONG i;
+
+   Status = IopOpenRegistryKeyEx(&EnumKey, NULL, &EnumRoot, KEY_READ);
+   if (!NT_SUCCESS(Status))
+      return FALSE;
+   Status = IopOpenRegistryKeyEx(&InstanceKey, EnumKey, &DeviceNode->InstancePath, KEY_READ);
+   ZwClose(EnumKey);
+   if (!NT_SUCCESS(Status))
+      return FALSE;
+
+   for (i = 0; i < RTL_NUMBER_OF(MsiKeyNames); i++)
+   {
+      RtlInitUnicodeString(&MsiKeyName, MsiKeyNames[i]);
+      Status = IopOpenRegistryKeyEx(&MsiKey, InstanceKey, &MsiKeyName, KEY_READ);
+      if (!NT_SUCCESS(Status))
+         continue;
+
+      Status = IopGetRegistryValue(MsiKey, L"MSISupported", &Information);
+      ZwClose(MsiKey);
+      if (!NT_SUCCESS(Status))
+         continue;
+
+      if ((Information->Type == REG_DWORD) && (Information->DataLength == sizeof(ULONG)))
+         Supported = (*(PULONG)((ULONG_PTR)Information + Information->DataOffset) != 0);
+      ExFreePool(Information);
+      break;
+   }
+
+   ZwClose(InstanceKey);
+   return Supported;
+}
+
 NTSTATUS
 NTAPI
 IopAssignDeviceResources(
@@ -1170,7 +1281,8 @@ IopAssignDeviceResources(
 
    /* Add resource requirements that aren't in the list we already got */
    Status = IopFixupResourceListWithRequirements(DeviceNode->ResourceRequirements,
-                                                 &DeviceNode->ResourceList);
+                                                 &DeviceNode->ResourceList,
+                                                 IopDeviceSupportsMessageInterrupts(DeviceNode));
    if (!NT_SUCCESS(Status))
    {
        DPRINT1("Failed to fixup a resource list from supplied resources for %wZ\n", &DeviceNode->InstancePath);

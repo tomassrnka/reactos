@@ -15,6 +15,9 @@
 
 KAFFINITY KeActiveProcessors = 0;
 
+/* Started processors that are not active yet; they take TLB flushes */
+KAFFINITY KiStartingProcessors = 0;
+
 /* Number of processors */
 CCHAR KeNumberProcessors = 0;
 

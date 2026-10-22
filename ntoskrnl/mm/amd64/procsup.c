@@ -70,6 +70,10 @@ MiArchCreateProcessAddressSpace(
     /* Get its address */
     PageTablePointer = MiPteToAddress(SystemPte);
 
+    /* The PTE is remapped below with local flushes only, so stay on this
+       processor: another one could keep a stale translation of it */
+    KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+
     /* Build the PTE for the page directory and map it */
     MI_MAKE_HARDWARE_PTE_KERNEL(&PdePte, SystemPte, MM_READWRITE, TableBasePfn);
     MI_WRITE_VALID_PTE(SystemPte, PdePte);
@@ -124,6 +128,8 @@ MiArchCreateProcessAddressSpace(
     TempPte.u.Hard.PageFrameNumber = Process->WorkingSetPage;
     TableIndex = MiAddressToPti(MmWorkingSetList);
     PageTablePointer[TableIndex] = TempPte;
+
+    KeLowerIrql(OldIrql);
 
     /* Release the system PTE */
     MiReleaseSystemPtes(SystemPte, 1, SystemPteSpace);

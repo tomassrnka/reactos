@@ -1433,7 +1433,13 @@ BOOLEAN ParaNdis_OnLegacyInterrupt(
 {
     ULONG status = virtio_read_isr_status(&pContext->IODevice);
 
-    if((status == 0)                                   ||
+    /* A message is not shared and need not set the ISR status; reading it still reports configuration changes */
+    if (pContext->bUsingMSIX && (pContext->powerState == NdisDeviceStateD0))
+    {
+        if (status == VIRTIO_NET_INVALID_INTERRUPT_STATUS)
+            status = 0;
+    }
+    else if((status == 0)                                   ||
        (status == VIRTIO_NET_INVALID_INTERRUPT_STATUS) ||
        (pContext->powerState != NdisDeviceStateD0))
     {
@@ -1508,6 +1514,11 @@ void ReuseReceiveBufferRegular(PARANDIS_ADAPTER *pContext, pIONetDescriptor pBuf
         {
             pContext->Counters.nReusedRxBuffers = 0;
             virtqueue_kick_always(pContext->NetReceiveQueue);
+        }
+        else
+        {
+            /* A device that ran out of receive buffers waits for this notification */
+            virtqueue_kick(pContext->NetReceiveQueue);
         }
 
         if (IsListEmpty(&pContext->NetReceiveBuffersWaiting))

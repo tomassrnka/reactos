@@ -104,8 +104,20 @@ extern USHORT KeProcessorLevel;
 extern USHORT KeProcessorRevision;
 extern ULONG64 KeFeatureBits;
 extern KAFFINITY KeActiveProcessors;
+extern KAFFINITY KiStartingProcessors;
 extern PKPRCB KiProcessorBlock[];
 #ifdef CONFIG_SMP
+/* A processor joins KeActiveProcessors before it leaves KiStartingProcessors,
+   so reading the starting set first never misses it */
+FORCEINLINE
+KAFFINITY
+KiGetTbFlushProcessors(VOID)
+{
+    KAFFINITY Starting = *(volatile KAFFINITY *)&KiStartingProcessors;
+    _ReadBarrier();
+    return Starting | *(volatile KAFFINITY *)&KeActiveProcessors;
+}
+
 extern ULONG KeMaximumProcessors;
 extern ULONG KeNumprocSpecified;
 extern ULONG KeBootprocSpecified;
@@ -143,6 +155,8 @@ extern LIST_ENTRY KiProcessInSwapListHead, KiProcessOutSwapListHead;
 extern LIST_ENTRY KiStackInSwapListHead;
 extern KEVENT KiSwapEvent;
 extern KAFFINITY KiIdleSummary;
+extern ULONG KiIdlePollMicroseconds;
+#define KI_IDLE_POLL_DEFAULT 50
 extern PVOID KeUserApcDispatcher;
 extern PVOID KeUserCallbackDispatcher;
 extern PVOID KeUserExceptionDispatcher;
@@ -254,11 +268,36 @@ VOID
 FASTCALL
 KiDeferredReadyThread(IN PKTHREAD Thread);
 
+BOOLEAN
+FASTCALL
+KiIdlePollForWork(
+    _In_ PKPRCB Prcb
+);
+
 PKTHREAD
 FASTCALL
 KiIdleSchedule(
     IN PKPRCB Prcb
 );
+
+#ifdef CONFIG_SMP
+PKTHREAD
+FASTCALL
+KiSelectReadyThreadAny(
+    _In_ PKPRCB Prcb,
+    _In_ KPRIORITY Priority,
+    _In_ KPRIORITY RemotePriority
+);
+
+BOOLEAN
+FASTCALL
+KiIdleTakeReadyThread(
+    _In_ PKPRCB Prcb
+);
+#else
+#define KiSelectReadyThreadAny(Prcb, Priority, RemotePriority) \
+    KiSelectReadyThread((Priority), (Prcb))
+#endif
 
 VOID
 FASTCALL
@@ -313,6 +352,29 @@ NTAPI
 KeStartAllProcessors(
     VOID
 );
+
+#ifdef CONFIG_SMP
+/* Start handshake with an application processor, see KeStartAllProcessors */
+#define KI_AP_STARTUP_WAITING   1
+#define KI_AP_STARTUP_CLAIMED   2
+#define KI_AP_STARTUP_ABANDONED 3
+
+extern volatile LONG KiApStartupState;
+
+FORCEINLINE
+VOID
+KiClaimProcessorStartup(VOID)
+{
+    /* Too late: the boot processor no longer waits for this one */
+    if (InterlockedCompareExchange((PLONG)&KiApStartupState,
+                                   KI_AP_STARTUP_CLAIMED,
+                                   KI_AP_STARTUP_WAITING) != KI_AP_STARTUP_WAITING)
+    {
+        _disable();
+        for (;;) __halt();
+    }
+}
+#endif
 
 /* gmutex.c ********************************************************************/
 
