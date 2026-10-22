@@ -80,6 +80,9 @@ typedef struct _NG_VCB
     struct _NG_FCB *VolumeFcb;
     struct ngc_volinfo Info;
     ULONG SectorSize;
+    ULONG ClusterSize;              /* immutable cluster size, cached at mount; the paging path reads this,
+                                       never the refreshable Info whose ngc_volinfo() zeroes it mid-update */
+    UCHAR MajorVersion;             /* NTFS major version, cached at mount for the same reason */
     BOOLEAN ReadOnly;               /* mounted read-only: policy, registry or request */
     BOOLEAN Damaged;                /* read-only because the mount-time check found damage: write opens are
                                        granted and every modification refused, so a damaged system volume boots */
@@ -155,6 +158,7 @@ typedef struct _NG_FCB
     ULONG RunCount;
     UNICODE_STRING Stream;          /* empty for the unnamed $DATA */
     WCHAR StreamBuffer[256];
+    LIST_ENTRY CcbList;             /* CCBs of the opens that succeeded, until close (FcbListLock) */
 } NG_FCB, *PNG_FCB;
 
 /* Directory snapshot storage: entries are carved from 64 KB chunks freed together. */
@@ -176,13 +180,19 @@ typedef struct _NG_DIRENT
     WCHAR Name[ANYSIZE_ARRAY];
 } NG_DIRENT, *PNG_DIRENT;
 
-/* Context control block: one per file object. */
+/*
+ * Context control block: one per file object.  Path, ParentMftNo, NameLength and Name change when
+ * the file is renamed through any of its handles: the rename holds CreateGate and the FCB's main
+ * resource exclusive and FcbListLock, so a reader holds one of them.  None of them locates the
+ * file: a relative open starts at the related FCB's MFT record.
+ */
 typedef struct _NG_CCB
 {
-    UNICODE_STRING Path;            /* "\\dir\\file[:stream]" as opened, from the volume root */
+    UNICODE_STRING Path;            /* "\\dir\\file[:stream]" from the volume root, for names and notifications */
     ULONGLONG ParentMftNo;          /* directory holding the name this handle was opened by */
     USHORT NameLength;              /* that name as stored on disk, in WCHARs (0 for the root) */
     WCHAR Name[256];
+    LIST_ENTRY FcbLinks;            /* NG_FCB.CcbList */
     BOOLEAN DeleteOnClose;
     BOOLEAN AppendOnly;             /* opened with FILE_APPEND_DATA but not FILE_WRITE_DATA */
     PNG_DIRENT *Entries;            /* directory snapshot taken at the first query */
@@ -196,9 +206,13 @@ typedef struct _NG_CCB
     BOOLEAN AnyReturned;
     LONG QueryBusy;                 /* a directory query of this handle is running (dirctl.c) */
     ACCESS_MASK Granted;            /* access of the handle, generic rights mapped */
-    BOOLEAN ManageVolume;           /* a volume open that may lock, unlock and dismount the volume */
+    BOOLEAN ManageVolume;           /* a volume open that may lock, unlock, dismount the volume and read its bitmap (create.c) */
+    BOOLEAN ManageVolumeMutate;     /* a volume open that may resize (shrink/extend) the volume: needs write access or the privilege */
     BOOLEAN CleanedUp;              /* a volume handle's cleanup ran (set under FcbListLock) */
-    PVOID RetiredPaths;             /* earlier Path buffers of a renamed directory (change notify keeps them) */
+    PVOID RetiredPaths;             /* earlier Path buffers of a renamed file (the diagnostic log may still print one) */
+    UNICODE_STRING NotifyPath;      /* the name a change-notify registration watches: FsRtl reads it without our
+                                       locks, so its buffer (room for the longest path) never moves and a
+                                       rename rewrites it in place */
 } NG_CCB, *PNG_CCB;
 
 typedef struct _NG_GLOBAL
@@ -261,6 +275,7 @@ BOOLEAN NgNodeGone(ngc_node *Node);
 VOID NgSetDeletePending(PNG_FCB Fcb, PNG_CCB Ccb);
 BOOLEAN NgValidName(PCUNICODE_STRING Name);
 VOID NgNotify(PNG_VCB Vcb, PCUNICODE_STRING Path, ULONG Filter, ULONG Action);
+VOID NgNotifyCcb(PNG_VCB Vcb, PNG_CCB Ccb, ULONG Filter, ULONG Action);
 NTSTATUS NgCleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 NTSTATUS NgClose(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 

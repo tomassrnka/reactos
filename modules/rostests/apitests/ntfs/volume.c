@@ -1,7 +1,7 @@
 /*
  * PROJECT:     ReactOS API tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
- * PURPOSE:     NTFS: setting and reading the volume label
+ * PURPOSE:     NTFS: the volume label, the volume lock and the file system attributes
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -774,5 +774,432 @@ START_TEST(NtfsVolumeLock)
         NtClose(Lock);
     ok(GetLabel(Got) && !wcscmp(Got, Before), "Label after the refused sets is \"%ls\", expected \"%ls\"\n", Got, Before);
     ok(RestoreLabel(Original, OriginalBytes), "The label of %ls was not restored\n", LabelRoot);
+    NtCleanup();
+}
+
+/*
+ * Who may manage a volume through a volume handle (read its allocation bitmap, lock and dismount it).
+ * As NTFS on Windows (Server 2008 R2 and Windows 10, black-box): the opener whose token the volume
+ * device's ACL grants both read and write data access, or who holds SeManageVolumePrivilege enabled,
+ * whatever the handle was opened for; anybody else gets STATUS_ACCESS_DENIED, however the handle was
+ * opened.  The default ACL of a volume device lets a non-administrator open the volume for traverse,
+ * read attributes and read control only; such a handle still queries the volume (NTFS volume data, the
+ * dirty flag) but reads no sectors and manages nothing.
+ */
+/* Whether the volume device's ACL grants Token (a primary or impersonation token) all of Access. */
+static BOOLEAN AclGrants(HANDLE Token, ACCESS_MASK Access)
+{
+    static GENERIC_MAPPING Mapping = { FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_GENERIC_EXECUTE, FILE_ALL_ACCESS };
+    BYTE Sd[4096], PrivBuffer[256];
+    DWORD PrivLength = sizeof(PrivBuffer), Granted = 0;
+    BOOL Status = FALSE;
+    ULONG Length;
+    HANDLE Volume, Imp;
+
+    MapGenericMask(&Access, &Mapping);
+    if (!NT_SUCCESS(OpenVolume(READ_CONTROL, &Volume)))
+        return FALSE;
+    if (NT_SUCCESS(NtQuerySecurityObject(Volume, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+                                                 DACL_SECURITY_INFORMATION, Sd, sizeof(Sd), &Length)) &&
+        DuplicateToken(Token, SecurityImpersonation, &Imp))
+    {
+        if (!AccessCheck(Sd, Imp, Access, &Mapping, (PPRIVILEGE_SET)PrivBuffer, &PrivLength, &Granted, &Status))
+            Status = FALSE;
+        CloseHandle(Imp);
+    }
+    NtClose(Volume);
+    return Status != FALSE;
+}
+
+static NTSTATUS GetBitmap(HANDLE Handle)
+{
+    IO_STATUS_BLOCK Iosb;
+    LONGLONG Start = 0;
+    ULONGLONG Out[8];
+    NTSTATUS Status = NtFsControlFile(Handle, NULL, NULL, NULL, &Iosb, FSCTL_GET_VOLUME_BITMAP, &Start, sizeof(Start), Out, sizeof(Out));
+    /* A small buffer: a volume of more than 384 clusters does not fit. */
+    return Status == STATUS_BUFFER_OVERFLOW ? STATUS_SUCCESS : Status;
+}
+
+/* The volume operations through a handle opened with Access: open, sector read, queries, bitmap, lock. */
+static VOID CheckVolumeHandle(int Line, PCSTR Who, ACCESS_MASK Access, BOOLEAN Manage, BOOLEAN Lockable)
+{
+    IO_STATUS_BLOCK Iosb;
+    NTFS_VOLUME_DATA_BUFFER Data;
+    ULONG Dirty;
+    HANDLE Handle;
+    NTSTATUS Status;
+    PVOID Sector = VirtualAlloc(NULL, 4096, MEM_COMMIT, PAGE_READWRITE);
+
+    Status = OpenVolume(Access, &Handle);
+    ok_(__FILE__, Line)(Status == STATUS_SUCCESS, "%s, access 0x%lx: volume open 0x%08lx\n", Who, Access, Status);
+    if (!NT_SUCCESS(Status))
+    {
+        VirtualFree(Sector, 0, MEM_RELEASE);
+        return;
+    }
+    Status = NtFsControlFile(Handle, NULL, NULL, NULL, &Iosb, FSCTL_GET_NTFS_VOLUME_DATA, NULL, 0, &Data, sizeof(Data));
+    ok_(__FILE__, Line)(Status == STATUS_SUCCESS, "%s, access 0x%lx: FSCTL_GET_NTFS_VOLUME_DATA 0x%08lx\n", Who, Access, Status);
+    Status = NtFsControlFile(Handle, NULL, NULL, NULL, &Iosb, FSCTL_IS_VOLUME_DIRTY, NULL, 0, &Dirty, sizeof(Dirty));
+    ok_(__FILE__, Line)(Status == STATUS_SUCCESS, "%s, access 0x%lx: FSCTL_IS_VOLUME_DIRTY 0x%08lx\n", Who, Access, Status);
+    if (Sector)
+    {
+        Status = VolumeIo(Handle, FALSE, 0, Sector, 4096);
+        ok_(__FILE__, Line)(Status == ((Access & (FILE_READ_DATA | GENERIC_READ)) ? STATUS_SUCCESS : STATUS_ACCESS_DENIED),
+                            "%s, access 0x%lx: sector read 0x%08lx\n", Who, Access, Status);
+    }
+    Status = GetBitmap(Handle);
+    ok_(__FILE__, Line)(Status == (Manage ? STATUS_SUCCESS : STATUS_ACCESS_DENIED),
+                        "%s, access 0x%lx: FSCTL_GET_VOLUME_BITMAP 0x%08lx\n", Who, Access, Status);
+    if (!Manage || Lockable)
+    {
+        /* Refused before it can fail for a volume in use, so the system volume tests the refusal too. */
+        ULONG Try;
+        /* Something else may have the volume open for a moment (an indexer, a virus scanner on Windows). */
+        for (Try = 0; (Status = VolumeFsctl(Handle, FSCTL_LOCK_VOLUME)) == STATUS_ACCESS_DENIED && Manage && Try < 20; Try++)
+            Sleep(250);
+        ok_(__FILE__, Line)(Status == (Manage ? STATUS_SUCCESS : STATUS_ACCESS_DENIED),
+                            "%s, access 0x%lx: FSCTL_LOCK_VOLUME 0x%08lx\n", Who, Access, Status);
+        if (NT_SUCCESS(Status))
+            ok_(__FILE__, Line)(VolumeFsctl(Handle, FSCTL_UNLOCK_VOLUME) == STATUS_SUCCESS, "%s: unlock failed\n", Who);
+        else if (!Manage)
+        {
+            Status = VolumeFsctl(Handle, FSCTL_DISMOUNT_VOLUME);
+            ok_(__FILE__, Line)(Status == STATUS_ACCESS_DENIED, "%s, access 0x%lx: FSCTL_DISMOUNT_VOLUME 0x%08lx\n", Who, Access, Status);
+        }
+    }
+    NtClose(Handle);
+    VirtualFree(Sector, 0, MEM_RELEASE);
+}
+
+static BOOLEAN HasPrivilege(HANDLE Token, PCWSTR Name)
+{
+    UCHAR Buffer[1024];
+    PTOKEN_PRIVILEGES Privileges = (PTOKEN_PRIVILEGES)Buffer;
+    DWORD Len, i;
+    LUID Luid;
+
+    if (!LookupPrivilegeValueW(NULL, Name, &Luid) ||
+        !GetTokenInformation(Token, TokenPrivileges, Buffer, sizeof(Buffer), &Len))
+        return FALSE;
+    for (i = 0; i < Privileges->PrivilegeCount; i++)
+        if (Privileges->Privileges[i].Luid.LowPart == Luid.LowPart && Privileges->Privileges[i].Luid.HighPart == Luid.HighPart)
+            return TRUE;
+    return FALSE;
+}
+
+START_TEST(NtfsVolumeOpen)
+{
+    static const ACCESS_MASK UserAccess[] = { FILE_EXECUTE, FILE_EXECUTE | FILE_READ_ATTRIBUTES, GENERIC_EXECUTE };
+    static const ACCESS_MASK AdminAccess[] = { FILE_EXECUTE, FILE_EXECUTE | FILE_READ_ATTRIBUTES, GENERIC_READ, GENERIC_READ | GENERIC_WRITE };
+    static const ACCESS_MASK DataAccess[] = { GENERIC_READ, FILE_READ_DATA, FILE_WRITE_DATA };
+    BOOLEAN Lockable = FALSE, UserManage, PreHeld = FALSE;
+    HANDLE Handle, Token = NULL, Logon;
+    NTSTATUS Status;
+    ULONG i;
+
+    if (!LabelInit("NtfsVolumeOpen"))
+        return;
+
+    /* A volume that can be locked at all (not the system volume) also has the granted locks checked. */
+    if (NT_SUCCESS(OpenVolume(FILE_READ_DATA | FILE_WRITE_DATA, &Handle)))
+    {
+        for (i = 0; i < 20 && (Status = VolumeFsctl(Handle, FSCTL_LOCK_VOLUME)) == STATUS_ACCESS_DENIED; i++)
+            Sleep(500);
+        if (NT_SUCCESS(Status))
+        {
+            Lockable = TRUE;
+            VolumeFsctl(Handle, FSCTL_UNLOCK_VOLUME);
+        }
+        NtClose(Handle);
+    }
+    {
+        UCHAR Buffer[256];
+        DWORD Len;
+        LPSTR Sid = NULL;
+        if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &Token))
+        {
+            if (GetTokenInformation(Token, TokenUser, Buffer, sizeof(Buffer), &Len))
+                ConvertSidToStringSidA(((PTOKEN_USER)Buffer)->User.Sid, &Sid);
+            CloseHandle(Token);
+            Token = NULL;
+        }
+        trace("Volume %ls, %slockable, running as %s\n", VolumePath, Lockable ? "" : "not ", Sid ? Sid : "?");
+        if (Sid)
+            LocalFree(Sid);
+    }
+
+    /* An administrator manages the volume through any volume handle, a traverse-only one too. */
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, &Token) ||
+        !AclGrants(Token, FILE_READ_DATA | FILE_WRITE_DATA))
+        skip("The ACL of %ls does not grant this administrator read and write data access\n", VolumePath);
+    else
+    {
+        for (i = 0; i < RTL_NUMBER_OF(AdminAccess); i++)
+            CheckVolumeHandle(__LINE__, "Administrator", AdminAccess[i], TRUE, Lockable);
+    }
+    if (Token)
+        CloseHandle(Token);
+    Token = NULL;
+
+    if (!NtHaveUser())
+    {
+        NtCleanup();
+        return;
+    }
+    /* The default device ACL (ReactOS's always) gives a non-administrator no data access to the volume. */
+    ok(!is_reactos() || (!AclGrants(UserToken, FILE_READ_DATA) && !AclGrants(UserToken, FILE_WRITE_DATA)),
+       "The ACL of %ls grants the test user data access\n", VolumePath);
+    /* Read or write data access alone is not enough to manage the volume; both are. */
+    UserManage = AclGrants(UserToken, FILE_READ_DATA | FILE_WRITE_DATA);
+    for (i = 0; i < RTL_NUMBER_OF(DataAccess); i++)
+    {
+        BOOLEAN Expect = AclGrants(UserToken, DataAccess[i]);
+        NtBeginUser();
+        Status = OpenVolume(DataAccess[i], &Handle);
+        NtEndUser();
+        ok(Status == (Expect ? STATUS_SUCCESS : STATUS_ACCESS_DENIED), "Non-administrator, access 0x%lx: volume open 0x%08lx\n",
+           DataAccess[i], Status);
+        if (NT_SUCCESS(Status))
+        {
+            NtClose(Handle);
+            NtBeginUser();
+            CheckVolumeHandle(__LINE__, "Non-administrator", DataAccess[i], UserManage, Lockable);
+            NtEndUser();
+        }
+    }
+    for (i = 0; i < RTL_NUMBER_OF(UserAccess); i++)
+    {
+        if (!AclGrants(UserToken, UserAccess[i]))
+            continue;
+        NtBeginUser();
+        CheckVolumeHandle(__LINE__, "Non-administrator", UserAccess[i], UserManage, Lockable);
+        NtEndUser();
+    }
+
+    /* The non-administrator who holds SeManageVolumePrivilege manages the volume once it enables it. */
+    Logon = NtLogonUser();
+    Token = NULL;
+    if (Logon && DuplicateTokenEx(Logon, TOKEN_ALL_ACCESS, NULL, SecurityImpersonation, TokenImpersonation, &Token))
+        PreHeld = HasPrivilege(Token, L"SeManageVolumePrivilege");
+    if (Token)
+        CloseHandle(Token);
+    if (Logon)
+        CloseHandle(Logon);
+    Token = Logon = NULL;
+    if (UserManage || !AclGrants(UserToken, FILE_EXECUTE | FILE_READ_ATTRIBUTES))
+        skip("The ACL of %ls decides for the test user without the privilege\n", VolumePath);
+    else if (!PreHeld && !NtUserRight(L"SeManageVolumePrivilege", TRUE))
+        skip("Cannot grant SeManageVolumePrivilege to the test user\n");
+    else
+    {
+        Logon = NtLogonUser();
+        if (!Logon || !DuplicateTokenEx(Logon, TOKEN_ALL_ACCESS, NULL, SecurityImpersonation, TokenImpersonation, &Token))
+            ok(FALSE, "No logon of the test user with the privilege\n");
+        else if (!HasPrivilege(Token, L"SeManageVolumePrivilege"))
+            skip("A new logon of the test user has no SeManageVolumePrivilege\n");
+        else
+        {
+            ok(SetThreadToken(NULL, Token), "SetThreadToken failed %lu\n", GetLastError());
+            CheckVolumeHandle(__LINE__, "Privilege held, not enabled", FILE_EXECUTE | FILE_READ_ATTRIBUTES, FALSE, Lockable);
+            RevertToSelf();
+            ok(NtSetPrivilege(Token, L"SeManageVolumePrivilege", TRUE), "Enabling SeManageVolumePrivilege failed\n");
+            ok(SetThreadToken(NULL, Token), "SetThreadToken failed %lu\n", GetLastError());
+            CheckVolumeHandle(__LINE__, "Privilege enabled", FILE_EXECUTE | FILE_READ_ATTRIBUTES, TRUE, Lockable);
+            RevertToSelf();
+        }
+        if (Token)
+            CloseHandle(Token);
+        if (Logon)
+            CloseHandle(Logon);
+        /* Taken back at once: only a grant this test made. */
+        if (!PreHeld && !NtUserRight(L"SeManageVolumePrivilege", FALSE))
+            trace("SeManageVolumePrivilege of the test user was not taken back\n");
+    }
+    NtCleanup();
+}
+
+/* FSCTL_GET_NTFS_VOLUME_DATA on a volume handle; Windows refuses it on a handle without FILE_READ_DATA. */
+static NTSTATUS NtVolumeData(ULONG Length, PVOID Buffer, ULONG_PTR *Information)
+{
+    IO_STATUS_BLOCK Iosb;
+    HANDLE Handle;
+    NTSTATUS Status;
+
+    *Information = 0;
+    Status = OpenVolume(FILE_READ_DATA, &Handle);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    Iosb.Information = 0;
+    Status = NtFsControlFile(Handle, NULL, NULL, NULL, &Iosb, FSCTL_GET_NTFS_VOLUME_DATA, NULL, 0, Buffer, Length);
+    *Information = Iosb.Information;
+    NtClose(Handle);
+    return Status;
+}
+
+/* The major NTFS version of the test directory's volume (the extended FSCTL_GET_NTFS_VOLUME_DATA output), 0 if unknown. */
+static UCHAR NtVolumeMajor(VOID)
+{
+    struct { NTFS_VOLUME_DATA_BUFFER Data; NTFS_EXTENDED_VOLUME_DATA Extended; } Buffer;
+    ULONG_PTR Information;
+
+    RtlZeroMemory(&Buffer, sizeof(Buffer));
+    if (!NT_SUCCESS(NtVolumeData(sizeof(Buffer), &Buffer, &Information)) || Information < sizeof(Buffer))
+        return 0;
+    return (UCHAR)Buffer.Extended.MajorVersion;
+}
+
+/*
+ * The file system attributes FileFsAttributeInformation reports for the test directory's volume.
+ * Each flag checked here is reported by Windows 10 and Server 2008 R2 NTFS (0x03e706ff and
+ * 0x03e700ff on their system volumes) and implemented by ntfsng: FSCTL_SET/GET/DELETE_REPARSE_POINT
+ * and junction traversal (exercised by kernel32_apitest VolumeMountPoint and userenv_apitest, not
+ * here), hard links (NtfsHardLink) and open by file ID (NtfsOpenById).  On ReactOS the set is
+ * exact: a flag for a feature the driver does not implement must not be reported.
+ */
+START_TEST(NtfsVolumeAttributes)
+{
+    static const struct { ULONG Flag; PCSTR Name; } Expected[] =
+    {
+        { FILE_CASE_PRESERVED_NAMES, "FILE_CASE_PRESERVED_NAMES" },
+        { FILE_UNICODE_ON_DISK, "FILE_UNICODE_ON_DISK" },
+        { FILE_SUPPORTS_REPARSE_POINTS, "FILE_SUPPORTS_REPARSE_POINTS" },
+        { FILE_NAMED_STREAMS, "FILE_NAMED_STREAMS" },
+        { FILE_SUPPORTS_HARD_LINKS, "FILE_SUPPORTS_HARD_LINKS" },
+        { FILE_SUPPORTS_OPEN_BY_FILE_ID, "FILE_SUPPORTS_OPEN_BY_FILE_ID" },
+    };
+    ULONGLONG Buffer[(sizeof(FILE_FS_ATTRIBUTE_INFORMATION) + MAX_PATH * sizeof(WCHAR)) / sizeof(ULONGLONG)];
+    PFILE_FS_ATTRIBUTE_INFORMATION Info = (PFILE_FS_ATTRIBUTE_INFORMATION)Buffer;
+    WCHAR FsName[MAX_PATH];
+    IO_STATUS_BLOCK Iosb;
+    HANDLE Handle;
+    NTSTATUS Status;
+    DWORD Flags = 0, MaxComponent = 0;
+    ULONG i, All = 0;
+    UCHAR Major;
+
+    if (!LabelInit("NtfsVolumeAttributes"))
+        return;
+    Major = NtVolumeMajor();
+    ok(Major != 0, "No NTFS version from FSCTL_GET_NTFS_VOLUME_DATA\n");
+    Status = NtOpen(NtTestDir(), FILE_READ_ATTRIBUTES | SYNCHRONIZE, SHARE_RW | FILE_SHARE_DELETE, FILE_OPEN,
+                    FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT, NULL, &Handle);
+    ok(Status == STATUS_SUCCESS, "Opening %ls: 0x%08lx\n", NtTestDir(), Status);
+    if (NT_SUCCESS(Status))
+    {
+        RtlZeroMemory(Buffer, sizeof(Buffer));
+        Status = NtQueryVolumeInformationFile(Handle, &Iosb, Info, sizeof(Buffer), FileFsAttributeInformation);
+        NtClose(Handle);
+        ok(Status == STATUS_SUCCESS, "FileFsAttributeInformation: 0x%08lx\n", Status);
+    }
+    if (NT_SUCCESS(Status))
+    {
+        trace("%ls: FileSystemAttributes 0x%08lx\n", LabelRoot, Info->FileSystemAttributes);
+        ok(Info->FileSystemNameLength == 8 && !memcmp(Info->FileSystemName, L"NTFS", 8),
+           "File system name \"%.*ls\"\n", (int)(Info->FileSystemNameLength / sizeof(WCHAR)), Info->FileSystemName);
+        ok(Info->MaximumComponentNameLength == 255, "MaximumComponentNameLength %lu\n", Info->MaximumComponentNameLength);
+        for (i = 0; i < RTL_NUMBER_OF(Expected); i++)
+        {
+            /* An NTFS 1.x/2.x volume has no $Extend\$Reparse, hence no reparse points. */
+            if (Expected[i].Flag == FILE_SUPPORTS_REPARSE_POINTS && Major && Major < 3)
+            {
+                ok(!(Info->FileSystemAttributes & FILE_SUPPORTS_REPARSE_POINTS) || !is_reactos(),
+                   "Reparse points reported on an NTFS %u volume: 0x%08lx\n", Major, Info->FileSystemAttributes);
+                continue;
+            }
+            ok(Info->FileSystemAttributes & Expected[i].Flag, "%s (0x%08lx) not reported: 0x%08lx\n",
+               Expected[i].Name, Expected[i].Flag, Info->FileSystemAttributes);
+            All |= Expected[i].Flag;
+        }
+        ok(!(Info->FileSystemAttributes & FILE_READ_ONLY_VOLUME), "Writable volume reported read-only: 0x%08lx\n",
+           Info->FileSystemAttributes);
+        if (is_reactos())
+            ok(!(Info->FileSystemAttributes & ~All), "Unexpected flags reported: 0x%08lx\n", Info->FileSystemAttributes & ~All);
+
+        /* GetVolumeInformationW passes the same flags through. */
+        if (GetVolumeInformationW(LabelRoot, NULL, 0, NULL, &MaxComponent, &Flags, FsName, RTL_NUMBER_OF(FsName)))
+        {
+            ok(Flags == Info->FileSystemAttributes, "GetVolumeInformationW flags 0x%08lx, native 0x%08lx\n",
+               Flags, Info->FileSystemAttributes);
+            ok(MaxComponent == 255, "GetVolumeInformationW component length %lu\n", MaxComponent);
+            ok(!wcscmp(FsName, L"NTFS"), "GetVolumeInformationW file system \"%ls\"\n", FsName);
+        }
+        else
+        {
+            ok(FALSE, "GetVolumeInformationW failed %lu\n", GetLastError());
+        }
+    }
+    NtCleanup();
+}
+
+/*
+ * FSCTL_GET_NTFS_VOLUME_DATA: the base block, then whole fields of NTFS_EXTENDED_VOLUME_DATA as far
+ * as they fit, ByteCount saying how many bytes of it.  Measured on Server 2008 R2 (8-byte extended
+ * block) and Windows 10 (32 bytes: physical sector size, LFS version and trim limits follow; no
+ * extended block at all for 100 bytes).  ntfsng follows Server 2008 R2.
+ */
+START_TEST(NtfsVolumeData)
+{
+    struct { NTFS_VOLUME_DATA_BUFFER Data; NTFS_EXTENDED_VOLUME_DATA Extended; UCHAR Rest[160]; } Buffer;
+    ULONG_PTR Information;
+    NTSTATUS Status;
+    USHORT Major;
+
+    if (!LabelInit("NtfsVolumeData"))
+        return;
+
+    Status = NtVolumeData(sizeof(NTFS_VOLUME_DATA_BUFFER) - 1, &Buffer, &Information);
+    ok(Status == STATUS_BUFFER_TOO_SMALL, "Short buffer: 0x%08lx\n", Status);
+
+    memset(&Buffer, 0xcc, sizeof(Buffer));
+    Status = NtVolumeData(sizeof(NTFS_VOLUME_DATA_BUFFER), &Buffer, &Information);
+    ok(Status == STATUS_SUCCESS, "Base block: 0x%08lx\n", Status);
+    ok(Information == sizeof(NTFS_VOLUME_DATA_BUFFER), "Base block: %Iu bytes\n", Information);
+    ok(Buffer.Extended.ByteCount == 0xcccccccc, "Written past the buffer: 0x%08lx\n", Buffer.Extended.ByteCount);
+    ok(Buffer.Data.BytesPerSector >= 512 && Buffer.Data.BytesPerCluster >= Buffer.Data.BytesPerSector &&
+       Buffer.Data.BytesPerFileRecordSegment &&
+       Buffer.Data.ClustersPerFileRecordSegment == Buffer.Data.BytesPerFileRecordSegment / Buffer.Data.BytesPerCluster,
+       "Geometry %lu %lu %lu %lu\n", Buffer.Data.BytesPerSector, Buffer.Data.BytesPerCluster,
+       Buffer.Data.BytesPerFileRecordSegment, Buffer.Data.ClustersPerFileRecordSegment);
+    ok(Buffer.Data.FreeClusters.QuadPart <= Buffer.Data.TotalClusters.QuadPart, "Free %I64d of %I64d clusters\n",
+       Buffer.Data.FreeClusters.QuadPart, Buffer.Data.TotalClusters.QuadPart);
+
+    /* Room for ByteCount only: Server 2008 R2 returns it (as ntfsng does), Windows 10 only the base block. */
+    memset(&Buffer, 0xcc, sizeof(Buffer));
+    Status = NtVolumeData(sizeof(NTFS_VOLUME_DATA_BUFFER) + 4, &Buffer, &Information);
+    ok(Status == STATUS_SUCCESS, "ByteCount only: 0x%08lx\n", Status);
+    ok((Information == sizeof(NTFS_VOLUME_DATA_BUFFER) + 4 && Buffer.Extended.ByteCount == 4) ||
+       (!is_reactos() && Information == sizeof(NTFS_VOLUME_DATA_BUFFER) && Buffer.Extended.ByteCount == 0xcccccccc),
+       "ByteCount only: %Iu bytes, ByteCount 0x%08lx\n", Information, Buffer.Extended.ByteCount);
+    ok(Buffer.Extended.MajorVersion == 0xcccc, "ByteCount only: MajorVersion written: 0x%04x\n", Buffer.Extended.MajorVersion);
+
+    /* Room for ByteCount and MajorVersion, not MinorVersion. */
+    memset(&Buffer, 0xcc, sizeof(Buffer));
+    Status = NtVolumeData(sizeof(NTFS_VOLUME_DATA_BUFFER) + 7, &Buffer, &Information);
+    ok(Status == STATUS_SUCCESS, "Partial extended block: 0x%08lx\n", Status);
+    ok(Information == sizeof(NTFS_VOLUME_DATA_BUFFER) + 6, "Partial extended block: %Iu bytes\n", Information);
+    ok(Buffer.Extended.ByteCount == 6, "Partial ByteCount %lu\n", Buffer.Extended.ByteCount);
+    Major = Buffer.Extended.MajorVersion;
+    ok(Major >= 1 && Major <= 3, "Partial MajorVersion %u\n", Major);
+    ok(Buffer.Extended.MinorVersion == 0xcccc, "Partial MinorVersion written: 0x%04x\n", Buffer.Extended.MinorVersion);
+
+    memset(&Buffer, 0xcc, sizeof(Buffer));
+    Status = NtVolumeData(sizeof(NTFS_VOLUME_DATA_BUFFER) + sizeof(NTFS_EXTENDED_VOLUME_DATA), &Buffer, &Information);
+    ok(Status == STATUS_SUCCESS, "Extended block: 0x%08lx\n", Status);
+    ok(Information == sizeof(NTFS_VOLUME_DATA_BUFFER) + sizeof(NTFS_EXTENDED_VOLUME_DATA), "Extended block: %Iu bytes\n", Information);
+    ok(Buffer.Extended.ByteCount == sizeof(NTFS_EXTENDED_VOLUME_DATA), "ByteCount %lu\n", Buffer.Extended.ByteCount);
+    ok(Buffer.Extended.MajorVersion == Major && Buffer.Extended.MinorVersion <= 2, "Version %u.%u\n",
+       Buffer.Extended.MajorVersion, Buffer.Extended.MinorVersion);
+
+    /* A large buffer: the whole extended block, ByteCount matching the returned length. */
+    memset(&Buffer, 0xcc, sizeof(Buffer));
+    Status = NtVolumeData(sizeof(Buffer), &Buffer, &Information);
+    ok(Status == STATUS_SUCCESS, "Large buffer: 0x%08lx\n", Status);
+    ok(Information >= sizeof(NTFS_VOLUME_DATA_BUFFER) + sizeof(NTFS_EXTENDED_VOLUME_DATA) && Information < sizeof(Buffer),
+       "Large buffer: %Iu bytes\n", Information);
+    ok(Buffer.Extended.ByteCount == Information - sizeof(NTFS_VOLUME_DATA_BUFFER), "ByteCount %lu for %Iu bytes\n",
+       Buffer.Extended.ByteCount, Information);
+    if (is_reactos())
+        ok(Information == sizeof(NTFS_VOLUME_DATA_BUFFER) + sizeof(NTFS_EXTENDED_VOLUME_DATA), "Large buffer: %Iu bytes\n", Information);
     NtCleanup();
 }

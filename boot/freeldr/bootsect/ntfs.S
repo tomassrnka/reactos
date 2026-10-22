@@ -1,7 +1,7 @@
 /*
  * PROJECT:         ReactOS Bootsector
  * LICENSE:         GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
- * FILE:            boot/freeldr/bootsect/fat32.S
+ * FILE:            boot/freeldr/bootsect/ntfs.S
  * PURPOSE:         Implementing boot sector for NTFS
  * COPYRIGHT:       Copyright 2020 Sylvain Deverre (deverre.sylv@gmail.com)
  */

@@ -6,6 +6,7 @@
  */
 
 #include "precomp.h"
+#include <ntsecapi.h>
 
 #define NT_USER_NAME L"ntfsapitest"
 #define NT_USER_PASSWORD L"Ntfs-Api-Test-2026!"
@@ -38,6 +39,43 @@ BOOLEAN NtSetPrivilege(HANDLE Token, PCWSTR Name, BOOLEAN Enable)
     Tp.Privileges[0].Attributes = Enable ? SE_PRIVILEGE_ENABLED : 0;
     Ok = AdjustTokenPrivileges(Token, FALSE, &Tp, sizeof(Tp), NULL, NULL);
     return Ok && GetLastError() == ERROR_SUCCESS;
+}
+
+BOOLEAN NtUserRight(PCWSTR Right, BOOLEAN Add)
+{
+    LSA_OBJECT_ATTRIBUTES Oa;
+    LSA_UNICODE_STRING Name;
+    LSA_HANDLE Policy;
+    NTSTATUS Status;
+
+    if (!SidUser)
+        return FALSE;
+    RtlZeroMemory(&Oa, sizeof(Oa));
+    Status = LsaOpenPolicy(NULL, &Oa, POLICY_CREATE_ACCOUNT | POLICY_LOOKUP_NAMES, &Policy);
+    if (!NT_SUCCESS(Status))
+    {
+        trace("LsaOpenPolicy failed 0x%08lx\n", Status);
+        return FALSE;
+    }
+    Name.Buffer = (PWSTR)Right;
+    Name.Length = (USHORT)(wcslen(Right) * sizeof(WCHAR));
+    Name.MaximumLength = Name.Length + sizeof(WCHAR);
+    Status = Add ? LsaAddAccountRights(Policy, SidUser, &Name, 1) : LsaRemoveAccountRights(Policy, SidUser, FALSE, &Name, 1);
+    if (!NT_SUCCESS(Status))
+        trace("%s %ls failed 0x%08lx\n", Add ? "LsaAddAccountRights" : "LsaRemoveAccountRights", Right, Status);
+    LsaClose(Policy);
+    return NT_SUCCESS(Status);
+}
+
+HANDLE NtLogonUser(VOID)
+{
+    HANDLE Token;
+    if (!LogonUserW(NT_USER_NAME, L".", NT_USER_PASSWORD, LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &Token))
+    {
+        trace("LogonUserW failed %lu\n", GetLastError());
+        return NULL;
+    }
+    return Token;
 }
 
 static VOID NtPrepareUser(VOID)

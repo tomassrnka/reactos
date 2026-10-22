@@ -37,6 +37,10 @@ BOOLEAN NtHaveUser(VOID);
 VOID NtBeginUser(VOID);
 VOID NtEndUser(VOID);
 BOOLEAN NtSetPrivilege(HANDLE Token, PCWSTR Name, BOOLEAN Enable);
+/* Grants (Add) or takes back the account right Right of the test user in the local policy. */
+BOOLEAN NtUserRight(PCWSTR Right, BOOLEAN Add);
+/* A new logon of the test user (CloseHandle), which has the rights the policy gives it now; NULL if it fails. */
+HANDLE NtLogonUser(VOID);
 
 /* NtCreateFile on a Win32 path; with Handle NULL a successful open is closed again. */
 NTSTATUS NtOpen(PCWSTR Path, ACCESS_MASK Access, ULONG Share, ULONG Disposition, ULONG Options,

@@ -116,6 +116,9 @@ NTSTATUS NgQueryInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     if (Fcb->IsVolume)
         return STATUS_INVALID_PARAMETER;
     NgFillStat(Fcb);
+    /* Zero the reply buffer so uninitialized pool padding never reaches user mode. */
+    if (Buffer)
+        RtlZeroMemory(Buffer, Length);
 
 #define NEED(t) do { if (Length < sizeof(t)) return STATUS_BUFFER_TOO_SMALL; Used = sizeof(t); } while (0)
     switch (Stack->Parameters.QueryFile.FileInformationClass)
@@ -872,6 +875,9 @@ NTSTATUS NgQueryVolumeInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
     if (DeviceObject == NgGlobal.ControlDevice)
         return STATUS_INVALID_DEVICE_REQUEST;
+    /* Zero the reply buffer so uninitialized pool padding never reaches user mode. */
+    if (Buffer)
+        RtlZeroMemory(Buffer, Length);
     if (!Vcb->ReadOnly)
     {
         NgAcquireCore(Vcb);
@@ -962,8 +968,15 @@ NTSTATUS NgQueryVolumeInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             ULONG Fixed = FIELD_OFFSET(FILE_FS_ATTRIBUTE_INFORMATION, FileSystemName), Copy;
             if (Length < Fixed)
                 return STATUS_BUFFER_TOO_SMALL;
+            /* What the driver implements of what Windows NTFS reports: no case-sensitive lookup,
+             * compression, sparse files, quotas, object IDs, EAs, encryption or USN journal.
+             * FILE_PERSISTENT_ACLS waits for per-user recycle bin ACLs in shell32.  Reparse
+             * points need an NTFS 3.x volume ($Extend\$Reparse). */
             A->FileSystemAttributes = FILE_CASE_PRESERVED_NAMES | FILE_UNICODE_ON_DISK |
-                                      FILE_NAMED_STREAMS | (Vcb->ReadOnly ? FILE_READ_ONLY_VOLUME : 0);
+                                      FILE_NAMED_STREAMS | FILE_SUPPORTS_HARD_LINKS |
+                                      FILE_SUPPORTS_OPEN_BY_FILE_ID |
+                                      (Vcb->MajorVersion >= 3 ? FILE_SUPPORTS_REPARSE_POINTS : 0) |
+                                      (Vcb->ReadOnly ? FILE_READ_ONLY_VOLUME : 0);
             A->MaximumComponentNameLength = 255;
             /* On a short buffer the length reports what was copied (as FAT and the apitest expect). */
             Copy = min(sizeof(Name) - sizeof(WCHAR), Length - Fixed);

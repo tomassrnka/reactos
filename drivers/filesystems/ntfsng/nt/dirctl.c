@@ -445,8 +445,25 @@ NTSTATUS NgDirectoryControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     {
         if (!Fcb || !Ccb || !Fcb->IsDirectory)
             return STATUS_INVALID_PARAMETER;
-        /* FsRtl keeps the IRP and completes it when a reported change matches the filter. */
-        FsRtlNotifyFullChangeDirectory(Vcb->NotifySync, &Vcb->DirNotifyList, Ccb, (PSTRING)&Ccb->Path,
+        /* FsRtl keeps the IRP and completes it when a reported change matches the filter.  It reads the
+         * directory's name whenever a change is reported: a copy with room for the longest path, which
+         * a rename updates in place (info.c NgRetitleCcb). */
+        ExAcquireFastMutex(&Vcb->FcbListLock);
+        if (!Ccb->NotifyPath.Buffer)
+        {
+            USHORT Room = MAXUSHORT - 1;
+            Ccb->NotifyPath.Buffer = ExAllocatePoolWithTag(PagedPool, Room, TAG_NTFSNG);
+            if (Ccb->NotifyPath.Buffer)
+            {
+                RtlCopyMemory(Ccb->NotifyPath.Buffer, Ccb->Path.Buffer, Ccb->Path.Length);
+                Ccb->NotifyPath.Length = Ccb->Path.Length;
+                Ccb->NotifyPath.MaximumLength = Room;
+            }
+        }
+        ExReleaseFastMutex(&Vcb->FcbListLock);
+        if (!Ccb->NotifyPath.Buffer)
+            return STATUS_INSUFFICIENT_RESOURCES;
+        FsRtlNotifyFullChangeDirectory(Vcb->NotifySync, &Vcb->DirNotifyList, Ccb, (PSTRING)&Ccb->NotifyPath,
                                        (Stack->Flags & SL_WATCH_TREE) != 0, FALSE,
                                        Stack->Parameters.NotifyDirectory.CompletionFilter, Irp, NULL, NULL);
         return STATUS_PENDING;

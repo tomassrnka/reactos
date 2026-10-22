@@ -1,9 +1,19 @@
 /*
  * COPYRIGHT:   See COPYING in the top level directory
  * PROJECT:     ReactOS NTFS FS library
- * FILE:        lib/fslib/ntfslib/ntfslib.h
- * PURPOSE:     NTFS lib definitions
+ * FILE:        lib/fslib/ntfslib/data.h
+ * PURPOSE:     NTFS lib definitions and reference data tables
  * PROGRAMMERS: Klachkov Valery
+ *
+ * PROVENANCE:  ATTRIBUTES_TABLE holds the default NTFS $AttrDef attribute
+ *              definitions this library writes (names, types and the size
+ *              bounds it records; a volume's own $AttrDef is authoritative at
+ *              runtime). UPCASE_TABLE is the NTFS $UpCase uppercase-mapping
+ *              table, extracted verbatim from the $UpCase metafile of a
+ *              Windows 10 build 26100 NTFS volume; its CRC64 is the value
+ *              carried in the static $UpCase:$Info stream (UpCaseInfo in
+ *              refdata.h) that files.c writes. This Windows-derived data is
+ *              reproduced for on-disk interoperability.
  */
 
 #ifndef NTFSLIB_DATA_H

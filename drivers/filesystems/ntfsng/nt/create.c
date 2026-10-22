@@ -73,7 +73,48 @@ static PNG_FCB NgInsertOrFindFcb(PNG_VCB Vcb, PNG_FCB Candidate)
     return Candidate;
 }
 
-static NTSTATUS NgOpenVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject, PIO_STACK_LOCATION Stack)
+/* SeManageVolumePrivilege, enabled, in the security context of a user-mode open. */
+static BOOLEAN NgHasManageVolumePrivilege(PACCESS_STATE As)
+{
+    PRIVILEGE_SET Privileges;
+
+    Privileges.PrivilegeCount = 1;
+    Privileges.Control = PRIVILEGE_SET_ALL_NECESSARY;
+    Privileges.Privilege[0].Luid = SeExports->SeManageVolumePrivilege;
+    Privileges.Privilege[0].Attributes = 0;
+    return SePrivilegeCheck(&Privileges, &As->SubjectSecurityContext, UserMode);
+}
+
+/*
+ * Whether the opener may manage the volume (read its bitmap, lock, unlock and dismount it) without the
+ * privilege: as NTFS on Windows, when the volume device's ACL grants the opener's token both read and
+ * write data access, whatever the handle itself was opened for.  An administrator's read-only or even
+ * traverse-only volume handle may manage the volume; a non-administrator's handle that the default
+ * device ACL lets open (traverse, read attributes, read control) may not, nor may one whose ACL entry
+ * gives read or write access alone.  The descriptor is checked on the copy ObGetObjectSecurity makes,
+ * not through DeviceObject->SecurityDescriptor, which a change of the device's security replaces.
+ */
+static BOOLEAN NgVolumeAclGrantsManage(PNG_VCB Vcb, PACCESS_STATE As)
+{
+    PSECURITY_DESCRIPTOR Sd;
+    BOOLEAN Allocated, Granted;
+    ACCESS_MASK GrantedAccess;
+    NTSTATUS Status;
+
+    if (!NT_SUCCESS(ObGetObjectSecurity(Vcb->Vpb->RealDevice, &Sd, &Allocated)))
+        return FALSE;
+    if (!Sd)
+        return FALSE;
+    SeLockSubjectContext(&As->SubjectSecurityContext);
+    Granted = SeAccessCheck(Sd, &As->SubjectSecurityContext, TRUE, FILE_READ_DATA | FILE_WRITE_DATA, 0, NULL,
+                            IoGetFileObjectGenericMapping(), UserMode, &GrantedAccess, &Status);
+    SeUnlockSubjectContext(&As->SubjectSecurityContext);
+    ObReleaseObjectSecurity(Sd, Allocated);
+    return Granted;
+}
+
+/* Check: the create is checked for access (NgCreateChecksAccess); a kernel-mode open may manage the volume. */
+static NTSTATUS NgOpenVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject, PIO_STACK_LOCATION Stack, BOOLEAN Check)
 {
     UNICODE_STRING Empty = RTL_CONSTANT_STRING(L"");
     PNG_FCB Fcb;
@@ -136,12 +177,11 @@ static NTSTATUS NgOpenVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject, PIO_STACK_LOC
         return Status;
     }
     {
-        /* As FastFAT: access to the volume beyond traverse, or the manage-volume privilege. */
         PACCESS_STATE As = Stack->Parameters.Create.SecurityContext->AccessState;
-        KPROCESSOR_MODE Mode = (Stack->Flags & SL_FORCE_ACCESS_CHECK) ? UserMode : ExGetPreviousMode();
-        Ccb->ManageVolume = Mode == KernelMode ||
-                            (As && (As->PreviouslyGrantedAccess & (SPECIFIC_RIGHTS_ALL ^ FILE_TRAVERSE))) ||
-                            SeSinglePrivilegeCheck(SeExports->SeManageVolumePrivilege, Mode);
+        BOOLEAN Privileged = !Check || NgHasManageVolumePrivilege(As);
+        Ccb->ManageVolume = Privileged || NgVolumeAclGrantsManage(Vcb, As);
+        /* Volume resize (shrink/extend) mutates the volume: require actual write access (not mere read/execute), or the privilege. */
+        Ccb->ManageVolumeMutate = Privileged || (As->PreviouslyGrantedAccess & FILE_WRITE_DATA);
     }
     FileObject->FsContext = Fcb;
     FileObject->FsContext2 = Ccb;
@@ -717,7 +757,7 @@ static NTSTATUS NgCreateLocked(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             return Vcb->ReadOnly ? STATUS_MEDIA_WRITE_PROTECTED : STATUS_ACCESS_DENIED;
         if ((Access & NG_WRITE_ACCESS) && !(NgGlobal.PermissiveOpen || Vcb->Damaged) && Vcb->ReadOnly)
             return STATUS_MEDIA_WRITE_PROTECTED;
-        return NgOpenVolume(Vcb, FileObject, Stack);
+        return NgOpenVolume(Vcb, FileObject, Stack, Check);
     }
 
     /* Absolute path from the volume root, built from the related open if any. */
