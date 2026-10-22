@@ -100,15 +100,8 @@ T66SocketWork(
         int peerlen = sizeof(peer);
 
         srv = accept(lst, (struct sockaddr *)&peer, &peerlen);
-        if (srv == INVALID_SOCKET)
-        {
-            /* accept() currently fails with WSAEACCES even for Administrators
-             * on unmodified main (independent of the \Device\Tcp DACL), so it
-             * is reported rather than asserted here; data transfer is checked
-             * over UDP below. */
-            skip("%s: accept() failed %d (pre-existing, tracked separately)\n", Who, WSAGetLastError());
-        }
-        else
+        ok(srv != INVALID_SOCKET, "%s: accept failed %d\n", Who, WSAGetLastError());
+        if (srv != INVALID_SOCKET)
         {
             ok(send(cli, &c, 1, 0) == 1, "%s: send failed %d\n", Who, WSAGetLastError());
             ok(recv(srv, &rc, 1, 0) == 1 && rc == 'x', "%s: recv failed/mismatch\n", Who);
