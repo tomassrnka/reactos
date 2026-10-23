@@ -2245,7 +2245,8 @@ DIB_CreateDIBSection(
     // Fill BITMAP32 structure with DIB data
     CONST BITMAPINFOHEADER *bi = &bmi->bmiHeader;
     INT effHeight;
-    ULONG totalSize;
+    ULONG totalSize, ulPitch;
+    ULONGLONG ullPitch;
     BITMAP bm;
     //SIZEL Size;
     HANDLE hSecure;
@@ -2261,11 +2262,46 @@ DIB_CreateDIBSection(
         return (HBITMAP)NULL;
     }
 
+    /* The header is user controlled. Do the size arithmetic in a wider type and
+       reject anything that does not fit, instead of wrapping into an undersized
+       allocation behind a surface that claims the full dimensions. */
+    if ((bi->biWidth < 0) || (bi->biHeight == (LONG)MINLONG))
+    {
+        DPRINT1("Invalid dimensions %ld x %ld\n", bi->biWidth, bi->biHeight);
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+        return (HBITMAP)NULL;
+    }
+
     effHeight = bi->biHeight >= 0 ? bi->biHeight : -bi->biHeight;
+
+    if (ovr_pitch)
+    {
+        ulPitch = ovr_pitch;
+    }
+    else
+    {
+        /* width * bpp is at most 2^31 * 2^16, aligned to 32 bits */
+        ullPitch = (((ULONGLONG)bi->biWidth * bi->biBitCount + 31) & ~31ULL) >> 3;
+        if (ullPitch > 0xFFFFFFFFULL)
+            ulPitch = MAXULONG;
+        else
+            ulPitch = (ULONG)ullPitch;
+    }
+
+    /* SURFACE_AllocSurface converts the pitch back to a pixel count with
+       (pitch << 3), so a pitch of 512MB or more would wrap there and leave
+       a surface whose rows are shorter than its width. */
+    if (ulPitch >= 0x20000000)
+    {
+        DPRINT1("Pitch too large: %lu\n", ulPitch);
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+        return (HBITMAP)NULL;
+    }
+
     bm.bmType = 0;
     bm.bmWidth = bi->biWidth;
     bm.bmHeight = effHeight;
-    bm.bmWidthBytes = ovr_pitch ? ovr_pitch : WIDTH_BYTES_ALIGN32(bm.bmWidth, bi->biBitCount);
+    bm.bmWidthBytes = (LONG)ulPitch;
 
     bm.bmPlanes = bi->biPlanes;
     bm.bmBitsPixel = bi->biBitCount;
@@ -2273,8 +2309,16 @@ DIB_CreateDIBSection(
 
     // Get storage location for DIB bits.  Only use biSizeImage if it's valid and
     // we're dealing with a compressed bitmap.  Otherwise, use width * height.
-    totalSize = (bi->biSizeImage && (bi->biCompression != BI_RGB) && (bi->biCompression != BI_BITFIELDS))
-                ? bi->biSizeImage : (ULONG)(bm.bmWidthBytes * effHeight);
+    if (bi->biSizeImage && (bi->biCompression != BI_RGB) && (bi->biCompression != BI_BITFIELDS))
+    {
+        totalSize = bi->biSizeImage;
+    }
+    else if (!NT_SUCCESS(RtlULongMult(ulPitch, (ULONG)effHeight, &totalSize)))
+    {
+        DPRINT1("Size overflow: pitch %lu, height %d\n", ulPitch, effHeight);
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+        return (HBITMAP)NULL;
+    }
 
     if (section)
     {
@@ -2295,7 +2339,13 @@ DIB_CreateDIBSection(
         }
 
         mapOffset = offset - (offset % Sbi.AllocationGranularity);
-        mapSize = totalSize + (offset - mapOffset);
+        mapSize = (SIZE_T)totalSize + (offset - mapOffset);
+        if (mapSize < totalSize)
+        {
+            DPRINT1("Section view size overflow\n");
+            EngSetLastError(ERROR_INVALID_PARAMETER);
+            return NULL;
+        }
 
         SectionOffset.LowPart  = mapOffset;
         SectionOffset.HighPart = 0;
