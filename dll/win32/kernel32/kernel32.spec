@@ -971,6 +971,7 @@
 @ stdcall -version=0x600+ QueryProcessCycleTime(ptr ptr)
 @ stdcall -version=0x600+ QueryThreadCycleTime(ptr ptr)
 @ stdcall -version=0x601+ QueryUnbiasedInterruptTime(ptr)
+@ stdcall -version=0x601+ QueryUnbiasedInterruptTimePrecise(ptr) kernelbase.QueryUnbiasedInterruptTimePrecise
 @ stdcall QueueUserAPC(ptr long long)
 @ stdcall QueueUserWorkItem(ptr ptr long)
 @ stdcall -norelay RaiseException(long long long ptr)
