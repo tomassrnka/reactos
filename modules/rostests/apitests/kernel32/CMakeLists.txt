@@ -68,6 +68,7 @@ list(APPEND SOURCE
     GetLogicalProcessorInformationEx.c
     GetModuleFileName.c
     GetNumaProcessorNodeEx.c
+    GetSystemCpuSetInformation.c
     GetOverlappedResultEx.c
     GetQueuedCompletionStatusEx.c
     GetSystemTimePrecise.c
