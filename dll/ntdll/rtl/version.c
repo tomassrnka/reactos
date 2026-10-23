@@ -11,6 +11,7 @@
 /* INCLUDES *******************************************************************/
 
 #include <ntdll.h>
+#include <compat_undoc.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -194,6 +195,18 @@ RtlGetVersion(IN OUT PRTL_OSVERSIONINFOW lpVersionInformation)
     lpVersionInformation->dwMinorVersion = Peb->OSMinorVersion;
     lpVersionInformation->dwBuildNumber = Peb->OSBuildNumber;
     lpVersionInformation->dwPlatformId = Peb->OSPlatformId;
+
+    /* Honor a per-process compatibility version declared in the app manifest,
+     * reporting the higher of the manifest version and the real NT version, so
+     * GetVersionEx() agrees with GetVersion() for manifested apps (as on Windows). */
+    {
+        UINT EffectiveVersion = RosGetProcessEffectiveVersion();
+        if (EffectiveVersion > ((Peb->OSMajorVersion << 8) | Peb->OSMinorVersion))
+        {
+            lpVersionInformation->dwMajorVersion = EffectiveVersion >> 8;
+            lpVersionInformation->dwMinorVersion = EffectiveVersion & 0xFF;
+        }
+    }
     RtlZeroMemory(lpVersionInformation->szCSDVersion, sizeof(lpVersionInformation->szCSDVersion));
 
     /* If we have a CSD version string, initialized by Application Compatibility... */

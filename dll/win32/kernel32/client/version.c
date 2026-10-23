@@ -8,6 +8,7 @@
  */
 
 #include <k32.h>
+#include <compat_undoc.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -22,11 +23,27 @@ WINAPI
 GetVersion(VOID)
 {
     PPEB Peb = NtCurrentPeb();
+    ULONG MajorVersion = Peb->OSMajorVersion;
+    ULONG MinorVersion = Peb->OSMinorVersion;
+    UINT EffectiveVersion;
+
+    /* A process that declares a Windows version in its application manifest
+     * must observe that version, as on Windows. ReactOS detects the manifest
+     * compatibility GUID (LdrpInitializeProcessCompat) and records it, but the
+     * version APIs otherwise report the raw NT version. Honor the higher of the
+     * two so manifested apps take the code paths they target (e.g. Crashpad only
+     * creates its IPC pipe handle inheritable when GetVersion() reports Vista+). */
+    EffectiveVersion = RosGetProcessEffectiveVersion();
+    if (EffectiveVersion > ((MajorVersion << 8) | MinorVersion))
+    {
+        MajorVersion = EffectiveVersion >> 8;
+        MinorVersion = EffectiveVersion & 0xFF;
+    }
 
     return (DWORD)( ((Peb->OSPlatformId ^ 2) << 30) |
                      (Peb->OSBuildNumber     << 16) |
-                     (Peb->OSMinorVersion    << 8 ) |
-                      Peb->OSMajorVersion );
+                     (MinorVersion           << 8 ) |
+                      MajorVersion );
 }
 
 /*
