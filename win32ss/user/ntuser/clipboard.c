@@ -146,7 +146,7 @@ IntSynthesizeDib(
     HBITMAP hbm)
 {
     HDC hdc;
-    ULONG cjInfoSize, cjDataSize;
+    ULONG cjInfoSize, cjDataSize, cjObjectSize;
     PCLIPBOARDDATA pClipboardData;
     HANDLE hMem;
     INT iResult;
@@ -184,8 +184,13 @@ IntSynthesizeDib(
     /* Get the size for a full BITMAPINFO */
     cjInfoSize = DIB_BitmapInfoSize(pbmi, DIB_RGB_COLORS);
 
-    /* Calculate the size of the clipboard data, which is a packed DIB */
-    cjDataSize = cjInfoSize + pbmi->bmiHeader.biSizeImage;
+    /* Calculate the size of the clipboard data, which is a packed DIB.
+       Both sums must be overflow-checked before they size the allocation. */
+    if (!NT_SUCCESS(RtlULongAdd(cjInfoSize, pbmi->bmiHeader.biSizeImage, &cjDataSize)) ||
+        !NT_SUCCESS(RtlULongAdd(cjDataSize, sizeof(CLIPBOARDDATA), &cjObjectSize)))
+    {
+        goto cleanup;
+    }
 
     /* Create the clipboard data */
     pClipboardData = (PCLIPBOARDDATA)UserCreateObject(gHandleTable,
@@ -193,7 +198,7 @@ IntSynthesizeDib(
                                                       NULL,
                                                       &hMem,
                                                       TYPE_CLIPDATA,
-                                                      sizeof(CLIPBOARDDATA) + cjDataSize);
+                                                      cjObjectSize);
     if (!pClipboardData)
     {
         goto cleanup;
@@ -1195,11 +1200,19 @@ NtUserConvertMemHandle(
     HANDLE hMem = NULL;
     PCLIPBOARDDATA pMemObj;
     NTSTATUS Status = STATUS_SUCCESS;
+    ULONG cbObject;
+
+    /* cbData is caller-controlled: the object size must not wrap */
+    if (!NT_SUCCESS(RtlULongAdd(sizeof(CLIPBOARDDATA), cbData, &cbObject)))
+    {
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+        return NULL;
+    }
 
     UserEnterExclusive();
 
     /* Create Clipboard data object */
-    pMemObj = UserCreateObject(gHandleTable, NULL, NULL, &hMem, TYPE_CLIPDATA, sizeof(CLIPBOARDDATA) + cbData);
+    pMemObj = UserCreateObject(gHandleTable, NULL, NULL, &hMem, TYPE_CLIPDATA, cbObject);
     if (!pMemObj)
         goto cleanup;
 
