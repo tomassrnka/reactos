@@ -72,6 +72,47 @@ FsRtlNotifySetCancelRoutine(IN PIRP Irp,
                             IN PNOTIFY_CHANGE NotifyChange OPTIONAL);
 
 /*
+ * Take a notification off the FSD's NotifyList, once. Must be called with the
+ * notify mutex held, by whoever drops the last reference (cleanup or cancel).
+ * Both used to differ here: cancel freed the structure while it was still linked.
+ */
+static
+VOID
+FsRtlNotifyUnlinkChange(IN PNOTIFY_CHANGE NotifyChange)
+{
+    if (NotifyChange->NotifyList.Flink != NULL && NotifyChange->NotifyList.Blink != NULL)
+    {
+        RemoveEntryList(&NotifyChange->NotifyList);
+    }
+    NotifyChange->NotifyList.Flink = NULL;
+    NotifyChange->NotifyList.Blink = NULL;
+}
+
+/*
+ * Is the change buffer the one belonging to this (about to complete) IRP?
+ */
+static
+BOOLEAN
+FsRtlNotifyBufferBelongsToIrp(IN PIRP Irp,
+                              IN PVOID Buffer)
+{
+    PVOID MdlBuffer;
+
+    if (Buffer == Irp->AssociatedIrp.SystemBuffer)
+    {
+        return TRUE;
+    }
+
+    if (Irp->MdlAddress != NULL)
+    {
+        MdlBuffer = MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority);
+        return (MdlBuffer == Buffer);
+    }
+
+    return FALSE;
+}
+
+/*
  * @implemented
  */
 VOID
@@ -80,12 +121,13 @@ FsRtlCancelNotify(IN PDEVICE_OBJECT DeviceObject,
                   IN PIRP Irp)
 {
     PVOID Buffer;
+    PVOID _SEH2_VOLATILE Allocated;
     PIRP NotifyIrp;
     ULONG BufferLength;
     PIO_STACK_LOCATION Stack;
     PNOTIFY_CHANGE NotifyChange;
     PREAL_NOTIFY_SYNC RealNotifySync;
-    BOOLEAN PoolQuotaCharged;
+    BOOLEAN _SEH2_VOLATILE PoolQuotaCharged;
     PSECURITY_SUBJECT_CONTEXT _SEH2_VOLATILE SubjectContext = NULL;
 
     /* Get the NOTIFY_CHANGE struct and reset it */
@@ -102,14 +144,20 @@ FsRtlCancelNotify(IN PDEVICE_OBJECT DeviceObject,
 
    _SEH2_TRY
    {
-       /* Remove the IRP from the notifications list and mark it pending */
-       RemoveEntryList(&(Irp->Tail.Overlay.ListEntry));
+       /* Remove the IRP from the notifications list and mark it pending.
+        * FsRtlNotifyCompleteIrpList detaches (self-links) every IRP it takes off
+        * the list, including one whose cancel routine had already been taken by
+        * us: unlinking such an entry again would corrupt its former neighbours. */
+       if (!IsListEmpty(&Irp->Tail.Overlay.ListEntry))
+       {
+           RemoveEntryList(&(Irp->Tail.Overlay.ListEntry));
+           InitializeListHead(&(Irp->Tail.Overlay.ListEntry));
+       }
        IoMarkIrpPending(Irp);
 
        /* Now, the tricky part - let's find a buffer big enough to hold the return data */
        if (NotifyChange->Buffer && NotifyChange->AllocatedBuffer == NULL &&
-           ((Irp->MdlAddress && MmGetSystemAddressForMdl(Irp->MdlAddress) == NotifyChange->Buffer) ||
-           NotifyChange->Buffer == Irp->AssociatedIrp.SystemBuffer))
+           FsRtlNotifyBufferBelongsToIrp(Irp, NotifyChange->Buffer))
        {
            /* Assume we didn't find any */
            Buffer = NULL;
@@ -137,67 +185,80 @@ FsRtlCancelNotify(IN PDEVICE_OBJECT DeviceObject,
                    {
                        if (NotifyIrp->MdlAddress != NULL)
                        {
-                           Buffer = MmGetSystemAddressForMdl(NotifyIrp->MdlAddress);
+                           Buffer = MmGetSystemAddressForMdlSafe(NotifyIrp->MdlAddress, NormalPagePriority);
                        }
                    }
                    else
                    {
-                       Buffer = NotifyIrp->AssociatedIrp.MasterIrp;
+                       Buffer = NotifyIrp->AssociatedIrp.SystemBuffer;
                    }
 
                    /* Backup our accepted buffer length */
                    BufferLength = Stack->Parameters.NotifyDirectory.Length;
-                   if (BufferLength > NotifyChange->BufferLength)
+                   if (Buffer == NULL && BufferLength > NotifyChange->BufferLength)
                    {
                        BufferLength = NotifyChange->BufferLength;
                    }
                }
            }
 
-           /* At that point, we *may* have a buffer */
+           /* At that point, we *may* have a buffer. The pending data has to fit. */
+           if (BufferLength < NotifyChange->DataLength)
+           {
+               BufferLength = 0;
+           }
 
            /* If it has null length, then note that we won't use it */
            if (BufferLength == 0)
            {
                NotifyChange->Flags |= NOTIFY_IMMEDIATELY;
            }
+           else if (Buffer != NULL)
+           {
+               /* The next IRP's buffer takes over: carry the pending data across, and
+                * stop pointing at the buffer of the IRP we are about to complete */
+               RtlCopyMemory(Buffer, NotifyChange->Buffer, NotifyChange->DataLength);
+               NotifyChange->Buffer = Buffer;
+               NotifyChange->ThisBufferLength = BufferLength;
+           }
            else
            {
-               /* If we have a buffer length, but no buffer then allocate one */
-               if (Buffer == NULL)
+               /* We have a buffer length, but no buffer, so allocate one */
+               Allocated = NULL;
+               PoolQuotaCharged = FALSE;
+
+               _SEH2_TRY
                {
-                   /* Assume we haven't charged quotas */
-                   PoolQuotaCharged = FALSE;
+                   /* Charge quotas */
+                   PsChargePoolQuota(NotifyChange->OwningProcess, PagedPool, BufferLength);
+                   PoolQuotaCharged = TRUE;
 
-                   _SEH2_TRY
-                   {
-                       /* Charge quotas */
-                       PsChargePoolQuota(NotifyChange->OwningProcess, PagedPool, BufferLength);
-                       PoolQuotaCharged = TRUE;
+                   /* Allocate buffer */
+                   Allocated = ExAllocatePoolWithTag(PagedPool | POOL_RAISE_IF_ALLOCATION_FAILURE, BufferLength, TAG_FS_NOTIFICATIONS);
 
-                       /* Allocate buffer */
-                       Buffer = ExAllocatePoolWithTag(PagedPool | POOL_RAISE_IF_ALLOCATION_FAILURE, BufferLength, TAG_FS_NOTIFICATIONS);
-                       NotifyChange->AllocatedBuffer = Buffer;
-
-                       /* Copy data in that buffer */
-                       RtlCopyMemory(Buffer, NotifyChange->Buffer, NotifyChange->DataLength);
-                       NotifyChange->ThisBufferLength = BufferLength;
-                       NotifyChange->Buffer = Buffer;
-                   }
-                   _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-                   {
-                       /* Something went wrong, have we charged quotas? */
-                       if (PoolQuotaCharged)
-                       {
-                           /* We did, return quotas */
-                           PsReturnProcessPagedPoolQuota(NotifyChange->OwningProcess, BufferLength);
-                       }
-
-                       /* And notify immediately */
-                       NotifyChange->Flags |= NOTIFY_IMMEDIATELY;
-                   }
-                   _SEH2_END;
+                   /* Copy data in that buffer */
+                   RtlCopyMemory(Allocated, NotifyChange->Buffer, NotifyChange->DataLength);
+                   NotifyChange->AllocatedBuffer = Allocated;
+                   NotifyChange->ThisBufferLength = BufferLength;
+                   NotifyChange->Buffer = Allocated;
                }
+               _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+               {
+                   /* Something went wrong, have we allocated or charged quotas? */
+                   if (Allocated != NULL)
+                   {
+                       ExFreePoolWithTag(Allocated, TAG_FS_NOTIFICATIONS);
+                   }
+                   if (PoolQuotaCharged)
+                   {
+                       /* We did, return quotas */
+                       PsReturnProcessPagedPoolQuota(NotifyChange->OwningProcess, BufferLength);
+                   }
+
+                   /* And notify immediately */
+                   NotifyChange->Flags |= NOTIFY_IMMEDIATELY;
+               }
+               _SEH2_END;
            }
 
            /* If we have to notify immediately, ensure that any buffer is 0-ed out */
@@ -220,6 +281,10 @@ FsRtlCancelNotify(IN PDEVICE_OBJECT DeviceObject,
        /* If that notification isn't referenced any longer, drop it */
        if (!InterlockedDecrement((PLONG)&(NotifyChange->ReferenceCount)))
        {
+           /* Always leave the FSD's list before the memory goes away: a cleanup that
+            * found our reference still held did not unlink it */
+           FsRtlNotifyUnlinkChange(NotifyChange);
+
            /* If it had an allocated buffer, delete */
            if (NotifyChange->AllocatedBuffer)
            {
@@ -233,9 +298,7 @@ FsRtlCancelNotify(IN PDEVICE_OBJECT DeviceObject,
                SubjectContext = NotifyChange->SubjectContext;
            }
 
-           /* We mustn't have ANY change left anymore */
-           ASSERT(NotifyChange->NotifyList.Flink == NULL);
-           ExFreePoolWithTag(NotifyChange, 0);
+           ExFreePoolWithTag(NotifyChange, 'NrSF');
        }
     }
     _SEH2_FINALLY
@@ -343,6 +406,13 @@ FsRtlNotifyCompleteIrp(IN PIRP Irp,
         /* The watcher re-enumerates, so a pending overflow has been reported */
         NotifyChange->Flags &= ~NOTIFY_IMMEDIATELY;
         Status = STATUS_NOTIFY_ENUM_DIR;
+        /* Buffered data is dropped; a buffer borrowed from a pending IRP must not be
+         * kept, that IRP is about to complete */
+        if (!NotifyChange->AllocatedBuffer)
+        {
+            NotifyChange->Buffer = NULL;
+            NotifyChange->ThisBufferLength = 0;
+        }
         goto Completion;
     }
 
@@ -428,7 +498,10 @@ FsRtlNotifyCompleteIrpList(IN PNOTIFY_CHANGE NotifyChange,
 
     DataLength = NotifyChange->DataLength;
 
-    NotifyChange->Flags &= (NOTIFY_IMMEDIATELY | WATCH_TREE | WATCH_ROOT);
+    /* The cleanup and delete marks stay: they tell later requests, and reports, that
+     * this notification is finished, whatever the completions below did to it */
+    NotifyChange->Flags &= (NOTIFY_IMMEDIATELY | WATCH_TREE | WATCH_ROOT |
+                            CLEANUP_IN_PROCESS | DELETE_IN_PROCESS);
     NotifyChange->DataLength = 0;
     NotifyChange->LastEntry = 0;
 
@@ -436,12 +509,22 @@ FsRtlNotifyCompleteIrpList(IN PNOTIFY_CHANGE NotifyChange,
     {
         /* We take the first entry */
         NextEntry = RemoveHeadList(&(NotifyChange->NotifyIrps));
+        /* Mark the IRP as no longer queued: its cancel routine may already be running
+         * (and waiting for our mutex), and must not unlink it a second time */
+        InitializeListHead(NextEntry);
         Irp = CONTAINING_RECORD(NextEntry, IRP, Tail.Overlay.ListEntry);
         /* We complete it */
         FsRtlNotifyCompleteIrp(Irp, NotifyChange, DataLength, Status, TRUE);
         /* If we're notifying success, just notify first one */
         if (Status == STATUS_SUCCESS)
             break;
+    }
+
+    /* A buffer borrowed from a completed IRP is gone with it */
+    if (!NotifyChange->AllocatedBuffer)
+    {
+        NotifyChange->Buffer = NULL;
+        NotifyChange->ThisBufferLength = 0;
     }
 }
 
@@ -508,7 +591,9 @@ FsRtlNotifyUpdateBuffer(OUT PFILE_NOTIFY_INFORMATION OutputBuffer,
 {
     /* Unless there's an issue with buffers, there's no reason to fail */
     BOOLEAN Succeed = TRUE;
-    ULONG AlreadyWritten = 0, ResultSize;
+    ULONG Capacity, Written = 0, Needed, ResultSize;
+    PSTRING Names[3];
+    ULONG i;
 
     PAGED_CODE();
 
@@ -517,59 +602,96 @@ FsRtlNotifyUpdateBuffer(OUT PFILE_NOTIFY_INFORMATION OutputBuffer,
      * Then copy target name, there's always one
      * And finally, copy stream name if any
      * If these names aren't unicode, then convert first
+     * Every write is checked against the space DataLength accounted for,
+     * so a wrong length computed by the caller can't run past the entry
      */
+    if (DataLength < FIELD_OFFSET(FILE_NOTIFY_INFORMATION, FileName))
+    {
+        return FALSE;
+    }
+    Capacity = DataLength - FIELD_OFFSET(FILE_NOTIFY_INFORMATION, FileName);
+
+    Names[0] = ParentName;
+    Names[1] = TargetName;
+    Names[2] = StreamName;
+
     _SEH2_TRY
     {
         OutputBuffer->NextEntryOffset = 0;
         OutputBuffer->Action = Action;
-        OutputBuffer->FileNameLength = DataLength - FIELD_OFFSET(FILE_NOTIFY_INFORMATION, FileName);
-        if (IsUnicode)
-        {
-            if (ParentName->Length)
-            {
-                RtlCopyMemory(OutputBuffer->FileName, ParentName->Buffer, ParentName->Length);
-                OutputBuffer->FileName[ParentName->Length / sizeof(WCHAR)] = L'\\';
-                AlreadyWritten = ParentName->Length + sizeof(WCHAR);
-            }
-            RtlCopyMemory((PVOID)((ULONG_PTR)OutputBuffer->FileName + AlreadyWritten),
-                          TargetName->Buffer, TargetName->Length);
-            if (StreamName)
-            {
-                AlreadyWritten += TargetName->Length;
-                OutputBuffer->FileName[AlreadyWritten / sizeof(WCHAR)] = L':';
-                RtlCopyMemory((PVOID)((ULONG_PTR)OutputBuffer->FileName + AlreadyWritten + sizeof(WCHAR)),
-                              StreamName->Buffer, StreamName->Length);
-            }
-        }
-        else
-        {
-            if (!ParentName->Length)
-            {
-                ASSERT(StreamName);
-                RtlCopyMemory(OutputBuffer->FileName, StreamName->Buffer, StreamName->Length);
-            }
-            else
-            {
-                RtlOemToUnicodeN(OutputBuffer->FileName, OutputBuffer->FileNameLength,
-                                 &ResultSize, ParentName->Buffer,
-                                 ParentName->Length);
-                OutputBuffer->FileName[ResultSize / sizeof(WCHAR)] = L'\\';
-                AlreadyWritten = ResultSize + sizeof(WCHAR);
 
-                RtlOemToUnicodeN((PVOID)((ULONG_PTR)OutputBuffer->FileName + AlreadyWritten),
-                                 OutputBuffer->FileNameLength, &ResultSize,
-                                 TargetName->Buffer, TargetName->Length);
+        for (i = 0; i < 3; ++i)
+        {
+            PSTRING Name = Names[i];
+            WCHAR Separator = (i == 0) ? L'\\' : L':';
 
-                if (StreamName)
+            /* Absent names, and an empty parent (with its separator), write nothing */
+            if (Name == NULL || (i == 0 && Name->Length == 0))
+            {
+                continue;
+            }
+            if (Name->Length != 0 && Name->Buffer == NULL)
+            {
+                Succeed = FALSE;
+                break;
+            }
+
+            /* The separator goes after the parent and before the stream name */
+            if (i == 2)
+            {
+                if (Written + sizeof(WCHAR) > Capacity)
                 {
-                    AlreadyWritten += ResultSize;
-                    OutputBuffer->FileName[AlreadyWritten / sizeof(WCHAR)] = L':';
-                    RtlOemToUnicodeN((PVOID)((ULONG_PTR)OutputBuffer->FileName + AlreadyWritten + sizeof(WCHAR)),
-                                     OutputBuffer->FileNameLength, &ResultSize,
-                                     StreamName->Buffer, StreamName->Length);
+                    Succeed = FALSE;
+                    break;
                 }
+                OutputBuffer->FileName[Written / sizeof(WCHAR)] = Separator;
+                Written += sizeof(WCHAR);
+            }
+
+            if (Name->Length != 0)
+            {
+                if (IsUnicode)
+                {
+                    Needed = Name->Length;
+                }
+                else
+                {
+                    Needed = RtlOemStringToCountedUnicodeSize(Name);
+                }
+                if (Needed > Capacity - Written)
+                {
+                    Succeed = FALSE;
+                    break;
+                }
+
+                if (IsUnicode)
+                {
+                    RtlCopyMemory((PVOID)((ULONG_PTR)OutputBuffer->FileName + Written),
+                                  Name->Buffer, Name->Length);
+                    ResultSize = Name->Length;
+                }
+                else
+                {
+                    RtlOemToUnicodeN((PWCHAR)((ULONG_PTR)OutputBuffer->FileName + Written),
+                                     Capacity - Written, &ResultSize,
+                                     Name->Buffer, Name->Length);
+                }
+                Written += ResultSize;
+            }
+
+            if (i == 0)
+            {
+                if (Written + sizeof(WCHAR) > Capacity)
+                {
+                    Succeed = FALSE;
+                    break;
+                }
+                OutputBuffer->FileName[Written / sizeof(WCHAR)] = Separator;
+                Written += sizeof(WCHAR);
             }
         }
+
+        OutputBuffer->FileNameLength = Written;
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -693,7 +815,7 @@ FsRtlNotifyCleanup(IN PNOTIFY_SYNC NotifySync,
             if (!InterlockedDecrement((PLONG)&(NotifyChange->ReferenceCount)))
             {
                 /* Remove it from the notifications list */
-                RemoveEntryList(&NotifyChange->NotifyList);
+                FsRtlNotifyUnlinkChange(NotifyChange);
 
                 /* In case there was an allocated buffer, free it */
                 if (NotifyChange->AllocatedBuffer)
@@ -710,6 +832,15 @@ FsRtlNotifyCleanup(IN PNOTIFY_SYNC NotifySync,
 
                 /* Finally, free the notification, as it's not needed anymore */
                 ExFreePoolWithTag(NotifyChange, 'NrSF');
+            }
+            else
+            {
+                /* A cancel in flight still references the notification, and will free it;
+                 * until then the entry stays on the list, flagged as cleaned up. The FSD is
+                 * done with FsContext (it frees it after we return), so nothing may call
+                 * back with it any more. */
+                NotifyChange->TraverseCallback = NULL;
+                NotifyChange->FilterCallback = NULL;
             }
         }
     }
@@ -836,6 +967,8 @@ FsRtlNotifyFilterChangeDirectory(IN PNOTIFY_SYNC NotifySync,
                 IoMarkIrpPending(NotifyIrp);
                 NotifyIrp->IoStatus.Status = STATUS_NOTIFY_CLEANUP;
                 IoCompleteRequest(NotifyIrp, IO_DISK_INCREMENT);
+                /* The IRP is completed: it must not be completed or queued again */
+                _SEH2_LEAVE;
             }
             /* Or if it's about to be deleted, complete */
             else if (NotifyChange->Flags & DELETE_IN_PROCESS)
@@ -843,6 +976,7 @@ FsRtlNotifyFilterChangeDirectory(IN PNOTIFY_SYNC NotifySync,
                 IoMarkIrpPending(NotifyIrp);
                 NotifyIrp->IoStatus.Status = STATUS_DELETE_PENDING;
                 IoCompleteRequest(NotifyIrp, IO_DISK_INCREMENT);
+                _SEH2_LEAVE;
             }
             /* Complete now if asked to (and not asked to notify later on) */
             if ((NotifyChange->Flags & NOTIFY_IMMEDIATELY) && !(NotifyChange->Flags & NOTIFY_LATER))
@@ -1045,6 +1179,12 @@ FsRtlNotifyFilterReportChange(IN PNOTIFY_SYNC NotifySync,
         return;
     }
 
+    /* The offset of the last component has to lie inside the name the FSD gave us */
+    if (FullTargetName && TargetNameOffset > FullTargetName->Length)
+    {
+        return;
+    }
+
     /* Get real structure hidden behind the opaque pointer */
     RealNotifySync = (PREAL_NOTIFY_SYNC)NotifySync;
     /* Acquire lock - will be released in finally block */
@@ -1057,10 +1197,23 @@ FsRtlNotifyFilterReportChange(IN PNOTIFY_SYNC NotifySync,
         {
             /* Try to find an entry matching our change */
             NotifyChange = CONTAINING_RECORD(NextEntry, NOTIFY_CHANGE, NotifyList);
+
+            /* A watcher whose handle is closed only lingers until its last cancel ran */
+            if (NotifyChange->Flags & CLEANUP_IN_PROCESS)
+            {
+                continue;
+            }
+
             if (FullTargetName != NULL)
             {
                 ASSERT(NotifyChange->FullDirectoryName != NULL);
                 if (!NotifyChange->FullDirectoryName->Length)
+                {
+                    continue;
+                }
+
+                /* The offset has to cover the leading separator we are going to strip */
+                if (TargetNameOffset < NotifyChange->CharacterSize)
                 {
                     continue;
                 }
@@ -1239,6 +1392,10 @@ FsRtlNotifyFilterReportChange(IN PNOTIFY_SYNC NotifySync,
 
                                 /* Then, we can construct proper parent name */
                                 ParentNameOffset = NotifyChange->CharacterSize + LastPartOffset;
+                                if (ParentNameOffset > TargetDirectory.Length)
+                                {
+                                    continue;
+                                }
                                 ParentName.Buffer = &TargetDirectory.Buffer[ParentNameOffset];
                                 ParentNameLength = TargetDirectory.Length;
                             }
@@ -1248,6 +1405,10 @@ FsRtlNotifyFilterReportChange(IN PNOTIFY_SYNC NotifySync,
                                 ParentName.Buffer = &NormalizedParentName->Buffer[NotifyChange->FullDirectoryName->Length] + NotifyChange->CharacterSize;
                                 ParentNameLength = NormalizedParentName->Length - NotifyChange->FullDirectoryName->Length;
                                 ParentNameOffset = NotifyChange->CharacterSize;
+                                if (ParentNameOffset > ParentNameLength)
+                                {
+                                    continue;
+                                }
                             }
                             ParentNameLength -= ParentNameOffset;
                             ParentName.Length = ParentNameLength;
@@ -1262,7 +1423,16 @@ FsRtlNotifyFilterReportChange(IN PNOTIFY_SYNC NotifySync,
                     if (IsStream)
                     {
                         ASSERT(StreamName != NULL);
-                        DataLength += StreamName->Length;
+                        /* The name is the stream's, preceded by the ':' separator */
+                        if (NotifyChange->CharacterSize == sizeof(WCHAR))
+                        {
+                            DataLength += StreamName->Length;
+                        }
+                        else
+                        {
+                            DataLength += RtlOemStringToCountedUnicodeSize(StreamName);
+                        }
+                        DataLength += sizeof(WCHAR);
                     }
                     else
                     {
@@ -1307,7 +1477,7 @@ FsRtlNotifyFilterReportChange(IN PNOTIFY_SYNC NotifySync,
                             }
                             else
                             {
-                                DataLength = DataLength + RtlOemStringToCountedUnicodeSize(&TargetName) + sizeof(CHAR);
+                                DataLength = DataLength + RtlOemStringToCountedUnicodeSize(StreamName) + sizeof(WCHAR);
                             }
                         }
                     }
@@ -1373,6 +1543,10 @@ FsRtlNotifyFilterReportChange(IN PNOTIFY_SYNC NotifySync,
                                 {
                                     PsReturnProcessPagedPoolQuota(NotifyChange->OwningProcess, NotifyChange->ThisBufferLength);
                                 }
+                                /* There is no buffer, so there is no size either */
+                                NotifyChange->ThisBufferLength = 0;
+                                NotifyChange->Buffer = NULL;
+                                NotifyChange->AllocatedBuffer = NULL;
                                 NotifyChange->Flags |= NOTIFY_IMMEDIATELY;
                             }
                             _SEH2_END;
@@ -1646,6 +1820,12 @@ FsRtlNotifyReportChange(IN PNOTIFY_SYNC NotifySync,
                         IN PUSHORT FileNamePartLength,
                         IN ULONG FilterMatch)
 {
+      /* The final component can't be longer than the name it belongs to */
+      if (*FileNamePartLength > FullTargetName->Length)
+      {
+          return;
+      }
+
       FsRtlNotifyFilterReportChange(NotifySync,
                                     NotifyList,
                                     FullTargetName,

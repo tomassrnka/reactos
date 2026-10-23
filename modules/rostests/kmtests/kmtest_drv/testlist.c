@@ -38,6 +38,7 @@ KMT_TESTFUNC Test_FsRtlFileLockIrp;
 KMT_TESTFUNC Test_FsRtlFileLockStress;
 KMT_TESTFUNC Test_FsRtlLegal;
 KMT_TESTFUNC Test_FsRtlMcb;
+KMT_TESTFUNC Test_FsRtlNotify;
 KMT_TESTFUNC Test_FsRtlPerStreamContext;
 KMT_TESTFUNC Test_FsRtlRemoveDotsFromPath;
 KMT_TESTFUNC Test_FsRtlTunnel;
@@ -161,6 +162,7 @@ const KMT_TEST TestList[] =
     { "FsRtlFileLockStress",                Test_FsRtlFileLockStress },
     { "FsRtlLegal",                         Test_FsRtlLegal },
     { "FsRtlMcb",                           Test_FsRtlMcb },
+    { "FsRtlNotify",                        Test_FsRtlNotify },
     { "FsRtlPerStreamContext",              Test_FsRtlPerStreamContext },
     { "FsRtlRemoveDotsFromPath",            Test_FsRtlRemoveDotsFromPath },
     { "FsRtlTunnel",                        Test_FsRtlTunnel },
