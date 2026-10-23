@@ -154,6 +154,7 @@ typedef struct _RENAMER
     volatile LONG Stop;
     BOOL AtA;
     ULONG Done;
+    DWORD LastError;
 } RENAMER;
 
 /* Moves the directory between a short and a long name until told to stop. */
@@ -169,7 +170,10 @@ static DWORD WINAPI RenameLoop(PVOID Context)
             Rn->Done++;
         }
         else
+        {
+            Rn->LastError = GetLastError();
             Sleep(1);
+        }
     }
     return 0;
 }
@@ -261,7 +265,7 @@ START_TEST(NtfsNotifyRename)
     Thread = CreateThread(NULL, 0, RenameLoop, &Rn, 0, NULL);
     ok(Thread != NULL, "CreateThread %lu\n", GetLastError());
     Pending = FALSE;
-    for (i = 0; i < 300 && Thread; i++)
+    for (i = 0; (i < 300 || (Rn.Done < 40 && i < 3000)) && Thread; i++)
     {
         BOOL Bad = FALSE;
         DWORD Off = 0;
@@ -271,6 +275,7 @@ START_TEST(NtfsNotifyRename)
         {
             ok(ArmWatch(&W, TRUE), "ReadDirectoryChangesW %lu\n", GetLastError());
         }
+        Sleep(1);   /* let the renamer run: a single processor switches threads only at a wait or a quantum */
         _snwprintf(Rel, 63, L"sub\\n%lu.txt", i);
         ok(CreateRelative(W.Dir, Rel), "Creating %ls relative to the directory handle\n", Rel);
         Pending = !WaitWatch(&W, 50, &Bytes);
@@ -295,6 +300,7 @@ START_TEST(NtfsNotifyRename)
         WaitForSingleObject(Thread, 10000);
         CloseHandle(Thread);
     }
+    ok(Rn.Done >= 40, "the renamer made only %lu renames (last error %lu): the race was not exercised\n", Rn.Done, Rn.LastError);
     trace("race: %lu renames, %lu reports delivered of %lu rounds\n", Rn.Done, Delivered, i);
 
 cleanup:
