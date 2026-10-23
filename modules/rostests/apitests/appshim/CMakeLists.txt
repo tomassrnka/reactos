@@ -10,6 +10,7 @@ list(APPEND SOURCE
     layer_hooks.c
     versionconflict.c
     sysmain.c
+    manifestcompat.c
     versionlie.c
     verifyversion.c
     testlist.c
@@ -40,5 +41,16 @@ set_module_type(appshim_sysmain_firefox115 win32cui)
 add_importlibs(appshim_sysmain_firefox115 advapi32 msvcrt kernel32)
 add_rostests_file(TARGET appshim_sysmain_firefox115)
 
+add_executable(appshim_manifestver_none manifestver_probe.c manifestver_none.rc)
+set_module_type(appshim_manifestver_none win32cui)
+add_importlibs(appshim_manifestver_none msvcrt kernel32 ntdll)
+add_rostests_file(TARGET appshim_manifestver_none)
+
+add_executable(appshim_manifestver_vista manifestver_probe.c manifestver_vista.rc)
+set_module_type(appshim_manifestver_vista win32cui)
+add_importlibs(appshim_manifestver_vista msvcrt kernel32 ntdll)
+add_rostests_file(TARGET appshim_manifestver_vista)
+
 add_dependencies(appshim_apitest appshim_sysmain_probe appshim_sysmain_other
-                 appshim_sysmain_firefox158 appshim_sysmain_firefox115)
+                 appshim_sysmain_firefox158 appshim_sysmain_firefox115
+                 appshim_manifestver_none appshim_manifestver_vista)
