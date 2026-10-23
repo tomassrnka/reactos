@@ -12,6 +12,8 @@
 
 static RTL_UNLOAD_EVENT_TRACE RtlpUnloadEventTrace[RTL_UNLOAD_EVENT_TRACE_NUMBER];
 static UINT RtlpUnloadEventTraceIndex = 0;
+static ULONG RtlpUnloadEventTraceElementSize = sizeof(RTL_UNLOAD_EVENT_TRACE);
+static ULONG RtlpUnloadEventTraceElementCount = RTL_UNLOAD_EVENT_TRACE_NUMBER;
 
 /* FUNCTIONS ******************************************************************/
 
@@ -21,6 +23,24 @@ RtlGetUnloadEventTrace(VOID)
 {
     /* Just return a pointer to an array, according to MSDN */
     return RtlpUnloadEventTrace;
+}
+
+VOID
+NTAPI
+RtlGetUnloadEventTraceEx(
+    _Out_ PULONG *ElementSize,
+    _Out_ PULONG *ElementCount,
+    _Out_ PVOID *EventTrace)
+{
+    /*
+     * Return pointers to the element size, element count and the trace array
+     * base, matching the Windows/Wine contract. Callers (e.g. Chromium, which
+     * only probes this on Vista+) read *ElementCount entries of *ElementSize
+     * bytes from *EventTrace and skip entries whose BaseAddress is NULL.
+     */
+    *ElementSize = &RtlpUnloadEventTraceElementSize;
+    *ElementCount = &RtlpUnloadEventTraceElementCount;
+    *EventTrace = RtlpUnloadEventTrace;
 }
 
 VOID
