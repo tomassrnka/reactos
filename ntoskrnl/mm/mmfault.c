@@ -275,6 +275,7 @@ MiRetryOutOfMemoryFault(PULONG NoProgressSpins)
     return (++(*NoProgressSpins) < MiMaxOomSpinRetries);
 }
 
+#if DBG
 /*
  * Robustness test hook (T16). Drives the out-of-memory fault retry bound exactly
  * as MmAccessFault does, while this thread owns its process AddressCreationLock -
@@ -286,6 +287,9 @@ MiRetryOutOfMemoryFault(PULONG NoProgressSpins)
  * it equals Ceiling (would otherwise spin forever). The guarded mutex is always
  * released before returning, so repeated calls prove the lock is never held
  * across the bound.
+ *
+ * Debug/test only (T61): compiled out of Release, and its export in ntoskrnl.spec
+ * is -dbg, so shipped kernels carry neither the code nor the export.
  */
 ULONG
 NTAPI
@@ -316,6 +320,7 @@ MmDbgTestOomRetryBound(IN ULONG SimulatedMax,
     MiMaxOomSpinRetries = SavedMax;
     return Iterations;
 }
+#endif /* DBG */
 
 NTSTATUS
 NTAPI
