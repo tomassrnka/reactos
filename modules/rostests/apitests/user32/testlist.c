@@ -21,6 +21,7 @@ extern void func_DrawText(void);
 extern void func_EditInk(void);
 extern void func_desktop(void);
 extern void func_ClipboardSynthBitmap(void);
+extern void func_ConsoleClipText(void);
 extern void func_EmptyClipboard(void);
 extern void func_EnumDisplayDevices(void);
 extern void func_EnumDisplaySettings(void);
@@ -124,6 +125,7 @@ const struct test winetest_testlist[] =
     { "EditInk", func_EditInk },
     { "desktop", func_desktop },
     { "ClipboardSynthBitmap", func_ClipboardSynthBitmap },
+    { "ConsoleClipText", func_ConsoleClipText },
     { "EmptyClipboard", func_EmptyClipboard },
     { "EnumDisplayDevices", func_EnumDisplayDevices },
     { "EnumDisplaySettings", func_EnumDisplaySettings },

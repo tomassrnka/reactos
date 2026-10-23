@@ -568,7 +568,8 @@ ConSrvInitConsole(OUT PHANDLE NewConsoleHandle,
     ConsoleInfo->cbSize = sizeof(ConsoleInfoBuffer);
 
     /* 1. Get the title of the console (initialize ConsoleInfo->ConsoleTitle) */
-    Length = min(ConsoleInitInfo->TitleLength,
+    /* TitleLength is in bytes (client-supplied): the copy is bounded in WCHARs */
+    Length = min(ConsoleInitInfo->TitleLength / sizeof(WCHAR),
                  (ConsoleInfo->cbSize - FIELD_OFFSET(CONSOLE_STATE_INFO, ConsoleTitle) - sizeof(UNICODE_NULL)) / sizeof(WCHAR));
     wcsncpy(ConsoleInfo->ConsoleTitle, ConsoleInitInfo->ConsoleTitle, Length);
     ConsoleInfo->ConsoleTitle[Length] = UNICODE_NULL; // NULL-terminate it.

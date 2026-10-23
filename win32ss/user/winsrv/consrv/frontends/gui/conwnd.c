@@ -22,6 +22,7 @@
 
 #include "concfg/font.h"
 #include "guiterm.h"
+#include "cliptext.h"
 #include "resource.h"
 
 /* GLOBALS ********************************************************************/
@@ -2257,9 +2258,14 @@ PasteFromClipboard(PGUI_CONSOLE_DATA GuiData)
     hData = GetClipboardData(CF_UNICODETEXT);
     if (hData && (pszText = GlobalLock(hData)))
     {
-        Length = wcslen(pszText);
+        /* The clipboard text need not be NUL-terminated: stay inside the block */
+        Length = ConGetBoundedTextLength(pszText, GlobalSize(hData));
         Text = ConsoleAllocHeap(0, (Length + 1) * sizeof(WCHAR));
-        if (Text) RtlCopyMemory(Text, pszText, (Length + 1) * sizeof(WCHAR));
+        if (Text)
+        {
+            RtlCopyMemory(Text, pszText, Length * sizeof(WCHAR));
+            Text[Length] = UNICODE_NULL;
+        }
         GlobalUnlock(hData);
     }
     CloseClipboard();
