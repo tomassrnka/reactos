@@ -957,10 +957,9 @@ TestSectionMaxProtection(void)
  * The image-section counterpart of the check above. An image is mapped as one
  * segment per PE section, each carrying the protection derived from its section
  * header. The loader legitimately reprotects read-only / executable image pages
- * to PAGE_READWRITE (copy-on-write) to snap the IAT and apply relocations, so
- * that must stay allowed; but gaining EXECUTE on a subsection the image never
- * marked executable (turning a data page into RX / RWX shellcode) is a W^X /
- * privilege-escalation hole and must be rejected with STATUS_SECTION_PROTECTION.
+ * to PAGE_READWRITE (copy-on-write) to snap the IAT and apply relocations, and
+ * programs such as the Inno Setup loader reprotect their whole image to
+ * PAGE_EXECUTE_READWRITE: all of it is copy-on-write and must stay allowed.
  */
 static
 void
@@ -1101,35 +1100,34 @@ TestImageSectionMaxProtection(void)
 
     /*
      * Read-only, non-executable subsection (where the IAT typically lives):
-     * the loader-style RW fixup is copy-on-write and must be permitted, but
-     * escalating it to execute (RX / RWX) must be rejected.
+     * every reprotection is copy-on-write (it can only ever create a private
+     * page), so the loader-style RW fixup and, as on Windows, execute and
+     * write+execute (Inno Setup's loader VirtualProtect()s its whole image to
+     * PAGE_EXECUTE_READWRITE before touching it) must all be permitted.
      */
     if (RoDataPage != NULL)
     {
-        /* Legitimate loader-style RW fixup (copy-on-write) - allowed */
-        Target = RoDataPage;
-        ViewSize = PAGE_SIZE;
-        OldProtect = 0;
-        Status = NtProtectVirtualMemory(NtCurrentProcess(), &Target, &ViewSize, PAGE_READWRITE, &OldProtect);
-        ok_ntstatus(Status, STATUS_SUCCESS);
+        static const ULONG Requests[] =
+            { PAGE_READWRITE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY };
+        ULONG k;
 
-        /* Restore to read-only - allowed */
-        Target = RoDataPage;
-        ViewSize = PAGE_SIZE;
-        Status = NtProtectVirtualMemory(NtCurrentProcess(), &Target, &ViewSize, PAGE_READONLY, &OldProtect);
-        ok_ntstatus(Status, STATUS_SUCCESS);
+        for (k = 0; k < RTL_NUMBER_OF(Requests); k++)
+        {
+            Target = RoDataPage;
+            ViewSize = PAGE_SIZE;
+            OldProtect = 0;
+            Status = NtProtectVirtualMemory(NtCurrentProcess(), &Target, &ViewSize, Requests[k], &OldProtect);
+            ok_ntstatus(Status, STATUS_SUCCESS);
+            if (k == 0)
+                ok_hex(OldProtect, PAGE_READONLY);
 
-        /* Escalation to execute on a non-executable subsection - rejected */
-        Target = RoDataPage;
-        ViewSize = PAGE_SIZE;
-        Status = NtProtectVirtualMemory(NtCurrentProcess(), &Target, &ViewSize, PAGE_EXECUTE_READ, &OldProtect);
-        ok_ntstatus(Status, STATUS_SECTION_PROTECTION);
-
-        /* Escalation to RWX shellcode - rejected */
-        Target = RoDataPage;
-        ViewSize = PAGE_SIZE;
-        Status = NtProtectVirtualMemory(NtCurrentProcess(), &Target, &ViewSize, PAGE_EXECUTE_READWRITE, &OldProtect);
-        ok_ntstatus(Status, STATUS_SECTION_PROTECTION);
+            /* Restore to read-only - allowed */
+            Target = RoDataPage;
+            ViewSize = PAGE_SIZE;
+            Status = NtProtectVirtualMemory(NtCurrentProcess(), &Target, &ViewSize, PAGE_READONLY, &OldProtect);
+            ok_ntstatus(Status, STATUS_SUCCESS);
+            ok(OldProtect == Requests[k], "request 0x%lx: old protection 0x%lx\n", Requests[k], OldProtect);
+        }
     }
     else
     {
