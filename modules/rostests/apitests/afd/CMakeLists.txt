@@ -9,6 +9,7 @@ list(APPEND SOURCE
     windowsize.c
     defensive.c
     tcpnonadmin.c
+    tcpsetinfoex.c
     tcpaccept.c)
 
 list(APPEND PCH_SKIP_SOURCE
