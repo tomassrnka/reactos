@@ -500,8 +500,10 @@ ObpValidateAccessMask(IN PACCESS_STATE AccessState,
     if ((SecurityDescriptor) && (SecurityDescriptor->Control & SE_SACL_PRESENT))
     {
         /*
-         * Every label of a process or thread SACL must be whole and valid
-         * before the SACL is copied, which happens before the privilege check.
+         * Every mandatory label in the SACL must be whole and valid before
+         * the SACL is copied, which happens before the privilege check. A
+         * caller may label an object it creates (any object type) without
+         * SeSecurityPrivilege, as on NT 6; only audit/alarm ACEs still need it.
          */
         Sacl = SepGetSaclFromDescriptor(SecurityDescriptor);
         if ((AllowLabelOnly) && (Sacl))
@@ -2726,7 +2728,7 @@ ObOpenObjectByName(IN POBJECT_ATTRIBUTES ObjectAttributes,
     }
 
     /* Validate the access mask */
-    Status = ObpValidateAccessMask(PassedAccessState, FALSE);
+    Status = ObpValidateAccessMask(PassedAccessState, TRUE);
     if (!NT_SUCCESS(Status))
     {
         /* Cleanup after lookup */
@@ -3174,8 +3176,7 @@ ObInsertObject(IN PVOID Object,
     AccessState->SecurityDescriptor = ObjectCreateInfo->SecurityDescriptor;
 
     /* Validate the access mask */
-    Status = ObpValidateAccessMask(AccessState,
-                                   ObjectType == PsProcessType || ObjectType == PsThreadType);
+    Status = ObpValidateAccessMask(AccessState, TRUE);
     if (!NT_SUCCESS(Status))
     {
         /* Fail */

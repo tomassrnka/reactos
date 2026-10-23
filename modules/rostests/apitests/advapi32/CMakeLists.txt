@@ -1,6 +1,8 @@
 
 list(APPEND SOURCE
     AddMandatoryAce.c
+    BuildSecurityDescriptor.c
+    NamedPipeSD.c
     ConvertStringSidToSid.c
     RegWow64.c
     RegWow64Review.c

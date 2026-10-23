@@ -3,6 +3,8 @@
 #include <apitest.h>
 
 extern void func_AddMandatoryAce(void);
+extern void func_BuildSecurityDescriptor(void);
+extern void func_NamedPipeSD(void);
 extern void func_ConvertStringSidToSid(void);
 extern void func_CreateService(void);
 extern void func_CloseTrace(void);
@@ -64,6 +66,8 @@ extern void func_ServiceProcess(void);
 const struct test winetest_testlist[] =
 {
     { "AddMandatoryAce", func_AddMandatoryAce },
+    { "BuildSecurityDescriptor", func_BuildSecurityDescriptor },
+    { "NamedPipeSD", func_NamedPipeSD },
     { "ConvertStringSidToSid", func_ConvertStringSidToSid },
     { "RegWow64", func_RegWow64 },
     { "RegWow64Unicode", func_RegWow64Unicode },
