@@ -633,6 +633,7 @@
 @ stdcall GetStringTypeExA(long long str long ptr)
 @ stdcall GetStringTypeExW(long long wstr long ptr)
 @ stdcall GetStringTypeW(long wstr long ptr)
+@ stdcall -version=0x601+ GetSystemCpuSetInformation(ptr long ptr ptr long)
 @ stdcall GetSystemDEPPolicy()
 @ stdcall GetSystemDefaultLCID()
 @ stdcall GetSystemDefaultLangID()
@@ -971,6 +972,7 @@
 @ stdcall -version=0x600+ QueryProcessCycleTime(ptr ptr)
 @ stdcall -version=0x600+ QueryThreadCycleTime(ptr ptr)
 @ stdcall -version=0x601+ QueryUnbiasedInterruptTime(ptr)
+@ stdcall -version=0x601+ QueryUnbiasedInterruptTimePrecise(ptr) kernelbase.QueryUnbiasedInterruptTimePrecise
 @ stdcall QueueUserAPC(ptr long long)
 @ stdcall QueueUserWorkItem(ptr ptr long)
 @ stdcall -norelay RaiseException(long long long ptr)

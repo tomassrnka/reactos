@@ -416,6 +416,11 @@
         <LAYER NAME="WIN7VERSIONDEFAULT">
             <SHIM_REF NAME="Win7SP1VersionLie" />
         </LAYER>
+        <!-- ReactOS specific. The Windows 10 version answer alone (no memory cap, no process compatibility version), as a default
+             for programs that need Windows 10 (Firefox 116 and later). Same reason to be a layer as WIN7VERSIONDEFAULT. -->
+        <LAYER NAME="WIN10VERSIONDEFAULT">
+            <SHIM_REF NAME="Win10RTMVersionLie" />
+        </LAYER>
         <LAYER NAME="WIN8RTM">
             <SHIM_REF NAME="Win8RTMVersionLie" />
             <DATA NAME="SHIMVERSIONNT" DATA_DWORD="602" />
@@ -573,9 +578,22 @@
                 <PRODUCT_NAME>Firefox</PRODUCT_NAME>
                 <ORIGINAL_FILENAME>firefox.exe</ORIGINAL_FILENAME>
                 <BIN_PRODUCT_VERSION>4.0.0.0</BIN_PRODUCT_VERSION>
-                <UPTO_BIN_PRODUCT_VERSION>65535.65535.65535.65535</UPTO_BIN_PRODUCT_VERSION>
+                <UPTO_BIN_PRODUCT_VERSION>115.65535.65535.65535</UPTO_BIN_PRODUCT_VERSION>
             </MATCHING_FILE>
             <LAYER NAME="WIN7VERSIONDEFAULT" />
+        </EXE>
+
+        <!-- Firefox 116 and later need Windows 10 (Mozilla dropped Windows 7 and 8 with 116; ESR 115 is the last for them), and
+             report and choose by the version they find. Only the version answer is changed, as for the entry above. -->
+        <EXE NAME="firefox.exe" APP_NAME="Firefox 116 and later" VENDOR="Mozilla">
+            <MATCHING_FILE NAME="*">
+                <COMPANY_NAME>Mozilla Corporation</COMPANY_NAME>
+                <PRODUCT_NAME>Firefox</PRODUCT_NAME>
+                <ORIGINAL_FILENAME>firefox.exe</ORIGINAL_FILENAME>
+                <BIN_PRODUCT_VERSION>116.0.0.0</BIN_PRODUCT_VERSION>
+                <UPTO_BIN_PRODUCT_VERSION>65535.65535.65535.65535</UPTO_BIN_PRODUCT_VERSION>
+            </MATCHING_FILE>
+            <LAYER NAME="WIN10VERSIONDEFAULT" />
         </EXE>
 
         <!-- LibreOffice 24.8 and later need Windows 10 (documented; the installer is an MSI, see the layers on msiexec.exe) -->

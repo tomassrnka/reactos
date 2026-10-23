@@ -30,4 +30,15 @@ set_module_type(appshim_sysmain_other win32cui)
 add_importlibs(appshim_sysmain_other advapi32 msvcrt kernel32)
 add_rostests_file(TARGET appshim_sysmain_other)
 
-add_dependencies(appshim_apitest appshim_sysmain_probe appshim_sysmain_other)
+add_executable(appshim_sysmain_firefox158 sysmain_probe.c sysmain_firefox158.rc)
+set_module_type(appshim_sysmain_firefox158 win32cui)
+add_importlibs(appshim_sysmain_firefox158 advapi32 msvcrt kernel32)
+add_rostests_file(TARGET appshim_sysmain_firefox158)
+
+add_executable(appshim_sysmain_firefox115 sysmain_probe.c sysmain_firefox115.rc)
+set_module_type(appshim_sysmain_firefox115 win32cui)
+add_importlibs(appshim_sysmain_firefox115 advapi32 msvcrt kernel32)
+add_rostests_file(TARGET appshim_sysmain_firefox115)
+
+add_dependencies(appshim_apitest appshim_sysmain_probe appshim_sysmain_other
+                 appshim_sysmain_firefox158 appshim_sysmain_firefox115)

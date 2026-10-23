@@ -514,6 +514,209 @@ Cleanup:
 
 /*
  * @implemented
+ *
+ * Built from the information of GetLogicalProcessorInformation, with all processors in group 0. The kernel does not
+ * report caches, so a processor has last level cache index 0 unless the information holds caches. The processor
+ * ids follow Windows: 0x100 plus the number of the processor in its group. There is no allocation of CPU sets, so
+ * no entry is parked, allocated or real time, and the efficiency class is 0.
+ */
+BOOL
+WINAPI
+GetSystemCpuSetInformation(
+    _Out_writes_bytes_to_opt_(BufferLength, *ReturnedLength) PSYSTEM_CPU_SET_INFORMATION Information,
+    _In_ ULONG BufferLength,
+    _Out_ PULONG ReturnedLength,
+    _In_opt_ HANDLE Process,
+    _Reserved_ ULONG Flags)
+{
+    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION Info = NULL;
+    SYSTEM_BASIC_INFORMATION BasicInfo;
+    PSYSTEM_CPU_SET_INFORMATION Entry;
+    ULONG InfoLength, Count, Index, Bit, Required, Core, Numa, Cache, MaxLevel;
+    KAFFINITY Mask;
+    NTSTATUS Status;
+    BOOL Result = FALSE;
+
+    if (!ReturnedLength)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    /* Windows clears the length before it looks at anything else */
+    *ReturnedLength = 0;
+
+    if (Flags)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    /*
+     * The process that the allocation is looked up for: a handle of a process that may be queried (limited
+     * information is enough), else ERROR_INVALID_HANDLE for any other object and ERROR_ACCESS_DENIED for a
+     * process handle without the right
+     */
+    if (Process && (Process != NtCurrentProcess()))
+    {
+        union
+        {
+            OBJECT_TYPE_INFORMATION Type;
+            UCHAR Buffer[sizeof(OBJECT_TYPE_INFORMATION) + 64 * sizeof(WCHAR)];
+        } TypeInfo;
+        OBJECT_BASIC_INFORMATION BasicObjectInfo;
+
+        Status = NtQueryObject(Process, ObjectTypeInformation, &TypeInfo, sizeof(TypeInfo), NULL);
+        if (!NT_SUCCESS(Status))
+        {
+            BaseSetLastNTError(Status);
+            return FALSE;
+        }
+        if ((TypeInfo.Type.TypeName.Length != 7 * sizeof(WCHAR)) ||
+            _wcsnicmp(TypeInfo.Type.TypeName.Buffer, L"Process", 7))
+        {
+            SetLastError(ERROR_INVALID_HANDLE);
+            return FALSE;
+        }
+
+        Status = NtQueryObject(Process, ObjectBasicInformation, &BasicObjectInfo, sizeof(BasicObjectInfo), NULL);
+        if (!NT_SUCCESS(Status))
+        {
+            BaseSetLastNTError(Status);
+            return FALSE;
+        }
+        if (!(BasicObjectInfo.GrantedAccess & (PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_QUERY_INFORMATION)))
+        {
+            SetLastError(ERROR_ACCESS_DENIED);
+            return FALSE;
+        }
+    }
+
+    Status = NtQuerySystemInformation(SystemBasicInformation, &BasicInfo, sizeof(BasicInfo), NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    InfoLength = 0;
+    Status = NtQuerySystemInformation(SystemLogicalProcessorInformation, NULL, 0, &InfoLength);
+    while ((Status == STATUS_INFO_LENGTH_MISMATCH) || (Status == STATUS_BUFFER_TOO_SMALL))
+    {
+        if (Info)
+            RtlFreeHeap(RtlGetProcessHeap(), 0, Info);
+        Info = RtlAllocateHeap(RtlGetProcessHeap(), 0, InfoLength);
+        if (!Info)
+        {
+            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return FALSE;
+        }
+        Status = NtQuerySystemInformation(SystemLogicalProcessorInformation, Info, InfoLength, &InfoLength);
+    }
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        goto Cleanup;
+    }
+    Count = InfoLength / sizeof(*Info);
+
+    Mask = BasicInfo.ActiveProcessorsAffinityMask;
+    Required = 0;
+    for (Bit = 0; Bit < RTL_BITS_OF(Mask); Bit++)
+    {
+        if (Mask & ((KAFFINITY)1 << Bit))
+            Required += sizeof(SYSTEM_CPU_SET_INFORMATION);
+    }
+
+    if (BufferLength < Required)
+    {
+        *ReturnedLength = Required;
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        goto Cleanup;
+    }
+
+    /* A length that fits and no buffer */
+    if (!Information && Required)
+    {
+        SetLastError(ERROR_NOACCESS);
+        goto Cleanup;
+    }
+
+    /* The last level of cache that the information holds, if any */
+    MaxLevel = 0;
+    for (Index = 0; Index < Count; Index++)
+    {
+        if ((Info[Index].Relationship == RelationCache) && (Info[Index].Cache.Level > MaxLevel))
+            MaxLevel = Info[Index].Cache.Level;
+    }
+
+    Entry = Information;
+    for (Bit = 0; Bit < RTL_BITS_OF(Mask); Bit++)
+    {
+        KAFFINITY Member = (KAFFINITY)1 << Bit;
+        ULONG CoreIndex = 0, NumaIndex = 0, CacheIndex = 0, Found = 0;
+
+        if (!(Mask & Member))
+            continue;
+
+        /* The indexes count the entries of a relationship in the order of the information */
+        Core = Numa = Cache = 0;
+        for (Index = 0; Index < Count; Index++)
+        {
+            switch (Info[Index].Relationship)
+            {
+                case RelationProcessorCore:
+                    if (Info[Index].ProcessorMask & Member)
+                        CoreIndex = Core;
+                    Core++;
+                    break;
+
+                case RelationNumaNode:
+                    if (Info[Index].ProcessorMask & Member)
+                        NumaIndex = Numa;
+                    Numa++;
+                    break;
+
+                case RelationCache:
+                    if (Info[Index].Cache.Level == MaxLevel)
+                    {
+                        if ((Info[Index].ProcessorMask & Member) && !Found)
+                        {
+                            CacheIndex = Cache;
+                            Found = 1;
+                        }
+                        Cache++;
+                    }
+                    break;
+
+                default:
+                    break;
+            }
+        }
+
+        RtlZeroMemory(Entry, sizeof(*Entry));
+        Entry->Size = sizeof(*Entry);
+        Entry->Type = CpuSetInformation;
+        Entry->CpuSet.Id = 0x100 + Bit;
+        Entry->CpuSet.Group = 0;
+        Entry->CpuSet.LogicalProcessorIndex = (UCHAR)Bit;
+        Entry->CpuSet.CoreIndex = (UCHAR)CoreIndex;
+        Entry->CpuSet.LastLevelCacheIndex = (UCHAR)CacheIndex;
+        Entry->CpuSet.NumaNodeIndex = (UCHAR)NumaIndex;
+        Entry++;
+    }
+
+    *ReturnedLength = Required;
+    Result = TRUE;
+
+Cleanup:
+    if (Info)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Info);
+    return Result;
+}
+
+/*
+ * @implemented
  */
 BOOL
 WINAPI

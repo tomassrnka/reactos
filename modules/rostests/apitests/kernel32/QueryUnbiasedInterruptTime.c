@@ -9,6 +9,69 @@
 
 typedef BOOL (WINAPI *FN_QueryUnbiasedInterruptTime)(PULONGLONG);
 typedef ULONGLONG (WINAPI *FN_GetTickCount64)(VOID);
+typedef VOID (WINAPI *FN_QueryUnbiasedInterruptTimePrecise)(PULONGLONG);
+
+/* Windows 10 (and kernel32 here) exports the precise unbiased interrupt time; it has no result value */
+static
+VOID
+test_Precise(
+    _In_ HMODULE hKernel32,
+    _In_ FN_QueryUnbiasedInterruptTime pQueryUnbiasedInterruptTime)
+{
+    FN_QueryUnbiasedInterruptTimePrecise pPrecise;
+    ULONGLONG Coarse1, Coarse2, Time1, Time2, Prev;
+    int i;
+
+    /*
+     * Windows exports it from kernelbase.dll only (programs reach it through api-ms-win-core-realtime-l1-1-1, which is
+     * kernelbase there); the apisets of this system name kernel32, which forwards to kernelbase
+     */
+    pPrecise = (FN_QueryUnbiasedInterruptTimePrecise)GetProcAddress(hKernel32, "QueryUnbiasedInterruptTimePrecise");
+    if (!pPrecise && !is_reactos())
+        pPrecise = (FN_QueryUnbiasedInterruptTimePrecise)GetProcAddress(LoadLibraryW(L"kernelbase.dll"),
+                                                                         "QueryUnbiasedInterruptTimePrecise");
+    if (!pPrecise && is_reactos() && !GetProcAddress(hKernel32, "K32EnumProcesses"))
+    {
+        skip("No NT 6.1 exports\n");
+        return;
+    }
+    ok(pPrecise != NULL, "QueryUnbiasedInterruptTimePrecise is not exported\n");
+    if (!pPrecise)
+        return;
+
+    /* It agrees with the coarse time to within a clock tick or two (15.6 ms each) */
+    pQueryUnbiasedInterruptTime(&Coarse1);
+    pPrecise(&Time1);
+    pQueryUnbiasedInterruptTime(&Coarse2);
+    ok(Time1 + 400000 >= Coarse1, "Precise %I64u is behind the coarse time %I64u\n", Time1, Coarse1);
+    ok(Time1 <= Coarse2 + 400000, "Precise %I64u is ahead of the coarse time %I64u\n", Time1, Coarse2);
+
+    Sleep(100);
+    pPrecise(&Time2);
+    ok(Time2 >= Time1 + 80 * 10000, "Precise time advanced by only %I64u\n", Time2 - Time1);
+    ok(Time2 <= Time1 + 400 * 10000, "Precise time advanced by %I64u\n", Time2 - Time1);
+
+    /* Never goes backwards, and it moves in steps finer than the clock tick */
+    Prev = Time2;
+    for (i = 0; i < 100000; i++)
+    {
+        pPrecise(&Time2);
+        if (Time2 < Prev)
+            break;
+        Prev = Time2;
+    }
+    ok(i == 100000, "Precise time went backwards at %d: %I64u -> %I64u\n", i, Prev, Time2);
+
+    /* Not a multiple of the clock tick that the coarse time is read from */
+    Time1 = 0;
+    for (i = 0; i < 1000; i++)
+    {
+        pPrecise(&Time2);
+        if (Time2 % 156250)
+            Time1++;
+    }
+    ok(Time1 > 900, "Precise time is on clock tick boundaries (%I64u of 1000 off the tick)\n", Time1);
+}
 
 START_TEST(QueryUnbiasedInterruptTime)
 {
@@ -63,4 +126,6 @@ START_TEST(QueryUnbiasedInterruptTime)
             break;
     }
     ok(i == 100000, "Time went backwards at %d: %I64u -> %I64u\n", i, Time1, Time2);
+
+    test_Precise(hKernel32, pQueryUnbiasedInterruptTime);
 }

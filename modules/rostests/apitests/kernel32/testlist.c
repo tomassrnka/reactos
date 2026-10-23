@@ -72,6 +72,7 @@ extern void func_GetLocaleInfo(void);
 extern void func_GetLogicalProcessorInformationEx(void);
 extern void func_GetModuleFileName(void);
 extern void func_GetNumaProcessorNodeEx(void);
+extern void func_GetSystemCpuSetInformation(void);
 extern void func_GetOverlappedResultEx(void);
 extern void func_GetQueuedCompletionStatusEx(void);
 extern void func_GetSystemTimePrecise(void);
@@ -222,6 +223,7 @@ const struct test winetest_testlist[] =
     { "GetLocaleInfo",               func_GetLocaleInfo },
     { "GetLogicalProcessorInformationEx", func_GetLogicalProcessorInformationEx },
     { "GetModuleFileName",           func_GetModuleFileName },
+    { "GetSystemCpuSetInformation", func_GetSystemCpuSetInformation },
     { "GetNumaProcessorNodeEx",      func_GetNumaProcessorNodeEx },
     { "GetOverlappedResultEx",       func_GetOverlappedResultEx },
     { "GetQueuedCompletionStatusEx", func_GetQueuedCompletionStatusEx },
