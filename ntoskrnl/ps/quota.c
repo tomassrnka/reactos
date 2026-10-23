@@ -17,12 +17,104 @@ EPROCESS_QUOTA_BLOCK PspDefaultQuotaBlock;
 static LIST_ENTRY PspQuotaBlockList = {&PspQuotaBlockList, &PspQuotaBlockList};
 static KSPIN_LOCK PspQuotaLock;
 
+/*
+ * Charging and returning against the default block takes no lock, so moving a
+ * process to its own block (PspSetQuotaLimits) has to wait for those operations
+ * to finish before it can take the usage of the process over. A lockless
+ * operation that involves a process runs as a "section": it raises to
+ * DISPATCH_LEVEL (so it stays on one processor), registers itself in a per
+ * processor in-flight counter of the current epoch, and only then reads the
+ * quota block of the process. The switch publishes the new block first, flips
+ * the epoch and waits for the in-flight counters of the previous epoch to drain:
+ * an operation that is still running used the default block, any other one
+ * either registered after the flip (and then sees the new block) or is waited
+ * for. The switch is therefore a quiescent point for this process and its usage
+ * can be moved without losing or inventing a single charge.
+ */
+typedef struct DECLSPEC_CACHEALIGN _PSP_QUOTA_INFLIGHT
+{
+    volatile LONG Count[2];
+} PSP_QUOTA_INFLIGHT;
+
+typedef struct _PSP_QUOTA_SECTION
+{
+    KIRQL OldIrql;
+    BOOLEAN Raised;
+    ULONG Cpu;
+    ULONG Epoch;
+} PSP_QUOTA_SECTION;
+
+static PSP_QUOTA_INFLIGHT PspQuotaInFlight[MAXIMUM_PROCESSORS];
+static volatile LONG PspQuotaEpoch;
+static KGUARDED_MUTEX PspQuotaSwitchMutex;
+
 #define VALID_QUOTA_FLAGS (QUOTA_LIMITS_HARDWS_MIN_ENABLE | \
                            QUOTA_LIMITS_HARDWS_MIN_DISABLE | \
                            QUOTA_LIMITS_HARDWS_MAX_ENABLE | \
                            QUOTA_LIMITS_HARDWS_MAX_DISABLE)
 
 /* PRIVATE FUNCTIONS *******************************************************/
+
+/**
+ * @brief
+ * Starts a lockless default block operation on behalf of a process, see the
+ * comment at PspQuotaInFlight.
+ */
+static
+__inline
+VOID
+PspEnterQuotaSection(
+    _Out_ PSP_QUOTA_SECTION *Section)
+{
+    Section->Raised = KeGetCurrentIrql() < DISPATCH_LEVEL;
+    if (Section->Raised)
+        KeRaiseIrql(DISPATCH_LEVEL, &Section->OldIrql);
+    Section->Cpu = KeGetCurrentProcessorNumber();
+
+    for (;;)
+    {
+        Section->Epoch = (ULONG)PspQuotaEpoch & 1;
+        InterlockedIncrement(&PspQuotaInFlight[Section->Cpu].Count[Section->Epoch]);
+        if (((ULONG)PspQuotaEpoch & 1) == Section->Epoch)
+            break;
+
+        /* The epoch flipped under us, register in the new one */
+        InterlockedDecrement(&PspQuotaInFlight[Section->Cpu].Count[Section->Epoch]);
+    }
+}
+
+static
+__inline
+VOID
+PspLeaveQuotaSection(
+    _In_ PSP_QUOTA_SECTION *Section)
+{
+    InterlockedDecrement(&PspQuotaInFlight[Section->Cpu].Count[Section->Epoch]);
+    if (Section->Raised)
+        KeLowerIrql(Section->OldIrql);
+}
+
+/**
+ * @brief
+ * Waits until every lockless default block operation that started before the
+ * epoch flip has finished. Only the thread that switches a process to its own
+ * block calls this, holding PspQuotaSwitchMutex.
+ */
+static
+VOID
+PspQuiesceDefaultQuotaOperations(VOID)
+{
+    ULONG Old, Cpu;
+
+    Old = (ULONG)PspQuotaEpoch & 1;
+    InterlockedExchange(&PspQuotaEpoch, Old ^ 1);
+
+    for (Cpu = 0; Cpu < MAXIMUM_PROCESSORS; Cpu++)
+    {
+        while (PspQuotaInFlight[Cpu].Count[Old] != 0)
+            YieldProcessor();
+    }
+}
 
 /**
  * @brief
@@ -236,16 +328,37 @@ PspChargeProcessQuotaSpecifiedPool(
      */
     if (QuotaBlock == &PspDefaultQuotaBlock)
     {
-        NewUsage = InterlockedExchangeAddSizeT(&QuotaBlock->QuotaEntry[QuotaType].Usage, Amount) + Amount;
-        PspRaiseQuotaPeak(&QuotaBlock->QuotaEntry[QuotaType].Peak, NewUsage);
+        PSP_QUOTA_SECTION Section;
 
-        if (Process)
+        if (!Process)
         {
-            ASSERT(Process != PsInitialSystemProcess);
+            NewUsage = InterlockedExchangeAddSizeT(&QuotaBlock->QuotaEntry[QuotaType].Usage, Amount) + Amount;
+            PspRaiseQuotaPeak(&QuotaBlock->QuotaEntry[QuotaType].Peak, NewUsage);
+            return STATUS_SUCCESS;
+        }
+
+        /*
+         * The block came from the process. Make sure it still is the block of
+         * the process while the charge is in flight, otherwise a switch to a
+         * private block would take the usage over without this charge.
+         */
+        ASSERT(Process != PsInitialSystemProcess);
+        PspEnterQuotaSection(&Section);
+        if (*(PEPROCESS_QUOTA_BLOCK volatile *)&Process->QuotaBlock == &PspDefaultQuotaBlock)
+        {
+            NewUsage = InterlockedExchangeAddSizeT(&QuotaBlock->QuotaEntry[QuotaType].Usage, Amount) + Amount;
+            PspRaiseQuotaPeak(&QuotaBlock->QuotaEntry[QuotaType].Peak, NewUsage);
+
             NewUsage = InterlockedExchangeAddSizeT(&Process->QuotaUsage[QuotaType], Amount) + Amount;
             PspRaiseQuotaPeak(&Process->QuotaPeak[QuotaType], NewUsage);
+            PspLeaveQuotaSection(&Section);
+            return STATUS_SUCCESS;
         }
-        return STATUS_SUCCESS;
+        PspLeaveQuotaSection(&Section);
+
+        /* The process moved to its own block, which only ever happens once */
+        QuotaBlock = Process->QuotaBlock;
+        ASSERT(QuotaBlock != &PspDefaultQuotaBlock);
     }
 
     /* Guard ourselves in a spin lock */
@@ -399,14 +512,29 @@ PspReturnProcessQuotaSpecifiedPool(
     if (QuotaBlock == &PspDefaultQuotaBlock)
     {
         SIZE_T OldBlockUsage, OldProcessUsage = 0;
+        PSP_QUOTA_SECTION Section;
+
+        if (Process)
+        {
+            /* Same as when charging: stay in step with a switch to a private block */
+            ASSERT(Process != PsInitialSystemProcess);
+            PspEnterQuotaSection(&Section);
+            if (*(PEPROCESS_QUOTA_BLOCK volatile *)&Process->QuotaBlock != &PspDefaultQuotaBlock)
+            {
+                PspLeaveQuotaSection(&Section);
+                QuotaBlock = Process->QuotaBlock;
+                ASSERT(QuotaBlock != &PspDefaultQuotaBlock);
+                goto LockedReturn;
+            }
+        }
 
         OldBlockUsage = InterlockedExchangeAddSizeT(&QuotaBlock->QuotaEntry[QuotaType].Usage,
                                                     -(LONG_PTR)Amount);
         if (Process)
         {
-            ASSERT(Process != PsInitialSystemProcess);
             OldProcessUsage = InterlockedExchangeAddSizeT(&Process->QuotaUsage[QuotaType],
                                                           -(LONG_PTR)Amount);
+            PspLeaveQuotaSection(&Section);
         }
 
         if (OldBlockUsage < Amount || (Process && OldProcessUsage < Amount))
@@ -419,6 +547,8 @@ PspReturnProcessQuotaSpecifiedPool(
         }
         return;
     }
+
+LockedReturn:
 
     /* Guard ourselves in a spin lock */
     KeAcquireSpinLock(&PspQuotaLock, &OldIrql);
@@ -520,6 +650,8 @@ PsInitializeQuotaSystem(VOID)
      */
     PspDefaultQuotaBlock.ReferenceCount = 1;
     PspDefaultQuotaBlock.ProcessCount = 1;
+
+    KeInitializeGuardedMutex(&PspQuotaSwitchMutex);
 
     /* Assign that block to initial process */
     PsGetCurrentProcess()->QuotaBlock = &PspDefaultQuotaBlock;
@@ -1119,6 +1251,7 @@ PspSetQuotaLimits(
     SIZE_T MovedUsage[PsQuotaTypes];
     BOOLEAN IncreaseOkay;
     KAPC_STATE SavedApcState;
+    KIRQL OldIrql;
     NTSTATUS Status;
 
     UNREFERENCED_PARAMETER(Unused);
@@ -1256,20 +1389,7 @@ PspSetQuotaLimits(
         QuotaBlock->ReferenceCount = 1;
         QuotaBlock->ProcessCount = 1;
 
-        /*
-         * The process already holds quota charged against the default block
-         * (handle tables, VADs, ...). It returns that quota through its
-         * current block, which is this new one, so the block has to start
-         * with the usage of the process or the first such return underflows.
-         */
-        for (QuotaType = PsNonPagedPool; QuotaType < PsQuotaTypes; QuotaType++)
-        {
-            MovedUsage[QuotaType] = Process->QuotaUsage[QuotaType];
-            QuotaBlock->QuotaEntry[QuotaType].Usage = MovedUsage[QuotaType];
-        }
-        QuotaBlock->QuotaEntry[PsNonPagedPool].Peak = Process->QuotaPeak[PsNonPagedPool];
-        QuotaBlock->QuotaEntry[PsPagedPool].Peak = Process->QuotaPeak[PsPagedPool];
-        QuotaBlock->QuotaEntry[PsPageFile].Peak = Process->QuotaPeak[PsPageFile];
+        /* Initialize the limits, the usage and the peaks are taken over below */
         QuotaBlock->QuotaEntry[PsNonPagedPool].Limit =
             CapturedQuotaLimits.NonPagedPoolLimit ? CapturedQuotaLimits.NonPagedPoolLimit :
             PspDefaultQuotaBlock.QuotaEntry[PsNonPagedPool].Limit;
@@ -1278,14 +1398,41 @@ PspSetQuotaLimits(
             PspDefaultQuotaBlock.QuotaEntry[PsPagedPool].Limit;
         QuotaBlock->QuotaEntry[PsPageFile].Limit = PspDefaultQuotaBlock.QuotaEntry[PsPageFile].Limit;
 
-        /* Try to exchange the quota block, if that failed, just drop it */
+        /*
+         * The process already holds quota charged against the default block
+         * (handle tables, VADs, ...). It returns that quota through its
+         * current block, which is this new one, so the block has to start
+         * with the usage of the process or the first such return underflows.
+         *
+         * Charges and returns against the default block are lockless and may
+         * be running on other threads of the process right now. Publish the
+         * block first, with the quota lock held so nothing can charge or
+         * return through it yet, wait for the lockless operations that still
+         * use the default block to finish, and only then take the usage over:
+         * from that point the usage of the process is stable and every
+         * operation goes through the new block.
+         */
+        KeAcquireGuardedMutex(&PspQuotaSwitchMutex);
+        KeAcquireSpinLock(&PspQuotaLock, &OldIrql);
+
         OldQuotaBlock = InterlockedCompareExchangePointer((PVOID*)&Process->QuotaBlock,
                                                           QuotaBlock,
                                                           &PspDefaultQuotaBlock);
         if (OldQuotaBlock == &PspDefaultQuotaBlock)
         {
+            PspQuiesceDefaultQuotaOperations();
+
+            for (QuotaType = PsNonPagedPool; QuotaType < PsQuotaTypes; QuotaType++)
+            {
+                MovedUsage[QuotaType] = Process->QuotaUsage[QuotaType];
+                QuotaBlock->QuotaEntry[QuotaType].Usage = MovedUsage[QuotaType];
+            }
+            QuotaBlock->QuotaEntry[PsNonPagedPool].Peak = Process->QuotaPeak[PsNonPagedPool];
+            QuotaBlock->QuotaEntry[PsPagedPool].Peak = Process->QuotaPeak[PsPagedPool];
+            QuotaBlock->QuotaEntry[PsPageFile].Peak = Process->QuotaPeak[PsPageFile];
+
             /* Success, insert the new quota block */
-            PspInsertQuotaBlock(QuotaBlock);
+            InsertTailList(&PspQuotaBlockList, &QuotaBlock->QuotaList);
 
             /*
              * That usage moved over to the new block, so the default block
@@ -1298,7 +1445,11 @@ PspSetQuotaLimits(
                                             -(LONG_PTR)MovedUsage[QuotaType]);
             }
         }
-        else
+
+        KeReleaseSpinLock(&PspQuotaLock, OldIrql);
+        KeReleaseGuardedMutex(&PspQuotaSwitchMutex);
+
+        if (OldQuotaBlock != &PspDefaultQuotaBlock)
         {
             /* Failed, free the quota block and ignore it */
             ExFreePoolWithTag(QuotaBlock, TAG_QUOTA_BLOCK);

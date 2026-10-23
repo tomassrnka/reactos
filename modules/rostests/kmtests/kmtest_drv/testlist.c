@@ -110,6 +110,7 @@ KMT_TESTFUNC Test_PsQuotaLimited;
 KMT_TESTFUNC Test_PsQuotaLimitedTrim;
 KMT_TESTFUNC Test_PsQuotaLimitedSetLimits;
 KMT_TESTFUNC Test_PsQuotaLimitedThreshold;
+KMT_TESTFUNC Test_PsQuotaSwitchRace;
 KMT_TESTFUNC Test_SeAutoInherit;
 KMT_TESTFUNC Test_SeInheritance;
 KMT_TESTFUNC Test_SeLogonSession;
@@ -237,6 +238,7 @@ const KMT_TEST TestList[] =
     { "PsQuotaLimitedTrim",                 Test_PsQuotaLimitedTrim },
     { "PsQuotaLimitedSetLimits",            Test_PsQuotaLimitedSetLimits },
     { "PsQuotaLimitedThreshold",            Test_PsQuotaLimitedThreshold },
+    { "PsQuotaSwitchRace",                 Test_PsQuotaSwitchRace },
     { "RtlAvlTreeKM",                       Test_RtlAvlTree },
     { "RtlExceptionKM",                     Test_RtlException },
     { "RtlIntSafeKM",                       Test_RtlIntSafe },
