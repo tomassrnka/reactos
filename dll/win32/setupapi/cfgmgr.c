@@ -8874,3 +8874,164 @@ CM_Unregister_Device_Interface_ExW(
 
     return ret;
 }
+
+/***********************************************************************
+ * CM_Register_Notification and CM_Unregister_Notification (Windows 8 and later)
+ *
+ * The registration is checked as Windows 10 checks it, and kept: the handle that comes back is one that
+ * CM_Unregister_Notification accepts once. Nothing is delivered: the callback is never called, as if no device of
+ * the filter ever changed (Windows calls nothing at registration either; it calls when a device comes, goes or
+ * changes). Programs that watch for devices (browsers, audio and camera code) register at start and then work
+ * with the devices that were there at that time. Differences from Windows: a handle of a device that has no
+ * device node (the NUL device) is accepted, and the callback thread of Windows does not exist.
+ */
+
+typedef struct _CM_NOTIFY_ENTRY
+{
+    LIST_ENTRY ListEntry;
+    PCM_NOTIFY_CALLBACK pCallback;
+    PVOID pContext;
+    CM_NOTIFY_FILTER Filter;
+} CM_NOTIFY_ENTRY, *PCM_NOTIFY_ENTRY;
+
+static CRITICAL_SECTION CmNotifyLock;
+static CRITICAL_SECTION_DEBUG CmNotifyLockDebug =
+{
+    0, 0, &CmNotifyLock,
+    { &CmNotifyLockDebug.ProcessLocksList, &CmNotifyLockDebug.ProcessLocksList },
+    0, 0, { (DWORD_PTR)(__FILE__ ": CmNotifyLock") }
+};
+static CRITICAL_SECTION CmNotifyLock = { &CmNotifyLockDebug, -1, 0, 0, 0, 0 };
+static LIST_ENTRY CmNotifyList = { &CmNotifyList, &CmNotifyList };
+
+CONFIGRET
+WINAPI
+CM_Register_Notification(
+    _In_ PCM_NOTIFY_FILTER pFilter,
+    _In_opt_ PVOID pContext,
+    _In_ PCM_NOTIFY_CALLBACK pCallback,
+    _Out_ PHCMNOTIFICATION pNotifyContext)
+{
+    PCM_NOTIFY_ENTRY Entry;
+
+    TRACE("CM_Register_Notification(%p %p %p %p)\n", pFilter, pContext, pCallback, pNotifyContext);
+
+    /* The errors and their order are those of Windows 10 (build 19045) for the same calls */
+    if (pFilter == NULL || pCallback == NULL)
+        return CR_INVALID_DATA;
+
+    if (pFilter->cbSize != sizeof(CM_NOTIFY_FILTER) ||
+        pFilter->FilterType >= CM_NOTIFY_FILTER_TYPE_MAX ||
+        (pFilter->Flags & ~(CM_NOTIFY_FILTER_FLAG_ALL_INTERFACE_CLASSES |
+                            CM_NOTIFY_FILTER_FLAG_ALL_DEVICE_INSTANCES)))
+        return CR_INVALID_DATA;
+
+    switch (pFilter->FilterType)
+    {
+        case CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE:
+            /* All classes means no class given */
+            if (pFilter->Flags & CM_NOTIFY_FILTER_FLAG_ALL_DEVICE_INSTANCES)
+                return CR_INVALID_DATA;
+            if ((pFilter->Flags & CM_NOTIFY_FILTER_FLAG_ALL_INTERFACE_CLASSES) &&
+                !IsEqualGUID(&pFilter->u.DeviceInterface.ClassGuid, &GUID_NULL))
+                return CR_INVALID_DATA;
+            break;
+
+        case CM_NOTIFY_FILTER_TYPE_DEVICEHANDLE:
+            /* A handle of a file, directory or volume; a handle of any other kind of object is not accepted */
+            if (pFilter->Flags != 0 ||
+                GetFileType(pFilter->u.DeviceHandle.hTarget) != FILE_TYPE_DISK)
+                return CR_INVALID_DATA;
+            break;
+
+        case CM_NOTIFY_FILTER_TYPE_DEVICEINSTANCE:
+            if (pFilter->Flags & CM_NOTIFY_FILTER_FLAG_ALL_INTERFACE_CLASSES)
+                return CR_INVALID_DATA;
+            if (pFilter->Flags & CM_NOTIFY_FILTER_FLAG_ALL_DEVICE_INSTANCES)
+            {
+                /* All instances means no instance given */
+                if (pFilter->u.DeviceInstance.InstanceId[0] != UNICODE_NULL)
+                    return CR_INVALID_DATA;
+            }
+            else
+            {
+                DEVINST DevInst;
+
+                if (wmemchr(pFilter->u.DeviceInstance.InstanceId, UNICODE_NULL, MAX_DEVICE_ID_LEN) == NULL)
+                    return CR_INVALID_DATA;
+                /* An empty instance is the root device to CM_Locate_DevNode, and no instance to Windows */
+                if (pFilter->u.DeviceInstance.InstanceId[0] == UNICODE_NULL ||
+                    CM_Locate_DevNodeW(&DevInst, pFilter->u.DeviceInstance.InstanceId, CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS)
+                    return CR_FAILURE;
+            }
+            break;
+
+        default:
+            return CR_INVALID_DATA;
+    }
+
+    if (pNotifyContext == NULL)
+        return CR_FAILURE;
+
+    Entry = MyMalloc(sizeof(*Entry));
+    if (Entry == NULL)
+        return CR_OUT_OF_MEMORY;
+
+    Entry->pCallback = pCallback;
+    Entry->pContext = pContext;
+    Entry->Filter = *pFilter;
+
+    EnterCriticalSection(&CmNotifyLock);
+    InsertTailList(&CmNotifyList, &Entry->ListEntry);
+    LeaveCriticalSection(&CmNotifyLock);
+
+    *pNotifyContext = (HCMNOTIFICATION)Entry;
+    return CR_SUCCESS;
+}
+
+CONFIGRET
+WINAPI
+CM_Unregister_Notification(
+    _In_ HCMNOTIFICATION NotifyContext)
+{
+    PLIST_ENTRY Current;
+    PCM_NOTIFY_ENTRY Entry = NULL;
+
+    TRACE("CM_Unregister_Notification(%p)\n", NotifyContext);
+
+    EnterCriticalSection(&CmNotifyLock);
+    for (Current = CmNotifyList.Flink; Current != &CmNotifyList; Current = Current->Flink)
+    {
+        if ((HCMNOTIFICATION)Current == NotifyContext)
+        {
+            Entry = CONTAINING_RECORD(Current, CM_NOTIFY_ENTRY, ListEntry);
+            RemoveEntryList(&Entry->ListEntry);
+            break;
+        }
+    }
+    LeaveCriticalSection(&CmNotifyLock);
+
+    if (Entry == NULL)
+    {
+        BOOL Readable = FALSE;
+
+        /* Windows answers a handle that is not a registration as invalid data, and one that is not even memory as failure */
+        if (NotifyContext == NULL)
+            return CR_INVALID_DATA;
+
+        _SEH2_TRY
+        {
+            (VOID)*(volatile UCHAR *)NotifyContext;
+            Readable = TRUE;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+        }
+        _SEH2_END;
+
+        return Readable ? CR_INVALID_DATA : CR_FAILURE;
+    }
+
+    MyFree(Entry);
+    return CR_SUCCESS;
+}

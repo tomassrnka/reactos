@@ -187,6 +187,7 @@
 @ stdcall CM_Register_Device_InterfaceW(long ptr wstr wstr ptr long)
 @ stdcall CM_Register_Device_Interface_ExA(long ptr str str ptr long ptr)
 @ stdcall CM_Register_Device_Interface_ExW(long ptr wstr wstr ptr long ptr)
+@ stdcall CM_Register_Notification(ptr ptr ptr ptr)
 @ stdcall CM_Remove_SubTree(long long)
 @ stdcall CM_Remove_SubTree_Ex(long long ptr)
 @ stdcall CM_Request_Device_EjectA(long ptr str long long)
@@ -223,6 +224,7 @@
 @ stdcall CM_Unregister_Device_InterfaceW(wstr long)
 @ stdcall CM_Unregister_Device_Interface_ExA(str long ptr)
 @ stdcall CM_Unregister_Device_Interface_ExW(wstr long ptr)
+@ stdcall CM_Unregister_Notification(ptr)
 @ stub -version=0x600+ CM_Write_UserPowerKey
 @ stdcall DoesUserHavePrivilege(wstr)
 @ stub -version=0x600+ DriverStoreAddDriverPackageA
