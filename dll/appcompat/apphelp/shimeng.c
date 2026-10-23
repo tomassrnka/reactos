@@ -804,11 +804,12 @@ VOID SeiPatchNewImport(PIMAGE_THUNK_DATA FirstThunk, PHOOKAPIEX HookApi, PLDR_DA
 
     Ptr = &FirstThunk->u1.Function;
     Size = sizeof(FirstThunk->u1.Function);
-    Status = NtProtectVirtualMemory(NtCurrentProcess(), &Ptr, &Size, PAGE_EXECUTE_READWRITE, &OldProtection);
+    /* The import table is data: copy-on-write write access is all it needs (execute is refused for a non-executable section) */
+    Status = NtProtectVirtualMemory(NtCurrentProcess(), &Ptr, &Size, PAGE_READWRITE, &OldProtection);
 
     if (!NT_SUCCESS(Status))
     {
-        SHIMENG_FAIL("Unable to unprotect 0x%p\n", &FirstThunk->u1.Function);
+        SHIMENG_FAIL("Unable to unprotect 0x%p (0x%x)\n", &FirstThunk->u1.Function, Status);
         return;
     }
 
