@@ -220,3 +220,63 @@ START_TEST(NtGdiCreateDIBSectionCaptureBitsPtr)
     if (hbmp) DeleteObject(hbmp);
     ReleaseDC(0, hdc);
 }
+
+/* Contract for the size arithmetic in DIB_CreateDIBSection (T62): dimensions whose pitch or
+   pitch * height does not fit 32 bits must fail cleanly, not wrap into an undersized buffer.
+   Every case here is expected to be refused, so no large allocation is ever made. */
+START_TEST(NtGdiCreateDIBSectionSizeMath)
+{
+    struct { LONG w; LONG h; WORD bpp; } aCases[] =
+    {
+        { 0x7FFFFFFF, 2, 8 },           /* pitch ~2GB, *2 wraps ULONG */
+        { 0x7FFFFFFF, 0x7FFFFFFF, 1 },
+        { 0x40000000, 4, 32 },          /* width * bpp overflows 32 bits */
+        { 0x20000000, 4, 8 },           /* pitch 512MB: (pitch << 3) wraps in the surface code */
+        { 0x10000, 0x10000, 32 },       /* pitch 256KB * height 64K = 2^34 */
+        { 0x10000, 0x10000, 8 },        /* 2^32 exactly */
+        { 0x7FFFFFFF, 1, 0xFFFF },      /* absurd bit count */
+        { 0x01000001, 0x100, 32 },
+        { 4, MINLONG, 8 },              /* -MINLONG is MINLONG */
+        { 4, -0x7FFFFFFF - 1, 24 },
+        { MINLONG, 4, 8 },              /* negative width */
+        { -1, 4, 8 },
+    };
+    BITMAPINFOHEADER bih;
+    PVOID pvBits;
+    HBITMAP hbmp;
+    HDC hdc = GetDC(0);
+    ULONG i;
+
+    for (i = 0; i < ARRAYSIZE(aCases); i++)
+    {
+        FillHeader(&bih, aCases[i].bpp);
+        bih.biWidth = aCases[i].w;
+        bih.biHeight = aCases[i].h;
+        pvBits = (PVOID)-1;
+        hbmp = NtGdiCreateDIBSection(hdc, NULL, 0, (PBITMAPINFO)&bih, DIB_RGB_COLORS, sizeof(bih), 0, 0, &pvBits);
+        ok(hbmp == 0, "case %lu (%ld x %ld x %u) created a bitmap\n", i, aCases[i].w, aCases[i].h, aCases[i].bpp);
+        ok(pvBits == (PVOID)-1, "case %lu touched ppvBits\n", i);
+        if (hbmp) DeleteObject(hbmp);
+
+        /* A top-down header must be judged the same way */
+        if (aCases[i].h > 0)
+        {
+            bih.biHeight = -aCases[i].h;
+            pvBits = (PVOID)-1;
+            hbmp = NtGdiCreateDIBSection(hdc, NULL, 0, (PBITMAPINFO)&bih, DIB_RGB_COLORS, sizeof(bih), 0, 0, &pvBits);
+            ok(hbmp == 0, "case %lu top-down created a bitmap\n", i);
+            if (hbmp) DeleteObject(hbmp);
+        }
+    }
+
+    /* Ordinary sizes keep working, including a top-down one and an odd width */
+    FillHeader(&bih, 24);
+    bih.biWidth = 33; bih.biHeight = -17;
+    pvBits = NULL;
+    hbmp = NtGdiCreateDIBSection(hdc, NULL, 0, (PBITMAPINFO)&bih, DIB_RGB_COLORS, sizeof(bih), 0, 0, &pvBits);
+    TEST(hbmp != 0);
+    TEST(pvBits != NULL);
+    if (hbmp) DeleteObject(hbmp);
+
+    ReleaseDC(0, hdc);
+}

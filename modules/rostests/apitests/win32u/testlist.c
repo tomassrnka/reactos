@@ -19,6 +19,7 @@ extern void func_NtGdiCreateDIBSectionCaptureValid(void);
 extern void func_NtGdiCreateDIBSectionCaptureInvalid(void);
 extern void func_NtGdiCreateDIBSectionCaptureStraddle(void);
 extern void func_NtGdiCreateDIBSectionCaptureBitsPtr(void);
+extern void func_NtGdiCreateDIBSectionSizeMath(void);
 extern void func_NtGdiCreateDIBitmapInternal(void);
 extern void func_NtGdiDeleteObjectApp(void);
 extern void func_NtGdiDoPalette(void);
@@ -108,6 +109,7 @@ const struct test winetest_testlist[] =
     { "NtGdiCreateDIBSectionCaptureInvalid", func_NtGdiCreateDIBSectionCaptureInvalid },
     { "NtGdiCreateDIBSectionCaptureStraddle", func_NtGdiCreateDIBSectionCaptureStraddle },
     { "NtGdiCreateDIBSectionCaptureBitsPtr", func_NtGdiCreateDIBSectionCaptureBitsPtr },
+    { "NtGdiCreateDIBSectionSizeMath", func_NtGdiCreateDIBSectionSizeMath },
     { "NtGdiCreateDIBitmapInternal", func_NtGdiCreateDIBitmapInternal },
     { "NtGdiDeleteObjectApp", func_NtGdiDeleteObjectApp },
     { "NtGdiDoPalette", func_NtGdiDoPalette },
