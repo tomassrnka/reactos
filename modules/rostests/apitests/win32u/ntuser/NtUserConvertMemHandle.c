@@ -81,11 +81,44 @@ HANDLE getClipboardData(UINT uFormat)
     return hGlobal;
 }
 
+/* Contract: a caller-supplied size that cannot be represented once the object
+ * header is added must be rejected, not turned into a small allocation. */
+static void Test_SizeOverflow(void)
+{
+    SYSTEM_INFO si;
+    PBYTE pBase;
+    DWORD dwOld;
+    HANDLE hMem;
+    DWORD i;
+    static const DWORD sizes[] = { 0xFFFFFFFF, 0xFFFFFFF8, 0xFFFFFFF0 };
+
+    GetSystemInfo(&si);
+    pBase = VirtualAlloc(NULL, 2 * si.dwPageSize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (!pBase)
+    {
+        skip("VirtualAlloc failed\n");
+        return;
+    }
+    /* Only a few bytes are readable: any copy past them faults */
+    VirtualProtect(pBase + si.dwPageSize, si.dwPageSize, PAGE_NOACCESS, &dwOld);
+
+    for (i = 0; i < _countof(sizes); i++)
+    {
+        SetLastError(0xDEADBEEF);
+        hMem = NtUserConvertMemHandle(pBase + si.dwPageSize - 1, sizes[i]);
+        ok(hMem == NULL, "size 0x%lx: hMem = %p\n", sizes[i], hMem);
+    }
+
+    VirtualFree(pBase, 0, MEM_RELEASE);
+}
+
 START_TEST(NtUserConvertMemHandle)
 {
     HANDLE hMem;
     CONST CHAR testString[] = "Test string";
     HGLOBAL  hGlobal = NULL;
+
+    Test_SizeOverflow();
 
     hMem = NtUserConvertMemHandle(UlongToPtr(0xDEADBEEF), 0xFFFF);
     ok_hdl(hMem, NULL);
