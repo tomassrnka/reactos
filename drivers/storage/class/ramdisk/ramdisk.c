@@ -26,6 +26,7 @@
 #include "../../../filesystems/fs_rec/fs_rec.h"
 #include <stdio.h>
 #include "ramdisk_range.h"
+#include "ramdisk_flags.h"
 #define NDEBUG
 #include <debug.h>
 
@@ -2438,7 +2439,7 @@ RamdiskAddDevice(IN PDRIVER_OBJECT DriverObject,
         }
 
         /* All done */
-        DeviceObject->Flags &= DO_DEVICE_INITIALIZING;
+        DeviceObject->Flags = RamdiskClearDeviceFlag(DeviceObject->Flags, DO_DEVICE_INITIALIZING);
         Status = STATUS_SUCCESS;
     }
 
