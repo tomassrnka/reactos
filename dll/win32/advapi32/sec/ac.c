@@ -756,4 +756,79 @@ GetAuditedPermissionsFromAclA(IN PACL pacl,
     return ErrorCode;
 }
 
+/*
+ * @implemented
+ */
+DWORD
+WINAPI
+BuildSecurityDescriptorA(IN PTRUSTEE_A pOwner  OPTIONAL,
+                         IN PTRUSTEE_A pGroup  OPTIONAL,
+                         IN ULONG cCountOfAccessEntries,
+                         IN PEXPLICIT_ACCESS_A pListOfAccessEntries  OPTIONAL,
+                         IN ULONG cCountOfAuditEntries,
+                         IN PEXPLICIT_ACCESS_A pListOfAuditEntries  OPTIONAL,
+                         IN PSECURITY_DESCRIPTOR pOldSD  OPTIONAL,
+                         OUT PULONG pSizeNewSD,
+                         OUT PSECURITY_DESCRIPTOR* pNewSD)
+{
+    PTRUSTEE_W pOwnerW = NULL, pGroupW = NULL;
+    PEXPLICIT_ACCESS_W pAccessW = NULL, pAuditW = NULL;
+    DWORD ErrorCode = ERROR_SUCCESS;
+
+    /* Convert the ANSI trustees and entry lists to UNICODE and delegate */
+    if (pOwner != NULL)
+    {
+        ErrorCode = InternalTrusteeAToW(pOwner, &pOwnerW);
+        if (ErrorCode != ERROR_SUCCESS)
+            goto Cleanup;
+    }
+
+    if (pGroup != NULL)
+    {
+        ErrorCode = InternalTrusteeAToW(pGroup, &pGroupW);
+        if (ErrorCode != ERROR_SUCCESS)
+            goto Cleanup;
+    }
+
+    if (pListOfAccessEntries != NULL)
+    {
+        ErrorCode = InternalExplicitAccessAToW(cCountOfAccessEntries,
+                                               pListOfAccessEntries,
+                                               &pAccessW);
+        if (ErrorCode != ERROR_SUCCESS)
+            goto Cleanup;
+    }
+
+    if (pListOfAuditEntries != NULL)
+    {
+        ErrorCode = InternalExplicitAccessAToW(cCountOfAuditEntries,
+                                               pListOfAuditEntries,
+                                               &pAuditW);
+        if (ErrorCode != ERROR_SUCCESS)
+            goto Cleanup;
+    }
+
+    ErrorCode = BuildSecurityDescriptorW(pOwnerW,
+                                         pGroupW,
+                                         cCountOfAccessEntries,
+                                         pAccessW,
+                                         cCountOfAuditEntries,
+                                         pAuditW,
+                                         pOldSD,
+                                         pSizeNewSD,
+                                         pNewSD);
+
+Cleanup:
+    if (pAuditW != NULL)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, pAuditW);
+    if (pAccessW != NULL)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, pAccessW);
+    if (pGroupW != NULL)
+        InternalFreeConvertedTrustee(pGroupW, pGroup);
+    if (pOwnerW != NULL)
+        InternalFreeConvertedTrustee(pOwnerW, pOwner);
+
+    return ErrorCode;
+}
+
 /* EOF */
