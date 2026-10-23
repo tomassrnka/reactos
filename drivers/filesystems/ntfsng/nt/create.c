@@ -43,8 +43,7 @@ static VOID NgFreeCcb(PNG_CCB Ccb)
         ExFreePoolWithTag(Ccb->Pattern.Buffer, TAG_NTFSNG);
     if (Ccb->Path.Buffer)
         ExFreePoolWithTag(Ccb->Path.Buffer, TAG_NTFSNG);
-    if (Ccb->NotifyPath.Buffer)
-        ExFreePoolWithTag(Ccb->NotifyPath.Buffer, TAG_NTFSNG);
+    /* NotifyPath shares a buffer of Path (current or retired): freed above */
     ExFreePoolWithTag(Ccb, TAG_NTFSNG);
 }
 
@@ -419,6 +418,19 @@ static BOOLEAN NgBadComponent(PCUNICODE_STRING Comp)
     return FALSE;
 }
 
+/* Recursive: FsRtl may complete a watcher's IRP, and a completion routine below us can come back here. */
+VOID NgLockNotifyPath(PNG_VCB Vcb)
+{
+    KeEnterCriticalRegion();
+    ExAcquireResourceExclusiveLite(&Vcb->NotifyPathLock, TRUE);
+}
+
+VOID NgUnlockNotifyPath(PNG_VCB Vcb)
+{
+    ExReleaseResourceLite(&Vcb->NotifyPathLock);
+    KeLeaveCriticalRegion();
+}
+
 /* Reports a change of the object at Path ("\\dir\\name") to directory change notification. */
 VOID NgNotify(PNG_VCB Vcb, PCUNICODE_STRING Path, ULONG Filter, ULONG Action)
 {
@@ -427,8 +439,11 @@ VOID NgNotify(PNG_VCB Vcb, PCUNICODE_STRING Path, ULONG Filter, ULONG Action)
         return;
     while (i > 0 && Path->Buffer[i - 1] != L'\\')
         i--;
+    /* FsRtl compares Path with each watcher's NotifyPath, reading the latter's length again and again */
+    NgLockNotifyPath(Vcb);
     FsRtlNotifyFullReportChange(Vcb->NotifySync, &Vcb->DirNotifyList, (PSTRING)Path, (USHORT)(i * sizeof(WCHAR)),
                                 NULL, NULL, Filter, Action, NULL);
+    NgUnlockNotifyPath(Vcb);
 }
 
 /* NgNotify with the name of Ccb's handle, taken under FcbListLock (a rename through another handle may change it). */

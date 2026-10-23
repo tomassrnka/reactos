@@ -502,11 +502,12 @@ static VOID NgFreeRetitles(NG_RETITLE *Spare, ULONG Count)
 /*
  * Gives handle C the name NewPath (NewName in directory NewDirMftNo), all of it or, without an
  * allocation R, none of it (FcbListLock and the file's main resource held).  The old path buffer
- * stays until close for the diagnostic log.  A change-notify registration's name is rewritten in
- * place: FsRtl reads it without our locks, and as its buffer never moves (and holds the longest
- * path) a racing report sees at worst a mix of the two names, never more than the buffer.
+ * stays until close for the diagnostic log.  A change-notify registration shares the buffer of
+ * the path: FsRtl reads it (length, then bytes, several times) while it reports a change, and
+ * only under NotifyPathLock, so buffer and length change together there and a report sees the
+ * old name or the new one, never a mix.  The old buffer is not freed, so a reader never lacks one.
  */
-static VOID NgRetitleCcb(PNG_CCB C, NG_RETITLE *R, PCUNICODE_STRING NewPath, ULONGLONG NewDirMftNo, PCUNICODE_STRING NewName)
+static VOID NgRetitleCcb(PNG_VCB Vcb, PNG_CCB C, NG_RETITLE *R, PCUNICODE_STRING NewPath, ULONGLONG NewDirMftNo, PCUNICODE_STRING NewName)
 {
     if (!R || !R->Buffer || !R->Old)
     {
@@ -517,26 +518,15 @@ static VOID NgRetitleCcb(PNG_CCB C, NG_RETITLE *R, PCUNICODE_STRING NewPath, ULO
     R->Old[0] = C->RetiredPaths;
     R->Old[1] = C->Path.Buffer;
     C->RetiredPaths = R->Old;
+    NgLockNotifyPath(Vcb);
     C->Path.Buffer = R->Buffer;
     C->Path.Length = NewPath->Length;
     C->Path.MaximumLength = NewPath->Length + sizeof(WCHAR);
+    if (C->NotifyPath.Buffer)
+        C->NotifyPath = C->Path;
+    NgUnlockNotifyPath(Vcb);
     R->Buffer = NULL;
     R->Old = NULL;
-    if (C->NotifyPath.Buffer && NewPath->Length <= C->NotifyPath.MaximumLength)
-    {
-        if (NewPath->Length > C->NotifyPath.Length)
-        {
-            RtlCopyMemory(C->NotifyPath.Buffer, NewPath->Buffer, NewPath->Length);
-            KeMemoryBarrier();
-            C->NotifyPath.Length = NewPath->Length;
-        }
-        else
-        {
-            C->NotifyPath.Length = NewPath->Length;
-            KeMemoryBarrier();
-            RtlCopyMemory(C->NotifyPath.Buffer, NewPath->Buffer, NewPath->Length);
-        }
-    }
     C->ParentMftNo = NewDirMftNo;
     C->NameLength = NewName->Length / sizeof(WCHAR);
     RtlCopyMemory(C->Name, NewName->Buffer, NewName->Length);
@@ -880,7 +870,7 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
                                                   NgSameName(C->Name, C->NameLength, Ccb->Name, Ccb->NameLength))))
             {
                 /* No create runs (CreateGate), so no handle came after the count. */
-                NgRetitleCcb(C, Used < Spares ? &Spare[Used++] : NULL, &NewPath, NewDirMftNo, &NewName);
+                NgRetitleCcb(Vcb, C, Used < Spares ? &Spare[Used++] : NULL, &NewPath, NewDirMftNo, &NewName);
             }
         }
         if (DelPath && Fcb->DelParentMftNo == Ccb->ParentMftNo &&
@@ -898,7 +888,7 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
             Fcb->DelNameLength = NewName.Length / sizeof(WCHAR);
             RtlCopyMemory(Fcb->DelName, NewName.Buffer, NewName.Length);
         }
-        NgRetitleCcb(Ccb, &Spare[0], &NewPath, NewDirMftNo, &NewName);
+        NgRetitleCcb(Vcb, Ccb, &Spare[0], &NewPath, NewDirMftNo, &NewName);
         ExReleaseFastMutex(&Vcb->FcbListLock);
         NgNotify(Vcb, &NewPath, Filter, Moved ? FILE_ACTION_ADDED : FILE_ACTION_RENAMED_NEW_NAME);
     }

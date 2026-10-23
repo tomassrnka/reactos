@@ -3,6 +3,7 @@ list(APPEND SOURCE
     access.c
     delete.c
     inherit.c
+    notify.c
     relopen.c
     special.c
     util.c
