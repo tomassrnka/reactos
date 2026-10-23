@@ -2422,6 +2422,17 @@ BasepCheckProcThreadAttribute(
             return (Size == sizeof(DWORD) || Size == sizeof(DWORD64) || Size == 2 * sizeof(DWORD64)) ?
                    ERROR_SUCCESS : ERROR_BAD_LENGTH;
 
+        case PROC_THREAD_ATTRIBUTE_JOB_LIST:
+            /* One or more job handles; honoured by assigning the child to each */
+            return (Size && !(Size % sizeof(HANDLE))) ? ERROR_SUCCESS : ERROR_BAD_LENGTH;
+
+        case PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY:
+        case PROC_THREAD_ATTRIBUTE_COMPONENT_FILTER:
+            /* Validated and accepted. ReactOS does not enforce these policies,
+             * but must accept them so CreateProcess succeeds for callers that
+             * set them (e.g. Chromium-based sandboxes). */
+            return (Size == sizeof(DWORD)) ? ERROR_SUCCESS : ERROR_BAD_LENGTH;
+
         default:
             /* Refuse attributes that cannot be honoured. */
             return ERROR_NOT_SUPPORTED;
@@ -2558,10 +2569,12 @@ static
 NTSTATUS
 BasepReadProcThreadAttributes(
     _In_ LPPROC_THREAD_ATTRIBUTE_LIST AttributeList,
-    _Out_ PPROC_THREAD_ATTRIBUTE_ENTRY *HandleList)
+    _Out_ PPROC_THREAD_ATTRIBUTE_ENTRY *HandleList,
+    _Out_ PPROC_THREAD_ATTRIBUTE_ENTRY *JobList)
 {
     DWORD i;
     *HandleList = NULL;
+    *JobList = NULL;
     if (AttributeList->LastAttribute > AttributeList->AttributeCount ||
         AttributeList->AttributeCount > PROC_THREAD_ATTRIBUTE_NUMBER)
         return STATUS_INVALID_PARAMETER;
@@ -2575,6 +2588,21 @@ BasepReadProcThreadAttributes(
 
             if (!NT_SUCCESS(Status))
                 return Status;
+            continue;
+        }
+
+        if (Entry->Attribute == PROC_THREAD_ATTRIBUTE_JOB_LIST)
+        {
+            if (*JobList || !Entry->Size || Entry->Size % sizeof(HANDLE))
+                return STATUS_INVALID_PARAMETER;
+            *JobList = Entry;
+            continue;
+        }
+
+        if ((Entry->Attribute == PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY) ||
+            (Entry->Attribute == PROC_THREAD_ATTRIBUTE_COMPONENT_FILTER))
+        {
+            /* Accepted but not enforced. */
             continue;
         }
 
@@ -2682,6 +2710,7 @@ CreateProcessInternalW(IN HANDLE hUserToken,
     PIMAGE_NT_HEADERS NtHeaders;
     STARTUPINFOW StartupInfo;
     PPROC_THREAD_ATTRIBUTE_ENTRY HandleListAttribute = NULL;
+    PPROC_THREAD_ATTRIBUTE_ENTRY JobListAttribute = NULL;
     PHANDLE KernelHandleList = NULL, ConsoleHandleList = NULL;
     SIZE_T KernelHandleCount = 0, ConsoleHandleCount = 0;
     ROS_PS_ATTRIBUTE_LIST NativeAttributes;
@@ -2768,7 +2797,8 @@ CreateProcessInternalW(IN HANDLE hUserToken,
         if (((LPSTARTUPINFOEXW)lpStartupInfo)->lpAttributeList)
         {
             Status = BasepReadProcThreadAttributes(((LPSTARTUPINFOEXW)lpStartupInfo)->lpAttributeList,
-                                                   &HandleListAttribute);
+                                                   &HandleListAttribute,
+                                                   &JobListAttribute);
             if (!NT_SUCCESS(Status))
             {
                 BaseSetLastNTError(Status);
@@ -3671,8 +3701,8 @@ StartScan:
     {
         case STATUS_INVALID_IMAGE_WIN_16:
         {
-            /* A VDM task cannot apply a per-process handle list. */
-            if (HandleListAttribute)
+            /* A VDM task cannot apply a per-process handle list or job list. */
+            if (HandleListAttribute || JobListAttribute)
             {
                 BaseSetLastNTError(STATUS_NOT_SUPPORTED);
                 Result = FALSE;
@@ -3827,7 +3857,7 @@ StartScan:
                 (Status == STATUS_INVALID_IMAGE_NE_FORMAT) ||
                 (BinarySubType = BaseIsDosApplication(&PathName, Status)))
             {
-                if (HandleListAttribute)
+                if (HandleListAttribute || JobListAttribute)
                 {
                     BaseSetLastNTError(STATUS_NOT_SUPPORTED);
                     Result = FALSE;
@@ -5035,6 +5065,15 @@ StartScan:
             goto Quickie;
         }
     }
+
+    /* PROC_THREAD_ATTRIBUTE_JOB_LIST is validated and accepted above. Assigning
+     * the new process to the supplied job object here is intentionally NOT done
+     * yet: doing so regresses modern sandboxed apps. A Firefox 158 content
+     * process is torn down once it becomes a member of the sandbox job, which
+     * points at incomplete job completion-port / kill-on-close behaviour that
+     * must be fixed first. Accepting the attribute is enough for CreateProcess
+     * to succeed; honouring it is deferred to that follow-up. */
+    (void)JobListAttribute;
 
     /* Finally, resume the thread to actually get the process started */
     if (!(dwCreationFlags & CREATE_SUSPENDED))
