@@ -2385,7 +2385,8 @@ RegisterWow64Dlls(VOID)
     static const WCHAR *Dlls[] =
     {
         L"ole32.dll", L"oleaut32.dll", L"rsaenh.dll", L"wintrust.dll",
-        L"softpub.dll", L"mscat32.dll", L"cryptnet.dll", L"winhttp.dll", L"shell32.dll"
+        L"softpub.dll", L"mscat32.dll", L"cryptnet.dll", L"winhttp.dll", L"shell32.dll",
+        L"msxml3.dll"
     };
     WCHAR Directory[MAX_PATH], Application[MAX_PATH], Command[2 * MAX_PATH + 64];
     STARTUPINFOW Startup = {sizeof(Startup)};

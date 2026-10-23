@@ -149,6 +149,10 @@ SysWOW64/windowscodecs.dll
 SysWOW64/winhttp.dll
 SysWOW64/wldap32.dll
 
+# MSXML3 DOM (CoCreateInstance(DOMDocument30) from 32-bit installers), with the libxslt it imports.
+SysWOW64/msxml3.dll
+SysWOW64/libxslt.dll
+
 # Code-page data used by the guest kernel32 NLS loader.
 SysWOW64/c_037.nls
 SysWOW64/c_10000.nls
