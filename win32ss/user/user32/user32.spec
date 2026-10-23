@@ -358,7 +358,9 @@
 @ stdcall -version=0x602+ GetPointerTouchInfo(long ptr)
 @ stdcall -version=0x602+ GetPointerTouchInfoHistory(long ptr ptr)
 @ stdcall -version=0x601+ GetPointerDevices(ptr ptr)
-@ stdcall -version=0x602+ GetPointerType(long ptr)
+@ stdcall -version=0x601+ GetPointerDevice(ptr ptr)
+@ stdcall -version=0x601+ GetPointerPenInfo(long ptr)
+@ stdcall -version=0x601+ GetPointerType(long ptr)
 @ stdcall GetPriorityClipboardFormat(ptr long) NtUserGetPriorityClipboardFormat
 @ stdcall GetProcessDefaultLayout(ptr)
 @ stdcall GetProcessDpiAwarenessInternal(long ptr)
@@ -602,7 +604,7 @@
 @ stdcall RegisterHotKey(long long long long) NtUserRegisterHotKey
 @ stdcall RegisterLogonProcess(long long)
 @ stdcall RegisterMessagePumpHook(ptr)
-@ stdcall -version=0x602+ RegisterPointerDeviceNotifications(long long)
+@ stdcall -version=0x601+ RegisterPointerDeviceNotifications(long long)
 @ stdcall -version=0x600+ RegisterPowerSettingNotification(long ptr long)
 @ stdcall -import RegisterRawInputDevices(ptr long long) NtUserRegisterRawInputDevices
 @ stdcall RegisterServicesProcess(long)
