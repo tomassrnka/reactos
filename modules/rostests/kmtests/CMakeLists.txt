@@ -82,6 +82,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_fsrtl/FsRtlFileLock.c
     ntos_fsrtl/FsRtlLegal.c
     ntos_fsrtl/FsRtlMcb.c
+    ntos_fsrtl/FsRtlNotify.c
     ntos_fsrtl/FsRtlPerStreamContext.c
     ntos_fsrtl/FsRtlTunnel.c
     ntos_io/IoCreateFile.c
