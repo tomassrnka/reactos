@@ -11,9 +11,26 @@ PRTL_UNLOAD_EVENT_TRACE
 NTAPI
 RtlGetUnloadEventTrace(VOID);
 
+VOID
+NTAPI
+RtlGetUnloadEventTraceEx(
+    _Out_ PULONG *ElementSize,
+    _Out_ PULONG *ElementCount,
+    _Out_ PVOID *EventTrace);
+
+/*
+ * The on-disk / cross-process layout of RTL_UNLOAD_EVENT_TRACE must match
+ * Windows exactly: SizeOfImage is pointer-wide (SIZE_T), not ULONG. Out-of-process
+ * debuggers / crash handlers (e.g. Crashpad) read *ElementSize from the target and
+ * reject the unloaded-module list when it is smaller than their own sizeof of this
+ * struct. On x64 that expectation is 96 bytes; a ULONG SizeOfImage made it 88 and
+ * tripped "unexpected unloaded module list element size". See CORE / T100.
+ */
 #ifndef _WIN64
 C_ASSERT(sizeof(RTL_UNLOAD_EVENT_TRACE) == 84);
 C_ASSERT(sizeof(RTL_UNLOAD_EVENT_TRACE) * RTL_UNLOAD_EVENT_TRACE_NUMBER == 0x540);
+#else
+C_ASSERT(sizeof(RTL_UNLOAD_EVENT_TRACE) == 96);
 #endif
 
 static void Test_Dump()
@@ -36,6 +53,40 @@ static void Test_Dump()
         ok(Trace->CheckSum != 0, "Got no CheckSum for %u\n", n);
         ok(!wcscmp(Trace->ImageName, L"GetUName.dLl"), "Wrong ImageName for %u: %S\n", n, Trace->ImageName);
     }
+}
+
+/*
+ * RtlGetUnloadEventTraceEx reports the element size, element count and the trace
+ * array base. The element size it reports MUST equal sizeof(RTL_UNLOAD_EVENT_TRACE)
+ * so that a cross-process consumer using the same (Windows-accurate) struct accepts
+ * the data instead of rejecting it as too small. The array base must match the plain
+ * RtlGetUnloadEventTrace() pointer.
+ */
+static void Test_Ex()
+{
+    PULONG ElementSize = NULL;
+    PULONG ElementCount = NULL;
+    PVOID EventTrace = NULL;
+
+    RtlGetUnloadEventTraceEx(&ElementSize, &ElementCount, &EventTrace);
+
+    ok(ElementSize != NULL, "ElementSize not set\n");
+    ok(ElementCount != NULL, "ElementCount not set\n");
+    ok(EventTrace != NULL, "EventTrace not set\n");
+
+    if (ElementSize)
+    {
+        ok(*ElementSize == sizeof(RTL_UNLOAD_EVENT_TRACE),
+           "ElementSize %lu != sizeof(RTL_UNLOAD_EVENT_TRACE) %lu\n",
+           *ElementSize, (ULONG)sizeof(RTL_UNLOAD_EVENT_TRACE));
+    }
+    if (ElementCount)
+    {
+        ok(*ElementCount == RTL_UNLOAD_EVENT_TRACE_NUMBER,
+           "ElementCount %lu != %u\n", *ElementCount, RTL_UNLOAD_EVENT_TRACE_NUMBER);
+    }
+    ok(EventTrace == RtlGetUnloadEventTrace(),
+       "EventTrace %p != RtlGetUnloadEventTrace() %p\n", EventTrace, RtlGetUnloadEventTrace());
 }
 
 #define TESTDLL "GetUName.dLl"
@@ -78,6 +129,7 @@ START_TEST(RtlGetUnloadEventTrace)
         Test_LoadUnload();
     }
     Test_Dump();
+    Test_Ex();
 
     FreeLibrary(Ignore);
 }
