@@ -609,6 +609,26 @@ BOOL WINAPI GetPointerInfo(UINT32 id, POINTER_INFO *info)
     return FALSE;
 }
 
+/**********************************************************************
+ * GetPointerDevice [USER32.@]
+ */
+BOOL WINAPI GetPointerDevice(HANDLE device, POINTER_DEVICE_INFO *pointer_device)
+{
+    FIXME("(%p %p): stub\n", device, pointer_device);
+    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    return FALSE;
+}
+
+/**********************************************************************
+ * GetPointerPenInfo [USER32.@]
+ */
+BOOL WINAPI GetPointerPenInfo(UINT32 id, VOID *pen_info)
+{
+    FIXME("(%d %p): stub\n", id, pen_info);
+    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    return FALSE;
+}
+
 #ifndef __REACTOS__
 LRESULT WINAPI ImeWndProcA( HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam )
 {
