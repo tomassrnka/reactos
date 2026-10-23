@@ -303,6 +303,7 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     Vcb->BootSectors = BootSectors;
     ExInitializeResourceLite(&Vcb->CoreLock);
     ExInitializeResourceLite(&Vcb->CreateGate);
+    ExInitializeResourceLite(&Vcb->NotifyPathLock);
     ExInitializeFastMutex(&Vcb->FcbListLock);
     InitializeListHead(&Vcb->FcbList);
     InitializeListHead(&Vcb->DirNotifyList);
@@ -333,6 +334,7 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         FsRtlDeleteTunnelCache(&Vcb->Tunnel);
         ExDeleteResourceLite(&Vcb->CoreLock);
         ExDeleteResourceLite(&Vcb->CreateGate);
+        ExDeleteResourceLite(&Vcb->NotifyPathLock);
         IoDeleteDevice(Vdo);
         return STATUS_UNRECOGNIZED_VOLUME;
     }

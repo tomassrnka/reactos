@@ -17,6 +17,8 @@ extern void func_NtfsDeleteRunning(void);
 extern void func_NtfsDirRename(void);
 extern void func_NtfsHardLink(void);
 extern void func_NtfsInherit(void);
+extern void func_NtfsNotifyRename(void);
+extern void func_NtfsNotifyScale(void);
 extern void func_NtfsOpenById(void);
 extern void func_NtfsPagingFile(void);
 extern void func_NtfsRelativeOpen(void);
@@ -43,6 +45,8 @@ const struct test winetest_testlist[] =
     { "NtfsDirRename", func_NtfsDirRename },
     { "NtfsHardLink", func_NtfsHardLink },
     { "NtfsInherit", func_NtfsInherit },
+    { "NtfsNotifyRename", func_NtfsNotifyRename },
+    { "NtfsNotifyScale", func_NtfsNotifyScale },
     { "NtfsOpenById", func_NtfsOpenById },
     { "NtfsPagingFile", func_NtfsPagingFile },
     { "NtfsRelativeOpen", func_NtfsRelativeOpen },

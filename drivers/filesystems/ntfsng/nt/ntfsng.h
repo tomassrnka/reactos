@@ -105,6 +105,10 @@ typedef struct _NG_VCB
     TUNNEL Tunnel;                  /* creation times of names that just went away (FsRtl tunnel cache) */
     PFILE_OBJECT LockedBy;          /* FSCTL_LOCK_VOLUME holder: no other open while set */
     ERESOURCE CreateGate;           /* creates and cleanups shared; volume lock and dismount exclusive */
+    ERESOURCE NotifyPathLock;       /* a change report to FsRtl and a rewrite of a Ccb's NotifyPath exclude each other: FsRtl
+                                       reads a watcher's name (length, then bytes) several times under its own NotifySync
+                                       and takes the length as stable.  Recursive; taken before FsRtl's mutex, and after
+                                       FcbListLock (NgRetitleCcb), never the other way round */
     BOOLEAN RawWritten;             /* the lock holder wrote the disk directly: no core device I/O, dismounted when the lock ends */
     BOOLEAN LockEnding;             /* the holder's unlock or cleanup runs: its direct writes not yet started are refused (CoreLock) */
     LONG DroppedPagingWrites;       /* page writes of files not written: after RawWritten, or dismounted */
@@ -220,9 +224,10 @@ typedef struct _NG_CCB
     BOOLEAN ManageVolumeMutate;     /* a volume open that may resize (shrink/extend) the volume: needs write access or the privilege */
     BOOLEAN CleanedUp;              /* a volume handle's cleanup ran (set under FcbListLock) */
     PVOID RetiredPaths;             /* earlier Path buffers of a renamed file (the diagnostic log may still print one) */
-    UNICODE_STRING NotifyPath;      /* the name a change-notify registration watches: FsRtl reads it without our
-                                       locks, so its buffer (room for the longest path) never moves and a
-                                       rename rewrites it in place */
+    UNICODE_STRING NotifyPath;      /* the name a change-notify registration watches: it shares the buffer of Path (no
+                                       allocation of its own; a retired Path buffer lives until close), and a rename
+                                       replaces buffer and length together under NotifyPathLock, which FsRtl's reads
+                                       (NgNotify, the registration) hold too */
 } NG_CCB, *PNG_CCB;
 
 typedef struct _NG_GLOBAL
@@ -286,6 +291,8 @@ BOOLEAN NgNodeGone(ngc_node *Node);
 VOID NgSetDeletePending(PNG_FCB Fcb, PNG_CCB Ccb);
 BOOLEAN NgValidName(PCUNICODE_STRING Name);
 VOID NgNotify(PNG_VCB Vcb, PCUNICODE_STRING Path, ULONG Filter, ULONG Action);
+VOID NgLockNotifyPath(PNG_VCB Vcb);
+VOID NgUnlockNotifyPath(PNG_VCB Vcb);
 VOID NgNotifyCcb(PNG_VCB Vcb, PNG_CCB Ccb, ULONG Filter, ULONG Action);
 NTSTATUS NgCleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 NTSTATUS NgClose(PDEVICE_OBJECT DeviceObject, PIRP Irp);
