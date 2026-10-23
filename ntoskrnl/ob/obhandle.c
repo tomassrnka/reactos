@@ -2482,6 +2482,14 @@ ObDuplicateObject(IN PEPROCESS SourceProcess,
     /* Check if we're duplicating the access */
     if (Options & DUPLICATE_SAME_ACCESS) DesiredAccess = SourceAccess;
 
+    /* MAXIMUM_ALLOWED on a user-mode duplicate yields the access the SOURCE
+     * HANDLE already holds -- never more. Resolve it to the source access so
+     * the object's security descriptor is not re-checked for extra rights
+     * (the same anti-escalation rule enforced below). Matches Windows, where a
+     * duplicated handle is capped to the source handle's access. */
+    if ((PreviousMode != KernelMode) && (DesiredAccess & MAXIMUM_ALLOWED))
+        DesiredAccess = SourceAccess;
+
     /* Get object data */
     ObjectHeader = OBJECT_TO_OBJECT_HEADER(SourceObject);
     ObjectType = ObjectHeader->Type;
@@ -2507,8 +2515,26 @@ ObDuplicateObject(IN PEPROCESS SourceProcess,
     /* Check if we're asking for new access */
     if (TargetAccess & ~SourceAccess)
     {
-        /* We are. We need the security procedure to validate this */
-        if (ObjectType->TypeInfo.SecurityProcedure == SeDefaultObjectMethod)
+        /*
+         * The duplicate requests more access than the source handle holds.
+         * Windows never lets DuplicateHandle elevate access: a duplicated handle
+         * is capped to the source handle's granted access (equal or lesser, or the
+         * source's own access via DUPLICATE_SAME_ACCESS). Re-validating against the
+         * object's security descriptor here let a user-mode caller re-open a
+         * reduced-access handle with MORE rights -- e.g. turn a read-only section
+         * handle back into a writable one. Chromium/Electron (Claude Desktop) relies
+         * on the Windows behavior for its read-only shared-memory validation: it
+         * probes a read-only section handle with DuplicateHandle(FILE_MAP_WRITE) and
+         * requires it to FAIL (otherwise PlatformSharedMemoryRegion::TakeOrFail
+         * rejects the region and aborts). Deny the elevation for user-mode callers
+         * to match Windows; keep the legacy SD re-check for kernel mode only.
+         */
+        if (PreviousMode != KernelMode)
+        {
+            /* User mode cannot gain access beyond the source handle */
+            Status = STATUS_ACCESS_DENIED;
+        }
+        else if (ObjectType->TypeInfo.SecurityProcedure == SeDefaultObjectMethod)
         {
             /* Use our built-in access state */
             PassedAccessState = &AccessState;
