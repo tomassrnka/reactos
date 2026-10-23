@@ -113,6 +113,26 @@ FsRtlNotifyBufferBelongsToIrp(IN PIRP Irp,
 }
 
 /*
+ * The system address of the buffer an IRP returns its data in, if it has one.
+ */
+static
+PVOID
+FsRtlNotifyGetIrpBuffer(IN PIRP Irp)
+{
+    if (Irp->AssociatedIrp.SystemBuffer != NULL)
+    {
+        return Irp->AssociatedIrp.SystemBuffer;
+    }
+
+    if (Irp->MdlAddress != NULL)
+    {
+        return MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority);
+    }
+
+    return NULL;
+}
+
+/*
  * @implemented
  */
 VOID
@@ -336,6 +356,7 @@ FsRtlCheckNotifyForDelete(IN PLIST_ENTRY NotifyList,
             /* The FSD identifies the deleted directory by its stream context,
              * saved as StreamID, or by the context the watcher registered with */
             if ((NotifyChange->StreamID == FsContext || NotifyChange->FsContext == FsContext) &&
+                !(NotifyChange->Flags & CLEANUP_IN_PROCESS) &&
                 !IsListEmpty(&(NotifyChange->NotifyIrps)))
             {
                 FsRtlNotifyCompleteIrpList(NotifyChange, STATUS_DELETE_PENDING);
@@ -362,8 +383,12 @@ FsRtlIsNotifyOnList(IN PLIST_ENTRY NotifyList,
              NextEntry = NextEntry->Flink)
         {
             NotifyChange = CONTAINING_RECORD(NextEntry, NOTIFY_CHANGE, NotifyList);
-            /* If the current record matches with the given context, it's the good one */
-            if (NotifyChange->FsContext == FsContext)
+            /* If the current record matches with the given context, it's the good one.
+             * A notification that was cleaned up and only waits for a cancel in flight to
+             * free it belongs to a context the FSD has released: that address may have
+             * been reused for a new handle, which must not find (and clean up) it */
+            if (NotifyChange->FsContext == FsContext &&
+                !(NotifyChange->Flags & CLEANUP_IN_PROCESS))
             {
                 return NotifyChange;
             }
@@ -375,22 +400,23 @@ FsRtlIsNotifyOnList(IN PLIST_ENTRY NotifyList,
 /*
  * @implemented
  */
-VOID
+BOOLEAN
 FsRtlNotifyCompleteIrp(IN PIRP Irp,
                        IN PNOTIFY_CHANGE NotifyChange,
                        IN ULONG DataLength,
                        IN NTSTATUS Status,
                        IN BOOLEAN SkipCompletion)
 {
-    PVOID Buffer;
+    PVOID Buffer, Target;
     PIO_STACK_LOCATION Stack;
 
     PAGED_CODE();
 
-    /* Check if we need to complete */
+    /* Check if we need to complete: an IRP whose cancel routine is already gone is being
+     * cancelled, and that cancel completes it. Tell the caller it did not take it. */
     if (!FsRtlNotifySetCancelRoutine(Irp, NotifyChange) && SkipCompletion)
     {
-        return;
+        return FALSE;
     }
 
     /* No succes => no data to return just complete */
@@ -419,8 +445,27 @@ FsRtlNotifyCompleteIrp(IN PIRP Irp,
     /* Ensture there's a buffer where to find data */
     if (!NotifyChange->AllocatedBuffer)
     {
+        /* The data sit in the buffer of the IRP that was queued first. If that IRP is
+         * being cancelled (it is off the list, its cancel waits for us) they are not in
+         * this IRP's buffer: carry them over, the change is not lost with the cancel */
+        Buffer = NotifyChange->Buffer;
+        if (Buffer != NULL && !FsRtlNotifyBufferBelongsToIrp(Irp, Buffer))
+        {
+            Target = FsRtlNotifyGetIrpBuffer(Irp);
+            if (Target == NULL)
+            {
+                /* Nowhere to put them: the watcher re-enumerates */
+                NotifyChange->Flags &= ~NOTIFY_IMMEDIATELY;
+                NotifyChange->Buffer = NULL;
+                NotifyChange->ThisBufferLength = 0;
+                Status = STATUS_NOTIFY_ENUM_DIR;
+                goto Completion;
+            }
+            RtlCopyMemory(Target, Buffer, DataLength);
+        }
         Irp->IoStatus.Information = DataLength;
         NotifyChange->Buffer = NULL;
+        NotifyChange->ThisBufferLength = 0;
         goto Completion;
     }
 
@@ -483,6 +528,7 @@ Completion:
     IoMarkIrpPending(Irp);
     Irp->IoStatus.Status = Status;
     IoCompleteRequest(Irp, IO_DISK_INCREMENT);
+    return TRUE;
 }
 
 /*
@@ -493,10 +539,12 @@ FsRtlNotifyCompleteIrpList(IN PNOTIFY_CHANGE NotifyChange,
                            IN NTSTATUS Status)
 {
     PIRP Irp;
-    ULONG DataLength;
+    ULONG DataLength, LastEntry;
     PLIST_ENTRY NextEntry;
+    BOOLEAN Completed = FALSE;
 
     DataLength = NotifyChange->DataLength;
+    LastEntry = NotifyChange->LastEntry;
 
     /* The cleanup and delete marks stay: they tell later requests, and reports, that
      * this notification is finished, whatever the completions below did to it */
@@ -514,10 +562,26 @@ FsRtlNotifyCompleteIrpList(IN PNOTIFY_CHANGE NotifyChange,
         InitializeListHead(NextEntry);
         Irp = CONTAINING_RECORD(NextEntry, IRP, Tail.Overlay.ListEntry);
         /* We complete it */
-        FsRtlNotifyCompleteIrp(Irp, NotifyChange, DataLength, Status, TRUE);
+        if (!FsRtlNotifyCompleteIrp(Irp, NotifyChange, DataLength, Status, TRUE))
+        {
+            /* Its cancel is in flight and completes it, with nothing to return. That
+             * must not swallow a success: try the next queued IRP with the same data */
+            continue;
+        }
+        Completed = TRUE;
         /* If we're notifying success, just notify first one */
         if (Status == STATUS_SUCCESS)
             break;
+    }
+
+    /* Nobody took the change (every queued IRP is being cancelled): it stays pending
+     * for the next request. The buffer it sits in is the cancelled IRP's, which the
+     * cancel routine hands on, so it must not be forgotten here. */
+    if (Status == STATUS_SUCCESS && !Completed)
+    {
+        NotifyChange->DataLength = DataLength;
+        NotifyChange->LastEntry = LastEntry;
+        return;
     }
 
     /* A buffer borrowed from a completed IRP is gone with it */

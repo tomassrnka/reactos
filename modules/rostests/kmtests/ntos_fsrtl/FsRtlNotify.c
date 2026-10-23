@@ -479,6 +479,8 @@ TestCancelAgainstCleanup(VOID)
     FoLate = AllocateFileObject(&KeyA);
     if (skip(Fo && FoLate, "No file objects\n"))
         return;
+    /* Once the handle is cleaned up the I/O manager marks its file object so */
+    if (FoLate) FoLate->Flags |= FO_CLEANUP_COMPLETE;
     if (skip(BuildNotifyIrp(&A, Fo) && BuildNotifyIrp(&B, Fo) && BuildNotifyIrp(&C, FoLate), "No IRPs\n"))
         return;
 
@@ -560,6 +562,250 @@ TestCancelAgainstCleanup(VOID)
     ExFreePoolWithTag(FoLate, TAG_NTFY);
 }
 
+/* The same window, driven by helpers: the cancel of an IRP has taken its cancel routine
+ * and waits for the notify mutex, which the test holds. */
+
+typedef struct _CANCEL_JOB
+{
+    CANCEL_WORKER Worker;
+    PVOID Thread;
+    BOOLEAN Started;
+} CANCEL_JOB, *PCANCEL_JOB;
+
+static
+BOOLEAN
+StartCancel(PCANCEL_JOB Job, PIRP Irp)
+{
+    OBJECT_ATTRIBUTES Attributes;
+    HANDLE Handle;
+    LARGE_INTEGER Delay;
+    NTSTATUS Status;
+    ULONG i;
+
+    RtlZeroMemory(Job, sizeof(*Job));
+    Job->Worker.Irp = Irp;
+    KeInitializeEvent(&Job->Worker.Done, NotificationEvent, FALSE);
+    InitializeObjectAttributes(&Attributes, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+    Status = PsCreateSystemThread(&Handle, THREAD_ALL_ACCESS, &Attributes, NULL, NULL, CancelWorker, &Job->Worker);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+    Status = ObReferenceObjectByHandle(Handle, SYNCHRONIZE, *PsThreadType, KernelMode, &Job->Thread, NULL);
+    ZwClose(Handle);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+
+    Delay.QuadPart = -10 * 1000 * 10; /* 10 ms */
+    for (i = 0; i < 1000 && !(*(volatile BOOLEAN *)&Irp->Cancel && *(PVOID volatile *)&Irp->CancelRoutine == NULL); i++)
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+    ok(Irp->Cancel && Irp->CancelRoutine == NULL, "the cancel did not start\n");
+    Job->Started = TRUE;
+    return TRUE;
+}
+
+static
+BOOLEAN
+FinishCancel(PCANCEL_JOB Job)
+{
+    LARGE_INTEGER Timeout;
+    NTSTATUS Status;
+
+    if (!Job->Started)
+        return FALSE;
+    Timeout.QuadPart = -10 * 1000 * 1000 * 20; /* 20 s */
+    Status = KeWaitForSingleObject(&Job->Worker.Done, Executive, KernelMode, FALSE, &Timeout);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (Status != STATUS_SUCCESS)
+        return FALSE;
+    ObDereferenceObject(Job->Thread);
+    Job->Started = FALSE;
+    return TRUE;
+}
+
+static
+ULONG
+OneEntryLength(PCWSTR Name)
+{
+    return FIELD_OFFSET(FILE_NOTIFY_INFORMATION, FileName) + WLen(Name) * sizeof(WCHAR);
+}
+
+/* A success that finds the first queued IRP being cancelled must reach the next one
+ * (or, with none, wait for the next request): the change may not die with the cancel. */
+static
+VOID
+TestSuccessSkipsCancelInFlight(VOID)
+{
+    PFILE_OBJECT Fo;
+    TEST_IRP A, B, C;
+    CANCEL_JOB JobA, JobB;
+    BOOLEAN Held;
+
+    RtlZeroMemory(&A, sizeof(A));
+    RtlZeroMemory(&B, sizeof(B));
+    RtlZeroMemory(&C, sizeof(C));
+    RtlZeroMemory(&JobA, sizeof(JobA));
+    RtlZeroMemory(&JobB, sizeof(JobB));
+    Fo = AllocateFileObject(&KeyA);
+    if (skip(Fo != NULL, "No file object\n"))
+        return;
+
+    /* 1: A is being cancelled, B queued behind it. The report completes B, now. */
+    if (!skip(BuildNotifyIrp(&A, Fo) && BuildNotifyIrp(&B, Fo), "No IRPs\n"))
+    {
+        Watch(&A, &NotifyList, &DirName, TRUE);
+        Watch(&B, &NotifyList, &DirName, TRUE);
+        HoldNotifyMutex(Sync);
+        Held = TRUE;
+        if (!skip(StartCancel(&JobA, A.Irp), "No worker thread\n"))
+        {
+            ReportWide(&NotifyList, L"\\Dir\\one.txt", 5, NULL, FILE_ACTION_ADDED);
+            ok_eq_long(A.Calls, 0L);
+            ok_eq_long(B.Calls, 1L);
+            ok_eq_hex(B.Status, STATUS_SUCCESS);
+            ok(B.Information == OneEntryLength(L"one.txt"), "returned %Iu\n", B.Information);
+            ok(EntryIs(&B, 0, FILE_ACTION_ADDED, L"one.txt", 0), "the change was lost with the cancelled IRP\n");
+            ok(CanaryIntact(&B), "wrote past the returned length\n");
+            ReleaseNotifyMutex(Sync);
+            Held = FALSE;
+            if (FinishCancel(&JobA))
+            {
+                ok_eq_long(A.Calls, 1L);
+                ok_eq_hex(A.Status, STATUS_CANCELLED);
+                ok_eq_long(B.Calls, 1L);
+            }
+        }
+        if (Held) ReleaseNotifyMutex(Sync);
+    }
+    FreeNotifyIrp(&A);
+    FreeNotifyIrp(&B);
+    FsRtlNotifyCleanup(Sync, &NotifyList, &KeyA);
+    ok(IsListEmpty(&NotifyList), "watcher left on the list\n");
+
+    /* 2: A is the only IRP and is being cancelled. The change waits for the next request. */
+    if (!skip(BuildNotifyIrp(&A, Fo) && BuildNotifyIrp(&C, Fo), "No IRPs\n"))
+    {
+        Watch(&A, &NotifyList, &DirName, TRUE);
+        HoldNotifyMutex(Sync);
+        Held = TRUE;
+        if (!skip(StartCancel(&JobA, A.Irp), "No worker thread\n"))
+        {
+            ReportWide(&NotifyList, L"\\Dir\\two.txt", 5, NULL, FILE_ACTION_ADDED);
+            ReleaseNotifyMutex(Sync);
+            Held = FALSE;
+            if (FinishCancel(&JobA))
+            {
+                ok_eq_long(A.Calls, 1L);
+                ok_eq_hex(A.Status, STATUS_CANCELLED);
+                Watch(&C, &NotifyList, &DirName, TRUE);
+                ok_eq_long(C.Calls, 1L);
+                ok_eq_hex(C.Status, STATUS_SUCCESS);
+                ok(C.Information == OneEntryLength(L"two.txt"), "returned %Iu\n", C.Information);
+                ok(EntryIs(&C, 0, FILE_ACTION_ADDED, L"two.txt", 0), "the change was lost with the cancelled IRP\n");
+            }
+        }
+        if (Held) ReleaseNotifyMutex(Sync);
+    }
+    FreeNotifyIrp(&A);
+    FreeNotifyIrp(&C);
+    FsRtlNotifyCleanup(Sync, &NotifyList, &KeyA);
+    ok(IsListEmpty(&NotifyList), "watcher left on the list\n");
+
+    /* 3: both queued IRPs are being cancelled. Nobody can take the change; it is kept. */
+    if (!skip(BuildNotifyIrp(&A, Fo) && BuildNotifyIrp(&B, Fo) && BuildNotifyIrp(&C, Fo), "No IRPs\n"))
+    {
+        Watch(&A, &NotifyList, &DirName, TRUE);
+        Watch(&B, &NotifyList, &DirName, TRUE);
+        HoldNotifyMutex(Sync);
+        Held = TRUE;
+        if (!skip(StartCancel(&JobA, A.Irp) && StartCancel(&JobB, B.Irp), "No worker threads\n"))
+        {
+            ReportWide(&NotifyList, L"\\Dir\\three.txt", 5, NULL, FILE_ACTION_ADDED);
+            ok_eq_long(A.Calls, 0L);
+            ok_eq_long(B.Calls, 0L);
+            ReleaseNotifyMutex(Sync);
+            Held = FALSE;
+            if (FinishCancel(&JobA) && FinishCancel(&JobB))
+            {
+                ok_eq_long(A.Calls, 1L);
+                ok_eq_long(B.Calls, 1L);
+                ok_eq_hex(A.Status, STATUS_CANCELLED);
+                ok_eq_hex(B.Status, STATUS_CANCELLED);
+                Watch(&C, &NotifyList, &DirName, TRUE);
+                ok_eq_long(C.Calls, 1L);
+                ok_eq_hex(C.Status, STATUS_SUCCESS);
+                ok(C.Information == OneEntryLength(L"three.txt"), "returned %Iu\n", C.Information);
+                ok(EntryIs(&C, 0, FILE_ACTION_ADDED, L"three.txt", 0), "the change was lost with the cancelled IRPs\n");
+            }
+        }
+        if (Held) ReleaseNotifyMutex(Sync);
+    }
+    FreeNotifyIrp(&A);
+    FreeNotifyIrp(&B);
+    FreeNotifyIrp(&C);
+    FsRtlNotifyCleanup(Sync, &NotifyList, &KeyA);
+    ok(IsListEmpty(&NotifyList), "watcher left on the list\n");
+
+    ExFreePoolWithTag(Fo, TAG_NTFY);
+}
+
+/* The handle was cleaned up while a cancel still holds the watcher. The file system has
+ * freed the context; a new handle gets the same address. It is a new watcher: it must
+ * not find the dying one, not be completed as cleaned up, not clean it up a second time. */
+static
+VOID
+TestContextReuseDuringCancel(VOID)
+{
+    PFILE_OBJECT Fo, FoNew;
+    TEST_IRP A, D;
+    CANCEL_JOB Job;
+    BOOLEAN Held;
+
+    RtlZeroMemory(&A, sizeof(A));
+    RtlZeroMemory(&D, sizeof(D));
+    RtlZeroMemory(&Job, sizeof(Job));
+    Fo = AllocateFileObject(&KeyA);
+    FoNew = AllocateFileObject(&KeyA);
+    if (skip(Fo && FoNew, "No file objects\n"))
+        return;
+
+    if (!skip(BuildNotifyIrp(&A, Fo) && BuildNotifyIrp(&D, FoNew), "No IRPs\n"))
+    {
+        Watch(&A, &NotifyList, &DirName, TRUE);
+        HoldNotifyMutex(Sync);
+        Held = TRUE;
+        if (!skip(StartCancel(&Job, A.Irp), "No worker thread\n"))
+        {
+            FsRtlNotifyCleanup(Sync, &NotifyList, &KeyA);
+            ok_eq_long(A.Calls, 0L);
+
+            Watch(&D, &NotifyList, &DirName, TRUE);
+            ok(D.Calls == 0, "the new handle's request was completed (0x%lx)\n", D.Status);
+            ok(D.Irp->CancelRoutine != NULL, "the new handle's request was not queued\n");
+            ReportWide(&NotifyList, L"\\Dir\\new.txt", 5, NULL, FILE_ACTION_ADDED);
+            ok_eq_long(D.Calls, 1L);
+            ok_eq_hex(D.Status, STATUS_SUCCESS);
+            ok(EntryIs(&D, 0, FILE_ACTION_ADDED, L"new.txt", 0), "the new handle's change is wrong\n");
+
+            /* The new handle's cleanup finds the new watcher, not the dying one */
+            FsRtlNotifyCleanup(Sync, &NotifyList, &KeyA);
+            ReleaseNotifyMutex(Sync);
+            Held = FALSE;
+            if (FinishCancel(&Job))
+            {
+                ok_eq_long(A.Calls, 1L);
+                ok_eq_hex(A.Status, STATUS_CANCELLED);
+            }
+        }
+        if (Held) ReleaseNotifyMutex(Sync);
+    }
+    FreeNotifyIrp(&A);
+    FreeNotifyIrp(&D);
+    ok(IsListEmpty(&NotifyList), "watcher left on the list\n");
+    if (!IsListEmpty(&NotifyList))
+        InitializeListHead(&NotifyList);
+    ExFreePoolWithTag(Fo, TAG_NTFY);
+    ExFreePoolWithTag(FoNew, TAG_NTFY);
+}
+
 START_TEST(FsRtlNotify)
 {
     DirName.Buffer = (PCHAR)L"\\Dir";
@@ -587,6 +833,8 @@ START_TEST(FsRtlNotify)
     TestOemReports();
     TestCancelKeepsPendingData();
     TestCancelAgainstCleanup();
+    TestSuccessSkipsCancelInFlight();
+    TestContextReuseDuringCancel();
     KeLeaveCriticalRegion();
 
     FsRtlNotifyUninitializeSync(&Sync);
