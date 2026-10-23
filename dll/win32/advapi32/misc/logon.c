@@ -623,6 +623,42 @@ MergeProcessSecurity(
 }
 
 /*
+ * ntdll exports RtlAddMandatoryAce only from NT 6 on, so an NT 5 export
+ * version cannot import it. The label ACE has the layout of an access ACE
+ * with the policy bits as its mask; build it directly there.
+ */
+static NTSTATUS
+AddProcessLabelAce(
+    PACL Acl,
+    PSID LabelSid,
+    ULONG Policy)
+{
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA)
+    return RtlAddMandatoryAce(Acl, ACL_REVISION, 0, LabelSid,
+                              SYSTEM_MANDATORY_LABEL_ACE_TYPE, Policy);
+#else
+    ULONG AceBuffer[(sizeof(ACCESS_ALLOWED_ACE) + SECURITY_MAX_SID_SIZE + sizeof(ULONG) - 1) / sizeof(ULONG)];
+    PACCESS_ALLOWED_ACE Ace = (PVOID)AceBuffer;
+    DWORD SidLength = GetLengthSid(LabelSid);
+
+    if (Policy & ~SYSTEM_MANDATORY_LABEL_VALID_MASK)
+        return STATUS_INVALID_PARAMETER;
+    if (SidLength > SECURITY_MAX_SID_SIZE)
+        return STATUS_INVALID_PARAMETER;
+
+    Ace->Header.AceType = SYSTEM_MANDATORY_LABEL_ACE_TYPE;
+    Ace->Header.AceFlags = 0;
+    Ace->Header.AceSize = (WORD)(FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) + SidLength);
+    Ace->Mask = Policy;
+    CopySid(SidLength, (PSID)&Ace->SidStart, LabelSid);
+
+    if (!AddAce(Acl, ACL_REVISION, MAXDWORD, Ace, Ace->Header.AceSize))
+        return STATUS_INVALID_PARAMETER;
+    return STATUS_SUCCESS;
+#endif
+}
+
+/*
  * The NT 5 creation path installs the primary token after creating both
  * objects. Complete their NT 6 labels before releasing the suspended thread.
  * Native ProcessAccessToken assignment alone does not relabel objects.
@@ -674,8 +710,7 @@ SetProcessTokenLabel(
     {
         Sacl = (PACL)AclBuffer;
         InitializeAcl(Sacl, sizeof(AclBuffer), ACL_REVISION);
-        Status = RtlAddMandatoryAce(Sacl, ACL_REVISION, 0, Label->Label.Sid,
-                                    SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+        Status = AddProcessLabelAce(Sacl, Label->Label.Sid,
                                     SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | SYSTEM_MANDATORY_LABEL_NO_READ_UP);
         if (!NT_SUCCESS(Status))
         {
