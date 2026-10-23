@@ -2369,16 +2369,20 @@ MiIsProtectWithinMaximum(ULONG Protect, ULONG MaxProtect)
  * characteristics (see SectionCharacteristicsToProtect) and Segment->WriteCopy
  * is set for every non-shared image segment.
  *
- * The ceiling must still allow the loader's legitimate fixups: the ntdll loader
- * reprotects read-only / executable image pages to PAGE_READWRITE to snap the
- * IAT and apply relocations, then restores the original protection. Those writes
- * are copy-on-write - they create a private copy and never reach the file or any
- * other view - so adding write to a copy-on-write segment is always safe and is
- * therefore permitted even when the section header itself is read-only. What is
- * rejected is gaining *execute* on a segment the image never marked executable
- * (the remaining W^X / privilege-escalation hole: turning a data page into RWX
- * shellcode), and writing through a genuinely shared (non-copy-on-write)
- * read-only image segment (which would be visible to other mappers / the file).
+ * A copy-on-write segment can be reprotected to any protection (including
+ * execute and write+execute, as on Windows): a write only ever produces a
+ * private copy of the page that never reaches the file or any other view, and
+ * a process can already obtain private executable memory with VirtualAlloc, so
+ * refusing execute on its own private image pages protects nothing. Real
+ * programs depend on it: the Inno Setup loader (and many packers and
+ * self-protecting executables) VirtualProtect()s every region of their own
+ * image to PAGE_EXECUTE_READWRITE, touches each page to force the private copy
+ * and restores the old protection; failing that with ERROR_INVALID_PARAMETER
+ * made the touch fault inside the loader.
+ *
+ * What is still rejected is the real escalation: a genuinely shared
+ * (non-copy-on-write) image segment may not be given more access than its
+ * section header grants, as that would be visible to other mappers / the file.
  */
 static
 BOOLEAN
@@ -2388,21 +2392,8 @@ MiIsImageProtectWithinMaximum(ULONG Protect, PMM_SECTION_SEGMENT Segment)
 
     if (Segment->WriteCopy)
     {
-        /*
-         * Copy-on-write segment: a write only ever produces a private page, so
-         * the view may be made writable regardless of the section header. Widen
-         * the ceiling to allow write, without granting execute where the header
-         * did not already allow it.
-         */
-        if (MaxProtect & (PAGE_EXECUTE | PAGE_EXECUTE_READ |
-                          PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))
-        {
-            MaxProtect = PAGE_EXECUTE_READWRITE;
-        }
-        else
-        {
-            MaxProtect = PAGE_READWRITE;
-        }
+        /* Copy-on-write segment: every access level only ever yields a private page */
+        MaxProtect = PAGE_EXECUTE_READWRITE;
     }
 
     return MiIsProtectWithinMaximum(Protect, MaxProtect);
