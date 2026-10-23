@@ -166,6 +166,79 @@ PVOID GetContext(TDIEntityID ID)
     return Context;
 }
 
+/* The INFO_TYPE_ADDRESS_OBJECT and INFO_TYPE_CONNECTION query/set paths treat
+ * the resolved entity context as a PADDRESS_FILE and dereference it. Only the
+ * transport entities register an address-file context: TiCreateFileObject()
+ * (fileobjs.c) publishes CO_TL_ENTITY for TCP, CL_TL_ENTITY for UDP/RawIP and
+ * ER_ENTITY for ICMP, each with an ADDRESS_FILE as its context; interface
+ * entities (IF, AT, CL_NL, CO_NL in iinfo.c) publish a PIP_INTERFACE instead. toi_entity
+ * is chosen by the caller - unprivileged since the non-admin socket change - so
+ * resolving an interface (or network-layer) entity here would make
+ * Set/GetAddressFileInfo read and write through a mis-typed pointer (kernel
+ * pool corruption). Reject any entity that is not an address-file transport
+ * entity. Additionally, take a live reference on the address file while the
+ * entity-list lock is held, so a concurrent close cannot free it under the
+ * caller; GetContext() alone returns an unreferenced pointer. The caller must
+ * DereferenceObject() the returned object. Returns NULL for a wrong-typed,
+ * absent, or already-closing entity. */
+static
+PADDRESS_FILE
+ReferenceAddressFileByEntity(TDIEntityID ID)
+{
+    UINT i;
+    KIRQL OldIrql;
+    PADDRESS_FILE AddrFile;
+    LONG OldRefCount;
+
+    switch (ID.tei_entity)
+    {
+        case CO_TL_ENTITY:
+        case CL_TL_ENTITY:
+        case ER_ENTITY:
+            break;
+        default:
+            /* Not an address-file entity (would be a PIP_INTERFACE). */
+            return NULL;
+    }
+
+    TcpipAcquireSpinLock(&EntityListLock, &OldIrql);
+
+    for (i = 0; i < EntityCount; i++)
+    {
+        if (EntityList[i].tei_entity == ID.tei_entity &&
+            EntityList[i].tei_instance == ID.tei_instance)
+            break;
+    }
+
+    if (i == EntityCount)
+    {
+        TcpipReleaseSpinLock(&EntityListLock, OldIrql);
+        return NULL;
+    }
+
+    AddrFile = EntityList[i].context;
+
+    /* Reference it unless its last reference has already gone - AddrFileFree()
+     * is then about to RemoveEntityByContext() (under EntityListLock) and free
+     * it. Holding EntityListLock keeps both the entry and the object alive
+     * until that removal, so the RefCount read below is safe. */
+    do
+    {
+        OldRefCount = *((volatile LONG *)&AddrFile->RefCount);
+        if (OldRefCount == 0)
+        {
+            TcpipReleaseSpinLock(&EntityListLock, OldIrql);
+            return NULL;
+        }
+    } while (InterlockedCompareExchange(&AddrFile->RefCount,
+                                        OldRefCount + 1,
+                                        OldRefCount) != OldRefCount);
+
+    TcpipReleaseSpinLock(&EntityListLock, OldIrql);
+
+    return AddrFile;
+}
+
 TDI_STATUS InfoCopyOut( PCHAR DataOut, UINT SizeOut,
 			PNDIS_BUFFER ClientBuf, PUINT ClientBufSize ) {
     UINT RememberedCBSize = *ClientBufSize;
@@ -337,10 +410,16 @@ TDI_STATUS InfoTdiQueryInformationEx(
         case INFO_CLASS_PROTOCOL:
            if (ID->toi_type == INFO_TYPE_ADDRESS_OBJECT)
            {
-               if ((EntityListContext = GetContext(ID->toi_entity)))
-                    return GetAddressFileInfo(ID, EntityListContext, Buffer, BufferSize);
-               else
-                    return TDI_INVALID_PARAMETER;
+               PADDRESS_FILE AddressFile;
+               TDI_STATUS AddrStatus;
+
+               AddressFile = ReferenceAddressFileByEntity(ID->toi_entity);
+               if (AddressFile == NULL)
+                   return TDI_INVALID_PARAMETER;
+
+               AddrStatus = GetAddressFileInfo(ID, AddressFile, Buffer, BufferSize);
+               DereferenceObject(AddressFile);
+               return AddrStatus;
            }
 
            switch (ID->toi_id)
@@ -477,17 +556,29 @@ TDI_STATUS InfoTdiSetInformationEx
             {
                 case INFO_TYPE_ADDRESS_OBJECT:
                 {
-                    if ((EntityListContext = GetContext(ID->toi_entity)))
-                        return SetAddressFileInfo(ID, EntityListContext, Buffer, BufferSize);
-                    else
+                    PADDRESS_FILE AddressFile;
+                    TDI_STATUS AddrStatus;
+
+                    AddressFile = ReferenceAddressFileByEntity(ID->toi_entity);
+                    if (AddressFile == NULL)
                         return TDI_INVALID_PARAMETER;
+
+                    AddrStatus = SetAddressFileInfo(ID, AddressFile, Buffer, BufferSize);
+                    DereferenceObject(AddressFile);
+                    return AddrStatus;
                 }
                 case INFO_TYPE_CONNECTION:
                 {
-                    PADDRESS_FILE AddressFile = GetContext(ID->toi_entity);
+                    PADDRESS_FILE AddressFile;
+                    TDI_STATUS AddrStatus;
+
+                    AddressFile = ReferenceAddressFileByEntity(ID->toi_entity);
                     if (AddressFile == NULL)
                         return TDI_INVALID_PARAMETER;
-                    return SetConnectionInfo(ID, AddressFile->Connection, Buffer, BufferSize);
+
+                    AddrStatus = SetConnectionInfo(ID, AddressFile->Connection, Buffer, BufferSize);
+                    DereferenceObject(AddressFile);
+                    return AddrStatus;
                 }
                 case INFO_TYPE_PROVIDER:
                 {
