@@ -1,0 +1,31 @@
+#include <windef.h>
+#include <winuser.h>
+#include <winver.h>
+
+/* The version resource of Firefox 158.0.1 (firefox.exe), which the database entry for Firefox 116 and later matches */
+1 VERSIONINFO
+FILEVERSION 158,0,1,0
+PRODUCTVERSION 158,0,1,0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "Mozilla Corporation"
+            VALUE "FileDescription", "Firefox"
+            VALUE "FileVersion", "158.0.1"
+            VALUE "InternalName", "firefox"
+            VALUE "OriginalFilename", "firefox.exe"
+            VALUE "ProductName", "Firefox"
+            VALUE "ProductVersion", "158.0.1"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END
+
+1 24 "sysmain_probe.manifest"
