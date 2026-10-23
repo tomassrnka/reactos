@@ -3212,6 +3212,37 @@ NtReadVirtualMemory(IN HANDLE ProcessHandle,
                                          PreviousMode,
                                          &BytesRead);
 
+            /* Windows ReadProcessMemory semantics: when part of the range is
+             * inaccessible, copy the valid prefix and report STATUS_PARTIAL_COPY
+             * with the number of bytes transferred, instead of failing the whole
+             * transfer with zero bytes. */
+            if ((Status == STATUS_ACCESS_VIOLATION) &&
+                (BytesRead == 0) &&
+                (NumberOfBytesToRead > 1) &&
+                (Process != PsGetCurrentProcess()))
+            {
+                SIZE_T Off = 0, Chunk, Got;
+                NTSTATUS SubStatus;
+                while (Off < NumberOfBytesToRead)
+                {
+                    Chunk = PAGE_SIZE - (((ULONG_PTR)BaseAddress + Off) & (PAGE_SIZE - 1));
+                    if (Chunk > (NumberOfBytesToRead - Off)) Chunk = NumberOfBytesToRead - Off;
+                    Got = 0;
+                    SubStatus = MmCopyVirtualMemory(Process,
+                                                    (PVOID)((ULONG_PTR)BaseAddress + Off),
+                                                    PsGetCurrentProcess(),
+                                                    (PVOID)((ULONG_PTR)Buffer + Off),
+                                                    Chunk,
+                                                    PreviousMode,
+                                                    &Got);
+                    if (!NT_SUCCESS(SubStatus)) break;
+                    Off += Got;
+                    if (Got < Chunk) break;
+                }
+                BytesRead = Off;
+                Status = (Off > 0) ? STATUS_PARTIAL_COPY : STATUS_ACCESS_VIOLATION;
+            }
+
             //
             // Dereference the process
             //
