@@ -470,7 +470,11 @@ MiAllocatePoolPages(IN POOL_TYPE PoolType,
         // Paged pool is committed memory; it may use the kernel reserve. A
         // range taken from the S-LIST above kept its charge.
         //
-        if (!MiChargeCommit(SizeInPages, MiCommitKernel)) return NULL;
+        if (!MiChargeCommit(SizeInPages, MiCommitKernel))
+        {
+            MiReportKernelCommitFailure(SizeInPages, "paged pool");
+            return NULL;
+        }
 
         //
         // Lock the paged pool mutex
@@ -851,7 +855,11 @@ MiAllocatePoolPages(IN POOL_TYPE PoolType,
     // Pages taken to expand nonpaged pool stay in the pool for good: charge
     // them now, they are never given back (they may use the kernel reserve)
     //
-    if (!MiChargeCommit(SizeInPages, MiCommitKernel)) return NULL;
+    if (!MiChargeCommit(SizeInPages, MiCommitKernel))
+    {
+        MiReportKernelCommitFailure(SizeInPages, "nonpaged pool expansion");
+        return NULL;
+    }
 
     //
     // Allocate some system PTEs

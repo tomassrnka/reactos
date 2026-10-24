@@ -540,6 +540,17 @@ NTAPI
 MiWaitForPagingFileGrowth(
     _In_ SIZE_T Shortfall);
 
+VOID
+NTAPI
+MiRequestPagingFileGrowth(
+    _In_ SIZE_T Shortfall);
+
+VOID
+NTAPI
+MiReportKernelCommitFailure(
+    _In_ SIZE_T Pages,
+    _In_ PCSTR Site);
+
 typedef VOID
 (*PMM_ALTER_REGION_FUNC)(
     PMMSUPPORT AddressSpace,
