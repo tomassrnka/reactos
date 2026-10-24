@@ -633,8 +633,29 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         Cleanup->ThreadProcess = H(3);
         Status = Wow64CreateThread(&Cleanup->Thread, THREAD_ALL_ACCESS, OA(2), H(3), &Id, P(5), P(6), TRUE);
         if (NT_SUCCESS(Status))
+        {
+            /* The thread is created with THREAD_ALL_ACCESS so this routine can set its
+             * start address, publish TEB32 and resume it. The guest handle, however, must
+             * carry exactly the access the guest's own NtCreateThread would have been
+             * granted: its DesiredAccess capped to what the thread object can grant.
+             * A guest THREAD_ALL_ACCESS (0x1fffff) includes undefined specific bits
+             * (0xf000) that the created handle never received -- its granted access is
+             * 0x1f0fff through the thread generic mapping. Requesting those extra bits in
+             * the duplicate is a self-inflicted access elevation that ObDuplicateObject
+             * correctly denies for user mode (STATUS_ACCESS_DENIED), which previously
+             * broke every WoW64 thread creation (e.g. Chromium's broker init). Clamp the
+             * request to the source handle's granted access so the duplicate reproduces
+             * native NtCreateThread semantics. MAXIMUM_ALLOWED is passed through unchanged
+             * (ObDuplicateObject resolves it to the source handle's access). */
+            ACCESS_MASK Access = a[1];
+            OBJECT_BASIC_INFORMATION Obi;
+            if (!(Access & MAXIMUM_ALLOWED) &&
+                NT_SUCCESS(NtQueryObject(Cleanup->Thread, ObjectBasicInformation,
+                                         &Obi, sizeof(Obi), NULL)))
+                Access &= Obi.GrantedAccess;
             Status = NtDuplicateObject(NtCurrentProcess(), Cleanup->Thread, NtCurrentProcess(),
-                                        &Cleanup->Handle, a[1], a[2] ? Attributes.Attributes & OBJ_INHERIT : 0, 0);
+                                        &Cleanup->Handle, Access, a[2] ? Attributes.Attributes & OBJ_INHERIT : 0, 0);
+        }
         if (NT_SUCCESS(Status))
         {
             U(0) = HandleToUlong(Cleanup->Handle);
