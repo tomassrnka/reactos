@@ -210,6 +210,13 @@ HRESULT WINAPI CorBindToRuntimeHost(LPCWSTR pwszVersion, LPCWSTR pwszBuildFlavor
 
     *ppv = NULL;
 
+    {
+        void *fp = mscoree_real_export("CorBindToRuntimeHost");
+        if (fp)
+            return ((HRESULT (WINAPI *)(LPCWSTR, LPCWSTR, LPCWSTR, VOID *, DWORD, REFCLSID, REFIID, LPVOID *))fp)(
+                pwszVersion, pwszBuildFlavor, pwszHostConfigFile, pReserved, startupFlags, rclsid, riid, ppv);
+    }
+
     ret = get_runtime_info(NULL, pwszVersion, pwszHostConfigFile, NULL, startupFlags, 0, TRUE, &info);
 
     if (SUCCEEDED(ret))
@@ -311,7 +318,14 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 
 __int32 WINAPI _CorExeMain2(PBYTE ptrMemory, DWORD cntMemory, LPWSTR imageName, LPWSTR loaderName, LPWSTR cmdLine)
 {
+    void *fp;
+
     TRACE("(%p, %lu, %s, %s, %s)\n", ptrMemory, cntMemory, debugstr_w(imageName), debugstr_w(loaderName), debugstr_w(cmdLine));
+
+    fp = mscoree_real_export("_CorExeMain2");
+    if (fp)
+        return ((__int32 (WINAPI *)(PBYTE, DWORD, LPWSTR, LPWSTR, LPWSTR))fp)(ptrMemory, cntMemory, imageName, loaderName, cmdLine);
+
     FIXME("Directly running .NET applications not supported.\n");
     return -1;
 }
@@ -411,6 +425,13 @@ HRESULT WINAPI GetRequestedRuntimeInfo(LPCWSTR pExe, LPCWSTR pwszVersion, LPCWST
     if (!dwDirectoryLength) dwDirectoryLength = &length_dummy;
 
     if (!dwlength) dwlength = &length_dummy;
+
+    {
+        void *fp = mscoree_real_export("GetRequestedRuntimeInfo");
+        if (fp)
+            return ((HRESULT (WINAPI *)(LPCWSTR, LPCWSTR, LPCWSTR, DWORD, DWORD, LPWSTR, DWORD, DWORD *, LPWSTR, DWORD, DWORD *))fp)(
+                pExe, pwszVersion, pConfigurationFile, startupFlags, runtimeInfoFlags, pDirectory, dwDirectory, dwDirectoryLength, pVersion, cchBuffer, dwlength);
+    }
 
     ret = get_runtime_info(pExe, pwszVersion, pConfigurationFile, NULL, startupFlags, runtimeInfoFlags, TRUE, &info);
 
@@ -558,6 +579,13 @@ HRESULT WINAPI CorBindToRuntimeEx(LPWSTR szVersion, LPWSTR szBuildFlavor, DWORD 
 
     *ppv = NULL;
 
+    {
+        void *fp = mscoree_real_export("CorBindToRuntimeEx");
+        if (fp)
+            return ((HRESULT (WINAPI *)(LPWSTR, LPWSTR, DWORD, REFCLSID, REFIID, LPVOID *))fp)(
+                szVersion, szBuildFlavor, nflags, rslsid, riid, ppv);
+    }
+
     ret = get_runtime_info(NULL, szVersion, NULL, NULL, nflags, RUNTIME_INFO_UPGRADE_VERSION, TRUE, &info);
 
     if (SUCCEEDED(ret))
@@ -578,6 +606,12 @@ HRESULT WINAPI CorBindToCurrentRuntime(LPCWSTR filename, REFCLSID rclsid, REFIID
     TRACE("(%s, %s, %s, %p)\n", debugstr_w(filename), debugstr_guid(rclsid), debugstr_guid(riid), ppv);
 
     *ppv = NULL;
+
+    {
+        void *fp = mscoree_real_export("CorBindToCurrentRuntime");
+        if (fp)
+            return ((HRESULT (WINAPI *)(LPCWSTR, REFCLSID, REFIID, LPVOID *))fp)(filename, rclsid, riid, ppv);
+    }
 
     ret = get_runtime_info(NULL, NULL, filename, NULL, 0, RUNTIME_INFO_UPGRADE_VERSION, TRUE, &info);
 
@@ -686,7 +720,13 @@ HRESULT WINAPI CreateDebuggingInterfaceFromVersion(int nDebugVersion, LPCWSTR ve
 
 HRESULT WINAPI CLRCreateInstance(REFCLSID clsid, REFIID riid, LPVOID *ppInterface)
 {
+    void *fp;
+
     TRACE("(%s,%s,%p)\n", debugstr_guid(clsid), debugstr_guid(riid), ppInterface);
+
+    fp = mscoree_real_export("CLRCreateInstance");
+    if (fp)
+        return ((HRESULT (WINAPI *)(REFCLSID, REFIID, LPVOID *))fp)(clsid, riid, ppInterface);
 
     if (IsEqualGUID(clsid, &CLSID_CLRMetaHost))
         return CLRMetaHost_CreateInstance(riid, ppInterface);
