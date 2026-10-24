@@ -1439,6 +1439,11 @@ __int32 WINAPI _CorExeMain(void)
     parsed_config_file parsed_config;
     HRESULT hr;
     int i, number_of_private_paths = 0;
+    void *fp;
+
+    fp = mscoree_real_export("_CorExeMain");
+    if (fp)
+        return ((__int32 (WINAPI *)(void))fp)();
 
     get_utf8_args(&argc, &argv);
 

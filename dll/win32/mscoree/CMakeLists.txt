@@ -12,6 +12,7 @@ list(APPEND SOURCE
     metadata.c
     metahost.c
     mscoree_main.c
+    msclr_shim.c
     reactos.c)
 
 list(APPEND PCH_SKIP_SOURCE

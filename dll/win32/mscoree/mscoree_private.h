@@ -112,6 +112,10 @@ extern MonoDomain* get_root_domain(void);
 
 extern HRESULT ICLRRuntimeInfo_GetRuntimeHost(ICLRRuntimeInfo *iface, RuntimeHost **result);
 
+/* msclr_shim.c: hand off to the installed Microsoft mscoreei.dll when present. */
+extern HMODULE mscoree_get_real_mscoreei(void);
+extern void *mscoree_real_export(const char *name);
+
 extern HRESULT MetaDataDispenser_CreateInstance(IUnknown **ppUnk);
 
 typedef struct parsed_config_file
