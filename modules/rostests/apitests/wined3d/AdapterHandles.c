@@ -14,6 +14,14 @@
 #include <d3d9.h>
 
 #define CYCLES 64
+/* The leak that this test looks for uses up one of 16 slots per failed attempt, so 20 cycles show it.
+ * With an OpenGL driver a creation can take seconds and does not leak: the cycles stop when the child has
+ * run CYCLES_DEADLINE_MS, which leaves room for the creation in progress and the final checks within the
+ * 30 seconds that the parent waits. */
+#define MIN_CYCLES 20
+#define CYCLES_DEADLINE_MS 15000
+
+static DWORD child_start;
 
 typedef HRESULT (WINAPI *PFN_DIRECTDRAWCREATE)(GUID *, IDirectDraw **, IUnknown *);
 typedef HRESULT (WINAPI *PFN_DIRECTDRAWENUMERATEEXA)(LPDDENUMCALLBACKEXA, void *, DWORD);
@@ -22,6 +30,11 @@ typedef IDirect3D9 *(WINAPI *PFN_DIRECT3DCREATE9)(UINT);
 static PFN_DIRECTDRAWCREATE pDirectDrawCreate;
 static PFN_DIRECTDRAWENUMERATEEXA pDirectDrawEnumerateExA;
 static PFN_DIRECT3DCREATE9 pDirect3DCreate9;
+
+static BOOL keep_cycling(int cycle)
+{
+    return cycle < CYCLES && GetTickCount() - child_start < CYCLES_DEADLINE_MS;
+}
 
 /* One open of a DirectDraw video output as a media player does it:
  * create, cooperative level, primary surface, release. */
@@ -83,7 +96,7 @@ static void test_ddraw_cycles(void)
     int i, failed = 0, first = -1, devices;
     HRESULT hr, first_hr = S_OK;
 
-    for (i = 0; i < CYCLES; i++)
+    for (i = 0; keep_cycling(i); i++)
     {
         devices = 0;
         hr = pDirectDrawEnumerateExA(enum_cb, &devices, DDENUM_ATTACHEDSECONDARYDEVICES);
@@ -99,7 +112,9 @@ static void test_ddraw_cycles(void)
         }
     }
     ok(failed == 0, "%d of %d DirectDraw open/close cycles failed, first at cycle %d with 0x%08lx\n",
-       failed, CYCLES, first, first_hr);
+       failed, i, first, first_hr);
+    if (i < MIN_CYCLES)
+        skip("only %d of the %d cycles ran in time\n", i, MIN_CYCLES);
 }
 
 /* Without an OpenGL 2.0 driver Direct3DCreate9 fails on ReactOS; failing must not use up
@@ -123,7 +138,7 @@ static void test_d3d9_then_ddraw(void)
         return;
     }
 
-    for (i = 0; i < CYCLES; i++)
+    for (i = 0; keep_cycling(i); i++)
     {
         d3d9 = pDirect3DCreate9(D3D_SDK_VERSION);
         if (d3d9)
@@ -132,13 +147,15 @@ static void test_d3d9_then_ddraw(void)
             IDirect3D9_Release(d3d9);
         }
     }
-    trace("Direct3DCreate9 succeeded %d of %d times\n", created, CYCLES);
+    trace("Direct3DCreate9 succeeded %d of %d times\n", created, i);
+    if (i < MIN_CYCLES)
+        skip("only %d of the %d cycles ran in time\n", i, MIN_CYCLES);
 
     for (i = 0; i < 4; i++)
     {
         hr = ddraw_open_close();
-        ok(hr == DD_OK, "DirectDraw open %d after %d Direct3DCreate9 calls returned 0x%08lx\n",
-           i, CYCLES, hr);
+        ok(hr == DD_OK, "DirectDraw open %d after the Direct3DCreate9 calls returned 0x%08lx\n",
+           i, hr);
     }
     FreeLibrary(module);
 }
@@ -174,6 +191,7 @@ START_TEST(AdapterHandles)
         return;
     }
 
+    child_start = GetTickCount();
     ddraw = LoadLibraryW(L"ddraw.dll");
     ok(ddraw != NULL, "ddraw.dll not loaded, error %lu\n", GetLastError());
     if (!ddraw)

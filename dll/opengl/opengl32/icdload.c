@@ -31,12 +31,22 @@ typedef enum
     OGL_CD_CUSTOM_ICD
 } CUSTOM_DRIVER_STATE;
 
+typedef enum
+{
+    OGL_SD_NOT_QUERIED,
+    OGL_SD_NONE,
+    OGL_SD_AVAILABLE,
+    OGL_SD_BROKEN
+} SYSTEM_DRIVER_STATE;
+
 static CRITICAL_SECTION icdload_cs = {NULL, -1, 0, 0, 0, 0};
 static struct ICD_Data* ICD_Data_List = NULL;
 static const WCHAR OpenGLDrivers_Key[] = L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\OpenGLDrivers";
 static const WCHAR CustomDrivers_Key[] = L"SOFTWARE\\ReactOS\\OpenGL";
 static Drv_Opengl_Info CustomDrvInfo;
 static CUSTOM_DRIVER_STATE CustomDriverState = OGL_CD_NOT_QUERIED;
+static Drv_Opengl_Info SystemDrvInfo;
+static SYSTEM_DRIVER_STATE SystemDriverState = OGL_SD_NOT_QUERIED;
 
 static void APIENTRY wglSetCurrentValue(PVOID value)
 {
@@ -48,9 +58,12 @@ static PVOID APIENTRY wglGetCurrentValue()
     return IntGetCurrentICDPrivate();
 }
 
+/* An ICD passes the handle of the application, which may be stale or invalid */
 static DHGLRC APIENTRY wglGetDHGLRC(struct wgl_context* context)
 {
-    return context->dhglrc;
+    struct wgl_context* ctx = get_context((HGLRC)context);
+
+    return ctx ? ctx->dhglrc : 0;
 }
 
 /* GDI entry points (win32k) */
@@ -58,16 +71,101 @@ extern INT APIENTRY GdiDescribePixelFormat(HDC hdc, INT ipfd, UINT cjpfd, PPIXEL
 extern BOOL APIENTRY GdiSetPixelFormat(HDC hdc, INT ipfd);
 extern BOOL APIENTRY GdiSwapBuffers(HDC hdc);
 
+/* Fills Info from the OpenGLDrivers subkey of that name; only a registered driver has a Version */
+static BOOL IntReadDriverRegistration(PCWSTR Name, pDrv_Opengl_Info Info)
+{
+    HKEY OglKey, DrvKey;
+    DWORD dwInput, dwValueType;
+    BOOL Found = FALSE;
+
+    memset(Info, 0, sizeof(*Info));
+    if(wcslen(Name) >= ARRAYSIZE(Info->DriverName))
+        return FALSE;
+    wcscpy(Info->DriverName, Name);
+
+    if(RegOpenKeyExW(HKEY_LOCAL_MACHINE, OpenGLDrivers_Key, 0, KEY_READ, &OglKey) != ERROR_SUCCESS)
+        return FALSE;
+
+    if(RegOpenKeyExW(OglKey, Name, 0, KEY_READ, &DrvKey) == ERROR_SUCCESS)
+    {
+        dwInput = sizeof(Info->Version);
+        if((RegQueryValueExW(DrvKey, L"Version", 0, &dwValueType, (LPBYTE)&Info->Version, &dwInput) == ERROR_SUCCESS) &&
+           (dwValueType == REG_DWORD))
+        {
+            dwInput = sizeof(Info->DriverVersion);
+            if((RegQueryValueExW(DrvKey, L"DriverVersion", 0, &dwValueType, (LPBYTE)&Info->DriverVersion, &dwInput) != ERROR_SUCCESS) ||
+               (dwValueType != REG_DWORD))
+                Info->DriverVersion = 0;
+            Found = TRUE;
+        }
+        RegCloseKey(DrvKey);
+    }
+
+    RegCloseKey(OglKey);
+    return Found;
+}
+
+/* Reads the driver name stored as the default value of a ...\ReactOS\OpenGL key; FALSE if there is none */
+static BOOL IntReadRendererName(HKEY Root, PWSTR Name, DWORD NameSize)
+{
+    HKEY Key;
+    DWORD dwType, dwSize = NameSize - sizeof(WCHAR);
+    LONG ret;
+
+    if(RegOpenKeyExW(Root, CustomDrivers_Key, 0, KEY_READ, &Key) != ERROR_SUCCESS)
+        return FALSE;
+
+    ret = RegQueryValueExW(Key, L"", 0, &dwType, (LPBYTE)Name, &dwSize);
+    RegCloseKey(Key);
+
+    if((ret != ERROR_SUCCESS) || (dwType != REG_SZ) || (dwSize % sizeof(WCHAR)))
+        return FALSE;
+
+    /* The value may lack its terminator, which the room that was left makes up */
+    Name[dwSize / sizeof(WCHAR)] = UNICODE_NULL;
+    return wcslen(Name) != 0;
+}
+
+/* The system default driver is only for a window or screen DC: a bitmap or printer DC keeps the generic implementation */
+static BOOL IntIsDisplayDC(HDC hdc)
+{
+    return (GetObjectType(hdc) == OBJ_DC) && (GetDeviceCaps(hdc, TECHNOLOGY) == DT_RASDISPLAY);
+}
+
+/* The ICD that the system installs for display drivers that bring none (HKLM\Software\ReactOS\OpenGL) */
+static pDrv_Opengl_Info IntGetSystemDefaultDriver(void)
+{
+    pDrv_Opengl_Info Info = NULL;
+
+    EnterCriticalSection(&icdload_cs);
+    if(SystemDriverState == OGL_SD_NOT_QUERIED)
+    {
+        WCHAR Name[MAX_PATH];
+
+        SystemDriverState = OGL_SD_NONE;
+
+        if(IntReadRendererName(HKEY_LOCAL_MACHINE, Name, sizeof(Name)) &&
+           _wcsicmp(Name, L"ReactOS Software Implementation") &&
+           IntReadDriverRegistration(Name, &SystemDrvInfo))
+            SystemDriverState = OGL_SD_AVAILABLE;
+    }
+    if(SystemDriverState == OGL_SD_AVAILABLE)
+        Info = &SystemDrvInfo;
+    LeaveCriticalSection(&icdload_cs);
+
+    return Info;
+}
+
 /* Retrieves the ICD data (driver version + relevant DLL entry points) for a device context */
 struct ICD_Data* IntGetIcdData(HDC hdc)
 {
     int ret;
-    DWORD dwInput, dwValueType, Version, DriverVersion, Flags;
+    DWORD dwInput, dwValueType, Version, DriverVersion, Flags, RequiresSse2;
     Drv_Opengl_Info DrvInfo;
     pDrv_Opengl_Info pDrvInfo;
     struct ICD_Data* data;
     HKEY OglKey = NULL;
-    HKEY DrvKey, CustomKey;
+    HKEY DrvKey;
     WCHAR DllName[MAX_PATH];
     BOOL (WINAPI *DrvValidateVersion)(DWORD);
     void (WINAPI *DrvSetCallbackProcs)(int nProcs, PROC* pProcs);
@@ -78,53 +176,30 @@ struct ICD_Data* IntGetIcdData(HDC hdc)
      * built-in Software Implementation*/
     if(CustomDriverState == OGL_CD_NOT_QUERIED)
     {
+        WCHAR Name[MAX_PATH];
+
         /* Only do this once so there's not any significant performance penalty */
         CustomDriverState = OGL_CD_NONE;
         memset(&CustomDrvInfo, 0, sizeof(Drv_Opengl_Info));
 
-        ret = RegOpenKeyExW(HKEY_CURRENT_USER, CustomDrivers_Key, 0, KEY_READ, &CustomKey);
-        if(ret != ERROR_SUCCESS)
-            goto custom_end;
-
-        dwInput = sizeof(CustomDrvInfo.DriverName);
-        ret = RegQueryValueExW(CustomKey, L"", 0, &dwValueType, (LPBYTE)CustomDrvInfo.DriverName, &dwInput);
-        RegCloseKey(CustomKey);
-
-        if((ret != ERROR_SUCCESS) || (dwValueType != REG_SZ) || !wcslen(CustomDrvInfo.DriverName))
-            goto custom_end;
-
-        if(!_wcsicmp(CustomDrvInfo.DriverName, L"ReactOS Software Implementation"))
+        if(IntReadRendererName(HKEY_CURRENT_USER, Name, sizeof(Name)))
         {
-            /* Always announce the fact that we're forcing ROSSWI */
-            ERR("Forcing ReactOS Software Implementation\n");
-            CustomDriverState = OGL_CD_ROSSWI;
-            return NULL;
+            if(!_wcsicmp(Name, L"ReactOS Software Implementation"))
+            {
+                /* Always announce the fact that we're forcing ROSSWI */
+                ERR("Forcing ReactOS Software Implementation\n");
+                CustomDriverState = OGL_CD_ROSSWI;
+                return NULL;
+            }
+
+            if(IntReadDriverRegistration(Name, &CustomDrvInfo))
+            {
+                CustomDriverState = OGL_CD_CUSTOM_ICD;
+
+                /* Always announce the fact that we're overriding the default driver */
+                ERR("Overriding the default OGL ICD with %S\n", CustomDrvInfo.DriverName);
+            }
         }
-
-        ret = RegOpenKeyExW(HKEY_LOCAL_MACHINE, OpenGLDrivers_Key, 0, KEY_READ, &OglKey);
-        if(ret != ERROR_SUCCESS)
-            goto custom_end;
-
-        ret = RegOpenKeyExW(OglKey, CustomDrvInfo.DriverName, 0, KEY_READ, &OglKey);
-        if(ret != ERROR_SUCCESS)
-            goto custom_end;
-
-        dwInput = sizeof(CustomDrvInfo.Version);
-        ret = RegQueryValueExW(OglKey, L"Version", 0, &dwValueType, (LPBYTE)&CustomDrvInfo.Version, &dwInput);
-        if((ret != ERROR_SUCCESS) || (dwValueType != REG_DWORD))
-            goto custom_end;
-
-        dwInput = sizeof(DriverVersion);
-        ret = RegQueryValueExW(OglKey, L"DriverVersion", 0, &dwValueType, (LPBYTE)&CustomDrvInfo.DriverVersion, &dwInput);
-        CustomDriverState = OGL_CD_CUSTOM_ICD;
-
-        /* Always announce the fact that we're overriding the default driver */
-        ERR("Overriding the default OGL ICD with %S\n", CustomDrvInfo.DriverName);
-
-custom_end:
-        if(OglKey)
-            RegCloseKey(OglKey);
-        RegCloseKey(CustomKey);
     }
 
     /* If there's a custom ICD or ROSSWI was requested use it, otherwise proceed as usual */
@@ -142,21 +217,30 @@ custom_end:
         dwInput = OPENGL_GETINFO;
         ret = ExtEscape(hdc, QUERYESCSUPPORT, sizeof(DWORD), (LPCSTR)&dwInput, 0, NULL);
 
-        /* Driver doesn't support opengl */
-        if(ret <= 0)
-            return NULL;
-
-        /* Query for the ICD DLL name and version */
-        dwInput = OPENGL_GETINFO_DRVNAME;
-        ret = ExtEscape(hdc, OPENGL_GETINFO, sizeof(DWORD), (LPCSTR)&dwInput, sizeof(DrvInfo), (LPSTR)&DrvInfo);
-
         if(ret <= 0)
         {
-            ERR("Driver claims to support OPENGL_GETINFO escape code, but doesn't. ret: %X\n", ret);
-            return NULL;
-        }
+            /* Driver doesn't support opengl: the system default ICD, if one is installed, else the built-in implementation */
+            if(!IntIsDisplayDC(hdc))
+                return NULL;
 
-        pDrvInfo = &DrvInfo;
+            pDrvInfo = IntGetSystemDefaultDriver();
+            if(!pDrvInfo)
+                return NULL;
+        }
+        else
+        {
+            /* Query for the ICD DLL name and version */
+            dwInput = OPENGL_GETINFO_DRVNAME;
+            ret = ExtEscape(hdc, OPENGL_GETINFO, sizeof(DWORD), (LPCSTR)&dwInput, sizeof(DrvInfo), (LPSTR)&DrvInfo);
+
+            if(ret <= 0)
+            {
+                ERR("Driver claims to support OPENGL_GETINFO escape code, but doesn't. ret: %X\n", ret);
+                return NULL;
+            }
+
+            pDrvInfo = &DrvInfo;
+        }
     }
 
     /* Protect the list while we are loading*/
@@ -247,6 +331,18 @@ custom_end:
         {
             WARN("No driver version in driver subkey\n");
             Flags = 0;
+        }
+
+        /* ReactOS specific: a driver that was built for SSE2 is not loaded on a processor without it */
+        dwInput = sizeof(RequiresSse2);
+        ret = RegQueryValueExW(DrvKey, L"RequiresSSE2", 0, &dwValueType, (LPBYTE)&RequiresSse2, &dwInput);
+        if((ret == ERROR_SUCCESS) && (dwValueType == REG_DWORD) && RequiresSse2 &&
+           !IsProcessorFeaturePresent(PF_XMMI64_INSTRUCTIONS_AVAILABLE))
+        {
+            ERR("The ICD %S needs SSE2, which this processor lacks.\n", pDrvInfo->DriverName);
+            RegCloseKey(DrvKey);
+            RegCloseKey(OglKey);
+            goto end;
         }
 
         /* We're done */
@@ -348,11 +444,17 @@ custom_end:
     TRACE("ICD driver %S (%S) successfully loaded.\n", pDrvInfo->DriverName, DllName);
 
 end:
+    /* A system default driver that does not load is not retried for every DC */
+    if(!data && (pDrvInfo == &SystemDrvInfo))
+        SystemDriverState = OGL_SD_BROKEN;
+
     /* Unlock and return */
     LeaveCriticalSection(&icdload_cs);
     return data;
 
 fail:
+    if(pDrvInfo == &SystemDrvInfo)
+        SystemDriverState = OGL_SD_BROKEN;
     LeaveCriticalSection(&icdload_cs);
     FreeLibrary(data->hModule);
     HeapFree(GetProcessHeap(), 0, data);
