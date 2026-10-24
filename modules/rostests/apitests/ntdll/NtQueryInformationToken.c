@@ -871,6 +871,247 @@ QueryTokenOriginTests(
        Origin.OriginatingLogonSession.HighPart);
 }
 
+/*
+ * Elevation queries (T121). Burn/WiX read TokenElevation and TokenElevationType;
+ * both used to fail with STATUS_INVALID_INFO_CLASS (GetTokenInformation: error 87).
+ */
+static
+BOOLEAN
+TokenHasEnabledAdminGroup(
+    _In_ HANDLE Token)
+{
+    BYTE Buffer[4096];
+    PTOKEN_GROUPS Groups = (PTOKEN_GROUPS)Buffer;
+    ULONG Length, i;
+    PSID AdminSid;
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    BOOLEAN Result = FALSE;
+
+    if (!NT_SUCCESS(NtQueryInformationToken(Token, TokenGroups, Groups, sizeof(Buffer), &Length)))
+        return FALSE;
+    if (!NT_SUCCESS(RtlAllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID,
+                                                DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &AdminSid)))
+        return FALSE;
+    for (i = 0; i < Groups->GroupCount; i++)
+    {
+        if (RtlEqualSid(Groups->Groups[i].Sid, AdminSid) &&
+            (Groups->Groups[i].Attributes & SE_GROUP_ENABLED))
+            Result = TRUE;
+    }
+    RtlFreeSid(AdminSid);
+    return Result;
+}
+
+static
+VOID
+CheckElevation(
+    _In_ HANDLE Token,
+    _In_ PCSTR Name,
+    _In_ ULONG ExpectedElevated,
+    _In_ ULONG ExpectedType)
+{
+    NTSTATUS Status;
+    TOKEN_ELEVATION Elevation;
+    TOKEN_ELEVATION_TYPE Type;
+    ULONG Length;
+
+    Elevation.TokenIsElevated = 0xDEADBEEF;
+    Status = NtQueryInformationToken(Token, TokenElevation, &Elevation, sizeof(Elevation), &Length);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    ok_dec(Length, (ULONG)sizeof(TOKEN_ELEVATION));
+    ok(Elevation.TokenIsElevated == ExpectedElevated,
+       "%s: TokenIsElevated = %lu, expected %lu\n", Name, Elevation.TokenIsElevated, ExpectedElevated);
+
+    Type = 0;
+    Status = NtQueryInformationToken(Token, TokenElevationType, &Type, sizeof(Type), &Length);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    ok_dec(Length, (ULONG)sizeof(TOKEN_ELEVATION_TYPE));
+    ok(Type == ExpectedType, "%s: TokenElevationType = %d, expected %lu\n", Name, Type, ExpectedType);
+
+    trace("%s: IsElevated=%lu Type=%d\n", Name, Elevation.TokenIsElevated, Type);
+}
+
+/* Creates a token with the given groups, to cover the standard and deny-only cases */
+static
+HANDLE
+CreateTestToken(
+    _In_ HANDLE Token,
+    _In_ BOOLEAN WithAdmins,
+    _In_ ULONG AdminAttributes)
+{
+    NTSTATUS Status;
+    HANDLE NewToken = NULL;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    SECURITY_QUALITY_OF_SERVICE Qos;
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    SID_IDENTIFIER_AUTHORITY WorldAuthority = {SECURITY_WORLD_SID_AUTHORITY};
+    PSID UserSid, UsersSid, AdminsSid, EveryoneSid;
+    BYTE GroupsBuffer[sizeof(TOKEN_GROUPS) + 2 * sizeof(SID_AND_ATTRIBUTES)];
+    PTOKEN_GROUPS Groups = (PTOKEN_GROUPS)GroupsBuffer;
+    TOKEN_USER User;
+    TOKEN_PRIVILEGES Privileges;
+    TOKEN_OWNER Owner;
+    TOKEN_PRIMARY_GROUP PrimaryGroup;
+    TOKEN_SOURCE Source;
+    TOKEN_STATISTICS Stats;
+    ULONG Length;
+    LARGE_INTEGER Expiration;
+    BOOLEAN WasEnabled;
+
+    Status = RtlAdjustPrivilege(SE_CREATE_TOKEN_PRIVILEGE, TRUE, FALSE, &WasEnabled);
+    if (!NT_SUCCESS(Status))
+        return NULL;
+    if (!NT_SUCCESS(NtQueryInformationToken(Token, TokenStatistics, &Stats, sizeof(Stats), &Length)))
+        return NULL;
+
+    RtlAllocateAndInitializeSid(&NtAuthority, 5, SECURITY_NT_NON_UNIQUE, 1, 2, 3, 1000, 0, 0, 0, &UserSid);
+    RtlAllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_USERS, 0, 0, 0, 0, 0, 0, &UsersSid);
+    RtlAllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &AdminsSid);
+    RtlAllocateAndInitializeSid(&WorldAuthority, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &EveryoneSid);
+
+    Groups->GroupCount = WithAdmins ? 3 : 2;
+    Groups->Groups[0].Sid = UsersSid;
+    Groups->Groups[0].Attributes = SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED;
+    Groups->Groups[1].Sid = EveryoneSid;
+    Groups->Groups[1].Attributes = SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED;
+    Groups->Groups[2].Sid = AdminsSid;
+    Groups->Groups[2].Attributes = AdminAttributes;
+
+    User.User.Sid = UserSid;
+    User.User.Attributes = 0;
+    Privileges.PrivilegeCount = 0;
+    Owner.Owner = UserSid;
+    PrimaryGroup.PrimaryGroup = UsersSid;
+    RtlCopyMemory(Source.SourceName, "T121\0\0\0\0", 8);
+    Source.SourceIdentifier = Stats.TokenId;
+    Expiration.QuadPart = -1;
+
+    Qos.Length = sizeof(Qos);
+    Qos.ImpersonationLevel = SecurityImpersonation;
+    Qos.ContextTrackingMode = SECURITY_STATIC_TRACKING;
+    Qos.EffectiveOnly = FALSE;
+    InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
+    ObjectAttributes.SecurityQualityOfService = &Qos;
+
+    Status = NtCreateToken(&NewToken, TOKEN_ALL_ACCESS, &ObjectAttributes, TokenPrimary,
+                           &Stats.AuthenticationId, &Expiration, &User, Groups, &Privileges,
+                           &Owner, &PrimaryGroup, NULL, &Source);
+    if (!NT_SUCCESS(Status))
+        NewToken = NULL;
+
+    RtlFreeSid(UserSid);
+    RtlFreeSid(UsersSid);
+    RtlFreeSid(AdminsSid);
+    RtlFreeSid(EveryoneSid);
+    return NewToken;
+}
+
+static
+VOID
+QueryTokenElevationCreatedTests(
+    _In_ HANDLE Token)
+{
+    HANDLE Created;
+
+    /* Creating a token needs SeCreateTokenPrivilege, which only SYSTEM holds */
+
+    /* A standard user: no Administrators group */
+    Created = CreateTestToken(Token, FALSE, 0);
+    if (!Created)
+    {
+        skip("SeCreateTokenPrivilege is not held (run as SYSTEM): no standard/deny-only token tests\n");
+        return;
+    }
+    CheckElevation(Created, "created standard user", 0, 1 /* Default */);
+    NtClose(Created);
+
+    /* Administrators enabled, default (High) integrity */
+    Created = CreateTestToken(Token, TRUE, SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED);
+    if (Created)
+    {
+        CheckElevation(Created, "created admin (group enabled)", 1, 1 /* Default */);
+        NtClose(Created);
+    }
+
+    /* Administrators present but deny-only: an admin user whose token is filtered */
+    Created = CreateTestToken(Token, TRUE, SE_GROUP_USE_FOR_DENY_ONLY);
+    if (Created)
+    {
+        CheckElevation(Created, "created admin (deny-only group)", 0, 3 /* Limited */);
+        NtClose(Created);
+    }
+}
+
+static
+VOID
+QueryTokenElevationTests(
+    _In_ HANDLE Token)
+{
+    NTSTATUS Status;
+    ULONG Length, Value;
+    HANDLE Dup = NULL;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    BOOLEAN Admin = TokenHasEnabledAdminGroup(Token);
+    ULONG Integrity;
+    BYTE LabelBuffer[64];
+    PTOKEN_MANDATORY_LABEL Label = (PTOKEN_MANDATORY_LABEL)LabelBuffer;
+
+    /* Negative control: too small buffers report the required length */
+    Length = 0;
+    Status = NtQueryInformationToken(Token, TokenElevation, NULL, 0, &Length);
+    ok_ntstatus(Status, STATUS_BUFFER_TOO_SMALL);
+    ok_dec(Length, (ULONG)sizeof(TOKEN_ELEVATION));
+
+    Length = 0;
+    Status = NtQueryInformationToken(Token, TokenElevationType, &Value, sizeof(Value) - 1, &Length);
+    ok_ntstatus(Status, STATUS_BUFFER_TOO_SMALL);
+    ok_dec(Length, (ULONG)sizeof(TOKEN_ELEVATION_TYPE));
+
+    /* The current token: derive the expectation from its integrity level and groups */
+    Status = NtQueryInformationToken(Token, TokenIntegrityLevel, LabelBuffer, sizeof(LabelBuffer), &Length);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+    Integrity = *RtlSubAuthoritySid(Label->Label.Sid, 0);
+    trace("current token: admin=%d integrity=0x%lx\n", Admin, Integrity);
+
+    if (Admin && Integrity >= SECURITY_MANDATORY_HIGH_RID)
+        CheckElevation(Token, "current (admin, high)", 1, TokenElevationTypeDefault);
+    else if (Admin)
+        CheckElevation(Token, "current (admin, lowered)", 0, TokenElevationTypeLimited);
+    else
+        CheckElevation(Token, "current (standard)", 0, TokenElevationTypeDefault);
+
+    if (!Admin || Integrity < SECURITY_MANDATORY_HIGH_RID)
+    {
+        skip("Current token is not elevated, cannot derive limited tokens from it\n");
+        return;
+    }
+
+    /* Limited: the same token with its integrity level lowered to Medium */
+    InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
+    Status = NtDuplicateToken(Token, TOKEN_ALL_ACCESS, &ObjectAttributes, FALSE, TokenPrimary, &Dup);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        SID_IDENTIFIER_AUTHORITY LabelAuthority = {SECURITY_MANDATORY_LABEL_AUTHORITY};
+
+        CheckElevation(Dup, "duplicate (admin, high)", 1, TokenElevationTypeDefault);
+
+        RtlInitializeSid((PSID)(Label + 1), &LabelAuthority, 1);
+        *RtlSubAuthoritySid((PSID)(Label + 1), 0) = SECURITY_MANDATORY_MEDIUM_RID;
+        Label->Label.Sid = (PSID)(Label + 1);
+        Label->Label.Attributes = SE_GROUP_INTEGRITY;
+        Status = NtSetInformationToken(Dup, TokenIntegrityLevel, Label, sizeof(LabelBuffer));
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+            CheckElevation(Dup, "duplicate (admin, medium)", 0, TokenElevationTypeLimited);
+        NtClose(Dup);
+    }
+
+    QueryTokenElevationCreatedTests(Token);
+}
+
 START_TEST(NtQueryInformationToken)
 {
     NTSTATUS Status;
@@ -928,6 +1169,7 @@ START_TEST(NtQueryInformationToken)
     QueryTokenSessionIdTests(Token);
     QueryTokenIsSandboxInert(Token);
     QueryTokenOriginTests(Token);
+    QueryTokenElevationTests(Token);
 
     NtClose(Token);
 }

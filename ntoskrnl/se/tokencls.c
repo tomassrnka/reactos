@@ -56,11 +56,11 @@ static const INFORMATION_CLASS_INFO SeTokenInformationClass[] = {
     /* TokenOrigin */
     IQS_SAME(TOKEN_ORIGIN, ULONG, ICIF_QUERY | ICIF_SET),
     /* TokenElevationType */
-    IQS_NONE,
+    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
     /* TokenLinkedToken */
     IQS_NONE,
     /* TokenElevation */
-    IQS_NONE,
+    IQS_SAME(TOKEN_ELEVATION, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
     /* TokenHasRestrictions */
     IQS_NONE,
     /* TokenAccessInformation */
@@ -78,6 +78,69 @@ static const INFORMATION_CLASS_INFO SeTokenInformationClass[] = {
     /* TokenLogonSid */
     IQS_SAME(TOKEN_GROUPS, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
 };
+
+/* TOKEN_ELEVATION_TYPE values (the enum is declared in user-mode headers only) */
+#define SEP_ELEVATION_TYPE_DEFAULT  1 /* TokenElevationTypeDefault */
+#define SEP_ELEVATION_TYPE_FULL     2 /* TokenElevationTypeFull */
+#define SEP_ELEVATION_TYPE_LIMITED  3 /* TokenElevationTypeLimited */
+
+/**
+ * @brief
+ * Derives the elevation state of a token. The caller must hold the token lock.
+ *
+ * ReactOS has no linked (split) tokens, so the state is derived from what a
+ * token carries:
+ *
+ * - Elevated: the Administrators group is present and enabled (not disabled
+ *   and not deny-only) and the integrity level is High or above.
+ * - Limited: Administrators is among the token's groups (so the user is an
+ *   administrator) but the token is not elevated, i.e. the group is disabled
+ *   or deny-only, or the integrity level is below High. This is what the
+ *   filtered half of a UAC split token looks like.
+ * - Default: everything else (a standard-user token, or an unsplit token),
+ *   which is what a Windows system without a UAC split reports.
+ *
+ * TOKEN_HAS_ADMIN_GROUP is not used: it is set when the group is merely
+ * present at creation, even if it is deny-only. The token's actual group
+ * attributes are what decide.
+ *
+ * TokenElevationTypeFull is not reported since there is no linked token to
+ * distinguish the full half of a split pair from an unsplit admin token.
+ */
+static
+VOID
+SepQueryTokenElevation(
+    _In_ PTOKEN Token,
+    _Out_ PULONG IsElevated,
+    _Out_ PULONG ElevationType)
+{
+    BOOLEAN HasAdminGroup = FALSE, AdminEnabled = FALSE;
+    ULONG i;
+
+    for (i = 1; i < Token->UserAndGroupCount; i++)
+    {
+        if (RtlEqualSid(Token->UserAndGroups[i].Sid, SeAliasAdminsSid))
+        {
+            HasAdminGroup = TRUE;
+            if ((Token->UserAndGroups[i].Attributes & SE_GROUP_ENABLED) &&
+                !(Token->UserAndGroups[i].Attributes & SE_GROUP_USE_FOR_DENY_ONLY))
+            {
+                AdminEnabled = TRUE;
+            }
+        }
+    }
+
+    if (AdminEnabled && Token->IntegrityLevel >= SECURITY_MANDATORY_HIGH_RID)
+    {
+        *IsElevated = 1;
+        *ElevationType = SEP_ELEVATION_TYPE_DEFAULT;
+    }
+    else
+    {
+        *IsElevated = 0;
+        *ElevationType = HasAdminGroup ? SEP_ELEVATION_TYPE_LIMITED : SEP_ELEVATION_TYPE_DEFAULT;
+    }
+}
 
 /* PUBLIC FUNCTIONS *****************************************************************/
 
@@ -427,6 +490,44 @@ SeQueryInformationToken(
 
             /* Return the structure */
             *TokenInformation = ts;
+            Status = STATUS_SUCCESS;
+            break;
+        }
+
+        case TokenElevationType:
+        {
+            PULONG tet;
+            ULONG UnusedElevated;
+
+            DPRINT("SeQueryInformationToken(TokenElevationType)\n");
+            tet = ExAllocatePoolWithTag(PagedPool, sizeof(*tet), TAG_SE);
+            if (tet == NULL)
+            {
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                break;
+            }
+
+            SepQueryTokenElevation(Token, &UnusedElevated, tet);
+            *TokenInformation = tet;
+            Status = STATUS_SUCCESS;
+            break;
+        }
+
+        case TokenElevation:
+        {
+            PTOKEN_ELEVATION te;
+            ULONG UnusedType;
+
+            DPRINT("SeQueryInformationToken(TokenElevation)\n");
+            te = ExAllocatePoolWithTag(PagedPool, sizeof(*te), TAG_SE);
+            if (te == NULL)
+            {
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                break;
+            }
+
+            SepQueryTokenElevation(Token, &te->TokenIsElevated, &UnusedType);
+            *TokenInformation = te;
             Status = STATUS_SUCCESS;
             break;
         }
@@ -1090,6 +1191,40 @@ NtQueryInformationToken(
                     }
                     _SEH2_END;
                 }
+
+                break;
+            }
+
+            case TokenElevationType:
+            case TokenElevation:
+            {
+                ULONG IsElevated;
+                ULONG ElevationType;
+                ULONG Value;
+
+                DPRINT("NtQueryInformationToken(TokenElevation[Type])\n");
+                RequiredLength = sizeof(ULONG);
+                SepQueryTokenElevation(Token, &IsElevated, &ElevationType);
+                Value = (TokenInformationClass == TokenElevation) ? IsElevated : ElevationType;
+
+                _SEH2_TRY
+                {
+                    if (TokenInformationLength >= RequiredLength)
+                    {
+                        *(PULONG)TokenInformation = Value;
+                    }
+                    else
+                    {
+                        Status = STATUS_BUFFER_TOO_SMALL;
+                    }
+
+                    *ReturnLength = RequiredLength;
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    Status = _SEH2_GetExceptionCode();
+                }
+                _SEH2_END;
 
                 break;
             }
