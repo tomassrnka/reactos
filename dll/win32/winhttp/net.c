@@ -439,7 +439,10 @@ DWORD netconn_secure_connect( struct netconn *conn, WCHAR *hostname, DWORD secur
         free(conn->ssl_write_buf);
         conn->ssl_write_buf = NULL;
         DeleteSecurityContext(&ctx);
-        return ERROR_WINHTTP_SECURE_CHANNEL_ERROR;
+        /* Surface the specific cert failure (e.g. ERROR_WINHTTP_SECURE_CERT_DATE_INVALID) that
+         * netconn_verify_cert determined, rather than collapsing every TLS failure to the generic
+         * ERROR_WINHTTP_SECURE_CHANNEL_ERROR. The generic code is kept for handshake/socket errors. (T115) */
+        return res != ERROR_SUCCESS ? res : ERROR_WINHTTP_SECURE_CHANNEL_ERROR;
     }
 
 
