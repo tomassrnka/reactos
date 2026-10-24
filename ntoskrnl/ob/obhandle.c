@@ -2482,14 +2482,6 @@ ObDuplicateObject(IN PEPROCESS SourceProcess,
     /* Check if we're duplicating the access */
     if (Options & DUPLICATE_SAME_ACCESS) DesiredAccess = SourceAccess;
 
-    /* MAXIMUM_ALLOWED on a user-mode duplicate yields the access the SOURCE
-     * HANDLE already holds -- never more. Resolve it to the source access so
-     * the object's security descriptor is not re-checked for extra rights
-     * (the same anti-escalation rule enforced below). Matches Windows, where a
-     * duplicated handle is capped to the source handle's access. */
-    if ((PreviousMode != KernelMode) && (DesiredAccess & MAXIMUM_ALLOWED))
-        DesiredAccess = SourceAccess;
-
     /* Get object data */
     ObjectHeader = OBJECT_TO_OBJECT_HEADER(SourceObject);
     ObjectType = ObjectHeader->Type;
@@ -2515,26 +2507,8 @@ ObDuplicateObject(IN PEPROCESS SourceProcess,
     /* Check if we're asking for new access */
     if (TargetAccess & ~SourceAccess)
     {
-        /*
-         * The duplicate requests more access than the source handle holds.
-         * Windows never lets DuplicateHandle elevate access: a duplicated handle
-         * is capped to the source handle's granted access (equal or lesser, or the
-         * source's own access via DUPLICATE_SAME_ACCESS). Re-validating against the
-         * object's security descriptor here let a user-mode caller re-open a
-         * reduced-access handle with MORE rights -- e.g. turn a read-only section
-         * handle back into a writable one. Chromium/Electron (Claude Desktop) relies
-         * on the Windows behavior for its read-only shared-memory validation: it
-         * probes a read-only section handle with DuplicateHandle(FILE_MAP_WRITE) and
-         * requires it to FAIL (otherwise PlatformSharedMemoryRegion::TakeOrFail
-         * rejects the region and aborts). Deny the elevation for user-mode callers
-         * to match Windows; keep the legacy SD re-check for kernel mode only.
-         */
-        if (PreviousMode != KernelMode)
-        {
-            /* User mode cannot gain access beyond the source handle */
-            Status = STATUS_ACCESS_DENIED;
-        }
-        else if (ObjectType->TypeInfo.SecurityProcedure == SeDefaultObjectMethod)
+        /* We are. We need the security procedure to validate this */
+        if (ObjectType->TypeInfo.SecurityProcedure == SeDefaultObjectMethod)
         {
             /* Use our built-in access state */
             PassedAccessState = &AccessState;
@@ -3145,9 +3119,18 @@ ObInsertObject(IN PVOID Object,
             (ObjectType->TypeInfo.SecurityRequired) &&
             (NewObject == NULL)));
 
-    /* Check if the object is unnamed and also doesn't have security */
+    /*
+     * Check if the object is unnamed and also doesn't have security.
+     * An unnamed object whose type does not force security still carries a
+     * caller-supplied security descriptor (e.g. an anonymous section created
+     * with a restrictive DACL): it must go through the normal assign-security
+     * path so the SD is stored on the object and later re-evaluated on a
+     * widening DuplicateHandle. Only take the no-security shortcut when there
+     * is genuinely no SD to assign. Generic Ob behaviour, not section-only.
+     */
     PreviousMode = KeGetPreviousMode();
-    if (!(ObjectType->TypeInfo.SecurityRequired) && !(ObjectName))
+    if (!(ObjectType->TypeInfo.SecurityRequired) && !(ObjectName) &&
+        !(ObjectCreateInfo->SecurityDescriptor))
     {
         /* Assume failure */
         *Handle = NULL;
@@ -3304,8 +3287,9 @@ ObInsertObject(IN PVOID Object,
     /* Now check if this object is being created */
     if (InsertObject == Object)
     {
-        /* Check if it's named or forces security */
-        if ((ObjectName) || (ObjectType->TypeInfo.SecurityRequired))
+        /* Check if it's named, forces security, or carries an explicit SD */
+        if ((ObjectName) || (ObjectType->TypeInfo.SecurityRequired) ||
+            (ObjectCreateInfo->SecurityDescriptor))
         {
             /* Make sure it's inserted into an object directory */
             if ((ObjectNameInfo) && (ObjectNameInfo->Directory))
