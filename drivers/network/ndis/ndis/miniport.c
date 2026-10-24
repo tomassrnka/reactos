@@ -1709,15 +1709,15 @@ MiniportWorker(IN PDEVICE_OBJECT DeviceObject, IN PVOID Context)
   BOOLEAN AddressingReset;
 
   BOOLEAN Serialized = !(Adapter->NdisMiniportBlock.Flags & NDIS_ATTRIBUTE_DESERIALIZE);
-  KIRQL SerialOldIrql;
 
   IoFreeWorkItem((PIO_WORKITEM)Context);
 
-  /* Not preemptible while it runs a serialized miniport, the interrupt DPC waits for it */
-  SerialOldIrql = KeGetCurrentIrql();
-  if (Serialized)
-      KeRaiseIrql(DISPATCH_LEVEL, &SerialOldIrql);
-
+  /* The worker runs at PASSIVE_LEVEL: it is an I/O work item, and its body
+     touches pageable data (e.g. a protocol's request on the completion path).
+     A serialized miniport's handlers are still entered at DISPATCH_LEVEL by the
+     per-handler raises below, and MiniportBusy (set under the lock) is what
+     serializes the worker against the interrupt DPC and other senders - not the
+     IRQL. Raising the whole body to DISPATCH_LEVEL faulted on paged pool. */
   KeAcquireSpinLock(&Adapter->NdisMiniportBlock.Lock, &OldIrql);
   Adapter->WorkerScheduled = FALSE;
 
@@ -1729,7 +1729,6 @@ MiniportWorker(IN PDEVICE_OBJECT DeviceObject, IN PVOID Context)
         Adapter->NdisMiniportBlock.PendingRequest)))
   {
       KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
-      KeLowerIrql(SerialOldIrql);
       return;
   }
 
@@ -1737,7 +1736,6 @@ MiniportWorker(IN PDEVICE_OBJECT DeviceObject, IN PVOID Context)
   if (Serialized && Adapter->Stopping)
   {
       KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
-      KeLowerIrql(SerialOldIrql);
       return;
   }
 
@@ -1746,7 +1744,6 @@ MiniportWorker(IN PDEVICE_OBJECT DeviceObject, IN PVOID Context)
   {
       Adapter->WorkerDeferred = TRUE;
       KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
-      KeLowerIrql(SerialOldIrql);
       return;
   }
 
@@ -1900,7 +1897,6 @@ MiniportWorker(IN PDEVICE_OBJECT DeviceObject, IN PVOID Context)
           MiniLeaveSerialized(Adapter, MiniLeaveSender);
     }
 
-  KeLowerIrql(SerialOldIrql);
 }
 
 
