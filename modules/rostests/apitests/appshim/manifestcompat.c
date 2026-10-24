@@ -13,6 +13,7 @@
 
 #define VER_5_2 0x05020502  /* GetVersion 5.2 / RtlGetVersion 5.2 (real ReactOS base) */
 #define VER_6_0 0x06000600  /* GetVersion 6.0 / RtlGetVersion 6.0 (Vista, from manifest) */
+#define VER_6_1 0x06010601  /* GetVersion 6.1 / RtlGetVersion 6.1 (Windows 7, from manifest) */
 
 static DWORD run_path(PCWSTR Path)
 {
@@ -58,11 +59,13 @@ static DWORD run_probe(PCWSTR Name)
 
 START_TEST(manifestcompat)
 {
-    DWORD None, Vista;
+    DWORD None, Vista, Span, VistaWin10;
 
     None = run_probe(L"appshim_manifestver_none.exe");
     Vista = run_probe(L"appshim_manifestver_vista.exe");
-    trace("none=0x%08lx vista=0x%08lx\n", None, Vista);
+    Span = run_probe(L"appshim_manifestver_span.exe");
+    VistaWin10 = run_probe(L"appshim_manifestver_vista_win10.exe");
+    trace("none=0x%08lx vista=0x%08lx span=0x%08lx vista_win10=0x%08lx\n", None, Vista, Span, VistaWin10);
 
     if (is_reactos())
     {
@@ -78,6 +81,15 @@ START_TEST(manifestcompat)
         /* And the manifest must raise, never lower, the reported version. */
         ok(Vista > None, "vista-manifest (0x%08lx) must report a higher version than none (0x%08lx)\n",
            Vista, None);
+        /* A Vista..Win10 manifest reports the highest supportedOS we emulate (Windows 7,
+         * 6.1), as Windows 7 itself would; Burn-based installers gate on VersionNT >= 6.1
+         * (T101). It must NOT report 10.0: we do not implement Win10 behavior. */
+        ok(Span == VER_6_1, "vista..win10-manifest process reported 0x%08lx, expected 0x%08lx (6.1/6.1)\n",
+           Span, (DWORD)VER_6_1);
+        /* A manifest declaring only Vista and Win10 (no Win7) keeps the highest at or
+         * below the ceiling, Vista. */
+        ok(VistaWin10 == VER_6_0, "vista+win10-manifest process reported 0x%08lx, expected 0x%08lx (6.0/6.0)\n",
+           VistaWin10, (DWORD)VER_6_0);
     }
     else
     {
