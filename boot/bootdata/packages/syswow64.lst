@@ -154,6 +154,18 @@ SysWOW64/wldap32.dll
 SysWOW64/msxml3.dll
 SysWOW64/libxslt.dll
 
+# RICHEDIT50W (msftedit) for 32-bit installers/apps; riched20 is already shipped.
+SysWOW64/msftedit.dll
+
+# Direct3D 11 and its import chain, so 32-bit D3D11 apps (vcamp140 x86) can
+# load. Loading only; no 32-bit display driver path is claimed.
+@0x600 SysWOW64/d3d11.dll
+@0x600 SysWOW64/dxgi.dll
+@0x600 SysWOW64/d3dwine.dll
+@0x600 SysWOW64/gdi32_vista.dll
+@0x600 SysWOW64/opengl32.dll
+@0x600 SysWOW64/win32u.dll
+
 # Code-page data used by the guest kernel32 NLS loader.
 SysWOW64/c_037.nls
 SysWOW64/c_10000.nls
