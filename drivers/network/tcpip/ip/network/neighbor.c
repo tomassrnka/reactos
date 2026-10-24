@@ -676,7 +676,13 @@ VOID NBRemoveNeighbor(
 
 ULONG NBCopyNeighbors
 (PIP_INTERFACE Interface,
- PIPARP_ENTRY ArpTable)
+ PIPARP_ENTRY ArpTable,
+ ULONG Capacity)
+/*
+ * Counts the neighbors of Interface; when ArpTable is given, copies at most
+ * Capacity entries into it. The return value is the number of neighbors seen
+ * (it can exceed Capacity if the cache grew), never the number copied.
+ */
 {
   PNEIGHBOR_CACHE_ENTRY CurNCE;
   KIRQL OldIrql;
@@ -689,13 +695,16 @@ ULONG NBCopyNeighbors
 	   CurNCE = CurNCE->Next ) {
 	  if( CurNCE->Interface == Interface &&
               !AddrIsEqual( &CurNCE->Address, &CurNCE->Interface->Unicast ) ) {
-	      if( ArpTable ) {
+	      if( ArpTable && Size < Capacity ) {
+		  UINT CopyLen = min(CurNCE->LinkAddressLength,
+				     sizeof(ArpTable[Size].PhysAddr));
+		  RtlZeroMemory(&ArpTable[Size], sizeof(ArpTable[Size]));
 		  ArpTable[Size].Index = Interface->Index;
-		  ArpTable[Size].AddrSize = CurNCE->LinkAddressLength;
+		  ArpTable[Size].AddrSize = CopyLen;
 		  RtlCopyMemory
 		      (ArpTable[Size].PhysAddr,
 		       CurNCE->LinkAddress,
-		       CurNCE->LinkAddressLength);
+		       CopyLen);
 		  ArpTable[Size].LogAddr = CurNCE->Address.Address.IPv4Address;
 		  if( CurNCE->State & NUD_PERMANENT )
 		      ArpTable[Size].Type = ARP_ENTRY_STATIC;

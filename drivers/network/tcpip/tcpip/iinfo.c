@@ -207,16 +207,26 @@ TDI_STATUS InfoTdiQueryGetArptableMIB(TDIEntityID ID,
 				      PNDIS_BUFFER Buffer,
 				      PUINT BufferSize) {
     NTSTATUS Status;
-    ULONG NumNeighbors = NBCopyNeighbors( Interface, NULL );
-    ULONG MemSize = NumNeighbors * sizeof(IPARP_ENTRY);
+    ULONG NumNeighbors = NBCopyNeighbors( Interface, NULL, 0 );
+    ULONG MemSize;
     PIPARP_ENTRY ArpEntries;
 
-    if (MemSize != 0)
+    if (NumNeighbors != 0)
     {
+        ULONG Seen;
+
+        if (NumNeighbors > MAXULONG / sizeof(IPARP_ENTRY))
+            return STATUS_INSUFFICIENT_RESOURCES;
+        MemSize = NumNeighbors * sizeof(IPARP_ENTRY);
+
         ArpEntries = ExAllocatePoolWithTag( NonPagedPool, MemSize, ARP_ENTRY_TAG );
         if( !ArpEntries ) return STATUS_NO_MEMORY;
 
-        NBCopyNeighbors( Interface, ArpEntries );
+        /* The cache can change between the count and the copy: the copy is
+           capacity-bounded and the reply is clamped to what was copied */
+        Seen = NBCopyNeighbors( Interface, ArpEntries, NumNeighbors );
+        if (Seen < NumNeighbors)
+            MemSize = Seen * sizeof(IPARP_ENTRY);
 
         Status = InfoCopyOut( (PVOID)ArpEntries, MemSize, Buffer, BufferSize );
 
@@ -237,6 +247,9 @@ TDI_STATUS InfoTdiSetArptableMIB(PIP_INTERFACE IF, PVOID Buffer, UINT BufferSize
     PNEIGHBOR_CACHE_ENTRY NCE;
 
     if (!Buffer || BufferSize < sizeof(IPARP_ENTRY))
+        return TDI_INVALID_PARAMETER;
+
+    if (ArpEntry->AddrSize > sizeof(ArpEntry->PhysAddr))
         return TDI_INVALID_PARAMETER;
 
     AddrInitIPv4(&Address, ArpEntry->LogAddr);

@@ -24,6 +24,25 @@ typedef struct ARP_HEADER {
 #define ARP_OPCODE_REPLY   WH2N(0x0002) /* ARP reply */
 
 
+/* Largest link-layer address an ARP table entry (IPARP_ENTRY.PhysAddr) holds */
+#define ARP_MAX_LINK_ADDRESS_LENGTH 8
+
+/* Wire-field contract for an incoming ARP packet: the hardware address length
+   must be exactly the receiving interface's link address length (and fit a
+   neighbor table entry), and the protocol address length must be that of IPv4.
+   Anything else is rejected before any variable-length field is used. */
+static __inline BOOLEAN ARPValidateAddressLengths(
+    UINT HWAddrLen,
+    UINT ProtoAddrLen,
+    UINT InterfaceAddressLength)
+{
+    if (HWAddrLen == 0 || HWAddrLen > ARP_MAX_LINK_ADDRESS_LENGTH)
+        return FALSE;
+    if (HWAddrLen != InterfaceAddressLength)
+        return FALSE;
+    return ProtoAddrLen == 4;
+}
+
 BOOLEAN ARPTransmit(PIP_ADDRESS Address, PVOID LinkAddress, PIP_INTERFACE Interface);
 
 VOID ARPReceive(

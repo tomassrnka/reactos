@@ -46,6 +46,12 @@ PNDIS_PACKET PrepareARPPacket(
     TI_DbgPrint(DEBUG_ARP, ("Called.\n"));
 
     /* Prepare ARP packet */
+    /* Source buffers are the interface address (LinkAddressLength) and IP
+       address unions (ProtoAddressLength <= 16): never read past them */
+    if (LinkAddressLength > ARP_MAX_LINK_ADDRESS_LENGTH ||
+        ProtoAddressLength > sizeof(IF->Unicast.Address))
+        return NULL;
+
     Size = sizeof(ARP_HEADER) +
         2 * LinkAddressLength + /* Hardware address length */
         2 * ProtoAddressLength; /* Protocol address length */
@@ -234,6 +240,16 @@ VOID ARPReceive(
         return;
     }
 
+    /* HWAddrLen/ProtoAddrLen come from the wire: validate before use */
+    if (!ARPValidateAddressLengths(Header->HWAddrLen,
+                                   Header->ProtoAddrLen,
+                                   Interface->AddressLength)) {
+        TI_DbgPrint(DEBUG_ARP, ("Bad ARP address lengths (hw %u, proto %u).\n",
+                                Header->HWAddrLen, Header->ProtoAddrLen));
+        Packet->Free(Packet);
+        return;
+    }
+
     DataSize = (2 * Header->HWAddrLen) + (2 * Header->ProtoAddrLen);
     DataBuffer = ExAllocatePool(PagedPool,
                                 DataSize);
@@ -298,7 +314,7 @@ VOID ARPReceive(
         Header->HWType,                  /* Hardware type */
         Header->ProtoType,               /* Protocol type */
         (UCHAR)Interface->AddressLength, /* Hardware address length */
-        (UCHAR)Header->ProtoAddrLen,     /* Protocol address length */
+        (UCHAR)Header->ProtoAddrLen,     /* Protocol address length (validated == 4) */
         Interface->Address,              /* Sender's (local) hardware address */
         &Interface->Unicast.Address.IPv4Address,/* Sender's (local) protocol address */
         SenderHWAddress,                 /* Target's (remote) hardware address */
