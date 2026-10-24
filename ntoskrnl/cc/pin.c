@@ -81,9 +81,13 @@ CcpDereferenceBcb(
     if (RefCount == 0)
     {
         RemoveEntryList(&Bcb->BcbEntry);
+
+        /* PinCount is mutated under BcbSpinLock, so read it while we still
+         * hold the lock. With the last reference gone and the BCB unlinked,
+         * no other CPU can touch it after we release. */
+        ASSERT(Bcb->PinCount == 0);
         KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
 
-        ASSERT(Bcb->PinCount == 0);
         /*
          * Don't mark dirty, if it was dirty,
          * the VACB was already marked as such
@@ -168,7 +172,10 @@ CcpGetAppropriateBcb(
                 return NULL;
             }
 
+            /* PinCount is serialized by BcbSpinLock (see CcpDereferenceBcb). */
+            KeAcquireSpinLock(&SharedCacheMap->BcbSpinLock, &OldIrql);
             DupBcb->PinCount++;
+            KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
         }
 
         /* The winner holds its own VACB reference */
@@ -251,7 +258,10 @@ CcpPinData(
             return FALSE;
         }
 
+        /* PinCount is serialized by BcbSpinLock (see CcpDereferenceBcb). */
+        KeAcquireSpinLock(&SharedCacheMap->BcbSpinLock, &OldIrql);
         NewBcb->PinCount++;
+        KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
     }
     else
     {
@@ -587,16 +597,33 @@ CcUnpinDataForThread (
     IN	ERESOURCE_THREAD ResourceThreadId)
 {
     PINTERNAL_BCB iBcb = CONTAINING_RECORD(Bcb, INTERNAL_BCB, PFCB);
+    PROS_SHARED_CACHE_MAP SharedCacheMap = iBcb->Vacb->SharedCacheMap;
+    KIRQL OldIrql;
+    BOOLEAN Pinned;
 
     CCTRACE(CC_API_DEBUG, "Bcb=%p ResourceThreadId=%lu\n", Bcb, ResourceThreadId);
 
-    if (iBcb->PinCount != 0)
+    /* Test-and-decrement PinCount under BcbSpinLock so the counter stays
+     * coherent with concurrent pin/unpin on other CPUs. Without this the
+     * non-atomic decrement can race a non-atomic increment and lose an
+     * update, leaving PinCount != 0 when the last reference is dropped
+     * (ASSERT(Bcb->PinCount == 0) bugcheck in CcpDereferenceBcb). */
+    KeAcquireSpinLock(&SharedCacheMap->BcbSpinLock, &OldIrql);
+    Pinned = (iBcb->PinCount != 0);
+    if (Pinned)
     {
-        ExReleaseResourceForThreadLite(&iBcb->Lock, ResourceThreadId);
         iBcb->PinCount--;
     }
+    KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
 
-    CcpDereferenceBcb(iBcb->Vacb->SharedCacheMap, iBcb);
+    /* Release the resource outside the spinlock: this unpin owns one
+     * acquisition of the ERESOURCE and the resource has its own locking. */
+    if (Pinned)
+    {
+        ExReleaseResourceForThreadLite(&iBcb->Lock, ResourceThreadId);
+    }
+
+    CcpDereferenceBcb(SharedCacheMap, iBcb);
 }
 
 /*
