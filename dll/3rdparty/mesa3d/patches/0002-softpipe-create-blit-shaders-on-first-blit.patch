@@ -1,0 +1,57 @@
+softpipe: create the blit shaders on the first blit
+
+softpipe_create_context built every blit shader of the blitter before the
+first draw. Creating a context took more than 100 ms because of it, and
+wined3d creates a dozen contexts for one Direct3D object. The shaders
+are now made on the first blit. They must still be made with the
+function of the driver, because the blitter binds them without the
+wrappers of the Draw stages (aaline, aapoint, polygon stipple).
+
+diff -ru a/src/gallium/drivers/softpipe/sp_context.c b/src/gallium/drivers/softpipe/sp_context.c
+--- a/src/gallium/drivers/softpipe/sp_context.c
++++ b/src/gallium/drivers/softpipe/sp_context.c
+@@ -309,8 +309,9 @@
+       goto fail;
+    }
+ 
+-   /* must be done before installing Draw stages */
+-   util_blitter_cache_all_shaders(softpipe->blitter);
++   /* The blit shaders are made on the first blit, with the function that
++    * does not go through the Draw stages installed below. */
++   softpipe->driver_create_fs_state = softpipe->pipe.create_fs_state;
+ 
+    /* plug in AA line/point stages */
+    draw_install_aaline_stage(softpipe->draw, &softpipe->pipe);
+diff -ru a/src/gallium/drivers/softpipe/sp_context.h b/src/gallium/drivers/softpipe/sp_context.h
+--- a/src/gallium/drivers/softpipe/sp_context.h
++++ b/src/gallium/drivers/softpipe/sp_context.h
+@@ -172,6 +172,8 @@
+    struct draw_stage *vbuf;
+ 
+    struct blitter_context *blitter;
++   void *(*driver_create_fs_state)(struct pipe_context *, const struct pipe_shader_state *);
++   bool blit_shaders_cached;
+ 
+    bool dirty_render_cache;
+ 
+diff -ru a/src/gallium/drivers/softpipe/sp_surface.c b/src/gallium/drivers/softpipe/sp_surface.c
+--- a/src/gallium/drivers/softpipe/sp_surface.c
++++ b/src/gallium/drivers/softpipe/sp_surface.c
+@@ -52,6 +52,17 @@
+       return; /* done */
+    }
+ 
++   if (!sp->blit_shaders_cached) {
++      void *(*create_fs_state)(struct pipe_context *, const struct pipe_shader_state *) =
++         pipe->create_fs_state;
++
++      /* Shaders made through the Draw stages cannot be bound by the blitter. */
++      pipe->create_fs_state = sp->driver_create_fs_state;
++      util_blitter_cache_all_shaders(sp->blitter);
++      pipe->create_fs_state = create_fs_state;
++      sp->blit_shaders_cached = true;
++   }
++
+    if (!util_blitter_is_blit_supported(sp->blitter, info)) {
+       debug_printf("softpipe: blit unsupported %s -> %s\n",
+                    util_format_short_name(info->src.resource->format),

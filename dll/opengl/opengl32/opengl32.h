@@ -43,6 +43,8 @@ struct wgl_context
     volatile LONG thread_id;
 };
 
+struct wgl_context* get_context(HGLRC hglrc);
+
 #define WGL_DC_OBJ_DC 0x1
 struct wgl_dc_data
 {

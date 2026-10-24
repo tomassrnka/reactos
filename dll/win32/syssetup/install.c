@@ -1489,6 +1489,50 @@ SaveDefaultUserHive(VOID)
 }
 
 
+/*
+ * Registers the Vulkan ICD manifests that the system ships (the lavapipe software driver, when it is installed)
+ * with the Khronos Vulkan loader, which reads the absolute path of every manifest from the value names of
+ * HKLM\SOFTWARE\Khronos\Vulkan\Drivers (data 0 = enabled). The path depends on the Windows directory of
+ * the installation, so it cannot come from the registry hive template.
+ */
+static VOID
+RegisterVulkanIcds(
+    _In_ PCWSTR pszWindowsDir)
+{
+    static const PCWSTR Manifests[] = { L"lvp_icd.json" };
+    WCHAR szPath[MAX_PATH];
+    HKEY hKey = NULL;
+    DWORD dwEnabled = 0;
+    UINT i;
+
+    for (i = 0; i < ARRAYSIZE(Manifests); i++)
+    {
+        if (wcslen(pszWindowsDir) + wcslen(Manifests[i]) + 10 >= ARRAYSIZE(szPath))
+            continue;
+
+        wcscpy(szPath, pszWindowsDir);
+        wcscat(szPath, L"\\system32\\");
+        wcscat(szPath, Manifests[i]);
+
+        if (GetFileAttributesW(szPath) == INVALID_FILE_ATTRIBUTES)
+            continue;
+
+        if (!hKey &&
+            RegCreateKeyExW(HKEY_LOCAL_MACHINE,
+                            L"SOFTWARE\\Khronos\\Vulkan\\Drivers",
+                            0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL,
+                            &hKey, NULL) != ERROR_SUCCESS)
+        {
+            return;
+        }
+
+        RegSetValueExW(hKey, szPath, 0, REG_DWORD, (LPBYTE)&dwEnabled, sizeof(dwEnabled));
+    }
+
+    if (hKey)
+        RegCloseKey(hKey);
+}
+
 static
 DWORD
 InstallReactOS(VOID)
@@ -1542,6 +1586,8 @@ InstallReactOS(VOID)
 
             RegCloseKey(hKey);
         }
+
+        RegisterVulkanIcds(szBuffer);
 
         PathAddBackslash(szBuffer);
         wcscat(szBuffer, L"system");
