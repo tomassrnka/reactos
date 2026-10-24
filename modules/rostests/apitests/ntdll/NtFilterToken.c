@@ -26,6 +26,75 @@ GetTokenProcess(VOID)
     return Token;
 }
 
+/*
+ * Contract for T125: a SID named in SidsToDisable must actually be disabled
+ * (turned deny-only) in the filtered token. The group-matching RtlEqualSid in
+ * SepPerformTokenFiltering used to be passed the address of the SID pointer
+ * (&...Sid) instead of the SID, so it never matched and filtering was a silent
+ * no-op: the SID stayed enabled. Everyone (S-1-1-0) is present and enabled in
+ * every token, so it is a reliable target.
+ */
+static
+VOID
+TestSidToDisableIsDisabled(
+    _In_ HANDLE Token)
+{
+    NTSTATUS Status;
+    HANDLE FilteredToken = NULL;
+    SID_IDENTIFIER_AUTHORITY WorldAuthority = {SECURITY_WORLD_SID_AUTHORITY};
+    PSID EveryoneSid;
+    BYTE SidsBuffer[sizeof(TOKEN_GROUPS)];
+    PTOKEN_GROUPS SidsToDisable = (PTOKEN_GROUPS)SidsBuffer;
+    BYTE GroupsBuffer[4096];
+    PTOKEN_GROUPS Groups = (PTOKEN_GROUPS)GroupsBuffer;
+    ULONG Length, i;
+    BOOLEAN Found = FALSE;
+
+    Status = RtlAllocateAndInitializeSid(&WorldAuthority, 1, SECURITY_WORLD_RID,
+                                         0, 0, 0, 0, 0, 0, 0, &EveryoneSid);
+    if (!NT_SUCCESS(Status))
+    {
+        skip("Failed to build the Everyone SID (0x%lx)\n", Status);
+        return;
+    }
+
+    SidsToDisable->GroupCount = 1;
+    SidsToDisable->Groups[0].Sid = EveryoneSid;
+    SidsToDisable->Groups[0].Attributes = 0;
+
+    Status = NtFilterToken(Token, 0, SidsToDisable, NULL, NULL, &FilteredToken);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+    {
+        RtlFreeSid(EveryoneSid);
+        return;
+    }
+
+    Status = NtQueryInformationToken(FilteredToken, TokenGroups, Groups, sizeof(GroupsBuffer), &Length);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        for (i = 0; i < Groups->GroupCount; i++)
+        {
+            if (RtlEqualSid(Groups->Groups[i].Sid, EveryoneSid))
+            {
+                Found = TRUE;
+                ok(Groups->Groups[i].Attributes & SE_GROUP_USE_FOR_DENY_ONLY,
+                   "Everyone must be deny-only after filtering, attributes = 0x%lx\n",
+                   Groups->Groups[i].Attributes);
+                ok(!(Groups->Groups[i].Attributes & SE_GROUP_ENABLED),
+                   "Everyone must not be enabled after filtering, attributes = 0x%lx\n",
+                   Groups->Groups[i].Attributes);
+                break;
+            }
+        }
+        ok(Found, "Everyone SID must still be present in the filtered token\n");
+    }
+
+    RtlFreeSid(EveryoneSid);
+    CloseHandle(FilteredToken);
+}
+
 START_TEST(NtFilterToken)
 {
     NTSTATUS Status;
@@ -127,6 +196,9 @@ START_TEST(NtFilterToken)
     }
 
     trace("Number of privileges after token filtering (manually deleted privilege) -- %lu\n\n", TokenStats->PrivilegeCount);
+
+    /* T125 contract: disabling a SID must actually turn it deny-only */
+    TestSidToDisableIsDisabled(Token);
 
     /* We're done */
     RtlFreeHeap(RtlGetProcessHeap(), 0, TokenStats);

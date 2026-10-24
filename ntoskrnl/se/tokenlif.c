@@ -747,7 +747,7 @@ SepDuplicateToken(
                  * this group.
                  */
                 if (RtlEqualSid(SeAliasAdminsSid,
-                                &AccessToken->UserAndGroups[GroupsIndex].Sid))
+                                AccessToken->UserAndGroups[GroupsIndex].Sid))
                 {
                     AccessToken->TokenFlags &= ~TOKEN_HAS_ADMIN_GROUP;
                 }
@@ -1348,8 +1348,8 @@ SepPerformTokenFiltering(
             for (GroupsInList = 0; GroupsInList < RegularGroupsSidCount; GroupsInList++)
             {
                 /* Does this group SID exist in the token? */
-                if (RtlEqualSid(&AccessToken->UserAndGroups[GroupsInToken].Sid,
-                                &SidsToBeDisabled[GroupsInList].Sid))
+                if (RtlEqualSid(AccessToken->UserAndGroups[GroupsInToken].Sid,
+                                SidsToBeDisabled[GroupsInList].Sid))
                 {
                     /* Mark that we found it */
                     FoundGroup = TRUE;
@@ -1373,7 +1373,7 @@ SepPerformTokenFiltering(
                  * away TOKEN_HAS_ADMIN_GROUP flag from the token.
                  */
                 if (RtlEqualSid(SeAliasAdminsSid,
-                                &AccessToken->UserAndGroups[GroupsInToken].Sid))
+                                AccessToken->UserAndGroups[GroupsInToken].Sid))
                 {
                     AccessToken->TokenFlags &= ~TOKEN_HAS_ADMIN_GROUP;
                 }
@@ -1398,8 +1398,13 @@ SepPerformTokenFiltering(
                 AccessToken->UserAndGroups[GroupsInToken].Attributes &= ~(SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT);
                 AccessToken->UserAndGroups[GroupsInToken].Attributes |= SE_GROUP_USE_FOR_DENY_ONLY;
 
-                /* Adjust the index and continue with the next group */
-                GroupsInToken--;
+                /*
+                 * Unlike a deleted privilege, a disabled group SID stays in
+                 * the token (only its attributes change to deny-only), so the
+                 * index must NOT be rewound here: doing so would re-examine the
+                 * same SID, which still matches, and loop forever. Just move on
+                 * to the next group. (T125)
+                 */
                 FoundGroup = FALSE;
                 continue;
             }
