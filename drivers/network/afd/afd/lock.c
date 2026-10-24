@@ -24,6 +24,34 @@ PVOID GetLockedData(PIRP Irp, PIO_STACK_LOCATION IrpSp)
     return Irp->Tail.Overlay.DriverContext[0];
 }
 
+/* Validate the size of a METHOD_NEITHER request before it is locked and copied.
+ * For ioctls the input buffer must be present and at least MinLength bytes
+ * (and never empty); for read/write the user buffer must be present whenever
+ * a length is given. Callers that interpret the request as a structure pass
+ * the size of the part they actually read. */
+BOOLEAN AfdRequestLengthValid( PIRP Irp,
+                               PIO_STACK_LOCATION IrpSp,
+                               ULONG MinLength ) {
+    switch (IrpSp->MajorFunction)
+    {
+        case IRP_MJ_DEVICE_CONTROL:
+        case IRP_MJ_INTERNAL_DEVICE_CONTROL:
+            if (MinLength == 0)
+                MinLength = 1;
+            return IrpSp->Parameters.DeviceIoControl.Type3InputBuffer != NULL &&
+                   IrpSp->Parameters.DeviceIoControl.InputBufferLength >= MinLength;
+
+        case IRP_MJ_READ:
+            return Irp->UserBuffer != NULL || IrpSp->Parameters.Read.Length == 0;
+
+        case IRP_MJ_WRITE:
+            return Irp->UserBuffer != NULL || IrpSp->Parameters.Write.Length == 0;
+
+        default:
+            return FALSE;
+    }
+}
+
 /* Lock a method_neither request so it'll be available from DISPATCH_LEVEL */
 PVOID LockRequest( PIRP Irp,
                    PIO_STACK_LOCATION IrpSp,
@@ -33,13 +61,18 @@ PVOID LockRequest( PIRP Irp,
 
     ASSERT(!Irp->MdlAddress);
 
+    /* Backstop: a NULL or empty request buffer is never valid (ASSERTs vanish
+     * in release builds). Callers check their structure's minimum size first. */
+    if (!AfdRequestLengthValid(Irp, IrpSp, 1))
+    {
+        AFD_DbgPrint(MIN_TRACE,("Invalid request buffer\n"));
+        return NULL;
+    }
+
     switch (IrpSp->MajorFunction)
     {
         case IRP_MJ_DEVICE_CONTROL:
         case IRP_MJ_INTERNAL_DEVICE_CONTROL:
-            ASSERT(IrpSp->Parameters.DeviceIoControl.Type3InputBuffer);
-            ASSERT(IrpSp->Parameters.DeviceIoControl.InputBufferLength);
-
 
             Irp->MdlAddress =
             IoAllocateMdl( IrpSp->Parameters.DeviceIoControl.Type3InputBuffer,
@@ -107,8 +140,6 @@ PVOID LockRequest( PIRP Irp,
 
         case IRP_MJ_READ:
         case IRP_MJ_WRITE:
-            ASSERT(Irp->UserBuffer);
-
             Irp->MdlAddress =
             IoAllocateMdl(Irp->UserBuffer,
                           (IrpSp->MajorFunction == IRP_MJ_READ) ?
@@ -154,8 +185,25 @@ PVOID LockRequest( PIRP Irp,
                 AfdInfo->AfdFlags = 0;
                 AfdInfo->TdiFlags = 0;
 
-                /* Now build the buffer array */
-                AfdInfo->BufferArray[0].buf = MmGetSystemAddressForMdl(Irp->MdlAddress);
+                /* Now build the buffer array. A zero-length transfer has no
+                 * pages to map; leave the buffer empty (LockBuffers skips it). */
+                if (MmGetMdlByteCount(Irp->MdlAddress) != 0)
+                {
+                    AfdInfo->BufferArray[0].buf = MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority);
+                    if (!AfdInfo->BufferArray[0].buf)
+                    {
+                        AFD_DbgPrint(MIN_TRACE,("Failed to get mapped address\n"));
+                        ExFreePoolWithTag(AfdInfo, TAG_AFD_DATA_BUFFER);
+                        MmUnlockPages(Irp->MdlAddress);
+                        IoFreeMdl( Irp->MdlAddress );
+                        Irp->MdlAddress = NULL;
+                        return NULL;
+                    }
+                }
+                else
+                {
+                    AfdInfo->BufferArray[0].buf = NULL;
+                }
                 AfdInfo->BufferArray[0].len = MmGetMdlByteCount(Irp->MdlAddress);
 
                 /* Store the struct where AFD expects */
