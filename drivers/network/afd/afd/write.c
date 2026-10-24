@@ -10,6 +10,58 @@
 
 #include "afd.h"
 
+/* Largest user-supplied TDI transport address we accept for a datagram send.
+ * msafd caps its own buffer at 128 bytes; every supported address type fits. */
+#define AFD_MAX_SEND_TA_LENGTH 256
+
+/* Copy the caller's destination TRANSPORT_ADDRESS into kernel memory and check
+ * it. The pointer inside the (already captured) request is a raw user pointer,
+ * so it is probed and read under SEH; afterwards only Captured is used. The
+ * captured block is guaranteed to hold the address type's full TDI length. */
+static
+NTSTATUS
+AfdCaptureSendAddress(PIRP Irp,
+                      PTDI_CONNECTION_INFORMATION Info,
+                      PVOID CapturedBuf,
+                      PTRANSPORT_ADDRESS *Captured)
+{
+    PTRANSPORT_ADDRESS Source = Info->RemoteAddress;
+    ULONG Length = Info->RemoteAddressLength;
+    PTRANSPORT_ADDRESS Ta = CapturedBuf;
+    UINT TypeLength;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    *Captured = NULL;
+
+    /* Must at least hold the TRANSPORT_ADDRESS header plus the TA_ADDRESS header */
+    if (!Source ||
+        Length < sizeof(ULONG) + 2 * sizeof(USHORT) ||
+        Length > AFD_MAX_SEND_TA_LENGTH)
+        return STATUS_INVALID_PARAMETER;
+
+    _SEH2_TRY {
+        if (Irp->RequestorMode == UserMode)
+            ProbeForRead(Source, Length, 1);
+        RtlCopyMemory(Ta, Source, Length);
+    } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
+        Status = STATUS_ACCESS_VIOLATION;
+    } _SEH2_END;
+
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if (Ta->TAAddressCount < 1)
+        return STATUS_INVALID_PARAMETER;
+
+    /* TdiBuildConnectionInfo copies the by-type length out of the address */
+    TypeLength = TaLengthOfTransportAddressByType(Ta->Address[0].AddressType);
+    if (TypeLength == 0 || TypeLength > Length)
+        return STATUS_INVALID_PARAMETER;
+
+    *Captured = Ta;
+    return STATUS_SUCCESS;
+}
+
 static IO_COMPLETION_ROUTINE SendComplete;
 static NTSTATUS NTAPI SendComplete
 ( PDEVICE_OBJECT DeviceObject,
@@ -201,10 +253,17 @@ static NTSTATUS NTAPI SendComplete
         if (NextIrp != NULL)
         {
             for( i = 0; i < SendReq->BufferCount; i++ ) {
+                /* Zero-length (or NULL) WSABUFs have no MDL: nothing to copy */
+                if (Map[i].Mdl == NULL || SendReq->BufferArray[i].len == 0)
+                    continue;
+
                 BytesCopied = MIN(SendReq->BufferArray[i].len, SpaceAvail);
 
                 Map[i].BufferAddress =
-                   MmMapLockedPages( Map[i].Mdl, KernelMode );
+                   MmMapLockedPagesSpecifyCache( Map[i].Mdl, KernelMode, MmCached,
+                                                 NULL, FALSE, NormalPagePriority );
+                if (Map[i].BufferAddress == NULL)
+                    break;
 
                 RtlCopyMemory( FCB->Send.Window + FCB->Send.BytesUsed,
                                Map[i].BufferAddress,
@@ -276,8 +335,10 @@ static NTSTATUS NTAPI PacketSocketSendComplete
     if( !SocketAcquireStateLock( FCB ) )
         return STATUS_FILE_CLOSED;
 
-    ASSERT(FCB->SendIrp.InFlightRequest == Irp);
-    FCB->SendIrp.InFlightRequest = NULL;
+    /* Only clear the slot if it still names this request: another datagram
+     * send may have replaced it while this one was in flight */
+    if (FCB->SendIrp.InFlightRequest == Irp)
+        FCB->SendIrp.InFlightRequest = NULL;
     /* Request is not in flight any longer */
 
     if( FCB->SharedData.State == SOCKET_STATE_CLOSED ) {
@@ -297,7 +358,15 @@ static NTSTATUS NTAPI PacketSocketSendComplete
         return STATUS_FILE_CLOSED;
     }
 
-    ASSERT(!IsListEmpty(&FCB->PendingIrpList[FUNCTION_SEND]));
+    /* The user request this transport send belonged to may already be gone:
+     * AfdCancelHandler dequeues and completes a cancelled request while its
+     * datagram is still in flight. Never pop a list head that is not there
+     * (it would be the list head itself, not an IRP). */
+    if( IsListEmpty( &FCB->PendingIrpList[FUNCTION_SEND] ) ) {
+        AFD_DbgPrint(MIN_TRACE,("Datagram send completed with no pending request\n"));
+        SocketStateUnlock( FCB );
+        return STATUS_SUCCESS;
+    }
 
     /* TDI spec guarantees FIFO ordering on IRPs */
     NextIrpEntry = RemoveHeadList(&FCB->PendingIrpList[FUNCTION_SEND]);
@@ -357,8 +426,16 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                                            0 );
         }
 
+        /* Connected datagram sends use only the leading AFD_SEND_INFO fields */
+        if( !AfdRequestLengthValid( Irp, IrpSp, FIELD_OFFSET(AFD_SEND_INFO_UDP, TdiRequest) ) )
+            return UnlockAndMaybeComplete( FCB, STATUS_INVALID_PARAMETER, Irp, 0 );
+
         if( !(SendReq = LockRequest( Irp, IrpSp, FALSE, &LockMode )) )
             return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY, Irp, 0 );
+
+        /* The datagram is taken from BufferArray[0] below */
+        if( SendReq->BufferCount == 0 )
+            return UnlockAndMaybeComplete( FCB, STATUS_INVALID_PARAMETER, Irp, 0 );
 
         /* Must lock buffers before handing off user data */
         SendReq->BufferArray = LockBuffers( SendReq->BufferArray,
@@ -392,7 +469,8 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                                          FCB);
                 if (Status != STATUS_PENDING)
                 {
-                    NT_VERIFY(RemoveHeadList(&FCB->PendingIrpList[FUNCTION_SEND]) == &Irp->Tail.Overlay.ListEntry);
+                    /* Earlier datagrams may still be queued: unlink this request, not the head */
+                    RemoveEntryList(&Irp->Tail.Overlay.ListEntry);
                     Irp->IoStatus.Status = Status;
                     Irp->IoStatus.Information = ((Status == STATUS_SUCCESS) ? SendReq->BufferArray[0].len : 0);
                     AfdClearCancelRoutine(Irp);
@@ -439,9 +517,17 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         return UnlockAndMaybeComplete(FCB, STATUS_FILE_CLOSED, Irp, 0);
     }
 
+    if( !AfdRequestLengthValid( Irp, IrpSp, sizeof(AFD_SEND_INFO) ) )
+        return UnlockAndMaybeComplete
+            ( FCB, STATUS_INVALID_PARAMETER, Irp, 0 );
+
     if( !(SendReq = LockRequest( Irp, IrpSp, FALSE, &LockMode )) )
         return UnlockAndMaybeComplete
             ( FCB, STATUS_NO_MEMORY, Irp, 0 );
+
+    if( SendReq->BufferCount == 0 )
+        return UnlockAndMaybeComplete
+            ( FCB, STATUS_INVALID_PARAMETER, Irp, 0 );
 
     SendReq->BufferArray = LockBuffers( SendReq->BufferArray,
                                         SendReq->BufferCount,
@@ -573,6 +659,8 @@ AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PAFD_FCB FCB = FileObject->FsContext;
     PAFD_SEND_INFO_UDP SendReq;
     KPROCESSOR_MODE LockMode;
+    PTRANSPORT_ADDRESS RemoteAddress;
+    ULONG_PTR RemoteAddressBuf[(AFD_MAX_SEND_TA_LENGTH + sizeof(ULONG_PTR) - 1) / sizeof(ULONG_PTR)];
 
     UNREFERENCED_PARAMETER(DeviceObject);
 
@@ -596,8 +684,22 @@ AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         return UnlockAndMaybeComplete(FCB, STATUS_FILE_CLOSED, Irp, 0);
     }
 
+    if( !AfdRequestLengthValid( Irp, IrpSp, sizeof(AFD_SEND_INFO_UDP) ) )
+        return UnlockAndMaybeComplete(FCB, STATUS_INVALID_PARAMETER, Irp, 0);
+
     if( !(SendReq = LockRequest( Irp, IrpSp, FALSE, &LockMode )) )
         return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
+
+    /* The datagram is taken from BufferArray[0] below */
+    if( SendReq->BufferCount == 0 )
+        return UnlockAndMaybeComplete(FCB, STATUS_INVALID_PARAMETER, Irp, 0);
+
+    /* The destination is a user pointer: capture and validate it once, and use
+     * only the kernel copy from here on */
+    Status = AfdCaptureSendAddress(Irp, &SendReq->TdiConnection,
+                                   RemoteAddressBuf, &RemoteAddress);
+    if( !NT_SUCCESS(Status) )
+        return UnlockAndMaybeComplete(FCB, Status, Irp, 0);
 
     if (FCB->SharedData.State == SOCKET_STATE_CREATED)
     {
@@ -607,8 +709,7 @@ AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         }
 
         FCB->LocalAddress =
-        TaBuildNullTransportAddress( ((PTRANSPORT_ADDRESS)SendReq->TdiConnection.RemoteAddress)->
-                                      Address[0].AddressType );
+        TaBuildNullTransportAddress( RemoteAddress->Address[0].AddressType );
 
         if( FCB->LocalAddress ) {
             Status = WarmSocketForBind( FCB, AFD_SHARE_WILDCARD );
@@ -633,13 +734,10 @@ AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     AFD_DbgPrint
         (MID_TRACE,("RemoteAddress #%d Type %u\n",
-                    ((PTRANSPORT_ADDRESS)SendReq->TdiConnection.RemoteAddress)->
-                    TAAddressCount,
-                    ((PTRANSPORT_ADDRESS)SendReq->TdiConnection.RemoteAddress)->
-                    Address[0].AddressType));
+                    RemoteAddress->TAAddressCount,
+                    RemoteAddress->Address[0].AddressType));
 
-    Status = TdiBuildConnectionInfo( &TargetAddress,
-                            ((PTRANSPORT_ADDRESS)SendReq->TdiConnection.RemoteAddress) );
+    Status = TdiBuildConnectionInfo( &TargetAddress, RemoteAddress );
 
     /* Check the size of the Address given ... */
 
@@ -662,7 +760,8 @@ AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                                      FCB);
             if (Status != STATUS_PENDING)
             {
-                NT_VERIFY(RemoveHeadList(&FCB->PendingIrpList[FUNCTION_SEND]) == &Irp->Tail.Overlay.ListEntry);
+                /* Earlier datagrams may still be queued: unlink this request, not the head */
+                RemoveEntryList(&Irp->Tail.Overlay.ListEntry);
                 Irp->IoStatus.Status = Status;
                 Irp->IoStatus.Information = ((Status == STATUS_SUCCESS) ? SendReq->BufferArray[0].len : 0);
                 AfdClearCancelRoutine(Irp);

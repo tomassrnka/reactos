@@ -561,6 +561,10 @@ AfdConnectedSocketReadData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                                        Irp, 0 );
     }
 
+    if( !AfdRequestLengthValid( Irp, IrpSp, sizeof(AFD_RECV_INFO) ) )
+        return UnlockAndMaybeComplete( FCB, STATUS_INVALID_PARAMETER,
+                                       Irp, 0 );
+
     if( !(RecvReq = LockRequest( Irp, IrpSp, FALSE, &LockMode )) )
         return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY,
                                        Irp, 0 );
@@ -856,6 +860,9 @@ AfdPacketSocketReadData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         AFD_DbgPrint(MIN_TRACE,("Receive closed\n"));
         return UnlockAndMaybeComplete(FCB, STATUS_FILE_CLOSED, Irp, 0);
     }
+
+    if( !AfdRequestLengthValid( Irp, IrpSp, sizeof(AFD_RECV_INFO_UDP) ) )
+        return UnlockAndMaybeComplete(FCB, STATUS_INVALID_PARAMETER, Irp, 0);
 
     if( !(RecvReq = LockRequest( Irp, IrpSp, FALSE, &LockMode )) )
         return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);

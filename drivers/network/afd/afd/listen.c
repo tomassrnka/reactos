@@ -618,6 +618,10 @@ NTSTATUS AfdListenSocket( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     if( !SocketAcquireStateLock( FCB ) ) return LostSocket( Irp );
 
+    if( !AfdRequestLengthValid( Irp, IrpSp, sizeof(AFD_LISTEN_DATA) ) )
+        return UnlockAndMaybeComplete( FCB, STATUS_INVALID_PARAMETER, Irp,
+                                       0 );
+
     if( !(ListenReq = LockRequest( Irp, IrpSp, FALSE, NULL )) )
         return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY, Irp,
                                        0 );
