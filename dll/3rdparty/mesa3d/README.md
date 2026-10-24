@@ -89,8 +89,51 @@ Windows driver (it offers `PFD_SUPPORT_GDI` together with double buffering, does
 share list that was shared before, has one global swap interval). These are Mesa's choices and
 no program of the test set depends on them.
 
-## Updating
+## Updating (softpipe DLLs)
 
 Change `MESA_VERSION` and `MESA_SHA256` in `build-mesa.sh`, rebuild, check that the patches
 still apply, replace the two DLLs, rewrite `SHA256SUMS` and run
 `opengl32_apitest icd_default` and `ddraw_apitest` on both architectures.
+
+## llvmpipe and lavapipe (amd64, optional, not committed)
+
+`build-mesa.sh` also builds the amd64 driver with LLVM: `libgallium_wgl.dll` then contains llvmpipe (OpenGL 4.6
+compatibility profile, LLVM JIT, all cores) next to softpipe, and `vulkan_lvp.dll` is lavapipe, a software Vulkan 1.4
+driver. LLVM 19.1.7 (X86 target only, no tools) is built first, static, by `build-llvm.sh` (about 25 minutes on 16 cores,
+1.5 GB of work space); `AMD64_LLVM=0` skips all of it. Build host additions: `cmake`, `glslang-tools`.
+
+The two DLLs are 66-69 MB each (23 MB compressed each, 134 MB on disk against 18 MB for the softpipe-only driver), so
+they are an option of the image: when `amd64-llvm/` holds `libgallium_wgl.dll`, `vulkan_lvp.dll`, `lvp_icd.json`,
+`mesa3d-licenses.txt` and `llvm-licenses.txt` (copy them from `WORKDIR/out`), `CMakeLists.txt` installs them in place of
+the softpipe-only DLL. Without that directory nothing changes. i386 keeps softpipe: llvmpipe on i386 was built once and
+stopped (rasterizer threads deadlocked after a few seconds, see above); amd64 ran 60 s soaks and the Chromium runs
+without a stall, but i386 was not retried.
+
+* OpenGL: nothing to register beyond what is above; `GALLIUM_DRIVER=softpipe` in the environment of a process selects
+  softpipe from the same DLL.
+* Vulkan: Mesa's lavapipe has no Vulkan loader of its own, and the system has none; programs that bring `vulkan-1.dll`
+  (Chromium, Electron, games) find the driver through the Khronos registry list: each value name of
+  `HKLM\SOFTWARE\Khronos\Vulkan\Drivers` is the absolute path of an ICD manifest, data 0 = enabled. The path depends on
+  the Windows directory, so `syssetup` (`RegisterVulkanIcds`, in `InstallReactOS`) writes the value for
+  `%SystemRoot%\system32\lvp_icd.json` when that file exists. An application that registers its own ICD as well
+  (SwiftShader of Claude Desktop) makes the loader list two devices; remove that value to make lavapipe the one.
+* The loader of Chromium/ANGLE still wants a DXGI factory before it accepts a registry ICD, and nitro's wined3d-based
+  DXGI only creates one headless: Claude's per-app `HKCU\Software\Wine\AppDefaults\<app>.exe\Direct3D renderer=no3d` stays
+  necessary (with the default OpenGL driver now at 4.6 it is still not enough on its own).
+
+Checksums of the artifacts of the amd64 build (Mesa 26.2.4, LLVM 19.1.7, Ubuntu 24.04 mingw-w64 GCC 13-win32):
+
+```
+203b01379fb67dfd5fb44ef5902c2474b116664eda332313d88d7c940a9edf35  amd64-llvm/libgallium_wgl.dll
+4d29b2a6671f1cce55f490d543c9fccd9c243d378ec95f79639b556d3282b65e  amd64-llvm/vulkan_lvp.dll
+f977a5cde4a9022f263f4c2d78e89ade8e2ede726e91b860fc9e0a019bd941f6  amd64-llvm/lvp_icd.json
+e25fe82b9d310b74f2b9c979d4f5ae8c7915324d37428a6a72e058dbca29d406  amd64-llvm/mesa3d-licenses.txt
+8d85c1057d742e597985c7d4e6320b015a9139385cff4cbae06ffc0ebe89afee  amd64-llvm/llvm-licenses.txt
+```
+
+Speed (QEMU/KVM, 4 vCPUs, Intel host; 2026-10-24): the lit three-gear scene of 300 by 300 gives 1630 frames per second with
+llvmpipe, 364 with softpipe and 1530 with the built-in OpenGL 1.1 implementation; a GLSL 1.10 fragment-bound scene
+(400 by 400, 100 iterations) takes 16 ms per frame with llvmpipe and 452 ms with softpipe (the built-in implementation has
+no shaders). Chromium 138 (Electron 37.6) with ANGLE on Vulkan, WebGL scene of 1280 by 720: 12.7 ms per frame with
+lavapipe against 30.8 ms with SwiftShader (mean of 5 launches); a page of 150 blurred layers animated by CSS reaches 4.5 frames
+per second against 3.0. The first draw call costs about 30 ms more with the JIT (130 ms against 100 ms).
