@@ -108,6 +108,20 @@ QlRestore(
     _In_ PVOID UserBuf)
 {
     SIZE_T Size = 0;
+    ULONG t;
+
+    /*
+     * Moving onto a private block (PspSetQuotaLimits) seeds it with the usage of
+     * the process and takes that usage off the default block. Reverse that, or
+     * the default block, which every other process shares, ends up under-counted
+     * and underflows once the processes holding that usage return it
+     * (bugcheck 0x21). The process usage is what has to live on the original
+     * block again, charges made while on the private block included.
+     */
+    for (t = 0; t < PsQuotaTypes; t++)
+    {
+        InterlockedExchangeAddSizeT(&OldBlock->QuotaEntry[t].Usage, Process->QuotaUsage[t]);
+    }
 
     /*
      * Put the original block back first: the user buffer was charged to it, and
