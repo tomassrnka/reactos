@@ -1720,8 +1720,24 @@ SepComputeIntegrityLevel(
     if (RtlEqualSid(User, SeAnonymousLogonSid))
         return SECURITY_MANDATORY_UNTRUSTED_RID;
 
-    if (Token->TokenFlags & TOKEN_HAS_ADMIN_GROUP)
-        return SECURITY_MANDATORY_HIGH_RID;
+    /*
+     * A token is High integrity only if the Administrators group is present
+     * AND effective (enabled and not deny-only). TOKEN_HAS_ADMIN_GROUP must
+     * not be used here: it is set whenever the Administrators SID is merely
+     * present at token creation, even when the group is disabled or deny-only
+     * (as a filtered or UAC-limited token has it). Honouring the actual group
+     * attributes keeps such a token at Medium integrity instead of wrongly
+     * granting it High. (T125)
+     */
+    for (i = 1; i < Token->UserAndGroupCount; i++)
+    {
+        if ((Token->UserAndGroups[i].Attributes & SE_GROUP_ENABLED) &&
+            !(Token->UserAndGroups[i].Attributes & SE_GROUP_USE_FOR_DENY_ONLY) &&
+            RtlEqualSid(Token->UserAndGroups[i].Sid, SeAliasAdminsSid))
+        {
+            return SECURITY_MANDATORY_HIGH_RID;
+        }
+    }
 
     return SECURITY_MANDATORY_MEDIUM_RID;
 }

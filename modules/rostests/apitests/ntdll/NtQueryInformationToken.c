@@ -1006,6 +1006,34 @@ CreateTestToken(
     return NewToken;
 }
 
+/*
+ * Contract for T125: the stored integrity level of a freshly created token.
+ * SepComputeIntegrityLevel must grant High only when the Administrators group
+ * is effective (enabled, not deny-only); a deny-only admin group must leave the
+ * token at Medium. Before the fix it keyed off TOKEN_HAS_ADMIN_GROUP (set even
+ * for a deny-only group) and wrongly returned High.
+ */
+static
+VOID
+CheckIntegrityLevel(
+    _In_ HANDLE Token,
+    _In_ PCSTR Name,
+    _In_ ULONG ExpectedRid)
+{
+    NTSTATUS Status;
+    ULONG Length, Rid;
+    BYTE LabelBuffer[64];
+    PTOKEN_MANDATORY_LABEL Label = (PTOKEN_MANDATORY_LABEL)LabelBuffer;
+
+    Status = NtQueryInformationToken(Token, TokenIntegrityLevel, LabelBuffer, sizeof(LabelBuffer), &Length);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+    Rid = *RtlSubAuthoritySid(Label->Label.Sid, 0);
+    ok(Rid == ExpectedRid, "%s: integrity RID = 0x%lx, expected 0x%lx\n", Name, Rid, ExpectedRid);
+    trace("%s: integrity=0x%lx\n", Name, Rid);
+}
+
 static
 VOID
 QueryTokenElevationCreatedTests(
@@ -1023,6 +1051,7 @@ QueryTokenElevationCreatedTests(
         return;
     }
     CheckElevation(Created, "created standard user", 0, 1 /* Default */);
+    CheckIntegrityLevel(Created, "created standard user", SECURITY_MANDATORY_MEDIUM_RID);
     NtClose(Created);
 
     /* Administrators enabled, default (High) integrity */
@@ -1030,6 +1059,7 @@ QueryTokenElevationCreatedTests(
     if (Created)
     {
         CheckElevation(Created, "created admin (group enabled)", 1, 1 /* Default */);
+        CheckIntegrityLevel(Created, "created admin (group enabled)", SECURITY_MANDATORY_HIGH_RID);
         NtClose(Created);
     }
 
@@ -1038,6 +1068,7 @@ QueryTokenElevationCreatedTests(
     if (Created)
     {
         CheckElevation(Created, "created admin (deny-only group)", 0, 3 /* Limited */);
+        CheckIntegrityLevel(Created, "created admin (deny-only group)", SECURITY_MANDATORY_MEDIUM_RID);
         NtClose(Created);
     }
 }

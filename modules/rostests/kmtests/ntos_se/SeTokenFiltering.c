@@ -2,7 +2,7 @@
  * PROJECT:     ReactOS kernel-mode tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
  * PURPOSE:     Kernel mode tests for token filtering implementation
- * COPYRIGHT:   Copyright 2021 George Bișoc <george.bisoc@reactos.org>
+ * COPYRIGHT:   Copyright 2021 George Bisoc <george.bisoc@reactos.org>
  */
 
 #include <kmt_test.h>
@@ -68,6 +68,43 @@ FilterToken(VOID)
                            &FilteredToken);
     ok_irql(PASSIVE_LEVEL);
     ok_eq_hex(Status, STATUS_SUCCESS);
+
+    /*
+     * T125 contract: disabling a SID must actually turn it deny-only in the
+     * filtered token. The group match in SepPerformTokenFiltering used to pass
+     * RtlEqualSid the address of the SID pointer (&...Sid) instead of the SID,
+     * so it never matched and the filter was a silent no-op (the SID stayed
+     * enabled). Verifying the attributes here (not just the status) also guards
+     * the follow-on fix that had to drop a stray index rewind which would
+     * otherwise loop forever once the match worked.
+     */
+    if (NT_SUCCESS(Status))
+    {
+        PTOKEN_GROUPS FilteredGroups = NULL;
+        ULONG Index;
+        BOOLEAN FoundWorld = FALSE;
+
+        Status = SeQueryInformationToken(FilteredToken, TokenGroups, (PVOID *)&FilteredGroups);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status) && FilteredGroups != NULL)
+        {
+            for (Index = 0; Index < FilteredGroups->GroupCount; Index++)
+            {
+                if (RtlEqualSid(FilteredGroups->Groups[Index].Sid, SeExports->SeWorldSid))
+                {
+                    FoundWorld = TRUE;
+                    ok((FilteredGroups->Groups[Index].Attributes & SE_GROUP_USE_FOR_DENY_ONLY) != 0,
+                       "World SID must be deny-only after filtering, attributes = 0x%lx\n",
+                       FilteredGroups->Groups[Index].Attributes);
+                    ok((FilteredGroups->Groups[Index].Attributes & SE_GROUP_ENABLED) == 0,
+                       "World SID must not be enabled after filtering, attributes = 0x%lx\n",
+                       FilteredGroups->Groups[Index].Attributes);
+                }
+            }
+            ok(FoundWorld, "World SID must still be present in the filtered token\n");
+            ExFreePool(FilteredGroups);
+        }
+    }
 
     /*
      * Add a restricted SID but we're going to fail...
