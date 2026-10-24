@@ -424,8 +424,18 @@ static SECURITY_STATUS schan_validate_server_chain(MBEDTLS_SESSION *s)
     status = SEC_E_OK;
     if (policy_status.dwError && policy_status.dwError != CERT_E_CN_NO_MATCH)
     {
-        WARN("MBEDTLS server certificate rejected: %#x\n", policy_status.dwError);
-        status = schan_status_from_chain_error(policy_status.dwError);
+        /* Windows reports an untrusted or incomplete chain ahead of an expiry: a certificate that is
+         * both expired and of an unknown/untrusted issuer is rejected as UNTRUSTED_ROOT, not EXPIRED.
+         * Basic-constraint failures stay WRONG_USAGE below, so they are excluded here. (T114) */
+        if (policy_status.dwError == CERT_E_EXPIRED &&
+            !(chain->TrustStatus.dwErrorStatus & CERT_TRUST_INVALID_BASIC_CONSTRAINTS) &&
+            (chain->TrustStatus.dwErrorStatus & SCHAN_FATAL_CHAIN_ERRORS))
+            status = SEC_E_UNTRUSTED_ROOT;
+        else
+        {
+            WARN("MBEDTLS server certificate rejected: %#x\n", policy_status.dwError);
+            status = schan_status_from_chain_error(policy_status.dwError);
+        }
     }
     /* crypt32's SSL policy ignores these, so a missing issuer, a signer that is not a CA or a name constraint pass it */
     else if (chain->TrustStatus.dwErrorStatus & CERT_TRUST_INVALID_BASIC_CONSTRAINTS)
