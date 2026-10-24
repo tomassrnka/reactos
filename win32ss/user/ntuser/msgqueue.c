@@ -494,7 +494,11 @@ MsqWakeQueue(PTHREADINFO pti, DWORD MessageBits, BOOL KeyEvent)
 
    if (Queue->QF_flags & QF_INDESTROY)
    {
+      /* The queue is being torn down: its wake event (pEventQueueServer) may already
+         be dereferenced and no thread is left to service it, so signalling it is a
+         use-after-free (T131). Drop the wake. */
       ERR("This Message Queue is in Destroy!\n");
+      return;
    }
    pti->pcti->fsWakeBits |= MessageBits;
    pti->pcti->fsChangeBits |= MessageBits;
@@ -1058,7 +1062,13 @@ co_MsqDispatchOneSentMessage(
    /* If the message is a callback, insert it in the callback senders MessageQueue */
    if (Message->CompletionCallback)
    {
-      if (Message->ptiCallBackSender)
+      /* The callback sender can be torn down while we run the receiver's window
+         procedure, because that callout drops the USER lock. Its THREADINFO and its
+         wake event (pEventQueueServer) are then freed, so requeuing the result to it
+         and waking it is a use-after-free (T131). SMF_SENDERDIED is raised by the
+         sender's own teardown while this in-flight message sits on the trouble list;
+         once it is set there is no live sender left to hand the result to. */
+      if (Message->ptiCallBackSender && !(Message->flags & SMF_SENDERDIED))
       {
          Message->lResult = Result;
          Message->QS_Flags |= QS_SMRESULT;
@@ -1067,6 +1077,13 @@ co_MsqDispatchOneSentMessage(
          RemoveEntryList(&Message->ListEntry);
          InsertTailList(&Message->ptiCallBackSender->SentMessagesListHead, &Message->ListEntry);
          MsqWakeQueue(Message->ptiCallBackSender, QS_SENDMESSAGE, TRUE);
+      }
+      else if (Message->flags & SMF_RECEIVERFREE)
+      {
+         /* No live sender to collect the result: drop the message here. */
+         if (Message->HasPackedLParam && Message->Msg.lParam)
+            ExFreePool((PVOID)Message->Msg.lParam);
+         FreeUserMessage(Message);
       }
       Ret = TRUE;
       goto Exit;
@@ -1209,7 +1226,12 @@ MsqWithdrawSentMessagesOf(
          {
             Next = Entry->Flink;
             Message = CONTAINING_RECORD(Entry, USER_SENT_MESSAGE, ListEntry);
-            if (Message->ptiSender == ptiSender)
+            /* A callback (SendMessageCallback / SendNotifyMessage) sender is tracked in
+               ptiCallBackSender, not ptiSender, so the original test missed it: its message
+               outlived the dying thread on the receiver's queue and was later dispatched
+               back to the freed THREADINFO (T131 win32k UAF). Withdraw both. */
+            if (Message->ptiSender == ptiSender ||
+                Message->ptiCallBackSender == ptiSender)
             {
                MsqUnqueueSentMessage(pti, Message);
                Message->flags |= SMF_SENDERDIED;
@@ -2641,6 +2663,11 @@ MsqCleanupThreadMsgs(PTHREADINFO pti)
          else if ( pti == CurrentSentMessage->ptiSender ||
                    pti == CurrentSentMessage->ptiCallBackSender )
          {
+            /* This thread sent the message and is dying while the receiver still holds
+               it in flight. Mark it so the receiver does not hand the result back to a
+               thread that no longer exists (T131). */
+            CurrentSentMessage->flags |= SMF_SENDERDIED;
+
             // Determine whether this message is being processed or not.
             if ((CurrentSentMessage->flags & (SMF_RECEIVERBUSY|SMF_RECEIVEDMESSAGE)) != SMF_RECEIVEDMESSAGE)
             {
