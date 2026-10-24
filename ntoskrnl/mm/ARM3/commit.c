@@ -155,6 +155,43 @@ MiReturnCommit(
     }
 }
 
+/*
+ * A kernel-tier charge failed (pool, which returns NULL silently). Log it,
+ * rate-limited to one line per 5 s plus a count of the suppressed ones, and
+ * kick the paging file growth thread without waiting. Observability only: the
+ * charge semantics are unchanged.
+ */
+VOID
+NTAPI
+MiReportKernelCommitFailure(
+    _In_ SIZE_T Pages,
+    _In_ PCSTR Site)
+{
+    static volatile LONG64 NextReport;
+    static volatile LONG Suppressed;
+    LONG64 Now, Next;
+    SIZE_T Committed, Limit;
+
+    Committed = MmTotalCommittedPages;
+    Limit = MmTotalCommitLimit;
+
+    /* Room for this charge, were the limit raised */
+    if (Committed + Pages > Limit)
+        MiRequestPagingFileGrowth(Committed + Pages - Limit);
+
+    Now = (LONG64)KeQueryInterruptTime();
+    Next = NextReport;
+    if ((Now < Next) ||
+        (InterlockedCompareExchange64(&NextReport, Now + 5 * 10000000LL, Next) != Next))
+    {
+        InterlockedIncrement(&Suppressed);
+        return;
+    }
+
+    DPRINT1("MM: kernel commit charge failed at %s: %Iu pages, committed %Iu limit %Iu reserve %Iu (%ld similar suppressed)\n",
+            Site, Pages, Committed, Limit, MiCommitReserve, InterlockedExchange(&Suppressed, 0));
+}
+
 BOOLEAN
 NTAPI
 MiWaitForCommitGrowth(

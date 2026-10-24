@@ -591,6 +591,31 @@ MiWaitForPagingFileGrowth(
     return (MmTotalCommitLimit > LimitBefore);
 }
 
+/*
+ * Ask the growth thread for room without waiting. For a charge that failed on
+ * a path that cannot block (kernel tier, any IRQL <= DISPATCH_LEVEL): the next
+ * allocation then finds the room. Does not start the thread, take locks or
+ * wait; the thread itself skips files that cannot grow.
+ */
+VOID
+NTAPI
+MiRequestPagingFileGrowth(
+    _In_ SIZE_T Shortfall)
+{
+    SIZE_T Requested;
+
+    if ((MmNumberOfPagingFiles == 0) || (MiPagingFileGrowthThreadState != 2) || (Shortfall == 0))
+        return;
+
+    Requested = MiPagingFileGrowthShortfall;
+    while ((Shortfall > Requested) &&
+           (InterlockedCompareExchangeSizeT(&MiPagingFileGrowthShortfall, Shortfall, Requested) != Requested))
+    {
+        Requested = MiPagingFileGrowthShortfall;
+    }
+    KeSetEvent(&MiPagingFileGrowthRequestEvent, IO_NO_INCREMENT, FALSE);
+}
+
 SWAPENTRY
 NTAPI
 MmAllocSwapPage(VOID)
