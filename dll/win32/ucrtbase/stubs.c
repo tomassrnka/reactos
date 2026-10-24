@@ -43,8 +43,6 @@ int __cdecl __acrt_initialize_sse2(void)
 #pragma function(fmaf)
 #pragma function(log2)
 #pragma function(log2f)
-#pragma function(lrint)
-#pragma function(lrintf)
 #endif
 
 double fma(double x, double y, double z)
@@ -61,23 +59,24 @@ float fmaf(float x, float y, float z)
 
 double log2(double x)
 {
-    // Simplistic implementation: log2(x) = log(x) / log(2)
-    return log(x) * M_LOG2E;
+    int e;
+    double m;
+
+    /* Zero, negative, infinite and NaN arguments keep the behavior of log() */
+    if (!(x > 0.0) || x == INFINITY)
+        return log(x) * M_LOG2E;
+
+    /* x = m * 2^e with m in [sqrt(0.5), sqrt(2)): exact for the powers of two */
+    m = frexp(x, &e);
+    if (m < M_SQRT1_2)
+    {
+        m *= 2.0;
+        e--;
+    }
+    return e + log(m) * M_LOG2E;
 }
 
 float log2f(float x)
 {
     return (float)log2((double)x);
-}
-
-long int lrint(double x)
-{
-    __debugbreak();
-    return 0;
-}
-
-long int lrintf(float x)
-{
-    __debugbreak();
-    return 0;
 }
