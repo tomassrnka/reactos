@@ -51,6 +51,17 @@ set_module_type(appshim_manifestver_vista win32cui)
 add_importlibs(appshim_manifestver_vista msvcrt kernel32 ntdll)
 add_rostests_file(TARGET appshim_manifestver_vista)
 
+add_executable(appshim_manifestver_span manifestver_probe.c manifestver_span.rc)
+set_module_type(appshim_manifestver_span win32cui)
+add_importlibs(appshim_manifestver_span msvcrt kernel32 ntdll)
+add_rostests_file(TARGET appshim_manifestver_span)
+
+add_executable(appshim_manifestver_vista_win10 manifestver_probe.c manifestver_vista_win10.rc)
+set_module_type(appshim_manifestver_vista_win10 win32cui)
+add_importlibs(appshim_manifestver_vista_win10 msvcrt kernel32 ntdll)
+add_rostests_file(TARGET appshim_manifestver_vista_win10)
+
 add_dependencies(appshim_apitest appshim_sysmain_probe appshim_sysmain_other
                  appshim_sysmain_firefox158 appshim_sysmain_firefox115
-                 appshim_manifestver_none appshim_manifestver_vista)
+                 appshim_manifestver_none appshim_manifestver_vista
+                 appshim_manifestver_span appshim_manifestver_vista_win10)

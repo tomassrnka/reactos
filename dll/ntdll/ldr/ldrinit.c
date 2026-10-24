@@ -2326,6 +2326,9 @@ LdrpDisableProcessCompatGuidDetection(VOID)
 }
 
 
+/* Highest manifest compat version we select (the Windows version we emulate) */
+#define LDRP_COMPAT_CEILING _WIN32_WINNT_WIN7
+
 VOID
 NTAPI
 LdrpInitializeProcessCompat(PVOID pProcessActctx, PVOID* pOldShimData)
@@ -2346,7 +2349,7 @@ LdrpInitializeProcessCompat(PVOID pProcessActctx, PVOID* pOldShimData)
     ACTIVATION_CONTEXT_COMPATIBILITY_INFORMATION* ContextCompatInfo;
     SIZE_T SizeRequired;
     NTSTATUS Status;
-    DWORD n, cur;
+    DWORD n, cur, i, pass;
     ReactOS_ShimData* pShimData = *pOldShimData;
 
     if (pShimData)
@@ -2394,14 +2397,23 @@ LdrpInitializeProcessCompat(PVOID pProcessActctx, PVOID* pOldShimData)
     if (ContextCompatInfo->ElementCount == 0)
         return;
 
-    /* Search for known GUIDs, starting from oldest to newest.
-       Note that on Windows it is somewhat reversed, starting from the latest known
-       version, going down. But we are not Windows, trying to allow a lower version,
-       we are ReactOS trying to fake a higher version. So we interpret what Windows
-       does as "try the closest version to the actual version", so we start with the
-       lowest version, which is closest to Windows 2003, which we mostly are. */
-    for (cur = RTL_NUMBER_OF(KnownCompatGuids) - 1; cur != -1; --cur)
+    /* Pick the highest declared supportedOS GUID that we are willing to report.
+       Windows reports the highest supportedOS from the manifest that the host
+       supports, so a Vista..Win10 manifest reports 6.1 on Windows 7 (Burn-based
+       installers gate on VersionNT >= 6.1).
+       ReactOS does not claim more than Windows 7, so GUIDs above that are skipped
+       while a lower declared one exists: a manifest that also lists Win8/8.1/10
+       must not make the process take Win10-only code paths we do not implement.
+       If nothing at or below the ceiling is declared, fall back to the lowest
+       declared GUID (the previous behavior).
+       Pass 0: newest to oldest, ceiling applied. Pass 1: oldest to newest. */
+    for (pass = 0; pass < 2; ++pass)
+    for (i = 0; i < RTL_NUMBER_OF(KnownCompatGuids); ++i)
     {
+        cur = (pass == 0) ? i : (RTL_NUMBER_OF(KnownCompatGuids) - 1 - i);
+        if (pass == 0 && KnownCompatGuids[cur].Version > LDRP_COMPAT_CEILING)
+            continue;
+
         for (n = 0; n < ContextCompatInfo->ElementCount; ++n)
         {
             if (ContextCompatInfo->Elements[n].Type == ACTCTX_COMPATIBILITY_ELEMENT_TYPE_OS &&
@@ -2438,7 +2450,7 @@ LdrpInitializeProcessCompat(PVOID pProcessActctx, PVOID* pOldShimData)
                     *pOldShimData = pShimData;
                 }
 
-                /* Store the lowest found version, and bail out. */
+                /* Store the selected version, and bail out. */
                 pShimData->dwRosProcessCompatVersion = KnownCompatGuids[cur].Version;
                 DPRINT1("LdrpInitializeProcessCompat: Found guid for winver 0x%x in manifest from %wZ\n",
                         KnownCompatGuids[cur].Version,
