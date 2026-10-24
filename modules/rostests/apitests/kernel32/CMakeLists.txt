@@ -9,6 +9,7 @@ list(APPEND SOURCE
     Wow64RemoteThread.c
     Wow64ThreadApc.c
     Wow64Threads.c
+    Wow64CreateThreadAccess.c
     Wow64Environment.c
     BindIoCompletionCallback.c
     CancelIoEx.c
