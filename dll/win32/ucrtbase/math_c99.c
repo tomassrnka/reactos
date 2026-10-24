@@ -177,6 +177,30 @@ float __cdecl rintf(float x)
 
 #endif /* _M_IX86 */
 
+long __cdecl lrint(double x)
+{
+    double d = rint(x);
+    if (!(d >= -2147483648.0 && d <= 2147483647.0))
+    {
+        raise_invalid();
+        errno = EDOM;
+        return 0;
+    }
+    return (long)d;
+}
+
+long __cdecl lrintf(float x)
+{
+    float f = rintf(x);
+    if (!(f >= -2147483648.0f && f < 2147483648.0f))
+    {
+        raise_invalid();
+        errno = EDOM;
+        return 0;
+    }
+    return (long)f;
+}
+
 __int64 __cdecl llrint(double x)
 {
     double d = rint(x);

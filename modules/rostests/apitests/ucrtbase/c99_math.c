@@ -20,7 +20,7 @@
 #define DECL_F2(n) static float (__cdecl *p_##n)(float, float)
 
 DECL_D1(acosh); DECL_D1(asinh); DECL_D1(atanh); DECL_D1(cbrt); DECL_D1(erf); DECL_D1(erfc);
-DECL_D1(expm1); DECL_D1(log1p); DECL_D1(rint); DECL_D1(nearbyint);
+DECL_D1(expm1); DECL_D1(log1p); DECL_D1(log2); DECL_D1(rint); DECL_D1(nearbyint);
 DECL_D2(copysign); DECL_D2(fdim); DECL_D2(fmax); DECL_D2(fmin); DECL_D2(remainder);
 DECL_D1(lgamma); DECL_D1(lgammal); DECL_D1(tgamma); DECL_D1(tgammal); DECL_D1(logb); DECL_D1(logbl); DECL_D1(_logb);
 DECL_F1(lgammaf); DECL_F1(tgammaf); DECL_F1(logbf); DECL_F1(_logbf);
@@ -38,6 +38,8 @@ static long (__cdecl *p_lround)(double);
 static long (__cdecl *p_lroundf)(float);
 static __int64 (__cdecl *p_llround)(double);
 static __int64 (__cdecl *p_llroundf)(float);
+static long (__cdecl *p_lrint)(double);
+static long (__cdecl *p_lrintf)(float);
 static __int64 (__cdecl *p_llrint)(double);
 static __int64 (__cdecl *p_llrintf)(float);
 static unsigned int (__cdecl *p_statusfp)(void);
@@ -351,6 +353,45 @@ static void test_rounding(void)
     ok(p_llround(1e15 + 0.5) == 1000000000000001LL, "llround(1e15 + 0.5) = %I64d\n", p_llround(1e15 + 0.5));
     ok(p_llround(4503599627370497.0) == 4503599627370497LL, "llround(2^52 + 1) = %I64d\n", p_llround(4503599627370497.0));
     ok(p_llroundf(-3.5f) == -4, "llroundf(-3.5) = %I64d\n", p_llroundf(-3.5f));
+    /* lrint and lrintf used to be breakpoint stubs */
+    ok(p_lrint(2.5) == 2, "lrint(2.5) = %ld\n", p_lrint(2.5));
+    ok(p_lrint(3.5) == 4, "lrint(3.5) = %ld\n", p_lrint(3.5));
+    ok(p_lrint(-2.5) == -2, "lrint(-2.5) = %ld\n", p_lrint(-2.5));
+    ok(p_lrint(-3.7) == -4, "lrint(-3.7) = %ld\n", p_lrint(-3.7));
+    ok(p_lrint(2147483647.0) == 2147483647L, "lrint(2^31-1) = %ld\n", p_lrint(2147483647.0));
+    ok(p_lrint(-2147483648.0) == (-2147483647L - 1), "lrint(-2^31) = %ld\n", p_lrint(-2147483648.0));
+    ok(p_lrintf(1.5f) == 2, "lrintf(1.5) = %ld\n", p_lrintf(1.5f));
+    ok(p_lrintf(2.5f) == 2, "lrintf(2.5) = %ld\n", p_lrintf(2.5f));
+    ok(p_lrintf(-0.4f) == 0, "lrintf(-0.4) = %ld\n", p_lrintf(-0.4f));
+    CALL(l, p_lrint(1e20));
+    ok(l == 0, "lrint(1e20) = %ld\n", l);
+    ok_errno(EDOM);
+    CALL(l, p_lrint(2147483648.0));
+    ok(l == 0, "lrint(2^31) = %ld\n", l);
+    ok_errno(EDOM);
+    CALL(l, p_lrintf(1e20f));
+    ok(l == 0, "lrintf(1e20) = %ld\n", l);
+    ok_errno(EDOM);
+    CALL(l, p_lrint(NAN));
+    ok(l == 0, "lrint(nan) = %ld\n", l);
+    ok_errno(EDOM);
+
+    /* log2 of a power of two is exact (log(8) * M_LOG2E is 2.9999999999999996) */
+    {
+        int k;
+        for (k = -1074; k <= 1023; k++)
+        {
+            double x = ldexp(1.0, k);
+            ok(p_log2(x) == (double)k, "log2(2^%d) = %.17g\n", k, p_log2(x));
+            if (k == -1060) k = -20; /* keep the subnormal end and the range around 1 */
+            if (k == 20) k = 1000;
+        }
+    }
+    ok_near(p_log2(10.0), 3.3219280948873623, 1e-15);
+    ok_near(p_log2(0.1), -3.3219280948873623, 1e-15);
+    ok_near(p_log2(3.0), 1.5849625007211562, 1e-15);
+    ok(p_log2(1.0) == 0.0, "log2(1) = %g\n", p_log2(1.0));
+
     ok(p_llrint(2.5) == 2, "llrint(2.5) = %I64d\n", p_llrint(2.5));
     ok(p_llrint(3.5) == 4, "llrint(3.5) = %I64d\n", p_llrint(3.5));
     ok(p_llrint(-2.5) == -2, "llrint(-2.5) = %I64d\n", p_llrint(-2.5));
@@ -918,13 +959,13 @@ START_TEST(c99_math)
     }
 
 #define GET(n) do { *(void **)&p_##n = (void *)GetProcAddress(hUcrt, #n); ok(p_##n != NULL, #n " is missing\n"); if (!p_##n) return; } while (0)
-    GET(acosh); GET(asinh); GET(atanh); GET(cbrt); GET(erf); GET(erfc); GET(expm1); GET(log1p); GET(rint); GET(nearbyint);
+    GET(acosh); GET(asinh); GET(atanh); GET(cbrt); GET(erf); GET(erfc); GET(expm1); GET(log1p); GET(log2); GET(rint); GET(nearbyint);
     GET(copysign); GET(fdim); GET(fmax); GET(fmin); GET(remainder);
     GET(acoshf); GET(asinhf); GET(atanhf); GET(cbrtf); GET(erff); GET(erfcf); GET(expm1f); GET(log1pf); GET(rintf); GET(nearbyintf);
     GET(copysignf); GET(fdimf); GET(fmaxf); GET(fminf); GET(remainderf);
     *(void **)&p_modff = (void *)GetProcAddress(hUcrt, "modff");
     GET(nan); GET(nanf); GET(ilogb); GET(ilogbf); GET(remquo); GET(remquof);
-    GET(lround); GET(lroundf); GET(llround); GET(llroundf); GET(llrint); GET(llrintf);
+    GET(lround); GET(lroundf); GET(llround); GET(llroundf); GET(lrint); GET(lrintf); GET(llrint); GET(llrintf);
     GET(lgamma); GET(lgammal); GET(tgamma); GET(tgammal); GET(logb); GET(logbl); GET(_logb);
     GET(lgammaf); GET(tgammaf); GET(logbf);
     *(void **)&p__logbf = (void *)GetProcAddress(hUcrt, "_logbf");
