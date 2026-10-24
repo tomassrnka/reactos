@@ -1,0 +1,53 @@
+; virtgpump.inf - QEMU virtio-gpu 2D display adapter (nitro / GFX-02)
+[Version]
+Signature  = "$Windows NT$"
+LayoutFile = layout.inf
+Class      = Display
+ClassGUID  = {4D36E968-E325-11CE-BFC1-08002BE10318}
+Provider   = %Provider%
+DriverVer  = 10/24/2026,1.00
+
+[DestinationDirs]
+DefaultDestDir = 12
+VirtGpu.Display_CopyFiles = 11
+
+[Manufacturer]
+%Mfg% = VirtGpu
+
+[VirtGpu]
+%VirtGpu.DeviceDesc% = VirtGpu,PCI\VEN_1AF4&DEV_1050
+%VirtGpu.DeviceDesc% = VirtGpu,PCI\VEN_1AF4&DEV_1010
+
+[VirtGpu]
+CopyFiles = VirtGpu.Miniport_CopyFiles, VirtGpu.Display_CopyFiles
+
+[VirtGpu.Miniport_CopyFiles]
+virtgpump.sys
+
+[VirtGpu.Display_CopyFiles]
+framebuf.dll
+
+[VirtGpu.SoftwareSettings]
+AddReg = VirtGpu_SoftwareSettings
+
+[VirtGpu_SoftwareSettings]
+HKR,, InstalledDisplayDrivers, %REG_MULTI_SZ%, framebuf
+HKR,, VgaCompatible,           %REG_DWORD%,    0
+
+[VirtGpu.Services]
+AddService = virtgpump, 0x00000002, VirtGpu_Service
+
+[VirtGpu_Service]
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 0
+ServiceBinary  = %12%\virtgpump.sys
+LoadOrderGroup = Video
+
+[Strings]
+Provider = "ReactOS Project"
+Mfg      = "Red Hat / virtio"
+VirtGpu  = "virtio"
+REG_MULTI_SZ = 0x00010000
+REG_DWORD    = 0x00010001
+VirtGpu.DeviceDesc = "QEMU virtio-gpu 2D display adapter"
