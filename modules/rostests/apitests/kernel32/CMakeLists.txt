@@ -1,4 +1,5 @@
 
+add_subdirectory(dllinitdep)
 add_subdirectory(redirptest)
 add_subdirectory(tlsdyn)
 
@@ -40,6 +41,7 @@ list(APPEND SOURCE
     DiscardVirtualMemory.c
     DeleteTimerQueueEx.c
     DeviceIoControl.c
+    DllInitParentPrecondition.c
     dosdev.c
     DynamicTls.c
     DynamicTimeZone.c

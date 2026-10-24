@@ -44,6 +44,7 @@ extern void func_DefaultActCtx(void);
 extern void func_DiscardVirtualMemory(void);
 extern void func_DeleteTimerQueueEx(void);
 extern void func_DeviceIoControl(void);
+extern void func_DllInitParentPrecondition(void);
 extern void func_dosdev(void);
 extern void func_DynamicTls(void);
 extern void func_DynamicTimeZone(void);
@@ -198,6 +199,7 @@ const struct test winetest_testlist[] =
     { "DiscardVirtualMemory", func_DiscardVirtualMemory },
     { "DeleteTimerQueueEx",          func_DeleteTimerQueueEx },
     { "DeviceIoControl",             func_DeviceIoControl },
+    { "DllInitParentPrecondition",   func_DllInitParentPrecondition },
     { "dosdev",                      func_dosdev },
     { "DynamicTls",                  func_DynamicTls },
     { "DynamicTimeZone",             func_DynamicTimeZone },
