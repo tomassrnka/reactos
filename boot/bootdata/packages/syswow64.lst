@@ -141,6 +141,7 @@ SysWOW64/netapi32.dll
 SysWOW64/newdev.dll
 SysWOW64/powrprof.dll
 SysWOW64/samlib.dll
+SysWOW64/schannel.dll
 SysWOW64/secur32.dll
 SysWOW64/security.dll
 SysWOW64/setupapi.dll
