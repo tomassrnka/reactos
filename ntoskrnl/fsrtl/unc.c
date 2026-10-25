@@ -417,3 +417,60 @@ Cleanup:
     KeReleaseSemaphore(&FsRtlpUncSemaphore, IO_NO_INCREMENT, 1, FALSE);
     return Status;
 }
+
+/*++
+ * @name FsRtlRegisterUncProviderEx
+ * @implemented
+ *
+ * Registers a UNC provider by device object. MUP registers providers by device
+ * name, and a provider whose device has no name (WinFsp) cannot be told to it yet:
+ * this call succeeds without registering, so that the driver loads, and UNC paths
+ * do not reach it.
+ *
+ * @param MupHandle
+ *        Receives NULL
+ *
+ * @param RedirDevName
+ *        Name of the provider
+ *
+ * @param DeviceObject
+ *        Device object of the provider
+ *
+ * @param Flags
+ *        FSRTL_UNC_PROVIDER_FLAGS_*
+ *
+ * @return STATUS_SUCCESS
+ *
+ *--*/
+NTSTATUS
+NTAPI
+FsRtlRegisterUncProviderEx(OUT PHANDLE MupHandle,
+                           IN PUNICODE_STRING RedirDevName,
+                           IN PDEVICE_OBJECT DeviceObject,
+                           IN ULONG Flags)
+{
+    PAGED_CODE();
+
+    DPRINT1("FsRtlRegisterUncProviderEx(%wZ, %p, %lx): not registered with MUP\n",
+            RedirDevName, DeviceObject, Flags);
+
+    *MupHandle = NULL;
+    return STATUS_SUCCESS;
+}
+
+/*++
+ * @name FsRtlMupGetProviderInfoFromFileObject
+ * @unimplemented
+ *--*/
+NTSTATUS
+NTAPI
+FsRtlMupGetProviderInfoFromFileObject(IN PFILE_OBJECT pFileObject,
+                                      IN ULONG Level,
+                                      OUT PVOID pBuffer,
+                                      IN OUT PULONG pBufferSize)
+{
+    PAGED_CODE();
+
+    UNIMPLEMENTED;
+    return STATUS_NOT_IMPLEMENTED;
+}

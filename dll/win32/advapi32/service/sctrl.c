@@ -225,6 +225,9 @@ ScServiceMainStubW(LPVOID Context)
 }
 
 
+/* How long a process waits for the SCM control pipe, in milliseconds */
+#define SCM_PIPE_WAIT_MS 1000
+
 static DWORD
 ScConnectControlPipe(HANDLE *hPipe)
 {
@@ -235,6 +238,7 @@ ScConnectControlPipe(HANDLE *hPipe)
     WCHAR NtControlPipeName[MAX_PATH + 1];
     RTL_QUERY_REGISTRY_TABLE QueryTable[2];
     DWORD dwProcessId;
+    DWORD dwRetry;
 
     TRACE("ScConnectControlPipe(%p)\n",
           hPipe);
@@ -267,23 +271,30 @@ ScConnectControlPipe(HANDLE *hPipe)
     _swprintf(NtControlPipeName, L"\\\\.\\pipe\\net\\NtControlPipe%u", dwServiceCurrent);
     TRACE("PipeName: %S\n", NtControlPipeName);
 
-    if (!WaitNamedPipeW(NtControlPipeName, 30000))
+    /*
+     * The SCM creates the control pipe before it starts the service process, so a
+     * service finds an instance waiting for it and connects at once. A process the
+     * SCM did not start finds the pipe taken (or missing): give up after a short
+     * wait instead of the 30 seconds WaitNamedPipe would block for.
+     */
+    for (dwRetry = 0; ; dwRetry++)
     {
-        ERR("WaitNamedPipe(%S) failed (Error %lu)\n", NtControlPipeName, GetLastError());
-        return ERROR_FAILED_SERVICE_CONTROLLER_CONNECT;
-    }
+        *hPipe = CreateFileW(NtControlPipeName,
+                             GENERIC_READ | GENERIC_WRITE,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE,
+                             NULL,
+                             OPEN_EXISTING,
+                             FILE_ATTRIBUTE_NORMAL,
+                             NULL);
+        if (*hPipe != INVALID_HANDLE_VALUE)
+            break;
 
-    *hPipe = CreateFileW(NtControlPipeName,
-                         GENERIC_READ | GENERIC_WRITE,
-                         FILE_SHARE_READ | FILE_SHARE_WRITE,
-                         NULL,
-                         OPEN_EXISTING,
-                         FILE_ATTRIBUTE_NORMAL,
-                         NULL);
-    if (*hPipe == INVALID_HANDLE_VALUE)
-    {
-        ERR("CreateFileW() failed for pipe %S (Error %lu)\n", NtControlPipeName, GetLastError());
-        return ERROR_FAILED_SERVICE_CONTROLLER_CONNECT;
+        if (GetLastError() != ERROR_PIPE_BUSY || dwRetry >= 1 ||
+            !WaitNamedPipeW(NtControlPipeName, SCM_PIPE_WAIT_MS))
+        {
+            ERR("Connecting to pipe %S failed (Error %lu)\n", NtControlPipeName, GetLastError());
+            return ERROR_FAILED_SERVICE_CONTROLLER_CONNECT;
+        }
     }
 
     dwState = PIPE_READMODE_MESSAGE;

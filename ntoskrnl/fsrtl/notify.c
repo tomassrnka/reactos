@@ -1928,3 +1928,55 @@ FsRtlNotifyUninitializeSync(IN PNOTIFY_SYNC *NotifySync)
     }
 }
 
+
+/*++
+ * @name FsRtlNotifyCleanupAll
+ * @implemented
+ *
+ * Cleans up every notification of a list, as FsRtlNotifyCleanup does for one handle.
+ *
+ * @param NotifySync
+ *        Synchronization object pointer
+ *
+ * @param NotifyList
+ *        Notify list pointer (to head)
+ *
+ * @return None
+ *
+ *--*/
+VOID
+NTAPI
+FsRtlNotifyCleanupAll(IN PNOTIFY_SYNC NotifySync,
+                      IN PLIST_ENTRY NotifyList)
+{
+    PREAL_NOTIFY_SYNC RealNotifySync = (PREAL_NOTIFY_SYNC)NotifySync;
+    PLIST_ENTRY NextEntry;
+    PNOTIFY_CHANGE NotifyChange;
+    PVOID FsContext;
+    BOOLEAN Found;
+
+    for (;;)
+    {
+        Found = FALSE;
+        FsContext = NULL;
+
+        /* The first notification not cleaned up yet; one waiting for a cancel in flight is skipped */
+        FsRtlNotifyAcquireFastMutex(RealNotifySync);
+        for (NextEntry = NotifyList->Flink; NextEntry != NotifyList; NextEntry = NextEntry->Flink)
+        {
+            NotifyChange = CONTAINING_RECORD(NextEntry, NOTIFY_CHANGE, NotifyList);
+            if (!(NotifyChange->Flags & CLEANUP_IN_PROCESS))
+            {
+                FsContext = NotifyChange->FsContext;
+                Found = TRUE;
+                break;
+            }
+        }
+        FsRtlNotifyReleaseFastMutex(RealNotifySync);
+
+        if (!Found)
+            break;
+
+        FsRtlNotifyCleanup(NotifySync, NotifyList, FsContext);
+    }
+}

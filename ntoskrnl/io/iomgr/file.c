@@ -3100,6 +3100,68 @@ IoCreateFileSpecifyDeviceObjectHint(OUT PHANDLE FileHandle,
 }
 
 /*
+ * Honours the device object hint of the driver context. The extra create
+ * parameters (ECP list) of the context are not delivered to the file system.
+ *
+ * @implemented
+ */
+NTSTATUS
+NTAPI
+IoCreateFileEx(OUT PHANDLE FileHandle,
+               IN ACCESS_MASK DesiredAccess,
+               IN POBJECT_ATTRIBUTES ObjectAttributes,
+               OUT PIO_STATUS_BLOCK IoStatusBlock,
+               IN PLARGE_INTEGER AllocationSize OPTIONAL,
+               IN ULONG FileAttributes,
+               IN ULONG ShareAccess,
+               IN ULONG Disposition,
+               IN ULONG CreateOptions,
+               IN PVOID EaBuffer OPTIONAL,
+               IN ULONG EaLength,
+               IN CREATE_FILE_TYPE CreateFileType,
+               IN PVOID ExtraCreateParameters OPTIONAL,
+               IN ULONG Options,
+               IN PIO_DRIVER_CREATE_CONTEXT DriverContext OPTIONAL)
+{
+    PAGED_CODE();
+
+    if (DriverContext != NULL && DriverContext->Size >= sizeof(*DriverContext) &&
+        DriverContext->DeviceObjectHint != NULL)
+    {
+        return IoCreateFileSpecifyDeviceObjectHint(FileHandle,
+                                                   DesiredAccess,
+                                                   ObjectAttributes,
+                                                   IoStatusBlock,
+                                                   AllocationSize,
+                                                   FileAttributes,
+                                                   ShareAccess,
+                                                   Disposition,
+                                                   CreateOptions,
+                                                   EaBuffer,
+                                                   EaLength,
+                                                   CreateFileType,
+                                                   ExtraCreateParameters,
+                                                   Options,
+                                                   DriverContext->DeviceObjectHint);
+    }
+
+    return IoCreateFile(FileHandle,
+                        DesiredAccess,
+                        ObjectAttributes,
+                        IoStatusBlock,
+                        AllocationSize,
+                        FileAttributes,
+                        ShareAccess,
+                        Disposition,
+                        CreateOptions,
+                        EaBuffer,
+                        EaLength,
+                        CreateFileType,
+                        ExtraCreateParameters,
+                        Options);
+}
+
+/*
  * @implemented
  */
 PFILE_OBJECT

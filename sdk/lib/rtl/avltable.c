@@ -278,6 +278,64 @@ RtlEnumerateGenericTableWithoutSplayingAvl(IN PRTL_AVL_TABLE Table,
 }
 
 /*
+ * @implemented
+ */
+PVOID
+NTAPI
+RtlEnumerateGenericTableLikeADirectory(IN PRTL_AVL_TABLE Table,
+                                       IN PRTL_AVL_MATCH_FUNCTION MatchFunction,
+                                       IN PVOID MatchData,
+                                       IN ULONG NextFlag,
+                                       IN OUT PVOID *RestartKey,
+                                       IN OUT PULONG DeleteCount,
+                                       IN OUT PVOID Buffer)
+{
+    PRTL_BALANCED_LINKS Node = NULL, Found;
+    TABLE_SEARCH_RESULT Search;
+
+    if (RtlIsGenericTableEmptyAvl(Table))
+    {
+        *RestartKey = NULL;
+        return NULL;
+    }
+
+    if (*RestartKey != NULL && *DeleteCount == Table->DeleteCount)
+    {
+        /* Nothing was deleted since the last call: carry on from the node it returned */
+        Node = *RestartKey;
+        if (NextFlag)
+            Node = RtlRealSuccessorAvl(Node);
+    }
+    else
+    {
+        /* Start at the first element that is not below the key */
+        Search = RtlpFindAvlTableNodeOrParent(Table, Buffer, &Found);
+        if (Search == TableFoundNode || Search == TableInsertAsLeft)
+            Node = Found;
+        else if (Search == TableInsertAsRight)
+            Node = RtlRealSuccessorAvl(Found);
+    }
+
+    /* Skip the elements that do not match */
+    while (Node != NULL)
+    {
+        if (MatchFunction == NULL ||
+            MatchFunction(Table, &((PTABLE_ENTRY_HEADER)Node)->UserData, MatchData) == STATUS_SUCCESS)
+        {
+            break;
+        }
+        Node = RtlRealSuccessorAvl(Node);
+    }
+
+    if (Node == NULL)
+        return NULL;
+
+    *RestartKey = Node;
+    *DeleteCount = Table->DeleteCount;
+    return &((PTABLE_ENTRY_HEADER)Node)->UserData;
+}
+
+/*
  * @unimplemented
  */
 PVOID
