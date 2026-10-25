@@ -14,18 +14,41 @@
  */
 
 //
-// Windows NT Build 3790.3959
+// VERBUMP-01 single switch: system-reported NT version tier.
+//   0   = stock ReactOS (NT 5.2.3790, Server 2003 SP2)  [baseline]
+//   62  = Windows 8     (NT 6.2.9200)   -- clr.dll EEStartup floor (T118/T132)
+//   100 = Windows 10 22H2 (NT 10.0.19045.5247) -- modern-app identity
+// NOTE: boot/bootdata/*.inf (registry CurrentVersion block, CSDVersion) and
+// sdk/include/reactos/version.rc (DLL FileVersion) are text, not C -- they are
+// edited in this branch to MATCH VERBUMP_TIER and must be re-synced if the tier
+// is changed. See VERBUMP-01-kickoff-findings.md.
 //
+#ifndef VERBUMP_TIER
+#define VERBUMP_TIER 100
+#endif
+
+#if VERBUMP_TIER == 100
+#define VER_PRODUCTBUILD                    19045
+#define VER_PRODUCTBUILD_QFE                5247
+#define VER_PRODUCTMAJORVERSION             10
+#define VER_PRODUCTMINORVERSION             0
+#define VER_PRODUCTVERSION_W                (0x0A00)
+#define VER_PRODUCTVERSION_DW               (0x0A000000 | VER_PRODUCTBUILD)
+#elif VERBUMP_TIER == 62
+#define VER_PRODUCTBUILD                    9200
+#define VER_PRODUCTBUILD_QFE                0
+#define VER_PRODUCTMAJORVERSION             6
+#define VER_PRODUCTMINORVERSION             2
+#define VER_PRODUCTVERSION_W                (0x0602)
+#define VER_PRODUCTVERSION_DW               (0x06020000 | VER_PRODUCTBUILD)
+#else
 #define VER_PRODUCTBUILD                    3790
 #define VER_PRODUCTBUILD_QFE                3959
-
-//
-// Windows NT Version 5.2
-//
 #define VER_PRODUCTMAJORVERSION             5
 #define VER_PRODUCTMINORVERSION             2
 #define VER_PRODUCTVERSION_W                (0x0502)
 #define VER_PRODUCTVERSION_DW               (0x05020000 | VER_PRODUCTBUILD)
+#endif
 
 //
 // Not a beta
