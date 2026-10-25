@@ -2298,6 +2298,9 @@ UserGetClassInfo(IN PCLS Class,
     lpwcx->hCursor = Class->spcur ? UserHMGetHandle(Class->spcur) : NULL;
     lpwcx->hIconSm = Class->spicnSm ? UserHMGetHandle(Class->spicnSm) : NULL;
     lpwcx->hbrBackground = Class->hbrBackground;
+    /* NT6+ reports the desktop class background as COLOR_BACKGROUND + 1 */
+    if (Class->fnid == FNID_DESKTOP && SharedUserData->NtMajorVersion >= 6)
+        lpwcx->hbrBackground = (HBRUSH)(ULONG_PTR)(COLOR_BACKGROUND + 1);
 
     /* Copy non-string to user first. */
     if (Ansi)
@@ -2385,6 +2388,14 @@ UserRegisterSystemClasses(VOID)
 
         wc.cbClsExtra = 0;
         wc.cbWndExtra = DefaultServerClasses[i].ExtraBytes;
+        if (SharedUserData->NtMajorVersion >= 6)
+        {
+            /* NT6+ (see user32_apitest GetClassInfo): no desktop extra bytes, switch window has 16 */
+            if (DefaultServerClasses[i].fiId == FNID_DESKTOP)
+                wc.cbWndExtra = 0;
+            else if (DefaultServerClasses[i].fiId == FNID_SWITCH)
+                wc.cbWndExtra = 16;
+        }
         wc.hIcon = NULL;
 
         //// System Cursors should be initilized!!!

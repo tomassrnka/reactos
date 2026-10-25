@@ -6674,7 +6674,13 @@ NtUserTrackPopupMenuEx(
     if (fuFlags & ~VALID_TPM_FLAGS)
     {
         ERR("TPME : Invalid flags 0x%X (valid flags are 0x%X)\n", fuFlags, VALID_TPM_FLAGS);
-        EngSetLastError(ERROR_INVALID_FLAGS);
+        /* Win7+ reports TPM_WORKAREA (unsupported) as an invalid parameter */
+        if ((fuFlags & ~VALID_TPM_FLAGS) == 0x10000 /* TPM_WORKAREA */ &&
+            (SharedUserData->NtMajorVersion > 6 ||
+             (SharedUserData->NtMajorVersion == 6 && SharedUserData->NtMinorVersion >= 1)))
+            EngSetLastError(ERROR_INVALID_PARAMETER);
+        else
+            EngSetLastError(ERROR_INVALID_FLAGS);
         goto Exit0;
     }
 
