@@ -2244,6 +2244,20 @@ CmpParseKey(IN PVOID ParseObject,
     /* Copy the remaining name */
     Current = *RemainingName;
 
+    /*
+     * NtOpenKeyEx requests open-link semantics (don't traverse a symbolic
+     * link key) by placing REG_OPTION_OPEN_LINK in the parse context. The
+     * context is cleared for opens just below, so fold the request into
+     * Attributes here: this is exactly equivalent to the caller having set
+     * the OBJ_OPENLINK object attribute, and it rides the same code path.
+     */
+    if (ParseContext &&
+        !ParseContext->CreateOperation &&
+        (ParseContext->CreateOptions & REG_OPTION_OPEN_LINK))
+    {
+        Attributes |= OBJ_OPENLINK;
+    }
+
     /* Check if this is a create */
     if (!ParseContext || !ParseContext->CreateOperation)
     {

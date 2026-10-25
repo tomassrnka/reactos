@@ -295,6 +295,7 @@
     SVC_(QueryPortInformationProcess, 0)
     SVC_(GetCurrentProcessorNumber, 0)
     SVC_(WaitForMultipleObjects32, 5)
+    SVC_(OpenKeyEx, 4)
 #endif // SYSFUNCS_NT6_ONLY
 
 #ifndef SYSFUNCS_NT5_ONLY
