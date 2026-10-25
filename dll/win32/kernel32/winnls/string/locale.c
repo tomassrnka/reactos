@@ -5224,6 +5224,9 @@ static BOOL NLS_EnumSystemCodePages(ENUMSYSTEMCODEPAGES_CALLBACKS *lpProcs)
 
     switch (lpProcs->dwFlags)
     {
+        case 0: /* Windows handles this as CP_SUPPORTED */
+            lpProcs->dwFlags = CP_SUPPORTED;
+            break;
         case CP_INSTALLED:
         case CP_SUPPORTED:
             break;
@@ -5244,8 +5247,13 @@ static BOOL NLS_EnumSystemCodePages(ENUMSYSTEMCODEPAGES_CALLBACKS *lpProcs)
         if (NLS_RegEnumValue(hKey, ulIndex, szNumber, sizeof(szNumber),
                              szValue, sizeof(szValue)))
         {
-            if ((lpProcs->dwFlags == CP_SUPPORTED)||
-                ((lpProcs->dwFlags == CP_INSTALLED)&&(wcslen(szValue) > 2)))
+            /*
+             * The CodePage key also holds the non-numeric ACP, OEMCP and
+             * MACCP settings; only real code page numbers are enumerated.
+             */
+            if ((szNumber[0] >= L'0' && szNumber[0] <= L'9') &&
+                ((lpProcs->dwFlags == CP_SUPPORTED)||
+                ((lpProcs->dwFlags == CP_INSTALLED)&&(wcslen(szValue) > 2))))
             {
                 if (lpProcs->procW)
                 {
