@@ -199,6 +199,376 @@ done:
     return Status;
 }
 
+/*
+ * Inheritance and selection of ACLs for new security objects. This is the user mode
+ * counterpart of SepShouldPropagateAce/SepPropagateAcl/SepSelectAcl in ntoskrnl/se.
+ */
+static
+BOOLEAN
+RtlpShouldPropagateAce(
+    IN UCHAR AceFlags,
+    OUT PUCHAR NewAceFlags,
+    IN BOOLEAN IsInherited,
+    IN BOOLEAN IsDirectoryObject)
+{
+    if (!IsInherited)
+    {
+        *NewAceFlags = AceFlags;
+        return TRUE;
+    }
+
+    if (!IsDirectoryObject)
+    {
+        if (AceFlags & OBJECT_INHERIT_ACE)
+        {
+            *NewAceFlags = AceFlags & ~VALID_INHERIT_FLAGS;
+            return TRUE;
+        }
+        return FALSE;
+    }
+
+    if (AceFlags & NO_PROPAGATE_INHERIT_ACE)
+    {
+        if (AceFlags & CONTAINER_INHERIT_ACE)
+        {
+            *NewAceFlags = AceFlags & ~VALID_INHERIT_FLAGS;
+            return TRUE;
+        }
+        return FALSE;
+    }
+
+    if (AceFlags & CONTAINER_INHERIT_ACE)
+    {
+        *NewAceFlags = CONTAINER_INHERIT_ACE | (AceFlags & OBJECT_INHERIT_ACE) | (AceFlags & ~VALID_INHERIT_FLAGS);
+        return TRUE;
+    }
+
+    if (AceFlags & OBJECT_INHERIT_ACE)
+    {
+        *NewAceFlags = INHERIT_ONLY_ACE | OBJECT_INHERIT_ACE | (AceFlags & ~VALID_INHERIT_FLAGS);
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+/* Whether every ACE of the ACL is in bounds and keeps the next one ULONG aligned */
+static
+BOOLEAN
+RtlpAclIsSane(
+    IN PACL Acl)
+{
+    PUCHAR End = (PUCHAR)Acl + Acl->AclSize;
+    PACE_HEADER Ace = (PACE_HEADER)(Acl + 1);
+    ULONG i;
+
+    if (!RtlValidAcl(Acl))
+        return FALSE;
+
+    for (i = 0; i < Acl->AceCount; i++)
+    {
+        if ((PUCHAR)(Ace + 1) > End ||
+            Ace->AceSize < sizeof(ACE_HEADER) ||
+            (Ace->AceSize % sizeof(ULONG)) != 0 ||
+            (PUCHAR)Ace + Ace->AceSize > End)
+            return FALSE;
+
+        /* The simple ACE types are interpreted below, so they must hold a whole SID */
+        if (Ace->AceType <= ACCESS_MAX_MS_V2_ACE_TYPE)
+        {
+            PACCESS_ALLOWED_ACE Simple = (PACCESS_ALLOWED_ACE)Ace;
+            PISID Sid = (PISID)&Simple->SidStart;
+
+            if (Ace->AceSize < FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) + 8 ||
+                Ace->AceSize < FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) + RtlLengthRequiredSid(Sid->SubAuthorityCount) ||
+                !RtlValidSid(Sid))
+                return FALSE;
+        }
+        Ace = (PACE_HEADER)((PUCHAR)Ace + Ace->AceSize);
+    }
+    return TRUE;
+}
+
+/*
+ * Copies ExplicitAcl, then the inheritable ACEs of ParentAcl, into AclDest. With a too small
+ * *AclLength nothing beyond the sizes is written, and *AclLength returns the required size.
+ */
+static
+NTSTATUS
+RtlpPropagateAcl(
+    OUT PACL AclDest OPTIONAL,
+    IN OUT PULONG AclLength,
+    IN PACL ExplicitAcl OPTIONAL,
+    IN PACL ParentAcl OPTIONAL,
+    IN PSID Owner,
+    IN PSID Group,
+    IN BOOLEAN AutoInherit,
+    IN BOOLEAN IsDirectoryObject,
+    IN PGENERIC_MAPPING GenericMapping)
+{
+    static const SID_IDENTIFIER_AUTHORITY CreatorAuthority = {SECURITY_CREATOR_SID_AUTHORITY};
+    UCHAR CreatorOwnerBuffer[SECURITY_MAX_SID_SIZE], CreatorGroupBuffer[SECURITY_MAX_SID_SIZE];
+    PSID CreatorOwnerSid = (PSID)CreatorOwnerBuffer, CreatorGroupSid = (PSID)CreatorGroupBuffer;
+    PACL AclSource = ExplicitAcl ? ExplicitAcl : ParentAcl;
+    BOOLEAN IsInherited = FALSE;
+    ULONG ExplicitCount = ExplicitAcl ? ExplicitAcl->AceCount : 0;
+    ULONG TotalCount = ExplicitCount + (ParentAcl ? ParentAcl->AceCount : 0);
+    UCHAR InheritedFlag;
+    ACCESS_MASK Mask;
+    PACCESS_ALLOWED_ACE AceSource;
+    PACCESS_ALLOWED_ACE AceDest;
+    PUCHAR CurrentDest;
+    PUCHAR CurrentSource;
+    ULONG i;
+    ULONG Written;
+    UCHAR AceFlags;
+    USHORT AceSize;
+    USHORT AceCount = 0;
+    PSID Sid;
+    BOOLEAN WriteTwoAces;
+
+    RtlInitializeSid(CreatorOwnerSid, (PSID_IDENTIFIER_AUTHORITY)&CreatorAuthority, 1);
+    *RtlSubAuthoritySid(CreatorOwnerSid, 0) = SECURITY_CREATOR_OWNER_RID;
+    RtlInitializeSid(CreatorGroupSid, (PSID_IDENTIFIER_AUTHORITY)&CreatorAuthority, 1);
+    *RtlSubAuthoritySid(CreatorGroupSid, 0) = SECURITY_CREATOR_GROUP_RID;
+
+    Written = 0;
+    if (*AclLength >= Written + sizeof(ACL))
+    {
+        RtlCopyMemory(AclDest, AclSource, sizeof(ACL));
+        AclDest->Sbz1 = 0;
+        AclDest->Sbz2 = 0;
+        if (ExplicitAcl && ParentAcl)
+            AclDest->AclRevision = max(ExplicitAcl->AclRevision, ParentAcl->AclRevision);
+    }
+    Written += sizeof(ACL);
+
+    CurrentDest = AclDest ? (PUCHAR)(AclDest + 1) : NULL;
+    CurrentSource = (PUCHAR)(AclSource + 1);
+    for (i = 0; i < TotalCount; i++)
+    {
+        if (i == ExplicitCount)
+        {
+            /* The inherited ACEs follow the explicit ones */
+            CurrentSource = (PUCHAR)(ParentAcl + 1);
+            IsInherited = TRUE;
+        }
+
+        AceDest = (PACCESS_ALLOWED_ACE)CurrentDest;
+        AceSource = (PACCESS_ALLOWED_ACE)CurrentSource;
+
+        if ((AutoInherit && !IsInherited && (AceSource->Header.AceFlags & INHERITED_ACE)) ||
+            !RtlpShouldPropagateAce(AceSource->Header.AceFlags,
+                                    &AceFlags,
+                                    IsInherited,
+                                    IsDirectoryObject))
+        {
+            CurrentSource += AceSource->Header.AceSize;
+            continue;
+        }
+        InheritedFlag = (AutoInherit && IsInherited) ? INHERITED_ACE : 0;
+
+        if (AceSource->Header.AceType > ACCESS_MAX_MS_V2_ACE_TYPE)
+        {
+            /* Object and compound ACEs are copied as they are */
+            AceSize = AceSource->Header.AceSize;
+
+            if (*AclLength >= Written + AceSize)
+            {
+                RtlCopyMemory(AceDest, AceSource, AceSize);
+                AceDest->Header.AceFlags = AceFlags | InheritedFlag;
+            }
+            if (CurrentDest)
+                CurrentDest += AceSize;
+            CurrentSource += AceSize;
+            Written += AceSize;
+            AceCount++;
+            continue;
+        }
+
+        /* Allowed, denied, audit and alarm ACEs have the same structure */
+        AceSize = AceSource->Header.AceSize;
+        Mask = AceSource->Mask;
+        Sid = (PSID)&AceSource->SidStart;
+
+        WriteTwoAces = FALSE;
+        /* Map effective ACE to specific rights */
+        if (!(AceFlags & INHERIT_ONLY_ACE))
+        {
+            RtlMapGenericMask(&Mask, GenericMapping);
+            Mask &= GenericMapping->GenericAll;
+
+            if (IsInherited)
+            {
+                if (RtlEqualSid(Sid, CreatorOwnerSid))
+                    Sid = Owner;
+                else if (RtlEqualSid(Sid, CreatorGroupSid))
+                    Sid = Group;
+                AceSize = FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) + RtlLengthSid(Sid);
+
+                /*
+                 * A generic container ACE becomes two ACEs: a specific effective
+                 * ACE with no inheritance flags, and an inherit-only ACE that keeps
+                 * the generic rights.
+                 */
+                if (IsDirectoryObject &&
+                    (AceFlags & CONTAINER_INHERIT_ACE) &&
+                    (Mask != AceSource->Mask || Sid != (PSID)&AceSource->SidStart))
+                {
+                    WriteTwoAces = TRUE;
+                }
+            }
+        }
+
+        while (1)
+        {
+            if (*AclLength >= Written + AceSize)
+            {
+                AceDest->Header.AceType = AceSource->Header.AceType;
+                AceDest->Header.AceFlags = (WriteTwoAces ? AceFlags & ~VALID_INHERIT_FLAGS
+                                                         : AceFlags) | InheritedFlag;
+                AceDest->Header.AceSize = AceSize;
+                AceDest->Mask = Mask;
+                RtlCopySid(AceSize - FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart),
+                           (PSID)&AceDest->SidStart,
+                           Sid);
+            }
+            Written += AceSize;
+
+            AceCount++;
+            if (CurrentDest)
+                CurrentDest += AceSize;
+
+            if (!WriteTwoAces)
+                break;
+
+            /* The second ACE keeps all the generics of the source ACE */
+            WriteTwoAces = FALSE;
+            AceDest = (PACCESS_ALLOWED_ACE)CurrentDest;
+            AceSize = AceSource->Header.AceSize;
+            Mask = AceSource->Mask;
+            Sid = (PSID)&AceSource->SidStart;
+            AceFlags |= INHERIT_ONLY_ACE;
+        }
+
+        CurrentSource += AceSource->Header.AceSize;
+    }
+
+    if (*AclLength >= sizeof(ACL))
+    {
+        AclDest->AceCount = AceCount;
+        AclDest->AclSize = (USHORT)Written;
+    }
+
+    if (Written > *AclLength)
+    {
+        *AclLength = Written;
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+    *AclLength = Written;
+    return STATUS_SUCCESS;
+}
+
+static
+PACL
+RtlpSelectAcl(
+    IN PACL ExplicitAcl OPTIONAL,
+    IN BOOLEAN ExplicitPresent,
+    IN BOOLEAN ExplicitDefaulted,
+    IN PACL ParentAcl OPTIONAL,
+    IN PACL DefaultAcl OPTIONAL,
+    OUT PULONG AclLength,
+    IN PSID Owner,
+    IN PSID Group,
+    OUT PBOOLEAN AclPresent,
+    OUT PACL *InheritedAcl,
+    IN BOOLEAN ExplicitProtected,
+    IN BOOLEAN AutoInherit,
+    IN BOOLEAN IsDirectoryObject,
+    IN PGENERIC_MAPPING GenericMapping)
+{
+    PACL Acl;
+
+    *AclPresent = TRUE;
+    *InheritedAcl = NULL;
+    if (ExplicitPresent && !ExplicitDefaulted)
+    {
+        Acl = ExplicitAcl;
+
+        /* Auto-inheritance appends the inheritable ACEs of the parent */
+        if (Acl && AutoInherit && !ExplicitProtected)
+            *InheritedAcl = ParentAcl;
+    }
+    else
+    {
+        if (ParentAcl)
+        {
+            *AclLength = 0;
+            RtlpPropagateAcl(NULL, AclLength, NULL, ParentAcl, Owner, Group,
+                             AutoInherit, IsDirectoryObject, GenericMapping);
+
+            /* Use the parent ACL only if anything is inherited from it */
+            if (*AclLength != sizeof(ACL))
+            {
+                *InheritedAcl = ParentAcl;
+                return NULL;
+            }
+        }
+
+        if (ExplicitPresent)
+        {
+            Acl = ExplicitAcl;
+        }
+        else if (DefaultAcl)
+        {
+            Acl = DefaultAcl;
+        }
+        else
+        {
+            *AclPresent = FALSE;
+            Acl = NULL;
+        }
+    }
+
+    *AclLength = 0;
+    if (Acl)
+    {
+        RtlpPropagateAcl(NULL, AclLength, Acl, *InheritedAcl, Owner, Group,
+                         AutoInherit, IsDirectoryObject, GenericMapping);
+    }
+    return Acl;
+}
+
+/* Reads a token information class into a heap buffer, which the caller frees */
+static
+NTSTATUS
+RtlpQueryTokenInfo(
+    IN HANDLE Token,
+    IN TOKEN_INFORMATION_CLASS Class,
+    OUT PVOID *Buffer)
+{
+    ULONG Length = 0;
+    NTSTATUS Status;
+
+    *Buffer = NULL;
+    Status = NtQueryInformationToken(Token, Class, NULL, 0, &Length);
+    if (Status != STATUS_BUFFER_TOO_SMALL && Status != STATUS_BUFFER_OVERFLOW &&
+        Status != STATUS_INFO_LENGTH_MISMATCH)
+        return NT_SUCCESS(Status) ? STATUS_UNSUCCESSFUL : Status;
+
+    *Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, Length);
+    if (*Buffer == NULL)
+        return STATUS_NO_MEMORY;
+
+    Status = NtQueryInformationToken(Token, Class, *Buffer, Length, &Length);
+    if (!NT_SUCCESS(Status))
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, *Buffer);
+        *Buffer = NULL;
+    }
+    return Status;
+}
+
 NTSTATUS
 NTAPI
 RtlpNewSecurityObject(IN PSECURITY_DESCRIPTOR ParentDescriptor,
@@ -211,8 +581,252 @@ RtlpNewSecurityObject(IN PSECURITY_DESCRIPTOR ParentDescriptor,
                       IN HANDLE Token,
                       IN PGENERIC_MAPPING GenericMapping)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PSID Owner = NULL, Group = NULL;
+    PTOKEN_OWNER OwnerInfo = NULL;
+    PTOKEN_PRIMARY_GROUP GroupInfo = NULL;
+    PTOKEN_DEFAULT_DACL DaclInfo = NULL;
+    HANDLE LocalToken = NULL;
+    PACL ExplicitAcl, ParentAcl, Dacl = NULL, Sacl = NULL, DaclInherited, SaclInherited;
+    BOOLEAN ExplicitPresent, ExplicitDefaulted, ExplicitProtected;
+    BOOLEAN DaclPresent, SaclPresent, Present, Defaulted;
+    BOOLEAN DaclAutoInherit = (AutoInheritFlags & SEF_DACL_AUTO_INHERIT) != 0;
+    BOOLEAN SaclAutoInherit = (AutoInheritFlags & SEF_SACL_AUTO_INHERIT) != 0;
+    SECURITY_DESCRIPTOR_CONTROL Control = 0, ExplicitControl, ParentControl;
+    ULONG Revision, OwnerLength, GroupLength, DaclLength = 0, SaclLength = 0, Length, Current;
+    PISECURITY_DESCRIPTOR_RELATIVE Descriptor;
+    NTSTATUS Status;
+
+    UNREFERENCED_PARAMETER(ObjectTypes);
+    UNREFERENCED_PARAMETER(GuidCount);
+
+    if (NewDescriptor == NULL || GenericMapping == NULL)
+        return STATUS_INVALID_PARAMETER;
+    *NewDescriptor = NULL;
+
+    if ((ParentDescriptor && !RtlValidSecurityDescriptor(ParentDescriptor)) ||
+        (CreatorDescriptor && !RtlValidSecurityDescriptor(CreatorDescriptor)))
+        return STATUS_INVALID_SECURITY_DESCR;
+
+    /* Without a token the effective one of the thread (or else of the process) is used */
+    if (Token == NULL)
+    {
+        Status = NtOpenThreadToken(NtCurrentThread(), TOKEN_QUERY, TRUE, &LocalToken);
+        if (!NT_SUCCESS(Status))
+            Status = NtOpenProcessToken(NtCurrentProcess(), TOKEN_QUERY, &LocalToken);
+        if (!NT_SUCCESS(Status))
+            return Status;
+        Token = LocalToken;
+    }
+
+    /* Owner and group: explicit, else from the parent if asked for, else the token's */
+    if (CreatorDescriptor != NULL)
+    {
+        RtlGetOwnerSecurityDescriptor(CreatorDescriptor, &Owner, &Defaulted);
+        RtlGetGroupSecurityDescriptor(CreatorDescriptor, &Group, &Defaulted);
+    }
+
+    if (Owner == NULL)
+    {
+        if (AutoInheritFlags & SEF_DEFAULT_OWNER_FROM_PARENT)
+        {
+            if (ParentDescriptor != NULL)
+                RtlGetOwnerSecurityDescriptor(ParentDescriptor, &Owner, &Defaulted);
+            if (Owner == NULL)
+            {
+                Status = STATUS_INVALID_OWNER;
+                goto done;
+            }
+        }
+        else
+        {
+            Status = RtlpQueryTokenInfo(Token, TokenOwner, (PVOID *)&OwnerInfo);
+            if (!NT_SUCCESS(Status))
+                goto done;
+            Owner = OwnerInfo->Owner;
+        }
+    }
+
+    if (Group == NULL)
+    {
+        if (AutoInheritFlags & SEF_DEFAULT_GROUP_FROM_PARENT)
+        {
+            if (ParentDescriptor != NULL)
+                RtlGetGroupSecurityDescriptor(ParentDescriptor, &Group, &Defaulted);
+            if (Group == NULL)
+            {
+                Status = STATUS_INVALID_PRIMARY_GROUP;
+                goto done;
+            }
+        }
+        else
+        {
+            Status = RtlpQueryTokenInfo(Token, TokenPrimaryGroup, (PVOID *)&GroupInfo);
+            if (!NT_SUCCESS(Status))
+                goto done;
+            Group = GroupInfo->PrimaryGroup;
+        }
+    }
+
+    if (Owner == NULL || !RtlValidSid(Owner))
+    {
+        Status = STATUS_INVALID_OWNER;
+        goto done;
+    }
+    if (Group == NULL || !RtlValidSid(Group))
+    {
+        Status = STATUS_INVALID_PRIMARY_GROUP;
+        goto done;
+    }
+    OwnerLength = ROUND_UP(RtlLengthSid(Owner), sizeof(ULONG));
+    GroupLength = ROUND_UP(RtlLengthSid(Group), sizeof(ULONG));
+
+    ExplicitControl = 0;
+    ParentControl = 0;
+    if (CreatorDescriptor != NULL)
+        RtlGetControlSecurityDescriptor(CreatorDescriptor, &ExplicitControl, &Revision);
+    if (ParentDescriptor != NULL)
+        RtlGetControlSecurityDescriptor(ParentDescriptor, &ParentControl, &Revision);
+
+    /* The DACL */
+    ExplicitAcl = NULL;
+    ExplicitPresent = FALSE;
+    ExplicitDefaulted = FALSE;
+    ExplicitProtected = FALSE;
+    if (CreatorDescriptor != NULL && (ExplicitControl & SE_DACL_PRESENT))
+    {
+        RtlGetDaclSecurityDescriptor(CreatorDescriptor, &Present, &ExplicitAcl, &Defaulted);
+        ExplicitPresent = TRUE;
+        if (ExplicitControl & SE_DACL_DEFAULTED)
+            ExplicitDefaulted = TRUE;
+        else if (ExplicitControl & SE_DACL_PROTECTED)
+            ExplicitProtected = TRUE;
+    }
+    ParentAcl = NULL;
+    if (ParentDescriptor != NULL && (ParentControl & SE_DACL_PRESENT))
+        RtlGetDaclSecurityDescriptor(ParentDescriptor, &Present, &ParentAcl, &Defaulted);
+
+    Status = RtlpQueryTokenInfo(Token, TokenDefaultDacl, (PVOID *)&DaclInfo);
+    if (!NT_SUCCESS(Status))
+        goto done;
+
+    if ((ExplicitAcl && !RtlpAclIsSane(ExplicitAcl)) ||
+        (ParentAcl && !RtlpAclIsSane(ParentAcl)) ||
+        (DaclInfo->DefaultDacl && !RtlpAclIsSane(DaclInfo->DefaultDacl)))
+    {
+        Status = STATUS_INVALID_ACL;
+        goto done;
+    }
+
+    Dacl = RtlpSelectAcl(ExplicitAcl, ExplicitPresent, ExplicitDefaulted, ParentAcl,
+                         DaclInfo->DefaultDacl, &DaclLength, Owner, Group, &DaclPresent,
+                         &DaclInherited, ExplicitProtected, DaclAutoInherit,
+                         IsDirectoryObject, GenericMapping);
+    if (DaclPresent)
+        Control |= SE_DACL_PRESENT;
+    if (ExplicitProtected)
+        Control |= SE_DACL_PROTECTED;
+    if (DaclAutoInherit)
+        Control |= SE_DACL_AUTO_INHERITED;
+
+    /* The SACL */
+    ExplicitAcl = NULL;
+    ExplicitPresent = FALSE;
+    ExplicitDefaulted = FALSE;
+    ExplicitProtected = FALSE;
+    if (CreatorDescriptor != NULL && (ExplicitControl & SE_SACL_PRESENT))
+    {
+        RtlGetSaclSecurityDescriptor(CreatorDescriptor, &Present, &ExplicitAcl, &Defaulted);
+        ExplicitPresent = TRUE;
+        if (ExplicitControl & SE_SACL_DEFAULTED)
+            ExplicitDefaulted = TRUE;
+        else if (ExplicitControl & SE_SACL_PROTECTED)
+            ExplicitProtected = TRUE;
+    }
+    ParentAcl = NULL;
+    if (ParentDescriptor != NULL && (ParentControl & SE_SACL_PRESENT))
+        RtlGetSaclSecurityDescriptor(ParentDescriptor, &Present, &ParentAcl, &Defaulted);
+
+    if ((ExplicitAcl && !RtlpAclIsSane(ExplicitAcl)) ||
+        (ParentAcl && !RtlpAclIsSane(ParentAcl)))
+    {
+        Status = STATUS_INVALID_ACL;
+        goto done;
+    }
+
+    Sacl = RtlpSelectAcl(ExplicitAcl, ExplicitPresent, ExplicitDefaulted, ParentAcl,
+                         NULL, &SaclLength, Owner, Group, &SaclPresent,
+                         &SaclInherited, ExplicitProtected, SaclAutoInherit,
+                         IsDirectoryObject, GenericMapping);
+    if (SaclPresent)
+        Control |= SE_SACL_PRESENT;
+    if (ExplicitProtected)
+        Control |= SE_SACL_PROTECTED;
+    if (SaclAutoInherit)
+        Control |= SE_SACL_AUTO_INHERITED;
+
+    /* A merged ACL can exceed what AclSize can describe */
+    if (DaclLength > MAXUSHORT || SaclLength > MAXUSHORT)
+    {
+        Status = STATUS_BAD_INHERITANCE_ACL;
+        goto done;
+    }
+
+    Length = sizeof(SECURITY_DESCRIPTOR_RELATIVE) + OwnerLength + GroupLength + DaclLength + SaclLength;
+    Descriptor = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, Length);
+    if (Descriptor == NULL)
+    {
+        Status = STATUS_NO_MEMORY;
+        goto done;
+    }
+
+    RtlCreateSecurityDescriptorRelative(Descriptor, SECURITY_DESCRIPTOR_REVISION);
+    Descriptor->Control = Control | SE_SELF_RELATIVE;
+    Current = sizeof(SECURITY_DESCRIPTOR_RELATIVE);
+
+    if (SaclLength != 0)
+    {
+        Status = RtlpPropagateAcl((PACL)((PUCHAR)Descriptor + Current), &SaclLength, Sacl,
+                                  SaclInherited, Owner, Group, SaclAutoInherit,
+                                  IsDirectoryObject, GenericMapping);
+        if (!NT_SUCCESS(Status))
+        {
+            RtlFreeHeap(RtlGetProcessHeap(), 0, Descriptor);
+            goto done;
+        }
+        Descriptor->Sacl = Current;
+        Current += SaclLength;
+    }
+
+    if (DaclLength != 0)
+    {
+        Status = RtlpPropagateAcl((PACL)((PUCHAR)Descriptor + Current), &DaclLength, Dacl,
+                                  DaclInherited, Owner, Group, DaclAutoInherit,
+                                  IsDirectoryObject, GenericMapping);
+        if (!NT_SUCCESS(Status))
+        {
+            RtlFreeHeap(RtlGetProcessHeap(), 0, Descriptor);
+            goto done;
+        }
+        Descriptor->Dacl = Current;
+        Current += DaclLength;
+    }
+
+    RtlCopyMemory((PUCHAR)Descriptor + Current, Owner, RtlLengthSid(Owner));
+    Descriptor->Owner = Current;
+    Current += OwnerLength;
+
+    RtlCopyMemory((PUCHAR)Descriptor + Current, Group, RtlLengthSid(Group));
+    Descriptor->Group = Current;
+
+    *NewDescriptor = Descriptor;
+    Status = STATUS_SUCCESS;
+
+done:
+    if (OwnerInfo) RtlFreeHeap(RtlGetProcessHeap(), 0, OwnerInfo);
+    if (GroupInfo) RtlFreeHeap(RtlGetProcessHeap(), 0, GroupInfo);
+    if (DaclInfo) RtlFreeHeap(RtlGetProcessHeap(), 0, DaclInfo);
+    if (LocalToken) NtClose(LocalToken);
+    return Status;
 }
 
 NTSTATUS
