@@ -47,6 +47,7 @@ list(APPEND SOURCE
     client/pathansi.c
     client/perfcnt.c
     client/power.c
+    client/privnamespace.c
     client/proc.c
     client/procinfo.c
     client/procansi.c

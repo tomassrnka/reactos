@@ -9,7 +9,7 @@
 @ stdcall AddLocalAlternateComputerNameA(str ptr)
 @ stdcall AddLocalAlternateComputerNameW(wstr ptr)
 @ stdcall AddRefActCtx(ptr)
-@ stdcall -stub -version=0x600+ AddSIDToBoundaryDescriptor(ptr ptr)
+@ stdcall -version=0x600+ AddSIDToBoundaryDescriptor(ptr ptr)
 @ stdcall -stub -version=0x600+ AddSecureMemoryCacheCallback(ptr)
 @ stdcall AddVectoredContinueHandler(long ptr) ntdll.RtlAddVectoredContinueHandler
 @ stdcall AddVectoredExceptionHandler(long ptr) ntdll.RtlAddVectoredExceptionHandler
@@ -73,7 +73,7 @@
 @ stdcall CloseConsoleHandle(long)
 @ stdcall CloseHandle(long)
 @ stdcall ClosePackageInfo(ptr)
-@ stdcall -stub -version=0x600+ ClosePrivateNamespace(ptr long)
+@ stdcall -version=0x600+ ClosePrivateNamespace(ptr long)
 @ stdcall CloseProfileUserMapping()
 @ stdcall -version=0x600+ CloseThreadpool(ptr) ntdll.TpReleasePool
 @ stdcall -version=0x600+ CloseThreadpoolCleanupGroup(ptr) ntdll.TpReleaseCleanupGroup
@@ -113,7 +113,7 @@
 @ stdcall CreateActCtxA(ptr)
 @ stdcall CreateActCtxW(ptr)
 @ stdcall -stub -version=0x600+ CreateBoundaryDescriptorA(str long)
-@ stdcall -stub -version=0x600+ CreateBoundaryDescriptorW(wstr long)
+@ stdcall -version=0x600+ CreateBoundaryDescriptorW(wstr long)
 @ stdcall CreateConsoleScreenBuffer(long long ptr long ptr)
 @ stdcall CreateDirectoryA(str ptr)
 @ stdcall CreateDirectoryExA(str str ptr)
@@ -156,7 +156,7 @@
 @ stdcall -version=0x501-0x502 CreateNlsSecurityDescriptor(ptr long long)
 @ stdcall CreatePipe(ptr ptr ptr long)
 @ stdcall -stub -version=0x600+ CreatePrivateNamespaceA(ptr ptr str)
-@ stdcall -stub -version=0x600+ CreatePrivateNamespaceW(ptr ptr wstr)
+@ stdcall -version=0x600+ CreatePrivateNamespaceW(ptr ptr wstr)
 @ stdcall CreateProcessA(str str ptr ptr long long ptr str ptr ptr)
 @ stdcall -private -version=0x601+ CreateProcessAsUserW(long wstr wstr ptr ptr long long ptr wstr ptr ptr) advapi32.CreateProcessAsUserW
 @ stdcall CreateProcessInternalA(ptr str str ptr ptr long long ptr str ptr ptr long)
@@ -201,7 +201,7 @@
 @ stdcall DefineDosDeviceW(long wstr wstr)
 @ stdcall DelayLoadFailureHook(str str)
 @ stdcall DeleteAtom(long)
-@ stub -version=0x600+ DeleteBoundaryDescriptor
+@ stdcall -version=0x600+ DeleteBoundaryDescriptor(ptr)
 @ stdcall DeleteCriticalSection(ptr) ntdll.RtlDeleteCriticalSection
 @ stdcall DeleteFiber(ptr)
 @ stdcall DeleteFileA(str)
@@ -919,7 +919,7 @@
 @ stdcall OpenMutexW(long long wstr)
 @ stdcall OpenPackageInfoByFullName(wstr long ptr)
 @ stub -version=0x600+ OpenPrivateNamespaceA
-@ stub -version=0x600+ OpenPrivateNamespaceW
+@ stdcall -version=0x600+ OpenPrivateNamespaceW(ptr wstr)
 @ stdcall OpenProcess(long long long)
 @ stdcall -private -version=0x601+ OpenProcessToken(long long ptr) advapi32.OpenProcessToken
 @ stdcall OpenProfileUserMapping()
