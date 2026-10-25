@@ -905,8 +905,10 @@ LdrpRunInitializeRoutines(IN PCONTEXT Context OPTIONAL)
             /* Save the Current DLL Initializer */
             LdrpCurrentDllInitializer = OldInitializer;
 
-            /* Mark the entry as processed */
-            LdrEntry->Flags |= LDRP_PROCESS_ATTACH_CALLED;
+            /* Mark the entry as processed. NT6+ does not send DLL_PROCESS_DETACH
+               to a module whose DLL_PROCESS_ATTACH failed (VERBUMP B5) */
+            if (DllStatus || (SharedUserData->NtMajorVersion < 6))
+                LdrEntry->Flags |= LDRP_PROCESS_ATTACH_CALLED;
 
             /* Fail if DLL init failed */
             if (!DllStatus)
