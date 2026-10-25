@@ -1296,6 +1296,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         ULONG InputLength = a[7];
         AFD_RECV_INFO Transfer;
         AFD_SEND_INFO_UDP Datagram;
+        AFD_RECV_INFO_UDP RecvDatagram;
         AFD_ACCEPT_DATA Accept;
         /* These requests contain counted strings/addresses or opaque bytes.
          * AFD requests carrying handles or WSABUF arrays need translation. */
@@ -1360,6 +1361,40 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             Datagram.TdiConnection.RemoteAddress = PTR32(From[13]);
             Input = &Datagram;
             InputLength = sizeof(Datagram);
+            break;
+        }
+        case IOCTL_AFD_RECV_DATAGRAM:
+        {
+            /* 32-bit AFD_RECV_INFO_UDP: BufferArray, BufferCount, AfdFlags,
+             * TdiFlags, Address, AddressLength (all 32-bit). Widen the WSABUF
+             * array like IOCTL_AFD_RECV and widen the source-address buffer and
+             * address-length pointers; AFD locks the guest buffers and writes
+             * the sender sockaddr and its length back through them (the sockaddr
+             * layout itself is identical in 32 and 64 bits). */
+            const ULONG *From = Input;
+            const ULONG *Buffers;
+            ULONG i;
+            if (InputLength < 6 * sizeof(ULONG)) return STATUS_BUFFER_TOO_SMALL;
+            RtlZeroMemory(&RecvDatagram, sizeof(RecvDatagram));
+            RecvDatagram.BufferCount = From[1];
+            RecvDatagram.AfdFlags = From[2];
+            RecvDatagram.TdiFlags = From[3];
+            RecvDatagram.Address = PTR32(From[4]);
+            RecvDatagram.AddressLength = PTR32(From[5]);
+            Buffers = PTR32(From[0]);
+            if (!RecvDatagram.BufferCount ||
+                RecvDatagram.BufferCount > MAXULONG / (sizeof(AFD_WSABUF) + 2 * sizeof(PVOID)) - 2)
+                return STATUS_INVALID_PARAMETER;
+            RecvDatagram.BufferArray = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0,
+                                        RecvDatagram.BufferCount * sizeof(AFD_WSABUF));
+            if (!RecvDatagram.BufferArray) return STATUS_NO_MEMORY;
+            for (i = 0; i < RecvDatagram.BufferCount; ++i)
+            {
+                RecvDatagram.BufferArray[i].len = Buffers[2 * i];
+                RecvDatagram.BufferArray[i].buf = PTR32(Buffers[2 * i + 1]);
+            }
+            Input = &RecvDatagram;
+            InputLength = sizeof(RecvDatagram);
             break;
         }
         case IOCTL_AFD_SEND:
