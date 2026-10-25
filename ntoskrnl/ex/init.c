@@ -1574,6 +1574,17 @@ Phase1InitializationDiscard(IN PVOID Context)
         KeBootTimeBias = 0;
     }
 
+    /* Check for NOHANDLECACHE (ReactOS, nitro SMP, T44): kill-switch that
+     * disables the per-CPU free-handle cache fast path so handle
+     * allocation/free use the shared FirstFree list (pre-T44 behaviour).
+     * Parsed outside CONFIG_SMP: the global exists in both kernels, and this
+     * lets the SMP test matrix sweep the kill-switch. */
+    if (CommandLine && strstr(CommandLine, "NOHANDLECACHE"))
+    {
+        ExpHandleCpuCacheEnabled = FALSE;
+        DPRINT1("T44: per-CPU handle cache DISABLED (NOHANDLECACHE)\n");
+    }
+
 #ifdef CONFIG_SMP
     /*
      * IMPORTANT NOTE:
