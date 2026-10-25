@@ -146,6 +146,32 @@ static DWORD WINAPI UnsupportedConsoleCallback(PVOID Parameter)
     return ERROR_NOT_SUPPORTED;
 }
 
+/* Guest CONSOLE_START_INFO to native, shared by the console connect and ConsolepAttach. The
+ * handles are widened; the property tail contains only fixed-width fields. InitEvents are
+ * outputs and stay zero. */
+static VOID ConsoleStartToNative(CONSOLE_START_INFO *To, const WOW64_CONSOLE_START *From)
+{
+#define H(Field) To->Field = HANDLE32(From->Field)
+    H(ConsoleHandle); H(InputWaitHandle); H(InputHandle); H(OutputHandle); H(ErrorHandle);
+    H(hIcon); H(hIconSm);
+#undef H
+    To->IconIndex = From->IconIndex;
+    RtlCopyMemory((PUCHAR)To + FIELD_OFFSET(CONSOLE_START_INFO, dwHotKey),
+                  (PUCHAR)From + FIELD_OFFSET(WOW64_CONSOLE_START, dwHotKey),
+                  sizeof(WOW64_CONSOLE_START) - FIELD_OFFSET(WOW64_CONSOLE_START, dwHotKey));
+}
+
+/* The handles the server returns, back into the guest structure */
+static VOID ConsoleStartToGuest(WOW64_CONSOLE_START *To, const CONSOLE_START_INFO *From)
+{
+    ULONG i;
+#define H(Field) To->Field = HandleToUlong(From->Field)
+    H(ConsoleHandle); H(InputWaitHandle); H(InputHandle); H(OutputHandle); H(ErrorHandle);
+#undef H
+    for (i = 0; i < MAX_INIT_EVENTS; ++i)
+        To->InitEvents[i] = HandleToUlong(From->InitEvents[i]);
+}
+
 static NTSTATUS Connect(ULONG *a, BOOLEAN *Reported)
 {
     ULONG *Length = PTR32(a[3]);
@@ -162,17 +188,9 @@ static NTSTATUS Connect(ULONG *a, BOOLEAN *Reported)
     {
         WOW64_CONSOLE_CONNECT *From = PTR32(a[2]);
         CONSRV_API_CONNECTINFO To = {0};
-        ULONG NativeLength = sizeof(To), i;
+        ULONG NativeLength = sizeof(To);
         if (*Length != sizeof(*From)) return STATUS_INFO_LENGTH_MISMATCH;
-#define H(Field) To.ConsoleStartInfo.Field = HANDLE32(From->ConsoleStartInfo.Field)
-        H(ConsoleHandle); H(InputWaitHandle); H(InputHandle); H(OutputHandle); H(ErrorHandle);
-        H(hIcon); H(hIconSm);
-#undef H
-        To.ConsoleStartInfo.IconIndex = From->ConsoleStartInfo.IconIndex;
-        /* The property tail contains only fixed-width fields. */
-        RtlCopyMemory((PUCHAR)&To.ConsoleStartInfo + FIELD_OFFSET(CONSOLE_START_INFO, dwHotKey),
-                      (PUCHAR)&From->ConsoleStartInfo + FIELD_OFFSET(WOW64_CONSOLE_START, dwHotKey),
-                      sizeof(WOW64_CONSOLE_START) - FIELD_OFFSET(WOW64_CONSOLE_START, dwHotKey));
+        ConsoleStartToNative(&To.ConsoleStartInfo, &From->ConsoleStartInfo);
         To.IsConsoleApp = From->IsConsoleApp;
         To.IsWindowVisible = From->IsWindowVisible;
         To.CtrlRoutine = ConsoleControl;
@@ -188,11 +206,7 @@ static NTSTATUS Connect(ULONG *a, BOOLEAN *Reported)
         Status = CsrClientConnectToServer(PTR32(a[0]), a[1], &To, &NativeLength, &InServer);
         if (NT_SUCCESS(Status))
         {
-#define H(Field) From->ConsoleStartInfo.Field = HandleToUlong(To.ConsoleStartInfo.Field)
-            H(ConsoleHandle); H(InputWaitHandle); H(InputHandle); H(OutputHandle); H(ErrorHandle);
-#undef H
-            for (i = 0; i < MAX_INIT_EVENTS; ++i)
-                From->ConsoleStartInfo.InitEvents[i] = HandleToUlong(To.ConsoleStartInfo.InitEvents[i]);
+            ConsoleStartToGuest(&From->ConsoleStartInfo, &To.ConsoleStartInfo);
         }
     }
     else return Wow64Unsupported(WOW64_SERVICE_CSR, WOW64_UNSUPPORTED_CSR_SERVER, a[1], Reported);
@@ -391,6 +405,37 @@ static NTSTATUS Call(ULONG *a, BOOLEAN *Reported)
         Create->ScreenBufferType = Guest->ScreenBufferType;
         Status = CsrClientCallServer((PCSR_API_MESSAGE)&Message, NULL, Api, sizeof(*Create));
         if (NT_SUCCESS(Status)) Guest->OutputHandle = HandleToUlong(Create->OutputHandle);
+        return Status;
+    }
+    case CSR_CREATE_API_NUMBER(CONSRV_SERVERDLL_INDEX, ConsolepAttach):
+    {
+        WOW64_CONSOLE_ATTACH *Guest = (PVOID)Data;
+        CONSOLE_ATTACHCONSOLE *Attach = &Message.Data.AttachConsoleRequest;
+        WOW64_CONSOLE_START *GuestStart;
+        CONSOLE_START_INFO NativeStart = {0};
+        PCSR_CAPTURE_BUFFER Capture;
+        if (a[3] != sizeof(*Guest)) return STATUS_INFO_LENGTH_MISMATCH;
+        /* The guest start info lives in the guest's capture buffer; the reply is written there. */
+        if (!Guest->ConsoleStartInfo ||
+            (ULONG64)Guest->ConsoleStartInfo + sizeof(*GuestStart) > (ULONG64)Wow64HighestUserAddress + 1)
+            return STATUS_INVALID_PARAMETER;
+        GuestStart = PTR32(Guest->ConsoleStartInfo);
+        {
+            volatile UCHAR *Bytes = (volatile UCHAR *)GuestStart;
+            ULONG i;
+            for (i = 0; i < sizeof(*GuestStart); ++i) Bytes[i] = Bytes[i];
+        }
+        ConsoleStartToNative(&NativeStart, GuestStart);
+        Capture = CsrAllocateCaptureBuffer(1, sizeof(NativeStart));
+        if (!Capture) return STATUS_NO_MEMORY;
+        Attach->ProcessId = Guest->ProcessId; /* ATTACH_PARENT_PROCESS (-1) stays -1 */
+        Attach->CtrlRoutine = ConsoleControl;
+        Attach->PropRoutine = UnsupportedConsoleCallback;
+        CsrCaptureMessageBuffer(Capture, &NativeStart, sizeof(NativeStart), (PVOID *)&Attach->ConsoleStartInfo);
+        Status = CsrClientCallServer((PCSR_API_MESSAGE)&Message, Capture, Api, sizeof(*Attach));
+        /* The server filled the captured copy (handles and init events) */
+        if (NT_SUCCESS(Status)) ConsoleStartToGuest(GuestStart, Attach->ConsoleStartInfo);
+        CsrFreeCaptureBuffer(Capture);
         return Status;
     }
     default:
