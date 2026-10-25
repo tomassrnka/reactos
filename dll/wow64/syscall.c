@@ -1484,9 +1484,11 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         {
         case FSCTL_PIPE_PEEK: case FSCTL_PIPE_LISTEN: case FSCTL_PIPE_DISCONNECT:
         case FSCTL_PIPE_WAIT: case FSCTL_PIPE_TRANSCEIVE:
-        /* GET_REPARSE_POINT takes no input and returns a flat REPARSE_DATA_BUFFER
-         * (no embedded pointers); the generic passthrough call suffices. */
+        /* The reparse point operations carry a flat REPARSE_DATA_BUFFER (no embedded
+         * pointers) in or out; the generic passthrough call suffices. */
         case FSCTL_GET_REPARSE_POINT:
+        case FSCTL_SET_REPARSE_POINT:
+        case FSCTL_DELETE_REPARSE_POINT:
             return NtFsControlFile(H(0), H(1),
                        a[2] ? (PIO_APC_ROUTINE)(ULONG_PTR)(-((LONG64)a[2] << 2)) : NULL,
                        P(3), (PVOID)(0x8000000000000000ULL | a[4]),

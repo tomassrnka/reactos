@@ -625,6 +625,7 @@ static DWORD custom_start_server(MSIPACKAGE *package, DWORD arch)
     HANDLE token;
     void *cookie;
     HANDLE pipe;
+    BOOL started;
 
     if ((arch == SCS_32BIT_BINARY && package->custom_server_32_process) ||
         (arch == SCS_64BIT_BINARY && package->custom_server_64_process))
@@ -649,13 +650,24 @@ static DWORD custom_start_server(MSIPACKAGE *package, DWORD arch)
     if (is_wow64 && arch == SCS_64BIT_BINARY)
     {
         Wow64DisableWow64FsRedirection(&cookie);
-        CreateProcessAsUserW(token, path, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+        started = CreateProcessAsUserW(token, path, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
         Wow64RevertWow64FsRedirection(cookie);
     }
     else
-        CreateProcessAsUserW(token, path, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+        started = CreateProcessAsUserW(token, path, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
 
     if (token) CloseHandle(token);
+
+#ifdef __REACTOS__
+    if (!started)
+    {
+        /* ConnectNamedPipe() below would wait forever for a server that does not exist */
+        DWORD err = GetLastError();
+        ERR("failed to start %d-bit custom action server: %lu\n", arch == SCS_32BIT_BINARY ? 32 : 64, err);
+        if (pipe != INVALID_HANDLE_VALUE) CloseHandle(pipe);
+        return err;
+    }
+#endif
 
     CloseHandle(pi.hThread);
 
@@ -847,7 +859,15 @@ static custom_action_info *do_msidbCustomActionTypeDll(
         return NULL;
     }
 
+#ifdef __REACTOS__
+    if (custom_start_server(package, info->arch) != ERROR_SUCCESS)
+    {
+        free_custom_action_data( info );
+        return NULL;
+    }
+#else
     custom_start_server(package, info->arch);
+#endif
 
     info->handle = CreateThread(NULL, 0, custom_client_thread, info, 0, NULL);
     if (!info->handle)
@@ -892,7 +912,18 @@ static BOOL CALLBACK disable_thread_window( HWND hwnd, LPARAM lparam )
     return TRUE;
 }
 
-/* There is no WOW64, so a 32-bit DLL custom action is skipped: log each one, warn once per package */
+/* A 32-bit DLL custom action runs in the 32-bit custom action server (SysWOW64/msiexec.exe -Embedding),
+ * as on Wine. Only when that server is not installed (no WOW64 subsystem) is the action skipped:
+ * log each one, warn once per package */
+static BOOL wow64_custom_action_server_exists(void)
+{
+    WCHAR path[MAX_PATH];
+
+    if (!GetSystemWow64DirectoryW( path, MAX_PATH - ARRAY_SIZE(L"\\msiexec.exe") )) return FALSE;
+    lstrcatW( path, L"\\msiexec.exe" );
+    return GetFileAttributesW( path ) != INVALID_FILE_ATTRIBUTES;
+}
+
 static void warn_skipped_32bit_custom_action( MSIPACKAGE *package, const WCHAR *action, const WCHAR *source )
 {
     struct disabled_windows disabled = { NULL, 0, 0, FALSE };
@@ -943,6 +974,17 @@ static void warn_skipped_32bit_custom_action( MSIPACKAGE *package, const WCHAR *
     }
     msiobj_release( &record->hdr );
 }
+
+/* TRUE if the 32-bit DLL custom action cannot run here and was skipped */
+static BOOL skip_32bit_custom_action( MSIPACKAGE *package, const WCHAR *path, const WCHAR *action, const WCHAR *source )
+{
+    DWORD arch = SCS_64BIT_BINARY;
+
+    get_binary_type( path, &arch );
+    if (arch != SCS_32BIT_BINARY || wow64_custom_action_server_exists()) return FALSE;
+    warn_skipped_32bit_custom_action( package, action, source );
+    return TRUE;
+}
 #endif
 
 static UINT HANDLE_CustomType1( MSIPACKAGE *package, const WCHAR *source, const WCHAR *target,
@@ -955,14 +997,8 @@ static UINT HANDLE_CustomType1( MSIPACKAGE *package, const WCHAR *source, const 
         return ERROR_FUNCTION_FAILED;
 
 #if defined(__REACTOS__) && defined(_M_AMD64)
-    {
-        DWORD arch = SCS_64BIT_BINARY;
-        get_binary_type(binary->tmpfile, &arch);
-        if (arch == SCS_32BIT_BINARY) {
-            warn_skipped_32bit_custom_action(package, action, source);
-            return ERROR_SUCCESS; // HACK: NO WOW64! return as executed though it's not true
-        }
-    }
+    if (skip_32bit_custom_action( package, binary->tmpfile, action, source ))
+        return ERROR_SUCCESS; // no WOW64 server installed: not executed, reported as executed
 #endif
 
     TRACE("Calling function %s from %s\n", debugstr_w(target), debugstr_w(binary->tmpfile));
@@ -1074,14 +1110,8 @@ static UINT HANDLE_CustomType17( MSIPACKAGE *package, const WCHAR *source, const
     }
 
 #if defined(__REACTOS__) && defined(_M_AMD64)
-    {
-        DWORD arch = SCS_64BIT_BINARY;
-        get_binary_type(file->TargetPath, &arch);
-        if (arch == SCS_32BIT_BINARY) {
-            warn_skipped_32bit_custom_action(package, action, source);
-            return ERROR_SUCCESS; // HACK: NO WOW64! return as executed though it's not true
-        }
-    }
+    if (skip_32bit_custom_action( package, file->TargetPath, action, source ))
+        return ERROR_SUCCESS; // no WOW64 server installed: not executed, reported as executed
 #endif
 
     if (!(info = do_msidbCustomActionTypeDll( package, type, file->TargetPath, target, action )))
