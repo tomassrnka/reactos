@@ -1,0 +1,23 @@
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+
+IDD_CHOOSER DIALOGEX 0, 0, 286, 206
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Choose Your Web Browser"
+FONT 8, "MS Shell Dlg", 0, 0, 0x0
+BEGIN
+    LTEXT "Select the web browser you would like to use as your default. You can change this later in Control Panel under Default Programs.",
+          IDC_INTRO, 7, 7, 272, 26
+    LISTBOX IDC_BROWSERLIST, 7, 38, 272, 112,
+            LBS_NOTIFY | LBS_HASSTRINGS | WS_VSCROLL | WS_BORDER | WS_TABSTOP
+    LTEXT "", IDC_STATUS, 7, 156, 272, 24
+    DEFPUSHBUTTON "Set as &Default", IDOK, 118, 184, 80, 15
+    PUSHBUTTON "&Skip", IDCANCEL, 202, 184, 77, 15
+END
+
+STRINGTABLE
+BEGIN
+    IDS_APPTITLE        "Choose Your Web Browser"
+    IDS_INSTALLFIREFOX  "Install Mozilla Firefox (ESR)"
+    IDS_INSTALLING      "Installing Mozilla Firefox through the Application Manager. This may take a few minutes, please wait..."
+    IDS_INSTALLFAILED   "Mozilla Firefox could not be installed. Please check your network connection and try again later from the Application Manager."
+END

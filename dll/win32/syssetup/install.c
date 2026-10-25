@@ -1534,6 +1534,36 @@ RegisterVulkanIcds(
 }
 
 static
+VOID
+RegisterBrowserChooser(VOID)
+{
+    HKEY hKey;
+    WCHAR szCmd[MAX_PATH];
+    LONG lError;
+
+    /*
+     * Register the first-login default-browser chooser as a RunOnce entry.
+     * Explorer runs HKLM RunOnce entries synchronously at the first interactive
+     * logon (after DHCP has settled) and deletes the value, so the chooser is
+     * presented exactly once on a fresh desktop.
+     */
+    lError = RegCreateKeyExW(HKEY_LOCAL_MACHINE,
+                             L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunOnce",
+                             0, NULL, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE,
+                             NULL, &hKey, NULL);
+    if (lError != ERROR_SUCCESS)
+    {
+        DPRINT1("RegisterBrowserChooser: cannot open RunOnce (0x%lx)\n", lError);
+        return;
+    }
+
+    wcscpy(szCmd, L"%SystemRoot%\\system32\\bchooser.exe");
+    RegSetValueExW(hKey, L"BrowserChooser", 0, REG_EXPAND_SZ,
+                   (const BYTE *)szCmd, (wcslen(szCmd) + 1) * sizeof(WCHAR));
+    RegCloseKey(hKey);
+}
+
+static
 DWORD
 InstallReactOS(VOID)
 {
@@ -1628,6 +1658,8 @@ InstallReactOS(VOID)
     }
 
     InstallWizard();
+
+    RegisterBrowserChooser();
 
     SetAutoAdminLogon();
 
