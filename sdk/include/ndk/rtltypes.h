@@ -1239,6 +1239,15 @@ typedef struct _RTL_FLS_DATA
     PVOID Data[RTL_FLS_MAXIMUM_AVAILABLE];
 } RTL_FLS_DATA, *PRTL_FLS_DATA;
 
+/*
+ * PEB::FlsCallback holds one pointer per index on NT 5.2, and from NT 6.0 on a
+ * {callback, reserved} pair per index. The allocation always has room for the
+ * pairs; this addresses the callback slot of Index for the OS version the PEB
+ * reports (NT 6 callers see the pair layout, NT 5.2 identity keeps one slot).
+ */
+#define RTL_FLS_CALLBACK_SLOT(Peb, Index) \
+    ((Peb)->FlsCallback[((Peb)->OSMajorVersion >= 6) ? ((Index) * 2) : (Index)])
+
 
 //
 // Unload Event Trace Structure for RtlGetUnloadEventTrace
