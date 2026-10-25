@@ -1250,6 +1250,37 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         }
         return Status;
     }
+    case W64_NtRemoveIoCompletionEx:
+    {
+        /* Widen the FILE_IO_COMPLETION_INFORMATION array: the 32-bit entry is
+         * { ULONG KeyContext; ULONG ApcContext; WOW64_IOSB; } == 16 bytes, the
+         * native one 32 bytes. Remove into a native array, then narrow each of
+         * the reported entries. */
+        typedef struct { ULONG KeyContext, ApcContext; WOW64_IOSB IoStatusBlock; } WOW64_IO_COMPLETION;
+        FILE_IO_COMPLETION_INFORMATION *Native;
+        WOW64_IO_COMPLETION *Guest = P(1);
+        ULONG Count = a[2], Removed = 0, i;
+        if (!Count || Count > MAXULONG / sizeof(*Native)) return STATUS_INVALID_PARAMETER;
+        if (!GuestSpan(a[1], (ULONG64)Count * sizeof(*Guest))) return STATUS_ACCESS_VIOLATION;
+        PROBE(3);
+        ProbeOutput(a[1], Count * sizeof(*Guest));
+        Native = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, Count * sizeof(*Native));
+        if (!Native) return STATUS_NO_MEMORY;
+        Status = NtRemoveIoCompletionEx(H(0), Native, Count, &Removed, P(4), a[5]);
+        if (Status == STATUS_SUCCESS)
+        {
+            if (Removed > Count) Removed = Count;
+            for (i = 0; i < Removed; ++i)
+            {
+                Guest[i].KeyContext = PtrToUlong(Native[i].KeyContext);
+                Guest[i].ApcContext = PtrToUlong(Native[i].ApcContext);
+                Guest[i].IoStatusBlock.Status = Native[i].IoStatusBlock.Status;
+                Guest[i].IoStatusBlock.Information = (ULONG)Native[i].IoStatusBlock.Information;
+            }
+            U(3) = Removed;
+        }
+        return Status;
+    }
     case W64_NtCreateKeyedEvent:
         PROBE(0);
         ATTR(2); Status = NtCreateKeyedEvent(&Cleanup->Handle, a[1], OA(2), a[3]); RETURN_HANDLE();
@@ -1304,6 +1335,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         {
         case IOCTL_MOUNTMGR_QUERY_DOS_VOLUME_PATH:
         case IOCTL_TCP_QUERY_INFORMATION_EX: /* TCP captures the guest context offset. */
+        case IOCTL_TCP_SET_INFORMATION_EX: /* setsockopt partner: TDIObjectID + BufferSize + inline bytes, no pointers. */
         case IOCTL_AFD_BIND:
         case IOCTL_AFD_CONNECT:
         case IOCTL_AFD_START_LISTEN:
@@ -1441,6 +1473,9 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         {
         case FSCTL_PIPE_PEEK: case FSCTL_PIPE_LISTEN: case FSCTL_PIPE_DISCONNECT:
         case FSCTL_PIPE_WAIT: case FSCTL_PIPE_TRANSCEIVE:
+        /* GET_REPARSE_POINT takes no input and returns a flat REPARSE_DATA_BUFFER
+         * (no embedded pointers); the generic passthrough call suffices. */
+        case FSCTL_GET_REPARSE_POINT:
             return NtFsControlFile(H(0), H(1),
                        a[2] ? (PIO_APC_ROUTINE)(ULONG_PTR)(-((LONG64)a[2] << 2)) : NULL,
                        P(3), (PVOID)(0x8000000000000000ULL | a[4]),
@@ -1874,6 +1909,43 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             U(1) = Wow64HighestUserAddress + 1;
             if (a[3]) U(3) = sizeof(ULONG);
             return STATUS_SUCCESS;
+        case SystemLogicalProcessorInformation:
+        {
+            /* SYSTEM_LOGICAL_PROCESSOR_INFORMATION differs only in the leading
+             * ULONG_PTR mask and the padding before the 8-byte-aligned union:
+             * native is 32 bytes with the union at 16, the 32-bit form 24 bytes
+             * with it at 8; the 16-byte union tail is byte-identical. Query into
+             * a native array sized from the required length and narrow each
+             * entry, mirroring the Windows WoW64 two-call size protocol. */
+            typedef struct { ULONG ProcessorMask, Relationship; UCHAR Union[16]; } WOW64_SLPI;
+            SYSTEM_LOGICAL_PROCESSOR_INFORMATION *Native;
+            ULONG NativeNeeded = 0, Count, GuestNeeded, i;
+            C_ASSERT(sizeof(WOW64_SLPI) == 24);
+            C_ASSERT(sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) == 32);
+            C_ASSERT(FIELD_OFFSET(SYSTEM_LOGICAL_PROCESSOR_INFORMATION, ProcessorCore) == 16);
+            if (a[3]) PROBE(3);
+            Status = NtQuerySystemInformation(a[0], NULL, 0, &NativeNeeded);
+            if (Status != STATUS_INFO_LENGTH_MISMATCH && !NT_SUCCESS(Status)) return Status;
+            if (!NativeNeeded || NativeNeeded % sizeof(*Native)) return STATUS_UNSUCCESSFUL;
+            Native = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, NativeNeeded);
+            if (!Native) return STATUS_NO_MEMORY;
+            Status = NtQuerySystemInformation(a[0], Native, NativeNeeded, &NativeNeeded);
+            if (!NT_SUCCESS(Status)) return Status;
+            Count = NativeNeeded / sizeof(*Native);
+            GuestNeeded = Count * sizeof(WOW64_SLPI);
+            if (a[3]) U(3) = GuestNeeded;
+            if (a[2] < GuestNeeded) return STATUS_INFO_LENGTH_MISMATCH;
+            if (!GuestSpan(a[1], GuestNeeded)) return STATUS_ACCESS_VIOLATION;
+            ProbeOutput(a[1], GuestNeeded);
+            for (i = 0; i < Count; ++i)
+            {
+                WOW64_SLPI *G = (WOW64_SLPI *)((PUCHAR)PTR32(a[1]) + i * sizeof(WOW64_SLPI));
+                G->ProcessorMask = (ULONG)Native[i].ProcessorMask;
+                G->Relationship = Native[i].Relationship;
+                RtlCopyMemory(G->Union, &Native[i].ProcessorCore, sizeof(G->Union));
+            }
+            return STATUS_SUCCESS;
+        }
         case SystemCurrentTimeZoneInformation: /* RTL_TIME_ZONE_INFORMATION has no pointers. */
         case SystemTimeOfDayInformation:
             return NtQuerySystemInformation(a[0], P(1), a[2], P(3));

@@ -131,4 +131,11 @@ typedef struct { ULONG ConsoleHandle; UINT CodePage; BOOL OutputCP; ULONG EventH
 typedef struct { ULONG ConsoleHandle; LANGID LangId; } WOW64_CONSOLE_LANGID;
 C_ASSERT(sizeof(WOW64_CONSOLE_GET_CP) == 12 && sizeof(WOW64_CONSOLE_SET_CP) == 16);
 C_ASSERT(sizeof(WOW64_CONSOLE_LANGID) == 8);
+typedef struct { ULONG ConsoleHandle, HandleType, DesiredAccess, InheritHandle, ShareMode, Handle; }
+    WOW64_CONSOLE_OPENCONSOLE;
+C_ASSERT(sizeof(WOW64_CONSOLE_OPENCONSOLE) == 24);
+typedef struct { ULONG ConsoleHandle, DesiredAccess, InheritHandle, ShareMode, ScreenBufferType;
+                 UCHAR GraphicsBufferInfo[20]; ULONG hMutex, lpBitMap, OutputHandle; }
+    WOW64_CONSOLE_CREATESCREENBUFFER;
+C_ASSERT(sizeof(WOW64_CONSOLE_CREATESCREENBUFFER) == 52);
 C_ASSERT(sizeof(BASE_GETSET_PROCESS_SHUTDOWN_PARAMS) == 8);
