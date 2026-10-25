@@ -2557,9 +2557,25 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
     /* Check for a VAD whose protection can't be changed */
     if (Vad->u.VadFlags.NoChange == 1)
     {
-        DPRINT1("Trying to change protection of a NoChange VAD\n");
-        Status = STATUS_INVALID_PAGE_PROTECTION;
-        goto FailPath;
+        /*
+         * A SEC_NO_CHANGE section mapping is genuinely immutable, and so is the
+         * shared user data page. But the PEB and TEBs are kernel-secured PRIVATE
+         * VADs (see MiCreatePebOrTeb) which Windows lets their process reprotect;
+         * the Chromium renderer sandbox does exactly that during target setup.
+         * Only allow that one case.
+         */
+        if (!Vad->u.VadFlags.PrivateMemory ||
+            (Vad->u2.VadFlags2.SecNoChange == 1) ||
+            (Vad->StartingVpn == (MM_SHARED_USER_DATA_VA >> PAGE_SHIFT)))
+        {
+            /* Scalar arguments only: we hold the address space mutex here */
+            DPRINT1("Trying to change protection of a NoChange VAD (private %u, base %p)\n",
+                    (ULONG)Vad->u.VadFlags.PrivateMemory, (PVOID)StartingAddress);
+            Status = STATUS_INVALID_PAGE_PROTECTION;
+            goto FailPath;
+        }
+
+        /* PEB/TEB: fall through and perform the protection change */
     }
 
     /* Is this section, or private memory? */
