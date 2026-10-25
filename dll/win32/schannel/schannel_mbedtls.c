@@ -606,6 +606,14 @@ static ALG_ID schannel_get_cipher_algid(int ciphersuite_id)
             return CALG_RC4;
 #endif
 
+#ifdef MBEDTLS_CHACHAPOLY_C
+        /* ChaCha20-Poly1305 (256-bit key). wincrypt has no CALG_CHACHA20, so, like Camellia
+         * below, it is reported as the closest ALG_ID: AES-256, a 256-bit modern AEAD cipher.
+         * 0 would read as "no encryption" to callers. dwCipherStrength stays the real 256. */
+        case MBEDTLS_CIPHER_CHACHA20_POLY1305:
+            return CALG_AES_256;
+#endif
+
 #ifdef MBEDTLS_DES_C
         /* DES */
         case MBEDTLS_CIPHER_DES_ECB:

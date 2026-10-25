@@ -19,8 +19,8 @@ list(APPEND SOURCE
     camellia.c
     ccm.c
     #certs.c
-    #chacha20.c
-    #chachapoly.c
+    chacha20.c
+    chachapoly.c
     cipher.c
     cipher_wrap.c
     #cmac.c
@@ -60,7 +60,7 @@ list(APPEND SOURCE
     #pkwrite.c
     platform.c
     platform_util.c
-    #poly1305.c
+    poly1305.c
     ripemd160.c
     rsa.c
     rsa_internal.c
