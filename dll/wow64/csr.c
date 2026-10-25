@@ -438,6 +438,59 @@ static NTSTATUS Call(ULONG *a, BOOLEAN *Reported)
         CsrFreeCaptureBuffer(Capture);
         return Status;
     }
+    case CSR_CREATE_API_NUMBER(CONSRV_SERVERDLL_INDEX, ConsolepFree):
+    {
+        WOW64_CONSOLE_FREE *Guest = (PVOID)Data;
+        if (a[3] != sizeof(*Guest)) return STATUS_INFO_LENGTH_MISMATCH;
+        Message.Data.FreeConsoleRequest.ConsoleHandle = HANDLE32(Guest->ConsoleHandle);
+        return CsrClientCallServer((PCSR_API_MESSAGE)&Message, NULL, Api,
+                                   sizeof(Message.Data.FreeConsoleRequest));
+    }
+    case CSR_CREATE_API_NUMBER(CONSRV_SERVERDLL_INDEX, ConsolepGetConsoleWindow):
+    {
+        WOW64_CONSOLE_GETWINDOW *Guest = (PVOID)Data;
+        if (a[3] != sizeof(*Guest)) return STATUS_INFO_LENGTH_MISMATCH;
+        Message.Data.GetWindowRequest.ConsoleHandle = HANDLE32(Guest->ConsoleHandle);
+        Status = CsrClientCallServer((PCSR_API_MESSAGE)&Message, NULL, Api,
+                                     sizeof(Message.Data.GetWindowRequest));
+        if (NT_SUCCESS(Status)) Guest->WindowHandle = HandleToUlong(Message.Data.GetWindowRequest.WindowHandle);
+        return Status;
+    }
+    case CSR_CREATE_API_NUMBER(CONSRV_SERVERDLL_INDEX, ConsolepGetProcessList):
+    {
+        WOW64_CONSOLE_GETPROCESSLIST *Guest = (PVOID)Data;
+        CONSOLE_GETPROCESSLIST *List = &Message.Data.GetProcessListRequest;
+        PCSR_CAPTURE_BUFFER Capture;
+        ULONG Count, Copy;
+        if (a[3] != sizeof(*Guest)) return STATUS_INFO_LENGTH_MISMATCH;
+        Count = Guest->ProcessCount;
+        /* The id array lives in the guest capture buffer and is written back: it must lie in the
+         * guest range and be writable before the server is asked */
+        if (!Guest->ProcessIdsList || Count > 0x10000 ||
+            (ULONG64)Guest->ProcessIdsList + (ULONG64)Count * sizeof(ULONG) > (ULONG64)Wow64HighestUserAddress + 1)
+            return STATUS_INVALID_PARAMETER;
+        {
+            volatile UCHAR *Bytes = PTR32(Guest->ProcessIdsList);
+            ULONG i;
+            for (i = 0; i < Count * sizeof(ULONG); ++i) Bytes[i] = Bytes[i];
+        }
+        /* The ids are ULONGs on both sides: only the buffer itself is native */
+        Capture = CsrAllocateCaptureBuffer(1, Count * sizeof(ULONG));
+        if (!Capture) return STATUS_NO_MEMORY;
+        List->ConsoleHandle = HANDLE32(Guest->ConsoleHandle);
+        List->ProcessCount = Count;
+        CsrAllocateMessagePointer(Capture, Count * sizeof(ULONG), (PVOID *)&List->ProcessIdsList);
+        Status = CsrClientCallServer((PCSR_API_MESSAGE)&Message, Capture, Api, sizeof(*List));
+        if (NT_SUCCESS(Status))
+        {
+            /* The server returns the total; only the first Count ids were stored */
+            Guest->ProcessCount = List->ProcessCount;
+            Copy = min(List->ProcessCount, Count);
+            RtlCopyMemory(PTR32(Guest->ProcessIdsList), List->ProcessIdsList, Copy * sizeof(ULONG));
+        }
+        CsrFreeCaptureBuffer(Capture);
+        return Status;
+    }
     default:
         return UnsupportedApi(Api, a[3], Reported);
     }

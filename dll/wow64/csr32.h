@@ -143,3 +143,12 @@ C_ASSERT(sizeof(BASE_GETSET_PROCESS_SHUTDOWN_PARAMS) == 8);
 /* ConsolepAttach: the start info is a pointer into the guest capture buffer */
 typedef struct { ULONG ProcessId, ConsoleStartInfo, CtrlRoutine, PropRoutine; } WOW64_CONSOLE_ATTACH;
 C_ASSERT(sizeof(WOW64_CONSOLE_ATTACH) == 16);
+
+/* ConsolepFree, ConsolepGetConsoleWindow and ConsolepGetProcessList. The process list is a
+ * pointer into the guest capture buffer. */
+typedef struct { ULONG ConsoleHandle; } WOW64_CONSOLE_FREE;
+C_ASSERT(sizeof(WOW64_CONSOLE_FREE) == 4);
+typedef struct { ULONG ConsoleHandle, WindowHandle; } WOW64_CONSOLE_GETWINDOW;
+C_ASSERT(sizeof(WOW64_CONSOLE_GETWINDOW) == 8);
+typedef struct { ULONG ConsoleHandle, ProcessCount, ProcessIdsList; } WOW64_CONSOLE_GETPROCESSLIST;
+C_ASSERT(sizeof(WOW64_CONSOLE_GETPROCESSLIST) == 12);
