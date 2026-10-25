@@ -1,0 +1,3 @@
+ReactOS-Nitro Optional Feature payload: OpenGL Software Renderer Pack (gl-sw-pack)
+Managed by featmgr / Optional Features (FEATMGMT-01).
+Placed by the feature engine on enable; removed on disable.
