@@ -1520,6 +1520,7 @@
 @ stdcall ZwOpenFile(ptr long ptr ptr long long)
 @ stdcall ZwOpenJobObject(ptr long ptr)
 @ stdcall ZwOpenKey(ptr long ptr)
+@ stdcall ZwOpenKeyEx(ptr long ptr long)
 @ stdcall ZwOpenProcess(ptr long ptr ptr)
 @ stdcall ZwOpenProcessToken(ptr long ptr)
 @ stdcall ZwOpenProcessTokenEx(ptr long long ptr)

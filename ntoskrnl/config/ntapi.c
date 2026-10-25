@@ -334,19 +334,38 @@ NtCreateKey(OUT PHANDLE KeyHandle,
     return Status;
 }
 
+/*
+ * Legal OpenOptions bits accepted by NtOpenKeyEx. REG_OPTION_OPEN_LINK is
+ * honored (open the symbolic-link key itself rather than its target).
+ * REG_OPTION_BACKUP_RESTORE and REG_OPTION_DONT_VIRTUALIZE (0x10, Win7+)
+ * are accepted for application compatibility but have no effect: ReactOS
+ * performs neither backup-intent opens nor registry virtualization.
+ */
+#define CMP_OPEN_LEGAL_OPTIONS \
+    (REG_OPTION_OPEN_LINK | REG_OPTION_BACKUP_RESTORE | 0x00000010)
+
+/*
+ * Shared open path for NtOpenKey / NtOpenKeyEx. With OpenOptions == 0 this
+ * is byte-for-byte equivalent to the historical NtOpenKey behavior.
+ */
+static
 NTSTATUS
-NTAPI
-NtOpenKey(OUT PHANDLE KeyHandle,
-          IN ACCESS_MASK DesiredAccess,
-          IN POBJECT_ATTRIBUTES ObjectAttributes)
+CmpOpenKeyInternal(OUT PHANDLE KeyHandle,
+                   IN ACCESS_MASK DesiredAccess,
+                   IN POBJECT_ATTRIBUTES ObjectAttributes,
+                   IN ULONG OpenOptions)
 {
     CM_PARSE_CONTEXT ParseContext = {0};
     HANDLE Handle;
     NTSTATUS Status;
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
     PAGED_CODE();
-    DPRINT("NtOpenKey(Path: %wZ, Root %x, Access: %x)\n",
-            ObjectAttributes->ObjectName, ObjectAttributes->RootDirectory, DesiredAccess);
+    DPRINT("CmpOpenKeyInternal(Path: %wZ, Root %x, Access: %x, Options: %x)\n",
+            ObjectAttributes->ObjectName, ObjectAttributes->RootDirectory,
+            DesiredAccess, OpenOptions);
+
+    /* Reject options we don't recognize, matching Windows validation */
+    if (OpenOptions & ~CMP_OPEN_LEGAL_OPTIONS) return STATUS_INVALID_PARAMETER;
 
 #ifdef BUILD_WOW64_ENABLED
     ParseContext.Wow64Flags = DesiredAccess & KEY_WOW64_RES;
@@ -354,6 +373,14 @@ NtOpenKey(OUT PHANDLE KeyHandle,
 #endif
     /* View selectors are not access rights. Native i386 ignores them. */
     DesiredAccess &= ~KEY_WOW64_RES;
+
+    /*
+     * Carry the open-link request to the parse routine (CmpParseKey), which
+     * folds it into the open's object attributes. This is the OpenOptions
+     * equivalent of the OBJ_OPENLINK object attribute. CmpParseKey only
+     * consults it on the open path, so NtCreateKey semantics are unaffected.
+     */
+    ParseContext.CreateOptions = OpenOptions & REG_OPTION_OPEN_LINK;
 
     /* Check for user-mode caller */
     if (PreviousMode != KernelMode)
@@ -407,6 +434,29 @@ NtOpenKey(OUT PHANDLE KeyHandle,
 
     /* Return status */
     return Status;
+}
+
+NTSTATUS
+NTAPI
+NtOpenKey(OUT PHANDLE KeyHandle,
+          IN ACCESS_MASK DesiredAccess,
+          IN POBJECT_ATTRIBUTES ObjectAttributes)
+{
+    /* Identical to NtOpenKeyEx with no open options */
+    return CmpOpenKeyInternal(KeyHandle, DesiredAccess, ObjectAttributes, 0);
+}
+
+NTSTATUS
+NTAPI
+NtOpenKeyEx(OUT PHANDLE KeyHandle,
+            IN ACCESS_MASK DesiredAccess,
+            IN POBJECT_ATTRIBUTES ObjectAttributes,
+            IN ULONG OpenOptions)
+{
+    return CmpOpenKeyInternal(KeyHandle,
+                              DesiredAccess,
+                              ObjectAttributes,
+                              OpenOptions);
 }
 
 
