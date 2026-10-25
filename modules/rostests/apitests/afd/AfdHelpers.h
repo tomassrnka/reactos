@@ -16,6 +16,14 @@ AfdCreateSocket(
     _In_ int Protocol);
 
 NTSTATUS
+AfdCreateSocketOnTransport(
+    _Out_ PHANDLE SocketHandle,
+    _In_ int AddressFamily,
+    _In_ int SocketType,
+    _In_ int Protocol,
+    _In_opt_ PCWSTR TransportDevice);
+
+NTSTATUS
 AfdBind(
     _In_ HANDLE SocketHandle,
     _In_ const struct sockaddr *Address,
