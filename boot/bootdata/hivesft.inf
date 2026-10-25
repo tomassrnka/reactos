@@ -589,7 +589,13 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers","",0x0
 
 ; Version Information
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion","InstallDate",0x00010003,0
-HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion","ProductName",2,"ReactOS"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion","ProductName",2,"Windows 10 Pro"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion","CurrentMajorVersionNumber",0x00010003,10
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion","CurrentMinorVersionNumber",0x00010003,0
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion","CurrentBuild",2,"19045"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion","EditionID",2,"Professional"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion","DisplayVersion",2,"22H2"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion","UBR",0x00010003,5247
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion","RegDone",0x00000002,""
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion","RegisteredOrganization",2,""
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion","RegisteredOwner",2,""
