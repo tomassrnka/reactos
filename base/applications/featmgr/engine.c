@@ -460,6 +460,181 @@ static void RevertRegUndo(LPCWSTR line, FILE *log)
     RegCloseKey(k);
 }
 
+/* ---- driver/service registration ----------------------------------------- */
+
+/* [Service] spec: Name|Type|StartType|ImagePath|DisplayName|Run
+ *   Type      = filesys | kernel | win32   (SERVICE_FILE_SYSTEM_DRIVER / KERNEL_DRIVER / WIN32_OWN_PROCESS)
+ *   StartType = boot | system | auto | demand | disabled
+ *   Run       = 1 => start the service right after creating it (failure is logged, not fatal)
+ * Whether we created the service is recorded in the state value "Services"
+ * (one service name per line) so disable removes exactly what enable made. */
+static DWORD ParseSvcType(LPCWSTR s)
+{
+    if (!_wcsicmp(s, L"kernel")) return SERVICE_KERNEL_DRIVER;
+    if (!_wcsicmp(s, L"win32"))  return SERVICE_WIN32_OWN_PROCESS;
+    return SERVICE_FILE_SYSTEM_DRIVER;
+}
+
+static DWORD ParseSvcStart(LPCWSTR s)
+{
+    if (!_wcsicmp(s, L"boot"))     return SERVICE_BOOT_START;
+    if (!_wcsicmp(s, L"system"))   return SERVICE_SYSTEM_START;
+    if (!_wcsicmp(s, L"auto"))     return SERVICE_AUTO_START;
+    if (!_wcsicmp(s, L"disabled")) return SERVICE_DISABLED;
+    return SERVICE_DEMAND_START;
+}
+
+static HRESULT ApplyServiceAction(LPCWSTR spec, HKEY state, FILE *log)
+{
+    WCHAR buf[1024];
+    WCHAR *tok[6] = {0};
+    int ti = 0;
+    WCHAR *p, *start;
+    SC_HANDLE scm, svc;
+    HRESULT hr = S_OK;
+
+    StringCchCopyW(buf, 1024, spec);
+    start = buf;
+    for (p = buf; ; p++)
+    {
+        if (*p == L'|' || *p == L'\0')
+        {
+            BOOL end = (*p == L'\0');
+            *p = L'\0';
+            if (ti < 6) tok[ti++] = start;
+            start = p + 1;
+            if (end) break;
+        }
+    }
+    if (ti < 4) { LOGF(log, L"  bad service spec: %s\n", spec); return E_INVALIDARG; }
+
+    scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_ALL_ACCESS);
+    if (!scm) { LOGF(log, L"  ERROR: OpenSCManager (%lu)\n", GetLastError()); return HRESULT_FROM_WIN32(GetLastError()); }
+
+    svc = CreateServiceW(scm, tok[0], (ti > 4 && tok[4][0]) ? tok[4] : tok[0],
+                         SERVICE_ALL_ACCESS, ParseSvcType(tok[1]), ParseSvcStart(tok[2]),
+                         SERVICE_ERROR_NORMAL, tok[3], NULL, NULL, NULL, NULL, NULL);
+    if (!svc)
+    {
+        DWORD e = GetLastError();
+        /* a pre-existing service is not ours: refuse rather than adopt + later delete it */
+        LOGF(log, L"  ERROR: CreateService %s failed (%lu)%s\n", tok[0], e,
+             e == ERROR_SERVICE_EXISTS ? L" - already registered by something else" : L"");
+        hr = HRESULT_FROM_WIN32(e);
+    }
+    else
+    {
+        LOGF(log, L"  service: created %s (type=%s start=%s image=%s)\n", tok[0], tok[1], tok[2], tok[3]);
+        MultiSzAppend(state, L"Services", tok[0]);
+        if (ti > 5 && _wtoi(tok[5]))
+        {
+            if (StartServiceW(svc, 0, NULL) || GetLastError() == ERROR_SERVICE_ALREADY_RUNNING)
+                LOGF(log, L"  service: %s started\n", tok[0]);
+            else
+                LOGF(log, L"  warn: StartService %s failed (%lu); it stays registered\n", tok[0], GetLastError());
+        }
+        CloseServiceHandle(svc);
+    }
+    CloseServiceHandle(scm);
+    return hr;
+}
+
+/* Stop (wait up to ~10 s) one service. TRUE if it is stopped / absent / never ran. */
+static BOOL StopServiceByName(SC_HANDLE scm, LPCWSTR name, FILE *log)
+{
+    SC_HANDLE svc = OpenServiceW(scm, name, SERVICE_ALL_ACCESS);
+    SERVICE_STATUS ss;
+    int i;
+    BOOL ok = TRUE;
+    if (!svc) return TRUE;
+    if (QueryServiceStatus(svc, &ss) && ss.dwCurrentState != SERVICE_STOPPED)
+    {
+        LOGF(log, L"  service: stopping %s\n", name);
+        ControlService(svc, SERVICE_CONTROL_STOP, &ss);
+        for (i = 0; i < 50; i++)
+        {
+            if (!QueryServiceStatus(svc, &ss) || ss.dwCurrentState == SERVICE_STOPPED) break;
+            Sleep(200);
+        }
+        if (!QueryServiceStatus(svc, &ss) || ss.dwCurrentState != SERVICE_STOPPED)
+        {
+            LOGF(log, L"  ERROR: service %s did not stop (state %lu); in use?\n", name, ss.dwCurrentState);
+            ok = FALSE;
+        }
+    }
+    CloseServiceHandle(svc);
+    return ok;
+}
+
+/* Unregister the services enable created. A driver that cannot be unloaded on this
+ * system (WinFsp registers a UNC provider with MUP, and an FSD with a live
+ * \FileSystem device never stops under ReactOS) is set to Start=disabled and marked
+ * for deletion; its name goes into "PendingServices" and removal completes at reboot. */
+static void RemoveRecordedServices(HKEY state, FILE *log)
+{
+    WCHAR *svcs = MultiSzRead(state, L"Services"), *p;
+    SC_HANDLE scm, svc;
+    if (!svcs) return;
+    scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_ALL_ACCESS);
+    if (scm)
+    {
+        for (p = svcs; *p; p += wcslen(p) + 1)
+        {
+            BOOL stopped = StopServiceByName(scm, p, log);
+            svc = OpenServiceW(scm, p, SERVICE_ALL_ACCESS);
+            if (!svc) continue;
+            if (!stopped)
+            {
+                LOGF(log, L"  note: %s cannot be unloaded while the system is up; disabling it, removal completes at reboot\n", p);
+                ChangeServiceConfigW(svc, SERVICE_NO_CHANGE, SERVICE_DISABLED, SERVICE_NO_CHANGE,
+                                     NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+                MultiSzAppend(state, L"PendingServices", p);
+            }
+            LOGF(log, L"  service: deleting %s\n", p);
+            if (!DeleteService(svc))
+                LOGF(log, L"  warn: DeleteService %s failed (%lu)\n", p, GetLastError());
+            CloseServiceHandle(svc);
+        }
+        CloseServiceHandle(scm);
+    }
+    HeapFree(GetProcessHeap(), 0, svcs);
+}
+
+/* Is a previous disable still waiting for a reboot? Clears the markers once nothing is left. */
+static BOOL PendingRebootActive(HKEY state)
+{
+    WCHAR *l, *p;
+    BOOL active = FALSE;
+    SC_HANDLE scm, svc;
+
+    l = MultiSzRead(state, L"PendingFiles");
+    if (l)
+    {
+        for (p = l; *p; p += wcslen(p) + 1)
+            if (GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES) active = TRUE;
+        HeapFree(GetProcessHeap(), 0, l);
+    }
+    l = MultiSzRead(state, L"PendingServices");
+    if (l)
+    {
+        scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+        for (p = l; *p && scm; p += wcslen(p) + 1)
+        {
+            svc = OpenServiceW(scm, p, SERVICE_QUERY_STATUS);
+            if (svc) { active = TRUE; CloseServiceHandle(svc); }
+        }
+        if (scm) CloseServiceHandle(scm);
+        HeapFree(GetProcessHeap(), 0, l);
+    }
+    if (!active)
+    {
+        RegDeleteValueW(state, L"PendingFiles");
+        RegDeleteValueW(state, L"PendingServices");
+        RegDeleteValueW(state, L"PendingReboot");
+    }
+    return active;
+}
+
 /* ---- enable / disable ---------------------------------------------------- */
 
 static HRESULT EnableDeps(const FM_FEATURE *f, FILE *log)
@@ -507,6 +682,18 @@ HRESULT FmEnable(LPCWSTR id, FILE *log)
         return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
     }
 
+    if (OpenStateKey(id, FALSE, KEY_READ | KEY_WRITE, &state) == ERROR_SUCCESS)
+    {
+        BOOL pend = PendingRebootActive(state);
+        RegCloseKey(state);
+        state = NULL;
+        if (pend)
+        {
+            LOGF(log, L"error: '%s' was disabled but is still being removed; reboot, then enable again\n", id);
+            return HRESULT_FROM_WIN32(ERROR_SUCCESS_REBOOT_REQUIRED);
+        }
+    }
+
     LOGF(log, L"enabling '%s' (%s, tier=%s)\n", f.Id, f.Name, FmTierStr(f.Tier));
 
     hr = EnableDeps(&f, log);
@@ -519,6 +706,7 @@ HRESULT FmEnable(LPCWSTR id, FILE *log)
     RegDeleteValueW(state, L"Files");
     RegDeleteValueW(state, L"RegUndo");
     RegDeleteValueW(state, L"Backups");
+    RegDeleteValueW(state, L"Services");
 
     /* payload files */
     FmGetPayloadDir(id, payloadDir, MAX_PATH);
@@ -551,6 +739,21 @@ HRESULT FmEnable(LPCWSTR id, FILE *log)
             hr = ApplyRegAction(eq + 1, state, log);
             if (FAILED(hr)) goto done;
         }
+        HeapFree(GetProcessHeap(), 0, sect);
+        sect = NULL;
+    }
+
+    /* driver/service registration (after files + registry, so the image exists) */
+    sect = ReadSection(f.ManifestPath, L"Service");
+    if (sect)
+    {
+        for (p = sect; *p; p += wcslen(p) + 1)
+        {
+            WCHAR *eq = wcschr(p, L'=');
+            if (!eq) continue;
+            hr = ApplyServiceAction(eq + 1, state, log);
+            if (FAILED(hr)) goto done;
+        }
     }
 
     UtcNow(now, 32);
@@ -578,7 +781,10 @@ static void RevertState(HKEY state, FILE *log)
 {
     WCHAR *files, *undo, *baks, *p;
 
-    /* revert registry first */
+    /* unregister services first: the driver image must not be in use when deleted */
+    RemoveRecordedServices(state, log);
+
+    /* revert registry */
     undo = MultiSzRead(state, L"RegUndo");
     if (undo)
     {
@@ -595,7 +801,16 @@ static void RevertState(HKEY state, FILE *log)
         {
             LOGF(log, L"  remove file: %s\n", p);
             if (!DeleteFileW(p) && GetLastError() != ERROR_FILE_NOT_FOUND)
-                LOGF(log, L"  warn: delete failed (%lu)\n", GetLastError());
+            {
+                DWORD e = GetLastError();
+                if (MoveFileExW(p, NULL, MOVEFILE_DELAY_UNTIL_REBOOT))
+                {
+                    LOGF(log, L"  note: %s is in use (%lu); will be deleted at reboot\n", p, e);
+                    MultiSzAppend(state, L"PendingFiles", p);
+                }
+                else
+                    LOGF(log, L"  warn: delete failed (%lu), reboot-delete failed (%lu)\n", e, GetLastError());
+            }
             else
             {
                 /* drop a pack-private directory once it is empty (fails harmlessly if not) */
@@ -629,6 +844,7 @@ static void RevertState(HKEY state, FILE *log)
     RegDeleteValueW(state, L"Files");
     RegDeleteValueW(state, L"RegUndo");
     RegDeleteValueW(state, L"Backups");
+    RegDeleteValueW(state, L"Services");
 }
 
 HRESULT FmDisable(LPCWSTR id, FILE *log)
@@ -644,7 +860,19 @@ HRESULT FmDisable(LPCWSTR id, FILE *log)
     }
 
     LOGF(log, L"disabling '%s'\n", id);
+    RegDeleteValueW(state, L"PendingFiles");
+    RegDeleteValueW(state, L"PendingServices");
+    RegDeleteValueW(state, L"PendingReboot");
     RevertState(state, log);
+    {
+        DWORD cb = 0;
+        if (RegQueryValueExW(state, L"PendingFiles", NULL, NULL, NULL, &cb) == ERROR_SUCCESS ||
+            RegQueryValueExW(state, L"PendingServices", NULL, NULL, NULL, &cb) == ERROR_SUCCESS)
+        {
+            SetStateSz(state, L"PendingReboot", L"Yes");
+            LOGF(log, L"note: some components are in use; removal completes at the next reboot\n");
+        }
+    }
     SetStateSz(state, L"State", L"Disabled");
     LOGF(log, L"'%s' disabled.\n", id);
     RegCloseKey(state);
