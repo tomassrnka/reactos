@@ -30,6 +30,7 @@ list(APPEND SOURCE
     CopyFile2Identity.c
     CreateEventMutexEx.c
     CreateFile2.c
+    CreateFileDirectory.c
     CreateRemoteThreadEx.c
     CreateProcess.c
     CreateProcessRace.c

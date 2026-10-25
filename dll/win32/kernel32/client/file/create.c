@@ -262,6 +262,21 @@ BasepCreateFile(LPCWSTR lpFileName,
    else
       Flags |= FILE_NON_DIRECTORY_FILE;
 
+   /* Windows creates a new *directory* (not a file) when the caller asks for
+      POSIX semantics together with the directory attribute and CREATE_NEW; this
+      is the documented translation performed by kernelbase (get_nt_file_options:
+      FILE_FLAG_POSIX_SEMANTICS && FILE_ATTRIBUTE_DIRECTORY && CREATE_NEW ->
+      FILE_DIRECTORY_FILE). It is the path WinFsp's installer custom action uses
+      to create its junction point before stamping the mount-point reparse data.
+      dwCreationDisposition has already been translated to the NT disposition
+      above, so CREATE_NEW is FILE_CREATE here. */
+   if ((dwFlagsAndAttributes & FILE_FLAG_POSIX_SEMANTICS) &&
+       (dwFlagsAndAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+       dwCreationDisposition == FILE_CREATE)
+   {
+      Flags |= FILE_DIRECTORY_FILE;
+   }
+
    if(dwFlagsAndAttributes & FILE_FLAG_OPEN_REPARSE_POINT)
       Flags |= FILE_OPEN_REPARSE_POINT;
 

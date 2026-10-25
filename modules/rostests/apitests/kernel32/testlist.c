@@ -33,6 +33,7 @@ extern void func_CopyFile2(void);
 extern void func_CopyFile2Identity(void);
 extern void func_CreateEventMutexEx(void);
 extern void func_CreateFile2(void);
+extern void func_CreateFileDirectory(void);
 extern void func_CreateRemoteThreadEx(void);
 extern void func_CreateProcess(void);
 extern void func_CreateProcessRace(void);
@@ -188,6 +189,7 @@ const struct test winetest_testlist[] =
     { "CopyFile2Identity",           func_CopyFile2Identity },
     { "CreateEventMutexEx",          func_CreateEventMutexEx },
     { "CreateFile2",                 func_CreateFile2 },
+    { "CreateFileDirectory",         func_CreateFileDirectory },
     { "CreateRemoteThreadEx",        func_CreateRemoteThreadEx },
     { "CreateProcess",               func_CreateProcess },
     { "CreateProcessRace",           func_CreateProcessRace },
