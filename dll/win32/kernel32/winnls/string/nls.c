@@ -307,6 +307,7 @@ IntGetCodePageEntry(UINT CodePage)
     WCHAR FileName[MAX_PATH + 1];
     UINT FileNamePos;
     PCODEPAGE_ENTRY CodePageEntry;
+    DWORD SavedError;
 
     if (CodePage == CP_ACP)
     {
@@ -347,6 +348,12 @@ IntGetCodePageEntry(UINT CodePage)
     {
         return CodePageEntry;
     }
+
+    /*
+     * Loading the table below goes through file/section APIs that clobber the
+     * last error; a successful lookup must not change it (Windows keeps it).
+     */
+    SavedError = GetLastError();
 
     /*
      * Yes, we really want to lock here. Otherwise it can happen that
@@ -476,6 +483,7 @@ IntGetCodePageEntry(UINT CodePage)
     InsertTailList(&CodePageListHead, &CodePageEntry->Entry);
     RtlLeaveCriticalSection(&CodePageListLock);
 
+    SetLastError(SavedError);
     return CodePageEntry;
 }
 
