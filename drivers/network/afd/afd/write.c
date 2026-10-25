@@ -834,7 +834,16 @@ AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         TaBuildNullTransportAddress( RemoteAddress->Address[0].AddressType );
 
         if( FCB->LocalAddress ) {
-            Status = WarmSocketForBind( FCB, AFD_SHARE_WILDCARD );
+            /* The explicit bind path builds AddressFrom before warming the
+             * socket; the implicit bind must do the same. WarmSocketForBind
+             * pre-posts a receive datagram with FCB->AddressFrom, and tcpip
+             * dereferences it (DGReceiveDatagram), so leaving it NULL here
+             * bugchecks the transport from an unbound raw sendto (T134). */
+            Status = TdiBuildConnectionInfo( &FCB->AddressFrom,
+                                             FCB->LocalAddress );
+
+            if( NT_SUCCESS(Status) )
+                Status = WarmSocketForBind( FCB, AFD_SHARE_WILDCARD );
 
             if( NT_SUCCESS(Status) )
                 FCB->SharedData.State = SOCKET_STATE_BOUND;
