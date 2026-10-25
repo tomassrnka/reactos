@@ -14,6 +14,15 @@
 #define NDEBUG
 #include <debug.h>
 
+/* The header only has the macro; Windows also exports the function */
+#undef CcCopyWriteWontFlush
+BOOLEAN
+NTAPI
+CcCopyWriteWontFlush(
+    _In_ PFILE_OBJECT FileObject,
+    _In_ PLARGE_INTEGER FileOffset,
+    _In_ ULONG Length);
+
 /* PUBLIC FUNCTIONS **********************************************************/
 
 /*
@@ -2042,4 +2051,20 @@ FsRtlRegisterFileSystemFilterCallbacks(
     DriverExtension->FsFilterCallbacks = NewCallbacks;
 
     return STATUS_SUCCESS;
+}
+
+/*
+ * @implemented
+ */
+BOOLEAN
+NTAPI
+CcCopyWriteWontFlush(
+    _In_ PFILE_OBJECT FileObject,
+    _In_ PLARGE_INTEGER FileOffset,
+    _In_ ULONG Length)
+{
+    /* The same rule as the WDK macro: a write of up to 64kB is not flushed synchronously */
+    UNREFERENCED_PARAMETER(FileObject);
+    UNREFERENCED_PARAMETER(FileOffset);
+    return Length <= 0x10000;
 }

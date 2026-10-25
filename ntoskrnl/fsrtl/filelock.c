@@ -1432,3 +1432,16 @@ FsRtlFreeFileLock(IN PFILE_LOCK FileLock)
     FsRtlUninitializeFileLock(FileLock);
     ExFreeToPagedLookasideList(&FsRtlFileLockLookasideList, FileLock);
 }
+
+/*
+ * The locks of this implementation are granted or refused while the call runs,
+ * so none is ever in progress.
+ *
+ * @implemented
+ */
+BOOLEAN
+NTAPI
+FsRtlAreThereCurrentOrInProgressFileLocks(IN PFILE_LOCK FileLock)
+{
+    return FsRtlAreThereCurrentFileLocks(FileLock);
+}

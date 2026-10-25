@@ -1699,3 +1699,73 @@ FsRtlUninitializeOplock(IN POPLOCK Oplock)
     ExFreePoolWithTag(IntOplock, TAG_OPLOCK);
 }
 
+
+/*
+ * The oplock engine here has no handle (RH, RWH) oplocks, so these Windows 7
+ * entry points have nothing of their own to act on.
+ */
+
+/*
+ * Extended check; the flags (completion options, atomic back out) are not supported.
+ *
+ * @implemented
+ */
+NTSTATUS
+NTAPI
+FsRtlCheckOplockEx(IN POPLOCK Oplock,
+                   IN PIRP Irp,
+                   IN ULONG Flags,
+                   IN PVOID Context OPTIONAL,
+                   IN POPLOCK_WAIT_COMPLETE_ROUTINE CompletionRoutine OPTIONAL,
+                   IN POPLOCK_FS_PREPOST_IRP PostIrpRoutine OPTIONAL)
+{
+    UNREFERENCED_PARAMETER(Flags);
+    return FsRtlCheckOplock(Oplock, Irp, Context, CompletionRoutine, PostIrpRoutine);
+}
+
+/*
+ * No handle oplock exists to break.
+ *
+ * @implemented
+ */
+NTSTATUS
+NTAPI
+FsRtlOplockBreakH(IN POPLOCK Oplock,
+                  IN PIRP Irp,
+                  IN ULONG Flags,
+                  IN PVOID Context OPTIONAL,
+                  IN POPLOCK_WAIT_COMPLETE_ROUTINE CompletionRoutine OPTIONAL,
+                  IN POPLOCK_FS_PREPOST_IRP PostIrpRoutine OPTIONAL)
+{
+    UNREFERENCED_PARAMETER(Oplock);
+    UNREFERENCED_PARAMETER(Irp);
+    UNREFERENCED_PARAMETER(Flags);
+    UNREFERENCED_PARAMETER(Context);
+    UNREFERENCED_PARAMETER(CompletionRoutine);
+    UNREFERENCED_PARAMETER(PostIrpRoutine);
+    return STATUS_SUCCESS;
+}
+
+/*
+ * @implemented
+ */
+BOOLEAN
+NTAPI
+FsRtlCurrentOplockH(IN POPLOCK Oplock)
+{
+    UNREFERENCED_PARAMETER(Oplock);
+    return FALSE;
+}
+
+/*
+ * Requests for shared oplocks (FSCTL_REQUEST_OPLOCK read caching) are not supported.
+ *
+ * @implemented
+ */
+BOOLEAN
+NTAPI
+FsRtlOplockIsSharedRequest(IN PIRP Irp)
+{
+    UNREFERENCED_PARAMETER(Irp);
+    return FALSE;
+}

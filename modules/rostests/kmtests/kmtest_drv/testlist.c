@@ -32,6 +32,7 @@ KMT_TESTFUNC Test_ExTimer;
 KMT_TESTFUNC Test_ExTimerResolution;
 KMT_TESTFUNC Test_ExUuid;
 KMT_TESTFUNC Test_FsRtlDissect;
+KMT_TESTFUNC Test_FsRtlEcp;
 KMT_TESTFUNC Test_FsRtlExpression;
 KMT_TESTFUNC Test_FsRtlFileLock;
 KMT_TESTFUNC Test_FsRtlFileLockIrp;
@@ -158,6 +159,7 @@ const KMT_TEST TestList[] =
     { "KsCapture",                          Test_KsCapture },
     { "Example",                            Test_Example },
     { "FsRtlDissect",                       Test_FsRtlDissect },
+    { "FsRtlEcp",                           Test_FsRtlEcp },
     { "FsRtlExpression",                    Test_FsRtlExpression },
     { "FsRtlFileLock",                      Test_FsRtlFileLock },
     { "FsRtlFileLockIrp",                   Test_FsRtlFileLockIrp },
