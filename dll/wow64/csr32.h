@@ -139,3 +139,7 @@ typedef struct { ULONG ConsoleHandle, DesiredAccess, InheritHandle, ShareMode, S
     WOW64_CONSOLE_CREATESCREENBUFFER;
 C_ASSERT(sizeof(WOW64_CONSOLE_CREATESCREENBUFFER) == 52);
 C_ASSERT(sizeof(BASE_GETSET_PROCESS_SHUTDOWN_PARAMS) == 8);
+
+/* ConsolepAttach: the start info is a pointer into the guest capture buffer */
+typedef struct { ULONG ProcessId, ConsoleStartInfo, CtrlRoutine, PropRoutine; } WOW64_CONSOLE_ATTACH;
+C_ASSERT(sizeof(WOW64_CONSOLE_ATTACH) == 16);

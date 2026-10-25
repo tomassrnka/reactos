@@ -175,6 +175,13 @@ SysWOW64/msdmo.dll
 SysWOW64/ddraw.dll
 SysWOW64/wmvcore.dll
 
+# Games and older media apps (T138): DirectSound, DirectInput (legacy and 8) and Direct3D 8.
+# d3d8 imports d3dwine, which is only listed from export level 0x600, so d3d8 is too.
+SysWOW64/dsound.dll
+SysWOW64/dinput.dll
+SysWOW64/dinput8.dll
+@0x600 SysWOW64/d3d8.dll
+
 # Code-page data used by the guest kernel32 NLS loader.
 SysWOW64/c_037.nls
 SysWOW64/c_10000.nls
