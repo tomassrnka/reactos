@@ -1226,24 +1226,31 @@ MsqWithdrawSentMessagesOf(
          {
             Next = Entry->Flink;
             Message = CONTAINING_RECORD(Entry, USER_SENT_MESSAGE, ListEntry);
-            /* A callback (SendMessageCallback / SendNotifyMessage) sender is tracked in
-               ptiCallBackSender, not ptiSender, so the original test missed it: its message
-               outlived the dying thread on the receiver's queue and was later dispatched
-               back to the freed THREADINFO (T131 win32k UAF). Withdraw both. */
+            /* T131 withdrew every message whose ptiCallBackSender was the dying thread,
+               but SendMessageCallback and SendNotifyMessage share ptiCallBackSender and
+               differ only in CompletionCallback. The UAF is dispatch-side and callback-only:
+               co_MsqDispatchOneSentMessage requeues the result to ptiCallBackSender and wakes
+               it ONLY under "if (Message->CompletionCallback)", so a genuine callback left on
+               the receiver would touch the freed sender THREADINFO / wake event. A pure notify
+               (CompletionCallback == NULL) has no result to hand back, no wake, and never
+               dereferences ptiCallBackSender on dispatch, so it must stay queued and be
+               delivered to the receiver even after its sender exits (T144). Withdraw a
+               synchronous sender's message (ptiSender match) and a genuine callback message
+               whose callback sender is dying; leave a pure notify for the receiver. */
             if (Message->ptiSender == ptiSender ||
-                Message->ptiCallBackSender == ptiSender)
+                (Message->ptiCallBackSender == ptiSender &&
+                 Message->CompletionCallback != NULL))
             {
                MsqUnqueueSentMessage(pti, Message);
                Message->flags |= SMF_SENDERDIED;
 
                if (Message->ptiSender == NULL)
                {
-                  /* A pure callback/notify message (no ptiSender, no completion event)
-                     that was still queued is now on no thread list and not in flight, and
-                     its only owner is the dying sender. Neither the receiver cleanup nor
-                     the sender cleanup branches free it (RECEIVERFREE is set from birth),
-                     so free it and its packed lParam here instead of leaking it on the
-                     trouble list (T131 follow-up). */
+                  /* A withdrawn genuine callback message (no ptiSender, no completion event)
+                     is now on no thread list and not in flight, and its only owner is the
+                     dying sender. Neither the receiver cleanup nor the sender cleanup branches
+                     free it (RECEIVERFREE is set from birth), so free it and its packed lParam
+                     here instead of leaking it on the trouble list (P2-2). */
                   if (Message->HasPackedLParam && Message->Msg.lParam)
                      ExFreePool((PVOID)Message->Msg.lParam);
                   FreeUserMessage(Message);
