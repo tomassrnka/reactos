@@ -979,10 +979,41 @@ BOOL WINAPI PathIsUNCEx(const WCHAR *path, const WCHAR **server)
 #ifndef STATIC_PATHCCH
 /* Other functions not part of the PathCch library */
 
+#ifdef __REACTOS__
+/* NT6+ treats the long-path prefix (backslash x2, question mark, backslash) specially: only the UNC form of it is a UNC path. NT5 does not. */
+static BOOL path_is_nt6(void)
+{
+    return NtCurrentTeb()->Peb->OSMajorVersion >= 6;
+}
+
+/* Returns the number of characters to skip to reach the server part, or -1 if not a UNC path */
+static int path_unc_prefix_len(const WCHAR *path)
+{
+    if (!(path && path[0] == '\\' && path[1] == '\\'))
+        return -1;
+    if (path_is_nt6() && path[2] == '?' && (!path[3] || path[3] == '\\'))
+    {
+        if (path[3] == '\\' && (path[4] == 'U' || path[4] == 'u') && (path[5] == 'N' || path[5] == 'n') &&
+            (path[6] == 'C' || path[6] == 'c') && path[7] == '\\')
+            return 8;
+        return -1;
+    }
+    return 2;
+}
+#endif
+
 BOOL WINAPI PathIsUNCA(const char *path)
 {
     TRACE("%s\n", wine_dbgstr_a(path));
 
+#ifdef __REACTOS__
+    if (path && path[0] == '\\' && path[1] == '\\' && path_is_nt6() && path[2] == '?' &&
+        (!path[3] || path[3] == '\\'))
+    {
+        return path[3] == '\\' && (path[4] == 'U' || path[4] == 'u') && (path[5] == 'N' || path[5] == 'n') &&
+               (path[6] == 'C' || path[6] == 'c') && path[7] == '\\';
+    }
+#endif
     return path && (path[0] == '\\') && (path[1] == '\\');
 }
 
@@ -990,7 +1021,13 @@ BOOL WINAPI PathIsUNCW(const WCHAR *path)
 {
     TRACE("%s\n", wine_dbgstr_w(path));
 
+#ifdef __REACTOS__
+    if (path && path[0] == '\\' && path[1] == '\\')
+        return path_unc_prefix_len(path) >= 0;
+    return FALSE;
+#else
     return path && (path[0] == '\\') && (path[1] == '\\');
+#endif
 }
 
 BOOL WINAPI PathIsRelativeA(const char *path)
@@ -1851,12 +1888,22 @@ BOOL WINAPI PathIsUNCServerA(const char *path)
 
 BOOL WINAPI PathIsUNCServerW(const WCHAR *path)
 {
+#ifdef __REACTOS__
+    int skip;
+#endif
     TRACE("%s\n", wine_dbgstr_w(path));
 
     if (!(path && path[0] == '\\' && path[1] == '\\'))
         return FALSE;
 
+#ifdef __REACTOS__
+    skip = path_unc_prefix_len(path);
+    if (skip < 0)
+        return FALSE;
+    return !wcschr(path + skip, '\\');
+#else
     return !wcschr(path + 2, '\\');
+#endif
 }
 
 void WINAPI PathRemoveBlanksA(char *path)
