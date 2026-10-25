@@ -2501,7 +2501,7 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
    /* Send the WM_SIZE and WM_MOVE messages. */
    if (!(Window->state & WNDS_SENDSIZEMOVEMSGS))
    {
-        co_WinPosSendSizeMove(Window);
+        co_WinPosSendSizeMoveEx(Window, TRUE);
    }
 
    /* Show or maybe minimize or maximize the window. */
@@ -2513,7 +2513,10 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
       UINT SwFlag = (style & WS_MINIMIZE) ? SW_MINIMIZE : SW_MAXIMIZE;
 
       SwFlag = co_WinPosMinMaximize(Window, SwFlag, &NewPos);
-      SwFlag |= SWP_NOZORDER|SWP_FRAMECHANGED; /* Frame always gets changed */
+      SwFlag |= SWP_FRAMECHANGED; /* Frame always gets changed */
+      /* NT6+ does not pass SWP_NOZORDER here (it is added again in WM_WINDOWPOSCHANGED if unchanged) */
+      if (SharedUserData->NtMajorVersion < 6)
+         SwFlag |= SWP_NOZORDER;
       if (!(style & WS_VISIBLE) || (style & WS_CHILD) || UserGetActiveWindow() ||
           (Window->ExStyle & WS_EX_NOACTIVATE))
       {
@@ -2521,6 +2524,14 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
       }
       co_WinPosSetWindowPos(Window, 0, NewPos.left, NewPos.top,
                             NewPos.right, NewPos.bottom, SwFlag);
+
+      /* Win8+ recalculates the non-client area once more after the state change took effect */
+      if ((style & WS_MAXIMIZE) &&
+          (SharedUserData->NtMajorVersion > 6 ||
+           (SharedUserData->NtMajorVersion == 6 && SharedUserData->NtMinorVersion >= 2)))
+      {
+         co_WinPosSendNcCalcSizeStateChanged(Window);
+      }
    }
 
    /* Send the WM_PARENTNOTIFY message */
@@ -2568,6 +2579,20 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
         co_IntSendMessage(UserHMGetHandle(ParentWindow), WM_MDIREFRESHMENU, 0, 0);
         /* ShowWindow won't activate child windows */
         co_WinPosSetWindowPos(Window, HWND_TOP, 0, 0, 0, 0, SWP_SHOWWINDOW | SWP_NOMOVE | SWP_NOSIZE);
+
+        /* NT6+: once a maximized MDI child is shown and activated, the MDI frame gets its caption
+           and system buttons refreshed */
+        if (SharedUserData->NtMajorVersion >= 6 && (Window->style & WS_MAXIMIZE) &&
+            ParentWindow->spwndParent && !UserIsDesktopWindow(ParentWindow->spwndParent))
+        {
+            USER_REFERENCE_ENTRY FrameRef;
+            PWND FrameWnd = ParentWindow->spwndParent;
+
+            UserRefObjectCo(FrameWnd, &FrameRef);
+            co_WinPosSetWindowPos(FrameWnd, NULL, 0, 0, 0, 0,
+                                  SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+            UserDerefObjectCo(FrameWnd);
+        }
       }
    }
 

@@ -2338,7 +2338,12 @@ HANDLE WINAPI CopyImage(
     TRACE("hImage=%p, uType=%u, cxDesired=%d, cyDesired=%d, fuFlags=%x\n",
         hImage, uType, cxDesired, cyDesired, fuFlags);
 
-    if (fuFlags & ~COPYIMAGE_VALID_FLAGS)
+    /* Vista+ additionally accepts an undocumented flag 0x10000 */
+    UINT uValidFlags = COPYIMAGE_VALID_FLAGS;
+    if (NtCurrentPeb()->OSMajorVersion >= 6)
+        uValidFlags |= 0x10000;
+
+    if (fuFlags & ~uValidFlags)
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return NULL;
