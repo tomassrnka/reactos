@@ -577,8 +577,15 @@ PspCreateThread(OUT PHANDLE ThreadHandle,
                                 SubjectContext.PrimaryToken);
         ObReleaseObjectSecurity(SecurityDescriptor, SdAllocated);
 
-        /* Remove access if it failed */
-        if (!Result) Process->GrantedAccess = 0;
+        /* Remove access if it failed. This access check validates the new
+         * thread against itself, so a failure must clear the *thread* granted
+         * access, not the process one. Clearing Process->GrantedAccess here
+         * (a copy/paste from PspCreateProcess) permanently wiped the whole
+         * process access mask the first time a thread was created under a
+         * restricted token, which then made ObReferenceObjectByHandle refuse
+         * every NtCurrentProcess() self-reference (e.g. PROCESS_VM_OPERATION
+         * in NtMapViewOfSection). */
+        if (!Result) Thread->GrantedAccess = 0;
 
         /* Set at least some minimum access */
         Thread->GrantedAccess |= (THREAD_TERMINATE |
