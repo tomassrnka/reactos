@@ -749,6 +749,44 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             }
             return Status;
         }
+        if (a[1] == ObjectTypeInformation)
+        {
+            /* OBJECT_TYPE_INFORMATION is a UNICODE_STRING followed by a fixed
+             * tail of ULONG/BYTE fields (no pointers). Only the leading string
+             * header differs in width (16 vs 8 bytes); the tail is byte-identical.
+             * Mirror the ObjectNameInformation thunk: query into a native buffer
+             * widened by that difference, narrow the string header, copy the
+             * identical tail, then append the type-name characters. */
+            OBJECT_TYPE_INFORMATION *Native;
+            WOW64_STRING *Guest = P(2);
+            ULONG Needed = 0, GuestNeeded;
+            ULONG TailOffset = FIELD_OFFSET(OBJECT_TYPE_INFORMATION, TotalNumberOfObjects);
+            ULONG TailSize = sizeof(OBJECT_TYPE_INFORMATION) - TailOffset;
+            ULONG GuestSize = sizeof(WOW64_STRING) + TailSize;
+            ULONG Extra = sizeof(OBJECT_TYPE_INFORMATION) - GuestSize;
+            if (a[3] > MAXULONG - Extra) return STATUS_INVALID_PARAMETER;
+            if (a[4]) PROBE(4);
+            Native = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, a[3] + Extra);
+            if (!Native) return STATUS_NO_MEMORY;
+            Status = NtQueryObject(H(0), a[1], Native, a[3] + Extra, &Needed);
+            GuestNeeded = Needed >= sizeof(OBJECT_TYPE_INFORMATION) ? Needed - Extra : Needed;
+            if (a[4]) U(4) = GuestNeeded;
+            if (NT_SUCCESS(Status))
+            {
+                if (a[3] < GuestSize ||
+                    Native->TypeName.MaximumLength > a[3] - GuestSize)
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                RtlCopyMemory((PUCHAR)Guest + sizeof(WOW64_STRING),
+                              (PUCHAR)Native + TailOffset, TailSize);
+                Guest->Length = Native->TypeName.Length;
+                Guest->MaximumLength = Native->TypeName.MaximumLength;
+                Guest->Buffer = Native->TypeName.Buffer ? PtrToUlong((PUCHAR)Guest + GuestSize) : 0;
+                if (Native->TypeName.Buffer)
+                    RtlCopyMemory((PUCHAR)Guest + GuestSize, Native->TypeName.Buffer,
+                                  Native->TypeName.MaximumLength);
+            }
+            return Status;
+        }
         UNSUPPORTED(CLASS, a[1]);
     case W64_NtSetInformationObject:
         if (a[1] == ObjectHandleFlagInformation)
@@ -1257,6 +1295,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         PVOID Input = P(6);
         ULONG InputLength = a[7];
         AFD_RECV_INFO Transfer;
+        AFD_SEND_INFO_UDP Datagram;
         AFD_ACCEPT_DATA Accept;
         /* These requests contain counted strings/addresses or opaque bytes.
          * AFD requests carrying handles or WSABUF arrays need translation. */
@@ -1275,6 +1314,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         case IOCTL_AFD_GET_PEER_NAME:
         case IOCTL_AFD_SET_CONTEXT:
         case IOCTL_AFD_GET_CONTEXT_SIZE:
+        case IOCTL_AFD_GET_CONTEXT: /* opaque socket-context blob; output only, symmetric of SET_CONTEXT. */
         case IOCTL_AFD_GET_TDI_HANDLES: /* AFD captures the 32-bit output handles. */
         case IOCTL_AFD_EVENT_SELECT: /* AFD captures event handles and the in/out record. */
         case IOCTL_AFD_ENUM_NETWORK_EVENTS:
@@ -1288,6 +1328,40 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             Input = &Accept;
             InputLength = sizeof(Accept);
             break;
+        case IOCTL_AFD_SEND_DATAGRAM:
+        {
+            /* 32-bit AFD_SEND_INFO_UDP: BufferArray, BufferCount, AfdFlags,
+             * then TDI_REQUEST_SEND_DATAGRAM (unused by AFD) and
+             * TDI_CONNECTION_INFORMATION. AfdPacketSocketWriteData reads only
+             * BufferArray/BufferCount and the destination
+             * (TdiConnection.RemoteAddress/RemoteAddressLength). Widen the WSABUF
+             * array like IOCTL_AFD_SEND and widen the opaque address pointer; the
+             * kernel captures the TRANSPORT_ADDRESS target itself. */
+            const ULONG *From = Input;
+            const ULONG *Buffers;
+            ULONG i;
+            if (InputLength < 14 * sizeof(ULONG)) return STATUS_BUFFER_TOO_SMALL;
+            RtlZeroMemory(&Datagram, sizeof(Datagram));
+            Datagram.BufferCount = From[1];
+            Datagram.AfdFlags = From[2];
+            Buffers = PTR32(From[0]);
+            if (!Datagram.BufferCount ||
+                Datagram.BufferCount > MAXULONG / (sizeof(AFD_WSABUF) + 2 * sizeof(PVOID)))
+                return STATUS_INVALID_PARAMETER;
+            Datagram.BufferArray = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0,
+                                        Datagram.BufferCount * sizeof(AFD_WSABUF));
+            if (!Datagram.BufferArray) return STATUS_NO_MEMORY;
+            for (i = 0; i < Datagram.BufferCount; ++i)
+            {
+                Datagram.BufferArray[i].len = Buffers[2 * i];
+                Datagram.BufferArray[i].buf = PTR32(Buffers[2 * i + 1]);
+            }
+            Datagram.TdiConnection.RemoteAddressLength = From[12];
+            Datagram.TdiConnection.RemoteAddress = PTR32(From[13]);
+            Input = &Datagram;
+            InputLength = sizeof(Datagram);
+            break;
+        }
         case IOCTL_AFD_SEND:
         case IOCTL_AFD_RECV:
         {
@@ -1461,6 +1535,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         switch (a[4])
         {
         case FileFsDeviceInformation: case FileFsVolumeInformation: case FileFsSizeInformation:
+        case FileFsFullSizeInformation:
         case FileFsAttributeInformation:
             ProbeOutput(a[1], sizeof(WOW64_IOSB));
             Status = NtQueryVolumeInformationFile(H(0), &Io, P(2), a[3], a[4]);
