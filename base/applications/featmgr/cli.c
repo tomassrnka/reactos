@@ -75,6 +75,16 @@ static int DoQuery(LPCWSTR id)
     Out(L"Dependencies: %s\n", f.Dependencies[0] ? f.Dependencies : L"(none)");
     Out(L"Manifest:     %s\n", f.ManifestPath);
     Out(L"Description:  %s\n", f.Description);
+    {
+        WCHAR v[512];
+        static const WCHAR *k[] = { L"Artifact", L"ArtifactSHA256", L"SizeBytes", L"License" };
+        int i;
+        for (i = 0; i < 4; i++)
+        {
+            GetPrivateProfileStringW(L"Source", k[i], L"", v, 512, f.ManifestPath);
+            if (v[0]) Out(L"Source.%s: %s\n", k[i], v);
+        }
+    }
     return 0;
 }
 

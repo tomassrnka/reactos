@@ -298,11 +298,15 @@ static HKEY HiveFromName(LPCWSTR s)
     return NULL;
 }
 
-/* Copy one payload file; records absolute dest into the state "Files" list. */
+/* Copy one payload file; records absolute dest into the state "Files" list.
+ * A file that already exists at the destination (e.g. the in-box softpipe
+ * libgallium_wgl.dll that the lavapipe pack replaces) is moved aside to
+ * <dest>.fmbak first and recorded in "Backups" as "dest|bak", so disable can
+ * put the original back instead of just deleting it. */
 static HRESULT ApplyPayloadFile(LPCWSTR payloadDir, LPCWSTR srcRel, LPCWSTR destRaw,
                                 HKEY state, FILE *log)
 {
-    WCHAR src[MAX_PATH], dest[MAX_PATH], destDir[MAX_PATH];
+    WCHAR src[MAX_PATH], dest[MAX_PATH], destDir[MAX_PATH], bak[MAX_PATH + 8], rec[2 * MAX_PATH + 16];
     StringCchPrintfW(src, MAX_PATH, L"%s\\%s", payloadDir, srcRel);
     ExpandEnvironmentStringsW(destRaw, dest, MAX_PATH);
 
@@ -310,13 +314,27 @@ static HRESULT ApplyPayloadFile(LPCWSTR payloadDir, LPCWSTR srcRel, LPCWSTR dest
     PathRemoveFileSpecW(destDir);
     SHCreateDirectoryExW(NULL, destDir, NULL);
 
+    if (GetFileAttributesW(dest) != INVALID_FILE_ATTRIBUTES)
+    {
+        StringCchPrintfW(bak, MAX_PATH + 8, L"%s.fmbak", dest);
+        DeleteFileW(bak);
+        LOGF(log, L"  backup: %s -> %s\n", dest, bak);
+        if (!MoveFileW(dest, bak))
+        {
+            LOGF(log, L"  ERROR: cannot back up existing file (%lu)\n", GetLastError());
+            return HRESULT_FROM_WIN32(GetLastError());
+        }
+        StringCchPrintfW(rec, ARRAYSIZE(rec), L"%s|%s", dest, bak);
+        MultiSzAppend(state, L"Backups", rec);
+    }
+
     LOGF(log, L"  file: %s -> %s\n", src, dest);
+    MultiSzAppend(state, L"Files", dest);
     if (!CopyFileW(src, dest, FALSE))
     {
         LOGF(log, L"  ERROR: CopyFile failed (%lu)\n", GetLastError());
         return HRESULT_FROM_WIN32(GetLastError());
     }
-    MultiSzAppend(state, L"Files", dest);
     return S_OK;
 }
 
@@ -335,7 +353,9 @@ static HRESULT ApplyRegAction(LPCWSTR spec, HKEY state, FILE *log)
     DWORD prevType = 0, prevCb = sizeof(prev);
     LONG r;
 
-    StringCchCopyW(buf, 1024, spec);
+    /* expand %VAR% (value names/data such as the Khronos ICD manifest path) */
+    if (!ExpandEnvironmentStringsW(spec, buf, 1024))
+        StringCchCopyW(buf, 1024, spec);
     /* split on '|' into up to 5 fields (keep empties) */
     start = buf;
     for (p = buf; ; p++)
@@ -460,6 +480,8 @@ static HRESULT EnableDeps(const FM_FEATURE *f, FILE *log)
     return S_OK;
 }
 
+static void RevertState(HKEY state, FILE *log);
+
 HRESULT FmEnable(LPCWSTR id, FILE *log)
 {
     FM_FEATURE f;
@@ -496,6 +518,7 @@ HRESULT FmEnable(LPCWSTR id, FILE *log)
     /* fresh undo lists for this activation */
     RegDeleteValueW(state, L"Files");
     RegDeleteValueW(state, L"RegUndo");
+    RegDeleteValueW(state, L"Backups");
 
     /* payload files */
     FmGetPayloadDir(id, payloadDir, MAX_PATH);
@@ -541,27 +564,21 @@ HRESULT FmEnable(LPCWSTR id, FILE *log)
 done:
     if (sect) HeapFree(GetProcessHeap(), 0, sect);
     if (FAILED(hr))
-        LOGF(log, L"enable FAILED (0x%08lx)\n", hr);
+    {
+        LOGF(log, L"enable FAILED (0x%08lx); rolling back\n", hr);
+        if (state) RevertState(state, log);
+    }
     if (state) RegCloseKey(state);
     return hr;
 }
 
-HRESULT FmDisable(LPCWSTR id, FILE *log)
+/* Undo everything recorded in the state key: registry, placed files, then
+ * restore any backed-up originals. Used by disable and by enable rollback. */
+static void RevertState(HKEY state, FILE *log)
 {
-    HKEY state = NULL;
-    WCHAR *files, *undo, *p;
+    WCHAR *files, *undo, *baks, *p;
 
-    if (OpenStateKey(id, FALSE, KEY_READ | KEY_WRITE, &state) != ERROR_SUCCESS
-        || FmGetState(id) != FM_STATE_ENABLED)
-    {
-        LOGF(log, L"feature '%s' is not enabled; nothing to do\n", id);
-        if (state) RegCloseKey(state);
-        return S_OK;
-    }
-
-    LOGF(log, L"disabling '%s'\n", id);
-
-    /* revert registry first (undo lines in reverse order not required here) */
+    /* revert registry first */
     undo = MultiSzRead(state, L"RegUndo");
     if (undo)
     {
@@ -579,12 +596,55 @@ HRESULT FmDisable(LPCWSTR id, FILE *log)
             LOGF(log, L"  remove file: %s\n", p);
             if (!DeleteFileW(p) && GetLastError() != ERROR_FILE_NOT_FOUND)
                 LOGF(log, L"  warn: delete failed (%lu)\n", GetLastError());
+            else
+            {
+                /* drop a pack-private directory once it is empty (fails harmlessly if not) */
+                WCHAR dir[MAX_PATH];
+                StringCchCopyW(dir, MAX_PATH, p);
+                PathRemoveFileSpecW(dir);
+                RemoveDirectoryW(dir);
+            }
         }
         HeapFree(GetProcessHeap(), 0, files);
     }
 
+    /* put back files that enable moved aside ("dest|bak") */
+    baks = MultiSzRead(state, L"Backups");
+    if (baks)
+    {
+        for (p = baks; *p; p += wcslen(p) + 1)
+        {
+            WCHAR *sep = wcschr(p, L'|');
+            if (!sep) continue;
+            *sep = L'\0';
+            LOGF(log, L"  restore file: %s <- %s\n", p, sep + 1);
+            DeleteFileW(p);
+            if (!MoveFileW(sep + 1, p))
+                LOGF(log, L"  warn: restore failed (%lu)\n", GetLastError());
+            *sep = L'|';
+        }
+        HeapFree(GetProcessHeap(), 0, baks);
+    }
+
     RegDeleteValueW(state, L"Files");
     RegDeleteValueW(state, L"RegUndo");
+    RegDeleteValueW(state, L"Backups");
+}
+
+HRESULT FmDisable(LPCWSTR id, FILE *log)
+{
+    HKEY state = NULL;
+
+    if (OpenStateKey(id, FALSE, KEY_READ | KEY_WRITE, &state) != ERROR_SUCCESS
+        || FmGetState(id) != FM_STATE_ENABLED)
+    {
+        LOGF(log, L"feature '%s' is not enabled; nothing to do\n", id);
+        if (state) RegCloseKey(state);
+        return S_OK;
+    }
+
+    LOGF(log, L"disabling '%s'\n", id);
+    RevertState(state, log);
     SetStateSz(state, L"State", L"Disabled");
     LOGF(log, L"'%s' disabled.\n", id);
     RegCloseKey(state);
