@@ -239,9 +239,17 @@ static NTSTATUS SetProcessTls32(HANDLE Process, ULONG Address, ULONG Length, WOW
 
 static VOID ProbeOutput(ULONG Address, ULONG Size)
 {
-    volatile UCHAR *Bytes = PTR32(Address);
+    /* A locked compare-exchange of a byte with its own value is a write the
+     * hardware performs atomically: it faults on read-only or unmapped memory
+     * but cannot lose a concurrent store by another guest thread (a plain
+     * read then write-back could). One byte per page, plus the last byte,
+     * covers every page of the range. */
+    volatile CHAR *Bytes = PTR32(Address);
     ULONG i;
-    for (i = 0; i < Size; ++i) Bytes[i] = Bytes[i];
+    if (!Size) return;
+    for (i = 0; i < Size; i += PAGE_SIZE)
+        _InterlockedCompareExchange8(&Bytes[i], 0, 0);
+    _InterlockedCompareExchange8(&Bytes[Size - 1], 0, 0);
 }
 
 /* Size bytes at a guest address lie below the guest's highest address */
@@ -541,6 +549,7 @@ static NTSTATUS GuestArrayCount(ULONG Address, ULONG ElementSize, PULONG Count)
     if (!Address) return STATUS_SUCCESS;
     if (!GuestSpan(Address, sizeof(ULONG))) return STATUS_ACCESS_VIOLATION;
     *Count = *(ULONG *)PTR32(Address);
+    if (*Count > WOW64_MAX_ARRAY_COUNT) return STATUS_INVALID_PARAMETER;
     if (!GuestSpan(Address, sizeof(ULONG) + (ULONG64)*Count * ElementSize)) return STATUS_ACCESS_VIOLATION;
     return STATUS_SUCCESS;
 }
@@ -731,9 +740,10 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             ULONG Needed = 0, GuestNeeded, Extra = sizeof(UNICODE_STRING) - sizeof(WOW64_STRING);
             if (a[3] > MAXULONG - Extra) return STATUS_INVALID_PARAMETER;
             if (a[4]) PROBE(4);
-            Native = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, a[3] + Extra);
+            ULONG NativeLen = min(a[3], WOW64_MAX_INFO_BUFFER) + Extra;
+            Native = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, NativeLen);
             if (!Native) return STATUS_NO_MEMORY;
-            Status = NtQueryObject(H(0), a[1], Native, a[3] + Extra, &Needed);
+            Status = NtQueryObject(H(0), a[1], Native, NativeLen, &Needed);
             GuestNeeded = Needed >= sizeof(UNICODE_STRING) ? Needed - Extra : Needed;
             if (a[4]) U(4) = GuestNeeded;
             if (NT_SUCCESS(Status))
@@ -766,9 +776,10 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             ULONG Extra = sizeof(OBJECT_TYPE_INFORMATION) - GuestSize;
             if (a[3] > MAXULONG - Extra) return STATUS_INVALID_PARAMETER;
             if (a[4]) PROBE(4);
-            Native = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, a[3] + Extra);
+            ULONG NativeLen = min(a[3], WOW64_MAX_INFO_BUFFER) + Extra;
+            Native = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, NativeLen);
             if (!Native) return STATUS_NO_MEMORY;
-            Status = NtQueryObject(H(0), a[1], Native, a[3] + Extra, &Needed);
+            Status = NtQueryObject(H(0), a[1], Native, NativeLen, &Needed);
             GuestNeeded = Needed >= sizeof(OBJECT_TYPE_INFORMATION) ? Needed - Extra : Needed;
             if (a[4]) U(4) = GuestNeeded;
             if (NT_SUCCESS(Status))
@@ -1020,7 +1031,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         ProbeOutput(a[1], a[2]);
         if (a[2] > MAXULONG - Extra) return STATUS_INVALID_PARAMETER;
         Index = a[4] ? 0 : U(5);
-        NativeLength = a[2] + Extra;
+        NativeLength = min(a[2], WOW64_MAX_INFO_BUFFER) + Extra;
         From = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, NativeLength);
         if (!From) return STATUS_NO_MEMORY;
         Status = NtQueryDirectoryObject(H(0), From, NativeLength, a[3], a[4], &Index, &Bytes);
@@ -1260,7 +1271,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         FILE_IO_COMPLETION_INFORMATION *Native;
         WOW64_IO_COMPLETION *Guest = P(1);
         ULONG Count = a[2], Removed = 0, i;
-        if (!Count || Count > MAXULONG / sizeof(*Native)) return STATUS_INVALID_PARAMETER;
+        if (!Count || Count > WOW64_MAX_ARRAY_COUNT) return STATUS_INVALID_PARAMETER;
         if (!GuestSpan(a[1], (ULONG64)Count * sizeof(*Guest))) return STATUS_ACCESS_VIOLATION;
         PROBE(3);
         ProbeOutput(a[1], Count * sizeof(*Guest));
@@ -1379,7 +1390,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             Datagram.AfdFlags = From[2];
             Buffers = PTR32(From[0]);
             if (!Datagram.BufferCount ||
-                Datagram.BufferCount > MAXULONG / (sizeof(AFD_WSABUF) + 2 * sizeof(PVOID)))
+                Datagram.BufferCount > WOW64_MAX_ARRAY_COUNT)
                 return STATUS_INVALID_PARAMETER;
             Datagram.BufferArray = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0,
                                         Datagram.BufferCount * sizeof(AFD_WSABUF));
@@ -1415,7 +1426,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             RecvDatagram.AddressLength = PTR32(From[5]);
             Buffers = PTR32(From[0]);
             if (!RecvDatagram.BufferCount ||
-                RecvDatagram.BufferCount > MAXULONG / (sizeof(AFD_WSABUF) + 2 * sizeof(PVOID)) - 2)
+                RecvDatagram.BufferCount > WOW64_MAX_ARRAY_COUNT)
                 return STATUS_INVALID_PARAMETER;
             RecvDatagram.BufferArray = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0,
                                         RecvDatagram.BufferCount * sizeof(AFD_WSABUF));
@@ -1443,7 +1454,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             /* AFD's capture adds two pointer-sized mapping fields per buffer
              * and uses a ULONG byte count. Bound that allocation as well. */
             if (!Transfer.BufferCount ||
-                Transfer.BufferCount > MAXULONG / (sizeof(AFD_WSABUF) + 2 * sizeof(PVOID)))
+                Transfer.BufferCount > WOW64_MAX_ARRAY_COUNT)
                 return STATUS_INVALID_PARAMETER;
             Transfer.BufferArray = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0,
                                         Transfer.BufferCount * sizeof(AFD_WSABUF));
@@ -1786,9 +1797,10 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             ULONG Needed = 0, Extra = sizeof(UNICODE_STRING) - sizeof(WOW64_STRING);
             if (a[3] > MAXULONG - Extra) return STATUS_INVALID_PARAMETER;
             if (a[4]) PROBE(4);
-            Native = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, a[3] + Extra);
+            ULONG NativeLen = min(a[3], WOW64_MAX_INFO_BUFFER) + Extra;
+            Native = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, NativeLen);
             if (!Native) return STATUS_NO_MEMORY;
-            Status = NtQueryInformationProcess(H(0), a[1], Native, a[3] + Extra, &Needed);
+            Status = NtQueryInformationProcess(H(0), a[1], Native, NativeLen, &Needed);
             if (a[4] && Needed) U(4) = Needed >= sizeof(UNICODE_STRING) ? Needed - Extra : Needed;
             if (NT_SUCCESS(Status))
             {

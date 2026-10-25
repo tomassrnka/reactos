@@ -154,20 +154,33 @@ NTSTATUS Wow64QueryThread(HANDLE Thread, ULONG Class, PVOID Buffer, ULONG Length
         UNICODE_STRING *Native;
         WOW64_STRING *Guest = Buffer;
         ULONG Needed = 0, Extra = sizeof(UNICODE_STRING) - sizeof(WOW64_STRING);
+        ULONG NativeLength;
         if (Length > MAXULONG - Extra) return STATUS_INVALID_PARAMETER;
-        Native = RtlAllocateHeap(RtlGetProcessHeap(), 0, Length + Extra);
+        /* A counted string never exceeds 64 KiB, so a larger scratch buffer
+         * is never needed whatever length the guest claims. */
+        NativeLength = min(Length, WOW64_MAX_INFO_BUFFER) + Extra;
+        Native = RtlAllocateHeap(RtlGetProcessHeap(), 0, NativeLength);
         if (!Native) return STATUS_NO_MEMORY;
-        Status = NtQueryInformationThread(Thread, Class, Native, Length + Extra, &Needed);
-        if (ReturnLength && Needed) *ReturnLength = Needed >= sizeof(UNICODE_STRING) ? Needed - Extra : Needed;
-        if (NT_SUCCESS(Status))
+        /* The guest's ReturnLength and Buffer are unprobed: a fault in the
+         * copy-out must still release the scratch buffer. */
+        _SEH2_TRY
         {
-            Guest->Length = Native->Length;
-            Guest->MaximumLength = Native->MaximumLength;
-            Guest->Buffer = Native->Buffer ? PtrToUlong(Guest + 1) : 0;
-            if (Native->Buffer)
-                RtlCopyMemory(Guest + 1, Native->Buffer, Native->Length);
+            Status = NtQueryInformationThread(Thread, Class, Native, NativeLength, &Needed);
+            if (ReturnLength && Needed) *ReturnLength = Needed >= sizeof(UNICODE_STRING) ? Needed - Extra : Needed;
+            if (NT_SUCCESS(Status))
+            {
+                Guest->Length = Native->Length;
+                Guest->MaximumLength = Native->MaximumLength;
+                Guest->Buffer = Native->Buffer ? PtrToUlong(Guest + 1) : 0;
+                if (Native->Buffer)
+                    RtlCopyMemory(Guest + 1, Native->Buffer, Native->Length);
+            }
         }
-        RtlFreeHeap(RtlGetProcessHeap(), 0, Native);
+        _SEH2_FINALLY
+        {
+            RtlFreeHeap(RtlGetProcessHeap(), 0, Native);
+        }
+        _SEH2_END;
         return Status;
     }
     switch (Class)
