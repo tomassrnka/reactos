@@ -1008,10 +1008,14 @@ IntWideCharToMultiByteUTF8(UINT CodePage,
                            LPCSTR DefaultChar,
                            LPBOOL UsedDefaultChar)
 {
+    /* Vista+ semantics: WC_ERR_INVALID_CHARS is accepted and lone surrogates
+       are replaced by U+FFFD. NT5 rejects all flags and passes them through. */
+    const BOOLEAN Vista = (NtCurrentPeb()->OSMajorVersion >= 6);
+    BOOLEAN Invalid = FALSE;
     INT TempLength;
     DWORD Char;
 
-    if (Flags)
+    if (Flags && (!Vista || (Flags & ~WC_ERR_INVALID_CHARS)))
     {
         SetLastError(ERROR_INVALID_FLAGS);
         return 0;
@@ -1031,15 +1035,25 @@ IntWideCharToMultiByteUTF8(UINT CodePage,
                 {
                     TempLength++;
                     if (*WideCharString >= 0xd800 && *WideCharString < 0xdc00 &&
-                        WideCharCount >= 1 &&
-                        WideCharString[1] >= 0xdc00 && WideCharString[1] <= 0xe000)
+                        WideCharCount > 1 &&
+                        WideCharString[1] >= 0xdc00 && WideCharString[1] < 0xe000)
                     {
                         WideCharCount--;
                         WideCharString++;
                         TempLength++;
                     }
+                    else if (Vista && *WideCharString >= 0xd800 && *WideCharString < 0xe000)
+                    {
+                        /* Lone surrogate, replaced by U+FFFD (3 bytes) */
+                        Invalid = TRUE;
+                    }
                 }
             }
+        }
+        if (Invalid && (Flags & WC_ERR_INVALID_CHARS))
+        {
+            SetLastError(ERROR_NO_UNICODE_TRANSLATION);
+            return 0;
         }
         return TempLength;
     }
@@ -1052,7 +1066,7 @@ IntWideCharToMultiByteUTF8(UINT CodePage,
             if (!TempLength)
             {
                 SetLastError(ERROR_INSUFFICIENT_BUFFER);
-                break;
+                return MultiByteCount - TempLength;
             }
             TempLength--;
             *MultiByteString++ = (CHAR)Char;
@@ -1064,7 +1078,7 @@ IntWideCharToMultiByteUTF8(UINT CodePage,
             if (TempLength < 2)
             {
                 SetLastError(ERROR_INSUFFICIENT_BUFFER);
-                break;
+                return MultiByteCount - TempLength;
             }
             MultiByteString[1] = 0x80 | (Char & 0x3f); Char >>= 6;
             MultiByteString[0] = 0xc0 | Char;
@@ -1075,7 +1089,7 @@ IntWideCharToMultiByteUTF8(UINT CodePage,
 
         /* surrogate pair 0x10000-0x10ffff: 4 bytes */
         if (Char >= 0xd800 && Char < 0xdc00 &&
-            WideCharCount >= 1 &&
+            WideCharCount > 1 &&
             WideCharString[1] >= 0xdc00 && WideCharString[1] < 0xe000)
         {
             WideCharCount--;
@@ -1084,7 +1098,7 @@ IntWideCharToMultiByteUTF8(UINT CodePage,
             if (TempLength < 4)
             {
                 SetLastError(ERROR_INSUFFICIENT_BUFFER);
-                break;
+                return MultiByteCount - TempLength;
             }
 
             Char = (Char - 0xd800) << 10;
@@ -1102,17 +1116,30 @@ IntWideCharToMultiByteUTF8(UINT CodePage,
             continue;
         }
 
+        /* Lone surrogate: U+FFFD on Vista+, encoded verbatim on NT5 */
+        if (Vista && Char >= 0xd800 && Char < 0xe000)
+        {
+            Char = 0xfffd;
+            Invalid = TRUE;
+        }
+
         /* 0x800-0xffff: 3 bytes */
         if (TempLength < 3)
         {
             SetLastError(ERROR_INSUFFICIENT_BUFFER);
-            break;
+            return MultiByteCount - TempLength;
         }
         MultiByteString[2] = 0x80 | (Char & 0x3f); Char >>= 6;
         MultiByteString[1] = 0x80 | (Char & 0x3f); Char >>= 6;
         MultiByteString[0] = 0xe0 | Char;
         MultiByteString += 3;
         TempLength -= 3;
+    }
+
+    if (Invalid && (Flags & WC_ERR_INVALID_CHARS))
+    {
+        SetLastError(ERROR_NO_UNICODE_TRANSLATION);
+        return 0;
     }
 
     return MultiByteCount - TempLength;
