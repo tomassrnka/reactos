@@ -12,6 +12,7 @@
 #include <commctrl.h>
 #include <shlwapi.h>
 #include <shlobj.h>
+#include <iphlpapi.h>
 #include <stdio.h>
 #include <strsafe.h>
 
@@ -19,6 +20,10 @@
 
 #define MAX_BROWSERS 32
 #define WM_APP_INSTALLDONE (WM_APP + 1)
+
+/* Bounded wait for the network to come up before a download. */
+#define NET_WAIT_TIMEOUT_MS 60000
+#define NET_WAIT_POLL_MS    1000
 
 typedef struct _BROWSER_ENTRY
 {
@@ -414,6 +419,90 @@ EnsureFirefoxClient(LPCWSTR pszExe)
 }
 
 /* ------------------------------------------------------------------ */
+/* Network readiness                                                   */
+/* ------------------------------------------------------------------ */
+
+/* Parse a dotted-quad into four octets. */
+static BOOL
+ParseIPv4(const char *psz, UINT *pOct)
+{
+    return sscanf(psz, "%u.%u.%u.%u", &pOct[0], &pOct[1], &pOct[2], &pOct[3]) == 4
+           && pOct[0] < 256 && pOct[1] < 256 && pOct[2] < 256 && pOct[3] < 256;
+}
+
+/* TRUE if at least one adapter has a usable IPv4 address (not 0.0.0.0, not
+ * APIPA 169.254/16, not loopback) and a non-zero default gateway. */
+static BOOL
+IsNetworkReady(void)
+{
+    PIP_ADAPTER_INFO pInfo = NULL, pAd;
+    ULONG cb = 0;
+    BOOL bReady = FALSE;
+    DWORD dwErr;
+
+    dwErr = GetAdaptersInfo(NULL, &cb);
+    if (dwErr != ERROR_BUFFER_OVERFLOW || !cb)
+        return FALSE;
+
+    pInfo = HeapAlloc(GetProcessHeap(), 0, cb);
+    if (!pInfo)
+        return FALSE;
+
+    if (GetAdaptersInfo(pInfo, &cb) == NO_ERROR)
+    {
+        for (pAd = pInfo; pAd && !bReady; pAd = pAd->Next)
+        {
+            PIP_ADDR_STRING pIp, pGw;
+            for (pIp = &pAd->IpAddressList; pIp && !bReady; pIp = pIp->Next)
+            {
+                UINT ip[4], gw[4];
+
+                if (!ParseIPv4(pIp->IpAddress.String, ip))
+                    continue;
+                if ((ip[0] | ip[1] | ip[2] | ip[3]) == 0 || ip[0] == 127 ||
+                    (ip[0] == 169 && ip[1] == 254))
+                    continue;
+
+                for (pGw = &pAd->GatewayList; pGw; pGw = pGw->Next)
+                {
+                    if (ParseIPv4(pGw->IpAddress.String, gw) && (gw[0] | gw[1] | gw[2] | gw[3]) != 0)
+                    {
+                        bReady = TRUE;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    HeapFree(GetProcessHeap(), 0, pInfo);
+    return bReady;
+}
+
+/* A connect fired before DHCP completes fails with WSAENETUNREACH (10051) /
+ * wininet 12029, so wait (bounded) for a usable address before downloading. */
+static BOOL
+WaitForNetwork(DWORD dwTimeoutMs)
+{
+    DWORD dwStart = GetTickCount();
+
+    for (;;)
+    {
+        if (IsNetworkReady())
+        {
+            LogLine(L"WaitForNetwork: network ready after %lu ms", GetTickCount() - dwStart);
+            return TRUE;
+        }
+        if (GetTickCount() - dwStart >= dwTimeoutMs)
+            break;
+        Sleep(NET_WAIT_POLL_MS);
+    }
+
+    LogLine(L"WaitForNetwork: no usable IPv4 address/gateway after %lu ms", dwTimeoutMs);
+    return FALSE;
+}
+
+/* ------------------------------------------------------------------ */
 /* Firefox install through RAPPS                                       */
 /* ------------------------------------------------------------------ */
 
@@ -459,6 +548,12 @@ InstallFirefox(void)
         EnsureFirefoxClient(szFfExe);
         SetDefaultBrowser(L"FIREFOX.EXE", L"Mozilla Firefox", szFfExe);
         return TRUE;
+    }
+
+    if (!WaitForNetwork(NET_WAIT_TIMEOUT_MS))
+    {
+        LogLine(L"InstallFirefox: network not ready; not starting download");
+        return FALSE;
     }
 
     if (!GetSystemDirectoryW(szRapps, ARRAYSIZE(szRapps)))
