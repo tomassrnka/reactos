@@ -3,6 +3,7 @@
 
 extern void func_select(void);
 extern void func_send(void);
+extern void func_sendtounbound(void);
 extern void func_windowsize(void);
 extern void func_defensive(void);
 extern void func_dgramstub(void);
@@ -18,6 +19,7 @@ const struct test winetest_testlist[] =
 {
     { "select", func_select },
     { "send", func_send },
+    { "sendtounbound", func_sendtounbound },
     { "windowsize", func_windowsize },
     { "defensive", func_defensive },
     { "dgramstub", func_dgramstub },
