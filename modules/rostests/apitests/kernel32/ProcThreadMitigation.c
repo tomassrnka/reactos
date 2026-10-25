@@ -8,9 +8,10 @@
  * a list entry is a DWORD on Windows 7 and may also be a DWORD64 from Windows 8 on and
  * two of them from Windows 10 1703 on; any other size is ERROR_BAD_LENGTH. Update accepts
  * any value, and CreateProcess refuses a DWORD with a bit that is not a defined
- * mitigation. ReactOS refuses a request for a mitigation its child cannot get
- * (see BASEP_HONOURED_MITIGATIONS in kernel32), measured with the no-execute probe in
- * the lane notes: DEP holds on amd64 only, ATL thunk emulation and SEHOP never.
+ * mitigation. ReactOS matches that for the DWORD form. It cannot enforce most of the
+ * mitigations the wide forms define (only DEP holds, on amd64 only), but a sandbox such
+ * as Chromium's asks for the whole Windows 8/10 set by OS version and fails to start a
+ * child that is refused, so the wide forms are accepted and the unenforced bits ignored.
  */
 
 #include "precomp.h"
@@ -37,24 +38,6 @@ static DELETE_LIST pDelete;
 static WCHAR Image[MAX_PATH];
 static BOOL IsReactOS, IsWin8, IsWin10_1703;
 static HANDLE Inheritable;
-
-/* DEP holds for a child wherever the processor enforces no-execute: on an amd64 kernel for a
- * 64-bit process, and for a 32-bit one under WOW64, and nowhere on an i386 kernel. */
-static DWORD HonouredMitigations;
-
-static DWORD DetectHonouredMitigations(void)
-{
-#ifdef _WIN64
-    return 0x1;
-#else
-    /* A 32-bit process honours DEP exactly when it runs on an amd64 kernel (under WOW64).
-     * Read the kernel's own architecture from the shared data at offset 0x2c
-     * (KUSER_SHARED_DATA.ImageNumberLow) - the same signal the kernel32 validation uses,
-     * so the test and the code can never disagree. */
-    USHORT KernelMachine = *(volatile USHORT *)(ULONG_PTR)(KUSER_SHARED_DATA_UMPTR + 0x2C);
-    return (KernelMachine == IMAGE_FILE_MACHINE_AMD64) ? 0x1 : 0x0;
-#endif
-}
 
 /* Returns the error of the failing step, or ERROR_SUCCESS when the child ran and exited with 0.
  * With WithHandleList the same list also holds a handle-list entry (the inheritable event). */
@@ -116,8 +99,6 @@ static DWORD RunWithPolicy(const void *Value, SIZE_T Size, BOOL WithHandleList, 
 /* What CreateProcess says to a DWORD policy */
 static DWORD DwordError(DWORD Value)
 {
-    if (IsReactOS)
-        return (Value & ~HonouredMitigations) ? ERROR_INVALID_PARAMETER : ERROR_SUCCESS;
     return (Value & ~7UL) ? ERROR_INVALID_PARAMETER : ERROR_SUCCESS;
 }
 
@@ -143,7 +124,7 @@ static VOID ExpectSize(SIZE_T Size, DWORD ExpectedError)
        "size %lu: Update failed %d for expected error %lu\n", (ULONG)Size, UpdateFailed, ExpectedError);
 }
 
-/* ReactOS reads the whole declared width and refuses a request it cannot honour */
+/* ReactOS reads the whole declared width and accepts what it cannot honour */
 static VOID ExpectWide(SIZE_T Size, ULONGLONG First, ULONGLONG Second, DWORD ExpectedError)
 {
     ULONGLONG Value[2];
@@ -188,7 +169,6 @@ START_TEST(ProcThreadMitigation)
     /* GetVersionEx tells a program without a manifest that it runs on Windows 8 */
     RtlGetVersion(&Version);
     IsReactOS = is_reactos();
-    HonouredMitigations = DetectHonouredMitigations();
     IsWin8 = Version.dwMajorVersion > 6 || (Version.dwMajorVersion == 6 && Version.dwMinorVersion >= 2);
     IsWin10_1703 = Version.dwMajorVersion > 10 || (Version.dwMajorVersion == 10 && Version.dwBuildNumber >= 15063);
     GetModuleFileNameW(NULL, Image, _countof(Image));
@@ -222,13 +202,17 @@ START_TEST(ProcThreadMitigation)
 
     if (IsReactOS)
     {
-        /* The wide forms are read in full; any bit but an honoured one is refused */
-        ExpectWide(8, HonouredMitigations, 0, ERROR_SUCCESS);
-        ExpectWide(8, 0x100, 0, ERROR_INVALID_PARAMETER);
-        ExpectWide(8, 0x8000000000000000ULL, 0, ERROR_INVALID_PARAMETER);
+        /* The wide forms are read in full; the mitigations ReactOS cannot enforce are
+         * accepted and ignored, so a Chromium-style request for the whole Windows 8/10
+         * set (ASLR, dynamic code, CFG, image load, Win32k lockdown, ...) starts the child */
+        ExpectWide(8, 0x1, 0, ERROR_SUCCESS);
+        ExpectWide(8, 0x100, 0, ERROR_SUCCESS);
+        ExpectWide(8, 0x8000000000000000ULL, 0, ERROR_SUCCESS);
+        ExpectWide(8, 0x3333333333333307ULL, 0, ERROR_SUCCESS);
         ExpectWide(16, 0, 0, ERROR_SUCCESS);
-        ExpectWide(16, 0, 1, ERROR_INVALID_PARAMETER);
-        ExpectWide(16, 0x100, 0, ERROR_INVALID_PARAMETER);
+        ExpectWide(16, 0, 1, ERROR_SUCCESS);
+        ExpectWide(16, 0x100, 0, ERROR_SUCCESS);
+        ExpectWide(16, 0x3333333333333307ULL, 0x33333333ULL, ERROR_SUCCESS);
         ExpectBadPointer(4);
         ExpectBadPointer(8);
         ExpectBadPointer(16);
