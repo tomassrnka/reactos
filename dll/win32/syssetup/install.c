@@ -1583,7 +1583,7 @@ RegisterBrowserChooser(VOID)
         return;
     }
 
-    wcscpy(szCmd, L"%SystemRoot%\\system32\\bchooser.exe /firstlogon");
+    wcscpy(szCmd, L"\"%SystemRoot%\\system32\\bchooser.exe\" /firstlogon");
     RegSetValueExW(hKey, L"BrowserChooser", 0, REG_EXPAND_SZ,
                    (const BYTE *)szCmd, (wcslen(szCmd) + 1) * sizeof(WCHAR));
     RegCloseKey(hKey);
