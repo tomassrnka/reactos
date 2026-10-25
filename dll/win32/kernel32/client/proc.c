@@ -2515,29 +2515,19 @@ BasepIsValidIdealProcessor(
 }
 
 /* The DWORD form of the mitigation policy defines DEP (0x1), DEP-ATL thunk emulation (0x2)
- * and SEHOP (0x4); Windows 7 refuses any other bit when the process is created. The
- * mitigations a child process really gets on ReactOS, by measurement: DEP wherever the
- * processor enforces no-execute, no ATL thunk emulation and no SEHOP anywhere. DEP holds
- * for every process on an amd64 kernel - a 64-bit child, and a 32-bit child under WOW64
- * alike, because the processor enforces no-execute for both; an i386 kernel runs data
- * pages as code, so it holds for nothing there. A request for anything else is refused
- * like Windows refuses a mitigation it does not support, rather than starting a child
- * that is less protected than the caller asked for. */
-static
-ULONGLONG
-BasepHonouredMitigations(VOID)
-{
-#ifdef _WIN64
-    return 0x1;
-#else
-    /* A 32-bit guest under WOW64 runs on an amd64 kernel, where the child gets
-     * processor-enforced DEP just as a native child does, so it honours DEP like the
-     * native path; a real i386 kernel honours none. SharedUserData->ImageNumberLow is
-     * the kernel's own architecture (see RtlWow64GetProcessMachines). */
-    return (SharedUserData->ImageNumberLow == IMAGE_FILE_MACHINE_AMD64) ? 0x1 : 0x0;
-#endif
-}
-
+ * and SEHOP (0x4); Windows refuses any other bit in that form when the process is created.
+ * The DWORD64 and 2 x DWORD64 forms (Windows 8 / Windows 10 1703 on) define the ASLR,
+ * dynamic-code, CFG, image-load, Win32k-lockdown ... mitigations, and sandboxes such as
+ * Chromium's select the set they request by the OS version they see: at a Windows 10
+ * identity they ask for the whole set.
+ *
+ * What a child process really gets on ReactOS, by measurement: DEP wherever the processor
+ * enforces no-execute (every process on an amd64 kernel, a 32-bit child under WOW64
+ * included; nothing on an i386 kernel) and none of the others. Refusing a wide request for
+ * a mitigation ReactOS cannot enforce makes CreateProcess fail, and with it the sandboxed
+ * child of every browser/Electron process model ("GPU process error_code=17"). So the wide
+ * forms are accepted and the bits ReactOS cannot enforce are ignored - the child is less
+ * hardened than requested but it runs. Same compromise as CHILD_PROCESS_POLICY below. */
 static
 NTSTATUS
 BasepCheckMitigationPolicy(
@@ -2559,7 +2549,8 @@ BasepCheckMitigationPolicy(
     if (!NT_SUCCESS(Status))
         return Status;
 
-    if ((Policy[0] & ~BasepHonouredMitigations()) || Policy[1])
+    /* The DWORD form keeps the Windows contract: only the three Windows 7 bits exist */
+    if (Entry->Size == sizeof(DWORD) && (Policy[0] & ~0x7ULL))
         return STATUS_INVALID_PARAMETER;
 
     return STATUS_SUCCESS;
