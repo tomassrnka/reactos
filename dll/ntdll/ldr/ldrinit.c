@@ -1008,7 +1008,7 @@ LdrpRundownFls(VOID)
     {
         /* An index that FlsFree released (its callback may have raised) runs nothing */
         RtlAcquirePebLock();
-        lpCallback = RtlAreBitsSet(NtCurrentPeb()->FlsBitmap, n, 1) ? NtCurrentPeb()->FlsCallback[n] : NULL;
+        lpCallback = RtlAreBitsSet(NtCurrentPeb()->FlsBitmap, n, 1) ? RTL_FLS_CALLBACK_SLOT(NtCurrentPeb(), n) : NULL;
         RtlReleasePebLock();
         if (lpCallback && pFlsData->Data[n])
         {

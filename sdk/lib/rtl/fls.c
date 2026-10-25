@@ -23,10 +23,10 @@
 //RTL_SRWLOCK RtlpFlsLock = RTL_SRWLOCK_INIT;
 
 /*
- * PEB::FlsCallback keeps one callback pointer per index, as on NT 5.2 (the
- * version ReactOS reports). NT 6 keeps a callback and a reserved pointer per
- * index; kernel32 (FlsAlloc of every DLL version, BaseRundownFls), ntdll
- * (LdrShutdownThread) and this file share the NT 5.2 layout.
+ * PEB::FlsCallback keeps one callback pointer per index on NT 5.2 and a
+ * callback + reserved pointer pair per index from NT 6.0 on. The layout follows
+ * the OS version the PEB reports (RTL_FLS_CALLBACK_SLOT); kernel32
+ * (BaseRundownFls), ntdll (LdrShutdownThread) and this file all use that macro.
  */
 
 static
@@ -57,7 +57,7 @@ RtlpAllocateFlsCallbackArray(VOID)
     /* Allocate a new callback array */
     newCallbacks = RtlAllocateHeap(RtlGetProcessHeap(),
                                    HEAP_ZERO_MEMORY,
-                                   RTL_FLS_MAXIMUM_AVAILABLE * sizeof(PVOID));
+                                   RTL_FLS_MAXIMUM_AVAILABLE * 2 * sizeof(PVOID));
     if (newCallbacks == NULL)
     {
         return STATUS_NO_MEMORY;
@@ -157,7 +157,7 @@ RtlFlsAllocEx(
 
     /* Set the callback; a slot freed by a FlsFree whose callback raised still
        holds this thread's old value (NT 5.2 FlsAlloc clears it too) */
-    peb->FlsCallback[index] = Callback;
+    RTL_FLS_CALLBACK_SLOT(peb, index) = Callback;
     ((PRTL_FLS_DATA)teb->FlsData)->Data[index] = NULL;
 
     /* Update high index */
@@ -204,7 +204,7 @@ RtlFlsFree(
     }
 
     /* Check if there is a callback */
-    PFLS_CALLBACK_FUNCTION callbackFunction = (PFLS_CALLBACK_FUNCTION)peb->FlsCallback[FlsIndex];
+    PFLS_CALLBACK_FUNCTION callbackFunction = (PFLS_CALLBACK_FUNCTION)RTL_FLS_CALLBACK_SLOT(peb, FlsIndex);
 
     /* Clear the FLS index bit */
     RtlClearBit(peb->FlsBitmap, FlsIndex);
@@ -238,7 +238,7 @@ RtlFlsFree(
         }
 
         /* Clear the callback */
-        peb->FlsCallback[FlsIndex] = NULL;
+        RTL_FLS_CALLBACK_SLOT(peb, FlsIndex) = NULL;
     }
     _SEH2_FINALLY
     {
