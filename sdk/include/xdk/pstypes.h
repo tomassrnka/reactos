@@ -281,6 +281,14 @@ typedef enum _PROCESSINFOCLASS {
   ProcessTokenVirtualizationEnabled,
   ProcessConsoleHostProcess,
   ProcessWindowInformation,
+  ProcessHandleInformation,
+  ProcessMitigationPolicy,
+  ProcessDynamicFunctionTableInformation,
+  ProcessHandleCheckingMode,
+  ProcessKeepAliveCount,
+  ProcessRevokeFileHandles,
+  ProcessWorkingSetControl,
+  ProcessHandleTable,
   MaxProcessInfoClass
 } PROCESSINFOCLASS;
 

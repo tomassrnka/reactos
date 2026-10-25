@@ -206,6 +206,39 @@ PspDumpThreadInfoClassName(
 /*
  * @implemented
  */
+/*
+ * Snapshot of a process handle table into a caller-sized ULONG[] buffer, used
+ * to implement the ProcessHandleTable (58) query.
+ */
+typedef struct _PSP_HANDLE_SNAP
+{
+    PULONG Buffer;
+    ULONG Capacity;
+    ULONG Count;
+} PSP_HANDLE_SNAP, *PPSP_HANDLE_SNAP;
+
+static
+BOOLEAN
+NTAPI
+PspHandleSnapCallback(
+    _In_ PHANDLE_TABLE_ENTRY HandleTableEntry,
+    _In_ HANDLE Handle,
+    _In_ PVOID Context)
+{
+    PPSP_HANDLE_SNAP Snap = (PPSP_HANDLE_SNAP)Context;
+
+    UNREFERENCED_PARAMETER(HandleTableEntry);
+
+    /* Record the handle value while there is room; keep counting regardless so
+     * the caller can be told the full size it needs. */
+    if (Snap->Count < Snap->Capacity)
+        Snap->Buffer[Snap->Count] = HandleToUlong(Handle);
+    Snap->Count++;
+
+    /* FALSE: keep walking every entry. */
+    return FALSE;
+}
+
 NTSTATUS
 NTAPI
 NtQueryInformationProcess(
@@ -1422,6 +1455,97 @@ NtQueryInformationProcess(
             DPRINT1("Pool limits not implemented: %lu\n", ProcessInformationClass);
             Status = STATUS_NOT_IMPLEMENTED;
             break;
+
+        /* ProcessHandleTable (Windows 8.1+): the process open handle values as a
+         * ULONG[]. Chromium win32 lockdown queries this on itself right after it
+         * lowers its token, to confirm no unexpected handle leaked into the
+         * sandboxed process; on an NT 6.3+ identity a failed query is fatal and
+         * the child self-terminates (observed exit 0x1b62). A process always has
+         * implicit access to its own handle table, as on Windows. */
+        case ProcessHandleTable:
+        {
+            PSP_HANDLE_SNAP Snap;
+            PVOID ObjectTable;
+            ULONG HandleCount;
+
+            Status = ObReferenceObjectByHandle(ProcessHandle,
+                                               PROCESS_QUERY_INFORMATION,
+                                               PsProcessType,
+                                               PreviousMode,
+                                               (PVOID*)&Process,
+                                               NULL);
+            if (!NT_SUCCESS(Status)) break;
+
+            /* Size the result by the current handle count. */
+            HandleCount = ObGetProcessHandleCount(Process);
+            Length = HandleCount * sizeof(ULONG);
+
+            /* Sizing probe or a buffer too small: report the needed size. */
+            if (ProcessInformationLength < Length)
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                ObDereferenceObject(Process);
+                break;
+            }
+
+            /* No handles: nothing to copy. */
+            if (HandleCount == 0)
+            {
+                Status = STATUS_SUCCESS;
+                ObDereferenceObject(Process);
+                break;
+            }
+
+            /* Collect the handle values into a kernel buffer first: the enum
+             * callback runs in a critical region with a table entry locked, so
+             * it must not touch user memory. */
+            Snap.Buffer = ExAllocatePoolWithTag(PagedPool,
+                                                HandleCount * sizeof(ULONG),
+                                                'tHsP');
+            if (!Snap.Buffer)
+            {
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                ObDereferenceObject(Process);
+                break;
+            }
+            Snap.Capacity = HandleCount;
+            Snap.Count = 0;
+
+            ObjectTable = ObReferenceProcessHandleTable(Process);
+            if (ObjectTable)
+            {
+                ExEnumHandleTable((PHANDLE_TABLE)ObjectTable,
+                                  PspHandleSnapCallback,
+                                  &Snap,
+                                  NULL);
+                ObDereferenceProcessHandleTable(Process);
+            }
+
+            if (Snap.Count > Snap.Capacity)
+            {
+                /* Raced with handle creation and overflowed: ask for more. */
+                Length = Snap.Count * sizeof(ULONG);
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+            }
+            else
+            {
+                Length = Snap.Count * sizeof(ULONG);
+                _SEH2_TRY
+                {
+                    RtlCopyMemory(ProcessInformation, Snap.Buffer, Length);
+                    Status = STATUS_SUCCESS;
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    Status = _SEH2_GetExceptionCode();
+                }
+                _SEH2_END;
+            }
+
+            ExFreePoolWithTag(Snap.Buffer, 'tHsP');
+            ObDereferenceObject(Process);
+            break;
+        }
 
         /* Not supported by Server 2003 */
         default:
