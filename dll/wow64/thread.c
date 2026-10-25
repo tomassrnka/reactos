@@ -147,6 +147,29 @@ NTSTATUS Wow64QueryThread(HANDLE Thread, ULONG Class, PVOID Buffer, ULONG Length
         if (ReturnLength) *ReturnLength = sizeof(ULONG);
         return Status;
     }
+    if (Class == ThreadNameInformation)
+    {
+        /* A UNICODE_STRING followed by its characters: the guest header is
+         * eight bytes, the native one sixteen, so the buffer is widened. */
+        UNICODE_STRING *Native;
+        WOW64_STRING *Guest = Buffer;
+        ULONG Needed = 0, Extra = sizeof(UNICODE_STRING) - sizeof(WOW64_STRING);
+        if (Length > MAXULONG - Extra) return STATUS_INVALID_PARAMETER;
+        Native = RtlAllocateHeap(RtlGetProcessHeap(), 0, Length + Extra);
+        if (!Native) return STATUS_NO_MEMORY;
+        Status = NtQueryInformationThread(Thread, Class, Native, Length + Extra, &Needed);
+        if (ReturnLength && Needed) *ReturnLength = Needed >= sizeof(UNICODE_STRING) ? Needed - Extra : Needed;
+        if (NT_SUCCESS(Status))
+        {
+            Guest->Length = Native->Length;
+            Guest->MaximumLength = Native->MaximumLength;
+            Guest->Buffer = Native->Buffer ? PtrToUlong(Guest + 1) : 0;
+            if (Native->Buffer)
+                RtlCopyMemory(Guest + 1, Native->Buffer, Native->Length);
+        }
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Native);
+        return Status;
+    }
     switch (Class)
     {
     case ThreadTimes: case ThreadPriorityBoost: case ThreadAmILastThread:

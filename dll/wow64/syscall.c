@@ -1576,6 +1576,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         case FileAlignmentInformation: case FileNetworkOpenInformation:
         case FileAttributeTagInformation: case FileAllInformation:
         case FilePipeLocalInformation:
+        case FileEaInformation: /* a single ULONG EaSize */
             ProbeOutput(a[1], sizeof(WOW64_IOSB));
             Status = NtQueryInformationFile(H(0), &Io, P(2), a[3], a[4]);
             StoreIo(a[1], &Io); return Status;
@@ -1799,6 +1800,18 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             }
             return Status;
         }
+        if (a[1] == ProcessDebugPort)
+        {
+            /* The debug port is a pointer-sized value that only ever reports
+             * 0 or -1 (debugged) to user mode; narrow it to the guest's ULONG. */
+            ULONG_PTR Port;
+            if (a[3] != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+            if (a[4]) PROBE(4);
+            Status = NtQueryInformationProcess(H(0), a[1], &Port, sizeof(Port), NULL);
+            if (NT_SUCCESS(Status)) U(2) = (ULONG)Port;
+            if (a[4]) U(4) = sizeof(ULONG);
+            return Status;
+        }
         switch (a[1])
         {
         case ProcessDefaultHardErrorMode: case ProcessExecuteFlags: case ProcessPriorityClass:
@@ -1855,6 +1868,14 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         case ThreadHideFromDebugger: case ThreadPriority: case ThreadBasePriority:
         case ThreadBreakOnTermination:
             return NtSetInformationThread(H(0), a[1], P(2), a[3]);
+        case ThreadNameInformation:
+        {
+            /* THREAD_NAME_INFORMATION is a UNICODE_STRING: widen the 8-byte
+             * guest header; the kernel captures and probes the characters. */
+            if (a[3] != sizeof(WOW64_STRING)) return STATUS_INFO_LENGTH_MISMATCH;
+            if (!GuestSpan(a[2], sizeof(WOW64_STRING))) return STATUS_ACCESS_VIOLATION;
+            return NtSetInformationThread(H(0), a[1], String32(&Name, P(2)), sizeof(Name));
+        }
         default: UNSUPPORTED(CLASS, a[1]);
         }
     case W64_NtPowerInformation:
@@ -1870,6 +1891,14 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             return NtPowerInformation(a[0], P(1), a[2], P(3), a[4]);
         default: UNSUPPORTED(CLASS, a[0]);
         }
+    case W64_NtQueryTimerResolution:
+    {
+        ULONG Minimum, Maximum, Actual;
+        PROBE(0); PROBE(1); PROBE(2);
+        Status = NtQueryTimerResolution(&Minimum, &Maximum, &Actual);
+        if (NT_SUCCESS(Status)) { U(0) = Minimum; U(1) = Maximum; U(2) = Actual; }
+        return Status;
+    }
     case W64_NtQuerySystemInformation:
         if (a[0] == SystemBasicInformation)
         {
@@ -1948,6 +1977,8 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         }
         case SystemCurrentTimeZoneInformation: /* RTL_TIME_ZONE_INFORMATION has no pointers. */
         case SystemTimeOfDayInformation:
+        case SystemPerformanceInformation: /* LARGE_INTEGER/ULONG counters, no pointers, same layout. */
+        case SystemTimeAdjustmentInformation: /* { ULONG, ULONG, BOOLEAN }, no pointers. */
             return NtQuerySystemInformation(a[0], P(1), a[2], P(3));
         default: UNSUPPORTED(CLASS, a[0]);
         }
