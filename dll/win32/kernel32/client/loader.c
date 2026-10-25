@@ -372,6 +372,16 @@ LoadLibraryExW(LPCWSTR lpLibFileName,
         }
     }
 
+    if (!(dwFlags & LOAD_LIBRARY_AS_DATAFILE) && (SharedUserData->NtMajorVersion >= 10))
+    {
+        /* Windows 10 kernel32 has no exception frame around the loader call (VERBUMP B5) */
+        Status = LdrLoadDll(SearchPath,
+                            &DllCharacteristics,
+                            &DllName,
+                            (PVOID*)&hInst);
+        goto done;
+    }
+
     _SEH2_TRY
     {
         if (dwFlags & LOAD_LIBRARY_AS_DATAFILE)

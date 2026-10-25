@@ -1319,6 +1319,9 @@ SSI_DEF(SystemFlagsInformation)
     if (!SeSinglePrivilegeCheck(SeDebugPrivilege, ExGetPreviousMode()))
     {
 #if (NTDDI_VERSION < NTDDI_WIN7)
+        /* NT 6.1 and later report the missing privilege (VERBUMP B5) */
+        if (NtMajorVersion > 6 || (NtMajorVersion == 6 && NtMinorVersion >= 1))
+            return STATUS_ACCESS_DENIED;
         return STATUS_ACCESS_VIOLATION;
 #else
         return STATUS_ACCESS_DENIED;
@@ -1823,12 +1826,23 @@ SSI_DEF(SystemTimeAdjustmentInformation)
     }
     else
     {
-        /* Check if a valid time adjustment value is given */
-        if (TimeInfo->TimeAdjustment == 0) return STATUS_INVALID_PARAMETER_2;
+        ULONG Adjustment = TimeInfo->TimeAdjustment;
+
+        /* NT 6.1 and later divide by the value (VERBUMP B5) and cap it */
+        if (NtMajorVersion > 6 || (NtMajorVersion == 6 && NtMinorVersion >= 1))
+        {
+            if (Adjustment == 0) return STATUS_INTEGER_DIVIDE_BY_ZERO;
+            if (Adjustment > 0x7076cc) Adjustment = 0x7076cc;
+        }
+        else
+        {
+            /* Check if a valid time adjustment value is given */
+            if (Adjustment == 0) return STATUS_INVALID_PARAMETER_2;
+        }
 
         /* Enable time adjustment and set the adjustment value */
         KiTimeAdjustmentEnabled = TRUE;
-        KeTimeAdjustment = TimeInfo->TimeAdjustment;
+        KeTimeAdjustment = Adjustment;
     }
 
     return STATUS_SUCCESS;

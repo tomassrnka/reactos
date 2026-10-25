@@ -1300,6 +1300,41 @@ quickie:
 /*
  * @implemented
  */
+/*
+ * Calls the TLS callbacks (first, as at process exit) and the entry point of a
+ * module for DLL_PROCESS_DETACH.
+ */
+static
+VOID
+LdrpCallDetachRoutines(IN PLDR_DATA_TABLE_ENTRY LdrEntry)
+{
+    if (LdrEntry->TlsIndex)
+        LdrpCallTlsInitializers(LdrEntry, DLL_PROCESS_DETACH);
+
+    LdrpCallInitRoutine(LdrEntry->EntryPoint,
+                        LdrEntry->DllBase,
+                        DLL_PROCESS_DETACH,
+                        NULL);
+}
+
+/*
+ * VERBUMP B5: the Windows 10 loader runs the detach notifications one exception
+ * frame deeper than the NT 5.2 one; the ntdll apitests count the frames.
+ */
+static
+VOID
+LdrpCallDetachRoutinesFramed(IN PLDR_DATA_TABLE_ENTRY LdrEntry)
+{
+    _SEH2_TRY
+    {
+        LdrpCallDetachRoutines(LdrEntry);
+    }
+    _SEH2_FINALLY
+    {
+    }
+    _SEH2_END;
+}
+
 NTSTATUS
 NTAPI
 LdrUnloadDll(
@@ -1468,14 +1503,10 @@ LdrUnloadDll(
             /* Call the entrypoint */
             _SEH2_TRY
             {
-                /* TLS callbacks first, as at process exit */
-                if (LdrEntry->TlsIndex)
-                    LdrpCallTlsInitializers(LdrEntry, DLL_PROCESS_DETACH);
-
-                LdrpCallInitRoutine(LdrEntry->EntryPoint,
-                                    LdrEntry->DllBase,
-                                    DLL_PROCESS_DETACH,
-                                    NULL);
+                if (SharedUserData->NtMajorVersion >= 10)
+                    LdrpCallDetachRoutinesFramed(LdrEntry);
+                else
+                    LdrpCallDetachRoutines(LdrEntry);
             }
             _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
             {

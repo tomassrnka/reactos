@@ -51,7 +51,10 @@ RtlGetProductInfo(
     }
     else if (SharedUserData->NtProductType == NtProductServer)
     {
-        *ReturnedProductType = PRODUCT_STANDARD_SERVER;
+        /* Windows 10 identity (VERBUMP B5): the SKU a Windows 10 / Server 2016 system reports
+           is never the plain "Standard Server" of the NT 5.2 identity */
+        *ReturnedProductType = (SharedUserData->NtMajorVersion >= 10) ?
+                               PRODUCT_DATACENTER_SERVER : PRODUCT_STANDARD_SERVER;
         return TRUE;
     }
 
