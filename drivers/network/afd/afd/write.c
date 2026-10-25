@@ -14,6 +14,13 @@
  * msafd caps its own buffer at 128 bytes; every supported address type fits. */
 #define AFD_MAX_SEND_TA_LENGTH 256
 
+/* Caller-supplied buffer lengths are summed without wrapping: an overflow
+ * would let a huge request pass the SendLength > SpaceAvail check. */
+static __inline UINT AfdSaturatedAdd(UINT Total, UINT Add)
+{
+    return (Add > MAXULONG - Total) ? MAXULONG : Total + Add;
+}
+
 /* Copy the caller's destination TRANSPORT_ADDRESS into kernel memory and check
  * it. The pointer inside the (already captured) request is a raw user pointer,
  * so it is probed and read under SEH; afterwards only Captured is used. The
@@ -224,7 +231,7 @@ static NTSTATUS NTAPI SendComplete
         SendLength = 0;
         for (i = 0; i < SendReq->BufferCount; i++)
         {
-            SendLength += SendReq->BufferArray[i].len;
+            SendLength = AfdSaturatedAdd(SendLength, SendReq->BufferArray[i].len);
         }
 
         /* Make sure we've got the space */
@@ -415,6 +422,8 @@ static NTSTATUS NTAPI PacketSocketSendComplete
         while( !IsListEmpty( &FCB->PendingIrpList[FUNCTION_SEND] ) ) {
             NextIrpEntry = RemoveHeadList(&FCB->PendingIrpList[FUNCTION_SEND]);
             NextIrp = CONTAINING_RECORD(NextIrpEntry, IRP, Tail.Overlay.ListEntry);
+            /* its datagram may still be in flight: drop the stale pointer */
+            AfdOrphanDatagramSend(FCB, NextIrp);
             SendReq = GetLockedData(NextIrp, IoGetCurrentIrpStackLocation(NextIrp));
             NextIrp->IoStatus.Status = STATUS_FILE_CLOSED;
             NextIrp->IoStatus.Information = 0;
@@ -681,7 +690,7 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     SendLength = 0;
     for (i = 0; i < SendReq->BufferCount; i++)
     {
-        SendLength += SendReq->BufferArray[i].len;
+        SendLength = AfdSaturatedAdd(SendLength, SendReq->BufferArray[i].len);
     }
 
     /* Make sure we've got the space */
@@ -839,8 +848,11 @@ AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
              * pre-posts a receive datagram with FCB->AddressFrom, and tcpip
              * dereferences it (DGReceiveDatagram), so leaving it NULL here
              * bugchecks the transport from an unbound raw sendto (T134). */
-            Status = TdiBuildConnectionInfo( &FCB->AddressFrom,
-                                             FCB->LocalAddress );
+            if( FCB->AddressFrom )
+                Status = STATUS_SUCCESS; /* kept from an earlier failed attempt: rebuilding would leak it */
+            else
+                Status = TdiBuildConnectionInfo( &FCB->AddressFrom,
+                                                 FCB->LocalAddress );
 
             if( NT_SUCCESS(Status) )
                 Status = WarmSocketForBind( FCB, AFD_SHARE_WILDCARD );
