@@ -421,6 +421,7 @@ AfdCreateSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     }
 
     InitializeListHead( &FCB->DatagramList );
+    InitializeListHead( &FCB->DatagramSendList );
     InitializeListHead( &FCB->PendingConnections );
 
     AFD_DbgPrint(MID_TRACE,("%p: Checking command channel\n", FCB));
@@ -527,6 +528,7 @@ WaitForInFlightRequests(PAFD_FCB FCB, PAFD_IN_FLIGHT_REQUEST *InFlightRequest)
             if (InFlightRequest[i]->InFlightRequest)
                 IoCancelIrp(InFlightRequest[i]->InFlightRequest);
         }
+        AfdCancelDatagramSends(FCB);
 
         if (!AfdHasInFlightRequest(FCB))
             break;
@@ -572,6 +574,9 @@ AfdCloseSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
             IoCancelIrp(InFlightRequest[i]->InFlightRequest);
         }
     }
+
+    /* The slot above names only the last datagram sent */
+    AfdCancelDatagramSends(FCB);
 
     KillSelectsForFCB( FCB->DeviceExt, FileObject, FALSE );
 
@@ -1479,6 +1484,8 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
                 return;
             }
 
+            if (Function == FUNCTION_SEND)
+                AfdOrphanDatagramSend(FCB, Irp);
             RemoveEntryList(CurrentEntry);
             CleanupPendingIrp(FCB, Irp, IrpSp, NULL);
             if (Function == FUNCTION_PREACCEPT)

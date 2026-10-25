@@ -11,6 +11,8 @@
  *              recv/send/listen/disconnect requests, sends with no WSABUFs
  *              or an unusable datagram destination are rejected, while
  *              ordinary loopback TCP/UDP I/O keeps working.
+ *              Also covers T124: a datagram send completes the request that
+ *              issued it, also when a neighbouring send was cancelled.
  * COPYRIGHT:   Copyright 2026 Tomas Srnka (tomas.srnka@e2b.dev)
  */
 
@@ -486,6 +488,180 @@ TestDatagramSendValidation(void)
     closesocket(Tx);
 }
 
+/* T124: each datagram send completes the request that issued it. Three
+ * threads send datagrams of different lengths on one socket at the same time;
+ * the middle one cancels its own request right after issuing it. The other
+ * two requests must complete successfully with their own byte counts (a
+ * completion matched by queue position instead of by owner reports another
+ * request's result), and exactly their datagrams must arrive. */
+typedef struct _SEND_CANCEL_PARAM
+{
+    HANDLE Socket;
+    HANDLE Start;
+    PAFD_SEND_INFO_UDP Udp;
+    BOOLEAN Cancel;
+    ULONG Length;
+    NTSTATUS Status;
+    ULONG_PTR Info;
+} SEND_CANCEL_PARAM;
+
+static
+DWORD
+WINAPI
+SendCancelThread(PVOID Context)
+{
+    SEND_CANCEL_PARAM *Param = Context;
+    IO_STATUS_BLOCK IoStatus, CancelStatus;
+    HANDLE Event;
+    NTSTATUS Status;
+
+    Param->Status = STATUS_UNSUCCESSFUL;
+    Param->Info = 0;
+    if (!NT_SUCCESS(NtCreateEvent(&Event, EVENT_ALL_ACCESS, NULL, NotificationEvent, FALSE)))
+        return 0;
+
+    WaitForSingleObject(Param->Start, 10000);
+
+    IoStatus.Status = STATUS_PENDING;
+    IoStatus.Information = 0;
+    Status = NtDeviceIoControlFile(Param->Socket, Event, NULL, NULL, &IoStatus,
+                                   IOCTL_AFD_SEND_DATAGRAM,
+                                   Param->Udp, sizeof(*Param->Udp), NULL, 0);
+    if (Param->Cancel)
+        NtCancelIoFile(Param->Socket, &CancelStatus);
+    if (Status == STATUS_PENDING)
+    {
+        NtWaitForSingleObject(Event, FALSE, NULL);
+        Status = IoStatus.Status;
+    }
+    Param->Status = Status;
+    Param->Info = IoStatus.Information;
+    NtClose(Event);
+    return 0;
+}
+
+static
+void
+TestDatagramSendCancelOwnership(void)
+{
+    enum { ROUNDS = 100, LEN_A = 10, LEN_B = 20, LEN_C = 30 };
+    SOCKET Rx, Tx;
+    struct sockaddr_in Addr, Local;
+    int Len = sizeof(Addr);
+    UCHAR Ta[FIELD_OFFSET(TRANSPORT_ADDRESS, Address[0].Address) + 14];
+    PTRANSPORT_ADDRESS Dest = (PTRANSPORT_ADDRESS)Ta;
+    char Data[3][32];
+    AFD_WSABUF Buf[3];
+    AFD_SEND_INFO_UDP Udp[3];
+    SEND_CANCEL_PARAM Param[3];
+    HANDLE Threads[3], Start;
+    DWORD Timeout = 300;
+    ULONG Round, i;
+    ULONG BadA = 0, BadC = 0, BadB = 0, LostA = 0, LostC = 0, Extra = 0, Cancelled = 0;
+    static const ULONG Lens[3] = { LEN_A, LEN_B, LEN_C };
+
+    Rx = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    Tx = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    ok(Rx != INVALID_SOCKET && Tx != INVALID_SOCKET, "UDP sockets: %d\n", WSAGetLastError());
+    if (Rx == INVALID_SOCKET || Tx == INVALID_SOCKET)
+        return;
+
+    RtlZeroMemory(&Addr, sizeof(Addr));
+    Addr.sin_family = AF_INET;
+    Addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    ok(bind(Rx, (struct sockaddr *)&Addr, sizeof(Addr)) == 0, "bind failed\n");
+    ok(getsockname(Rx, (struct sockaddr *)&Addr, &Len) == 0, "getsockname failed\n");
+    Local = Addr;
+    Local.sin_port = 0;
+    ok(bind(Tx, (struct sockaddr *)&Local, sizeof(Local)) == 0, "bind failed\n");
+    setsockopt(Rx, SOL_SOCKET, SO_RCVTIMEO, (char *)&Timeout, sizeof(Timeout));
+
+    RtlZeroMemory(Ta, sizeof(Ta));
+    Dest->TAAddressCount = 1;
+    Dest->Address[0].AddressType = TDI_ADDRESS_TYPE_IP;
+    Dest->Address[0].AddressLength = 14;
+    RtlCopyMemory(&Dest->Address[0].Address, (PUCHAR)&Addr + FIELD_OFFSET(struct sockaddr, sa_data), 14);
+
+    Start = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ok(Start != NULL, "CreateEvent failed\n");
+    if (!Start)
+        return;
+
+    for (i = 0; i < 3; i++)
+    {
+        RtlFillMemory(Data[i], sizeof(Data[i]), 'A' + (char)i);
+        Buf[i].buf = Data[i];
+        Buf[i].len = Lens[i];
+        RtlZeroMemory(&Udp[i], sizeof(Udp[i]));
+        Udp[i].BufferArray = &Buf[i];
+        Udp[i].BufferCount = 1;
+        Udp[i].TdiConnection.RemoteAddress = Dest;
+        Udp[i].TdiConnection.RemoteAddressLength = sizeof(Ta);
+        Param[i].Socket = (HANDLE)Tx;
+        Param[i].Start = Start;
+        Param[i].Udp = &Udp[i];
+        Param[i].Cancel = (i == 1);
+        Param[i].Length = Lens[i];
+    }
+
+    for (Round = 0; Round < ROUNDS; Round++)
+    {
+        ULONG GotA = 0, GotB = 0, GotC = 0;
+        char Got[64];
+        int Size;
+
+        ResetEvent(Start);
+        for (i = 0; i < 3; i++)
+            Threads[i] = CreateThread(NULL, 0, SendCancelThread, &Param[i], 0, NULL);
+        SetEvent(Start);
+        WaitForMultipleObjects(3, Threads, TRUE, 20000);
+        for (i = 0; i < 3; i++)
+            CloseHandle(Threads[i]);
+
+        if (Param[0].Status != STATUS_SUCCESS || Param[0].Info != LEN_A)
+            BadA++;
+        if (Param[2].Status != STATUS_SUCCESS || Param[2].Info != LEN_C)
+            BadC++;
+        if (Param[1].Status == STATUS_CANCELLED)
+            Cancelled++;
+        else if (Param[1].Status != STATUS_SUCCESS || Param[1].Info != LEN_B)
+            BadB++;
+
+        while ((Size = recvfrom(Rx, Got, sizeof(Got), 0, NULL, NULL)) > 0)
+        {
+            if (Size == LEN_A && Got[0] == 'A') GotA++;
+            else if (Size == LEN_B && Got[0] == 'B') GotB++;
+            else if (Size == LEN_C && Got[0] == 'C') GotC++;
+            else Extra++;
+            if (GotA + GotB + GotC >= 3)
+                break;
+        }
+        if (GotA != 1) LostA++;
+        if (GotC != 1) LostC++;
+        if (GotB > 1) Extra++;
+        if (Param[1].Status == STATUS_CANCELLED && GotB != 0) Extra++;
+    }
+
+    ok(BadA == 0, "request A completed with a wrong result in %lu rounds\n", BadA);
+    ok(BadC == 0, "request C completed with a wrong result in %lu rounds\n", BadC);
+    ok(BadB == 0, "request B completed with a wrong result in %lu rounds\n", BadB);
+    ok(LostA == 0 && LostC == 0, "datagrams missing or duplicated: A %lu, C %lu\n", LostA, LostC);
+    ok(Extra == 0, "unexpected datagrams: %lu\n", Extra);
+    trace("middle send cancelled in %lu of %d rounds\n", Cancelled, ROUNDS);
+
+    /* The socket is still usable afterwards */
+    ok(sendto(Tx, "ok", 2, 0, (struct sockaddr *)&Addr, sizeof(Addr)) == 2, "sendto failed: %d\n", WSAGetLastError());
+    {
+        char Got[8] = { 0 };
+        ok(recvfrom(Rx, Got, sizeof(Got), 0, NULL, NULL) == 2 && !memcmp(Got, "ok", 2),
+           "datagram after the cancels did not arrive: %d\n", WSAGetLastError());
+    }
+
+    CloseHandle(Start);
+    closesocket(Rx);
+    closesocket(Tx);
+}
+
 static
 void
 TestLoopbackIoUnregressed(void)
@@ -537,6 +713,7 @@ START_TEST(defensive)
     TestShortRequestsRejected();
     TestSendBufferCounts();
     TestDatagramSendValidation();
+    TestDatagramSendCancelOwnership();
     TestLoopbackIoUnregressed();
     WSACleanup();
 }

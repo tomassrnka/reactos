@@ -50,6 +50,7 @@
 #define TAG_AFD_ACTIVE_POLL                'pafA'
 #define TAG_AFD_EA_INFO                    'aefA'
 #define TAG_AFD_STORED_DATAGRAM            'gsfA'
+#define TAG_AFD_DGRAM_SEND                 'sdfA'
 #define TAG_AFD_SNMP_ADDRESS_INFO          'asfA'
 #define TAG_AFD_TDI_CONNECTION_INFORMATION 'cTfA'
 #define TAG_AFD_WSA_BUFFER                 'bWfA'
@@ -146,6 +147,19 @@ typedef struct _AFD_IN_FLIGHT_REQUEST {
     PTDI_CONNECTION_INFORMATION ConnectionReturnInfo;
 } AFD_IN_FLIGHT_REQUEST, *PAFD_IN_FLIGHT_REQUEST;
 
+/* One datagram handed to the transport, and the user send request it completes.
+ * The transport may complete datagrams in any order and a user request may be
+ * cancelled while its datagram is in flight, so the request is recorded here
+ * rather than inferred from its position in the pending list. UserIrp is
+ * cleared when that request goes away before the datagram completes. */
+typedef struct _AFD_DGRAM_SEND_CONTEXT {
+    LIST_ENTRY ListEntry;
+    struct _AFD_FCB *FCB;
+    PIRP UserIrp;
+    PIRP TransportIrp;      /* the IRP in the transport; valid while the entry is listed */
+    BOOLEAN CancelRequested;
+} AFD_DGRAM_SEND_CONTEXT, *PAFD_DGRAM_SEND_CONTEXT;
+
 typedef struct _AFD_DATA_WINDOW {
     PCHAR Window;
     UINT BytesUsed, Size, Content;
@@ -208,6 +222,7 @@ typedef struct _AFD_FCB {
     UINT OnConnectSendBufferSize;
     LIST_ENTRY PendingIrpList[MAX_FUNCTIONS];
     LIST_ENTRY DatagramList;
+    LIST_ENTRY DatagramSendList; /* AFD_DGRAM_SEND_CONTEXT of datagrams in the transport */
     LIST_ENTRY PendingConnections;
     PIO_WORKITEM RelistenWorkItem;
     KEVENT RelistenIdle;
@@ -325,6 +340,8 @@ NTSTATUS NTAPI UnlockAndMaybeComplete
   UINT Information );
 VOID SocketStateUnlock( PAFD_FCB FCB );
 BOOLEAN AfdHasInFlightRequest( PAFD_FCB FCB );
+VOID AfdOrphanDatagramSend( PAFD_FCB FCB, PIRP Irp );
+VOID AfdCancelDatagramSends( PAFD_FCB FCB );
 VOID AfdClearCancelRoutine( PIRP Irp );
 NTSTATUS LostSocket( PIRP Irp );
 NTSTATUS LockHandles( PAFD_HANDLE HandleArray, UINT HandleCount,

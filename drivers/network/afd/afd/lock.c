@@ -452,7 +452,8 @@ BOOLEAN SocketAcquireStateLock( PAFD_FCB FCB ) {
 BOOLEAN AfdHasInFlightRequest( PAFD_FCB FCB ) {
     return FCB->ConnectIrp.InFlightRequest || FCB->ListenIrp.InFlightRequest ||
            FCB->ReceiveIrp.InFlightRequest || FCB->SendIrp.InFlightRequest ||
-           FCB->DisconnectIrp.InFlightRequest;
+           FCB->DisconnectIrp.InFlightRequest ||
+           !IsListEmpty(&FCB->DatagramSendList);
 }
 
 VOID SocketStateUnlock( PAFD_FCB FCB ) {

@@ -1,6 +1,7 @@
 
 include_directories(
-    ${REACTOS_SOURCE_DIR}/sdk/include/reactos/drivers)
+    ${REACTOS_SOURCE_DIR}/sdk/include/reactos/drivers
+    ${REACTOS_SOURCE_DIR}/modules/rostests/drivers/afdstub)
 
 list(APPEND SOURCE
     AfdHelpers.c
@@ -8,6 +9,7 @@ list(APPEND SOURCE
     send.c
     windowsize.c
     defensive.c
+    dgramstub.c
     tcpnonadmin.c
     tcpsetinfoex.c
     tcpaccept.c)
@@ -23,4 +25,5 @@ target_link_libraries(afd_apitest wine)
 set_module_type(afd_apitest win32cui)
 add_importlibs(afd_apitest ws2_32 msvcrt kernel32 advapi32 netapi32 ntdll)
 add_pch(afd_apitest precomp.h "${PCH_SKIP_SOURCE}")
+add_dependencies(afd_apitest afdstub)
 add_rostests_file(TARGET afd_apitest)

@@ -27,6 +27,17 @@ AfdCreateSocket(
     _In_ int SocketType,
     _In_ int Protocol)
 {
+    return AfdCreateSocketOnTransport(SocketHandle, AddressFamily, SocketType, Protocol, NULL);
+}
+
+NTSTATUS
+AfdCreateSocketOnTransport(
+    _Out_ PHANDLE SocketHandle,
+    _In_ int AddressFamily,
+    _In_ int SocketType,
+    _In_ int Protocol,
+    _In_opt_ PCWSTR TransportDevice)
+{
     NTSTATUS Status;
     OBJECT_ATTRIBUTES ObjectAttributes;
     IO_STATUS_BLOCK IoStatus;
@@ -42,6 +53,9 @@ AfdCreateSocket(
     UNICODE_STRING DeviceName = RTL_CONSTANT_STRING(L"\\Device\\Afd\\Endpoint");
 
     *SocketHandle = NULL;
+
+    if (TransportDevice)
+        RtlInitUnicodeString(&TransportName, TransportDevice);
 
     if (LOBYTE(LOWORD(GetVersion())) >= 6)
     {

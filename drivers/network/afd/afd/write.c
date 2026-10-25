@@ -316,12 +316,75 @@ static NTSTATUS NTAPI SendComplete
     return STATUS_SUCCESS;
 }
 
+/* The datagram of a cancelled send request is still in flight: it must not
+ * complete whichever request now happens to head the list */
+VOID AfdOrphanDatagramSend( PAFD_FCB FCB, PIRP Irp ) {
+    PLIST_ENTRY Entry;
+
+    for( Entry = FCB->DatagramSendList.Flink;
+         Entry != &FCB->DatagramSendList;
+         Entry = Entry->Flink ) {
+        PAFD_DGRAM_SEND_CONTEXT Ctx =
+            CONTAINING_RECORD(Entry, AFD_DGRAM_SEND_CONTEXT, ListEntry);
+        if( Ctx->UserIrp == Irp )
+            Ctx->UserIrp = NULL;
+    }
+}
+
+/* Cancels every datagram still in the transport, each once. The socket state
+ * lock is held. A cancel may complete its datagram inside IoCancelIrp, which
+ * unlinks the entry (the lock is recursive), so the walk restarts after each. */
+VOID AfdCancelDatagramSends( PAFD_FCB FCB ) {
+    for(;;) {
+        PLIST_ENTRY Entry;
+        PAFD_DGRAM_SEND_CONTEXT Ctx = NULL;
+
+        for( Entry = FCB->DatagramSendList.Flink;
+             Entry != &FCB->DatagramSendList;
+             Entry = Entry->Flink ) {
+            PAFD_DGRAM_SEND_CONTEXT This =
+                CONTAINING_RECORD(Entry, AFD_DGRAM_SEND_CONTEXT, ListEntry);
+            if( !This->CancelRequested && This->TransportIrp ) {
+                Ctx = This;
+                break;
+            }
+        }
+        if( !Ctx )
+            return;
+        Ctx->CancelRequested = TRUE;
+        IoCancelIrp( Ctx->TransportIrp );
+    }
+}
+
+static BOOLEAN DgramSendIsTracked( PAFD_FCB FCB, PAFD_DGRAM_SEND_CONTEXT Ctx ) {
+    PLIST_ENTRY Entry;
+
+    for( Entry = FCB->DatagramSendList.Flink;
+         Entry != &FCB->DatagramSendList;
+         Entry = Entry->Flink )
+        if( CONTAINING_RECORD(Entry, AFD_DGRAM_SEND_CONTEXT, ListEntry) == Ctx )
+            return TRUE;
+    return FALSE;
+}
+
+static BOOLEAN DgramSendRequestQueued( PAFD_FCB FCB, PIRP Irp ) {
+    PLIST_ENTRY Entry;
+
+    for( Entry = FCB->PendingIrpList[FUNCTION_SEND].Flink;
+         Entry != &FCB->PendingIrpList[FUNCTION_SEND];
+         Entry = Entry->Flink )
+        if( CONTAINING_RECORD(Entry, IRP, Tail.Overlay.ListEntry) == Irp )
+            return TRUE;
+    return FALSE;
+}
+
 static IO_COMPLETION_ROUTINE PacketSocketSendComplete;
 static NTSTATUS NTAPI PacketSocketSendComplete
 ( PDEVICE_OBJECT DeviceObject,
   PIRP Irp,
   PVOID Context ) {
-    PAFD_FCB FCB = (PAFD_FCB)Context;
+    PAFD_DGRAM_SEND_CONTEXT Ctx = (PAFD_DGRAM_SEND_CONTEXT)Context;
+    PAFD_FCB FCB = Ctx->FCB;
     PLIST_ENTRY NextIrpEntry;
     PIRP NextIrp;
     PAFD_SEND_INFO SendReq;
@@ -334,6 +397,12 @@ static NTSTATUS NTAPI PacketSocketSendComplete
 
     if( !SocketAcquireStateLock( FCB ) )
         return STATUS_FILE_CLOSED;
+
+    /* This datagram is done; the request it belongs to is the one recorded
+     * when it was sent (NULL when that request was cancelled meanwhile) */
+    NextIrp = Ctx->UserIrp;
+    RemoveEntryList( &Ctx->ListEntry );
+    ExFreePoolWithTag( Ctx, TAG_AFD_DGRAM_SEND );
 
     /* Only clear the slot if it still names this request: another datagram
      * send may have replaced it while this one was in flight */
@@ -358,19 +427,15 @@ static NTSTATUS NTAPI PacketSocketSendComplete
         return STATUS_FILE_CLOSED;
     }
 
-    /* The user request this transport send belonged to may already be gone:
-     * AfdCancelHandler dequeues and completes a cancelled request while its
-     * datagram is still in flight. Never pop a list head that is not there
-     * (it would be the list head itself, not an IRP). */
-    if( IsListEmpty( &FCB->PendingIrpList[FUNCTION_SEND] ) ) {
+    /* The owning request may be gone (cancelled, or completed by another
+     * path); other requests stay queued for their own datagrams */
+    if( !NextIrp || !DgramSendRequestQueued( FCB, NextIrp ) ) {
         AFD_DbgPrint(MIN_TRACE,("Datagram send completed with no pending request\n"));
         SocketStateUnlock( FCB );
         return STATUS_SUCCESS;
     }
 
-    /* TDI spec guarantees FIFO ordering on IRPs */
-    NextIrpEntry = RemoveHeadList(&FCB->PendingIrpList[FUNCTION_SEND]);
-    NextIrp = CONTAINING_RECORD(NextIrpEntry, IRP, Tail.Overlay.ListEntry);
+    RemoveEntryList(&NextIrp->Tail.Overlay.ListEntry);
 
     SendReq = GetLockedData(NextIrp, IoGetCurrentIrpStackLocation(NextIrp));
 
@@ -392,6 +457,86 @@ static NTSTATUS NTAPI PacketSocketSendComplete
     SocketStateUnlock(FCB);
 
     return STATUS_SUCCESS;
+}
+
+/* Queue a datagram send request and hand its datagram to the transport,
+ * recording which request the datagram completes. Returns FALSE, with the
+ * request untouched, when the record cannot be allocated. Otherwise the
+ * request is pending (or already completed) and the caller returns
+ * STATUS_PENDING. The socket state lock is held. */
+static BOOLEAN AfdQueueDatagramSend
+( PAFD_FCB FCB, PIRP Irp, PAFD_SEND_INFO_UDP SendReq,
+  PTDI_CONNECTION_INFORMATION TargetAddress ) {
+    NTSTATUS Status;
+    PIRP SavedInFlight;
+    PAFD_DGRAM_SEND_CONTEXT Ctx;
+
+    Ctx = ExAllocatePoolWithTag( NonPagedPool, sizeof(*Ctx), TAG_AFD_DGRAM_SEND );
+    if( !Ctx )
+        return FALSE;
+    Ctx->FCB = FCB;
+    Ctx->UserIrp = Irp;
+    Ctx->TransportIrp = NULL;
+    Ctx->CancelRequested = FALSE;
+
+    FCB->PollState &= ~AFD_EVENT_SEND;
+
+    Status = QueueUserModeIrp(FCB, Irp, FUNCTION_SEND);
+    if (Status != STATUS_PENDING)
+    {
+        /* Cancelled before it could be queued: completed by the cancel handler */
+        ExFreePoolWithTag( Ctx, TAG_AFD_DGRAM_SEND );
+        return TRUE;
+    }
+
+    if (SendReq->BufferCount > 1)
+    {
+        AFD_DbgPrint(MIN_TRACE,("WARN: More than one buffer %ld\n", SendReq->BufferCount));
+    }
+
+    InsertTailList( &FCB->DatagramSendList, &Ctx->ListEntry );
+    /* A failed hand-off must not erase an earlier datagram's slot */
+    SavedInFlight = FCB->SendIrp.InFlightRequest;
+    Status = TdiSendDatagram(&FCB->SendIrp.InFlightRequest,
+                             FCB->AddressFile.Object,
+                             SendReq->BufferArray[0].buf,
+                             SendReq->BufferArray[0].len,
+                             TargetAddress,
+                             PacketSocketSendComplete,
+                             Ctx);
+    if (Status == STATUS_PENDING)
+    {
+        /* The completion needs the state lock, which this thread holds, so the
+         * record is still listed unless the transport completed it inline */
+        if (DgramSendIsTracked( FCB, Ctx ))
+            Ctx->TransportIrp = FCB->SendIrp.InFlightRequest;
+        return TRUE;
+    }
+
+    /* Not pending: normally the transport never took the datagram and the
+     * completion routine did not run. If it did run, it consumed Ctx and
+     * completed the request. */
+    if (DgramSendIsTracked( FCB, Ctx ))
+    {
+        RemoveEntryList( &Ctx->ListEntry );
+        ExFreePoolWithTag( Ctx, TAG_AFD_DGRAM_SEND );
+        FCB->SendIrp.InFlightRequest = SavedInFlight;
+    }
+    else
+        return TRUE;
+
+    /* Earlier datagrams may still be queued: unlink this request, not the head */
+    if (DgramSendRequestQueued( FCB, Irp ))
+    {
+        RemoveEntryList(&Irp->Tail.Overlay.ListEntry);
+        Irp->IoStatus.Status = Status;
+        Irp->IoStatus.Information = ((Status == STATUS_SUCCESS) ? SendReq->BufferArray[0].len : 0);
+        AfdClearCancelRoutine(Irp);
+        UnlockBuffers(SendReq->BufferArray, SendReq->BufferCount, FALSE);
+        UnlockRequest(Irp, IoGetCurrentIrpStackLocation(Irp));
+        IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
+    }
+    return TRUE;
 }
 
 NTSTATUS NTAPI
@@ -451,33 +596,10 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         Status = TdiBuildConnectionInfo( &TargetAddress, FCB->RemoteAddress );
 
         if( NT_SUCCESS(Status) ) {
-            FCB->PollState &= ~AFD_EVENT_SEND;
-
-            Status = QueueUserModeIrp(FCB, Irp, FUNCTION_SEND);
-            if (Status == STATUS_PENDING)
-            {
-                if (SendReq->BufferCount > 1)
-                {
-                    AFD_DbgPrint(MIN_TRACE,("WARN: More than one buffer %ld\n", SendReq->BufferCount));
-                }
-                Status = TdiSendDatagram(&FCB->SendIrp.InFlightRequest,
-                                         FCB->AddressFile.Object,
-                                         SendReq->BufferArray[0].buf,
-                                         SendReq->BufferArray[0].len,
-                                         TargetAddress,
-                                         PacketSocketSendComplete,
-                                         FCB);
-                if (Status != STATUS_PENDING)
-                {
-                    /* Earlier datagrams may still be queued: unlink this request, not the head */
-                    RemoveEntryList(&Irp->Tail.Overlay.ListEntry);
-                    Irp->IoStatus.Status = Status;
-                    Irp->IoStatus.Information = ((Status == STATUS_SUCCESS) ? SendReq->BufferArray[0].len : 0);
-                    AfdClearCancelRoutine(Irp);
-                    UnlockBuffers(SendReq->BufferArray, SendReq->BufferCount, FALSE);
-                    UnlockRequest(Irp, IoGetCurrentIrpStackLocation(Irp));
-                    IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
-                }
+            if (!AfdQueueDatagramSend(FCB, Irp, SendReq, TargetAddress)) {
+                ExFreePoolWithTag(TargetAddress, TAG_AFD_TDI_CONNECTION_INFORMATION);
+                UnlockBuffers(SendReq->BufferArray, SendReq->BufferCount, FALSE);
+                return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY, Irp, 0 );
             }
 
             ExFreePoolWithTag(TargetAddress, TAG_AFD_TDI_CONNECTION_INFORMATION);
@@ -742,33 +864,10 @@ AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     /* Check the size of the Address given ... */
 
     if( NT_SUCCESS(Status) ) {
-        FCB->PollState &= ~AFD_EVENT_SEND;
-
-        Status = QueueUserModeIrp(FCB, Irp, FUNCTION_SEND);
-        if (Status == STATUS_PENDING)
-        {
-            if (SendReq->BufferCount > 1)
-            {
-                AFD_DbgPrint(MIN_TRACE,("WARN: More than one buffer %ld\n", SendReq->BufferCount));
-            }
-            Status = TdiSendDatagram(&FCB->SendIrp.InFlightRequest,
-                                     FCB->AddressFile.Object,
-                                     SendReq->BufferArray[0].buf,
-                                     SendReq->BufferArray[0].len,
-                                     TargetAddress,
-                                     PacketSocketSendComplete,
-                                     FCB);
-            if (Status != STATUS_PENDING)
-            {
-                /* Earlier datagrams may still be queued: unlink this request, not the head */
-                RemoveEntryList(&Irp->Tail.Overlay.ListEntry);
-                Irp->IoStatus.Status = Status;
-                Irp->IoStatus.Information = ((Status == STATUS_SUCCESS) ? SendReq->BufferArray[0].len : 0);
-                AfdClearCancelRoutine(Irp);
-                UnlockBuffers(SendReq->BufferArray, SendReq->BufferCount, FALSE);
-                UnlockRequest(Irp, IoGetCurrentIrpStackLocation(Irp));
-                IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
-            }
+        if (!AfdQueueDatagramSend(FCB, Irp, SendReq, TargetAddress)) {
+            ExFreePoolWithTag(TargetAddress, TAG_AFD_TDI_CONNECTION_INFORMATION);
+            UnlockBuffers(SendReq->BufferArray, SendReq->BufferCount, FALSE);
+            return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY, Irp, 0 );
         }
 
         ExFreePoolWithTag(TargetAddress, TAG_AFD_TDI_CONNECTION_INFORMATION);
