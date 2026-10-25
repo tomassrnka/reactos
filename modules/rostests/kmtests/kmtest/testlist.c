@@ -27,6 +27,7 @@ KMT_TESTFUNC Test_FltMgrLoad;
 KMT_TESTFUNC Test_FltMgrReg;
 KMT_TESTFUNC Test_HidPDescription;
 KMT_TESTFUNC Test_IoCreateFile;
+KMT_TESTFUNC Test_IoCreateFileEx;
 KMT_TESTFUNC Test_IoDeviceObject;
 KMT_TESTFUNC Test_IoReadWrite;
 KMT_TESTFUNC Test_MmMapLockedPagesProcessExit;
@@ -71,6 +72,7 @@ const KMT_TEST TestList[] =
     { "-FltMgrReg",                   Test_FltMgrReg }, // TODO: WIP/untested/crashes.
     { "HidPDescription",              Test_HidPDescription },
     { "IoCreateFile",                 Test_IoCreateFile },
+    { "IoCreateFileEx",               Test_IoCreateFileEx },
     { "IoDeviceObject",               Test_IoDeviceObject },
     { "IoReadWrite",                  Test_IoReadWrite },
     { "KeTrapFrame",                  Test_KeTrapFrame },
