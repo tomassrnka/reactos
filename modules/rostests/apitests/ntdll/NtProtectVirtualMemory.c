@@ -1139,6 +1139,98 @@ Cleanup:
     NtClose(SectionHandle);
 }
 
+static
+void
+TestNoChangeVads(void)
+{
+    NTSTATUS Status;
+    HANDLE SectionHandle;
+    LARGE_INTEGER MaximumSize;
+    PVOID BaseAddress;
+    SIZE_T ViewSize, RegionSize;
+    ULONG OldProtect;
+
+    /* A SEC_NO_CHANGE section view must keep refusing protection changes */
+    MaximumSize.QuadPart = PAGE_SIZE;
+    Status = NtCreateSection(&SectionHandle,
+                             SECTION_ALL_ACCESS,
+                             NULL,
+                             &MaximumSize,
+                             PAGE_READWRITE,
+                             SEC_COMMIT | SEC_NO_CHANGE,
+                             NULL);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        BaseAddress = NULL;
+        ViewSize = 0;
+        Status = NtMapViewOfSection(SectionHandle,
+                                    NtCurrentProcess(),
+                                    &BaseAddress,
+                                    0,
+                                    0,
+                                    NULL,
+                                    &ViewSize,
+                                    ViewUnmap,
+                                    0,
+                                    PAGE_READWRITE);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+        {
+            RegionSize = PAGE_SIZE;
+            OldProtect = 0;
+            Status = NtProtectVirtualMemory(NtCurrentProcess(),
+                                            &BaseAddress,
+                                            &RegionSize,
+                                            PAGE_READONLY,
+                                            &OldProtect);
+            ok_ntstatus(Status, STATUS_INVALID_PAGE_PROTECTION);
+            NtUnmapViewOfSection(NtCurrentProcess(), BaseAddress);
+        }
+        NtClose(SectionHandle);
+    }
+
+    /* The PEB and TEB are kernel-secured private VADs, but their process may reprotect them
+     * (the Chromium renderer sandbox does) */
+    BaseAddress = NtCurrentTeb();
+    RegionSize = PAGE_SIZE;
+    OldProtect = 0;
+    Status = NtProtectVirtualMemory(NtCurrentProcess(),
+                                    &BaseAddress,
+                                    &RegionSize,
+                                    PAGE_READWRITE,
+                                    &OldProtect);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    ok(OldProtect == PAGE_READWRITE, "TEB: old protection 0x%lx\n", OldProtect);
+
+    BaseAddress = NtCurrentPeb();
+    RegionSize = PAGE_SIZE;
+    OldProtect = 0;
+    Status = NtProtectVirtualMemory(NtCurrentProcess(),
+                                    &BaseAddress,
+                                    &RegionSize,
+                                    PAGE_READWRITE,
+                                    &OldProtect);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    ok(OldProtect == PAGE_READWRITE, "PEB: old protection 0x%lx\n", OldProtect);
+
+    /* The TEB stays usable */
+    StartSeh()
+    {
+        ok(NtCurrentTeb()->ProcessEnvironmentBlock == NtCurrentPeb(), "TEB damaged\n");
+    } EndSeh(STATUS_SUCCESS);
+
+    /* The shared user data page stays immutable */
+    BaseAddress = (PVOID)MM_SHARED_USER_DATA_VA;
+    RegionSize = PAGE_SIZE;
+    Status = NtProtectVirtualMemory(NtCurrentProcess(),
+                                    &BaseAddress,
+                                    &RegionSize,
+                                    PAGE_READWRITE,
+                                    &OldProtect);
+    ok_ntstatus(Status, STATUS_INVALID_PAGE_PROTECTION);
+}
+
 START_TEST(NtProtectVirtualMemory)
 {
     TestReadWrite();
@@ -1154,4 +1246,5 @@ START_TEST(NtProtectVirtualMemory)
     TestNoCacheFreshPages();
     TestSectionMaxProtection();
     TestImageSectionMaxProtection();
+    TestNoChangeVads();
 }
