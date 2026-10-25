@@ -361,6 +361,38 @@ static NTSTATUS Call(ULONG *a, BOOLEAN *Reported)
         BaseMessage.Data.ExitProcessRequest.uExitCode = Data[0];
         return CsrClientCallServer((PCSR_API_MESSAGE)&BaseMessage, NULL, Api, sizeof(BASE_EXIT_PROCESS));
     }
+    case CSR_CREATE_API_NUMBER(CONSRV_SERVERDLL_INDEX, ConsolepOpenConsole):
+    {
+        WOW64_CONSOLE_OPENCONSOLE *Guest = (PVOID)Data;
+        CONSOLE_OPENCONSOLE *Open = &Message.Data.OpenConsoleRequest;
+        if (a[3] != sizeof(*Guest)) return STATUS_INFO_LENGTH_MISMATCH;
+        Open->ConsoleHandle = HANDLE32(Guest->ConsoleHandle);
+        Open->HandleType = Guest->HandleType;
+        Open->DesiredAccess = Guest->DesiredAccess;
+        Open->InheritHandle = Guest->InheritHandle;
+        Open->ShareMode = Guest->ShareMode;
+        Status = CsrClientCallServer((PCSR_API_MESSAGE)&Message, NULL, Api, sizeof(*Open));
+        if (NT_SUCCESS(Status)) Guest->Handle = HandleToUlong(Open->Handle);
+        return Status;
+    }
+    case CSR_CREATE_API_NUMBER(CONSRV_SERVERDLL_INDEX, ConsolepCreateScreenBuffer):
+    {
+        WOW64_CONSOLE_CREATESCREENBUFFER *Guest = (PVOID)Data;
+        CONSOLE_CREATESCREENBUFFER *Create = &Message.Data.CreateScreenBufferRequest;
+        if (a[3] != sizeof(*Guest)) return STATUS_INFO_LENGTH_MISMATCH;
+        /* A graphics screen buffer carries a BITMAPINFO pointer and a shared
+         * section mapping; only text-mode buffers are a pure fixed-width request. */
+        if (Guest->ScreenBufferType != CONSOLE_TEXTMODE_BUFFER)
+            return UnsupportedApi(Api, a[3], Reported);
+        Create->ConsoleHandle = HANDLE32(Guest->ConsoleHandle);
+        Create->DesiredAccess = Guest->DesiredAccess;
+        Create->InheritHandle = Guest->InheritHandle;
+        Create->ShareMode = Guest->ShareMode;
+        Create->ScreenBufferType = Guest->ScreenBufferType;
+        Status = CsrClientCallServer((PCSR_API_MESSAGE)&Message, NULL, Api, sizeof(*Create));
+        if (NT_SUCCESS(Status)) Guest->OutputHandle = HandleToUlong(Create->OutputHandle);
+        return Status;
+    }
     default:
         return UnsupportedApi(Api, a[3], Reported);
     }
