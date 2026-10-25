@@ -308,12 +308,16 @@ static const INFORMATION_CLASS_INFO PsProcessInfoClass[] =
         ICIF_QUERY | ICIF_SET
     ),
 
-    /* ProcessTlsInformation */
+    /* ProcessTlsInformation
+     * Query is known to the table from Vista on so that buffer probing
+     * behaves as on NT6+; NtQueryInformationProcess rejects it with
+     * STATUS_INVALID_INFO_CLASS below that (runtime NT version gate) and has
+     * no data to return for it (VERBUMP). */
     IQS_SAME
     (
         PROCESS_TLS_INFORMATION,
         ULONG,
-        ICIF_SET | ICIF_SET_SIZE_VARIABLE
+        ICIF_QUERY | ICIF_SET | ICIF_SET_SIZE_VARIABLE
     ),
 
     /* ProcessCookie */

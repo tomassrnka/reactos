@@ -577,6 +577,14 @@ NtQueryInformationProcess(
 
     PAGED_CODE();
 
+    /* ProcessTlsInformation has no query below Vista: a 5.2 identity must
+     * behave like Windows Server 2003, where the class does not exist */
+    if ((ProcessInformationClass == ProcessTlsInformation) &&
+        (NtMajorVersion < 6))
+    {
+        return STATUS_INVALID_INFO_CLASS;
+    }
+
     /* Validate the information class */
     Status = DefaultQueryInfoBufferCheck(ProcessInformationClass,
                                          PsProcessInfoClass,
@@ -1867,6 +1875,28 @@ NtQueryInformationProcess(
             ObDereferenceObject(Process);
             break;
         }
+
+        /* Known to the table (Vista+) so that probing matches, but there is
+         * nothing to query: TLS replacement is a set-only operation here */
+        case ProcessTlsInformation:
+            Status = STATUS_INVALID_INFO_CLASS;
+
+            /* The caller's buffer is still validated first, as on NT6+ */
+            if (PreviousMode != KernelMode)
+            {
+                _SEH2_TRY
+                {
+                    ProbeForWrite(ProcessInformation,
+                                  ProcessInformationLength,
+                                  sizeof(ULONG));
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    Status = _SEH2_GetExceptionCode();
+                }
+                _SEH2_END;
+            }
+            break;
 
         /* Not supported by Server 2003 */
         default:
