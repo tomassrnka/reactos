@@ -76,7 +76,8 @@ FsRtlpIsDfsEnabled(VOID)
 
 NTSTATUS
 FsRtlpOpenDev(OUT PHANDLE DeviceHandle,
-              IN PCWSTR DeviceName)
+              IN PCWSTR DeviceName,
+              IN ULONG HandleAttributes)
 {
     NTSTATUS Status;
     UNICODE_STRING StrDeviceName;
@@ -89,7 +90,7 @@ FsRtlpOpenDev(OUT PHANDLE DeviceHandle,
     RtlInitUnicodeString(&StrDeviceName, DeviceName);
     InitializeObjectAttributes(&ObjectAttributes,
                                &StrDeviceName,
-                               0,
+                               HandleAttributes,
                                NULL,
                                NULL);
     Status = ZwCreateFile(DeviceHandle,
@@ -161,12 +162,12 @@ FsRtlpRegisterProviderWithMUP(IN HANDLE MupHandle,
                   RedirectorDeviceName->Buffer, RedirectorDeviceName->Length);
 
     /* Call MUP with the registration FSCTL */
-    Status = NtFsControlFile(MupHandle, NULL, NULL, NULL,
+    Status = ZwFsControlFile(MupHandle, NULL, NULL, NULL,
                              &IoStatusBlock, FSCTL_MUP_REGISTER_PROVIDER,
                              RegistrationInfo, BufferSize, NULL, 0);
     if (Status == STATUS_PENDING)
     {
-        Status = NtWaitForSingleObject(MupHandle, TRUE, NULL);
+        Status = ZwWaitForSingleObject(MupHandle, TRUE, NULL);
     }
 
     if (NT_SUCCESS(Status))
@@ -176,6 +177,55 @@ FsRtlpRegisterProviderWithMUP(IN HANDLE MupHandle,
 
     /* And we're done! */
     ASSERT(NT_SUCCESS(Status));
+    ExFreePoolWithTag(RegistrationInfo, TAG_UNC);
+
+    return Status;
+}
+
+/* Registers a provider by device object: the FSCTL carries the pointer, so it must
+ * come from kernel mode, which ZwFsControlFile guarantees */
+NTSTATUS
+FsRtlpRegisterProviderWithMUPEx(IN HANDLE MupHandle,
+                                IN PCUNICODE_STRING RedirectorDeviceName,
+                                IN PDEVICE_OBJECT DeviceObject,
+                                IN ULONG Flags)
+{
+    NTSTATUS Status;
+    ULONG BufferSize;
+    IO_STATUS_BLOCK IoStatusBlock;
+    PMUP_PROVIDER_REGISTRATION_INFO_EX RegistrationInfo;
+
+    PAGED_CODE();
+
+    DPRINT("FsRtlpRegisterProviderWithMUPEx(%p, %wZ, %p, %lx)\n", (PVOID)MupHandle, RedirectorDeviceName, DeviceObject, Flags);
+
+    BufferSize = sizeof(*RegistrationInfo) + RedirectorDeviceName->Length;
+    RegistrationInfo = ExAllocatePoolWithTag(NonPagedPool, BufferSize, TAG_UNC);
+    if (RegistrationInfo == NULL)
+    {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    RegistrationInfo->RedirectorDeviceNameOffset = sizeof(*RegistrationInfo);
+    RegistrationInfo->RedirectorDeviceNameLength = RedirectorDeviceName->Length;
+    RegistrationInfo->DeviceObject = DeviceObject;
+    RegistrationInfo->Flags = Flags;
+    RtlCopyMemory((PWSTR)((ULONG_PTR)RegistrationInfo + RegistrationInfo->RedirectorDeviceNameOffset),
+                  RedirectorDeviceName->Buffer, RedirectorDeviceName->Length);
+
+    Status = ZwFsControlFile(MupHandle, NULL, NULL, NULL,
+                             &IoStatusBlock, FSCTL_MUP_REGISTER_PROVIDER_EX,
+                             RegistrationInfo, BufferSize, NULL, 0);
+    if (Status == STATUS_PENDING)
+    {
+        Status = ZwWaitForSingleObject(MupHandle, TRUE, NULL);
+    }
+
+    if (NT_SUCCESS(Status))
+    {
+        Status = IoStatusBlock.Status;
+    }
+
     ExFreePoolWithTag(RegistrationInfo, TAG_UNC);
 
     return Status;
@@ -255,39 +305,24 @@ FsRtlDeregisterUncProvider(IN HANDLE Handle)
      */
 }
 
-/*++
- * @name FsRtlRegisterUncProvider
- * @implemented
- *
- * FILLME
- *
- * @param Handle
- *        FILLME
- *
- * @param RedirectorDeviceName
- *        FILLME
- *
- * @param MailslotsSupported
- *        FILLME
- *
- * @return None
- *
- * @remarks None
- *
- *--*/
+/* Worker of FsRtlRegisterUncProvider and FsRtlRegisterUncProviderEx */
+static
 NTSTATUS
-NTAPI
-FsRtlRegisterUncProvider(OUT PHANDLE Handle,
-                         IN PCUNICODE_STRING RedirectorDeviceName,
-                         IN BOOLEAN MailslotsSupported)
+FsRtlpRegisterUncProvider(OUT PHANDLE Handle,
+                          IN PCUNICODE_STRING RedirectorDeviceName,
+                          IN BOOLEAN MailslotsSupported,
+                          IN PDEVICE_OBJECT ProviderDevice OPTIONAL,
+                          IN ULONG ProviderFlags)
 {
     NTSTATUS Status;
     HANDLE DeviceHandle;
     UNICODE_STRING MupString;
+    /* A device object provider is registered with a kernel handle: it is used from any context */
+    ULONG MupHandleAttributes = (ProviderDevice != NULL) ? OBJ_KERNEL_HANDLE : 0;
 
     PAGED_CODE();
 
-    DPRINT1("FsRtlRegisterUncProvider(%p, %wZ, %u)\n", Handle, RedirectorDeviceName, MailslotsSupported);
+    DPRINT1("FsRtlpRegisterUncProvider(%p, %wZ, %u, %p)\n", Handle, RedirectorDeviceName, MailslotsSupported, ProviderDevice);
 
     KeWaitForSingleObject(&FsRtlpUncSemaphore, Executive, KernelMode, FALSE, NULL);
 
@@ -296,9 +331,9 @@ FsRtlRegisterUncProvider(OUT PHANDLE Handle,
      */
     if (FsRtlpRedirs == 0)
     {
-        if (FsRtlpIsDfsEnabled())
+        if (ProviderDevice != NULL || FsRtlpIsDfsEnabled())
         {
-            DPRINT1("DFS is not disabled. Going through MUP\n");
+            DPRINT1("DFS is not disabled (or provider has no name). Going through MUP\n");
 
             /* We've to go with MUP, make sure our internal structure doesn't
              * contain any leftover data and raise redirs to one, to make sure
@@ -316,7 +351,7 @@ FsRtlRegisterUncProvider(OUT PHANDLE Handle,
     if (FsRtlpRedirs == 0)
     {
         /* As we don't provide MUP, just give a handle to NULL device */
-        Status = FsRtlpOpenDev(&DeviceHandle, L"\\Device\\Null");
+        Status = FsRtlpOpenDev(&DeviceHandle, L"\\Device\\Null", 0);
         if (!NT_SUCCESS(Status))
         {
             goto Cleanup;
@@ -345,13 +380,13 @@ FsRtlRegisterUncProvider(OUT PHANDLE Handle,
     else
     {
         /* We (will) have several providers, MUP is required */
-        Status = FsRtlpOpenDev(&DeviceHandle, L"\\Device\\Mup");
+        Status = FsRtlpOpenDev(&DeviceHandle, L"\\Device\\Mup", MupHandleAttributes);
         if (!NT_SUCCESS(Status))
         {
             /* Opening MUP may have failed because the driver was not loaded, so load it and retry */
             RtlInitUnicodeString(&MupString, L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\Mup");
             ZwLoadDriver(&MupString);
-            Status = FsRtlpOpenDev(&DeviceHandle, L"\\Device\\Mup");
+            Status = FsRtlpOpenDev(&DeviceHandle, L"\\Device\\Mup", MupHandleAttributes);
             if (!NT_SUCCESS(Status))
             {
                 goto Cleanup;
@@ -378,7 +413,7 @@ FsRtlRegisterUncProvider(OUT PHANDLE Handle,
             FsRtlpDRD.RedirectorDeviceName.Buffer = NULL;
 
             /* Re-open MUP to have a handle to give back to the user */
-            Status = FsRtlpOpenDev(&DeviceHandle, L"\\Device\\Mup");
+            Status = FsRtlpOpenDev(&DeviceHandle, L"\\Device\\Mup", MupHandleAttributes);
             if (!NT_SUCCESS(Status))
             {
                 goto Cleanup;
@@ -390,7 +425,14 @@ FsRtlRegisterUncProvider(OUT PHANDLE Handle,
         FsRtlpSetSymbolicLink(&MupString);
 
         /* Register new provider */
-        Status = FsRtlpRegisterProviderWithMUP(DeviceHandle, RedirectorDeviceName, MailslotsSupported);
+        if (ProviderDevice != NULL)
+        {
+            Status = FsRtlpRegisterProviderWithMUPEx(DeviceHandle, RedirectorDeviceName, ProviderDevice, ProviderFlags);
+        }
+        else
+        {
+            Status = FsRtlpRegisterProviderWithMUP(DeviceHandle, RedirectorDeviceName, MailslotsSupported);
+        }
     }
 
 Cleanup:
@@ -419,16 +461,47 @@ Cleanup:
 }
 
 /*++
+ * @name FsRtlRegisterUncProvider
+ * @implemented
+ *
+ * FILLME
+ *
+ * @param Handle
+ *        FILLME
+ *
+ * @param RedirectorDeviceName
+ *        FILLME
+ *
+ * @param MailslotsSupported
+ *        FILLME
+ *
+ * @return None
+ *
+ * @remarks None
+ *
+ *--*/
+NTSTATUS
+NTAPI
+FsRtlRegisterUncProvider(OUT PHANDLE Handle,
+                         IN PCUNICODE_STRING RedirectorDeviceName,
+                         IN BOOLEAN MailslotsSupported)
+{
+    PAGED_CODE();
+
+    return FsRtlpRegisterUncProvider(Handle, RedirectorDeviceName, MailslotsSupported, NULL, 0);
+}
+
+/*++
  * @name FsRtlRegisterUncProviderEx
  * @implemented
  *
- * Registers a UNC provider by device object. MUP registers providers by device
- * name, and a provider whose device has no name (WinFsp) cannot be told to it yet:
- * this call succeeds without registering, so that the driver loads, and UNC paths
- * do not reach it.
+ * Registers a UNC provider by device object, for a provider whose device has
+ * no name: MUP sends its path queries to the device, and hands creates over to
+ * it (the provider completes them, usually with STATUS_REPARSE). MUP is always
+ * involved, as UNC paths have to reach the provider through \Device\Mup.
  *
  * @param MupHandle
- *        Receives NULL
+ *        Receives the handle of the registration (INVALID_HANDLE_VALUE on failure)
  *
  * @param RedirDevName
  *        Name of the provider
@@ -439,7 +512,7 @@ Cleanup:
  * @param Flags
  *        FSRTL_UNC_PROVIDER_FLAGS_*
  *
- * @return STATUS_SUCCESS
+ * @return STATUS_SUCCESS, or why MUP refused the provider
  *
  *--*/
 NTSTATUS
@@ -451,11 +524,18 @@ FsRtlRegisterUncProviderEx(OUT PHANDLE MupHandle,
 {
     PAGED_CODE();
 
-    DPRINT1("FsRtlRegisterUncProviderEx(%wZ, %p, %lx): not registered with MUP\n",
-            RedirDevName, DeviceObject, Flags);
+    DPRINT("FsRtlRegisterUncProviderEx(%wZ, %p, %lx)\n", RedirDevName, DeviceObject, Flags);
 
-    *MupHandle = NULL;
-    return STATUS_SUCCESS;
+    if (MupHandle == NULL || RedirDevName == NULL || DeviceObject == NULL)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    return FsRtlpRegisterUncProvider(MupHandle,
+                                     RedirDevName,
+                                     (Flags & FSRTL_UNC_PROVIDER_FLAGS_MAILSLOTS_SUPPORTED) != 0,
+                                     DeviceObject,
+                                     Flags);
 }
 
 /*++

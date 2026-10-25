@@ -82,6 +82,7 @@ typedef struct _MUP_UNC
     ULONG ProviderOrder;
     BOOLEAN MailslotsSupported;
     BOOLEAN Registered;
+    BOOLEAN ByDeviceObject; /* registered with FsRtlRegisterUncProviderEx: no named device, no FileObject */
 } MUP_UNC, *PMUP_UNC;
 
 typedef struct _MUP_PFX
