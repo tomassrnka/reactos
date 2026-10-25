@@ -45,13 +45,19 @@ public:
 
     virtual ~CBasePropertyBag() { }
 
+    // NT5 exposes IPropertyBag2 on every bag; NT6+ only on the registry bag
+    virtual bool SupportsPropertyBag2() const
+    {
+        return GetProcessOsVersion() < _WIN32_WINNT_VISTA;
+    }
+
     // IUnknown interface
     STDMETHODIMP QueryInterface(REFIID riid, void **ppvObject) override
     {
         if (!ppvObject)
             return E_POINTER;
         
-        if (GetProcessOsVersion() < _WIN32_WINNT_VISTA)
+        if (SupportsPropertyBag2())
         {
             if (::IsEqualGUID(riid, IID_IPropertyBag2))
             {
@@ -296,6 +302,8 @@ public:
             ::RegCloseKey(m_hKey);
     }
 
+    bool SupportsPropertyBag2() const override { return true; }
+
     HRESULT Init(HKEY hKey, LPCWSTR lpSubKey);
 
     STDMETHODIMP Read(_In_z_ LPCWSTR pszPropName, _Inout_ VARIANT *pvari,
@@ -373,7 +381,17 @@ CRegPropertyBag::_ReadBinary(
     DWORD uBytes)
 {
     HRESULT hr = E_FAIL;
-    if (vt != VT_UNKNOWN || uBytes < sizeof(GUID))
+    /* NT5 only reads a stream when VT_UNKNOWN is requested; NT6+ also reads it for VT_EMPTY */
+    if (GetProcessOsVersion() < _WIN32_WINNT_VISTA)
+    {
+        if (vt != VT_UNKNOWN)
+            return hr;
+    }
+    else if (vt != VT_UNKNOWN && vt != VT_EMPTY)
+    {
+        return hr;
+    }
+    if (uBytes < sizeof(GUID))
         return hr;
 
     LPBYTE pbData = (LPBYTE)::LocalAlloc(LMEM_ZEROINIT, uBytes);
