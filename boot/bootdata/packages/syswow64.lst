@@ -166,6 +166,15 @@ SysWOW64/msftedit.dll
 @0x600 SysWOW64/opengl32.dll
 @0x600 SysWOW64/win32u.dll
 
+# Runtime dependencies of common 32-bit apps (T136): Firefox 52 imports pdh (xul.dll) and
+# delay-loads msdmo; its ANGLE libGLESv2 imports d3d9; Winamp visualisers import ddraw and the
+# WMA encoder imports wmvcore. Each is loaded with an import chain that is listed here too.
+SysWOW64/pdh.dll
+SysWOW64/msdmo.dll
+@0x600 SysWOW64/d3d9.dll
+SysWOW64/ddraw.dll
+SysWOW64/wmvcore.dll
+
 # Code-page data used by the guest kernel32 NLS loader.
 SysWOW64/c_037.nls
 SysWOW64/c_10000.nls
