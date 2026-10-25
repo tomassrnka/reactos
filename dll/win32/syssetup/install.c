@@ -1534,12 +1534,38 @@ RegisterVulkanIcds(
 }
 
 static
+BOOL
+IsUnattendedSetup(VOID)
+{
+    WCHAR szPath[MAX_PATH];
+    WCHAR szValue[16];
+
+    /* Same test as wizard.c!ProcessUnattendSection(): [Unattend] UnattendSetupEnabled=yes */
+    GetSetupInfPath(szPath, _countof(szPath));
+    if (!GetPrivateProfileStringW(L"Unattend", L"UnattendSetupEnabled", L"no",
+                                  szValue, _countof(szValue), szPath))
+        return FALSE;
+    return (_wcsicmp(szValue, L"yes") == 0);
+}
+
+static
 VOID
 RegisterBrowserChooser(VOID)
 {
     HKEY hKey;
     WCHAR szCmd[MAX_PATH];
     LONG lError;
+
+    /*
+     * The chooser is a modal dialog awaiting a click. Nobody is there to click
+     * it under an unattended/automated setup (CI golden builds, unattended
+     * installs), so the automated first logon would hang. Skip it there.
+     */
+    if (IsUnattendedSetup())
+    {
+        DPRINT1("RegisterBrowserChooser: unattended setup, not registering\n");
+        return;
+    }
 
     /*
      * Register the first-login default-browser chooser as a RunOnce entry.
@@ -1557,7 +1583,7 @@ RegisterBrowserChooser(VOID)
         return;
     }
 
-    wcscpy(szCmd, L"%SystemRoot%\\system32\\bchooser.exe");
+    wcscpy(szCmd, L"%SystemRoot%\\system32\\bchooser.exe /firstlogon");
     RegSetValueExW(hKey, L"BrowserChooser", 0, REG_EXPAND_SZ,
                    (const BYTE *)szCmd, (wcslen(szCmd) + 1) * sizeof(WCHAR));
     RegCloseKey(hKey);

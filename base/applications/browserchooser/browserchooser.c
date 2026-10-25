@@ -765,11 +765,40 @@ DlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
  * provisioning scripts):
  *   bchooser.exe /set <StartMenuInternetKey>   set that client as default
  *   bchooser.exe /installfirefox               install Firefox via RAPPS + set default
- * Returns 0 on success, 1 on failure.  Without arguments the GUI chooser runs.
+ *   bchooser.exe /firstlogon                   the RunOnce launch: show the chooser, except
+ *                                              under unattended setup (no dialog, rc 0)
+ * Returns 0 on success, 1 on failure (-1: run the GUI).  Without arguments the GUI chooser runs.
  */
+/* Same test as syssetup: [Unattend] UnattendSetupEnabled=yes in $winnt$.inf */
+static BOOL
+IsUnattendedSetup(VOID)
+{
+    WCHAR szPath[MAX_PATH];
+    WCHAR szValue[16];
+
+    if (!GetSystemDirectoryW(szPath, ARRAYSIZE(szPath)))
+        return FALSE;
+    StringCchCatW(szPath, ARRAYSIZE(szPath), L"\\$winnt$.inf");
+    if (!GetPrivateProfileStringW(L"Unattend", L"UnattendSetupEnabled", L"no",
+                                  szValue, ARRAYSIZE(szValue), szPath))
+        return FALSE;
+    return !StrCmpIW(szValue, L"yes");
+}
+
 static int
 RunAutomation(int argc, LPWSTR *argv)
 {
+    if (!StrCmpIW(argv[0], L"/firstlogon"))
+    {
+        /* Never block an automated logon on a dialog nobody will answer. */
+        if (IsUnattendedSetup())
+        {
+            LogLine(L"Automation: /firstlogon under unattended setup, skipping");
+            return 0;
+        }
+        return -1; /* interactive: fall through to the GUI */
+    }
+
     if (!StrCmpIW(argv[0], L"/installfirefox"))
     {
         LogLine(L"Automation: /installfirefox");
@@ -827,9 +856,13 @@ wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nCm
     if (argv && argc > 1)
     {
         ret = RunAutomation(argc - 1, &argv[1]);
-        LocalFree(argv);
-        LogLine(L"Browser chooser exiting (automation rc=%d)", ret);
-        return ret;
+        if (ret != -1)
+        {
+            LocalFree(argv);
+            LogLine(L"Browser chooser exiting (automation rc=%d)", ret);
+            return ret;
+        }
+        ret = 0; /* /firstlogon on an interactive setup: show the chooser */
     }
     if (argv)
         LocalFree(argv);
