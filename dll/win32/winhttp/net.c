@@ -312,6 +312,9 @@ void netconn_release( struct netconn *conn )
     free(conn);
 }
 
+/* Upper bound on the TLS handshake read buffer (certificate chains are tens of KiB) */
+#define MAX_HANDSHAKE_BUFFER (256 * 1024)
+
 DWORD netconn_secure_connect( struct netconn *conn, WCHAR *hostname, DWORD security_flags, CredHandle *cred_handle,
                               BOOL check_revocation )
 {
@@ -369,6 +372,13 @@ DWORD netconn_secure_connect( struct netconn *conn, WCHAR *hostname, DWORD secur
 
         if(in_bufs[0].cbBuffer + 1024 > read_buf_size) {
             BYTE *new_read_buf;
+
+            /* a hostile server must not make the handshake buffer grow forever */
+            if(read_buf_size + 1024 > MAX_HANDSHAKE_BUFFER) {
+                WARN("handshake message too large\n");
+                status = ERROR_WINHTTP_SECURE_CHANNEL_ERROR;
+                break;
+            }
 
             new_read_buf = realloc(read_buf, read_buf_size + 1024);
             if(!new_read_buf) {

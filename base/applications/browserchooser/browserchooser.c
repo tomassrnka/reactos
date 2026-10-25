@@ -68,10 +68,12 @@ LogLine(LPCWSTR fmt, ...)
     OutputDebugStringW(szBuf);
     OutputDebugStringW(L"\n");
 
-    /* Append it to a persistent on-disk log for post-mortem/harness read-back. */
-    if (GetWindowsDirectoryW(szPath, ARRAYSIZE(szPath)))
+    /* Append it to an on-disk log for post-mortem read-back. The log lives in
+     * the calling user's own temp directory, never in the shared, predictable
+     * %windir%\\Temp (the first-logon process may be elevated). */
+    if (GetTempPathW(ARRAYSIZE(szPath), szPath) &&
+        SUCCEEDED(StringCchCatW(szPath, ARRAYSIZE(szPath), L"browserchooser.log")))
     {
-        StringCchCatW(szPath, ARRAYSIZE(szPath), L"\\Temp\\browserchooser.log");
         hFile = CreateFileW(szPath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
                             NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hFile != INVALID_HANDLE_VALUE)
@@ -94,6 +96,10 @@ LogLine(LPCWSTR fmt, ...)
 /* Registry helpers                                                   */
 /* ------------------------------------------------------------------ */
 
+/* First registry write failure since SetDefaultBrowser/EnsureFirefoxClient
+ * started; they report failure instead of claiming success. */
+static LONG g_WriteError = ERROR_SUCCESS;
+
 static LONG
 SetStringValue(HKEY hRoot, LPCWSTR pszSubKey, LPCWSTR pszValue, LPCWSTR pszData)
 {
@@ -102,14 +108,88 @@ SetStringValue(HKEY hRoot, LPCWSTR pszSubKey, LPCWSTR pszValue, LPCWSTR pszData)
 
     lRet = RegCreateKeyExW(hRoot, pszSubKey, 0, NULL, REG_OPTION_NON_VOLATILE,
                            KEY_WRITE, NULL, &hKey, NULL);
-    if (lRet != ERROR_SUCCESS)
-        return lRet;
+    if (lRet == ERROR_SUCCESS)
+    {
+        lRet = RegSetValueExW(hKey, pszValue, 0, REG_SZ,
+                              (const BYTE *)pszData,
+                              (DWORD)((wcslen(pszData) + 1) * sizeof(WCHAR)));
+        RegCloseKey(hKey);
+    }
 
-    lRet = RegSetValueExW(hKey, pszValue, 0, REG_SZ,
-                          (const BYTE *)pszData,
-                          (DWORD)((wcslen(pszData) + 1) * sizeof(WCHAR)));
-    RegCloseKey(hKey);
+    if (lRet != ERROR_SUCCESS)
+    {
+        LogLine(L"SetStringValue: writing %s [%s] failed err=%ld", pszSubKey,
+                pszValue ? pszValue : L"(default)", lRet);
+        if (g_WriteError == ERROR_SUCCESS)
+            g_WriteError = lRet;
+    }
     return lRet;
+}
+
+/* Read a REG_SZ/REG_EXPAND_SZ value into pszBuf. The type is checked and the
+ * result is always NUL-terminated (registry data carries no such guarantee). */
+static BOOL
+ReadRegString(HKEY hKey, LPCWSTR pszValue, LPWSTR pszBuf, DWORD cchBuf)
+{
+    DWORD dwType = 0, cbData;
+
+    if (!cchBuf)
+        return FALSE;
+
+    cbData = (cchBuf - 1) * sizeof(WCHAR); /* keep room for our own NUL */
+    if (RegQueryValueExW(hKey, pszValue, NULL, &dwType, (LPBYTE)pszBuf, &cbData) != ERROR_SUCCESS)
+        return FALSE;
+    if (dwType != REG_SZ && dwType != REG_EXPAND_SZ)
+        return FALSE;
+
+    pszBuf[cbData / sizeof(WCHAR)] = L'\0';
+    return TRUE;
+}
+
+/* A browser executable path we are willing to write under HKLM: an absolute
+ * drive path (not UNC / relative), no quote or control characters, a .exe
+ * name, and an existing regular file. */
+static BOOL
+IsSafeExePath(LPCWSTR pszExe)
+{
+    size_t len = wcslen(pszExe);
+    DWORD attr;
+    size_t i;
+
+    if (len < 7 || len >= MAX_PATH)
+        return FALSE;
+    if (!((pszExe[0] >= L'A' && pszExe[0] <= L'Z') || (pszExe[0] >= L'a' && pszExe[0] <= L'z')) ||
+        pszExe[1] != L':' || pszExe[2] != L'\\')
+        return FALSE;
+    for (i = 0; i < len; i++)
+    {
+        if (pszExe[i] == L'"' || pszExe[i] < L' ')
+            return FALSE;
+    }
+    if (StrCmpIW(pszExe + len - 4, L".exe"))
+        return FALSE;
+
+    attr = GetFileAttributesW(pszExe);
+    return attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+/* A RAPPS package name: letters, digits, '.', '-', '_' only. It is appended to
+ * a command line, so nothing that could add an argument is accepted. */
+static BOOL
+IsSafePackageName(LPCWSTR psz)
+{
+    size_t i, len = wcslen(psz);
+
+    if (!len || len > 64)
+        return FALSE;
+    for (i = 0; i < len; i++)
+    {
+        WCHAR c = psz[i];
+        if (!((c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z') ||
+              (c >= L'0' && c <= L'9') || c == L'.' || c == L'-' || c == L'_'))
+            return FALSE;
+    }
+    return TRUE;
 }
 
 /* Strip surrounding quotes and any trailing argument list, and expand
@@ -118,9 +198,17 @@ static void
 ExtractExePath(LPCWSTR pszCommand, LPWSTR pszOut, size_t cchOut)
 {
     WCHAR szExpanded[MAX_PATH * 2];
+    DWORD cchExp;
     LPWSTR p;
 
-    ExpandEnvironmentStringsW(pszCommand, szExpanded, ARRAYSIZE(szExpanded));
+    cchExp = ExpandEnvironmentStringsW(pszCommand, szExpanded, ARRAYSIZE(szExpanded));
+    if (cchExp == 0 || cchExp > ARRAYSIZE(szExpanded))
+    {
+        /* failed or truncated: the buffer content is not usable */
+        if (cchOut)
+            pszOut[0] = L'\0';
+        return;
+    }
 
     p = szExpanded;
     while (*p == L' ')
@@ -160,15 +248,13 @@ ReadClientCommand(HKEY hClients, LPCWSTR pszKeyName, LPWSTR pszExe, size_t cchEx
 {
     WCHAR szCmdSub[256];
     WCHAR szCommand[MAX_PATH * 2];
-    DWORD cbData;
     HKEY hCmd;
 
     StringCchPrintfW(szCmdSub, ARRAYSIZE(szCmdSub), L"%s\\shell\\open\\command", pszKeyName);
     if (RegOpenKeyExW(hClients, szCmdSub, 0, KEY_READ, &hCmd) != ERROR_SUCCESS)
         return FALSE;
 
-    cbData = sizeof(szCommand);
-    if (RegQueryValueExW(hCmd, NULL, NULL, NULL, (LPBYTE)szCommand, &cbData) != ERROR_SUCCESS)
+    if (!ReadRegString(hCmd, NULL, szCommand, ARRAYSIZE(szCommand)))
     {
         RegCloseKey(hCmd);
         return FALSE;
@@ -176,7 +262,7 @@ ReadClientCommand(HKEY hClients, LPCWSTR pszKeyName, LPWSTR pszExe, size_t cchEx
     RegCloseKey(hCmd);
 
     ExtractExePath(szCommand, pszExe, cchExe);
-    return (pszExe[0] != L'\0');
+    return IsSafeExePath(pszExe);
 }
 
 static void
@@ -196,7 +282,6 @@ EnumBrowsers(void)
     {
         HKEY hBrowser;
         WCHAR szName[256];
-        DWORD cbName;
         PBROWSER_ENTRY pEntry;
 
         cchSubKey = ARRAYSIZE(szSubKey);
@@ -219,8 +304,8 @@ EnumBrowsers(void)
         szName[0] = L'\0';
         if (RegOpenKeyExW(hClients, szSubKey, 0, KEY_READ, &hBrowser) == ERROR_SUCCESS)
         {
-            cbName = sizeof(szName);
-            RegQueryValueExW(hBrowser, NULL, NULL, NULL, (LPBYTE)szName, &cbName);
+            if (!ReadRegString(hBrowser, NULL, szName, ARRAYSIZE(szName)))
+                szName[0] = L'\0';
             RegCloseKey(hBrowser);
         }
         StringCchCopyW(pEntry->szName, ARRAYSIZE(pEntry->szName),
@@ -235,17 +320,19 @@ EnumBrowsers(void)
 static BOOL
 FindFirefoxExe(LPWSTR pszOut, size_t cchOut)
 {
-    static const LPCWSTR candidates[] = {
-        L"%ProgramFiles%\\Mozilla Firefox\\firefox.exe",
-        L"%ProgramFiles(x86)%\\Mozilla Firefox\\firefox.exe",
-    };
+    /* Program Files locations come from the shell (registry), not from the
+     * caller's environment variables, which a user could have changed. */
+    static const int folders[] = { CSIDL_PROGRAM_FILES, CSIDL_PROGRAM_FILESX86 };
     WCHAR szPath[MAX_PATH];
     UINT i;
 
-    for (i = 0; i < ARRAYSIZE(candidates); i++)
+    for (i = 0; i < ARRAYSIZE(folders); i++)
     {
-        ExpandEnvironmentStringsW(candidates[i], szPath, ARRAYSIZE(szPath));
-        if (GetFileAttributesW(szPath) != INVALID_FILE_ATTRIBUTES)
+        if (FAILED(SHGetFolderPathW(NULL, folders[i], NULL, SHGFP_TYPE_CURRENT, szPath)))
+            continue;
+        if (FAILED(StringCchCatW(szPath, ARRAYSIZE(szPath), L"\\Mozilla Firefox\\firefox.exe")))
+            continue;
+        if (IsSafeExePath(szPath))
         {
             StringCchCopyW(pszOut, cchOut, szPath);
             return TRUE;
@@ -344,6 +431,13 @@ SetDefaultBrowser(LPCWSTR pszKey, LPCWSTR pszName, LPCWSTR pszExe)
 
     LogLine(L"SetDefaultBrowser key=%s name=%s exe=%s", pszKey, pszName, pszExe);
 
+    if (!IsSafeExePath(pszExe))
+    {
+        LogLine(L"SetDefaultBrowser: refusing unsafe executable path");
+        return FALSE;
+    }
+    g_WriteError = ERROR_SUCCESS;
+
     SanitizeToken(pszKey, szToken, ARRAYSIZE(szToken));
     StringCchPrintfW(szUrlProgId, ARRAYSIZE(szUrlProgId), L"Nitro.%s.URL", szToken);
     StringCchPrintfW(szHtmlProgId, ARRAYSIZE(szHtmlProgId), L"Nitro.%s.HTML", szToken);
@@ -395,17 +489,28 @@ SetDefaultBrowser(LPCWSTR pszKey, LPCWSTR pszName, LPCWSTR pszExe)
     /* Notify the shell that associations changed. */
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_FLUSH, NULL, NULL);
 
+    if (g_WriteError != ERROR_SUCCESS)
+    {
+        LogLine(L"SetDefaultBrowser: failed for %s (err=%ld)", pszKey, g_WriteError);
+        return FALSE;
+    }
+
     LogLine(L"SetDefaultBrowser done for %s", pszKey);
     return TRUE;
 }
 
 /* Register a StartMenuInternet client entry for a freshly installed Firefox,
  * in case the installer did not create one in the native registry view. */
-static void
+static BOOL
 EnsureFirefoxClient(LPCWSTR pszExe)
 {
     WCHAR szSub[256];
     WCHAR szIcon[MAX_PATH + 8];
+    WCHAR szCmd[MAX_PATH + 8];
+
+    if (!IsSafeExePath(pszExe))
+        return FALSE;
+    g_WriteError = ERROR_SUCCESS;
 
     StringCchPrintfW(szSub, ARRAYSIZE(szSub), L"%s\\FIREFOX.EXE", szStartMenuInternet);
     SetStringValue(HKEY_LOCAL_MACHINE, szSub, NULL, L"Mozilla Firefox");
@@ -415,7 +520,9 @@ EnsureFirefoxClient(LPCWSTR pszExe)
     SetStringValue(HKEY_LOCAL_MACHINE, szSub, NULL, szIcon);
 
     StringCchPrintfW(szSub, ARRAYSIZE(szSub), L"%s\\FIREFOX.EXE\\shell\\open\\command", szStartMenuInternet);
-    SetStringValue(HKEY_LOCAL_MACHINE, szSub, NULL, pszExe);
+    StringCchPrintfW(szCmd, ARRAYSIZE(szCmd), L"\"%s\"", pszExe);
+    SetStringValue(HKEY_LOCAL_MACHINE, szSub, NULL, szCmd);
+    return g_WriteError == ERROR_SUCCESS;
 }
 
 /* ------------------------------------------------------------------ */
@@ -510,18 +617,18 @@ static void
 GetFirefoxPackage(LPWSTR pszOut, size_t cchOut)
 {
     HKEY hKey;
-    DWORD cbData;
 
     StringCchCopyW(pszOut, cchOut, szDefaultFfPackage);
 
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, szConfigKey, 0, KEY_READ, &hKey) == ERROR_SUCCESS)
     {
         WCHAR szVal[128];
-        cbData = sizeof(szVal);
-        if (RegQueryValueExW(hKey, L"FirefoxPackage", NULL, NULL, (LPBYTE)szVal, &cbData) == ERROR_SUCCESS
-            && szVal[0])
+        if (ReadRegString(hKey, L"FirefoxPackage", szVal, ARRAYSIZE(szVal)) && szVal[0])
         {
-            StringCchCopyW(pszOut, cchOut, szVal);
+            if (IsSafePackageName(szVal))
+                StringCchCopyW(pszOut, cchOut, szVal);
+            else
+                LogLine(L"GetFirefoxPackage: ignoring invalid FirefoxPackage value");
         }
         RegCloseKey(hKey);
     }
@@ -545,9 +652,8 @@ InstallFirefox(void)
     if (FindFirefoxExe(szFfExe, ARRAYSIZE(szFfExe)))
     {
         LogLine(L"InstallFirefox: firefox already present at %s; adopting as default", szFfExe);
-        EnsureFirefoxClient(szFfExe);
-        SetDefaultBrowser(L"FIREFOX.EXE", L"Mozilla Firefox", szFfExe);
-        return TRUE;
+        return EnsureFirefoxClient(szFfExe) &&
+               SetDefaultBrowser(L"FIREFOX.EXE", L"Mozilla Firefox", szFfExe);
     }
 
     if (!WaitForNetwork(NET_WAIT_TIMEOUT_MS))
@@ -585,9 +691,8 @@ InstallFirefox(void)
     if (FindFirefoxExe(szFfExe, ARRAYSIZE(szFfExe)))
     {
         LogLine(L"InstallFirefox: firefox present at %s", szFfExe);
-        EnsureFirefoxClient(szFfExe);
-        SetDefaultBrowser(L"FIREFOX.EXE", L"Mozilla Firefox", szFfExe);
-        return TRUE;
+        return EnsureFirefoxClient(szFfExe) &&
+               SetDefaultBrowser(L"FIREFOX.EXE", L"Mozilla Firefox", szFfExe);
     }
 
     LogLine(L"InstallFirefox: firefox.exe not found after install");
@@ -696,10 +801,10 @@ OnOk(HWND hDlg)
 
     if (data >= 0 && data < g_BrowserCount)
     {
-        SetDefaultBrowser(g_Browsers[data].szKey,
-                          g_Browsers[data].szName,
-                          g_Browsers[data].szExe);
-        EndDialog(hDlg, IDOK);
+        if (SetDefaultBrowser(g_Browsers[data].szKey,
+                              g_Browsers[data].szName,
+                              g_Browsers[data].szExe))
+            EndDialog(hDlg, IDOK);
     }
 }
 

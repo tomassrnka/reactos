@@ -116,7 +116,7 @@ AfdBindSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                   IrpSp->Parameters.DeviceIoControl.InputBufferLength - FIELD_OFFSET(AFD_BIND_DATA, Address))
             : NULL;
 
-    if( FCB->LocalAddress )
+    if( FCB->LocalAddress && !FCB->AddressFrom )
         Status = TdiBuildConnectionInfo( &FCB->AddressFrom,
                                          FCB->LocalAddress );
 

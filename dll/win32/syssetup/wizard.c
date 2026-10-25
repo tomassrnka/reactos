@@ -57,8 +57,17 @@ extern void WINAPI Control_RunDLLW(HWND hWnd, HINSTANCE hInst, LPCWSTR cmd, DWOR
 VOID
 GetSetupInfPath(PWSTR szPath, UINT cchMax)
 {
-    GetSystemDirectoryW(szPath, cchMax);
-    wcscat(szPath, L"\\$winnt$.inf");
+    static const WCHAR szName[] = L"\\$winnt$.inf";
+    UINT cch = GetSystemDirectoryW(szPath, cchMax);
+
+    /* GetSystemDirectoryW returns the needed size when the buffer is too small */
+    if (cch == 0 || cch + _countof(szName) > cchMax)
+    {
+        if (cchMax)
+            szPath[0] = UNICODE_NULL;
+        return;
+    }
+    wcscat(szPath, szName);
 }
 
 static VOID

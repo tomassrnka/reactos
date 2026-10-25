@@ -130,13 +130,21 @@ DGDeliverData(
                      DataBuffer,
                      MIN(Current->BufferSize, DataSize));
 
-                RTAIPAddress = (PTA_IP_ADDRESS)Current->ReturnInfo->RemoteAddress;
-                RTAIPAddress->TAAddressCount = 1;
-                RTAIPAddress->Address->AddressType = TDI_ADDRESS_TYPE_IP;
-                RTAIPAddress->Address->AddressLength = TDI_ADDRESS_LENGTH_IP;
-                RTAIPAddress->Address->Address->sin_port = SrcPort;
-                RTAIPAddress->Address->Address->in_addr = SrcAddress->Address.IPv4Address;
-                RtlZeroMemory(RTAIPAddress->Address->Address->sin_zero, 8);
+                /* The caller may not want the source address (no return info
+                 * or no address buffer): skip it then. */
+                RTAIPAddress = NULL;
+                if (Current->ReturnInfo && Current->ReturnInfo->RemoteAddress)
+                    RTAIPAddress = (PTA_IP_ADDRESS)Current->ReturnInfo->RemoteAddress;
+
+                if (RTAIPAddress)
+                {
+                    RTAIPAddress->TAAddressCount = 1;
+                    RTAIPAddress->Address->AddressType = TDI_ADDRESS_TYPE_IP;
+                    RTAIPAddress->Address->AddressLength = TDI_ADDRESS_LENGTH_IP;
+                    RTAIPAddress->Address->Address->sin_port = SrcPort;
+                    RTAIPAddress->Address->Address->in_addr = SrcAddress->Address.IPv4Address;
+                    RtlZeroMemory(RTAIPAddress->Address->Address->sin_zero, 8);
+                }
 
                 TI_DbgPrint(MAX_TRACE, ("(A: %08x) Addr %08x Port %04x\n",
                             RTAIPAddress,

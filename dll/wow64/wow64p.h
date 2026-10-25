@@ -85,6 +85,13 @@ VOID Wow64InitializeTeb(TEB32 *, const TEB *, PTEB, const INITIAL_TEB *);
 VOID Wow64AbortThread(HANDLE, HANDLE, NTSTATUS);
 NTSTATUS Wow64CreateThread(HANDLE *, ACCESS_MASK, OBJECT_ATTRIBUTES *, HANDLE,
                            CLIENT_ID *, const WOW64_CONTEXT *, const ULONG *, BOOLEAN);
+/* Caps on host allocations sized by guest-supplied lengths or counts. Counted
+ * strings are at most 64 KiB each, so a larger native query buffer is never
+ * useful; element arrays (WSABUFs, completion entries, token SIDs) stay far
+ * below the count cap in real use. */
+#define WOW64_MAX_INFO_BUFFER 0x30000UL
+#define WOW64_MAX_ARRAY_COUNT 0x10000UL
+
 NTSTATUS Wow64QueryThread(HANDLE, ULONG, PVOID, ULONG, PULONG);
 
 extern PVOID Wow64ApcDispatcher;

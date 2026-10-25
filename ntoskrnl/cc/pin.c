@@ -78,14 +78,25 @@ CcpDereferenceBcb(
 
     KeAcquireSpinLock(&SharedCacheMap->BcbSpinLock, &OldIrql);
     RefCount = --Bcb->RefCount;
+    if (RefCount == 0 && Bcb->PinCount != 0)
+    {
+        /* Invariant violation: a pinned BCB holds its ERESOURCE, so freeing
+         * it here would delete a held resource. Checked builds stop; in
+         * release builds keep the BCB linked and referenced (a bounded leak)
+         * instead of corrupting pool. */
+        DPRINT1("CcpDereferenceBcb: BCB %p dropped with PinCount %lu\n", Bcb, Bcb->PinCount);
+        ASSERT(Bcb->PinCount == 0);
+        Bcb->RefCount = 1;
+        KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
+        return;
+    }
+
     if (RefCount == 0)
     {
         RemoveEntryList(&Bcb->BcbEntry);
 
-        /* PinCount is mutated under BcbSpinLock, so read it while we still
-         * hold the lock. With the last reference gone and the BCB unlinked,
-         * no other CPU can touch it after we release. */
-        ASSERT(Bcb->PinCount == 0);
+        /* PinCount is mutated under BcbSpinLock and was verified zero above;
+         * with the BCB unlinked no other CPU can reach it after we release. */
         KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
 
         /*
