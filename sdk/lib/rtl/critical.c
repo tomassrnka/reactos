@@ -462,6 +462,17 @@ RtlSetCriticalSectionSpinCount(PRTL_CRITICAL_SECTION CriticalSection,
                                ULONG SpinCount)
 {
     ULONG OldCount = (ULONG)CriticalSection->SpinCount;
+    ULONG OsVersion = NtCurrentPeb()->OSMajorVersion << 8 |
+                      NtCurrentPeb()->OSMinorVersion;
+
+    if (OsVersion >= _WIN32_WINNT_WIN7)
+    {
+        /* Win7+: the flag bits stay, only the low 24 bits are the spin count */
+        SpinCount &= ~RTL_CRITICAL_SECTION_ALL_FLAG_BITS;
+        CriticalSection->SpinCount = ((NtCurrentPeb()->NumberOfProcessors > 1) ? SpinCount : 0) |
+                                     (OldCount & RTL_CRITICAL_SECTION_ALL_FLAG_BITS);
+        return OldCount & ~RTL_CRITICAL_SECTION_ALL_FLAG_BITS;
+    }
 
     /* Set to parameter if MP, or to 0 if this is Uniprocessor */
     CriticalSection->SpinCount = (NtCurrentPeb()->NumberOfProcessors > 1) ? SpinCount : 0;
@@ -581,6 +592,8 @@ RtlInitializeCriticalSectionEx(
     PRTL_CRITICAL_SECTION_DEBUG CritcalSectionDebugData;
     ULONG AllowedFlags;
     ULONG OsVersion;
+    ULONG StoredFlags = 0;
+    BOOLEAN IsWin7Plus, WantDebugInfo;
 
     /* Remove lower bits from flags */
     Flags &= RTL_CRITICAL_SECTION_ALL_FLAG_BITS;
@@ -593,7 +606,8 @@ RtlInitializeCriticalSectionEx(
     /* Flags for Windows 7+ (CHECKME) */
     OsVersion = NtCurrentPeb()->OSMajorVersion << 8 |
                 NtCurrentPeb()->OSMinorVersion;
-    if (OsVersion >= _WIN32_WINNT_WIN7)
+    IsWin7Plus = (OsVersion >= _WIN32_WINNT_WIN7);
+    if (IsWin7Plus)
     {
         AllowedFlags |= RTL_CRITICAL_SECTION_FLAG_RESOURCE_TYPE |
                         RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO;
@@ -614,10 +628,34 @@ RtlInitializeCriticalSectionEx(
     CriticalSection->LockCount = -1;
     CriticalSection->RecursionCount = 0;
     CriticalSection->OwningThread = 0;
-    CriticalSection->SpinCount = (NtCurrentPeb()->NumberOfProcessors > 1) ? SpinCount : 0;
     CriticalSection->LockSemaphore = 0;
 
-    if (Flags & RTL_CRITICAL_SECTION_FLAG_NO_DEBUG_INFO)
+    /* Vista+: a zero spin count on an MP system selects the default dynamic spin count */
+    if ((NtCurrentPeb()->NumberOfProcessors > 1) && (SpinCount == 0) &&
+        (OsVersion >= _WIN32_WINNT_VISTA))
+    {
+        SpinCount = RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN | 2000;
+    }
+
+    /* Win7+: resource type, no-debug-info and dynamic-spin are kept in the spin count */
+    if (IsWin7Plus)
+    {
+        StoredFlags = Flags & (RTL_CRITICAL_SECTION_FLAG_RESOURCE_TYPE |
+                               RTL_CRITICAL_SECTION_FLAG_NO_DEBUG_INFO |
+                               RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN);
+    }
+    CriticalSection->SpinCount = ((NtCurrentPeb()->NumberOfProcessors > 1) ? SpinCount : 0) |
+                                 StoredFlags;
+
+    /*
+     * Debug info is allocated unless suppressed, at every version. Real Win7+
+     * defaults to none, but the Wine-derived code in this tree (msvcrt, wic,
+     * strmbase...) dereferences cs.DebugInfo->Spare[0] after a plain
+     * InitializeCriticalSection and would crash at load.
+     */
+    WantDebugInfo = !(Flags & RTL_CRITICAL_SECTION_FLAG_NO_DEBUG_INFO);
+
+    if (!WantDebugInfo)
     {
         CriticalSection->DebugInfo = LongToPtr(-1);
     }
@@ -636,7 +674,8 @@ RtlInitializeCriticalSectionEx(
             return STATUS_NO_MEMORY;
         }
 
-        /* Set it up */
+        /* Set it up (heap memory is not zeroed) */
+        RtlZeroMemory(CritcalSectionDebugData, sizeof(*CritcalSectionDebugData));
         CritcalSectionDebugData->Type = RTL_CRITSECT_TYPE;
         CritcalSectionDebugData->ContentionCount = 0;
         CritcalSectionDebugData->EntryCount = 0;
