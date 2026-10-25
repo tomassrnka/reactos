@@ -671,7 +671,6 @@
 @ stdcall KeQueryActiveProcessors()
 @ stdcall KeQueryMaximumProcessorCount()
 @ stdcall KeQueryMaximumProcessorCountEx(long)
-@ stdcall KeQueryActiveProcessorCount(ptr)
 @ stdcall KeQueryActiveProcessorCountEx(long)
 @ stdcall -arch=i386,arm KeQueryInterruptTime()
 ;@ cdecl -arch=x86_64 KeQueryMultiThreadProcessorSet
