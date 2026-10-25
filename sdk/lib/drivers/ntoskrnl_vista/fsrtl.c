@@ -301,14 +301,16 @@ FsRtlGetNextExtraCreateParameter(IN PECP_LIST EcpList,
     }
     else
     {
-        /* Otherwise, consider the entry matching the given context */
-        CurrentEntry = ECP_CONTEXT_TO_HEADER(CurrentEcpContext);
+        /* Otherwise, the entry after the one matching the given context */
+        PLIST_ENTRY NextEntry = ECP_CONTEXT_TO_HEADER(CurrentEcpContext)->ListEntry.Flink;
 
         /* Make sure we didn't reach the end */
-        if (&CurrentEntry->ListEntry == &EcpList->EcpList)
+        if (NextEntry == &EcpList->EcpList)
         {
             goto FailEmpty;
         }
+
+        CurrentEntry = CONTAINING_RECORD(NextEntry, ECP_HEADER, ListEntry);
     }
 
     /* We must have an entry */
