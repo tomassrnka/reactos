@@ -263,8 +263,12 @@ NTSTATUS DGReceiveDatagram(
     {
 	/* Initialize a receive request */
 
-	/* Extract the remote address filter from the request (if any) */
-	if ((ConnInfo->RemoteAddressLength != 0) &&
+	/* Extract the remote address filter from the request (if any).
+	 * A NULL ConnInfo means "no filter": guard it so a caller that posts a
+	 * receive datagram without connection information cannot NULL-deref the
+	 * transport (T134: an unbound raw AFD sendto reached here with NULL). */
+	if ((ConnInfo != NULL) &&
+	    (ConnInfo->RemoteAddressLength != 0) &&
 	    (ConnInfo->RemoteAddress))
         {
 	    Status = AddrGetAddress(ConnInfo->RemoteAddress,
