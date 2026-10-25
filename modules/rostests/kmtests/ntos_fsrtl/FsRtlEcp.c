@@ -393,9 +393,10 @@ TestMisc(VOID)
 
     ok_bool_false(FsRtlCurrentOplockH(NULL), "FsRtlCurrentOplockH");
 
+    /* A provider is registered by its device object, which can not be missing */
     Status = FsRtlRegisterUncProviderEx(&MupHandle, &Name, NULL, 0);
-    ok_eq_hex(Status, STATUS_SUCCESS);
-    ok_eq_pointer(MupHandle, NULL);
+    ok_eq_hex(Status, STATUS_INVALID_PARAMETER);
+    ok_eq_pointer(MupHandle, (HANDLE)1);
 
     InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_KERNEL_HANDLE, NULL, NULL);
     Status = IoCreateFileEx(&Handle, FILE_READ_DATA, &ObjectAttributes, &IoStatus, NULL, 0,

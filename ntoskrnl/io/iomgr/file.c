@@ -763,6 +763,13 @@ IopParseDevice(IN PVOID ParseObject,
         Irp->CancelRoutine = NULL;
         Irp->Tail.Overlay.AuxiliaryBuffer = NULL;
 
+        /*
+         * Deliver the ECP list of IoCreateFileEx: a create IRP carries it in UserBuffer,
+         * where IoGetIrpExtraCreateParameter (FsRtlGetEcpListFromIrp) reads it.
+         * The caller owns the list for the duration of the create.
+         */
+        Irp->UserBuffer = OpenPacket->EcpList;
+
         /* Setup the security context */
         SecurityContext.SecurityQos = SecurityQos;
         SecurityContext.AccessState = AccessState;
@@ -2573,7 +2580,8 @@ IopCreateFile(OUT PHANDLE FileHandle,
               IN PVOID ExtraCreateParameters OPTIONAL,
               IN ULONG Options,
               IN ULONG Flags,
-              IN PDEVICE_OBJECT DeviceObject OPTIONAL)
+              IN PDEVICE_OBJECT DeviceObject OPTIONAL,
+              IN PVOID EcpList OPTIONAL)
 {
     KPROCESSOR_MODE AccessMode;
     HANDLE LocalHandle = 0;
@@ -2865,6 +2873,7 @@ IopCreateFile(OUT PHANDLE FileHandle,
     OpenPacket->ExtraCreateParameters = ExtraCreateParameters;
     OpenPacket->InternalFlags = Flags;
     OpenPacket->TopDeviceObjectHint = DeviceObject;
+    OpenPacket->EcpList = EcpList;
 
     /* Update the operation count */
     IopUpdateOperationCount(IopOtherTransfer);
@@ -3046,6 +3055,7 @@ IoCreateFile(OUT PHANDLE FileHandle,
                          ExtraCreateParameters,
                          Options,
                          0,
+                         NULL,
                          NULL);
 }
 
@@ -3096,12 +3106,14 @@ IoCreateFileSpecifyDeviceObjectHint(OUT PHANDLE FileHandle,
                          ExtraCreateParameters,
                          Options | IO_NO_PARAMETER_CHECKING,
                          Flags,
-                         DeviceObject);
+                         DeviceObject,
+                         NULL);
 }
 
 /*
- * Honours the device object hint of the driver context. The extra create
- * parameters (ECP list) of the context are not delivered to the file system.
+ * Honours the device object hint and the extra create parameters (ECP list) of the
+ * driver context: the list is delivered to the file system in the create IRP and
+ * read there with FsRtlGetEcpListFromIrp.
  *
  * @implemented
  */
@@ -3123,42 +3135,43 @@ IoCreateFileEx(OUT PHANDLE FileHandle,
                IN ULONG Options,
                IN PIO_DRIVER_CREATE_CONTEXT DriverContext OPTIONAL)
 {
+    PDEVICE_OBJECT DeviceObject = NULL;
+    PVOID EcpList = NULL;
+    ULONG Flags = 0;
+
     PAGED_CODE();
 
-    if (DriverContext != NULL && DriverContext->Size >= sizeof(*DriverContext) &&
-        DriverContext->DeviceObjectHint != NULL)
+    if (DriverContext != NULL && DriverContext->Size >= sizeof(*DriverContext))
     {
-        return IoCreateFileSpecifyDeviceObjectHint(FileHandle,
-                                                   DesiredAccess,
-                                                   ObjectAttributes,
-                                                   IoStatusBlock,
-                                                   AllocationSize,
-                                                   FileAttributes,
-                                                   ShareAccess,
-                                                   Disposition,
-                                                   CreateOptions,
-                                                   EaBuffer,
-                                                   EaLength,
-                                                   CreateFileType,
-                                                   ExtraCreateParameters,
-                                                   Options,
-                                                   DriverContext->DeviceObjectHint);
+        DeviceObject = DriverContext->DeviceObjectHint;
+        EcpList = DriverContext->ExtraCreateParameter;
     }
 
-    return IoCreateFile(FileHandle,
-                        DesiredAccess,
-                        ObjectAttributes,
-                        IoStatusBlock,
-                        AllocationSize,
-                        FileAttributes,
-                        ShareAccess,
-                        Disposition,
-                        CreateOptions,
-                        EaBuffer,
-                        EaLength,
-                        CreateFileType,
-                        ExtraCreateParameters,
-                        Options);
+    /* A device object hint is tagged into a file object extension, like in
+     * IoCreateFileSpecifyDeviceObjectHint, which also forces kernel mode */
+    if (DeviceObject != NULL)
+    {
+        Flags = (IOP_CREATE_FILE_OBJECT_EXTENSION | IOP_USE_TOP_LEVEL_DEVICE_HINT);
+        Options |= IO_NO_PARAMETER_CHECKING;
+    }
+
+    return IopCreateFile(FileHandle,
+                         DesiredAccess,
+                         ObjectAttributes,
+                         IoStatusBlock,
+                         AllocationSize,
+                         FileAttributes,
+                         ShareAccess,
+                         Disposition,
+                         CreateOptions,
+                         EaBuffer,
+                         EaLength,
+                         CreateFileType,
+                         ExtraCreateParameters,
+                         Options,
+                         Flags,
+                         DeviceObject,
+                         EcpList);
 }
 
 /*

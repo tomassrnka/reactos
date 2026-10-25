@@ -403,6 +403,7 @@ typedef struct _OPEN_PACKET
     BOOLEAN TraversedMountPoint;
     ULONG InternalFlags;
     PDEVICE_OBJECT TopDeviceObjectHint;
+    PVOID EcpList;
 } OPEN_PACKET, *POPEN_PACKET;
 
 //

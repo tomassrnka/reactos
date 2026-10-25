@@ -208,6 +208,7 @@ list(APPEND KMTEST_SOURCE
     ntos_cc/CcSetFileSizes_user.c
     ntos_cm/CmFlush_user.c
     ntos_io/IoCreateFile_user.c
+    ntos_io/IoCreateFileEx_user.c
     ntos_io/IoDeviceObject_user.c
     ntos_io/IoReadWrite_user.c
     ntos_kd/NtSystemDebugControl.c

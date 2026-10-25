@@ -17,6 +17,20 @@ target_compile_definitions(iocreatefile_drv PRIVATE KMT_STANDALONE_DRIVER)
 add_rostests_file(TARGET iocreatefile_drv)
 
 #
+# IoCreateFileEx
+#
+list(APPEND IOCREATEFILEEX_DRV_SOURCE
+    ../kmtest_drv/kmtest_standalone.c
+    IoCreateFileEx_drv.c)
+
+add_library(iocreatefileex_drv MODULE ${IOCREATEFILEEX_DRV_SOURCE})
+set_module_type(iocreatefileex_drv kernelmodedriver)
+target_link_libraries(iocreatefileex_drv kmtest_printf ${PSEH_LIB})
+add_importlibs(iocreatefileex_drv ntoskrnl hal)
+target_compile_definitions(iocreatefileex_drv PRIVATE KMT_STANDALONE_DRIVER)
+add_rostests_file(TARGET iocreatefileex_drv)
+
+#
 # IoDeviceObject
 #
 list(APPEND IODEVICEOBJECT_DRV_SOURCE

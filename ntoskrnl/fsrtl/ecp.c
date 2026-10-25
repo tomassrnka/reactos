@@ -7,8 +7,7 @@
  * This is the container part of the ECP API: allocating, inserting, finding
  * and freeing ECPs. FsRtlGetEcpListFromIrp and FsRtlGetNextExtraCreateParameter
  * are in sdk/lib/drivers/ntoskrnl_vista/fsrtl.c, and the layouts here must match
- * that file. IoCreateFileEx does not deliver a list to the file system yet, so a
- * create IRP carries none.
+ * that file. IoCreateFileEx delivers its list in the create IRP (UserBuffer).
  */
 
 /* INCLUDES *******************************************************************/
