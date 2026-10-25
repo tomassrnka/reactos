@@ -156,6 +156,8 @@ typedef struct _AFD_DGRAM_SEND_CONTEXT {
     LIST_ENTRY ListEntry;
     struct _AFD_FCB *FCB;
     PIRP UserIrp;
+    PIRP TransportIrp;      /* the IRP in the transport; valid while the entry is listed */
+    BOOLEAN CancelRequested;
 } AFD_DGRAM_SEND_CONTEXT, *PAFD_DGRAM_SEND_CONTEXT;
 
 typedef struct _AFD_DATA_WINDOW {
@@ -339,6 +341,7 @@ NTSTATUS NTAPI UnlockAndMaybeComplete
 VOID SocketStateUnlock( PAFD_FCB FCB );
 BOOLEAN AfdHasInFlightRequest( PAFD_FCB FCB );
 VOID AfdOrphanDatagramSend( PAFD_FCB FCB, PIRP Irp );
+VOID AfdCancelDatagramSends( PAFD_FCB FCB );
 VOID AfdClearCancelRoutine( PIRP Irp );
 NTSTATUS LostSocket( PIRP Irp );
 NTSTATUS LockHandles( PAFD_HANDLE HandleArray, UINT HandleCount,

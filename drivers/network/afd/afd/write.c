@@ -331,6 +331,31 @@ VOID AfdOrphanDatagramSend( PAFD_FCB FCB, PIRP Irp ) {
     }
 }
 
+/* Cancels every datagram still in the transport, each once. The socket state
+ * lock is held. A cancel may complete its datagram inside IoCancelIrp, which
+ * unlinks the entry (the lock is recursive), so the walk restarts after each. */
+VOID AfdCancelDatagramSends( PAFD_FCB FCB ) {
+    for(;;) {
+        PLIST_ENTRY Entry;
+        PAFD_DGRAM_SEND_CONTEXT Ctx = NULL;
+
+        for( Entry = FCB->DatagramSendList.Flink;
+             Entry != &FCB->DatagramSendList;
+             Entry = Entry->Flink ) {
+            PAFD_DGRAM_SEND_CONTEXT This =
+                CONTAINING_RECORD(Entry, AFD_DGRAM_SEND_CONTEXT, ListEntry);
+            if( !This->CancelRequested && This->TransportIrp ) {
+                Ctx = This;
+                break;
+            }
+        }
+        if( !Ctx )
+            return;
+        Ctx->CancelRequested = TRUE;
+        IoCancelIrp( Ctx->TransportIrp );
+    }
+}
+
 static BOOLEAN DgramSendIsTracked( PAFD_FCB FCB, PAFD_DGRAM_SEND_CONTEXT Ctx ) {
     PLIST_ENTRY Entry;
 
@@ -451,6 +476,8 @@ static BOOLEAN AfdQueueDatagramSend
         return FALSE;
     Ctx->FCB = FCB;
     Ctx->UserIrp = Irp;
+    Ctx->TransportIrp = NULL;
+    Ctx->CancelRequested = FALSE;
 
     FCB->PollState &= ~AFD_EVENT_SEND;
 
@@ -478,7 +505,13 @@ static BOOLEAN AfdQueueDatagramSend
                              PacketSocketSendComplete,
                              Ctx);
     if (Status == STATUS_PENDING)
+    {
+        /* The completion needs the state lock, which this thread holds, so the
+         * record is still listed unless the transport completed it inline */
+        if (DgramSendIsTracked( FCB, Ctx ))
+            Ctx->TransportIrp = FCB->SendIrp.InFlightRequest;
         return TRUE;
+    }
 
     /* Not pending: normally the transport never took the datagram and the
      * completion routine did not run. If it did run, it consumed Ctx and
