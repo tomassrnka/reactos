@@ -368,6 +368,23 @@ static const INFORMATION_CLASS_INFO PsProcessInfoClass[] =
 
     /* ProcessMemoryAllocationMode */
     IQS_NONE,
+
+    /* 47..57: defined on NT6+ Windows but not implemented here; present only so
+     * the info-class table spans the range up to ProcessHandleTable (58). */
+    IQS_NONE, /* ProcessGroupInformation (47) */
+    IQS_NONE, /* ProcessTokenVirtualizationEnabled (48) */
+    IQS_NONE, /* ProcessConsoleHostProcess (49) */
+    IQS_NONE, /* ProcessWindowInformation (50) */
+    IQS_NONE, /* ProcessHandleInformation (51) */
+    IQS_NONE, /* ProcessMitigationPolicy (52) */
+    IQS_NONE, /* ProcessDynamicFunctionTableInformation (53) */
+    IQS_NONE, /* ProcessHandleCheckingMode (54) */
+    IQS_NONE, /* ProcessKeepAliveCount (55) */
+    IQS_NONE, /* ProcessRevokeFileHandles (56) */
+    IQS_NONE, /* ProcessWorkingSetControl (57) */
+
+    /* ProcessHandleTable (58): queried as a ULONG[] of open handle values (Win8.1+) */
+    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
 };
 
 //
