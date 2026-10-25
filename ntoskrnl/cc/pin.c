@@ -636,9 +636,17 @@ CcRepinBcb (
 {
     PINTERNAL_BCB iBcb = CONTAINING_RECORD(Bcb, INTERNAL_BCB, PFCB);
 
+    KIRQL OldIrql;
+    PROS_SHARED_CACHE_MAP SharedCacheMap = iBcb->Vacb->SharedCacheMap;
+
     CCTRACE(CC_API_DEBUG, "Bcb=%p\n", Bcb);
 
+    /* RefCount is always serialized by BcbSpinLock (see CcpDereferenceBcb);
+     * an unlocked increment can lose an update against a concurrent
+     * dereference and free the BCB early or leak it. */
+    KeAcquireSpinLock(&SharedCacheMap->BcbSpinLock, &OldIrql);
     iBcb->RefCount++;
+    KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
 }
 
 /*
@@ -676,10 +684,15 @@ CcUnpinRepinnedBcb (
     KeAcquireSpinLock(&SharedCacheMap->BcbSpinLock, &OldIrql);
     if (--iBcb->RefCount == 0)
     {
+        BOOLEAN Pinned;
+
         RemoveEntryList(&iBcb->BcbEntry);
+        /* Read PinCount while still holding BcbSpinLock, like the other
+         * PinCount accesses; the BCB is unreachable once unlinked. */
+        Pinned = (iBcb->PinCount != 0);
         KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
 
-        if (iBcb->PinCount != 0)
+        if (Pinned)
         {
             ExReleaseResourceLite(&iBcb->Lock);
             iBcb->PinCount--;

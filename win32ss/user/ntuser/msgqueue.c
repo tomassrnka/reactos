@@ -1235,6 +1235,19 @@ MsqWithdrawSentMessagesOf(
             {
                MsqUnqueueSentMessage(pti, Message);
                Message->flags |= SMF_SENDERDIED;
+
+               if (Message->ptiSender == NULL)
+               {
+                  /* A pure callback/notify message (no ptiSender, no completion event)
+                     that was still queued is now on no thread list and not in flight, and
+                     its only owner is the dying sender. Neither the receiver cleanup nor
+                     the sender cleanup branches free it (RECEIVERFREE is set from birth),
+                     so free it and its packed lParam here instead of leaking it on the
+                     trouble list (T131 follow-up). */
+                  if (Message->HasPackedLParam && Message->Msg.lParam)
+                     ExFreePool((PVOID)Message->Msg.lParam);
+                  FreeUserMessage(Message);
+               }
             }
          }
       }
