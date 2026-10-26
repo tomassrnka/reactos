@@ -205,6 +205,9 @@ HRESULT WINAPI CIDLDataObj::Initialize(HWND hwndOwner, PCIDLIST_ABSOLUTE pMyPidl
     medium.tymed = TYMED_HGLOBAL;
     medium.hGlobal = hida;
     HRESULT hr = SetData(&Format, &medium, TRUE);
+    /* Win8+ always offers HDROP and the filename formats */
+    if (SHELL_GetNTVersion() >= _WIN32_WINNT_WIN8)
+        bAddAdditionalFormats = TRUE;
     if (!FAILED_UNEXPECTEDLY(hr) && bAddAdditionalFormats)
     {
         /* The Windows default shell IDataObject::GetData fails with DV_E_CLIPFORMAT if the desktop is present.
@@ -247,6 +250,7 @@ HRESULT WINAPI CIDLDataObj::GetData(LPFORMATETC pformatetcIn, STGMEDIUM *pmedium
         GetClipboardFormatNameA (pformatetcIn->cfFormat, szTemp, 256);
         TRACE("(%p)->(%p %p format=%s)\n", this, pformatetcIn, pmedium, szTemp);
     }
+    const BOOL bVista = SHELL_GetNTVersion() >= _WIN32_WINNT_VISTA;
     pmedium->hGlobal = NULL;
     pmedium->pUnkForRelease = NULL;
     for (int n = 0; n < m_Formats.GetSize(); ++n)
@@ -262,7 +266,32 @@ HRESULT WINAPI CIDLDataObj::GetData(LPFORMATETC pformatetcIn, STGMEDIUM *pmedium
             if (pformatetcIn->tymed != TYMED_HGLOBAL)
             {
                 UNIMPLEMENTED;
-                return E_INVALIDARG;
+                return bVista ? DV_E_FORMATETC : E_INVALIDARG;
+            }
+            else if (bVista)
+            {
+                /* NT6+: the caller gets its own copy of the data */
+                HGLOBAL hSrc = m_Storage[n].hGlobal;
+                SIZE_T cb = hSrc ? GlobalSize(hSrc) : 0;
+                HGLOBAL hCopy = hSrc ? GlobalAlloc(GMEM_MOVEABLE, cb) : NULL;
+                if (!hCopy)
+                    return E_OUTOFMEMORY;
+                PVOID pSrc = GlobalLock(hSrc), pDst = GlobalLock(hCopy);
+                if (pSrc && pDst)
+                    CopyMemory(pDst, pSrc, cb);
+                if (pSrc)
+                    GlobalUnlock(hSrc);
+                if (pDst)
+                    GlobalUnlock(hCopy);
+                if (!pSrc || !pDst)
+                {
+                    GlobalFree(hCopy);
+                    return E_OUTOFMEMORY;
+                }
+                pmedium->tymed = TYMED_HGLOBAL;
+                pmedium->hGlobal = hCopy;
+                pmedium->pUnkForRelease = NULL;
+                return S_OK;
             }
             else
             {
@@ -272,7 +301,7 @@ HRESULT WINAPI CIDLDataObj::GetData(LPFORMATETC pformatetcIn, STGMEDIUM *pmedium
         }
     }
 
-    return E_INVALIDARG;
+    return bVista ? DV_E_FORMATETC : E_INVALIDARG;
 }
 
 HRESULT WINAPI CIDLDataObj::GetDataHere(LPFORMATETC pformatetc, STGMEDIUM *pmedium)
@@ -302,13 +331,19 @@ HRESULT WINAPI CIDLDataObj::QueryGetData(LPFORMATETC pformatetc)
 HRESULT WINAPI CIDLDataObj::GetCanonicalFormatEtc(LPFORMATETC pformatectIn, LPFORMATETC pformatetcOut)
 {
     //FIXME("(%p)->()\n", this);
+    if (SHELL_GetNTVersion() >= _WIN32_WINNT_VISTA && pformatectIn && pformatetcOut)
+    {
+        /* NT6+: the input format is copied to the output (without a target device) */
+        *pformatetcOut = *pformatectIn;
+        pformatetcOut->ptd = NULL;
+    }
     return DATA_S_SAMEFORMATETC;
 }
 
 HRESULT WINAPI CIDLDataObj::SetData(LPFORMATETC pformatetc, STGMEDIUM *pmedium, BOOL fRelease)
 {
     if (!fRelease)
-        return E_INVALIDARG;
+        return (SHELL_GetNTVersion() >= _WIN32_WINNT_WIN8) ? E_NOTIMPL : E_INVALIDARG;
 
     for (int n = 0; n < m_Formats.GetSize(); ++n)
     {

@@ -2246,20 +2246,44 @@ HRESULT CShellLink::SetTargetFromPIDLOrPath(LPCITEMIDLIST pidl, LPCWSTR pszFile)
             /* This failed, try to resolve the path, then create a simple PIDL */
 
             StringCchCopyW(szPath, _countof(szPath), pszFile);
-            PathResolveW(szPath, NULL, PRF_TRYPROGRAMEXTENSIONS);
 
-            if (PathIsFileSpecW(szPath))
+            /* NT6+: a relative path containing a drive separator is not a valid target */
+            if (SHELL_GetNTVersion() >= _WIN32_WINNT_VISTA &&
+                PathIsRelativeW(pszFile) && wcschr(pszFile, L':'))
             {
                 hr = E_INVALIDARG;
                 szPath[0] = 0;
             }
             else
             {
-                hr = S_OK;
-                pidlNew = SHSimpleIDListFromPathW(szPath);
-                // NOTE: Don't make it failed here even if pidlNew was NULL.
-                // We don't fail on purpose even if SHSimpleIDListFromPathW returns NULL.
-                // This behaviour has been verified with tests.
+                PathResolveW(szPath, NULL, PRF_TRYPROGRAMEXTENSIONS);
+
+                if (PathIsFileSpecW(szPath))
+                {
+                    WCHAR szDesktop[MAX_PATH];
+                    if (SHELL_GetNTVersion() >= _WIN32_WINNT_VISTA &&
+                        SHGetSpecialFolderPathW(NULL, szDesktop, CSIDL_DESKTOPDIRECTORY, FALSE))
+                    {
+                        /* NT6+: a bare file name is taken relative to the Desktop folder */
+                        hr = S_OK;
+                        PathAppendW(szDesktop, szPath);
+                        StringCchCopyW(szPath, _countof(szPath), szDesktop);
+                        pidlNew = SHSimpleIDListFromPathW(szPath);
+                    }
+                    else
+                    {
+                        hr = E_INVALIDARG;
+                        szPath[0] = 0;
+                    }
+                }
+                else
+                {
+                    hr = S_OK;
+                    pidlNew = SHSimpleIDListFromPathW(szPath);
+                    // NOTE: Don't make it failed here even if pidlNew was NULL.
+                    // We don't fail on purpose even if SHSimpleIDListFromPathW returns NULL.
+                    // This behaviour has been verified with tests.
+                }
             }
         }
     }
