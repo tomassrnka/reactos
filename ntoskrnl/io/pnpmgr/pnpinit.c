@@ -197,13 +197,13 @@ PipGetDriverTagPriority(IN HANDLE ServiceHandle)
     PKEY_VALUE_FULL_INFORMATION KeyValueInformationTag;
     PKEY_VALUE_FULL_INFORMATION KeyValueInformationGroupOrderList;
     PVOID Buffer;
-    UNICODE_STRING Group;
+    UNICODE_STRING Group = {0, 0, NULL};
     PULONG GroupOrder;
     ULONG Count, Tag = 0;
     USHORT i = -1;
     UNICODE_STRING GroupString =
     RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet"
-                        L"\\Control\\ServiceGroupOrder");
+                        L"\\Control\\GroupOrderList");
 
     /* Open the key */
     Status = IopOpenRegistryKeyEx(&KeyHandle, NULL, &GroupString, KEY_READ);
@@ -213,16 +213,24 @@ PipGetDriverTagPriority(IN HANDLE ServiceHandle)
     Status = IopGetRegistryValue(ServiceHandle, L"Group", &KeyValueInformation);
     if (!NT_SUCCESS(Status)) goto Quickie;
 
-    /* Make sure we have a group */
-    if ((KeyValueInformation->Type == REG_SZ) &&
-        (KeyValueInformation->DataLength))
+    /* Make sure we have a NUL-terminated group, otherwise there is nothing to look up */
+    if ((KeyValueInformation->Type != REG_SZ) ||
+        (KeyValueInformation->DataLength < sizeof(WCHAR)))
     {
-        /* Convert to unicode string */
-        Buffer = (PVOID)((ULONG_PTR)KeyValueInformation + KeyValueInformation->DataOffset);
-        PnpRegSzToString(Buffer, KeyValueInformation->DataLength, &Group.Length);
-        Group.MaximumLength = (USHORT)KeyValueInformation->DataLength;
-        Group.Buffer = Buffer;
+        Status = STATUS_UNSUCCESSFUL;
+        goto Quickie;
     }
+
+    /* Convert to unicode string */
+    Buffer = (PVOID)((ULONG_PTR)KeyValueInformation + KeyValueInformation->DataOffset);
+    if (((PWCHAR)Buffer)[(KeyValueInformation->DataLength / sizeof(WCHAR)) - 1] != UNICODE_NULL)
+    {
+        Status = STATUS_UNSUCCESSFUL;
+        goto Quickie;
+    }
+    PnpRegSzToString(Buffer, KeyValueInformation->DataLength, &Group.Length);
+    Group.MaximumLength = (USHORT)KeyValueInformation->DataLength;
+    Group.Buffer = Buffer;
 
     /* Now read the tag */
     Status = IopGetRegistryValue(ServiceHandle, L"Tag", &KeyValueInformationTag);
