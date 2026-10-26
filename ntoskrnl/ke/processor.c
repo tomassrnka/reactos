@@ -39,7 +39,7 @@ ULONG KeBootprocSpecified = 0;
 
 /* FUNCTIONS *****************************************************************/
 
-/* EXPERIMENT (win7-identity): minimal NT6 processor-count exports KMDF probes on 6.x */
+/* Minimal NT6 processor-count exports (KMDF probes these on 6.x) */
 ULONG NTAPI KeQueryMaximumProcessorCount(VOID) { return KeNumberProcessors; }
 ULONG NTAPI KeQueryMaximumProcessorCountEx(USHORT GroupNumber) { return (GroupNumber == 0 || GroupNumber == 0xFFFF) ? KeNumberProcessors : 0; }
 ULONG NTAPI KeQueryActiveProcessorCount(PKAFFINITY ActiveProcessors)

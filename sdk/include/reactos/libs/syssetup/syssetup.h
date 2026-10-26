@@ -31,7 +31,11 @@ typedef enum _INSTALLATION_TYPE
     // INSTALLATION_TYPE_NANO_SERVER,
     INSTALLATION_TYPE_MAX,
 
-    INSTALLATION_TYPE_DEFAULT = INSTALLATION_TYPE_SERVER
+    /* nitro default: workstation. The shipped identity is "Windows 10 Pro" (a client/
+     * workstation SKU), so the default ProductType is WinNT natively -- consistent with
+     * hivesys.inf and ProductName -- instead of ServerNT masked by ReportAsWorkstation.
+     * Server stays selectable in the installer. */
+    INSTALLATION_TYPE_DEFAULT = INSTALLATION_TYPE_WORKSTATION
 } INSTALLATION_TYPE;
 
 /* Private Setup data shared between syssetup.dll and netshell.dll */
