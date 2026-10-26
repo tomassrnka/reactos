@@ -47,6 +47,10 @@ static
 ULONG
 GetNtDdiIndex(ULONG NtDdiVersion)
 {
+    /* ReactOS creates its object types in a fixed order, matching the first column */
+    if (NtDdiVersion >= NTDDI_WIN10 && is_reactos())
+        return 0;
+
     switch (NtDdiVersion)
     {
         case NTDDI_WS03: return 0;
@@ -347,6 +351,12 @@ START_TEST(ObTypes)
             TestObjectTypes<NTDDI_WIN7>();
             return;
         default:
+            if (NtDdiVersion >= NTDDI_WIN10)
+            {
+                /* Windows 10 identity: generic mappings are the Vista+ ones */
+                TestObjectTypes<NTDDI_WIN10>();
+                return;
+            }
             skip(FALSE, "Unsupported NTDDI version: 0x%lx\n", NtDdiVersion);
             return;
     }

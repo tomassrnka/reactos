@@ -492,6 +492,11 @@ TestObjectType(
             TestObjectType_<NTDDI_WIN7>(Clean);
             return;
         default:
+            if (NtDdiVersion >= NTDDI_WIN10)
+            {
+                TestObjectType_<NTDDI_WIN10>(Clean);
+                return;
+            }
             skip(FALSE, "Unsupported NTDDI version: 0x%lx\n", NtDdiVersion);
             return;
     }
