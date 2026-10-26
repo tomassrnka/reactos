@@ -6292,10 +6292,14 @@ START_TEST(input)
     else
         win_skip("GetRawInputDeviceList is not available\n");
 
-    if (pGetCurrentInputMessageSource)
-        test_input_message_source();
-    else
+    if (!pGetCurrentInputMessageSource)
         win_skip("GetCurrentInputMessageSource is not available\n");
+#ifdef __REACTOS__
+    else if (is_reactos())
+        skip("ReactOS does not record the source of an input message\n");
+#endif
+    else
+        test_input_message_source();
 
     SetCursorPos( pos.x, pos.y );
 
@@ -6311,6 +6315,11 @@ START_TEST(input)
     else
     {
         run_in_process( argv, "test_EnableMouseInPointer 0" );
+#ifdef __REACTOS__
+        if (is_reactos())
+            skip("ReactOS sends no pointer messages for the mouse\n");
+        else
+#endif
         run_in_process( argv, "test_EnableMouseInPointer 1" );
     }
 

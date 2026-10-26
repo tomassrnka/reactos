@@ -31,7 +31,7 @@ WINAPI
 GetDisplayAutoRotationPreferences(
     _Out_ ULONG *pOrientation)
 {
-    if (!pOrientation)
+    if (!pOrientation || IsBadWritePtr(pOrientation, sizeof(*pOrientation)))
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
@@ -61,7 +61,7 @@ WINAPI
 GetAutoRotationState(
     _Out_ ULONG *pState)
 {
-    if (!pState)
+    if (!pState || IsBadWritePtr(pState, sizeof(*pState)))
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;

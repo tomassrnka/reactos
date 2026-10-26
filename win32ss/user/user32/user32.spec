@@ -41,7 +41,7 @@
 @ stdcall ChangeMenuA(long long ptr long long)
 @ stdcall ChangeMenuW(long long ptr long long)
 @ stdcall -version=0x600+ ChangeWindowMessageFilter(ptr long)
-@ stdcall -version=0x601+ ChangeWindowMessageFilterEx(ptr long long ptr)
+@ stdcall ChangeWindowMessageFilterEx(ptr long long ptr)
 @ stdcall CharLowerA(str)
 @ stdcall CharLowerBuffA(str long)
 @ stdcall CharLowerBuffW(wstr long)
@@ -102,7 +102,7 @@
 @ stdcall CreateMenu()
 @ stdcall CreatePopupMenu()
 @ stdcall CreateSystemThreads(long)
-@ stdcall -version=0xA00+ CreateSyntheticPointerDevice(long long long)
+@ stdcall CreateSyntheticPointerDevice(long long long)
 @ stdcall CreateWindowExA(long str str long long long long long long long long ptr)
 @ stdcall CreateWindowExW(long wstr wstr long long long long long long long long ptr)
 @ stdcall CreateWindowStationA(str long long ptr)
@@ -162,6 +162,7 @@
 @ stdcall DestroyIcon(long)
 @ stdcall DestroyMenu(long) NtUserDestroyMenu
 @ stdcall DestroyReasons(ptr)
+@ stdcall -version=0x601+ DestroySyntheticPointerDevice(ptr)
 @ stdcall DestroyWindow(long) NtUserDestroyWindow
 @ stdcall DeviceEventWorker(long long long long long)
 @ stdcall DialogBoxIndirectParamA(long ptr long ptr long)
@@ -206,6 +207,7 @@
 @ stdcall EditWndProc(long long long long) EditWndProcA
 @ stdcall EmptyClipboard() NtUserEmptyClipboard
 @ stdcall EnableMenuItem(long long long)
+@ stdcall -version=0x601+ EnableMouseInPointer(long)
 @ stdcall EnableNonClientDpiScaling(long)
 @ stdcall EnableScrollBar(long long long)
 @ stdcall EnableWindow(long long)
@@ -236,7 +238,8 @@
 @ stdcall EnumWindowStationsW(ptr long)
 @ stdcall EnumWindows(ptr long)
 @ stdcall EqualRect(ptr ptr)
-@ stdcall -version=0x602+ EvaluateProximityToRect(ptr ptr ptr)
+@ stdcall -version=0x601+ EvaluateProximityToPolygon(long ptr ptr ptr)
+@ stdcall EvaluateProximityToRect(ptr ptr ptr)
 @ stdcall ExcludeUpdateRgn(long long) NtUserExcludeUpdateRgn
 @ stdcall ExitWindowsEx(long long)
 @ stdcall FillRect(long ptr long)
@@ -261,6 +264,7 @@
 @ stdcall GetCapture()
 @ stdcall GetCaretBlinkTime() NtUserGetCaretBlinkTime
 @ stdcall GetCaretPos(ptr) NtUserGetCaretPos
+@ stdcall -version=0x601+ GetCIMSSM(ptr)
 @ stdcall GetClassInfoA(long str ptr)
 @ stdcall GetClassInfoExA(long str ptr)
 @ stdcall GetClassInfoExW(long wstr ptr)
@@ -281,6 +285,7 @@
 @ stdcall GetClipboardSequenceNumber() NtUserGetClipboardSequenceNumber
 @ stdcall GetClipboardViewer() NtUserGetClipboardViewer
 @ stdcall GetComboBoxInfo(long ptr) ; Direct call NtUserGetComboBoxInfo
+@ stdcall -version=0x601+ GetCurrentInputMessageSource(ptr)
 @ stdcall GetCursor()
 @ stdcall GetCursorFrameInfo(long long long long long)
 @ stdcall GetCursorInfo(ptr) NtUserGetCursorInfo
@@ -354,12 +359,25 @@
 @ stdcall GetNextDlgTabItem(long long long)
 @ stdcall GetOpenClipboardWindow() NtUserGetOpenClipboardWindow
 @ stdcall GetParent(long)
-@ stdcall -version=0x602+ GetPointerInfo(long ptr)
-@ stdcall -version=0x602+ GetPointerTouchInfo(long ptr)
-@ stdcall -version=0x602+ GetPointerTouchInfoHistory(long ptr ptr)
-@ stdcall -version=0x601+ GetPointerDevices(ptr ptr)
+@ stdcall -version=0x601+ GetPointerCursorId(long ptr)
 @ stdcall -version=0x601+ GetPointerDevice(ptr ptr)
+@ stdcall -version=0x601+ GetPointerDeviceCursors(ptr ptr ptr)
+@ stdcall -version=0x601+ GetPointerDeviceProperties(ptr ptr ptr)
+@ stdcall -version=0x601+ GetPointerDeviceRects(ptr ptr ptr)
+@ stdcall -version=0x601+ GetPointerDevices(ptr ptr)
+@ stdcall -version=0x601+ GetPointerFrameInfo(long ptr ptr)
+@ stdcall -version=0x601+ GetPointerFrameInfoHistory(long ptr ptr ptr)
+@ stdcall -version=0x601+ GetPointerFramePenInfo(long ptr ptr)
+@ stdcall -version=0x601+ GetPointerFramePenInfoHistory(long ptr ptr ptr)
+@ stdcall -version=0x601+ GetPointerFrameTouchInfo(long ptr ptr)
+@ stdcall -version=0x601+ GetPointerFrameTouchInfoHistory(long ptr ptr ptr)
+@ stdcall -version=0x601+ GetPointerInfo(long ptr)
+@ stdcall -version=0x601+ GetPointerInfoHistory(long ptr ptr)
+@ stdcall -version=0x601+ GetPointerInputTransform(long long ptr)
 @ stdcall -version=0x601+ GetPointerPenInfo(long ptr)
+@ stdcall -version=0x601+ GetPointerPenInfoHistory(long ptr ptr)
+@ stdcall -version=0x601+ GetPointerTouchInfo(long ptr)
+@ stdcall -version=0x601+ GetPointerTouchInfoHistory(long ptr ptr)
 @ stdcall -version=0x601+ GetPointerType(long ptr)
 @ stdcall GetPriorityClipboardFormat(ptr long) NtUserGetPriorityClipboardFormat
 @ stdcall GetProcessDefaultLayout(ptr)
@@ -374,6 +392,7 @@
 @ stdcall GetRawInputDeviceInfoA(ptr long ptr ptr)
 @ stdcall GetRawInputDeviceInfoW(ptr long ptr ptr) NtUserGetRawInputDeviceInfo
 @ stdcall GetRawInputDeviceList(ptr ptr long) NtUserGetRawInputDeviceList
+@ stdcall -version=0x601+ GetRawPointerDeviceData(long long long ptr ptr)
 @ stdcall GetReasonTitleFromReasonCode(long long long)
 @ stdcall GetRegisteredRawInputDevices(ptr ptr long) NtUserGetRegisteredRawInputDevices
 # GetRipFlags
@@ -402,8 +421,10 @@
 @ stdcall GetUserObjectInformationA(long long ptr long ptr)
 @ stdcall GetUserObjectInformationW(long long ptr long ptr) NtUserGetObjectInformation
 @ stdcall GetUserObjectSecurity (long ptr ptr long ptr)
+@ stdcall -version=0x601+ GetWindowBand(ptr ptr)
 @ stdcall GetWindowDpiAwarenessContext(long)
 @ stdcall GetWindowDpiHostingBehavior(long)
+@ stdcall -version=0x601+ GetWindowFeedbackSetting(ptr long long ptr ptr)
 @ stdcall GetWinStationInfo(ptr)
 @ stdcall GetWindow(long long)
 @ stdcall GetWindowContextHelpId(long)
@@ -438,6 +459,9 @@
 @ stdcall IMPSetIMEA(long ptr)
 @ stdcall IMPSetIMEW(long ptr)
 @ stdcall ImpersonateDdeClientWindow(long long) ; Direct call NtUserImpersonateDdeClientWindow
+@ stdcall -version=0x601+ InitializeTouchInjection(long long)
+@ stdcall -version=0x601+ InjectSyntheticPointerInput(ptr ptr long)
+@ stdcall -version=0x601+ InjectTouchInput(long ptr)
 @ stdcall InSendMessage()
 @ stdcall InSendMessageEx(ptr)
 @ stdcall InflateRect(ptr long long)
@@ -470,7 +494,9 @@
 @ stdcall IsGUIThread(long)
 @ stdcall IsHungAppWindow(long)
 @ stdcall IsIconic(long)
+@ stdcall -version=0x601+ IsImmersiveProcess(ptr)
 @ stdcall IsMenu(long)
+@ stdcall -version=0x601+ IsMouseInPointerEnabled()
 @ stdcall -stub IsProcess16Bit()
 @ stdcall IsProcessDPIAware()
 @ stdcall IsRectEmpty(ptr)
@@ -564,7 +590,7 @@
 @ stdcall OpenWindowStationA(str long long)
 @ stdcall OpenWindowStationW(wstr long long)
 @ stdcall PackDDElParam(long long long)
-@ stdcall -version=0x602+ PackTouchHitTestingProximityEvaluation(ptr ptr)
+@ stdcall PackTouchHitTestingProximityEvaluation(ptr ptr)
 @ stdcall PaintDesktop(long) NtUserPaintDesktop
 @ stdcall PaintMenuBar(long long long long long long) NtUserPaintMenuBar
 @ stdcall PeekMessageA(ptr long long long long)
@@ -605,6 +631,8 @@
 @ stdcall RegisterLogonProcess(long long)
 @ stdcall RegisterMessagePumpHook(ptr)
 @ stdcall -version=0x601+ RegisterPointerDeviceNotifications(long long)
+@ stdcall -version=0x601+ RegisterPointerInputTarget(ptr long)
+@ stdcall -version=0x601+ RegisterPointerInputTargetEx(ptr long long)
 @ stdcall -version=0x600+ RegisterPowerSettingNotification(long ptr long)
 @ stdcall -import RegisterRawInputDevices(ptr long long) NtUserRegisterRawInputDevices
 @ stdcall RegisterServicesProcess(long)
@@ -612,7 +640,7 @@
 @ stdcall RegisterShellHookWindow(long)
 @ stdcall RegisterSystemThread(long long)
 @ stdcall RegisterTasklist(long) NtUserRegisterTasklist
-@ stdcall -version=0x602+ RegisterTouchHitTestingWindow(long long)
+@ stdcall RegisterTouchHitTestingWindow(long long)
 @ stdcall -version=0x601+ RegisterTouchWindow(long long)
 @ stdcall RegisterUserApiHook(ptr)
 @ stdcall RegisterWindowMessageA(str)
@@ -716,6 +744,7 @@
 @ stdcall SetUserObjectInformationA(long long ptr long) NtUserSetObjectInformation
 @ stdcall SetUserObjectInformationW(long long ptr long) NtUserSetObjectInformation
 @ stdcall SetUserObjectSecurity(long ptr ptr)
+@ stdcall -version=0x601+ SetWindowFeedbackSetting(ptr long long long ptr)
 @ stdcall SetWinEventHook(long long long ptr long long long)
 @ stdcall -version=0x601+ SetWindowCompositionAttribute(ptr ptr)
 @ stdcall SetWindowContextHelpId(long long)
@@ -744,6 +773,7 @@
 @ stdcall ShowWindowAsync(long long) NtUserShowWindowAsync
 @ stdcall -version=0x600+ ShutdownBlockReasonCreate(long wstr)
 @ stdcall -version=0x600+ ShutdownBlockReasonDestroy(long)
+@ stdcall -version=0x601+ SkipPointerFrameMessages(long)
 @ stdcall SoftModalMessageBox(ptr)
 @ stdcall SubtractRect(ptr ptr ptr)
 @ stdcall SwapMouseButton(long)
@@ -781,6 +811,8 @@
 @ stdcall UnregisterDeviceNotification(long)
 @ stdcall UnregisterHotKey(long long) NtUserUnregisterHotKey
 @ stdcall UnregisterMessagePumpHook()
+@ stdcall -version=0x601+ UnregisterPointerInputTarget(ptr long)
+@ stdcall -version=0x601+ UnregisterPointerInputTargetEx(ptr long)
 @ stdcall -version=0x601+ UnregisterTouchWindow(ptr)
 @ stdcall -version=0x600+ UnregisterPowerSettingNotification(ptr)
 @ stdcall -version=0x601+ UnregisterSuspendResumeNotification(ptr)

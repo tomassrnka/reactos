@@ -3506,5 +3506,17 @@ SetCoalescableTimer(
         return 0;
     }
 
+    /* The window belongs to its process; Windows refuses a coalescable timer on another process's window */
+    if (hWnd)
+    {
+        DWORD ProcessId = 0;
+        GetWindowThreadProcessId(hWnd, &ProcessId);
+        if (ProcessId != GetCurrentProcessId())
+        {
+            SetLastError(ERROR_ACCESS_DENIED);
+            return 0;
+        }
+    }
+
     return SetTimer(hWnd, nIDEvent, uElapse, lpTimerFunc);
 }
