@@ -3179,6 +3179,140 @@ static void *read_file_flat( HANDLE file )
     return buf;
 }
 
+/* Cheaper variant of read_file_flat(): only the PE headers and the section that
+ * holds the resource directory are read, which is all that the manifest lookup
+ * ever touches. The result is a compact private copy that is indistinguishable
+ * from a flat file image for RtlImageNtHeader() and for the "data file" (base|1)
+ * resource walk: the headers are at offset 0, the resource section's raw data is
+ * placed right behind them and the copied section table is rewritten to match
+ * (all other sections are made empty so they never resolve an RVA).
+ * Returns NULL for anything unusual, in which case the caller falls back to the
+ * full flat read and then to the mapped view, so the result can never be worse. */
+#define ACTCTX_HDR_READ 4096
+static void *read_pe_resources( HANDLE file )
+{
+    FILE_STANDARD_INFORMATION info;
+    IO_STATUS_BLOCK io;
+    LARGE_INTEGER off;
+    NTSTATUS status;
+    LONGLONG fsize;
+    PUCHAR hdr, buf = NULL, opt;
+    IMAGE_DOS_HEADER *dos;
+    IMAGE_FILE_HEADER *fh;
+    IMAGE_SECTION_HEADER *sec, *rsrc = NULL;
+    IMAGE_DATA_DIRECTORY *dd = NULL;
+    ULONG n, lfanew, rsrc_idx = 0, optsize, nsec, ndirs, i, soh, va, dirsize, data_off, total;
+    USHORT magic;
+
+    status = NtQueryInformationFile( file, &io, &info, sizeof(info), FileStandardInformation );
+    if (status != STATUS_SUCCESS) return NULL;
+    fsize = info.EndOfFile.QuadPart;
+    if (fsize < (LONGLONG)sizeof(IMAGE_DOS_HEADER) || fsize > MAXLONG) return NULL;
+
+    n = fsize < ACTCTX_HDR_READ ? (ULONG)fsize : ACTCTX_HDR_READ;
+    hdr = RtlAllocateHeap( GetProcessHeap(), 0, n );
+    if (!hdr) return NULL;
+    off.QuadPart = 0;
+    status = NtReadFile( file, NULL, NULL, NULL, &io, hdr, n, &off, NULL );
+    if (status != STATUS_SUCCESS || io.Information != n) goto fail;
+
+    dos = (IMAGE_DOS_HEADER *)hdr;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) goto fail;
+    lfanew = dos->e_lfanew;
+    if (lfanew < sizeof(*dos) || lfanew > n || n - lfanew < 4 + sizeof(*fh) + 2) goto fail;
+    if (*(ULONG *)(hdr + lfanew) != IMAGE_NT_SIGNATURE) goto fail;
+    fh = (IMAGE_FILE_HEADER *)(hdr + lfanew + 4);
+    opt = (PUCHAR)(fh + 1);
+    optsize = fh->SizeOfOptionalHeader;
+    nsec = fh->NumberOfSections;
+    if (n - (ULONG)(opt - hdr) < optsize) goto fail;
+    if (n - (ULONG)(opt - hdr) - optsize < nsec * sizeof(IMAGE_SECTION_HEADER)) goto fail;
+    sec = (IMAGE_SECTION_HEADER *)(opt + optsize);
+
+    magic = *(USHORT *)opt;
+    if (magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC)
+    {
+        IMAGE_OPTIONAL_HEADER32 *oh = (IMAGE_OPTIONAL_HEADER32 *)opt;
+        if (optsize < FIELD_OFFSET(IMAGE_OPTIONAL_HEADER32, DataDirectory)) goto fail;
+        soh = oh->SizeOfHeaders;
+        ndirs = oh->NumberOfRvaAndSizes;
+        if (ndirs > IMAGE_DIRECTORY_ENTRY_RESOURCE &&
+            optsize >= FIELD_OFFSET(IMAGE_OPTIONAL_HEADER32, DataDirectory[IMAGE_DIRECTORY_ENTRY_RESOURCE + 1]))
+            dd = &oh->DataDirectory[IMAGE_DIRECTORY_ENTRY_RESOURCE];
+        else if (ndirs > IMAGE_DIRECTORY_ENTRY_RESOURCE) goto fail;
+    }
+    else if (magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+    {
+        IMAGE_OPTIONAL_HEADER64 *oh = (IMAGE_OPTIONAL_HEADER64 *)opt;
+        if (optsize < FIELD_OFFSET(IMAGE_OPTIONAL_HEADER64, DataDirectory)) goto fail;
+        soh = oh->SizeOfHeaders;
+        ndirs = oh->NumberOfRvaAndSizes;
+        if (ndirs > IMAGE_DIRECTORY_ENTRY_RESOURCE &&
+            optsize >= FIELD_OFFSET(IMAGE_OPTIONAL_HEADER64, DataDirectory[IMAGE_DIRECTORY_ENTRY_RESOURCE + 1]))
+            dd = &oh->DataDirectory[IMAGE_DIRECTORY_ENTRY_RESOURCE];
+        else if (ndirs > IMAGE_DIRECTORY_ENTRY_RESOURCE) goto fail;
+    }
+    else goto fail;
+
+    /* No resource directory: the lookup fails right at the data directory, the headers are enough. */
+    if (!dd || !dd->VirtualAddress) return hdr;
+
+    va = dd->VirtualAddress;
+    dirsize = dd->Size;
+    if (va < soh) goto fail;  /* directory inside the headers: not worth special-casing */
+
+    /* Same section selection as RtlImageRvaToSection() */
+    for (i = 0; i < nsec; i++)
+    {
+        if (sec[i].VirtualAddress <= va && va < (ULONG64)sec[i].VirtualAddress + sec[i].SizeOfRawData)
+        {
+            rsrc = &sec[i];
+            rsrc_idx = i;
+            break;
+        }
+    }
+    if (!rsrc) goto fail;
+    if ((ULONG64)va + dirsize > (ULONG64)rsrc->VirtualAddress + rsrc->SizeOfRawData) goto fail;
+    if (rsrc->SizeOfRawData > ACTCTX_MAX_FLAT_READ) goto fail;
+    if ((ULONG64)rsrc->PointerToRawData + rsrc->SizeOfRawData > (ULONG64)fsize) goto fail;
+    /* any other section sharing RVAs with it would make the section choice ambiguous */
+    for (i = 0; i < nsec; i++)
+    {
+        if (&sec[i] == rsrc || !sec[i].SizeOfRawData) continue;
+        if (sec[i].VirtualAddress < (ULONG64)rsrc->VirtualAddress + rsrc->SizeOfRawData &&
+            rsrc->VirtualAddress < (ULONG64)sec[i].VirtualAddress + sec[i].SizeOfRawData) goto fail;
+    }
+
+    data_off = ((n + 15) & ~15u) + (rsrc->PointerToRawData & 15);
+    total = data_off + rsrc->SizeOfRawData;  /* cannot overflow: SizeOfRawData <= 32MiB */
+    buf = RtlAllocateHeap( GetProcessHeap(), 0, total );
+    if (!buf) goto fail;
+    RtlCopyMemory( buf, hdr, n );
+    RtlZeroMemory( buf + n, data_off - n );
+    off.QuadPart = rsrc->PointerToRawData;
+    status = NtReadFile( file, NULL, NULL, NULL, &io, buf + data_off, rsrc->SizeOfRawData, &off, NULL );
+    if (status != STATUS_SUCCESS || io.Information != rsrc->SizeOfRawData) goto fail;
+
+    /* rewrite the private copy of the section table to the compact layout */
+    sec = (IMAGE_SECTION_HEADER *)(buf + ((PUCHAR)sec - hdr));
+    for (i = 0; i < nsec; i++)
+    {
+        if (i == rsrc_idx) sec[i].PointerToRawData = data_off;
+        else
+        {
+            sec[i].SizeOfRawData = 0;
+            sec[i].PointerToRawData = 0;
+        }
+    }
+    RtlFreeHeap( GetProcessHeap(), 0, hdr );
+    return buf;
+
+fail:
+    if (buf) RtlFreeHeap( GetProcessHeap(), 0, buf );
+    RtlFreeHeap( GetProcessHeap(), 0, hdr );
+    return NULL;
+}
+
 static NTSTATUS get_manifest_in_pe_file( struct actctx_loader* acl, struct assembly_identity* ai,
                                          LPCWSTR filename, LPCWSTR directory, BOOL shared,
                                          HANDLE file, LPCWSTR resname, ULONG lang )
@@ -3202,7 +3336,8 @@ static NTSTATUS get_manifest_in_pe_file( struct actctx_loader* acl, struct assem
 
     DPRINT( "looking for res %S in %S\n", resptr, filename ? filename : L"<NULL>");
 
-    heapbuf = read_file_flat( file );
+    heapbuf = read_pe_resources( file );
+    if (!heapbuf) heapbuf = read_file_flat( file );
     if (heapbuf)
     {
         base = heapbuf;
