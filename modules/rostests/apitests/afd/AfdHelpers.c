@@ -10,15 +10,8 @@
 
 #define DD_UDP_DEVICE_NAME L"\\Device\\Udp"
 
-typedef struct _AFD_CREATE_PACKET_NT6 {
-    DWORD                               EndpointFlags;
-    DWORD                               GroupID;
-    DWORD                               AddressFamily;
-    DWORD                               SocketType;
-    DWORD                               Protocol;
-    DWORD                               SizeOfTransportName;
-    WCHAR                               TransportName[1];
-} AFD_CREATE_PACKET_NT6, *PAFD_CREATE_PACKET_NT6;
+/* AFD_CREATE_PACKET_NT6 now comes from <afd/shared.h> (via precomp.h); the
+   local duplicate was removed to fix the redefinition build break. */
 
 NTSTATUS
 AfdCreateSocket(
