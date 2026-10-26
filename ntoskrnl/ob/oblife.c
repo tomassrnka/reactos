@@ -1561,6 +1561,111 @@ NtMakePermanentObject(IN HANDLE ObjectHandle)
     return STATUS_SUCCESS;
 }
 
+/**
+ * @brief
+ * Builds the ObjectTypesInformation result: an OBJECT_TYPES_INFORMATION header
+ * followed by one OBJECT_TYPE_INFORMATION (and its type name) per registered
+ * object type, each entry aligned to a pointer boundary.
+ *
+ * @param[out] Buffer
+ * Caller-supplied (probed) output buffer.
+ *
+ * @param[in] Length
+ * Size of @p Buffer in bytes.
+ *
+ * @param[out] ReturnLength
+ * Receives the number of bytes needed (or written on success).
+ *
+ * @return
+ * STATUS_SUCCESS, or STATUS_INFO_LENGTH_MISMATCH if @p Buffer is too small.
+ **/
+static
+NTSTATUS
+ObpQueryTypesInformation(
+    _Out_writes_bytes_(Length) PVOID Buffer,
+    _In_ ULONG Length,
+    _Out_ PULONG ReturnLength)
+{
+    POBJECT_TYPES_INFORMATION TypesInfo = Buffer;
+    PLIST_ENTRY ListHead, NextEntry;
+    POBJECT_HEADER_CREATOR_INFO CreatorInfo;
+    POBJECT_HEADER Header;
+    POBJECT_TYPE Type;
+    ULONG Needed, Offset, Count;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    ObpEnterObjectTypeMutex(ObpTypeObjectType);
+    ListHead = &ObpTypeObjectType->TypeList;
+
+    /* First pass: count the types and compute the required size */
+    Needed = ALIGN_UP(sizeof(ULONG), ULONG_PTR);
+    Count = 0;
+    for (NextEntry = ListHead->Flink; NextEntry != ListHead; NextEntry = NextEntry->Flink)
+    {
+        CreatorInfo = CONTAINING_RECORD(NextEntry, OBJECT_HEADER_CREATOR_INFO, TypeList);
+        Header = (POBJECT_HEADER)(CreatorInfo + 1);
+        Type = (POBJECT_TYPE)&Header->Body;
+
+        Needed += sizeof(OBJECT_TYPE_INFORMATION) +
+                  ALIGN_UP(Type->Name.Length + sizeof(UNICODE_NULL), ULONG_PTR);
+        Count++;
+    }
+
+    *ReturnLength = Needed;
+    if (Length < Needed)
+    {
+        ObpLeaveObjectTypeMutex(ObpTypeObjectType);
+        return STATUS_INFO_LENGTH_MISMATCH;
+    }
+
+    /* Second pass: fill the buffer (user memory, so guard every access) */
+    _SEH2_TRY
+    {
+        TypesInfo->NumberOfTypes = Count;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+    if (!NT_SUCCESS(Status))
+    {
+        ObpLeaveObjectTypeMutex(ObpTypeObjectType);
+        return Status;
+    }
+
+    Offset = ALIGN_UP(sizeof(ULONG), ULONG_PTR);
+    for (NextEntry = ListHead->Flink; NextEntry != ListHead; NextEntry = NextEntry->Flink)
+    {
+        POBJECT_TYPE_INFORMATION TypeInfo = (POBJECT_TYPE_INFORMATION)((PUCHAR)Buffer + Offset);
+        ULONG EntryLength = 0;
+
+        CreatorInfo = CONTAINING_RECORD(NextEntry, OBJECT_HEADER_CREATOR_INFO, TypeList);
+        Header = (POBJECT_HEADER)(CreatorInfo + 1);
+        Type = (POBJECT_TYPE)&Header->Body;
+
+        Status = ObQueryTypeInfo(Type, TypeInfo, Length - Offset, &EntryLength);
+        if (!NT_SUCCESS(Status)) break;
+
+        /* Make the walkable stride (aligned MaximumLength) match what we reserved */
+        _SEH2_TRY
+        {
+            TypeInfo->TypeName.MaximumLength = TypeInfo->TypeName.Length + sizeof(UNICODE_NULL);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+        if (!NT_SUCCESS(Status)) break;
+
+        Offset += EntryLength;
+    }
+
+    ObpLeaveObjectTypeMutex(ObpTypeObjectType);
+    return Status;
+}
+
 /*++
 * @name NtQueryObject
 * @implemented NT4
@@ -1764,9 +1869,11 @@ NtQueryObject(IN HANDLE ObjectHandle,
 
             /* Information about all types */
             case ObjectTypesInformation:
-                DPRINT1("NOT IMPLEMENTED!\n");
-                InfoLength = Length;
-                Status = STATUS_NOT_IMPLEMENTED;
+
+                /* Report all the object types; no handle is required */
+                Status = ObpQueryTypesInformation(ObjectInformation,
+                                                  Length,
+                                                  &InfoLength);
                 break;
 
             /* Information about the handle flags */
