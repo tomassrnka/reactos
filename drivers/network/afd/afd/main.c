@@ -336,6 +336,66 @@ AfdGetTdiHandles(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     return UnlockAndMaybeComplete(FCB, STATUS_SUCCESS, Irp, 0);
 }
 
+/*
+ * The AFD create packet (the EA passed when opening \Device\Afd) has two
+ * wire layouts and no version field to tell them apart:
+ *
+ *   NT5  (AFD_CREATE_PACKET)     - what ReactOS msafd.dll sends.
+ *   NT6+ (AFD_CREATE_PACKET_NT6) - what Windows mswsock sends on Vista and
+ *                                  later; it inserts AddressFamily, SocketType
+ *                                  and Protocol (three DWORDs) ahead of
+ *                                  SizeOfTransportName, shifting the transport
+ *                                  name by 12 bytes.
+ *
+ * EndpointFlags and GroupID keep the same offset in both, so only the
+ * transport name moves. We detect the layout from content: an AFD transport
+ * name is always a "\Device\..." string, so a correctly located name begins
+ * with L'\\' and its declared byte count fits the bytes after the header.
+ * We switch to the NT6 layout only when it is self-consistent and the NT5
+ * interpretation is not, so a genuine NT5 packet is parsed exactly as before.
+ */
+static
+BOOLEAN
+AfdCreatePacketNameConsistent(ULONG SizeOfTransportName,
+                              const WCHAR *TransportName,
+                              ULONG BytesAvailable)
+{
+    /* A non-empty, WCHAR-sized name that fits and looks like a device path. */
+    if( SizeOfTransportName < sizeof(WCHAR) ||
+        SizeOfTransportName > BytesAvailable ||
+        (SizeOfTransportName % sizeof(WCHAR)) != 0 )
+    {
+        return FALSE;
+    }
+
+    return (TransportName[0] == L'\\');
+}
+
+static
+BOOLEAN
+AfdIsCreatePacketNt6(PAFD_CREATE_PACKET ConnectInfo, ULONG EaValueLength)
+{
+    PAFD_CREATE_PACKET_NT6 ConnectInfo6 = (PAFD_CREATE_PACKET_NT6)ConnectInfo;
+    BOOLEAN Nt5Consistent, Nt6Consistent;
+
+    /* Too small to even contain the larger NT6 header: cannot be NT6. */
+    if( EaValueLength < FIELD_OFFSET(AFD_CREATE_PACKET_NT6, TransportName) )
+        return FALSE;
+
+    Nt5Consistent =
+        EaValueLength >= FIELD_OFFSET(AFD_CREATE_PACKET, TransportName) &&
+        AfdCreatePacketNameConsistent(ConnectInfo->SizeOfTransportName,
+                                      ConnectInfo->TransportName,
+                                      EaValueLength - FIELD_OFFSET(AFD_CREATE_PACKET, TransportName));
+
+    Nt6Consistent =
+        AfdCreatePacketNameConsistent(ConnectInfo6->SizeOfTransportName,
+                                      ConnectInfo6->TransportName,
+                                      EaValueLength - FIELD_OFFSET(AFD_CREATE_PACKET_NT6, TransportName));
+
+    return (Nt6Consistent && !Nt5Consistent);
+}
+
 static NTSTATUS NTAPI
 AfdCreateSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                 PIO_STACK_LOCATION IrpSp) {
@@ -346,6 +406,8 @@ AfdCreateSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PAFD_CREATE_PACKET ConnectInfo = NULL;
     //ULONG EaLength;
     PWCHAR EaInfoValue = NULL;
+    PWCHAR TransportName = NULL;
+    ULONG SizeOfTransportName = 0;
     //UINT Disposition;
     UINT i;
     NTSTATUS Status = STATUS_SUCCESS;
@@ -363,18 +425,35 @@ AfdCreateSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     EaInfo = Irp->AssociatedIrp.SystemBuffer;
 
     if( EaInfo ) {
+        ULONG HeaderSize = FIELD_OFFSET(AFD_CREATE_PACKET, TransportName);
+
         ConnectInfo = (PAFD_CREATE_PACKET)(EaInfo->EaName + EaInfo->EaNameLength + 1);
-        EaInfoValue = (PWCHAR)(((PCHAR)ConnectInfo) + sizeof(AFD_CREATE_PACKET));
 
         //EaLength = sizeof(FILE_FULL_EA_INFORMATION) + EaInfo->EaNameLength + EaInfo->EaValueLength;
+
+        /* Select the create-packet layout the caller used (see
+         * AfdIsCreatePacketNt6) and read the transport name from its offset. */
+        if( AfdIsCreatePacketNt6(ConnectInfo, EaInfo->EaValueLength) )
+        {
+            PAFD_CREATE_PACKET_NT6 ConnectInfo6 = (PAFD_CREATE_PACKET_NT6)ConnectInfo;
+
+            HeaderSize = FIELD_OFFSET(AFD_CREATE_PACKET_NT6, TransportName);
+            SizeOfTransportName = ConnectInfo6->SizeOfTransportName;
+            TransportName = ConnectInfo6->TransportName;
+        }
+        else
+        {
+            SizeOfTransportName = ConnectInfo->SizeOfTransportName;
+            TransportName = ConnectInfo->TransportName;
+        }
+        EaInfoValue = TransportName;
 
         /* The EA value must span the create-packet header and the transport
          * name it declares; without this, reading SizeOfTransportName and then
          * copying that many bytes from TransportName over-reads the EA pool
          * block (the declared name length is a DWORD, up to 64KB-1). */
-        if( EaInfo->EaValueLength < FIELD_OFFSET(AFD_CREATE_PACKET, TransportName) ||
-            ConnectInfo->SizeOfTransportName >
-                EaInfo->EaValueLength - FIELD_OFFSET(AFD_CREATE_PACKET, TransportName) )
+        if( EaInfo->EaValueLength < HeaderSize ||
+            SizeOfTransportName > EaInfo->EaValueLength - HeaderSize )
         {
             AFD_DbgPrint(MIN_TRACE,("Invalid AFD_CREATE_PACKET EA length\n"));
             Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
@@ -427,7 +506,7 @@ AfdCreateSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     AFD_DbgPrint(MID_TRACE,("%p: Checking command channel\n", FCB));
 
     if( ConnectInfo ) {
-        FCB->TdiDeviceName.Length = ConnectInfo->SizeOfTransportName;
+        FCB->TdiDeviceName.Length = SizeOfTransportName;
         FCB->TdiDeviceName.MaximumLength = FCB->TdiDeviceName.Length;
         FCB->TdiDeviceName.Buffer = ExAllocatePoolWithTag(NonPagedPool,
                                                           FCB->TdiDeviceName.Length,
@@ -442,7 +521,7 @@ AfdCreateSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         }
 
         RtlCopyMemory( FCB->TdiDeviceName.Buffer,
-                       ConnectInfo->TransportName,
+                       TransportName,
                        FCB->TdiDeviceName.Length );
 
         AFD_DbgPrint(MID_TRACE,("Success: %s %wZ\n",
