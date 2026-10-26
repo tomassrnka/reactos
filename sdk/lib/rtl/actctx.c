@@ -3083,6 +3083,8 @@ static NTSTATUS get_manifest_in_module( struct actctx_loader* acl, struct assemb
         RtlFreeUnicodeString(&nameW);
     }
     if (status == STATUS_SUCCESS) status = LdrAccessResource(hModule, entry, &ptr, NULL);
+    /* a data-file module whose resource RVA maps to no section yields a NULL pointer */
+    if (status == STATUS_SUCCESS && !ptr) status = STATUS_RESOURCE_DATA_NOT_FOUND;
 
     if (status == STATUS_SUCCESS)
         status = parse_manifest(acl, ai, filename, hModule, directory, shared, ptr, entry->Size);
@@ -3142,6 +3144,7 @@ static NTSTATUS search_manifest_in_module( struct actctx_loader* acl, struct ass
 
     entry = ptr;
     status = LdrAccessResource(hModule, entry, &ptr, NULL);
+    if (status == STATUS_SUCCESS && !ptr) status = STATUS_RESOURCE_DATA_NOT_FOUND;
 
     if (status == STATUS_SUCCESS)
         status = parse_manifest(acl, ai, filename, hModule, directory, shared, ptr, entry->Size);
@@ -3189,7 +3192,7 @@ static void *read_file_flat( HANDLE file )
  * Returns NULL for anything unusual, in which case the caller falls back to the
  * full flat read and then to the mapped view, so the result can never be worse. */
 #define ACTCTX_HDR_READ 4096
-static void *read_pe_resources( HANDLE file )
+static void *read_pe_resources( HANDLE file, BOOL *compact )
 {
     FILE_STANDARD_INFORMATION info;
     IO_STATUS_BLOCK io;
@@ -3204,6 +3207,7 @@ static void *read_pe_resources( HANDLE file )
     ULONG n, lfanew, rsrc_idx = 0, optsize, nsec, ndirs, i, soh, va, dirsize, data_off, total;
     USHORT magic;
 
+    *compact = FALSE;
     status = NtQueryInformationFile( file, &io, &info, sizeof(info), FileStandardInformation );
     if (status != STATUS_SUCCESS) return NULL;
     fsize = info.EndOfFile.QuadPart;
@@ -3305,12 +3309,26 @@ static void *read_pe_resources( HANDLE file )
         }
     }
     RtlFreeHeap( GetProcessHeap(), 0, hdr );
+    *compact = TRUE;
     return buf;
 
 fail:
     if (buf) RtlFreeHeap( GetProcessHeap(), 0, buf );
     RtlFreeHeap( GetProcessHeap(), 0, hdr );
     return NULL;
+}
+
+static NTSTATUS parse_pe_buffer( struct actctx_loader* acl, struct assembly_identity* ai,
+                                  LPCWSTR filename, LPCWSTR directory, BOOL shared,
+                                  void *base, LPCWSTR resname, ULONG lang )
+{
+    HANDLE module;
+
+    if (!RtlImageNtHeader(base)) return STATUS_INVALID_IMAGE_FORMAT;  /* not a PE file */
+    module = (HMODULE)((ULONG_PTR)base | 1);  /* make it a LOAD_LIBRARY_AS_DATAFILE handle */
+    if (resname)
+        return get_manifest_in_module( acl, ai, filename, directory, shared, module, resname, lang );
+    return search_manifest_in_module( acl, ai, filename, directory, shared, module, lang );
 }
 
 static NTSTATUS get_manifest_in_pe_file( struct actctx_loader* acl, struct assembly_identity* ai,
@@ -3325,6 +3343,7 @@ static NTSTATUS get_manifest_in_pe_file( struct actctx_loader* acl, struct assem
     SIZE_T              count;
     void               *base;
     void               *heapbuf;
+    BOOL                compact;
     WCHAR resnameBuf[20];
     LPCWSTR resptr = resname;
 
@@ -3336,47 +3355,46 @@ static NTSTATUS get_manifest_in_pe_file( struct actctx_loader* acl, struct assem
 
     DPRINT( "looking for res %S in %S\n", resptr, filename ? filename : L"<NULL>");
 
-    heapbuf = read_pe_resources( file );
-    if (!heapbuf) heapbuf = read_file_flat( file );
+    heapbuf = read_pe_resources( file, &compact );
     if (heapbuf)
     {
-        base = heapbuf;
+        status = parse_pe_buffer( acl, ai, filename, directory, shared, heapbuf, resname, lang );
+        RtlFreeHeap( GetProcessHeap(), 0, heapbuf );
+        /* The compact copy only holds the resource directory section. If the manifest data
+         * lives in another section the lookup comes back as "data not found": redo it on a
+         * full read, which has every section. */
+        if (!compact || status != STATUS_RESOURCE_DATA_NOT_FOUND) return status;
     }
-    else
+    heapbuf = read_file_flat( file );
+    if (heapbuf)
     {
-        attr.Length                   = sizeof(attr);
-        attr.RootDirectory            = 0;
-        attr.ObjectName               = NULL;
-        attr.Attributes               = OBJ_CASE_INSENSITIVE | OBJ_OPENIF;
-        attr.SecurityDescriptor       = NULL;
-        attr.SecurityQualityOfService = NULL;
-
-        size.QuadPart = 0;
-        status = NtCreateSection( &mapping, STANDARD_RIGHTS_REQUIRED | SECTION_QUERY | SECTION_MAP_READ,
-                                  &attr, &size, PAGE_READONLY, SEC_COMMIT, file );
-        if (status != STATUS_SUCCESS) return status;
-
-        offset.QuadPart = 0;
-        count = 0;
-        base = NULL;
-        status = NtMapViewOfSection( mapping, GetCurrentProcess(), &base, 0, 0, &offset,
-                                     &count, ViewShare, 0, PAGE_READONLY );
-        NtClose( mapping );
-        if (status != STATUS_SUCCESS) return status;
+        status = parse_pe_buffer( acl, ai, filename, directory, shared, heapbuf, resname, lang );
+        RtlFreeHeap( GetProcessHeap(), 0, heapbuf );
+        return status;
     }
 
-    if (RtlImageNtHeader(base)) /* we got a PE file */
-    {
-        HANDLE module = (HMODULE)((ULONG_PTR)base | 1);  /* make it a LOAD_LIBRARY_AS_DATAFILE handle */
-        if (resname)
-            status = get_manifest_in_module( acl, ai, filename, directory, shared, module, resname, lang );
-        else
-            status = search_manifest_in_module(acl, ai, filename, directory, shared, module, lang);
-    }
-    else status = STATUS_INVALID_IMAGE_FORMAT;
+    attr.Length                   = sizeof(attr);
+    attr.RootDirectory            = 0;
+    attr.ObjectName               = NULL;
+    attr.Attributes               = OBJ_CASE_INSENSITIVE | OBJ_OPENIF;
+    attr.SecurityDescriptor       = NULL;
+    attr.SecurityQualityOfService = NULL;
 
-    if (heapbuf) RtlFreeHeap( GetProcessHeap(), 0, heapbuf );
-    else NtUnmapViewOfSection( GetCurrentProcess(), base );
+    size.QuadPart = 0;
+    status = NtCreateSection( &mapping, STANDARD_RIGHTS_REQUIRED | SECTION_QUERY | SECTION_MAP_READ,
+                              &attr, &size, PAGE_READONLY, SEC_COMMIT, file );
+    if (status != STATUS_SUCCESS) return status;
+
+    offset.QuadPart = 0;
+    count = 0;
+    base = NULL;
+    status = NtMapViewOfSection( mapping, GetCurrentProcess(), &base, 0, 0, &offset,
+                                 &count, ViewShare, 0, PAGE_READONLY );
+    NtClose( mapping );
+    if (status != STATUS_SUCCESS) return status;
+
+    status = parse_pe_buffer( acl, ai, filename, directory, shared, base, resname, lang );
+    NtUnmapViewOfSection( GetCurrentProcess(), base );
     return status;
 }
 
