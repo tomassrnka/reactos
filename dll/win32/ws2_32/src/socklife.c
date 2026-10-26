@@ -15,6 +15,34 @@
 
 /* FUNCTIONS *****************************************************************/
 
+/* TRUE when [Buffer, Buffer + Length) can be read; Windows reports WSAEFAULT
+ * for an unreadable sockaddr instead of faulting in the caller */
+static
+BOOL
+WsIsReadable(IN CONST VOID *Buffer,
+             IN INT Length)
+{
+    CONST volatile CHAR *Pointer = Buffer;
+    CHAR Dummy;
+    INT Offset;
+    BOOL Readable = TRUE;
+
+    _SEH2_TRY
+    {
+        for (Offset = 0; Offset < Length; Offset += 0x1000)
+            Dummy = Pointer[Offset];
+        Dummy = Pointer[Length - 1];
+        (VOID)Dummy;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Readable = FALSE;
+    }
+    _SEH2_END;
+
+    return Readable;
+}
+
 /*
  * @implemented
  */
@@ -48,7 +76,7 @@ bind(IN SOCKET s,
         /* Get the Socket Context */
         if ((Socket = WsSockGetSocket(s)))
         {
-            if (name && (namelen >= sizeof(*name)))
+            if (name && (namelen >= sizeof(*name)) && WsIsReadable(name, namelen))
             {
                 /* Make the call */
                 Status = Socket->Provider->Service.lpWSPBind(s,

@@ -523,9 +523,10 @@ NTSTATUS FileOpenAddress(
           /* Sanity check */
           ASSERT(Address->Address[0].Address[0].sin_port == AddrFile->Port);
       }
-      else if (!AddrIsUnspecified(&AddrFile->Address))
+      else
       {
-          /* The client is trying to bind to a local address so allocate a port now too */
+          /* No port given: reserve an ephemeral one now, so that getsockname
+             after bind reports it for a wildcard address as well */
           AllocatedPort = TCPAllocatePort(0);
 
           /* Every ephemeral port is taken: WSAENOBUFS, as on Windows */
@@ -535,11 +536,6 @@ NTSTATUS FileOpenAddress(
               return STATUS_INSUFFICIENT_RESOURCES;
           }
           AddrFile->Port = AllocatedPort;
-      }
-      else
-      {
-          /* The client wants an unspecified port with an unspecified address so we wait to see what the TCP library gives us */
-          AddrFile->Port = 0;
       }
 
       EntityType = CO_TL_ENTITY;
