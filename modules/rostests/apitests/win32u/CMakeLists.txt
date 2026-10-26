@@ -77,6 +77,7 @@ list(APPEND SOURCE
     ntuser/NtUserGetThreadState.c
     ntuser/NtUserGetTitleBarInfo.c
     ntuser/NtUserMessageCallAsync.c
+    ntuser/NtUserMessageCallPackParam.c
     ntuser/NtUserProcessConnect.c
     ntuser/NtUserRedrawWindow.c
     ntuser/NtUserSBGetParms.c
