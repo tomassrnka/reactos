@@ -609,6 +609,10 @@ co_UserCallNextHookEx(PHOOK Hook,
         {
             MSLLHOOKSTRUCT Mouse;
 
+            /* SECURITY (Astra #8): when lParam==0 this struct is passed to the
+               hook procedure uninitialized -> kernel-stack info-leak. Zero it. */
+            RtlZeroMemory(&Mouse, sizeof(Mouse));
+
             if (lParam)
             {
                 _SEH2_TRY
@@ -643,6 +647,9 @@ co_UserCallNextHookEx(PHOOK Hook,
         case WH_KEYBOARD_LL:
         {
             KBDLLHOOKSTRUCT Keyboard;
+
+            /* SECURITY (Astra #8): avoid kernel-stack info-leak when lParam==0. */
+            RtlZeroMemory(&Keyboard, sizeof(Keyboard));
 
             if (lParam)
             {
@@ -680,6 +687,9 @@ co_UserCallNextHookEx(PHOOK Hook,
         case WH_GETMESSAGE:
         {
             MSG Msg;
+
+            /* SECURITY (Astra #8): avoid kernel-stack info-leak when lParam==0. */
+            RtlZeroMemory(&Msg, sizeof(Msg));
 
             if (lParam)
             {
@@ -810,6 +820,9 @@ co_UserCallNextHookEx(PHOOK Hook,
                 {
                     RECTL rt;
 
+                    /* SECURITY (Astra #8): avoid kernel-stack info-leak when lParam==0. */
+                    RtlZeroMemory(&rt, sizeof(rt));
+
                     TRACE("HOOK HCBT_MOVESIZE\n");
 
                     if (lParam)
@@ -846,6 +859,9 @@ co_UserCallNextHookEx(PHOOK Hook,
                 case HCBT_ACTIVATE:
                 {
                     CBTACTIVATESTRUCT CbAs;
+
+                    /* SECURITY (Astra #8): avoid kernel-stack info-leak when lParam==0. */
+                    RtlZeroMemory(&CbAs, sizeof(CbAs));
 
                     TRACE("HOOK HCBT_ACTIVATE\n");
                     if (lParam)
