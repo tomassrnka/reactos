@@ -6225,6 +6225,14 @@ NtUserGetMenuItemRect(
 
    _SEH2_TRY
    {
+      /* SECURITY (Astra #8): lprcItem is a user-mode pointer. Without
+         ProbeForWrite, SEH only catches a *fault* - a caller that passes a
+         valid kernel address writes Rect straight into kernel memory (no
+         fault raised) -> arbitrary kernel write. Probe the user buffer
+         before copying. Alignment 1: the prior SEH-only path accepted any
+         writable (even misaligned) RECT, so do not newly reject misaligned
+         user buffers with STATUS_DATATYPE_MISALIGNMENT. */
+      ProbeForWrite(lprcItem, sizeof(RECTL), 1);
       RtlCopyMemory(lprcItem, &Rect, sizeof(RECTL));
    }
    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
