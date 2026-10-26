@@ -1,0 +1,5 @@
+add_executable(wevtapi_winetest wevtapi.c)
+target_compile_definitions(wevtapi_winetest PRIVATE STANDALONE __WINESRC__)
+set_module_type(wevtapi_winetest win32cui)
+add_importlibs(wevtapi_winetest wevtapi advapi32 msvcrt kernel32)
+add_rostests_file(TARGET wevtapi_winetest)
