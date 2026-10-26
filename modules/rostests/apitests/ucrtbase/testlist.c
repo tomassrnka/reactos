@@ -24,6 +24,7 @@ extern void func_wctomb(void);
 extern void func_math_errno(void);
 extern void func_c99_math(void);
 extern void func_fenv(void);
+extern void func_version(void);
 
 
 const struct test winetest_testlist[] =
@@ -49,6 +50,7 @@ const struct test winetest_testlist[] =
     { "math_errno", func_math_errno },
     { "c99_math", func_c99_math },
     { "fenv", func_fenv },
+    { "version", func_version },
 
     { 0, 0 }
 };

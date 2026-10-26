@@ -27,6 +27,7 @@ list(APPEND SOURCE
     math_errno.c
     c99_math.c
     fenv.c
+    version.c
     testlist.c
 )
 
@@ -50,5 +51,5 @@ if(NOT MSVC)
     target_link_libraries(ucrtbase_apitest -lgcc)
 endif()
 
-add_importlibs(ucrtbase_apitest ucrtbase kernel32 ntdll)
+add_importlibs(ucrtbase_apitest ucrtbase advapi32 version kernel32 ntdll)
 add_rostests_file(TARGET ucrtbase_apitest)

@@ -16,6 +16,11 @@ add_registry_inf(
     hivesys.inf
     hivebcd.inf)
 
+# Visual C++ runtime keys of the architecture
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/hivevcrt_${ARCH}.inf)
+    add_registry_inf(hivevcrt_${ARCH}.inf)
+endif()
+
 # Regtest
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/bootcdregtest/regtest.cmd DESTINATION reactos/bin FOR all)
 
