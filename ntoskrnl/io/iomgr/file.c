@@ -1969,6 +1969,30 @@ IopQueryNameInternal(IN PVOID ObjectBody,
     /* Validate length */
     if (Length < sizeof(OBJECT_NAME_INFORMATION))
     {
+        /* NT6+ reports the full size needed for the name even if the caller
+         * could not even fit the OBJECT_NAME_INFORMATION header. Run the query
+         * against a scratch header (never the caller's buffer, which may be
+         * zero sized) just to learn the required length. */
+        if (NtMajorVersion >= 6)
+        {
+            OBJECT_NAME_INFORMATION ScratchInfo;
+            ULONG RequiredLength = 0;
+
+            Status = IopQueryNameInternal(ObjectBody,
+                                          HasName,
+                                          QueryDosName,
+                                          &ScratchInfo,
+                                          sizeof(ScratchInfo),
+                                          &RequiredLength,
+                                          PreviousMode);
+            if ((Status == STATUS_BUFFER_OVERFLOW) &&
+                (RequiredLength > sizeof(OBJECT_NAME_INFORMATION)))
+            {
+                *ReturnLength = RequiredLength;
+                return STATUS_INFO_LENGTH_MISMATCH;
+            }
+        }
+
         /* Wrong length, fail */
         *ReturnLength = sizeof(OBJECT_NAME_INFORMATION);
         return STATUS_INFO_LENGTH_MISMATCH;
