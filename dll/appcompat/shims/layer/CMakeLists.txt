@@ -8,6 +8,7 @@ list(APPEND SOURCE
     forcedxsetupsuccess.c
     globalmemorystatus.c
     ignoreloadlibrary.c
+    verifyversionlite.c
     versionlie.c
     vmhorizon.c
     main.c

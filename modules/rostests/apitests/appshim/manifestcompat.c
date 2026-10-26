@@ -14,6 +14,13 @@
 #define VER_5_2 0x05020502  /* GetVersion 5.2 / RtlGetVersion 5.2 (real ReactOS base) */
 #define VER_6_0 0x06000600  /* GetVersion 6.0 / RtlGetVersion 6.0 (Vista, from manifest) */
 #define VER_6_1 0x06010601  /* GetVersion 6.1 / RtlGetVersion 6.1 (Windows 7, from manifest) */
+#define VER_10_0 0x0a000a00 /* GetVersion 10.0 / RtlGetVersion 10.0 (Windows 10 identity, as is) */
+
+/* The system version, from the shared user data that no per-process version lie touches (same address on Windows) */
+static DWORD system_major_version(void)
+{
+    return *(volatile ULONG*)(ULONG_PTR)0x7FFE026C;
+}
 
 static DWORD run_path(PCWSTR Path)
 {
@@ -67,7 +74,23 @@ START_TEST(manifestcompat)
     VistaWin10 = run_probe(L"appshim_manifestver_vista_win10.exe");
     trace("none=0x%08lx vista=0x%08lx span=0x%08lx vista_win10=0x%08lx\n", None, Vista, Span, VistaWin10);
 
-    if (is_reactos())
+    if (is_reactos() && system_major_version() >= 10)
+    {
+        /*
+         * Windows 10 identity (the default): the system itself is 10.0, and a manifest does not change what a
+         * program is told (since Windows 8.1 the supportedOS list does not lower GetVersion()/RtlGetVersion()),
+         * so every probe, with or without a manifest, sees 10.0.
+         */
+        ok(None == VER_10_0, "no-manifest process reported 0x%08lx, expected 0x%08lx (10.0/10.0)\n",
+           None, (DWORD)VER_10_0);
+        ok(Vista == VER_10_0, "vista-manifest process reported 0x%08lx, expected 0x%08lx (10.0/10.0)\n",
+           Vista, (DWORD)VER_10_0);
+        ok(Span == VER_10_0, "vista..win10-manifest process reported 0x%08lx, expected 0x%08lx (10.0/10.0)\n",
+           Span, (DWORD)VER_10_0);
+        ok(VistaWin10 == VER_10_0, "vista+win10-manifest process reported 0x%08lx, expected 0x%08lx (10.0/10.0)\n",
+           VistaWin10, (DWORD)VER_10_0);
+    }
+    else if (is_reactos())
     {
         /* Negative control: no manifest compatibility GUID -> the real NT 5.2 shows
          * through BOTH GetVersion() and RtlGetVersion(). Proves the fix is per-app

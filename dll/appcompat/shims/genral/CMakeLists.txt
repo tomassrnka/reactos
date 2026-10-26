@@ -4,9 +4,12 @@ include_directories(${SHIMLIB_DIR})
 spec2def(acgenral.dll genral.spec)
 
 list(APPEND SOURCE
+    chromesandbox.c
     ignoredbgout.c
     ignorefreelib.c
+    ignoreloadlib.c
     main.c
+    procparamflags.c
     shimtest.c
     themes.c
     genral.spec)
