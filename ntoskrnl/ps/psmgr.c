@@ -574,7 +574,7 @@ PsGetVersion(OUT PULONG MajorVersion OPTIONAL,
 {
     if (MajorVersion) *MajorVersion = NtMajorVersion;
     if (MinorVersion) *MinorVersion = NtMinorVersion;
-    if (BuildNumber ) *BuildNumber  = NtBuildNumber & 0x3FFF;
+    if (BuildNumber ) *BuildNumber  = NtBuildNumber & 0xFFFF; /* VERBUMP: build 19045 exceeds 14 bits */
 
     if (CSDVersion)
     {

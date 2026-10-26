@@ -589,7 +589,13 @@ START_TEST(HandleList)
     }
     GetVersionExW(&Version);
     IsReactOS = is_reactos();
-    IsWin8 = Version.dwMajorVersion > 6 || (Version.dwMajorVersion == 6 && Version.dwMinorVersion >= 2);
+    /* Windows 8+ filters console handles with the explicit list and gives the child fresh
+     * default standard handles. ReactOS keeps the Windows 7 behavior at every reported
+     * version: it inherits console handles separately from the list, so a child's
+     * standard handles stay usable. Filtering them without the fresh-default-handle half
+     * leaves a child with a list unable to use the console, so it is not done. */
+    IsWin8 = !IsReactOS && (Version.dwMajorVersion > 6 ||
+                            (Version.dwMajorVersion == 6 && Version.dwMinorVersion >= 2));
     GetModuleFileNameW(NULL, Image, _countof(Image));
     StringCchPrintfW(MappingName, _countof(MappingName), L"Local\\HandleList-%lu", GetCurrentProcessId());
     Mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, sizeof(*Report), MappingName);
