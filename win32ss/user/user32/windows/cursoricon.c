@@ -2169,6 +2169,88 @@ BITMAP_CopyImage(
     return res;
 }
 
+/*
+ * Stretch the color and mask bitmaps of a (color) icon/cursor to cxNew x cyNew, as CopyImage does
+ * on Windows. On success the bitmaps of piconinfo are replaced (the old ones are deleted) and the
+ * hotspot is scaled. On failure piconinfo is left untouched. Monochrome icons are left alone.
+ */
+static
+BOOL
+CURSORICON_StretchIconInfo(
+    _Inout_ PICONINFO piconinfo,
+    _In_ int cxNew,
+    _In_ int cyNew)
+{
+    BITMAP bm;
+    BITMAPINFO bmi;
+    HDC hdcScreen, hdcSrc, hdcDst;
+    HBITMAP hbmOldSrc, hbmOldDst, hbmColor, hbmMask;
+    VOID *pBits;
+    BOOL ok = FALSE;
+
+    if (!piconinfo->hbmColor || !piconinfo->hbmMask ||
+        !GetObjectW(piconinfo->hbmColor, sizeof(bm), &bm) ||
+        bm.bmWidth <= 0 || bm.bmHeight <= 0)
+        return FALSE;
+
+    if (bm.bmWidth == cxNew && bm.bmHeight == cyNew)
+        return FALSE;
+
+    hdcScreen = GetDC(NULL);
+    hdcSrc = CreateCompatibleDC(hdcScreen);
+    hdcDst = CreateCompatibleDC(hdcScreen);
+
+    ZeroMemory(&bmi, sizeof(bmi));
+    bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
+    bmi.bmiHeader.biWidth = cxNew;
+    bmi.bmiHeader.biHeight = -cyNew;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    hbmColor = CreateDIBSection(hdcScreen, &bmi, DIB_RGB_COLORS, &pBits, NULL, 0);
+    hbmMask = CreateBitmap(cxNew, cyNew, 1, 1, NULL);
+    ReleaseDC(NULL, hdcScreen);
+
+    if (hdcSrc && hdcDst && hbmColor && hbmMask)
+    {
+        hbmOldSrc = SelectObject(hdcSrc, piconinfo->hbmColor);
+        hbmOldDst = SelectObject(hdcDst, hbmColor);
+        SetStretchBltMode(hdcDst, HALFTONE);
+        ok = StretchBlt(hdcDst, 0, 0, cxNew, cyNew, hdcSrc, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
+        SelectObject(hdcSrc, hbmOldSrc);
+        SelectObject(hdcDst, hbmOldDst);
+
+        if (ok)
+        {
+            hbmOldSrc = SelectObject(hdcSrc, piconinfo->hbmMask);
+            hbmOldDst = SelectObject(hdcDst, hbmMask);
+            SetStretchBltMode(hdcDst, COLORONCOLOR);
+            ok = StretchBlt(hdcDst, 0, 0, cxNew, cyNew, hdcSrc, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
+            SelectObject(hdcSrc, hbmOldSrc);
+            SelectObject(hdcDst, hbmOldDst);
+        }
+    }
+
+    if (hdcSrc) DeleteDC(hdcSrc);
+    if (hdcDst) DeleteDC(hdcDst);
+
+    if (ok)
+    {
+        DeleteObject(piconinfo->hbmColor);
+        DeleteObject(piconinfo->hbmMask);
+        piconinfo->hbmColor = hbmColor;
+        piconinfo->hbmMask = hbmMask;
+        piconinfo->xHotspot = piconinfo->xHotspot * cxNew / bm.bmWidth;
+        piconinfo->yHotspot = piconinfo->yHotspot * cyNew / bm.bmHeight;
+    }
+    else
+    {
+        if (hbmColor) DeleteObject(hbmColor);
+        if (hbmMask) DeleteObject(hbmMask);
+    }
+    return ok;
+}
+
 static
 HICON
 CURSORICON_CopyImage(
@@ -2274,6 +2356,10 @@ CURSORICON_CopyImage(
         ERR("GetIconInfo failed.\n");
         return NULL;
     }
+
+    /* Windows stretches the image to the requested size */
+    if (cxDesired > 0 && cyDesired > 0)
+        CURSORICON_StretchIconInfo(&ii, cxDesired, cyDesired);
 
     /* This is CreateIconIndirect with the LR_SHARED coat added */
     if  (!CURSORICON_GetCursorDataFromIconInfo(&CursorData, &ii))
