@@ -38,6 +38,7 @@ list(APPEND SOURCE
     DefaultDllDirectories.c
     ThreadImpersonationToken.c
     DebugTrapInterrupts.c
+    ActCtxResDirBound.c
     DefaultActCtx.c
     DiscardVirtualMemory.c
     DeleteTimerQueueEx.c

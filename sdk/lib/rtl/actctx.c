@@ -3172,7 +3172,7 @@ static NTSTATUS search_manifest_in_module( struct actctx_loader* acl, struct ass
  * to NtMapViewOfSection hooks that assume every view in the process is a
  * loader-mapped image (the early DLL blocklist hook of Firefox does). */
 #define ACTCTX_MAX_FLAT_READ (32 * 1024 * 1024)
-static void *read_file_flat( HANDLE file )
+static void *read_file_flat( HANDLE file, SIZE_T *size )
 {
     FILE_STANDARD_INFORMATION info;
     IO_STATUS_BLOCK io;
@@ -3193,6 +3193,7 @@ static void *read_file_flat( HANDLE file )
         RtlFreeHeap( GetProcessHeap(), 0, buf );
         return NULL;
     }
+    *size = info.EndOfFile.LowPart;
     return buf;
 }
 
@@ -3332,6 +3333,68 @@ fail:
     return NULL;
 }
 
+/* The resource directory of a PE read into a private heap buffer is attacker
+ * controlled: every offset the manifest lookup will follow (directory headers,
+ * entry arrays, name strings, data entries) must lie inside the buffer, or the
+ * walk would read past the heap block. Only the part of the tree the lookup
+ * touches is checked: the root level and the whole RT_MANIFEST subtree. */
+static BOOL rsrc_range_ok( SIZE_T avail, ULONG off, SIZE_T len )
+{
+    return (SIZE_T)off <= avail && len <= avail - off;
+}
+
+static BOOL rsrc_dir_ok( const BYTE *root, SIZE_T avail, ULONG off, ULONG depth, BOOL root_level )
+{
+    const IMAGE_RESOURCE_DIRECTORY *dir;
+    const IMAGE_RESOURCE_DIRECTORY_ENTRY *entry;
+    ULONG i, n;
+
+    if (!rsrc_range_ok( avail, off, sizeof(*dir) )) return FALSE;
+    dir = (const IMAGE_RESOURCE_DIRECTORY *)(root + off);
+    n = (ULONG)dir->NumberOfNamedEntries + dir->NumberOfIdEntries;
+    if (!rsrc_range_ok( avail, off + sizeof(*dir), n * sizeof(*entry) )) return FALSE;
+    entry = (const IMAGE_RESOURCE_DIRECTORY_ENTRY *)(dir + 1);
+    for (i = 0; i < n; i++)
+    {
+        if (i < dir->NumberOfNamedEntries)
+        {
+            const IMAGE_RESOURCE_DIR_STRING_U *str;
+            if (!rsrc_range_ok( avail, entry[i].NameOffset, sizeof(*str) )) return FALSE;
+            str = (const IMAGE_RESOURCE_DIR_STRING_U *)(root + entry[i].NameOffset);
+            if (!rsrc_range_ok( avail, entry[i].NameOffset,
+                                FIELD_OFFSET(IMAGE_RESOURCE_DIR_STRING_U, NameString) +
+                                (SIZE_T)str->Length * sizeof(WCHAR) )) return FALSE;
+        }
+        if (root_level)
+        {
+            /* only the manifest type is descended into */
+            if (i < dir->NumberOfNamedEntries || entry[i].Id != (WORD)(ULONG_PTR)RT_MANIFEST ||
+                !entry[i].DataIsDirectory) continue;
+        }
+        if (entry[i].DataIsDirectory)
+        {
+            if (depth >= 2) continue;  /* never followed by the lookup */
+            if (!rsrc_dir_ok( root, avail, entry[i].OffsetToDirectory, depth + 1, FALSE )) return FALSE;
+        }
+        else if (!rsrc_range_ok( avail, entry[i].OffsetToData, sizeof(IMAGE_RESOURCE_DATA_ENTRY) ))
+            return FALSE;
+    }
+    return TRUE;
+}
+
+/* base is a heap buffer of 'len' bytes holding a PE file image (flat or compact) */
+static BOOL rsrc_tree_in_buffer( HANDLE module, SIZE_T len )
+{
+    ULONG size;
+    const BYTE *base = (const BYTE *)((ULONG_PTR)module & ~(ULONG_PTR)1);
+    const BYTE *root;
+
+    root = RtlImageDirectoryEntryToData( module, TRUE, IMAGE_DIRECTORY_ENTRY_RESOURCE, &size );
+    if (!root) return TRUE;  /* nothing to walk, the lookup fails by itself */
+    if (root < base || (SIZE_T)(root - base) > len) return FALSE;
+    return rsrc_dir_ok( root, len - (root - base), 0, 0, TRUE );
+}
+
 static NTSTATUS parse_pe_buffer( struct actctx_loader* acl, struct assembly_identity* ai,
                                   LPCWSTR filename, LPCWSTR directory, BOOL shared,
                                   void *base, LPCWSTR resname, ULONG lang, SIZE_T limit )
@@ -3340,6 +3403,8 @@ static NTSTATUS parse_pe_buffer( struct actctx_loader* acl, struct assembly_iden
 
     if (!RtlImageNtHeader(base)) return STATUS_INVALID_IMAGE_FORMAT;  /* not a PE file */
     module = (HMODULE)((ULONG_PTR)base | 1);  /* make it a LOAD_LIBRARY_AS_DATAFILE handle */
+    /* limit != 0: base is a heap buffer of that size, bound the resource walk to it */
+    if (limit && !rsrc_tree_in_buffer( module, limit )) return STATUS_RESOURCE_DATA_NOT_FOUND;
     if (resname)
         return get_manifest_in_module( acl, ai, filename, directory, shared, module, resname, lang, limit );
     return search_manifest_in_module( acl, ai, filename, directory, shared, module, lang, limit );
@@ -3358,6 +3423,7 @@ static NTSTATUS get_manifest_in_pe_file( struct actctx_loader* acl, struct assem
     void               *base;
     void               *heapbuf;
     SIZE_T              compact_size;
+    SIZE_T              flat_size = 0;
     WCHAR resnameBuf[20];
     LPCWSTR resptr = resname;
 
@@ -3379,10 +3445,10 @@ static NTSTATUS get_manifest_in_pe_file( struct actctx_loader* acl, struct assem
          * full read, which has every section. */
         if (!compact_size || status != STATUS_RESOURCE_DATA_NOT_FOUND) return status;
     }
-    heapbuf = read_file_flat( file );
+    heapbuf = read_file_flat( file, &flat_size );
     if (heapbuf)
     {
-        status = parse_pe_buffer( acl, ai, filename, directory, shared, heapbuf, resname, lang, 0 );
+        status = parse_pe_buffer( acl, ai, filename, directory, shared, heapbuf, resname, lang, flat_size );
         RtlFreeHeap( GetProcessHeap(), 0, heapbuf );
         return status;
     }
