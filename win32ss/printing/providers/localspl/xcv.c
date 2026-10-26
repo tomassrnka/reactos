@@ -123,11 +123,20 @@ _HandleDeletePort(HANDLE hXcv, PBYTE pInputData, PDWORD pcbOutputNeeded, DWORD* 
         pPort = FindPort( pPortName );
         if (pPort )
         {
-            FIXME("LocalXcvDeletePort removed Port Entry\n");
-            RemoveEntryList(&pPort->Entry);
-
-            DeleteCriticalSection(&pPort->PrintingSection);
-            DllFreeSplMem(pPort);
+            // Refuse while the printing thread holds PrintingSection (a job is active); taking it
+            // here guarantees that thread is not mid-write on the port we are about to free.
+            if (!TryEnterCriticalSection(&pPort->PrintingSection))
+            {
+                res = ERROR_BUSY;
+            }
+            else
+            {
+                FIXME("LocalXcvDeletePort removed Port Entry\n");
+                RemoveEntryList(&pPort->Entry);
+                LeaveCriticalSection(&pPort->PrintingSection);
+                DeleteCriticalSection(&pPort->PrintingSection);
+                DllFreeSplMem(pPort);
+            }
         }
         FIXME("=> %u with %u\n", res, GetLastError() );
     }
