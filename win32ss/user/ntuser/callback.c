@@ -311,8 +311,21 @@ co_IntCallWindowProc(WNDPROC Proc,
          ERR("Unable to allocate buffer for window proc callback\n");
          return -1;
       }
-      RtlMoveMemory((PVOID) ((char *) Arguments + sizeof(WINDOWPROC_CALLBACK_ARGUMENTS)),
-                    (PVOID) lParam, lParamBufferSize);
+      /* SECURITY: on the same-thread send path lParam can be a raw user pointer
+         (PackParam leaves non-packed MsgMemory messages pointing at user memory);
+         guard the copy out of it. */
+      _SEH2_TRY
+      {
+         RtlMoveMemory((PVOID) ((char *) Arguments + sizeof(WINDOWPROC_CALLBACK_ARGUMENTS)),
+                       (PVOID) lParam, lParamBufferSize);
+      }
+      _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+      {
+         ERR("co_IntCallWindowProc: bad lParam buffer, Message %u\n", Message);
+         IntCbFreeMemory(Arguments);
+         _SEH2_YIELD(return -1);
+      }
+      _SEH2_END;
    }
    else
    {
@@ -398,10 +411,23 @@ co_IntCallWindowProc(WNDPROC Proc,
           case WM_NEXTMENU:
             TRACE("Copy lParam, Message %u Size %d lParam %d!\n", Message, lParamBufferSize, lParam);
             if (InSendMessage)
+            {
                // Copy into kernel space.
-               RtlMoveMemory((PVOID) lParam,
-                             (PVOID) ((char *) Arguments + sizeof(WINDOWPROC_CALLBACK_ARGUMENTS)),
-                              lParamBufferSize);
+               /* SECURITY: guard the write-back; lParam is trusted to be a
+                  kernel buffer of lParamBufferSize here, but a bad pointer must
+                  not crash the kernel. */
+               _SEH2_TRY
+               {
+                  RtlMoveMemory((PVOID) lParam,
+                                (PVOID) ((char *) Arguments + sizeof(WINDOWPROC_CALLBACK_ARGUMENTS)),
+                                 lParamBufferSize);
+               }
+               _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+               {
+                  ERR("co_IntCallWindowProc: bad lParam write-back, Message %u!\n", Message);
+               }
+               _SEH2_END;
+            }
             else
             {
              _SEH2_TRY
@@ -497,7 +523,18 @@ co_IntLoadDefaultCursors(VOID)
    }
 
    /* HACK: The desktop class doen't have a proper cursor yet, so set it here */
-    gDesktopCursor = *((HCURSOR*)ResultPointer);
+   /* SECURITY: ResultPointer is a user-mode buffer returned by the callback;
+      probe and guard before dereferencing it. */
+   _SEH2_TRY
+   {
+      ProbeForRead(ResultPointer, sizeof(HCURSOR), 1);
+      gDesktopCursor = *((HCURSOR*)ResultPointer);
+   }
+   _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+   {
+      ERR("co_IntLoadDefaultCursors: bad result buffer\n");
+   }
+   _SEH2_END;
 
    return TRUE;
 }
@@ -942,7 +979,17 @@ co_IntCallLoadMenu( HINSTANCE hModule,
 
    if (NT_SUCCESS(Status))
    {
-      Result = *(LRESULT*)ResultPointer;
+      /* SECURITY: ResultPointer is a user-mode result buffer; probe/guard it. */
+      _SEH2_TRY
+      {
+         ProbeForRead(ResultPointer, sizeof(LRESULT), 1);
+         Result = *(LRESULT*)ResultPointer;
+      }
+      _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+      {
+         Result = 0;
+      }
+      _SEH2_END;
    }
    else
    {
@@ -1022,7 +1069,17 @@ co_IntCopyImage(HANDLE hnd, UINT type, INT desiredx, INT desiredy, UINT flags)
 
    if (NT_SUCCESS(Status))
    {
-      Handle = *(HANDLE*)ResultPointer;
+      /* SECURITY: ResultPointer is a user-mode result buffer; probe/guard it. */
+      _SEH2_TRY
+      {
+         ProbeForRead(ResultPointer, sizeof(HANDLE), 1);
+         Handle = *(HANDLE*)ResultPointer;
+      }
+      _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+      {
+         Handle = NULL;
+      }
+      _SEH2_END;
    }
    else
    {
@@ -1134,7 +1191,20 @@ co_IntSetWndIcons(VOID)
       return FALSE;
    }
 
-   RtlMoveMemory(Common, ResultPointer, ArgumentLength);
+   /* SECURITY: ResultPointer is a user-mode result buffer; probe/guard the read
+      before consuming the icon handles out of it. */
+   _SEH2_TRY
+   {
+      ProbeForRead(ResultPointer, ArgumentLength, 1);
+      RtlMoveMemory(Common, ResultPointer, ArgumentLength);
+   }
+   _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+   {
+      ERR("Set Window Icons callback: bad result buffer\n");
+      IntCbFreeMemory(Argument);
+      _SEH2_YIELD(return FALSE);
+   }
+   _SEH2_END;
    gpsi->hIconSmWindows = Common->hIconSmWindows;
    gpsi->hIconWindows   = Common->hIconWindows;
 
@@ -1213,7 +1283,19 @@ co_IntSetupOBM(VOID)
       return;
    }
 
-   RtlMoveMemory(Common, ResultPointer, ArgumentLength);
+   /* SECURITY: ResultPointer is a user-mode result buffer; probe/guard it. */
+   _SEH2_TRY
+   {
+      ProbeForRead(ResultPointer, ArgumentLength, 1);
+      RtlMoveMemory(Common, ResultPointer, ArgumentLength);
+   }
+   _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+   {
+      ERR("SetOBM callback: bad result buffer\n");
+      IntCbFreeMemory(Argument);
+      _SEH2_YIELD(return);
+   }
+   _SEH2_END;
    RtlCopyMemory(gpsi->oembmi, Common->oembmi, sizeof(gpsi->oembmi));
 
    IntCbFreeMemory(Argument);
@@ -1296,7 +1378,19 @@ co_IntImmProcessKey(HWND hWnd, HKL hKL, UINT vKey, LPARAM lParam, DWORD dwHotKey
     UserEnterCo();
 
     if (NT_SUCCESS(Status))
-        ret = *(LPDWORD)ResultPointer;
+    {
+        /* SECURITY: ResultPointer is a user-mode result buffer; probe/guard it. */
+        _SEH2_TRY
+        {
+            ProbeForRead(ResultPointer, sizeof(DWORD), 1);
+            ret = *(LPDWORD)ResultPointer;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            ret = 0;
+        }
+        _SEH2_END;
+    }
 
     return ret;
 }
