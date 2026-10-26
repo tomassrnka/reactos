@@ -4017,6 +4017,13 @@ NtUserSetWindowPlacement(HWND hWnd,
         Ret = IntSetWindowPlacement(Wnd, &Safepl, Flags);
     UserDerefObjectCo(Wnd);
 
+    /* A successful SetWindowPlacement reports ERROR_SUCCESS like Windows does.
+       Internal repositioning dispatches may send a message to a window that has
+       already been destroyed and leave ERROR_INVALID_WINDOW_HANDLE in the thread
+       last-error; that internal bookkeeping must not leak to the caller. */
+    if (Ret)
+        EngSetLastError(ERROR_SUCCESS);
+
 Exit:
    TRACE("Leave NtUserSetWindowPlacement, ret=%i\n", Ret);
    UserLeave();
