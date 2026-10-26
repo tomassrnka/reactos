@@ -2306,6 +2306,16 @@ NtUserPostMessage(HWND hWnd,
 
     UserEnterExclusive();
 
+    /* SECURITY: reject the kernel-only WM_ASYNC_* (0x80000000+) range from
+       user mode; these messages are kernel-originated only (see NtUserMessageCall). */
+    if (Msg & 0x80000000)
+    {
+        ERR("NtUserPostMessage: rejected kernel-internal message 0x%x from user mode\n", Msg);
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+        UserLeave();
+        return FALSE;
+    }
+
     ret = UserPostMessage(hWnd, Msg, wParam, lParam);
 
     UserLeave();
@@ -2325,6 +2335,16 @@ NtUserPostThreadMessage(DWORD idThread,
     NTSTATUS Status;
 
     UserEnterExclusive();
+
+    /* SECURITY: reject the kernel-only WM_ASYNC_* (0x80000000+) range from
+       user mode; these messages are kernel-originated only (see NtUserMessageCall). */
+    if (Msg & 0x80000000)
+    {
+        ERR("NtUserPostThreadMessage: rejected kernel-internal message 0x%x from user mode\n", Msg);
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+        UserLeave();
+        return FALSE;
+    }
 
     Status = PsLookupThreadByThreadId(UlongToHandle(idThread), &peThread);
 
@@ -2563,6 +2583,23 @@ NtUserMessageCall( HWND hWnd,
     USER_REFERENCE_ENTRY Ref;
 
     UserEnterExclusive();
+
+    /* SECURITY: the 0x80000000+ message range (WM_ASYNC_*, see enum
+       internal_event_message in msgqueue.h) is strictly kernel-originated.
+       Its handlers (handle_internal_message) treat lParam as a kernel-built
+       object - e.g. WM_ASYNC_SETWINDOWPOS dereferences and ExFreePoolWithTag()s
+       a kernel PWINDOWPOS - and act cross-thread/cross-process with no sender
+       check. A user-mode caller must never be able to route one, so reject any
+       message with bit 31 set that crosses the user/kernel boundary. Legitimate
+       internal dispatch uses co_IntSendMessage / co_IntSendMessageNoWait directly
+       from kernel code and never passes through this syscall. */
+    if (Msg & 0x80000000)
+    {
+        ERR("NtUserMessageCall: rejected kernel-internal message 0x%x from user mode\n", Msg);
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+        UserLeave();
+        return FALSE;
+    }
 
     switch(dwType)
     {
