@@ -62,7 +62,7 @@ static const INFORMATION_CLASS_INFO SeTokenInformationClass[] = {
     /* TokenElevation */
     IQS_SAME(TOKEN_ELEVATION, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
     /* TokenHasRestrictions */
-    IQS_NONE,
+    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
     /* TokenAccessInformation */
     IQS_NONE,
     /* TokenVirtualizationAllowed */
@@ -1212,6 +1212,36 @@ NtQueryInformationToken(
                     if (TokenInformationLength >= RequiredLength)
                     {
                         *(PULONG)TokenInformation = Value;
+                    }
+                    else
+                    {
+                        Status = STATUS_BUFFER_TOO_SMALL;
+                    }
+
+                    *ReturnLength = RequiredLength;
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    Status = _SEH2_GetExceptionCode();
+                }
+                _SEH2_END;
+
+                break;
+            }
+
+            case TokenHasRestrictions:
+            {
+                ULONG HasRestrictions;
+
+                DPRINT("NtQueryInformationToken(TokenHasRestrictions)\n");
+                RequiredLength = sizeof(ULONG);
+                HasRestrictions = (Token->RestrictedSidCount > 0) ? TRUE : FALSE;
+
+                _SEH2_TRY
+                {
+                    if (TokenInformationLength >= RequiredLength)
+                    {
+                        *(PULONG)TokenInformation = HasRestrictions;
                     }
                     else
                     {
