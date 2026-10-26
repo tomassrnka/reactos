@@ -1075,6 +1075,12 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         KeyAccess = a[1];
         if (!(KeyAccess & KEY_WOW64_RES)) KeyAccess |= KEY_WOW64_32KEY;
         Status = NtOpenKey(&Cleanup->Handle, KeyAccess, OA(2)); RETURN_HANDLE();
+    case W64_NtOpenKeyEx:
+        PROBE(0);
+        ATTR(2);
+        KeyAccess = a[1];
+        if (!(KeyAccess & KEY_WOW64_RES)) KeyAccess |= KEY_WOW64_32KEY;
+        Status = NtOpenKeyEx(&Cleanup->Handle, KeyAccess, OA(2), a[3]); RETURN_HANDLE();
     case W64_NtCreateKey:
     {
         UNICODE_STRING Class;
