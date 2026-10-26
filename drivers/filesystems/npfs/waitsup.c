@@ -133,6 +133,9 @@ NpCancelWaiter(IN PNP_WAIT_QUEUE WaitQueue,
 
     Linkage = NULL;
 
+    /* Nobody can wait for an unnamed pipe */
+    if (PipePath->Length == 0) return STATUS_SUCCESS;
+
     Buffer = ExAllocatePoolWithTag(NonPagedPool,
                                    PipePath->Length,
                                    NPFS_WAIT_BLOCK_TAG);

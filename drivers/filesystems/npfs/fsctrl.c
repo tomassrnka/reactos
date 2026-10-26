@@ -69,7 +69,8 @@ NpQueryClientProcess(IN PDEVICE_OBJECT DeviceObject,
     NodeTypeCode = NpDecodeFileObject(IoStackLocation->FileObject, 0, &Ccb, 0);
     if (NodeTypeCode != NPFS_NTC_CCB)
     {
-        return STATUS_PIPE_DISCONNECTED;
+        /* Vista+ rejects the volume and the root directory handles as invalid */
+        return NpIsVistaOrLater() ? STATUS_INVALID_PARAMETER : STATUS_PIPE_DISCONNECTED;
     }
 
     /* Get the length of the query buffer */
@@ -156,8 +157,8 @@ NpSetClientProcess(IN PDEVICE_OBJECT DeviceObject,
     /* Get the current stack location */
     IoStackLocation = IoGetCurrentIrpStackLocation(Irp);
 
-    /* Only kernel calls are allowed! */
-    if (IoStackLocation->MinorFunction != IRP_MN_KERNEL_CALL)
+    /* Before Vista, only kernel calls are allowed, whatever the handle */
+    if (!NpIsVistaOrLater() && (IoStackLocation->MinorFunction != IRP_MN_KERNEL_CALL))
     {
         return STATUS_ACCESS_DENIED;
     }
@@ -166,7 +167,14 @@ NpSetClientProcess(IN PDEVICE_OBJECT DeviceObject,
     NodeTypeCode = NpDecodeFileObject(IoStackLocation->FileObject, 0, &Ccb, 0);
     if (NodeTypeCode != NPFS_NTC_CCB)
     {
-        return STATUS_PIPE_DISCONNECTED;
+        /* Not a pipe (the volume or the root directory) */
+        return NpIsVistaOrLater() ? STATUS_NOT_SUPPORTED : STATUS_PIPE_DISCONNECTED;
+    }
+
+    /* Only kernel calls are allowed! */
+    if (IoStackLocation->MinorFunction != IRP_MN_KERNEL_CALL)
+    {
+        return STATUS_ACCESS_DENIED;
     }
 
     /* Get the length of the query buffer and check if it's valid */
@@ -219,6 +227,20 @@ NTAPI
 NpAssignEvent(IN PDEVICE_OBJECT DeviceObject,
               IN PIRP Irp)
 {
+    NODE_TYPE_CODE NodeTypeCode;
+    PNP_CCB Ccb;
+    PAGED_CODE();
+
+    /* The volume and the root directory have no pipe events */
+    NodeTypeCode = NpDecodeFileObject(IoGetCurrentIrpStackLocation(Irp)->FileObject,
+                                      NULL,
+                                      &Ccb,
+                                      NULL);
+    if ((NodeTypeCode != NPFS_NTC_CCB) && NpIsVistaOrLater())
+    {
+        return STATUS_NOT_SUPPORTED;
+    }
+
     UNIMPLEMENTED;
     return STATUS_NOT_IMPLEMENTED;
 }
@@ -228,6 +250,20 @@ NTAPI
 NpQueryEvent(IN PDEVICE_OBJECT DeviceObject,
              IN PIRP Irp)
 {
+    NODE_TYPE_CODE NodeTypeCode;
+    PNP_CCB Ccb;
+    PAGED_CODE();
+
+    /* The volume and the root directory have no pipe events */
+    NodeTypeCode = NpDecodeFileObject(IoGetCurrentIrpStackLocation(Irp)->FileObject,
+                                      NULL,
+                                      &Ccb,
+                                      NULL);
+    if ((NodeTypeCode != NPFS_NTC_CCB) && NpIsVistaOrLater())
+    {
+        return STATUS_NOT_SUPPORTED;
+    }
+
     UNIMPLEMENTED;
     return STATUS_NOT_IMPLEMENTED;
 }
@@ -777,7 +813,8 @@ NpGetConnectionAttribute(
     NodeTypeCode = NpDecodeFileObject(IoStackLocation->FileObject, 0, &Ccb, 0);
     if (NodeTypeCode != NPFS_NTC_CCB)
     {
-        return STATUS_PIPE_DISCONNECTED;
+        /* Vista+ rejects the volume and the root directory handles as invalid */
+        return NpIsVistaOrLater() ? STATUS_INVALID_PARAMETER : STATUS_PIPE_DISCONNECTED;
     }
 
     SystemBuffer = Irp->AssociatedIrp.SystemBuffer;
