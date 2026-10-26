@@ -1143,6 +1143,76 @@ QueryTokenElevationTests(
     QueryTokenElevationCreatedTests(Token);
 }
 
+static
+VOID
+QueryTokenHasRestrictionsTests(
+    _In_ HANDLE Token)
+{
+    NTSTATUS Status;
+    ULONG Length, Value;
+    HANDLE FilteredToken;
+    PSID WorldSid;
+    SID_IDENTIFIER_AUTHORITY WorldAuthority = {SECURITY_WORLD_SID_AUTHORITY};
+    union
+    {
+        TOKEN_GROUPS Groups;
+        BYTE Buffer[sizeof(TOKEN_GROUPS) + sizeof(SID_AND_ATTRIBUTES)];
+    } SidToRestrict;
+
+    /* Too small buffers report the required length (a ULONG) */
+    Length = 0;
+    Status = NtQueryInformationToken(Token, TokenHasRestrictions, NULL, 0, &Length);
+    ok_ntstatus(Status, STATUS_BUFFER_TOO_SMALL);
+    ok_dec(Length, (ULONG)sizeof(ULONG));
+
+    Length = 0;
+    Value = 0xdeadbeef;
+    Status = NtQueryInformationToken(Token, TokenHasRestrictions, &Value, sizeof(Value) - 1, &Length);
+    ok_ntstatus(Status, STATUS_BUFFER_TOO_SMALL);
+    ok_dec(Length, (ULONG)sizeof(ULONG));
+    ok_hex(Value, 0xdeadbeef);
+
+    /* The current token is not restricted */
+    Length = 0;
+    Value = 0xdeadbeef;
+    Status = NtQueryInformationToken(Token, TokenHasRestrictions, &Value, sizeof(Value), &Length);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    ok_dec(Length, (ULONG)sizeof(ULONG));
+    ok_hex(Value, 0);
+
+    /* A token with a restricting SID is restricted */
+    Status = RtlAllocateAndInitializeSid(&WorldAuthority, 1, SECURITY_WORLD_RID,
+                                         0, 0, 0, 0, 0, 0, 0, &WorldSid);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+
+    SidToRestrict.Groups.GroupCount = 1;
+    SidToRestrict.Groups.Groups[0].Attributes = 0;
+    SidToRestrict.Groups.Groups[0].Sid = WorldSid;
+
+    Status = NtFilterToken(Token, 0, NULL, NULL, &SidToRestrict.Groups, &FilteredToken);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Length = 0;
+        Value = 0xdeadbeef;
+        Status = NtQueryInformationToken(FilteredToken, TokenHasRestrictions, &Value, sizeof(Value), &Length);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        ok_dec(Length, (ULONG)sizeof(ULONG));
+        ok_hex(Value, 1);
+
+        Length = 0;
+        Status = NtQueryInformationToken(FilteredToken, TokenHasRestrictions, &Value, sizeof(Value) - 1, &Length);
+        ok_ntstatus(Status, STATUS_BUFFER_TOO_SMALL);
+        ok_dec(Length, (ULONG)sizeof(ULONG));
+
+        NtClose(FilteredToken);
+    }
+
+    RtlFreeSid(WorldSid);
+}
+
 START_TEST(NtQueryInformationToken)
 {
     NTSTATUS Status;
@@ -1201,6 +1271,7 @@ START_TEST(NtQueryInformationToken)
     QueryTokenIsSandboxInert(Token);
     QueryTokenOriginTests(Token);
     QueryTokenElevationTests(Token);
+    QueryTokenHasRestrictionsTests(Token);
 
     NtClose(Token);
 }
