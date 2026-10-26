@@ -507,7 +507,7 @@
 @ stdcall -version=0x602+ GetFirmwareEnvironmentVariableExA(str str ptr long long)
 @ stdcall -version=0x602+ GetFirmwareEnvironmentVariableExW(wstr wstr ptr long long)
 @ stdcall GetFirmwareEnvironmentVariableW(wstr wstr ptr long)
-@ stdcall -version=0x602+ GetFirmwareType(ptr)
+@ stdcall -version=0x600+ GetFirmwareType(ptr)
 @ stdcall GetFullPathNameA(str long ptr ptr)
 @ stub -version=0x600+ GetFullPathNameTransactedA
 @ stub -version=0x600+ GetFullPathNameTransactedW
