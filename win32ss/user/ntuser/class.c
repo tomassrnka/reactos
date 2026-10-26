@@ -2378,7 +2378,17 @@ UserRegisterSystemClasses(VOID)
         wc.cbSize = sizeof(wc);
         wc.style = DefaultServerClasses[i].Style;
 
-        Flags |= CSF_SERVERSIDEPROC;
+        /* SECURITY (ASTRA8-FU): mark the genuine kernel-registered system
+           classes with CSF_SYSTEMCLASS. This is the ONLY place CSF_SYSTEMCLASS
+           is ever set: IntCreateClass copies dwFlags verbatim but the user-mode
+           entry point (NtUserRegisterClassExWOW) rejects any Flags beyond
+           CSF_ANSIPROC, and the CSF_SERVERSIDEPROC auto-detect in IntCreateClass
+           never touches CSF_SYSTEMCLASS. A user-mode RegisterClass can therefore
+           never produce a class carrying this flag, so it is a forge-proof
+           discriminator for the server-side window procedures (PopupMenuWndProc /
+           DesktopWindowProc / UserMessageWindowProc), which trust the window's
+           class-specific extra-byte state as kernel-owned. */
+        Flags |= CSF_SERVERSIDEPROC | CSF_SYSTEMCLASS;
 
         if (DefaultServerClasses[i].ProcW)
         {
@@ -2487,6 +2497,22 @@ NtUserRegisterClassExWOW(
     {
         ERR("NtUserRegisterClassExWOW Bad Flags!\n");
         EngSetLastError(ERROR_INVALID_FLAGS);
+        return Ret;
+    }
+
+    /* SECURITY (ASTRA8-FU): reject the server-side class fnIDs from user mode.
+       FNID_FIRST..FNID_SWITCH (scrollbar/icontitle/menu/desktop/messagewnd/
+       switch) are the classes whose window procedures run server-side in the
+       kernel and read class-specific state out of the window extra bytes. They
+       are registered exclusively by UserRegisterSystemClasses via IntCreateClass;
+       user32 only ever registers control classes (FNID_BUTTON and above) through
+       this syscall. Accepting a server-side fnID here let a user-mode class carry
+       fnid==FNID_MENU/DESKTOP/MESSAGEWND, which routed its windows into those
+       server procedures (type-confusion / OOB write past the WND). */
+    if (fnID >= FNID_FIRST && fnID <= FNID_SWITCH)
+    {
+        WARN("NtUserRegisterClassExWOW: rejected server-side fnID 0x%x from user mode\n", fnID);
+        EngSetLastError(ERROR_INVALID_PARAMETER);
         return Ret;
     }
 

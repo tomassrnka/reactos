@@ -92,6 +92,7 @@ extern void func_NtUserGetMenuItemRectProbe(void);
 extern void func_NtUserMenuInfoItemBound(void);
 extern void func_NtUserMenuStaleIndexAfterRemove(void);
 extern void func_NtUserPopupMenuClassExtra(void);
+extern void func_NtUserServerSideFnidForge(void);
 extern void func_NtUserRegisterUserApiHookGate(void);
 extern void func_NtUserGetWOWClassPtr(void);
 extern void func_NtUserCallNextHookZero(void);
@@ -193,6 +194,7 @@ const struct test winetest_testlist[] =
     { "NtUserMenuInfoItemBound", func_NtUserMenuInfoItemBound },
     { "NtUserMenuStaleIndexAfterRemove", func_NtUserMenuStaleIndexAfterRemove },
     { "NtUserPopupMenuClassExtra", func_NtUserPopupMenuClassExtra },
+    { "NtUserServerSideFnidForge", func_NtUserServerSideFnidForge },
     { "NtUserRegisterUserApiHookGate", func_NtUserRegisterUserApiHookGate },
     { "NtUserGetWOWClassPtr", func_NtUserGetWOWClassPtr },
     { "NtUserCallNextHookZero", func_NtUserCallNextHookZero },
