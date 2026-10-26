@@ -635,6 +635,16 @@ IntRemoveMenuItem( PMENU pMenu, UINT nPos, UINT wFlags, BOOL bRecurse )
             pMenu->rgItems = newItems;
         }
     }
+
+    /* SECURITY (Astra #8): the selected/focused index may now point at or past
+       the removed item (or rgItems is NULL when cItems hit 0). It is used later
+       as rgItems[iItem] by MENU_SelectItem / MENU_ExecFocusedItem /
+       MENU_HideSubPopups, so a stale index is the same OOB primitive the SET
+       bound (IntSetMenuInfo) guards against. Clear it when it is no longer a
+       valid position. */
+    if (pMenu->iItem != NO_SELECTED_ITEM && (UINT)pMenu->iItem >= pMenu->cItems)
+        pMenu->iItem = NO_SELECTED_ITEM;
+
     return TRUE;
 }
 
@@ -947,7 +957,16 @@ IntSetMenuInfo(PMENU Menu, PROSMENUINFO lpmi)
    }
    if (sizeof(MENUINFO) < lpmi->cbSize)
    {
-      Menu->iItem = lpmi->iItem;
+      /* SECURITY (Astra #8): iItem is a user-supplied index that is later used
+         directly to index Menu->rgItems[] (MENU_SelectItem, MENU_ExecFocusedItem,
+         MENU_HideSubPopups, etc.). Those paths only reject the NO_SELECTED_ITEM
+         sentinel; any other out-of-range value causes an OOB read/write of the
+         item array -> kernel memory corruption / EoP. Accept the sentinel, else
+         require a valid position; otherwise clear the selection. */
+      if (lpmi->iItem == NO_SELECTED_ITEM || lpmi->iItem < Menu->cItems)
+         Menu->iItem = lpmi->iItem;
+      else
+         Menu->iItem = NO_SELECTED_ITEM;
       Menu->cyMenu = lpmi->cyMenu;
       Menu->cxMenu = lpmi->cxMenu;
       /* SECURITY (T68): spwndNotify (kernel PWND) and Wnd (owner window) are
@@ -4700,7 +4719,16 @@ PopupMenuWndProc(
            *lResult = IntDefWindowProc(Wnd, Message, wParam, lParam, FALSE);
            return TRUE;
         }
-        Wnd->fnid = FNID_MENU;
+        /* SECURITY (Astra #8): ppopupmenu is stored in the window extra bytes
+           via (PMENUWND)Wnd, past the fixed WND. If this proc runs for a window
+           whose class did not reserve room for the pointer, that store is an
+           out-of-bounds write past the window object. Require the room first. */
+        if ((ULONG)Wnd->cbwndExtra < sizeof(((PMENUWND)Wnd)->ppopupmenu))
+        {
+           ERR("PopupMenuWndProc: no room for ppopupmenu (cbwndExtra %d)\n", Wnd->cbwndExtra);
+           *lResult = IntDefWindowProc(Wnd, Message, wParam, lParam, FALSE);
+           return TRUE;
+        }
         pPopupMenu = DesktopHeapAlloc( Wnd->head.rpdesk, sizeof(POPUPMENU) );
         if (pPopupMenu == NULL)
         {
@@ -4709,6 +4737,10 @@ PopupMenuWndProc(
         pPopupMenu->posSelectedItem = NO_SELECTED_ITEM;
         pPopupMenu->spwndPopupMenu = Wnd;
         ((PMENUWND)Wnd)->ppopupmenu = pPopupMenu;
+        /* SECURITY (Astra #8): flip the class to FNID_MENU only AFTER the popup
+           context is allocated and stored, so a failed alloc never leaves a
+           window marked FNID_MENU with a NULL ppopupmenu (later NULL deref). */
+        Wnd->fnid = FNID_MENU;
         TRACE("Pop Up Menu is Setup! Msg %d\n",Message);
         *lResult = 1;
         return TRUE;
@@ -4729,6 +4761,11 @@ PopupMenuWndProc(
     case WM_CREATE:
       {
         CREATESTRUCTW *cs = (CREATESTRUCTW *) lParam;
+        /* SECURITY (Astra #8): guard a NULL popup context (WM_NCCREATE alloc
+           may have failed while fnid was already FNID_MENU) and a NULL
+           CREATESTRUCT before dereferencing either. */
+        if (pPopupMenu == NULL || cs == NULL)
+           break;
         pPopupMenu->spmenu = UserGetMenuObject(cs->lpCreateParams);
         if (pPopupMenu->spmenu)
         {
@@ -4745,14 +4782,17 @@ PopupMenuWndProc(
       {
         PAINTSTRUCT ps;
         IntBeginPaint(Wnd, &ps);
-        MENU_DrawPopupMenu(Wnd, ps.hdc, pPopupMenu->spmenu);
+        /* SECURITY (Astra #8): pPopupMenu may be NULL (context never set up);
+           guard the dereference. MENU_DrawPopupMenu tolerates a NULL menu. */
+        MENU_DrawPopupMenu(Wnd, ps.hdc, pPopupMenu ? pPopupMenu->spmenu : NULL);
         IntEndPaint(Wnd, &ps);
         break;
       }
 
     case WM_PRINTCLIENT:
       {
-         MENU_DrawPopupMenu( Wnd, (HDC)wParam, pPopupMenu->spmenu);
+         /* SECURITY (Astra #8): guard a NULL popup context before deref. */
+         MENU_DrawPopupMenu( Wnd, (HDC)wParam, pPopupMenu ? pPopupMenu->spmenu : NULL);
          break;
       }
 
@@ -4778,12 +4818,18 @@ PopupMenuWndProc(
 
     case WM_NCDESTROY:
       {
-         if (pPopupMenu->spmenu)
+         /* SECURITY (Astra #8): pPopupMenu may be NULL (a window marked
+            FNID_MENU whose context was never allocated); guard before
+            dereferencing and freeing it. */
+         if (pPopupMenu)
          {
-            IntReleaseMenuObject(pPopupMenu->spmenu);
+            if (pPopupMenu->spmenu)
+            {
+               IntReleaseMenuObject(pPopupMenu->spmenu);
+            }
+            DesktopHeapFree(Wnd->head.rpdesk, pPopupMenu );
+            ((PMENUWND)Wnd)->ppopupmenu = 0;
          }
-         DesktopHeapFree(Wnd->head.rpdesk, pPopupMenu );
-         ((PMENUWND)Wnd)->ppopupmenu = 0;
          Wnd->fnid = FNID_DESTROY;
          break;
       }
@@ -4797,6 +4843,9 @@ PopupMenuWndProc(
            ERR("Bad Menu Handle\n");
            break;
         }
+        /* SECURITY (Astra #8): guard a NULL popup context before deref. */
+        if (!pPopupMenu)
+           break;
         UserReferenceObject(pmenu);
         if (pPopupMenu->spmenu)
         {
@@ -6206,6 +6255,14 @@ NtUserGetMenuItemRect(
 
    _SEH2_TRY
    {
+      /* SECURITY (Astra #8): lprcItem is a user-mode pointer. Without
+         ProbeForWrite, SEH only catches a *fault* - a caller that passes a
+         valid kernel address writes Rect straight into kernel memory (no
+         fault raised) -> arbitrary kernel write. Probe the user buffer
+         before copying. Alignment 1: the prior SEH-only path accepted any
+         writable (even misaligned) RECT, so do not newly reject misaligned
+         user buffers with STATUS_DATATYPE_MISALIGNMENT. */
+      ProbeForWrite(lprcItem, sizeof(RECTL), 1);
       RtlCopyMemory(lprcItem, &Rect, sizeof(RECTL));
    }
    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)

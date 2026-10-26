@@ -211,7 +211,9 @@ ULONG_PTR Wow64WinUserMiscService(ULONG Number, ULONG *a)
         PCLS Class;
         if (a[1]) StringIn(&Name, a[1]);
         Class = NtUserGetWOWClass(P(0), a[1] ? &Name : NULL);
-        /* The result is a desktop-heap pointer that a guest cannot address. */
+        /* The result is now this process's user-mode view of the class (or
+         * NULL), not a raw kernel pointer. On a 64-bit host that view may still
+         * sit above 4 GB, which a 32-bit guest cannot address - reject those. */
         if ((ULONG_PTR)Class > MAXULONG)
         {
             RtlSetLastWin32Error(ERROR_NOT_SUPPORTED);
