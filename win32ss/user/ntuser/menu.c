@@ -635,6 +635,16 @@ IntRemoveMenuItem( PMENU pMenu, UINT nPos, UINT wFlags, BOOL bRecurse )
             pMenu->rgItems = newItems;
         }
     }
+
+    /* SECURITY (Astra #8): the selected/focused index may now point at or past
+       the removed item (or rgItems is NULL when cItems hit 0). It is used later
+       as rgItems[iItem] by MENU_SelectItem / MENU_ExecFocusedItem /
+       MENU_HideSubPopups, so a stale index is the same OOB primitive the SET
+       bound (IntSetMenuInfo) guards against. Clear it when it is no longer a
+       valid position. */
+    if (pMenu->iItem != NO_SELECTED_ITEM && (UINT)pMenu->iItem >= pMenu->cItems)
+        pMenu->iItem = NO_SELECTED_ITEM;
+
     return TRUE;
 }
 
@@ -947,7 +957,16 @@ IntSetMenuInfo(PMENU Menu, PROSMENUINFO lpmi)
    }
    if (sizeof(MENUINFO) < lpmi->cbSize)
    {
-      Menu->iItem = lpmi->iItem;
+      /* SECURITY (Astra #8): iItem is a user-supplied index that is later used
+         directly to index Menu->rgItems[] (MENU_SelectItem, MENU_ExecFocusedItem,
+         MENU_HideSubPopups, etc.). Those paths only reject the NO_SELECTED_ITEM
+         sentinel; any other out-of-range value causes an OOB read/write of the
+         item array -> kernel memory corruption / EoP. Accept the sentinel, else
+         require a valid position; otherwise clear the selection. */
+      if (lpmi->iItem == NO_SELECTED_ITEM || lpmi->iItem < Menu->cItems)
+         Menu->iItem = lpmi->iItem;
+      else
+         Menu->iItem = NO_SELECTED_ITEM;
       Menu->cyMenu = lpmi->cyMenu;
       Menu->cxMenu = lpmi->cxMenu;
       /* SECURITY (T68): spwndNotify (kernel PWND) and Wnd (owner window) are
