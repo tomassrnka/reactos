@@ -70,13 +70,16 @@ static DWORD QueryLevel(HANDLE Object)
     return Level;
 }
 
+/* Vista+ API: not exported by the 2003-targeted ntdll, resolved at runtime */
+static NTSTATUS (NTAPI *pRtlAddMandatoryAce)(PACL, ULONG, ULONG, PSID, UCHAR, ULONG);
+
 static VOID MakeLabel(SECURITY_DESCRIPTOR *Sd, PACL Sacl, DWORD Level, DWORD Policy)
 {
     SID Sid = {SID_REVISION, 1, {SECURITY_MANDATORY_LABEL_AUTHORITY}, {0}};
     Sid.SubAuthority[0] = Level;
     ok(InitializeAcl(Sacl, 64, ACL_REVISION), "InitializeAcl\n");
-    ok_hex(RtlAddMandatoryAce(Sacl, ACL_REVISION, 0, &Sid,
-                             SYSTEM_MANDATORY_LABEL_ACE_TYPE, Policy), STATUS_SUCCESS);
+    ok_hex(pRtlAddMandatoryAce(Sacl, ACL_REVISION, 0, &Sid,
+                              SYSTEM_MANDATORY_LABEL_ACE_TYPE, Policy), STATUS_SUCCESS);
     InitializeSecurityDescriptor(Sd, SECURITY_DESCRIPTOR_REVISION);
     SetSecurityDescriptorSacl(Sd, TRUE, Sacl, FALSE);
 }
@@ -803,6 +806,13 @@ START_TEST(ProcessThreadLabel)
     TOKEN_MANDATORY_LABEL Label;
     SID Sid = {SID_REVISION, 1, {SECURITY_MANDATORY_LABEL_AUTHORITY}, {0}};
     BOOL Ret;
+
+    pRtlAddMandatoryAce = (PVOID)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlAddMandatoryAce");
+    if (!pRtlAddMandatoryAce)
+    {
+        skip("RtlAddMandatoryAce is not available\n");
+        return;
+    }
 
     if (winetest_get_mainargs(&Argv) >= 4 && !strcmp(Argv[2], "child"))
         ExitProcess(ChildRemoteThreads((HANDLE)(ULONG_PTR)_strtoui64(Argv[3], NULL, 16)));

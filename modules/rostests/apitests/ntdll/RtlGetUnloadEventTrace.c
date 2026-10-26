@@ -11,12 +11,7 @@ PRTL_UNLOAD_EVENT_TRACE
 NTAPI
 RtlGetUnloadEventTrace(VOID);
 
-VOID
-NTAPI
-RtlGetUnloadEventTraceEx(
-    _Out_ PULONG *ElementSize,
-    _Out_ PULONG *ElementCount,
-    _Out_ PVOID *EventTrace);
+typedef VOID (NTAPI *PFN_RtlGetUnloadEventTraceEx)(PULONG *, PULONG *, PVOID *);
 
 /*
  * The on-disk / cross-process layout of RTL_UNLOAD_EVENT_TRACE must match
@@ -67,8 +62,18 @@ static void Test_Ex()
     PULONG ElementSize = NULL;
     PULONG ElementCount = NULL;
     PVOID EventTrace = NULL;
+    PFN_RtlGetUnloadEventTraceEx pRtlGetUnloadEventTraceEx;
 
-    RtlGetUnloadEventTraceEx(&ElementSize, &ElementCount, &EventTrace);
+    /* Vista+ API: not exported by the 2003-targeted ntdll */
+    pRtlGetUnloadEventTraceEx = (PFN_RtlGetUnloadEventTraceEx)
+        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetUnloadEventTraceEx");
+    if (!pRtlGetUnloadEventTraceEx)
+    {
+        skip("RtlGetUnloadEventTraceEx is not available\n");
+        return;
+    }
+
+    pRtlGetUnloadEventTraceEx(&ElementSize, &ElementCount, &EventTrace);
 
     ok(ElementSize != NULL, "ElementSize not set\n");
     ok(ElementCount != NULL, "ElementCount not set\n");
