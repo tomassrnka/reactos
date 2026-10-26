@@ -1027,6 +1027,15 @@ NtCreateThread(OUT PHANDLE ThreadHandle,
         SafeInitialTeb = *InitialTeb;
     }
 
+    /* NT 10 no longer supports the NT4-style "grandparent" stack (the
+     * caller-supplied PreviousStackBase/PreviousStackLimit pair) */
+    if ((NtMajorVersion >= 10) &&
+        ((SafeInitialTeb.PreviousStackBase != NULL) ||
+         (SafeInitialTeb.PreviousStackLimit != NULL)))
+    {
+        return STATUS_NOT_SUPPORTED;
+    }
+
     /* Call the shared function */
     return PspCreateThread(ThreadHandle,
                            DesiredAccess,

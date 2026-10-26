@@ -116,7 +116,7 @@ KiInitializeContextThread(IN PKTHREAD Thread,
         TrapFrame->Rax = Context->Rax;
         TrapFrame->Rcx = Context->Rcx;
         TrapFrame->Rdx = Context->Rdx;
-        TrapFrame->Rbp = 0; // Context->Rbp; // 0 on Vista, copied on Win 10
+        TrapFrame->Rbp = (NtMajorVersion >= 10) ? Context->Rbp : 0; /* 0 on Vista, copied on Win 10 */
         TrapFrame->R8 = Context->R8;
         TrapFrame->R9 = Context->R9;
         TrapFrame->R10 = Context->R10;
