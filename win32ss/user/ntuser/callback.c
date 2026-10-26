@@ -1227,13 +1227,15 @@ APIENTRY
 co_UserCBClientPrinterThunk( PVOID pkt, INT InSize, PVOID pvOutData, INT OutSize )
 {
    NTSTATUS Status;
-   PVOID ResultPointer;
+   PVOID ResultPointer = NULL;
+   ULONG ResultLength = (OutSize > 0) ? (ULONG)OutSize : 0;
+   ULONG CopyLength;
 
    Status = KeUserModeCallback( USER32_CALLBACK_UMPD,
                                 pkt,
                                 InSize,
                                &ResultPointer,
-                               (PULONG)&OutSize );
+                               &ResultLength );
 
 
    if (!NT_SUCCESS(Status))
@@ -1242,7 +1244,35 @@ co_UserCBClientPrinterThunk( PVOID pkt, INT InSize, PVOID pvOutData, INT OutSize
       return 1;
    }
 
-   if (OutSize) RtlMoveMemory( pvOutData, ResultPointer, OutSize );
+   /* SECURITY: ResultLength is overwritten by the user-mode callback return
+      (NtCallbackReturn) and is fully attacker-controlled. The previous code fed
+      it straight back as the RtlMoveMemory length into pvOutData - a fixed-size
+      kernel buffer declared by the (kernel GDI) caller as OutSize bytes - giving
+      an unbounded out-of-bounds write. Clamp the copy to the caller's OutSize
+      and guard the read of the user result buffer with SEH (Astra static audit
+      #8, pre-existing; not dynamically confirmed). */
+   CopyLength = ResultLength;
+   if (OutSize <= 0)
+      CopyLength = 0;
+   else if (CopyLength > (ULONG)OutSize)
+      CopyLength = (ULONG)OutSize;
+
+   if (CopyLength != 0 && pvOutData != NULL && ResultPointer != NULL)
+   {
+      _SEH2_TRY
+      {
+         ProbeForRead(ResultPointer, CopyLength, 1);
+         RtlMoveMemory( pvOutData, ResultPointer, CopyLength );
+      }
+      _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+      {
+         /* pvOutData may be partly written; report failure rather than a
+            spurious success with a half-populated output buffer. */
+         ERR("UMPD callback: bad user result buffer\n");
+         _SEH2_YIELD(return 1);
+      }
+      _SEH2_END;
+   }
 
    return 0;
 }
