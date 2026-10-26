@@ -317,24 +317,67 @@ PackParam(LPARAM *lParamPacked, UINT Msg, WPARAM wParam, LPARAM lParam, BOOL Non
             ERR("Not enough memory to pack lParam\n");
             return STATUS_NO_MEMORY;
         }
-        RtlCopyMemory(PackedNcCalcsize, UnpackedNcCalcsize, sizeof(NCCALCSIZE_PARAMS));
-        PackedNcCalcsize->lppos = (PWINDOWPOS) (PackedNcCalcsize + 1);
-        RtlCopyMemory(PackedNcCalcsize->lppos, UnpackedNcCalcsize->lppos, sizeof(WINDOWPOS));
+        /* SECURITY: lParam may be a raw user pointer on the same-thread send
+           path; guard every dereference and free the block on a bad pointer. */
+        _SEH2_TRY
+        {
+            RtlCopyMemory(PackedNcCalcsize, UnpackedNcCalcsize, sizeof(NCCALCSIZE_PARAMS));
+            PackedNcCalcsize->lppos = (PWINDOWPOS) (PackedNcCalcsize + 1);
+            RtlCopyMemory(PackedNcCalcsize->lppos, UnpackedNcCalcsize->lppos, sizeof(WINDOWPOS));
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            ERR("PackParam: bad lParam for WM_NCCALCSIZE\n");
+            ExFreePoolWithTag(PackedNcCalcsize, TAG_MSG);
+            _SEH2_YIELD(return STATUS_ACCESS_VIOLATION);
+        }
+        _SEH2_END;
         *lParamPacked = (LPARAM) PackedNcCalcsize;
     }
     else if (WM_CREATE == Msg || WM_NCCREATE == Msg)
     {
+        UINT NameLength;
+        UINT ClassLength = 0;
+        PVOID NameBuffer;
+        PVOID ClassBuffer = NULL;
+        BOOL ClassIsAtom;
+
         UnpackedCs = (CREATESTRUCTW *) lParam;
-        WindowName = (PLARGE_STRING) UnpackedCs->lpszName;
-        ClassName = (PUNICODE_STRING) UnpackedCs->lpszClass;
-        Size = sizeof(CREATESTRUCTW) + WindowName->Length + sizeof(WCHAR);
-        if (IS_ATOM(ClassName->Buffer))
+
+        /* SECURITY: capture the attacker-controllable lengths and buffer
+           pointers exactly once. The previous code read WindowName->Length /
+           ClassName->Length a second time when copying (and MsgMemorySize read
+           them yet again when sizing): a concurrent change to Length between
+           the sizing read and the copy read sized the pool block from the old
+           value and then copied from the new, larger one, overflowing PackedCs.
+           Everything is captured under SEH because lParam can be a raw user
+           pointer on the same-thread send path. */
+        _SEH2_TRY
+        {
+            WindowName = (PLARGE_STRING) UnpackedCs->lpszName;
+            ClassName = (PUNICODE_STRING) UnpackedCs->lpszClass;
+            NameLength = WindowName->Length;
+            NameBuffer = WindowName->Buffer;
+            ClassBuffer = ClassName->Buffer;
+            ClassIsAtom = IS_ATOM(ClassBuffer);
+            if (!ClassIsAtom)
+                ClassLength = ClassName->Length;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            ERR("PackParam: bad CREATESTRUCT for WM_(NC)CREATE\n");
+            _SEH2_YIELD(return STATUS_ACCESS_VIOLATION);
+        }
+        _SEH2_END;
+
+        Size = sizeof(CREATESTRUCTW) + NameLength + sizeof(WCHAR);
+        if (ClassIsAtom)
         {
             Size += sizeof(WCHAR) + sizeof(ATOM);
         }
         else
         {
-            Size += sizeof(WCHAR) + ClassName->Length + sizeof(WCHAR);
+            Size += sizeof(WCHAR) + ClassLength + sizeof(WCHAR);
         }
         PackedCs = ExAllocatePoolWithTag(PoolType, Size, TAG_MSG);
         if (NULL == PackedCs)
@@ -342,31 +385,43 @@ PackParam(LPARAM *lParamPacked, UINT Msg, WPARAM wParam, LPARAM lParam, BOOL Non
             ERR("Not enough memory to pack lParam\n");
             return STATUS_NO_MEMORY;
         }
-        RtlCopyMemory(PackedCs, UnpackedCs, sizeof(CREATESTRUCTW));
-        CsData = (PCHAR) (PackedCs + 1);
-        PackedCs->lpszName = (LPCWSTR) (CsData - (PCHAR) PackedCs);
-        RtlCopyMemory(CsData, WindowName->Buffer, WindowName->Length);
-        CsData += WindowName->Length;
-        *((WCHAR *) CsData) = L'\0';
-        CsData += sizeof(WCHAR);
-        PackedCs->lpszClass = (LPCWSTR) (CsData - (PCHAR) PackedCs);
-        if (IS_ATOM(ClassName->Buffer))
+        /* Size and copy use the same captured NameLength / ClassLength, so the
+           copy can never exceed the block that was just allocated. */
+        _SEH2_TRY
         {
-            *((WCHAR *) CsData) = L'A';
-            CsData += sizeof(WCHAR);
-            *((ATOM *) CsData) = (ATOM)(DWORD_PTR) ClassName->Buffer;
-            CsData += sizeof(ATOM);
-        }
-        else
-        {
-            NT_ASSERT(ClassName->Buffer != NULL);
-            *((WCHAR *) CsData) = L'S';
-            CsData += sizeof(WCHAR);
-            RtlCopyMemory(CsData, ClassName->Buffer, ClassName->Length);
-            CsData += ClassName->Length;
+            RtlCopyMemory(PackedCs, UnpackedCs, sizeof(CREATESTRUCTW));
+            CsData = (PCHAR) (PackedCs + 1);
+            PackedCs->lpszName = (LPCWSTR) (CsData - (PCHAR) PackedCs);
+            RtlCopyMemory(CsData, NameBuffer, NameLength);
+            CsData += NameLength;
             *((WCHAR *) CsData) = L'\0';
             CsData += sizeof(WCHAR);
+            PackedCs->lpszClass = (LPCWSTR) (CsData - (PCHAR) PackedCs);
+            if (ClassIsAtom)
+            {
+                *((WCHAR *) CsData) = L'A';
+                CsData += sizeof(WCHAR);
+                *((ATOM *) CsData) = (ATOM)(DWORD_PTR) ClassBuffer;
+                CsData += sizeof(ATOM);
+            }
+            else
+            {
+                NT_ASSERT(ClassBuffer != NULL);
+                *((WCHAR *) CsData) = L'S';
+                CsData += sizeof(WCHAR);
+                RtlCopyMemory(CsData, ClassBuffer, ClassLength);
+                CsData += ClassLength;
+                *((WCHAR *) CsData) = L'\0';
+                CsData += sizeof(WCHAR);
+            }
         }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            ERR("PackParam: bad CREATESTRUCT buffer for WM_(NC)CREATE\n");
+            ExFreePoolWithTag(PackedCs, TAG_MSG);
+            _SEH2_YIELD(return STATUS_ACCESS_VIOLATION);
+        }
+        _SEH2_END;
         ASSERT(CsData == (PCHAR) PackedCs + Size);
         *lParamPacked = (LPARAM) PackedCs;
     }
@@ -395,7 +450,21 @@ PackParam(LPARAM *lParamPacked, UINT Msg, WPARAM wParam, LPARAM lParam, BOOL Non
             ERR("Not enough memory to pack lParam\n");
             return STATUS_NO_MEMORY;
         }
-        RtlCopyMemory(PackedData, (PVOID)lParam, MsgMemorySize(MsgMemoryEntry, wParam, lParam));
+        /* SECURITY: copy using the size captured above instead of calling
+           MsgMemorySize() a second time - re-deriving the size from the user
+           buffer is a TOCTOU that could size the copy past the pool block - and
+           guard the copy from a bad user lParam with SEH. */
+        _SEH2_TRY
+        {
+            RtlCopyMemory(PackedData, (PVOID)lParam, size);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            ERR("PackParam: bad lParam buffer for message 0x%x\n", Msg);
+            ExFreePoolWithTag(PackedData, TAG_MSG);
+            _SEH2_YIELD(return STATUS_ACCESS_VIOLATION);
+        }
+        _SEH2_END;
         *lParamPacked = (LPARAM)PackedData;
     }
 
