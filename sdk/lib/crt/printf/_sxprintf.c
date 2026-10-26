@@ -6,6 +6,10 @@
  * PROGRAMMER:      Timo Kreuzer
  */
 
+#ifdef _NTDLL_NT6_PRINTF
+/* ntdll's NT6+ argument handling needs the PEB */
+#include <precomp.h>
+#endif
 #include <stdio.h>
 #include <stdarg.h>
 #include <limits.h>
@@ -56,6 +60,26 @@ _sxprintf(
 #endif
     int result;
     FILE stream;
+
+#ifdef _NTDLL_NT6_PRINTF
+    /*
+     * ntdll on NT6+ validates its arguments instead of faulting (NULL format)
+     * or reporting the untruncated length into a NULL buffer: both cases fail
+     * with -1. A zero count with a NULL buffer is still the length query.
+     */
+    {
+        /* The compiler knows sprintf and friends take non-NULL arguments and
+         * would drop the checks below, so hide the values behind volatiles */
+        const _TCHAR * volatile checkFormat = format;
+        _TCHAR * volatile checkBuffer = buffer;
+
+        if ((NtCurrentPeb()->OSMajorVersion >= 6) &&
+            ((checkFormat == NULL) || ((checkBuffer == NULL) && (count != 0))))
+        {
+            return -1;
+        }
+    }
+#endif
 
 #if IS_SECAPI
     /* Validate parameters */
