@@ -3102,6 +3102,69 @@ QSI_DEF(SystemProcessorBrandString)
     return STATUS_SUCCESS;
 }
 
+
+/*
+ * FIRMWARE_TYPE and SYSTEM_BOOT_ENVIRONMENT_INFORMATION are gated behind
+ * NTDDI_VISTA / NTDDI_LONGHORN in the NDK/XDK headers, but ntoskrnl is built
+ * at a lower NTDDI level. Provide local definitions so we can service the
+ * Win8-era SystemBootEnvironmentInformation class without raising the global
+ * build target. These mirror the public SDK layout exactly.
+ */
+#if (NTDDI_VERSION < NTDDI_VISTA)
+typedef enum _FIRMWARE_TYPE
+{
+    FirmwareTypeUnknown,
+    FirmwareTypeBios,
+    FirmwareTypeUefi,
+    FirmwareTypeMax
+} FIRMWARE_TYPE, *PFIRMWARE_TYPE;
+#endif
+
+#if (NTDDI_VERSION < NTDDI_LONGHORN)
+typedef struct _SYSTEM_BOOT_ENVIRONMENT_INFORMATION
+{
+    GUID BootIdentifier;
+    FIRMWARE_TYPE FirmwareType;
+    ULONGLONG BootFlags;
+} SYSTEM_BOOT_ENVIRONMENT_INFORMATION, *PSYSTEM_BOOT_ENVIRONMENT_INFORMATION;
+#endif
+
+/* Class 90 - Boot Environment Information */
+QSI_DEF(SystemBootEnvironmentInformation)
+{
+    PSYSTEM_BOOT_ENVIRONMENT_INFORMATION BootInfo =
+        (PSYSTEM_BOOT_ENVIRONMENT_INFORMATION)Buffer;
+
+    /* Report the full size we can supply */
+    if (ReqSize)
+        *ReqSize = sizeof(SYSTEM_BOOT_ENVIRONMENT_INFORMATION);
+
+    /*
+     * Accept any buffer large enough to hold at least through FirmwareType.
+     * The trailing BootFlags field is Win8+, so callers compiled for an
+     * older target pass a smaller structure; tolerate that instead of
+     * failing (GetFirmwareType only needs FirmwareType).
+     */
+    if (Size < (FIELD_OFFSET(SYSTEM_BOOT_ENVIRONMENT_INFORMATION, FirmwareType) +
+                sizeof(FIRMWARE_TYPE)))
+        return STATUS_INFO_LENGTH_MISMATCH;
+
+    /* Zero only what the caller provided */
+    RtlZeroMemory(BootInfo, Size);
+
+    /*
+     * ReactOS does not yet propagate the real firmware type from the boot
+     * loader into the kernel. The supported nitro target boots via SeaBIOS
+     * under QEMU, i.e. legacy BIOS, so report FirmwareTypeBios. This is the
+     * value Windows' GetFirmwareType() would return on the same platform.
+     * TODO: detect UEFI from the loader parameter block once it carries the
+     * firmware type, and return FirmwareTypeUefi accordingly.
+     */
+    BootInfo->FirmwareType = FirmwareTypeBios;
+
+    return STATUS_SUCCESS;
+}
+
 /* Query/Set Calls Table */
 typedef
 struct _QSSI_CALLS
@@ -3205,6 +3268,7 @@ CallQS[] =
     // Vista and later
     SI_QX(SystemModuleInformationEx),
     SI_QX(SystemProcessorIdleCycleTimeInformation),
+    SI_QX(SystemBootEnvironmentInformation),
     SI_QX(SystemProcessorBrandString),
 };
 
