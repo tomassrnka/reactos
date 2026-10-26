@@ -1748,6 +1748,10 @@ NtOpenProcess(OUT PHANDLE ProcessHandle,
         /* Check if we didn't find anything */
         if (!NT_SUCCESS(Status))
         {
+            /* NT6+ reports an unknown process ID as an invalid client ID */
+            if ((Status == STATUS_INVALID_PARAMETER) && (NtMajorVersion >= 6))
+                Status = STATUS_INVALID_CID;
+
             /* Get rid of the access state and return */
             SeDeleteAccessState(&AccessState);
             return Status;
@@ -2039,29 +2043,41 @@ NtGetNextThread(
         return STATUS_INVALID_PARAMETER;
     }
 
-    /* Get the next thread (this will dereference the previous thread) */
-    NextThread = PsGetNextProcessThread(Process, Thread);
-
-    /* Dereference the process */
-    ObDereferenceObject(Process);
-
-    /* Fail, if no thread was found */
-    if (NextThread == NULL)
+    /*
+     * Walk the threads until one can be opened with the requested access.
+     * A thread that cannot be opened because access is denied (e.g. a zero
+     * access request) is skipped, like Windows does.
+     */
+    for (;;)
     {
-        return STATUS_NO_MORE_ENTRIES;
+        /* Get the next thread (this will dereference the previous thread) */
+        NextThread = PsGetNextProcessThread(Process, Thread);
+
+        /* Fail, if no thread was found */
+        if (NextThread == NULL)
+        {
+            ObDereferenceObject(Process);
+            return STATUS_NO_MORE_ENTRIES;
+        }
+
+        /* Open the Thread Object */
+        Status = ObOpenObjectByPointer(NextThread,
+                                       HandleAttributes,
+                                       NULL,
+                                       DesiredAccess,
+                                       PsThreadType,
+                                       PreviousMode,
+                                       &NextThreadHandle);
+        if (Status != STATUS_ACCESS_DENIED)
+            break;
+
+        /* Skip this thread and continue from it */
+        Thread = NextThread;
     }
 
-    /* Open the Thread Object */
-    Status = ObOpenObjectByPointer(NextThread,
-                                   HandleAttributes,
-                                   NULL,
-                                   DesiredAccess,
-                                   PsThreadType,
-                                   PreviousMode,
-                                   &NextThreadHandle);
-
-    /* Dereference the next thread */
+    /* Dereference the next thread and the process */
     ObDereferenceObject(NextThread);
+    ObDereferenceObject(Process);
 
     if (!NT_SUCCESS(Status))
     {
