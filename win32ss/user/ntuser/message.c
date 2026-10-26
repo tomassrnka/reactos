@@ -2613,9 +2613,14 @@ NtUserMessageCall( HWND hWnd,
            Window = UserGetWindowObject(hWnd);
            if (Window)
            {
+              /* Hold a reference across the server-side callback: the procedure
+                 can re-enter user mode and the window must not be freed under it.
+                 (The FNID_DEFWINDOWPROC case below already does this.) */
+              UserRefObjectCo(Window, &Ref);
               //ERR("FNID_DESKTOP IN\n");
               Ret = DesktopWindowProc(Window, Msg, wParam, lParam, &lResult);
               //ERR("FNID_DESKTOP OUT\n");
+              UserDerefObjectCo(Window);
            }
            break;
         }
@@ -2624,7 +2629,9 @@ NtUserMessageCall( HWND hWnd,
           Window = UserGetWindowObject(hWnd);
           if (Window)
           {
+              UserRefObjectCo(Window, &Ref);
               Ret = PopupMenuWndProc( Window, Msg, wParam, lParam, &lResult);
+              UserDerefObjectCo(Window);
           }
           break;
        }
@@ -2633,7 +2640,9 @@ NtUserMessageCall( HWND hWnd,
            Window = UserGetWindowObject(hWnd);
            if (Window)
            {
+                UserRefObjectCo(Window, &Ref);
                 Ret = !UserMessageWindowProc(Window, Msg, wParam, lParam, &lResult);
+                UserDerefObjectCo(Window);
            }
            break;
        }
