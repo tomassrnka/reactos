@@ -91,6 +91,7 @@ list(APPEND SOURCE
     ntuser/NtUserMenuInfoItemBound.c
     ntuser/NtUserMenuStaleIndexAfterRemove.c
     ntuser/NtUserPopupMenuClassExtra.c
+    ntuser/NtUserServerSideFnidForge.c
     ntuser/NtUserRegisterUserApiHookGate.c
     ntuser/NtUserGetWOWClassPtr.c
     ntuser/NtUserCallNextHookZero.c

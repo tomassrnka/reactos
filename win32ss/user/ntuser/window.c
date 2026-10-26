@@ -3858,8 +3858,35 @@ IntCheckFrameEdge(ULONG Style, ULONG ExStyle)
       return FALSE;
 }
 
+/* SECURITY (ASTRA8-FU): a menu (WC_MENU / #32768) window stores its PPOPUPMENU
+   at extra-byte offset 0 (see MENUWND in ntuser.h). The pointer is written by the
+   kernel (PopupMenuWndProc, via a direct (PMENUWND)Wnd->ppopupmenu assignment)
+   and later dereferenced/freed by the kernel server procedure (MN_SETHMENU writes
+   pPopupMenu->spmenu; WM_NCDESTROY does DesktopHeapFree(pPopupMenu)). A process
+   may legitimately OWN a menu window (CreateWindowExW(L"#32768"), or any
+   TrackPopupMenu popup it creates), so it must never be able to plant a value in
+   that slot via SetWindowLong(Ptr)/SetWindowWord -> otherwise arbitrary kernel
+   write/free. Refuse user-mode writes into a menu window's extra bytes.
+
+   Scope is deliberately the menu class only: it is the single system class whose
+   extra bytes hold a kernel-owned, kernel-dereferenced heap pointer. The switch
+   class (WC_SWITCH) also keeps a pointer in extra[0], but it is a user-heap
+   ALTTABINFO written AND read by the user32 client proc (appswitch.c) - blocking
+   it would break Alt+Tab. Scrollbar extra is the SBWND value tail (positions/
+   flags, not a heap pointer); desktop extra holds DT_GWL_* process/thread IDs
+   (values, written by the kernel via co_UserSetWindowLong); message windows have
+   no extra bytes. Legitimate user controls (FNID_BUTTON and above) are not system
+   classes at all, so their extra-byte usage is unaffected. */
+static BOOL FASTCALL
+IntIsSystemClassExtra(PWND Window)
+{
+    return (Window->pcls != NULL &&
+            (Window->pcls->CSF_flags & CSF_SYSTEMCLASS) != 0 &&
+            Window->pcls->fnid == FNID_MENU);
+}
+
 static LONG_PTR
-co_IntSetWindowLongPtr(HWND hWnd, DWORD Index, LONG_PTR NewValue, BOOL Ansi, ULONG Size, BOOL bAlter)
+co_IntSetWindowLongPtr(HWND hWnd, DWORD Index, LONG_PTR NewValue, BOOL Ansi, ULONG Size, BOOL bAlter, BOOL bUserMode)
 {
    PWND Window, Parent;
    PWINSTATION_OBJECT WindowStation;
@@ -3876,6 +3903,16 @@ co_IntSetWindowLongPtr(HWND hWnd, DWORD Index, LONG_PTR NewValue, BOOL Ansi, ULO
       if ((Index + Size) > Window->cbwndExtra)
       {
          EngSetLastError(ERROR_INVALID_INDEX);
+         return 0;
+      }
+
+      /* SECURITY (ASTRA8-FU): refuse user-mode writes into a system class's
+         kernel-owned extra bytes. See IntIsSystemClassExtra. */
+      if (bUserMode && IntIsSystemClassExtra(Window))
+      {
+         WARN("SetWindowLong: refused user write to system-class extra bytes (fnid 0x%x, index %lu)\n",
+              Window->pcls->fnid, Index);
+         EngSetLastError(ERROR_ACCESS_DENIED);
          return 0;
       }
 
@@ -4058,13 +4095,13 @@ co_IntSetWindowLongPtr(HWND hWnd, DWORD Index, LONG_PTR NewValue, BOOL Ansi, ULO
 LONG FASTCALL
 co_UserSetWindowLong(HWND hWnd, DWORD Index, LONG NewValue, BOOL Ansi)
 {
-    return (LONG)co_IntSetWindowLongPtr(hWnd, Index, NewValue, Ansi, sizeof(LONG), FALSE);
+    return (LONG)co_IntSetWindowLongPtr(hWnd, Index, NewValue, Ansi, sizeof(LONG), FALSE, FALSE);
 }
 
 LONG_PTR FASTCALL
 co_UserSetWindowLongPtr(HWND hWnd, DWORD Index, LONG_PTR NewValue, BOOL Ansi)
 {
-    return co_IntSetWindowLongPtr(hWnd, Index, NewValue, Ansi, sizeof(LONG_PTR), FALSE);
+    return co_IntSetWindowLongPtr(hWnd, Index, NewValue, Ansi, sizeof(LONG_PTR), FALSE, FALSE);
 }
 
 /*
@@ -4092,7 +4129,7 @@ NtUserSetWindowLong(HWND hWnd, DWORD Index, LONG NewValue, BOOL Ansi)
       return 0;
    }
 
-   ret = (LONG)co_IntSetWindowLongPtr(hWnd, Index, NewValue, Ansi, sizeof(LONG), FALSE);
+   ret = (LONG)co_IntSetWindowLongPtr(hWnd, Index, NewValue, Ansi, sizeof(LONG), FALSE, TRUE);
 
    UserLeave();
 
@@ -4114,7 +4151,7 @@ NtUserSetWindowLongPtr(HWND hWnd, DWORD Index, LONG_PTR NewValue, BOOL Ansi)
         return 0;
     }
 
-    ret = co_IntSetWindowLongPtr(hWnd, Index, NewValue, Ansi, sizeof(LONG_PTR), FALSE);
+    ret = co_IntSetWindowLongPtr(hWnd, Index, NewValue, Ansi, sizeof(LONG_PTR), FALSE, TRUE);
 
     UserLeave();
 
@@ -4136,7 +4173,7 @@ NtUserAlterWindowStyle(HWND hWnd, DWORD Index, LONG NewValue)
       return 0;
    }
 
-   ret = co_IntSetWindowLongPtr(hWnd, Index, NewValue, FALSE, sizeof(LONG), TRUE);
+   ret = co_IntSetWindowLongPtr(hWnd, Index, NewValue, FALSE, sizeof(LONG), TRUE, TRUE);
 
    UserLeave();
 
@@ -4194,6 +4231,17 @@ NtUserSetWindowWord(HWND hWnd, INT Index, WORD NewValue)
    if (((ULONG)Index + sizeof(WORD)) > Window->cbwndExtra)
    {
       EngSetLastError(ERROR_INVALID_INDEX);
+      goto Exit; // Return 0
+   }
+
+   /* SECURITY (ASTRA8-FU): NtUserSetWindowWord is a user-mode syscall; the same
+      kernel-owned-extra-bytes rule as co_IntSetWindowLongPtr applies (a pointer
+      could be forged two bytes at a time). See IntIsSystemClassExtra. */
+   if (IntIsSystemClassExtra(Window))
+   {
+      WARN("NtUserSetWindowWord: refused user write to system-class extra bytes (fnid 0x%x, index %d)\n",
+           Window->pcls->fnid, Index);
+      EngSetLastError(ERROR_ACCESS_DENIED);
       goto Exit; // Return 0
    }
 
@@ -4394,6 +4442,26 @@ NtUserSetWindowFNID(HWND hWnd,
       if (fnID < FNID_FIRST || fnID > FNID_GHOST ||
           Wnd->fnid != 0)
       {
+         EngSetLastError(ERROR_INVALID_PARAMETER);
+         goto Exit; // Return FALSE
+      }
+
+      /* SECURITY (ASTRA8-FU): a server-side fnID (FNID_FIRST..FNID_SWITCH) makes
+         the window dispatch to a kernel server procedure that reads/writes
+         class-specific state in the window extra bytes. Only allow it on a
+         window whose class is the genuine kernel system class for that fnID
+         (CSF_SYSTEMCLASS is set exclusively by UserRegisterSystemClasses and
+         cannot be forged from user mode). Without this, user mode could flip its
+         own window to FNID_MENU/FNID_DESKTOP and then plant a fake context
+         pointer in the extra bytes via SetWindowLongPtr -> type-confusion /
+         arbitrary kernel write. Control classes (FNID_BUTTON and above) are
+         handled client-side and keep the historic behaviour. */
+      if (fnID <= FNID_SWITCH &&
+          !(Wnd->pcls &&
+            (Wnd->pcls->CSF_flags & CSF_SYSTEMCLASS) &&
+            Wnd->pcls->fnid == fnID))
+      {
+         WARN("NtUserSetWindowFNID: rejected server-side fnID 0x%x on non-system class\n", fnID);
          EngSetLastError(ERROR_INVALID_PARAMETER);
          goto Exit; // Return FALSE
       }

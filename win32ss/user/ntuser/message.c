@@ -2637,6 +2637,40 @@ NtUserTranslateMessage(LPMSG lpMsg, UINT flags)
 
 LRESULT APIENTRY ScrollBarWndProc(HWND Wnd, UINT Msg, WPARAM wParam, LPARAM lParam);
 
+/*
+ * SECURITY (ASTRA8-FU): forge-proof gate for the NtUserMessageCall server-side
+ * window-procedure dispatch hatch (dwType == FNID_DESKTOP/FNID_MENU/
+ * FNID_MESSAGEWND). Those procedures (DesktopWindowProc / PopupMenuWndProc /
+ * UserMessageWindowProc) treat the target window as a genuine kernel system
+ * window and read/write class-specific state in its extra bytes. A user-mode
+ * caller chooses BOTH the target hWnd AND dwType, so without a gate it could run
+ * a server procedure on a mismatched-class window -> type-confusion / OOB write.
+ *
+ * Every previously-attempted discriminator was user-forgeable (see the
+ * ASTRA8-FU ticket): the instance fnid (accepted here regardless), the class
+ * fnid (NtUserRegisterClassExWOW stored a caller fnID), CSF_SERVERSIDEPROC
+ * (auto-granted when lpfnWndProc matched the public client-proc table, e.g.
+ * DefWindowProcW), and the class atom (a user RegisterClass can collide with a
+ * system class name/atom). The only non-forgeable marker is CSF_SYSTEMCLASS,
+ * set exclusively by UserRegisterSystemClasses; NtUserRegisterClassExWOW masks
+ * user Flags to CSF_ANSIPROC and never lets it through. Require it, plus that the
+ * class's fnid matches dwType (so one system class cannot be driven through a
+ * different server procedure). The legitimate menu-creation path passes: the
+ * menu window IS the WC_MENU system class (pcls->fnid == FNID_MENU,
+ * CSF_SYSTEMCLASS set) even while its instance fnid is still 0 at WM_NCCREATE.
+ */
+static BOOL FASTCALL
+IntServerSideWindowProcAllowed(PWND Window, DWORD dwType)
+{
+    if (Window == NULL || Window->pcls == NULL)
+        return FALSE;
+
+    if (!(Window->pcls->CSF_flags & CSF_SYSTEMCLASS))
+        return FALSE;
+
+    return (Window->pcls->fnid == dwType);
+}
+
 BOOL APIENTRY
 NtUserMessageCall( HWND hWnd,
                    UINT Msg,
@@ -2680,7 +2714,9 @@ NtUserMessageCall( HWND hWnd,
     case FNID_DESKTOP:
         {
            Window = UserGetWindowObject(hWnd);
-           if (Window)
+           /* SECURITY (ASTRA8-FU): forge-proof system-class gate, see
+              IntServerSideWindowProcAllowed. */
+           if (Window && IntServerSideWindowProcAllowed(Window, dwType))
            {
               /* Hold a reference across the server-side callback: the procedure
                  can re-enter user mode and the window must not be freed under it.
@@ -2691,27 +2727,44 @@ NtUserMessageCall( HWND hWnd,
               //ERR("FNID_DESKTOP OUT\n");
               UserDerefObjectCo(Window);
            }
+           else
+           {
+              WARN("NtUserMessageCall(FNID_DESKTOP): rejected non-system-class window %p\n", hWnd);
+              EngSetLastError(ERROR_INVALID_PARAMETER);
+           }
            break;
         }
    case FNID_MENU:
        {
           Window = UserGetWindowObject(hWnd);
-          if (Window)
+          /* SECURITY (ASTRA8-FU): forge-proof system-class gate. */
+          if (Window && IntServerSideWindowProcAllowed(Window, dwType))
           {
               UserRefObjectCo(Window, &Ref);
               Ret = PopupMenuWndProc( Window, Msg, wParam, lParam, &lResult);
               UserDerefObjectCo(Window);
+          }
+          else
+          {
+              WARN("NtUserMessageCall(FNID_MENU): rejected non-system-class window %p\n", hWnd);
+              EngSetLastError(ERROR_INVALID_PARAMETER);
           }
           break;
        }
    case FNID_MESSAGEWND:
        {
            Window = UserGetWindowObject(hWnd);
-           if (Window)
+           /* SECURITY (ASTRA8-FU): forge-proof system-class gate. */
+           if (Window && IntServerSideWindowProcAllowed(Window, dwType))
            {
                 UserRefObjectCo(Window, &Ref);
                 Ret = !UserMessageWindowProc(Window, Msg, wParam, lParam, &lResult);
                 UserDerefObjectCo(Window);
+           }
+           else
+           {
+                WARN("NtUserMessageCall(FNID_MESSAGEWND): rejected non-system-class window %p\n", hWnd);
+                EngSetLastError(ERROR_INVALID_PARAMETER);
            }
            break;
        }

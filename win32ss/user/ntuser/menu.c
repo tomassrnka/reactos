@@ -4752,6 +4752,22 @@ PopupMenuWndProc(
            ERR("Wrong window class for Menu! fnid %x\n",Wnd->fnid);
            return TRUE;
         }
+        /* SECURITY (ASTRA8-FU): defense-in-depth. ppopupmenu lives in the window
+           extra bytes via (PMENUWND)Wnd; reading it on a window whose class did
+           not reserve room is an OOB read past the WND (and the value read is
+           then used as a POPUPMENU pointer). The primary gates (the forge-proof
+           CSF_SYSTEMCLASS checks on the NtUserMessageCall hatch and on
+           NtUserSetWindowFNID, and the server-fnID rejection in
+           NtUserRegisterClassExWOW) ensure only genuine menu windows ever reach
+           this branch with fnid==FNID_MENU; this guard keeps the read in bounds
+           even if a future route lands here. The real WC_MENU class reserves 16
+           extra bytes, so legitimate menus are never rejected. */
+        if ((ULONG)Wnd->cbwndExtra < sizeof(((PMENUWND)Wnd)->ppopupmenu))
+        {
+           ERR("PopupMenuWndProc: FNID_MENU window has no room for ppopupmenu (cbwndExtra %d)\n", Wnd->cbwndExtra);
+           *lResult = IntDefWindowProc(Wnd, Message, wParam, lParam, FALSE);
+           return TRUE;
+        }
         pPopupMenu = ((PMENUWND)Wnd)->ppopupmenu;
      }
   }
