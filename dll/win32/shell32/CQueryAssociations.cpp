@@ -185,6 +185,11 @@ static HRESULT OpenShellVerbKey(HKEY hClass, LPCWSTR pszVerb, HKEY *phKey)
     return HResultFromWin32(RegOpenKeyExW(hClass, szPath, 0, KEY_READ, phKey));
 }
 
+static inline HRESULT OpenUnknownClass(HKEY *phKey)
+{
+    return HResultFromWin32(RegOpenKeyExW(HKEY_CLASSES_ROOT, L"Unknown", 0, KEY_READ, phKey));
+}
+
 static HRESULT OpenClassWithShellExecKey(ASSOCF fA, HKEY hClass, LPCWSTR pszVerb, HKEY *phKey)
 {
     if (fA & ASSOCF_VERIFY)
@@ -702,6 +707,7 @@ HRESULT STDMETHODCALLTYPE CQueryAssociations::GetKey(
     ASSOCSTR strInit = (ASSOCSTR)0;
     WCHAR buf[MAX_PATH];
     PCWSTR pszSetString = NULL;
+    const bool bUnknownFallback = !IsNT5() && m_InitType == '.' && !hkeyProgID;
     *phkeyOut = NULL;  // Note: Windows does not check if the pointer is valid
 
     switch (assockey)
@@ -711,6 +717,18 @@ HRESULT STDMETHODCALLTYPE CQueryAssociations::GetKey(
             if (hClass && SUCCEEDED(hr = OpenClassWithShellExecKey(cfFlags, hClass, pszExtra, phkeyOut)))
                 return hr;
             hr = HResultFromWin32(IsNT5() ? (hClass ? ERROR_FILE_NOT_FOUND : E_FAIL) : ERROR_NO_ASSOCIATION);
+            if (bUnknownFallback && !((cfFlags | m_InitFlags) & ASSOCF_INIT_IGNOREUNKNOWN))
+            {
+                // NT6+: an extension without a ProgId maps to the Unknown class
+                HKEY hUnknown;
+                if (SUCCEEDED(OpenUnknownClass(&hUnknown)))
+                {
+                    HRESULT hrUnknown = OpenClassWithShellExecKey(cfFlags, hUnknown, pszExtra, phkeyOut);
+                    RegCloseKey(hUnknown);
+                    if (SUCCEEDED(hrUnknown))
+                        return hrUnknown;
+                }
+            }
             break;
         case ASSOCKEY_APP:
             if (m_InitFlags & ASSOCF_INIT_BYEXENAME)
@@ -726,6 +744,8 @@ HRESULT STDMETHODCALLTYPE CQueryAssociations::GetKey(
             if (hClass)
                 return DuplicateHKey(hClass, phkeyOut);
             hr = IsNT5() ? E_FAIL : HResultFromWin32(ERROR_NOT_FOUND);
+            if (bUnknownFallback && SUCCEEDED(OpenUnknownClass(phkeyOut)))
+                return S_OK;
             break;
         case ASSOCKEY_BASECLASS:
             assockey = ASSOCKEY_CLASS;

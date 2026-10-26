@@ -5297,7 +5297,12 @@ HRESULT WINAPI SHPropertyBag_ReadGUID(IPropertyBag *ppb, LPCWSTR pszPropName, GU
     else if (V_VT(&vari) == VT_BSTR)
         bRet = GUIDFromStringW(V_BSTR(&vari), pguid);
     else if (GetProcessOsVersion() >= _WIN32_WINNT_VISTA)
-        bRet = FALSE;
+    {
+        /* Vista+ rejects any other variant type */
+        ERR("%p %s %p\n", ppb, debugstr_w(pszPropName), pguid);
+        VariantClear(&vari);
+        return E_INVALIDARG;
+    }
     else
         bRet = TRUE; /* This is by design in WinXP/Win2k3. */
 
