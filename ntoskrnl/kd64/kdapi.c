@@ -2772,14 +2772,11 @@ NtQueryDebugFilterState(
     }
     else
     {
-#if (NTDDI_VERSION >= NTDDI_VISTA)
-        /* Use the default component ID */
+        /* NT6+ (Windows Vista and later): an out-of-range ComponentId is not
+         * an error; fall back to the default per-component mask. Returning
+         * STATUS_INVALID_PARAMETER_1 here breaks NT6 user-mode callers of
+         * DbgPrintEx with a component id past the in-tree table. */
         Mask = &Kd_DEFAULT_Mask;
-        // Level = DPFLTR_INFO_LEVEL; // Override the Level.
-#else
-        /* Invalid ID, fail */
-        return STATUS_INVALID_PARAMETER_1;
-#endif
     }
 
     /* Convert Level to bit field if required */
@@ -2834,13 +2831,11 @@ NtSetDebugFilterState(
     }
     else
     {
-#if (NTDDI_VERSION >= NTDDI_VISTA)
-        /* Use the default component ID */
+        /* NT6+ (Windows Vista and later): an out-of-range ComponentId is not
+         * an error; fall back to the default per-component mask. Returning
+         * STATUS_INVALID_PARAMETER_1 here breaks NT6 user-mode callers of
+         * DbgPrintEx with a component id past the in-tree table. */
         Mask = &Kd_DEFAULT_Mask;
-#else
-        /* Invalid ID, fail */
-        return STATUS_INVALID_PARAMETER_1;
-#endif
     }
 
     /* Convert Level to bit field if required */
