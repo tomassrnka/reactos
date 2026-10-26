@@ -19,6 +19,7 @@ add_library(ucrtbase SHARED
     math_errno.c
     printf.c
     stubs.c
+    ucrtbase.rc
     ucrtbase_stubs.c
     ucrtbase.def
     musl/acosh.c

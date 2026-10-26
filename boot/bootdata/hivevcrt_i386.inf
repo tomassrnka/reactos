@@ -1,0 +1,14 @@
+[Version]
+Signature = "$Windows NT$"
+
+[AddReg]
+
+; Visual C++ 2015-2022 redistributable: the keys its installer writes, so that application installers
+; (Burn/WiX bundles, Inno Setup scripts) find the runtime that ships with the system and skip vc_redist.
+; The version is the one that msvcp140 declares (vcruntime140 is linked as 14.50).
+HKLM,"SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x86","Installed",0x00010003,1
+HKLM,"SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x86","Major",0x00010003,14
+HKLM,"SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x86","Minor",0x00010003,50
+HKLM,"SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x86","Bld",0x00010003,35719
+HKLM,"SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x86","Rbld",0x00010003,0
+HKLM,"SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x86","Version",2,"v14.50.35719.00"
