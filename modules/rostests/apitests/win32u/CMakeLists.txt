@@ -76,6 +76,7 @@ list(APPEND SOURCE
     ntuser/NtUserGetKeyboardLayoutName.c
     ntuser/NtUserGetThreadState.c
     ntuser/NtUserGetTitleBarInfo.c
+    ntuser/NtUserMessageCallAsync.c
     ntuser/NtUserProcessConnect.c
     ntuser/NtUserRedrawWindow.c
     ntuser/NtUserSBGetParms.c
