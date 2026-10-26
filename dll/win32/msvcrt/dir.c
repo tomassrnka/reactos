@@ -1112,6 +1112,15 @@ do_error:
 void CDECL _splitpath(const char *inpath, char *drv, char *dir,
         char *fname, char *ext)
 {
+    /* A NULL path fails with EINVAL; the unsecure variant also empties the
+     * output buffers it was given (NT6+ msvcrt behavior) */
+    if (!inpath)
+    {
+        if (drv)   drv[0]   = '\0';
+        if (dir)   dir[0]   = '\0';
+        if (fname) fname[0] = '\0';
+        if (ext)   ext[0]   = '\0';
+    }
     _splitpath_s(inpath, drv, drv ? _MAX_DRIVE : 0, dir, dir ? _MAX_DIR : 0,
             fname, fname ? _MAX_FNAME : 0, ext, ext ? _MAX_EXT : 0);
 }
@@ -1206,6 +1215,13 @@ do_error:
 void CDECL _wsplitpath(const wchar_t *inpath, wchar_t *drv, wchar_t *dir,
         wchar_t *fname, wchar_t *ext)
 {
+    if (!inpath)
+    {
+        if (drv)   drv[0]   = 0;
+        if (dir)   dir[0]   = 0;
+        if (fname) fname[0] = 0;
+        if (ext)   ext[0]   = 0;
+    }
     _wsplitpath_s(inpath, drv, drv ? _MAX_DRIVE : 0, dir, dir ? _MAX_DIR : 0,
             fname, fname ? _MAX_FNAME : 0, ext, ext ? _MAX_EXT : 0);
 }
