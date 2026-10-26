@@ -290,13 +290,24 @@ SHShouldShowWizards(_In_ IUnknown *pUnknown)
     if (FAILED(hr))
         return hr;
 
+    /* Win8+: the wizards are never shown */
+    if (SHELL_GetNTVersion() >= _WIN32_WINNT_WIN8)
+    {
+        pBrowser->Release();
+        return S_FALSE;
+    }
+
     SHELLSTATE state;
     SHGetSetSettings(&state, SSF_WEBVIEW, FALSE);
-    if (state.fWebView &&
-        !SHRegGetBoolUSValueW(L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
-                              L"ShowWizardsTEST", FALSE, FALSE))
+    if (state.fWebView)
     {
-        hr = S_FALSE;
+        /* Win7+: WebView implies no wizards; before that the ShowWizardsTEST override applies */
+        if (SHELL_GetNTVersion() >= _WIN32_WINNT_WIN7 ||
+            !SHRegGetBoolUSValueW(L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+                                  L"ShowWizardsTEST", FALSE, FALSE))
+        {
+            hr = S_FALSE;
+        }
     }
 
     pBrowser->Release();
@@ -1307,12 +1318,12 @@ Int64ToStr(
 {
     WCHAR szBuff[40];
     UINT ich = 0, ichValue;
-#if (WINVER >= _WIN32_WINNT_VISTA)
-    BOOL bMinus = (llValue < 0);
+    /* NT6+ prints negative numbers with a minus sign; NT5 mangles them (kept for NT5 identity) */
+    BOOL bVista = (SHELL_GetNTVersion() >= _WIN32_WINNT_VISTA);
+    BOOL bMinus = bVista && (llValue < 0);
 
     if (bMinus)
         llValue = -llValue;
-#endif
 
     if (cchValue <= 0)
         return E_FAIL;
@@ -1323,10 +1334,8 @@ Int64ToStr(
         llValue /= 10;
     } while (llValue != 0 && ich < _countof(szBuff) - 1);
 
-#if (WINVER >= _WIN32_WINNT_VISTA)
     if (bMinus && ich < _countof(szBuff))
-        szBuff[ich++] = '-';
-#endif
+        szBuff[ich++] = L'-';
 
     for (ichValue = 0; ich > 0 && ichValue < cchValue; ++ichValue)
     {

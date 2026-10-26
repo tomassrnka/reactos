@@ -961,11 +961,10 @@ static BOOL PathMakeUniqueNameW(
     PCWSTR pchDotExt, formatString = L"%d";
     INT maxCount, cchTitle;
 
+    /* Before Win10, a specified directory forces the short (8.3 style "nameN.ext") scheme */
     if (   !pszTitle
         || !IsLFNDriveW(pszDir)
-#if (NTDDI_VERSION < NTDDI_VISTA)
-        || pszDir
-#endif
+        || (pszDir && SHELL_GetNTVersion() < _WIN32_WINNT_WIN10)
     )
     {
         if (!pszTemplate)
