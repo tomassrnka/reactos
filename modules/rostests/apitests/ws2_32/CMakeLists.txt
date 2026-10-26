@@ -20,6 +20,7 @@ list(APPEND SOURCE
     ioctlsocket.c
     listen.c
     udpconnreset.c
+    manysockets.c
     nonblocking.c
     nostartup.c
     open_osfhandle.c
