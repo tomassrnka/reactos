@@ -3024,9 +3024,21 @@ static NTSTATUS find_first_manifest_resource_in_module( HANDLE hModule, const WC
     return STATUS_SUCCESS;
 }
 
+/* For a compact buffer (limit != 0) check that the resource data entry lies inside it */
+static BOOL res_data_in_buffer( HANDLE hModule, const void *ptr, ULONG size, SIZE_T limit )
+{
+    ULONG_PTR off;
+
+    if (!ptr) return FALSE;
+    if (!limit) return TRUE;
+    off = (ULONG_PTR)ptr - ((ULONG_PTR)hModule & ~(ULONG_PTR)1);
+    if ((ULONG_PTR)ptr < ((ULONG_PTR)hModule & ~(ULONG_PTR)1) || off > limit) return FALSE;
+    return size <= limit - off;
+}
+
 static NTSTATUS get_manifest_in_module( struct actctx_loader* acl, struct assembly_identity* ai,
                                         LPCWSTR filename, LPCWSTR directory, BOOL shared,
-                                        HANDLE hModule, LPCWSTR resname, ULONG lang )
+                                        HANDLE hModule, LPCWSTR resname, ULONG lang, SIZE_T limit )
 {
     NTSTATUS status;
     UNICODE_STRING nameW;
@@ -3084,7 +3096,8 @@ static NTSTATUS get_manifest_in_module( struct actctx_loader* acl, struct assemb
     }
     if (status == STATUS_SUCCESS) status = LdrAccessResource(hModule, entry, &ptr, NULL);
     /* a data-file module whose resource RVA maps to no section yields a NULL pointer */
-    if (status == STATUS_SUCCESS && !ptr) status = STATUS_RESOURCE_DATA_NOT_FOUND;
+    if (status == STATUS_SUCCESS && !res_data_in_buffer(hModule, ptr, entry->Size, limit))
+        status = STATUS_RESOURCE_DATA_NOT_FOUND;
 
     if (status == STATUS_SUCCESS)
         status = parse_manifest(acl, ai, filename, hModule, directory, shared, ptr, entry->Size);
@@ -3118,7 +3131,7 @@ static IMAGE_RESOURCE_DIRECTORY *find_first_id_entry( IMAGE_RESOURCE_DIRECTORY *
 
 static NTSTATUS search_manifest_in_module( struct actctx_loader* acl, struct assembly_identity* ai,
                                        LPCWSTR filename, LPCWSTR directory, BOOL shared,
-                                       HANDLE hModule, ULONG lang )
+                                       HANDLE hModule, ULONG lang, SIZE_T limit )
 {
     ULONG size;
     PVOID root, ptr;
@@ -3144,7 +3157,8 @@ static NTSTATUS search_manifest_in_module( struct actctx_loader* acl, struct ass
 
     entry = ptr;
     status = LdrAccessResource(hModule, entry, &ptr, NULL);
-    if (status == STATUS_SUCCESS && !ptr) status = STATUS_RESOURCE_DATA_NOT_FOUND;
+    if (status == STATUS_SUCCESS && !res_data_in_buffer(hModule, ptr, entry->Size, limit))
+        status = STATUS_RESOURCE_DATA_NOT_FOUND;
 
     if (status == STATUS_SUCCESS)
         status = parse_manifest(acl, ai, filename, hModule, directory, shared, ptr, entry->Size);
@@ -3192,7 +3206,7 @@ static void *read_file_flat( HANDLE file )
  * Returns NULL for anything unusual, in which case the caller falls back to the
  * full flat read and then to the mapped view, so the result can never be worse. */
 #define ACTCTX_HDR_READ 4096
-static void *read_pe_resources( HANDLE file, BOOL *compact )
+static void *read_pe_resources( HANDLE file, SIZE_T *compact_size )
 {
     FILE_STANDARD_INFORMATION info;
     IO_STATUS_BLOCK io;
@@ -3207,7 +3221,7 @@ static void *read_pe_resources( HANDLE file, BOOL *compact )
     ULONG n, lfanew, rsrc_idx = 0, optsize, nsec, ndirs, i, soh, va, dirsize, data_off, total;
     USHORT magic;
 
-    *compact = FALSE;
+    *compact_size = 0;
     status = NtQueryInformationFile( file, &io, &info, sizeof(info), FileStandardInformation );
     if (status != STATUS_SUCCESS) return NULL;
     fsize = info.EndOfFile.QuadPart;
@@ -3309,7 +3323,7 @@ static void *read_pe_resources( HANDLE file, BOOL *compact )
         }
     }
     RtlFreeHeap( GetProcessHeap(), 0, hdr );
-    *compact = TRUE;
+    *compact_size = total;
     return buf;
 
 fail:
@@ -3320,15 +3334,15 @@ fail:
 
 static NTSTATUS parse_pe_buffer( struct actctx_loader* acl, struct assembly_identity* ai,
                                   LPCWSTR filename, LPCWSTR directory, BOOL shared,
-                                  void *base, LPCWSTR resname, ULONG lang )
+                                  void *base, LPCWSTR resname, ULONG lang, SIZE_T limit )
 {
     HANDLE module;
 
     if (!RtlImageNtHeader(base)) return STATUS_INVALID_IMAGE_FORMAT;  /* not a PE file */
     module = (HMODULE)((ULONG_PTR)base | 1);  /* make it a LOAD_LIBRARY_AS_DATAFILE handle */
     if (resname)
-        return get_manifest_in_module( acl, ai, filename, directory, shared, module, resname, lang );
-    return search_manifest_in_module( acl, ai, filename, directory, shared, module, lang );
+        return get_manifest_in_module( acl, ai, filename, directory, shared, module, resname, lang, limit );
+    return search_manifest_in_module( acl, ai, filename, directory, shared, module, lang, limit );
 }
 
 static NTSTATUS get_manifest_in_pe_file( struct actctx_loader* acl, struct assembly_identity* ai,
@@ -3343,7 +3357,7 @@ static NTSTATUS get_manifest_in_pe_file( struct actctx_loader* acl, struct assem
     SIZE_T              count;
     void               *base;
     void               *heapbuf;
-    BOOL                compact;
+    SIZE_T              compact_size;
     WCHAR resnameBuf[20];
     LPCWSTR resptr = resname;
 
@@ -3355,20 +3369,20 @@ static NTSTATUS get_manifest_in_pe_file( struct actctx_loader* acl, struct assem
 
     DPRINT( "looking for res %S in %S\n", resptr, filename ? filename : L"<NULL>");
 
-    heapbuf = read_pe_resources( file, &compact );
+    heapbuf = read_pe_resources( file, &compact_size );
     if (heapbuf)
     {
-        status = parse_pe_buffer( acl, ai, filename, directory, shared, heapbuf, resname, lang );
+        status = parse_pe_buffer( acl, ai, filename, directory, shared, heapbuf, resname, lang, compact_size );
         RtlFreeHeap( GetProcessHeap(), 0, heapbuf );
         /* The compact copy only holds the resource directory section. If the manifest data
-         * lives in another section the lookup comes back as "data not found": redo it on a
+         * lives in another section, or runs past the copied bytes, the lookup comes back as "data not found": redo it on a
          * full read, which has every section. */
-        if (!compact || status != STATUS_RESOURCE_DATA_NOT_FOUND) return status;
+        if (!compact_size || status != STATUS_RESOURCE_DATA_NOT_FOUND) return status;
     }
     heapbuf = read_file_flat( file );
     if (heapbuf)
     {
-        status = parse_pe_buffer( acl, ai, filename, directory, shared, heapbuf, resname, lang );
+        status = parse_pe_buffer( acl, ai, filename, directory, shared, heapbuf, resname, lang, 0 );
         RtlFreeHeap( GetProcessHeap(), 0, heapbuf );
         return status;
     }
@@ -3393,7 +3407,7 @@ static NTSTATUS get_manifest_in_pe_file( struct actctx_loader* acl, struct assem
     NtClose( mapping );
     if (status != STATUS_SUCCESS) return status;
 
-    status = parse_pe_buffer( acl, ai, filename, directory, shared, base, resname, lang );
+    status = parse_pe_buffer( acl, ai, filename, directory, shared, base, resname, lang, 0 );
     NtUnmapViewOfSection( GetCurrentProcess(), base );
     return status;
 }
@@ -5800,7 +5814,7 @@ RtlCreateActivationContext(IN ULONG Flags,
         if (pActCtx->dwFlags & ACTCTX_FLAG_HMODULE_VALID)
         {
             status = get_manifest_in_module( &acl, NULL, NULL, directory, FALSE, pActCtx->hModule,
-                                             pActCtx->lpResourceName, lang );
+                                             pActCtx->lpResourceName, lang, 0 );
             if (status && status != STATUS_SXS_CANT_GEN_ACTCTX)
                 /* FIXME: what to do if pActCtx->lpSource is set */
                 status = get_manifest_in_associated_manifest( &acl, NULL, NULL, directory,
