@@ -309,6 +309,7 @@ BOOL IntDestroyMenu( PMENU pMenu, BOOL bRecurse)
        DesktopHeapFree(pMenu->head.rpdesk, pMenu->rgItems );
        pMenu->rgItems = NULL;
        pMenu->cItems = 0;
+       pMenu->iItem = NO_SELECTED_ITEM; /* no items, so no focused item */
     }
     return TRUE;
 }
@@ -604,9 +605,11 @@ IntRemoveMenuItem( PMENU pMenu, UINT nPos, UINT wFlags, BOOL bRecurse )
 {
     PITEM item;
     PITEM newItems;
+    UINT RemovedPos;
 
     TRACE("(menu=%p pos=%04x flags=%04x)\n",pMenu, nPos, wFlags);
     if (!(item = MENU_FindItem( &pMenu, &nPos, wFlags ))) return FALSE;
+    RemovedPos = nPos;
 
     /* Remove item */
 
@@ -642,8 +645,17 @@ IntRemoveMenuItem( PMENU pMenu, UINT nPos, UINT wFlags, BOOL bRecurse )
        MENU_HideSubPopups, so a stale index is the same OOB primitive the SET
        bound (IntSetMenuInfo) guards against. Clear it when it is no longer a
        valid position. */
-    if (pMenu->iItem != NO_SELECTED_ITEM && (UINT)pMenu->iItem >= pMenu->cItems)
-        pMenu->iItem = NO_SELECTED_ITEM;
+    if (pMenu->iItem != NO_SELECTED_ITEM)
+    {
+        /* Removal before the focused item shifts it down by one: keep iItem
+           naming the same logical item. Anything leaving iItem out of range
+           (removal at/after focus of the last item, or an emptied menu)
+           clears the focus. */
+        if (pMenu->iItem > RemovedPos)
+            pMenu->iItem--;
+        if (pMenu->iItem >= pMenu->cItems)
+            pMenu->iItem = NO_SELECTED_ITEM;
+    }
 
     return TRUE;
 }

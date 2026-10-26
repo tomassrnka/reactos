@@ -67,6 +67,87 @@ MakeOneItemMenu(void)
     return hMenu;
 }
 
+/* Focused-item bookkeeping (menu.c IntRemoveMenuItem / IntDestroyMenu).
+ * iItem is observable from user mode through GetMenuBarInfo().fFocused on a
+ * window menu bar, and can be seeded through the extended SET path. */
+static BOOL
+IsItemFocused(HWND hwnd, int id)
+{
+    MENUBARINFO mbi;
+
+    ZeroMemory(&mbi, sizeof(mbi));
+    mbi.cbSize = sizeof(mbi);
+    if (!GetMenuBarInfo(hwnd, OBJID_MENU, id, &mbi))
+        return FALSE;
+    return mbi.fFocused;
+}
+
+static void
+SetFocusedPos(HMENU hMenu, UINT iItem)
+{
+    TEST_ROSMENUINFO rmi;
+
+    ZeroMemory(&rmi, sizeof(rmi));
+    rmi.cbSize = sizeof(rmi);
+    rmi.iItem = iItem;
+    ok(NtUserThunkedMenuInfo(hMenu, (LPCMENUINFO)&rmi),
+       "NtUserThunkedMenuInfo(iItem=%u) failed, error %lu\n", iItem, GetLastError());
+}
+
+static void
+AddItems(HMENU hMenu, UINT first, UINT count)
+{
+    UINT i;
+
+    for (i = 0; i < count; i++)
+        ok(AppendMenuW(hMenu, MF_STRING, first + i, L"Item"),
+           "AppendMenuW failed, error %lu\n", GetLastError());
+}
+
+static void
+TestFocusedItemTracking(void)
+{
+    HMENU hMenu = CreateMenu();
+    HWND hwnd;
+
+    ok(hMenu != NULL, "CreateMenu failed, error %lu\n", GetLastError());
+    if (!hMenu)
+        return;
+    AddItems(hMenu, 1, 3); /* ids 1,2,3 at positions 0,1,2 */
+
+    hwnd = CreateWindowExW(0, L"STATIC", L"menutest", WS_POPUP | WS_CAPTION,
+                           0, 0, 100, 100, NULL, hMenu, GetModuleHandleW(NULL), NULL);
+    ok(hwnd != NULL, "CreateWindowExW failed, error %lu\n", GetLastError());
+    if (!hwnd)
+    {
+        DestroyMenu(hMenu);
+        return;
+    }
+
+    /* Remove an item BEFORE the focused one: focus must keep naming id 3 */
+    SetFocusedPos(hMenu, 2);
+    ok(IsItemFocused(hwnd, 3), "id 3 should be focused before remove\n");
+    ok(RemoveMenu(hMenu, 0, MF_BYPOSITION), "RemoveMenu failed\n");
+    ok(IsItemFocused(hwnd, 2), "focus did not follow id 3 after remove-before-focus\n");
+    ok(!IsItemFocused(hwnd, 1), "pos 0 wrongly focused after remove-before-focus\n");
+
+    /* Remove an item AFTER the focused one: focus unchanged */
+    SetFocusedPos(hMenu, 0);
+    ok(RemoveMenu(hMenu, 1, MF_BYPOSITION), "RemoveMenu(2) failed\n");
+    ok(IsItemFocused(hwnd, 1), "focus moved by remove-after-focus\n");
+
+    /* Empty the menu, rebuild: no stale focus may survive */
+    SetFocusedPos(hMenu, 0);
+    ok(RemoveMenu(hMenu, 0, MF_BYPOSITION), "RemoveMenu(3) failed\n");
+    ok(GetMenuItemCount(hMenu) == 0, "menu not empty\n");
+    AddItems(hMenu, 10, 3);
+    ok(!IsItemFocused(hwnd, 1) && !IsItemFocused(hwnd, 2) && !IsItemFocused(hwnd, 3),
+       "stale focus survived empty-then-rebuild\n");
+
+    DestroyWindow(hwnd);
+    DestroyMenu(hMenu);
+}
+
 START_TEST(NtUserMenuInfoItemBound)
 {
     HMENU hMenu;
@@ -130,4 +211,6 @@ START_TEST(NtUserMenuInfoItemBound)
        "menu unusable after out-of-range iItem SET\n");
 
     DestroyMenu(hMenu);
+
+    TestFocusedItemTracking();
 }
