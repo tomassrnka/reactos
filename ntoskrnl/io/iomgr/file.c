@@ -432,6 +432,23 @@ IopParseDevice(IN PVOID ParseObject,
             DesiredAccess |= AccessState->PreviouslyGrantedAccess;
         }
 
+        /*
+         * NT6+ refuses a user-mode open or create that asks for no access at
+         * all (zero access handles); attribute/delete-only probes carry their
+         * own access and are not affected.
+         */
+        if ((NtMajorVersion >= 6) &&
+            (AccessMode != KernelMode) &&
+            !(OpenPacket->QueryOnly) &&
+            !(OpenPacket->DeleteOnly) &&
+            (DesiredAccess == 0) &&
+            (AccessState->PreviouslyGrantedAccess == 0))
+        {
+            DPRINT("Zero access file open refused\n");
+            IopDereferenceDeviceObject(OriginalDeviceObject, FALSE);
+            return STATUS_ACCESS_DENIED;
+        }
+
         /* Check if this is a volume open */
         if ((OpenPacket->RelatedFileObject) &&
             (OpenPacket->RelatedFileObject->Flags & FO_VOLUME_OPEN) &&
