@@ -300,6 +300,15 @@ TestCancelledOwnerDoesNotStealCompletion(void)
     SEND A, B, C;
     IO_STATUS_BLOCK Cancel;
     NTSTATUS Status;
+    NTSTATUS (NTAPI *pNtCancelIoFileEx)(HANDLE, PIO_STATUS_BLOCK, PIO_STATUS_BLOCK);
+
+    /* Vista+ API: not exported by the 2003-targeted ntdll */
+    pNtCancelIoFileEx = (PVOID)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtCancelIoFileEx");
+    if (!pNtCancelIoFileEx)
+    {
+        skip("NtCancelIoFileEx is not available\n");
+        return;
+    }
 
     StubSet(1, 1, 1);
     Sock = NewSocket();
@@ -318,7 +327,7 @@ TestCancelledOwnerDoesNotStealCompletion(void)
        State.Entry[2].FirstByte == 'C', "datagrams in the transport out of order\n");
 
     /* cancel the request of the middle datagram only */
-    Status = NtCancelIoFileEx(Sock, &B.Iosb, &Cancel);
+    Status = pNtCancelIoFileEx(Sock, &B.Iosb, &Cancel);
     ok_hex(Status, STATUS_SUCCESS);
     ok(SendDone(&B, 5000), "cancelled request B did not complete\n");
     ok_hex(SendStatus(&B), STATUS_CANCELLED);

@@ -7,19 +7,31 @@
 
 #include "precomp.h"
 
+typedef NTSTATUS (NTAPI *PFN_NtGetNextThread)(HANDLE, HANDLE, ACCESS_MASK, ULONG, ULONG, PHANDLE);
+
 START_TEST(NtGetNextThread)
 {
+    PFN_NtGetNextThread pNtGetNextThread;
     NTSTATUS Status;
     HANDLE NextThread;
     WCHAR Path[MAX_PATH];
     STARTUPINFOW StartupInfo = { 0 };
     PROCESS_INFORMATION ProcessInfo = { 0 };
 
+    /* Vista+ API: not exported by the 2003-targeted ntdll */
+    pNtGetNextThread = (PFN_NtGetNextThread)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),
+                                                           "NtGetNextThread");
+    if (!pNtGetNextThread)
+    {
+        skip("NtGetNextThread is not available\n");
+        return;
+    }
+
     StartupInfo.cb = sizeof(StartupInfo);
 
     /* Baseline: enumerating our own process from the start must succeed. */
     NextThread = NULL;
-    Status = NtGetNextThread(NtCurrentProcess(), NULL,
+    Status = pNtGetNextThread(NtCurrentProcess(), NULL,
                              THREAD_QUERY_LIMITED_INFORMATION, 0, 0, &NextThread);
     ok(Status == STATUS_SUCCESS,
        "NtGetNextThread(self, NULL) returned 0x%lx\n", Status);
@@ -43,8 +55,8 @@ START_TEST(NtGetNextThread)
      * makes the helper interpret the child's EPROCESS list head as an ETHREAD).
      */
     NextThread = (HANDLE)(ULONG_PTR)0xdeadbeef;
-    Status = NtGetNextThread(NtCurrentProcess(), ProcessInfo.hThread,
-                             THREAD_QUERY_LIMITED_INFORMATION, 0, 0, &NextThread);
+    Status = pNtGetNextThread(NtCurrentProcess(), ProcessInfo.hThread,
+                              THREAD_QUERY_LIMITED_INFORMATION, 0, 0, &NextThread);
     ok(Status == STATUS_INVALID_PARAMETER,
        "NtGetNextThread(self, foreign thread) returned 0x%lx, expected STATUS_INVALID_PARAMETER\n",
        Status);
@@ -59,7 +71,7 @@ START_TEST(NtGetNextThread)
     /* Positive control: the child's own thread, queried through the child
      * process handle, must still enumerate. */
     NextThread = NULL;
-    Status = NtGetNextThread(ProcessInfo.hProcess, NULL,
+    Status = pNtGetNextThread(ProcessInfo.hProcess, NULL,
                              THREAD_QUERY_LIMITED_INFORMATION, 0, 0, &NextThread);
     ok(Status == STATUS_SUCCESS,
        "NtGetNextThread(child, NULL) returned 0x%lx\n", Status);
