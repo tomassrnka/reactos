@@ -3150,6 +3150,35 @@ static NTSTATUS search_manifest_in_module( struct actctx_loader* acl, struct ass
 }
 #endif // __REACTOS__
 
+/* Read a (reasonably small) file into a private heap buffer. The flat file image
+ * is only parsed for its resources, so no mapped view is needed. A view is visible
+ * to NtMapViewOfSection hooks that assume every view in the process is a
+ * loader-mapped image (the early DLL blocklist hook of Firefox does). */
+#define ACTCTX_MAX_FLAT_READ (32 * 1024 * 1024)
+static void *read_file_flat( HANDLE file )
+{
+    FILE_STANDARD_INFORMATION info;
+    IO_STATUS_BLOCK io;
+    LARGE_INTEGER off;
+    void *buf;
+    NTSTATUS status;
+
+    status = NtQueryInformationFile( file, &io, &info, sizeof(info), FileStandardInformation );
+    if (status != STATUS_SUCCESS) return NULL;
+    if (info.EndOfFile.QuadPart < (LONGLONG)sizeof(IMAGE_DOS_HEADER) ||
+        info.EndOfFile.QuadPart > ACTCTX_MAX_FLAT_READ) return NULL;
+    buf = RtlAllocateHeap( GetProcessHeap(), 0, info.EndOfFile.LowPart );
+    if (!buf) return NULL;
+    off.QuadPart = 0;
+    status = NtReadFile( file, NULL, NULL, NULL, &io, buf, info.EndOfFile.LowPart, &off, NULL );
+    if (status != STATUS_SUCCESS || io.Information != info.EndOfFile.LowPart)
+    {
+        RtlFreeHeap( GetProcessHeap(), 0, buf );
+        return NULL;
+    }
+    return buf;
+}
+
 static NTSTATUS get_manifest_in_pe_file( struct actctx_loader* acl, struct assembly_identity* ai,
                                          LPCWSTR filename, LPCWSTR directory, BOOL shared,
                                          HANDLE file, LPCWSTR resname, ULONG lang )
@@ -3161,6 +3190,7 @@ static NTSTATUS get_manifest_in_pe_file( struct actctx_loader* acl, struct assem
     NTSTATUS            status;
     SIZE_T              count;
     void               *base;
+    void               *heapbuf;
     WCHAR resnameBuf[20];
     LPCWSTR resptr = resname;
 
@@ -3172,25 +3202,33 @@ static NTSTATUS get_manifest_in_pe_file( struct actctx_loader* acl, struct assem
 
     DPRINT( "looking for res %S in %S\n", resptr, filename ? filename : L"<NULL>");
 
-    attr.Length                   = sizeof(attr);
-    attr.RootDirectory            = 0;
-    attr.ObjectName               = NULL;
-    attr.Attributes               = OBJ_CASE_INSENSITIVE | OBJ_OPENIF;
-    attr.SecurityDescriptor       = NULL;
-    attr.SecurityQualityOfService = NULL;
+    heapbuf = read_file_flat( file );
+    if (heapbuf)
+    {
+        base = heapbuf;
+    }
+    else
+    {
+        attr.Length                   = sizeof(attr);
+        attr.RootDirectory            = 0;
+        attr.ObjectName               = NULL;
+        attr.Attributes               = OBJ_CASE_INSENSITIVE | OBJ_OPENIF;
+        attr.SecurityDescriptor       = NULL;
+        attr.SecurityQualityOfService = NULL;
 
-    size.QuadPart = 0;
-    status = NtCreateSection( &mapping, STANDARD_RIGHTS_REQUIRED | SECTION_QUERY | SECTION_MAP_READ,
-                              &attr, &size, PAGE_READONLY, SEC_COMMIT, file );
-    if (status != STATUS_SUCCESS) return status;
+        size.QuadPart = 0;
+        status = NtCreateSection( &mapping, STANDARD_RIGHTS_REQUIRED | SECTION_QUERY | SECTION_MAP_READ,
+                                  &attr, &size, PAGE_READONLY, SEC_COMMIT, file );
+        if (status != STATUS_SUCCESS) return status;
 
-    offset.QuadPart = 0;
-    count = 0;
-    base = NULL;
-    status = NtMapViewOfSection( mapping, GetCurrentProcess(), &base, 0, 0, &offset,
-                                 &count, ViewShare, 0, PAGE_READONLY );
-    NtClose( mapping );
-    if (status != STATUS_SUCCESS) return status;
+        offset.QuadPart = 0;
+        count = 0;
+        base = NULL;
+        status = NtMapViewOfSection( mapping, GetCurrentProcess(), &base, 0, 0, &offset,
+                                     &count, ViewShare, 0, PAGE_READONLY );
+        NtClose( mapping );
+        if (status != STATUS_SUCCESS) return status;
+    }
 
     if (RtlImageNtHeader(base)) /* we got a PE file */
     {
@@ -3202,7 +3240,8 @@ static NTSTATUS get_manifest_in_pe_file( struct actctx_loader* acl, struct assem
     }
     else status = STATUS_INVALID_IMAGE_FORMAT;
 
-    NtUnmapViewOfSection( GetCurrentProcess(), base );
+    if (heapbuf) RtlFreeHeap( GetProcessHeap(), 0, heapbuf );
+    else NtUnmapViewOfSection( GetCurrentProcess(), base );
     return status;
 }
 
