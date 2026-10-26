@@ -658,4 +658,42 @@ Cleanup:
     return Ret;
 }
 
+/*
+ * @unimplemented
+ *
+ * Win8+ API. ReactOS has no support for conditional ACEs (SDDL conditional
+ * expressions / central access policies), so this is a safe stub: it fails
+ * cleanly with ERROR_CALL_NOT_IMPLEMENTED rather than corrupting the ACL.
+ * Exported so that modern apps (e.g. Chromium) which statically import it can
+ * load; callers that actually use conditional ACEs will get a documented
+ * failure. Implement for real if an app depends on the behaviour.
+ */
+BOOL
+WINAPI
+AddConditionalAce(
+    _Inout_ PACL pAcl,
+    _In_ DWORD dwAceRevision,
+    _In_ DWORD AceFlags,
+    _In_ UCHAR AceType,
+    _In_ DWORD AccessMask,
+    _In_ PSID pSid,
+    _In_ PWCHAR ConditionStr,
+    _Out_ DWORD *ReturnLength)
+{
+    UNREFERENCED_PARAMETER(pAcl);
+    UNREFERENCED_PARAMETER(dwAceRevision);
+    UNREFERENCED_PARAMETER(AceFlags);
+    UNREFERENCED_PARAMETER(AceType);
+    UNREFERENCED_PARAMETER(AccessMask);
+    UNREFERENCED_PARAMETER(pSid);
+    UNREFERENCED_PARAMETER(ConditionStr);
+
+    if (ReturnLength)
+        *ReturnLength = 0;
+
+    FIXME("AddConditionalAce is UNIMPLEMENTED (conditional ACEs unsupported)\n");
+    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    return FALSE;
+}
+
 /* EOF */
