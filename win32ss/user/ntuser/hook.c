@@ -1781,6 +1781,21 @@ NtUserRegisterUserApiHook(
     UNICODE_STRING strFuncNameSafe;
     NTSTATUS Status;
 
+    /* SECURITY (Astra #8): registering a user-api hook makes win32k inject the
+       named module (MSQ_INJECTMODULE) into every non-system, non-CSRSS process
+       on the current desktop. That is a privileged, desktop-wide operation; on
+       Windows it is driven by the trusted theme/console server, never by an
+       ordinary process. With no gate, any caller could force a DLL into other
+       processes -> cross-process code injection / EoP. Require SeTcbPrivilege,
+       which the LocalSystem theme service (the legitimate caller) holds and
+       unprivileged user processes do not. */
+    if (!SeSinglePrivilegeCheck(RtlConvertLongToLuid(SE_TCB_PRIVILEGE), UserMode))
+    {
+        ERR("NtUserRegisterUserApiHook: caller lacks SeTcbPrivilege, denying\n");
+        EngSetLastError(ERROR_ACCESS_DENIED);
+        return FALSE;
+    }
+
     /* Probe and capture parameters */
     Status = ProbeAndCaptureUnicodeString(&strDllNameSafe, UserMode, m_dllname1);
     if(!NT_SUCCESS(Status))
