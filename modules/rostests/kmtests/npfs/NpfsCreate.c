@@ -103,6 +103,40 @@ TestCreateNamedPipe(VOID)
 
 static
 VOID
+TestPrefixShadow(VOID)
+{
+    NTSTATUS Status;
+    HANDLE BackslashHandle = INVALID_HANDLE_VALUE;
+    HANDLE ServerHandle = INVALID_HANDLE_VALUE;
+
+    if (GetNTVersion() < _WIN32_WINNT_VISTA)
+    {
+        skip(FALSE, "A pipe named \"\\\" requires Vista+\n");
+        return;
+    }
+
+    /* While a pipe named "\" exists, "\foo" must still be creatable
+     * and not be resolved against the "\" pipe's prefix entry */
+    Status = NpCreatePipe(&BackslashHandle,
+                          DEVICE_NAMED_PIPE L"\\\\",
+                          BYTE_STREAM, QUEUE, BYTE_STREAM, DUPLEX,
+                          1, 4096, 4096);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!skip(NT_SUCCESS(Status), "No pipe named \"\\\"\n"))
+    {
+        Status = NpCreatePipe(&ServerHandle,
+                              DEVICE_NAMED_PIPE L"\\\\KmtestNpfsPrefixShadow",
+                              BYTE_STREAM, QUEUE, BYTE_STREAM, DUPLEX,
+                              1, 4096, 4096);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+            ObCloseHandle(ServerHandle, KernelMode);
+        ObCloseHandle(BackslashHandle, KernelMode);
+    }
+}
+
+static
+VOID
 TestCreate(VOID)
 {
 }
@@ -116,6 +150,7 @@ RunTest(
 {
     UNREFERENCED_PARAMETER(Context);
     TestCreateNamedPipe();
+    TestPrefixShadow();
     TestCreate();
 }
 

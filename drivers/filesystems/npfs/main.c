@@ -30,17 +30,27 @@ FAST_IO_DISPATCH NpFastIoDispatch =
 
 /* FUNCTIONS ******************************************************************/
 
+/* The OS identity is fixed for the lifetime of the boot: query it only once */
+static BOOLEAN NpVistaOrLater;
+
 BOOLEAN
 NTAPI
 NpIsVistaOrLater(VOID)
+{
+    return NpVistaOrLater;
+}
+
+static
+VOID
+NpInitializeVersion(VOID)
 {
     RTL_OSVERSIONINFOW VersionInfo;
 
     RtlZeroMemory(&VersionInfo, sizeof(VersionInfo));
     VersionInfo.dwOSVersionInfoSize = sizeof(VersionInfo);
 
-    return NT_SUCCESS(RtlGetVersion(&VersionInfo)) &&
-           (VersionInfo.dwMajorVersion >= 6);
+    NpVistaOrLater = NT_SUCCESS(RtlGetVersion(&VersionInfo)) &&
+                     (VersionInfo.dwMajorVersion >= 6);
 }
 
 NTSTATUS
@@ -344,6 +354,8 @@ DriverEntry(IN PDRIVER_OBJECT DriverObject,
     UNREFERENCED_PARAMETER(RegistryPath);
 
     DPRINT("Next-Generation NPFS-Advanced\n");
+
+    NpInitializeVersion();
 
     Status = NpInitializeAliases();
     if (!NT_SUCCESS(Status))
