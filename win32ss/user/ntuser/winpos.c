@@ -2589,7 +2589,7 @@ co_WinPosGetNonClientSize(PWND Window, RECT* WindowRect, RECT* ClientRect)
 }
 
 void FASTCALL
-co_WinPosSendSizeMove(PWND Wnd)
+co_WinPosSendSizeMoveEx(PWND Wnd, BOOL bCreate)
 {
     RECTL Rect;
     LPARAM lParam;
@@ -2600,7 +2600,13 @@ co_WinPosSendSizeMove(PWND Wnd)
 
     Wnd->state &= ~WNDS_SENDSIZEMOVEMSGS;
 
-    if (Wnd->style & WS_MAXIMIZE)
+    /* NT6+: during window creation WM_SIZE always reports SIZE_RESTORED, even for a window created
+       WS_MAXIMIZE/WS_MINIMIZE; the state is applied afterwards (see co_UserCreateWindowEx) */
+    if (bCreate && SharedUserData->NtMajorVersion >= 6)
+    {
+        /* SIZE_RESTORED */
+    }
+    else if (Wnd->style & WS_MAXIMIZE)
     {
         wParam = SIZE_MAXIMIZED;
     }
@@ -2620,6 +2626,56 @@ co_WinPosSendSizeMove(PWND Wnd)
     co_IntSendMessageNoWait(UserHMGetHandle(Wnd), WM_MOVE, 0, lParam);
 
     IntEngWindowChanged(Wnd, WOC_RGN_CLIENT);
+}
+
+/*
+ * Send a WM_NCCALCSIZE (wParam = TRUE) for the current window rectangle, as Win8+ does after the
+ * window state (maximized/minimized) changed. The result is only used to keep the client rectangle current.
+ */
+void FASTCALL
+co_WinPosSendNcCalcSizeStateChanged(PWND Wnd)
+{
+    NCCALCSIZE_PARAMS params;
+    WINDOWPOS wp;
+    PWND Parent = Wnd->spwndParent;
+    RECTL ClientRect;
+
+    params.rgrc[0] = Wnd->rcWindow;
+    params.rgrc[1] = Wnd->rcWindow;
+    params.rgrc[2] = Wnd->rcClient;
+    if ((Wnd->style & WS_CHILD) && Parent)
+    {
+        RECTL_vOffsetRect(&params.rgrc[0], -Parent->rcClient.left, -Parent->rcClient.top);
+        RECTL_vOffsetRect(&params.rgrc[1], -Parent->rcClient.left, -Parent->rcClient.top);
+        RECTL_vOffsetRect(&params.rgrc[2], -Parent->rcClient.left, -Parent->rcClient.top);
+    }
+
+    wp.hwnd = UserHMGetHandle(Wnd);
+    wp.hwndInsertAfter = NULL;
+    wp.x = Wnd->rcWindow.left;
+    wp.y = Wnd->rcWindow.top;
+    wp.cx = Wnd->rcWindow.right - Wnd->rcWindow.left;
+    wp.cy = Wnd->rcWindow.bottom - Wnd->rcWindow.top;
+    wp.flags = SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED;
+    params.lppos = &wp;
+
+    co_IntSendMessage(wp.hwnd, WM_NCCALCSIZE, TRUE, (LPARAM)&params);
+
+    /* If the window is still alive and the answer is sane, take over the client rectangle */
+    if (params.rgrc[0].left <= params.rgrc[0].right && params.rgrc[0].top <= params.rgrc[0].bottom)
+    {
+        ClientRect = params.rgrc[0];
+        if ((Wnd->style & WS_CHILD) && Parent)
+            RECTL_vOffsetRect(&ClientRect, Parent->rcClient.left, Parent->rcClient.top);
+        FixClientRect(&ClientRect, &Wnd->rcWindow);
+        Wnd->rcClient = ClientRect;
+    }
+}
+
+void FASTCALL
+co_WinPosSendSizeMove(PWND Wnd)
+{
+    co_WinPosSendSizeMoveEx(Wnd, FALSE);
 }
 
 UINT FASTCALL

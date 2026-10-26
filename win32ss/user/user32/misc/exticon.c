@@ -666,6 +666,16 @@ static UINT ICO_ExtractIconExW(
         ULONG size;
         UINT i;
 
+#ifdef __REACTOS__
+        /* NT6+: an odd number of icons cannot be extracted as (large, small) pairs from a PE image */
+        if (nIcons && (nIcons & 1) && HIWORD(cxDesired) && HIWORD(cyDesired) &&
+            NtCurrentPeb()->OSMajorVersion >= 6)
+        {
+            ret = 0;
+            goto end;
+        }
+#endif
+
         rootresdir = RtlImageDirectoryEntryToData((HMODULE)peimage, FALSE, IMAGE_DIRECTORY_ENTRY_RESOURCE, &size);
         if (!rootresdir)
         {
