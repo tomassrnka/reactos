@@ -2310,7 +2310,7 @@ NtUserPostMessage(HWND hWnd,
        user mode; these messages are kernel-originated only (see NtUserMessageCall). */
     if (Msg & 0x80000000)
     {
-        ERR("NtUserPostMessage: rejected kernel-internal message 0x%x from user mode\n", Msg);
+        WARN("NtUserPostMessage: rejected kernel-internal message 0x%x from user mode\n", Msg);
         EngSetLastError(ERROR_INVALID_PARAMETER);
         UserLeave();
         return FALSE;
@@ -2340,7 +2340,7 @@ NtUserPostThreadMessage(DWORD idThread,
        user mode; these messages are kernel-originated only (see NtUserMessageCall). */
     if (Msg & 0x80000000)
     {
-        ERR("NtUserPostThreadMessage: rejected kernel-internal message 0x%x from user mode\n", Msg);
+        WARN("NtUserPostThreadMessage: rejected kernel-internal message 0x%x from user mode\n", Msg);
         EngSetLastError(ERROR_INVALID_PARAMETER);
         UserLeave();
         return FALSE;
@@ -2595,7 +2595,7 @@ NtUserMessageCall( HWND hWnd,
        from kernel code and never passes through this syscall. */
     if (Msg & 0x80000000)
     {
-        ERR("NtUserMessageCall: rejected kernel-internal message 0x%x from user mode\n", Msg);
+        WARN("NtUserMessageCall: rejected kernel-internal message 0x%x from user mode\n", Msg);
         EngSetLastError(ERROR_INVALID_PARAMETER);
         UserLeave();
         return FALSE;

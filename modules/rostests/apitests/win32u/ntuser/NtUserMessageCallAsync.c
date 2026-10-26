@@ -113,10 +113,13 @@ START_TEST(NtUserMessageCallAsync)
     ok(rc.left == 11 && rc.top == 22,
        "Window not moved: left=%ld top=%ld\n", rc.left, rc.top);
 
-    /* --- Positive control 2: cross-thread SetWindowPos. co_WinPosSetWindowPos
-       posts WM_ASYNC_SETWINDOWPOS (kernel-built PWINDOWPOS) to the owning
-       thread, so this exercises the legitimate kernel WM_ASYNC_SETWINDOWPOS
-       dispatch that the fix must leave intact. */
+    /* --- Positive control 2: cross-thread SetWindowPos with SWP_ASYNCWINDOWPOS.
+       co_WinPosSetWindowPos only takes the async branch when SWP_ASYNCWINDOWPOS
+       is set: it allocates a kernel PWINDOWPOS and posts WM_ASYNC_SETWINDOWPOS
+       (via co_IntSendMessageNoWait) to the owning thread. This exercises the
+       legitimate kernel WM_ASYNC_SETWINDOWPOS dispatch that the fix must leave
+       intact; without SWP_ASYNCWINDOWPOS the async path is never driven and this
+       control would pass even if the gate broke it. */
     g_hWorkerReady = CreateEventW(NULL, TRUE, FALSE, NULL);
     ASSERT(g_hWorkerReady != NULL);
     hThread = CreateThread(NULL, 0, WorkerThreadProc, NULL, 0, &g_WorkerTid);
@@ -127,7 +130,7 @@ START_TEST(NtUserMessageCallAsync)
     if (g_hWndWorker)
     {
         bRet = SetWindowPos(g_hWndWorker, NULL, 33, 44, 70, 50,
-                            SWP_NOZORDER | SWP_NOACTIVATE);
+                            SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
         ok(bRet == TRUE, "SetWindowPos (cross thread) failed: %lu\n", GetLastError());
         /* Give the worker time to process the posted WM_ASYNC_SETWINDOWPOS. */
         Sleep(200);
@@ -135,6 +138,21 @@ START_TEST(NtUserMessageCallAsync)
         ok(rc.left == 33 && rc.top == 44,
            "Cross-thread window not moved (kernel WM_ASYNC_SETWINDOWPOS broken?): left=%ld top=%ld\n",
            rc.left, rc.top);
+
+        /* --- Positive control 3: ShowWindowAsync drives the legitimate kernel
+           WM_ASYNC_SHOWWINDOW dispatch (NtUserShowWindowAsync ->
+           co_IntSendMessageNoWait(hWnd, WM_ASYNC_SHOWWINDOW, ...)). The worker
+           window was created without WS_VISIBLE, so making it visible through the
+           async path proves the gate left the kernel-originated
+           WM_ASYNC_SHOWWINDOW path intact. */
+        ok(IsWindowVisible(g_hWndWorker) == FALSE,
+           "worker window unexpectedly visible before ShowWindowAsync\n");
+        bRet = ShowWindowAsync(g_hWndWorker, SW_SHOW);
+        ok(bRet == TRUE, "ShowWindowAsync failed: %lu\n", GetLastError());
+        /* Give the worker time to process the posted WM_ASYNC_SHOWWINDOW. */
+        Sleep(200);
+        ok(IsWindowVisible(g_hWndWorker) == TRUE,
+           "Worker window not shown (kernel WM_ASYNC_SHOWWINDOW broken?)\n");
     }
 
     /* Teardown. */
