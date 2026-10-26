@@ -67,6 +67,118 @@ RegisterClassWithFnid(LPCWSTR pszName, WNDPROC proc, int cbWndExtra, DWORD fnID)
                                           NULL);
 }
 
+/* A user-mode write of a positive extra-byte index on a genuine #32768 window
+   must fail with ERROR_ACCESS_DENIED, return 0, and leave the slot unchanged. */
+static void
+CheckRefusedPtr(HWND hWnd, int index, LONG_PTR planted, BOOL ansi)
+{
+    LONG_PTR before, ret, after;
+    DWORD err;
+
+    before = GetWindowLongPtrW(hWnd, index);
+    ok(before != planted, "slot %d already equals planted value\n", index);
+
+    SetLastError(0xdeadf00d);
+    ret = ansi ? SetWindowLongPtrA(hWnd, index, planted)
+               : SetWindowLongPtrW(hWnd, index, planted);
+    err = GetLastError();
+    ok(err == ERROR_ACCESS_DENIED,
+       "SetWindowLongPtr%c(#32768, %d) should fail ACCESS_DENIED, err=%lu\n",
+       ansi ? 'A' : 'W', index, err);
+    ok(ret == 0, "SetWindowLongPtr%c(#32768, %d) returned %p, expected 0\n",
+       ansi ? 'A' : 'W', index, (void *)ret);
+
+    after = GetWindowLongPtrW(hWnd, index);
+    ok(after == before,
+       "SECURITY: SetWindowLongPtr%c(#32768, %d) changed the slot (%p -> %p)\n",
+       ansi ? 'A' : 'W', index, (void *)before, (void *)after);
+}
+
+static void
+CheckRefusedLong(HWND hWnd, int index, BOOL ansi)
+{
+    LONG before, planted, ret, after;
+    DWORD err;
+
+    before = GetWindowLongW(hWnd, index);
+    planted = before ^ 0x51515151;   /* guaranteed different from the current value */
+
+    SetLastError(0xdeadf00d);
+    ret = ansi ? SetWindowLongA(hWnd, index, planted)
+               : SetWindowLongW(hWnd, index, planted);
+    err = GetLastError();
+    ok(err == ERROR_ACCESS_DENIED,
+       "SetWindowLong%c(#32768, %d) should fail ACCESS_DENIED, err=%lu\n",
+       ansi ? 'A' : 'W', index, err);
+    ok(ret == 0, "SetWindowLong%c(#32768, %d) returned 0x%lx, expected 0\n",
+       ansi ? 'A' : 'W', index, ret);
+
+    after = GetWindowLongW(hWnd, index);
+    ok(after == before,
+       "SECURITY: SetWindowLong%c(#32768, %d) changed the slot (0x%lx -> 0x%lx)\n",
+       ansi ? 'A' : 'W', index, before, after);
+}
+
+static void
+CheckRefusedWord(HWND hWnd, int index)
+{
+    WORD before, after, ret;
+    DWORD err;
+
+    before = GetWindowWord(hWnd, index);
+    SetLastError(0xdeadf00d);
+    ret = SetWindowWord(hWnd, index, (WORD)(before ^ 0x5252));
+    err = GetLastError();
+    ok(err == ERROR_ACCESS_DENIED,
+       "SetWindowWord(#32768, %d) should fail ACCESS_DENIED, err=%lu\n", index, err);
+    ok(ret == 0, "SetWindowWord(#32768, %d) returned 0x%x, expected 0\n", index, ret);
+    after = GetWindowWord(hWnd, index);
+    ok(after == before,
+       "SECURITY: SetWindowWord(#32768, %d) changed the slot (0x%x -> 0x%x)\n",
+       index, before, after);
+}
+
+/* Negative (non-extra-byte) indices on a genuine #32768 window must SUCCEED. */
+static void
+CheckAllowedNegativeIndex(HWND hWnd, BOOL ansi)
+{
+    LONG_PTR userdata = (LONG_PTR)(ULONG_PTR)0x1234ABCD;
+    LONG style, newstyle;
+    DWORD err;
+
+    /* GWLP_USERDATA */
+    SetLastError(0xdeadf00d);
+    if (ansi)
+        SetWindowLongPtrA(hWnd, GWLP_USERDATA, userdata);
+    else
+        SetWindowLongPtrW(hWnd, GWLP_USERDATA, userdata);
+    err = GetLastError();
+    ok(err != ERROR_ACCESS_DENIED,
+       "SetWindowLongPtr%c(#32768, GWLP_USERDATA) wrongly refused, err=%lu\n",
+       ansi ? 'A' : 'W', err);
+    ok(GetWindowLongPtrW(hWnd, GWLP_USERDATA) == userdata,
+       "SetWindowLongPtr%c(#32768, GWLP_USERDATA) did not take effect (read back %p)\n",
+       ansi ? 'A' : 'W', (void *)GetWindowLongPtrW(hWnd, GWLP_USERDATA));
+    SetWindowLongPtrW(hWnd, GWLP_USERDATA, 0);
+
+    /* GWL_STYLE: toggle a harmless bit, check it took, then restore. */
+    style = GetWindowLongW(hWnd, GWL_STYLE);
+    newstyle = style ^ WS_BORDER;
+    SetLastError(0xdeadf00d);
+    if (ansi)
+        SetWindowLongA(hWnd, GWL_STYLE, newstyle);
+    else
+        SetWindowLongW(hWnd, GWL_STYLE, newstyle);
+    err = GetLastError();
+    ok(err != ERROR_ACCESS_DENIED,
+       "SetWindowLong%c(#32768, GWL_STYLE) wrongly refused, err=%lu\n",
+       ansi ? 'A' : 'W', err);
+    ok((GetWindowLongW(hWnd, GWL_STYLE) & WS_BORDER) == (newstyle & WS_BORDER),
+       "SetWindowLong%c(#32768, GWL_STYLE) did not take effect (style 0x%lx -> 0x%lx, wanted 0x%lx)\n",
+       ansi ? 'A' : 'W', style, GetWindowLongW(hWnd, GWL_STYLE), newstyle);
+    SetWindowLongW(hWnd, GWL_STYLE, style);
+}
+
 START_TEST(NtUserServerSideFnidForge)
 {
     HINSTANCE hinst = GetModuleHandleW(NULL);
@@ -222,41 +334,56 @@ START_TEST(NtUserServerSideFnidForge)
     {
         HWND hSys = CreateWindowExW(0, L"#32768", L"sys", WS_POPUP,
                                     0, 0, 10, 10, NULL, NULL, hinst, NULL);
+        /* Assert (not trace-skip) creation: if a process may not own a #32768
+           window this case would otherwise pass vacuously and hide a regression
+           of the very hole it exists to cover. */
+        ok(hSys != NULL, "CreateWindowExW(#32768) failed, err %lu\n", GetLastError());
         if (hSys)
         {
             LONG_PTR planted = (LONG_PTR)(ULONG_PTR)0x5151515151515151ULL;
-            LONG_PTR before, after;
+            LONG_PTR slot0;
 
-            SetLastError(0xdeadf00d);
-            before = SetWindowLongPtrW(hSys, 0, planted);
-            /* The write must be refused ... */
-            ok(GetLastError() == ERROR_ACCESS_DENIED,
-               "SetWindowLongPtr on #32768 extra should fail ACCESS_DENIED, err=%lu (old=%p)\n",
-               GetLastError(), (void *)before);
-            /* ... and must not have taken effect (the slot must not read back the
-               planted value; the real kernel ppopupmenu is still there). */
-            after = GetWindowLongPtrW(hSys, 0);
-            ok(after != planted,
-               "SECURITY: planted pointer took effect in #32768 extra bytes (read back %p)\n",
-               (void *)after);
+            /* The kernel stored its real ppopupmenu at extra offset 0: it must be
+               a non-zero value that is not our planted pattern, otherwise the
+               "write did not take effect" checks below could pass vacuously. */
+            slot0 = GetWindowLongPtrW(hSys, 0);
+            ok(slot0 != 0, "#32768 extra[0] (ppopupmenu) unexpectedly zero\n");
+            ok(slot0 != planted, "#32768 extra[0] already equals the planted value\n");
 
-            /* A pointer could also be forged two bytes at a time via SetWindowWord. */
-            SetLastError(0xdeadf00d);
-            SetWindowWord(hSys, 0, 0x5252);
-            ok(GetLastError() == ERROR_ACCESS_DENIED,
-               "SetWindowWord on #32768 extra should fail ACCESS_DENIED, err=%lu\n",
-               GetLastError());
-            ok((WORD)GetWindowWord(hSys, 0) != 0x5252,
-               "SECURITY: planted word took effect in #32768 extra bytes\n");
+            /* Positive extra-byte indices are refused for every write flavour
+               (SetWindowLongPtr W/A, SetWindowLong W/A, SetWindowWord), at offset
+               0 (the ppopupmenu slot) and at a positive offset > 0. */
+            CheckRefusedPtr(hSys, 0, planted, FALSE);
+            CheckRefusedPtr(hSys, 0, planted, TRUE);
+            CheckRefusedPtr(hSys, 8, planted, FALSE);
+            CheckRefusedPtr(hSys, 8, planted, TRUE);
+            CheckRefusedLong(hSys, 0, FALSE);
+            CheckRefusedLong(hSys, 0, TRUE);
+            CheckRefusedLong(hSys, 4, FALSE);
+            CheckRefusedLong(hSys, 4, TRUE);
+            CheckRefusedWord(hSys, 0);
+            CheckRefusedWord(hSys, 8);
 
-            /* With the write refused the real ppopupmenu is intact, so teardown
+            /* The ppopupmenu slot survived every refused write bit-for-bit. */
+            ok(GetWindowLongPtrW(hSys, 0) == slot0,
+               "SECURITY: #32768 extra[0] changed (%p -> %p)\n",
+               (void *)slot0, (void *)GetWindowLongPtrW(hSys, 0));
+
+            /* NON-REGRESSION: the guard is positive-extra-byte-index ONLY. The
+               negative GWL_* / GWLP_* indices on the very same genuine #32768
+               window must keep working; this catches a future false positive if
+               someone broadens the guard to the whole window. */
+            CheckAllowedNegativeIndex(hSys, FALSE);
+            CheckAllowedNegativeIndex(hSys, TRUE);
+
+            /* ... and none of that disturbed the kernel's slot either. */
+            ok(GetWindowLongPtrW(hSys, 0) == slot0,
+               "SECURITY: #32768 extra[0] changed by negative-index writes (%p -> %p)\n",
+               (void *)slot0, (void *)GetWindowLongPtrW(hSys, 0));
+
+            /* With the writes refused the real ppopupmenu is intact, so teardown
                (WM_NCDESTROY frees the genuine context) is safe. */
             ok(DestroyWindow(hSys), "DestroyWindow(#32768) failed, err %lu\n", GetLastError());
-        }
-        else
-        {
-            trace("CreateWindowExW(#32768) not permitted from user mode (err %lu); "
-                  "genuine-system-class extra-write hole not reachable\n", GetLastError());
         }
     }
 
