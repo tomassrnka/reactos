@@ -41,7 +41,7 @@
 @ stdcall ChangeMenuA(long long ptr long long)
 @ stdcall ChangeMenuW(long long ptr long long)
 @ stdcall -version=0x600+ ChangeWindowMessageFilter(ptr long)
-@ stdcall ChangeWindowMessageFilterEx(ptr long long ptr)
+@ stdcall -version=0x601+ ChangeWindowMessageFilterEx(ptr long long ptr)
 @ stdcall CharLowerA(str)
 @ stdcall CharLowerBuffA(str long)
 @ stdcall CharLowerBuffW(wstr long)
@@ -102,7 +102,7 @@
 @ stdcall CreateMenu()
 @ stdcall CreatePopupMenu()
 @ stdcall CreateSystemThreads(long)
-@ stdcall CreateSyntheticPointerDevice(long long long)
+@ stdcall -version=0x601+ CreateSyntheticPointerDevice(long long long)
 @ stdcall CreateWindowExA(long str str long long long long long long long long ptr)
 @ stdcall CreateWindowExW(long wstr wstr long long long long long long long long ptr)
 @ stdcall CreateWindowStationA(str long long ptr)
@@ -239,7 +239,7 @@
 @ stdcall EnumWindows(ptr long)
 @ stdcall EqualRect(ptr ptr)
 @ stdcall -version=0x601+ EvaluateProximityToPolygon(long ptr ptr ptr)
-@ stdcall EvaluateProximityToRect(ptr ptr ptr)
+@ stdcall -version=0x601+ EvaluateProximityToRect(ptr ptr ptr)
 @ stdcall ExcludeUpdateRgn(long long) NtUserExcludeUpdateRgn
 @ stdcall ExitWindowsEx(long long)
 @ stdcall FillRect(long ptr long)
@@ -590,7 +590,7 @@
 @ stdcall OpenWindowStationA(str long long)
 @ stdcall OpenWindowStationW(wstr long long)
 @ stdcall PackDDElParam(long long long)
-@ stdcall PackTouchHitTestingProximityEvaluation(ptr ptr)
+@ stdcall -version=0x601+ PackTouchHitTestingProximityEvaluation(ptr ptr)
 @ stdcall PaintDesktop(long) NtUserPaintDesktop
 @ stdcall PaintMenuBar(long long long long long long) NtUserPaintMenuBar
 @ stdcall PeekMessageA(ptr long long long long)
@@ -640,7 +640,7 @@
 @ stdcall RegisterShellHookWindow(long)
 @ stdcall RegisterSystemThread(long long)
 @ stdcall RegisterTasklist(long) NtUserRegisterTasklist
-@ stdcall RegisterTouchHitTestingWindow(long long)
+@ stdcall -version=0x601+ RegisterTouchHitTestingWindow(long long)
 @ stdcall -version=0x601+ RegisterTouchWindow(long long)
 @ stdcall RegisterUserApiHook(ptr)
 @ stdcall RegisterWindowMessageA(str)

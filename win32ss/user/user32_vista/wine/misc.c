@@ -558,6 +558,12 @@ BOOL WINAPI ChangeWindowMessageFilter( UINT message, DWORD flag )
 
 /******************************************************************
  *      ChangeWindowMessageFilterEx (USER32.@)
+ *
+ * History: this was originally a stub that always returned TRUE. It now validates its
+ * arguments like Windows 10 (window handle, owning process, CHANGEFILTERSTRUCT, action,
+ * message) and fails with the matching error code; callers that passed bad arguments and
+ * relied on the old always-TRUE result will now see FALSE. Message filtering itself is
+ * still a no-op. Exported from 0x601 onwards only (see user32.spec).
  */
 BOOL WINAPI ChangeWindowMessageFilterEx( HWND hwnd, UINT message, DWORD action, CHANGEFILTERSTRUCT *changefilter )
 {
