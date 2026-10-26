@@ -2956,6 +2956,7 @@ NtUserGetWOWClass(
     UNICODE_STRING SafeClassName;
     PPROCESSINFO pi;
     PCLS Class = NULL;
+    PVOID UserClass = NULL;
     RTL_ATOM ClassAtom = 0;
     NTSTATUS Status;
 
@@ -2985,11 +2986,30 @@ NtUserGetWOWClass(
     if (SafeClassName.Buffer && !IS_ATOM(SafeClassName.Buffer))
         ExFreePoolWithTag(SafeClassName.Buffer, TAG_STRING);
 
+    /* SECURITY (Astra #8): Class is a kernel VA into the desktop (or global
+       user) heap. Returning it verbatim leaks a kernel pointer to user mode,
+       defeating kernel ASLR and aiding EoP. Hand back this process's read-only
+       user-mode VIEW of the heap object instead - what the original
+       "use DesktopPtrToUser" comment intended - and never expose the raw kernel
+       pointer. NOTE: UserHeapAddressToUser is pure pointer arithmetic with no
+       range check, so it is only valid for a pointer actually inside the global
+       user heap; range-check against that heap first and otherwise return NULL
+       (so the "not mapped -> NULL" path really fires for a desktop-heap pointer
+       that is not in the global heap). */
+    if (Class != NULL)
+    {
+        UserClass = DesktopHeapAddressToUser(Class);
+        if (UserClass == NULL &&
+            (ULONG_PTR)Class >= (ULONG_PTR)pi->HeapMappings.KernelMapping &&
+            (ULONG_PTR)Class <  (ULONG_PTR)pi->HeapMappings.KernelMapping + pi->HeapMappings.Limit)
+        {
+            UserClass = UserHeapAddressToUser(Class);
+        }
+    }
+
     UserLeave();
-//
-// Don't forget to use DesktopPtrToUser( ? ) with return pointer in user space.
-//
-    return Class;
+
+    return (PCLS)UserClass;
 }
 
 /* EOF */
