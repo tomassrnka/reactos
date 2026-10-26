@@ -2298,9 +2298,14 @@ UserGetClassInfo(IN PCLS Class,
     lpwcx->hCursor = Class->spcur ? UserHMGetHandle(Class->spcur) : NULL;
     lpwcx->hIconSm = Class->spicnSm ? UserHMGetHandle(Class->spicnSm) : NULL;
     lpwcx->hbrBackground = Class->hbrBackground;
-    /* NT6+ reports the desktop class background as COLOR_BACKGROUND + 1 */
+    /* NT6+ reports the desktop class background as COLOR_BACKGROUND + 1 and no extra window
+       bytes: win32k keeps the desktop class's DT_GWL_* storage (see UserRegisterSystemClasses),
+       but hides it from GetClassInfo for user32_apitest parity. */
     if (Class->fnid == FNID_DESKTOP && SharedUserData->NtMajorVersion >= 6)
+    {
         lpwcx->hbrBackground = (HBRUSH)(ULONG_PTR)(COLOR_BACKGROUND + 1);
+        lpwcx->cbWndExtra = 0;
+    }
 
     /* Copy non-string to user first. */
     if (Ansi)
@@ -2390,10 +2395,11 @@ UserRegisterSystemClasses(VOID)
         wc.cbWndExtra = DefaultServerClasses[i].ExtraBytes;
         if (SharedUserData->NtMajorVersion >= 6)
         {
-            /* NT6+ (see user32_apitest GetClassInfo): no desktop extra bytes, switch window has 16 */
-            if (DefaultServerClasses[i].fiId == FNID_DESKTOP)
-                wc.cbWndExtra = 0;
-            else if (DefaultServerClasses[i].fiId == FNID_SWITCH)
+            /* NT6+ (see user32_apitest GetClassInfo): the switch window class has 16 extra bytes.
+               The desktop class keeps its ExtraBytes allocation so DesktopWindowProc can store the
+               owner process/thread IDs in DT_GWL_PROCESSID/DT_GWL_THREADID; GetClassInfo masks the
+               reported value to 0 for NT6 parity (see UserGetClassInfo). */
+            if (DefaultServerClasses[i].fiId == FNID_SWITCH)
                 wc.cbWndExtra = 16;
         }
         wc.hIcon = NULL;
