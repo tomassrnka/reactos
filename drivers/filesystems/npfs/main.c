@@ -30,6 +30,19 @@ FAST_IO_DISPATCH NpFastIoDispatch =
 
 /* FUNCTIONS ******************************************************************/
 
+BOOLEAN
+NTAPI
+NpIsVistaOrLater(VOID)
+{
+    RTL_OSVERSIONINFOW VersionInfo;
+
+    RtlZeroMemory(&VersionInfo, sizeof(VersionInfo));
+    VersionInfo.dwOSVersionInfoSize = sizeof(VersionInfo);
+
+    return NT_SUCCESS(RtlGetVersion(&VersionInfo)) &&
+           (VersionInfo.dwMajorVersion >= 6);
+}
+
 NTSTATUS
 NTAPI
 NpReadAlias(

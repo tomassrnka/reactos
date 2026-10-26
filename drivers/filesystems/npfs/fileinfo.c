@@ -415,6 +415,13 @@ NpCommonQueryInformation(IN PDEVICE_OBJECT DeviceObject,
     switch (InfoClass)
     {
         case FileNameInformation:
+            /* An unnamed pipe has no path */
+            if ((NodeTypeCode == NPFS_NTC_CCB) && (Ccb->Fcb->FullName.Length == 0))
+            {
+                Status = STATUS_OBJECT_PATH_INVALID;
+                break;
+            }
+
             Status = NpQueryNameInfo(Ccb, Buffer, &Length);
             break;
 

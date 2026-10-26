@@ -439,6 +439,11 @@ NpCreateCcb(IN PNP_FCB Fcb,
             IN ULONG OutQuota,
             OUT PNP_CCB *NewCcb);
 
+/* Behaviors that only exist on Vista and later (unnamed pipes, the \\ pipe name, ...) */
+BOOLEAN
+NTAPI
+NpIsVistaOrLater(VOID);
+
 NTSTATUS
 NTAPI
 NpCreateFcb(IN PNP_DCB Dcb,

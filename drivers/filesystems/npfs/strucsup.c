@@ -81,8 +81,12 @@ NpDeleteFcb(IN PNP_FCB Fcb,
         ObDereferenceSecurityDescriptor(Fcb->SecurityDescriptor, 1);
     }
 
-    RtlRemoveUnicodePrefix(&NpVcb->PrefixTable, &Fcb->PrefixTableEntry);
-    ExFreePool(Fcb->FullName.Buffer);
+    /* Unnamed pipes are not in the prefix table and have no name buffer */
+    if (Fcb->FullName.Buffer)
+    {
+        RtlRemoveUnicodePrefix(&NpVcb->PrefixTable, &Fcb->PrefixTableEntry);
+        ExFreePool(Fcb->FullName.Buffer);
+    }
     ExFreePool(Fcb);
     NpCheckForNotify(Dcb, TRUE, ListEntry);
 }
@@ -223,6 +227,27 @@ NpCreateFcb(IN PNP_DCB Dcb,
 
     Length = PipeName->Length;
     MaximumLength = Length + sizeof(UNICODE_NULL);
+
+    if (Length == 0)
+    {
+        /* An unnamed pipe (Vista+): it is only reachable through its server
+           handle, so it has no name and is not entered in the prefix table */
+        Fcb = ExAllocatePoolWithTag(PagedPool, sizeof(*Fcb), NPFS_FCB_TAG);
+        if (!Fcb) return STATUS_INSUFFICIENT_RESOURCES;
+
+        RtlZeroMemory(Fcb, sizeof(*Fcb));
+        Fcb->MaximumInstances = MaximumInstances;
+        Fcb->Timeout = Timeout;
+        Fcb->NodeType = NPFS_NTC_FCB;
+        Fcb->ParentDcb = Dcb;
+        InitializeListHead(&Fcb->CcbList);
+        InsertTailList(&Dcb->FcbList, &Fcb->DcbEntry);
+
+        Fcb->NamedPipeConfiguration = NamedPipeConfiguration;
+        Fcb->NamedPipeType = NamedPipeType;
+        *NewFcb = Fcb;
+        return STATUS_SUCCESS;
+    }
 
     if ((Length < sizeof(WCHAR)) || (MaximumLength < Length))
     {

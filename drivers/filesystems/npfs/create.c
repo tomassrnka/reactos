@@ -825,6 +825,29 @@ NpFsdCreateNamedPipe(IN PDEVICE_OBJECT DeviceObject,
     if (RelatedFileObject)
     {
         Fcb = (PNP_FCB)((ULONG_PTR)RelatedFileObject->FsContext & ~1);
+        if ((Fcb) &&
+            (Fcb->NodeType == NPFS_NTC_ROOT_DCB) &&
+            (FileName.Length == 0) &&
+            NpIsVistaOrLater())
+        {
+            /* An empty name relative to the root directory creates an
+               unnamed pipe (Vista+), which is not visible in the namespace */
+            IoStatus.Status = NpCreateNewNamedPipe((PNP_DCB)Fcb,
+                                                   FileObject,
+                                                   FileName,
+                                                   IoStack->Parameters.CreatePipe.
+                                                   SecurityContext->DesiredAccess,
+                                                   IoStack->Parameters.CreatePipe.
+                                                   SecurityContext->AccessState,
+                                                   Disposition,
+                                                   ShareAccess,
+                                                   Parameters,
+                                                   Process,
+                                                   &DeferredList,
+                                                   &IoStatus);
+            goto Quickie;
+        }
+
         if (!(Fcb) ||
             (Fcb->NodeType != NPFS_NTC_ROOT_DCB) ||
             (FileName.Length < sizeof(WCHAR)) ||
@@ -856,7 +879,13 @@ NpFsdCreateNamedPipe(IN PDEVICE_OBJECT DeviceObject,
         Fcb = NpFindPrefix(&FileName, 1, &Prefix);
     }
 
-    if (Prefix.Length)
+    /* The name "\\" (a pipe named "\") leaves nothing after the root
+       prefix once the separators are stripped, but it is a valid new pipe */
+    if ((Prefix.Length) ||
+        (!RelatedFileObject &&
+         (Fcb->NodeType == NPFS_NTC_ROOT_DCB) &&
+         (FileName.Length > sizeof(OBJ_NAME_PATH_SEPARATOR)) &&
+         NpIsVistaOrLater()))
     {
         if (Fcb->NodeType == NPFS_NTC_ROOT_DCB)
         {
