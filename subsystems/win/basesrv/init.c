@@ -561,6 +561,29 @@ BaseInitializeStaticServerData(IN PCSR_SERVER_DLL LoadedServerDll)
                                      &ObjectAttributes);
     ASSERT(NT_SUCCESS(Status));
 
+    /*
+     * NT6+ code (and the object-manager conformance tests) address the
+     * session-local namespace of any session, including session 0, as
+     * \Sessions\<id>\BaseNamedObjects. ReactOS runs the interactive desktop
+     * in session 0, whose default (unqualified) namespace stays \BaseNamedObjects,
+     * so also provide the \Sessions\0\BaseNamedObjects directory itself.
+     */
+    if (SessionId == 0)
+    {
+        HANDLE Session0BnoDirectory;
+
+        RtlInitUnicodeString(&DirectoryName, L"\\Sessions\\0\\BaseNamedObjects");
+        InitializeObjectAttributes(&ObjectAttributes,
+                                   &DirectoryName,
+                                   OBJ_OPENIF | OBJ_PERMANENT | OBJ_CASE_INSENSITIVE,
+                                   NULL,
+                                   BnoSd);
+        Status = NtCreateDirectoryObject(&Session0BnoDirectory,
+                                         DIRECTORY_ALL_ACCESS,
+                                         &ObjectAttributes);
+        if (NT_SUCCESS(Status)) NtClose(Session0BnoDirectory);
+    }
+
     /* Check if we are session 0 */
     if (SessionId == 0)
     {

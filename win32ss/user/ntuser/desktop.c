@@ -2728,6 +2728,10 @@ NtUserOpenDesktop(
     NTSTATUS Status;
     HDESK Desktop;
 
+    /* NT6+ always grants read/write object access when opening a desktop */
+    if (SharedUserData->NtMajorVersion >= 6)
+        dwDesiredAccess |= DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS;
+
     Status = ObOpenObjectByName(
                  ObjectAttributes,
                  ExDesktopObjectType,
@@ -2820,6 +2824,10 @@ NtUserOpenInputDesktop(
     ACCESS_MASK dwDesiredAccess)
 {
     HDESK hdesk;
+
+    /* NT6+ always grants read/write object access when opening a desktop */
+    if (SharedUserData->NtMajorVersion >= 6)
+        dwDesiredAccess |= DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS;
 
     UserEnterExclusive();
     TRACE("Enter NtUserOpenInputDesktop gpdeskInputDesktop 0x%p\n", gpdeskInputDesktop);

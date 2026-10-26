@@ -27,6 +27,20 @@ static GENERIC_MAPPING SepTokenMapping = {
     TOKEN_ALL_ACCESS
 };
 
+/*
+ * Generic mapping of the Token object type as reported by NT6+ (Vista and
+ * later): GENERIC_READ also grants TOKEN_QUERY_SOURCE and TOKEN_DUPLICATE,
+ * GENERIC_WRITE also TOKEN_ADJUST_SESSIONID, and GENERIC_EXECUTE grants
+ * TOKEN_IMPERSONATE and TOKEN_ASSIGN_PRIMARY.
+ */
+static GENERIC_MAPPING SepTokenMappingNt6 = {
+    STANDARD_RIGHTS_READ | TOKEN_QUERY_SOURCE | TOKEN_QUERY | TOKEN_DUPLICATE,
+    STANDARD_RIGHTS_WRITE | TOKEN_ADJUST_SESSIONID | TOKEN_ADJUST_DEFAULT |
+        TOKEN_ADJUST_GROUPS | TOKEN_ADJUST_PRIVILEGES,
+    STANDARD_RIGHTS_EXECUTE | TOKEN_IMPERSONATE | TOKEN_ASSIGN_PRIMARY,
+    TOKEN_ALL_ACCESS
+};
+
 /* PRIVATE FUNCTIONS *****************************************************************/
 
 /**
@@ -2037,7 +2051,8 @@ SepInitializeTokenImplementation(VOID)
     ObjectTypeInitializer.InvalidAttributes = OBJ_OPENLINK;
     ObjectTypeInitializer.SecurityRequired = TRUE;
     ObjectTypeInitializer.DefaultPagedPoolCharge = sizeof(TOKEN);
-    ObjectTypeInitializer.GenericMapping = SepTokenMapping;
+    ObjectTypeInitializer.GenericMapping = (NtMajorVersion >= 6) ? SepTokenMappingNt6 :
+                                                                   SepTokenMapping;
     ObjectTypeInitializer.PoolType = PagedPool;
     ObjectTypeInitializer.ValidAccessMask = TOKEN_ALL_ACCESS;
     ObjectTypeInitializer.UseDefaultObject = TRUE;

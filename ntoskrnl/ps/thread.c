@@ -1181,6 +1181,10 @@ NtOpenThread(OUT PHANDLE ThreadHandle,
         /* Check if we didn't find anything */
         if (!NT_SUCCESS(Status))
         {
+            /* NT6+ reports an unknown thread ID as an invalid client ID */
+            if ((Status == STATUS_INVALID_PARAMETER) && (NtMajorVersion >= 6))
+                Status = STATUS_INVALID_CID;
+
             /* Get rid of the access state and return */
             SeDeleteAccessState(&AccessState);
             return Status;

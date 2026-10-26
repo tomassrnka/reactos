@@ -532,7 +532,10 @@ ObpLookupObjectName(IN HANDLE RootHandle OPTIONAL,
             {
                 /* We can't parse a name if we don't have a parse routine */
                 ObDereferenceObject(RootDirectory);
-                return STATUS_INVALID_HANDLE;
+
+                /* NT6+ reports that the root object is of the wrong type */
+                return (NtMajorVersion >= 6) ? STATUS_OBJECT_TYPE_MISMATCH :
+                                               STATUS_INVALID_HANDLE;
             }
 
             /* Set default parse count */
