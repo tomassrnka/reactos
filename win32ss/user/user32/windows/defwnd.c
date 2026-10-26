@@ -312,6 +312,84 @@ DefWndGetIcon(PWND pWnd, WPARAM wParam, LPARAM lParam)
 }
 
 
+/*
+ * Vista+ InternalGetWindowIcon: return a NEW (caller-destroyed) copy of the icon a window
+ * presents for the given WM_GETICON type. This does not send WM_GETICON (it must not block on
+ * the window thread), it reads the icons set through WM_SETICON and then the class icons.
+ * Precedence: window icon > class icon > default application icon. A missing small icon is
+ * derived from the big icon scaled to the small metrics.
+ */
+HICON WINAPI
+InternalGetWindowIcon(HWND hWnd, UINT Type)
+{
+    HICON hSrc = NULL, hRet = NULL, hBig, hSmall;
+    BOOL bScale = FALSE;
+    DWORD dwOldError;
+
+    if (!IsWindow(hWnd))
+    {
+        SetLastError(ERROR_INVALID_WINDOW_HANDLE);
+        return NULL;
+    }
+    if (Type > ICON_SMALL2)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return NULL;
+    }
+
+    dwOldError = GetLastError();
+
+    if (Type == ICON_BIG)
+    {
+        hSrc = UserGetProp(hWnd, gpsi->atomIconProp, TRUE);
+        if (!hSrc)
+            hSrc = (HICON)GetClassLongPtrW(hWnd, GCLP_HICON);
+    }
+    else
+    {
+        hBig = UserGetProp(hWnd, gpsi->atomIconProp, TRUE);
+        hSmall = UserGetProp(hWnd, gpsi->atomIconSmProp, TRUE);
+        if (hSmall)
+        {
+            hSrc = hSmall;
+        }
+        else if (hBig)
+        {
+            hSrc = hBig;
+            bScale = TRUE;
+        }
+        else
+        {
+            hSrc = (HICON)GetClassLongPtrW(hWnd, GCLP_HICONSM);
+            if (!hSrc)
+            {
+                hSrc = (HICON)GetClassLongPtrW(hWnd, GCLP_HICON);
+                bScale = (hSrc != NULL);
+            }
+        }
+    }
+
+    if (hSrc)
+    {
+        if (bScale)
+            hRet = CopyImage(hSrc, IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+                             GetSystemMetrics(SM_CYSMICON), 0);
+        else
+            hRet = CopyIcon(hSrc);
+    }
+    else
+    {
+        hRet = LoadImageW(NULL, MAKEINTRESOURCEW(IDI_APPLICATION), IMAGE_ICON,
+                          GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON),
+                          LR_DEFAULTCOLOR);
+    }
+
+    if (hRet)
+        SetLastError(dwOldError);
+    return hRet;
+}
+
+
 LRESULT WINAPI
 User32DefWindowProc(HWND hWnd,
                     UINT Msg,

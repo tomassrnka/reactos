@@ -1399,7 +1399,8 @@ LRESULT NC_HandleNCCalcSize( PWND Wnd, WPARAM wparam, RECTL *Rect, BOOL Suspende
       {
          Result |= WVR_HREDRAW;
       }
-      Result |= WVR_VALIDRECTS;
+      /* Windows (and the user32 winetest) return no WVR_VALIDRECTS here: without it the valid
+         source/destination rectangles are derived from the old/new client rects. */
    }
 
    if (!(Wnd->style & WS_MINIMIZE))
