@@ -310,6 +310,13 @@ BOOL SdbpAppendLayer(PWSTR target, DWORD len, PCWSTR layer, PCWSTR end)
 }
 
 
+/* The system version decides the order a newly enabled layer gets: Windows 8 (6.2) and later add it in front */
+static BOOL SdbpLayersPrepend(void)
+{
+    return SharedUserData->NtMajorVersion > 6 ||
+           (SharedUserData->NtMajorVersion == 6 && SharedUserData->NtMinorVersion >= 2);
+}
+
 /**
  * Determine if we allow permission layers to apply on this file.
  *
@@ -521,6 +528,12 @@ BOOL WINAPI SetPermLayerState(PCWSTR wszPath, PCWSTR wszLayer, DWORD dwFlags, BO
     if (dwWriteFlags & LAYER_APPLY_TO_SYSTEM_EXES)
         *(p++) = '#';
 
+    /* Windows 8 and later put the layer that is enabled in front of the existing ones, older versions append it */
+    if (bEnable && wszLayer[0] && SdbpLayersPrepend())
+    {
+        SdbpAppendLayer(newLayer, sizeof(newLayer), wszLayer, NULL);
+    }
+
     do
     {
         while (*start == ' ' || *start == '\t')
@@ -536,7 +549,7 @@ BOOL WINAPI SetPermLayerState(PCWSTR wszPath, PCWSTR wszLayer, DWORD dwFlags, BO
         start = p + 1;
     } while (p);
 
-    if (bEnable && wszLayer[0])
+    if (bEnable && wszLayer[0] && !SdbpLayersPrepend())
     {
         SdbpAppendLayer(newLayer, sizeof(newLayer), wszLayer, NULL);
     }

@@ -112,7 +112,10 @@ START_TEST(sysmain)
 
     /* Same code and manifest, other product name: no entry matches, so the version stays the real one */
     Code = run_probe(L"appshim_sysmain_other.exe");
-    if (is_reactos())
+    if (is_reactos() && real_windows_is_1809())
+        /* With the Windows 10 identity as the system default no entry is needed: the real version is the answer */
+        ok(Code == PROBE_ALL, "A program with another product name sees 0x%lx of the checks, expected 0x%x (the real version)\n", Code, PROBE_ALL);
+    else if (is_reactos())
         ok(Code == 0, "A program with another product name sees 0x%lx of the checks, expected none\n", Code);
     else
         skip("The real version shows through on Windows\n");
