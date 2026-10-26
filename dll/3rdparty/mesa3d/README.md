@@ -95,7 +95,7 @@ Change `MESA_VERSION` and `MESA_SHA256` in `build-mesa.sh`, rebuild, check that 
 still apply, replace the two DLLs, rewrite `SHA256SUMS` and run
 `opengl32_apitest icd_default` and `ddraw_apitest` on both architectures.
 
-## llvmpipe and lavapipe (amd64, optional, not committed)
+## llvmpipe and lavapipe (amd64 default GPU, fetched at configure, not committed)
 
 `build-mesa.sh` also builds the amd64 driver with LLVM: `libgallium_wgl.dll` then contains llvmpipe (OpenGL 4.6
 compatibility profile, LLVM JIT, all cores) next to softpipe, and `vulkan_lvp.dll` is lavapipe, a software Vulkan 1.4
@@ -103,9 +103,13 @@ driver. LLVM 19.1.7 (X86 target only, no tools) is built first, static, by `buil
 1.5 GB of work space); `AMD64_LLVM=0` skips all of it. Build host additions: `cmake`, `glslang-tools`.
 
 The two DLLs are 66-69 MB each (23 MB compressed each, 134 MB on disk against 18 MB for the softpipe-only driver), so
-they are an option of the image: when `amd64-llvm/` holds `libgallium_wgl.dll`, `vulkan_lvp.dll`, `lvp_icd.json`,
-`mesa3d-licenses.txt` and `llvm-licenses.txt` (copy them from `WORKDIR/out`), `CMakeLists.txt` installs them in place of
-the softpipe-only DLL. Without that directory nothing changes. i386 keeps softpipe: llvmpipe on i386 was built once and
+they are not committed. On amd64 they are now the DEFAULT GPU: `CMakeLists.txt` runs `stage-amd64-llvm.sh` at
+configure time, which fetches the GFX-01 artifact `gfx01-lavapipe-amd64-artifacts.tar.xz` from the S3 cold tier
+(`rclone` remote `vultr`), verifies it against `SHA256SUMS`, and populates `amd64-llvm/` with `libgallium_wgl.dll`,
+`vulkan_lvp.dll`, `lvp_icd.json`, `mesa3d-licenses.txt` and `llvm-licenses.txt`. `CMakeLists.txt` then installs them in
+place of the softpipe-only DLL (and installs the two licence files to `system32`). `-DMESA3D_AMD64_LLVM=OFF`, or a build
+host without `rclone`/network/the artifact, skips the fetch and the in-tree softpipe-only driver stays the default (no
+Vulkan ICD) so the build never breaks. Set `LAVAPIPE_ARTIFACT=<local tar>` to stage from a local copy instead of S3. i386 keeps softpipe: llvmpipe on i386 was built once and
 stopped (rasterizer threads deadlocked after a few seconds, see above); amd64 ran 60 s soaks and the Chromium runs
 without a stall, but i386 was not retried.
 
