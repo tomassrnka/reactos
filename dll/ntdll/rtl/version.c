@@ -153,20 +153,32 @@ RtlGetNtVersionNumbers(OUT PULONG pMajorVersion,
                        OUT PULONG pBuildNumber)
 {
     PPEB pPeb = NtCurrentPeb();
+    ULONG Major = pPeb->OSMajorVersion;
+    ULONG Minor = pPeb->OSMinorVersion;
+    UINT EffectiveVersion;
+
+    /* Never report less than XP (see NOTES above) */
+    if ((Major < 5) || ((Major == 5) && (Minor < 1)))
+    {
+        Major = 5;
+        Minor = 1;
+    }
+
+    /* Honor a per-process compatibility version (app manifest / shim), like
+     * RtlGetVersion() and GetVersion(): base::win::OSInfo and similar callers read
+     * this export and must agree with them. Only ever raises the version. */
+    EffectiveVersion = RosGetProcessEffectiveVersion();
+    if (EffectiveVersion > ((Major << 8) | Minor))
+    {
+        Major = EffectiveVersion >> 8;
+        Minor = EffectiveVersion & 0xFF;
+    }
 
     if (pMajorVersion)
-    {
-        *pMajorVersion = pPeb->OSMajorVersion < 5 ? 5 : pPeb->OSMajorVersion;
-    }
+        *pMajorVersion = Major;
 
     if (pMinorVersion)
-    {
-        if ( (pPeb->OSMajorVersion  < 5) ||
-            ((pPeb->OSMajorVersion == 5) && (pPeb->OSMinorVersion < 1)) )
-            *pMinorVersion = 1;
-        else
-            *pMinorVersion = pPeb->OSMinorVersion;
-    }
+        *pMinorVersion = Minor;
 
     if (pBuildNumber)
     {
