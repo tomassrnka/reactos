@@ -419,7 +419,7 @@ RegisterPointerDeviceNotifications(_In_ HWND hwnd, _In_ BOOL notifyRange)
         return Fail(ERROR_INVALID_WINDOW_HANDLE);
 
     if (!IsWindowOfThisProcess(hwnd))
-        return ERROR_ACCESS_DENIED;
+        return ERROR_ACCESS_DENIED; /* Deliberate: Windows returns 5 (truthy) as the BOOL here, with no SetLastError */
 
     LockState();
     if (EnsureAtom(&s_PointerNotifyAtom, s_PointerNotifyPropName) &&
