@@ -1787,14 +1787,22 @@ ResolvePattern(
     }
     else if (pszPatternPart == NULL)
     {
-        ASSERT(pszFullPath[_tcslen(pszFullPath)-1] == _T('\\'));
-
-        /* Anything NOT being "." or ".." (the special directories) must be fully restored */
-        if (*pNextDir && !IsDotDirectory(pNextDir))
+        /*
+         * The root of a UNC share (\\server\share) has no file part either,
+         * but when it is given without a trailing backslash the full path does
+         * not end with one. Its last component is the share name, which is part
+         * of the directory and not a criterion to restore: the contents of the
+         * share are listed below.
+         */
+        if (pszFullPath[_tcslen(pszFullPath)-1] == _T('\\'))
         {
-            pszPatternPart = &pszFullPath[_tcslen(pszFullPath)];
-            _tcscpy(pszPatternPart, pNextDir);
-            pszPatternPart = NULL;
+            /* Anything NOT being "." or ".." (the special directories) must be fully restored */
+            if (*pNextDir && !IsDotDirectory(pNextDir))
+            {
+                pszPatternPart = &pszFullPath[_tcslen(pszFullPath)];
+                _tcscpy(pszPatternPart, pNextDir);
+                pszPatternPart = NULL;
+            }
         }
     }
     else if (_tcscmp(pNextDir, pszPatternPart) != 0)
