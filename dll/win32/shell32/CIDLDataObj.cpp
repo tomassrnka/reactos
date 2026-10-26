@@ -205,7 +205,8 @@ HRESULT WINAPI CIDLDataObj::Initialize(HWND hwndOwner, PCIDLIST_ABSOLUTE pMyPidl
     medium.tymed = TYMED_HGLOBAL;
     medium.hGlobal = hida;
     HRESULT hr = SetData(&Format, &medium, TRUE);
-    /* Win8+ always offers HDROP and the filename formats */
+    /* Win8+ always offers HDROP and the filename formats, also for non-extended objects:
+     * shell32_apitest!CIDLData (TestDefaultFormat via CIDLData_CreateFromIDArray) expects 4 formats. */
     if (SHELL_GetNTVersion() >= _WIN32_WINNT_WIN8)
         bAddAdditionalFormats = TRUE;
     if (!FAILED_UNEXPECTEDLY(hr) && bAddAdditionalFormats)
@@ -272,21 +273,26 @@ HRESULT WINAPI CIDLDataObj::GetData(LPFORMATETC pformatetcIn, STGMEDIUM *pmedium
             {
                 /* NT6+: the caller gets its own copy of the data */
                 HGLOBAL hSrc = m_Storage[n].hGlobal;
-                SIZE_T cb = hSrc ? GlobalSize(hSrc) : 0;
-                HGLOBAL hCopy = hSrc ? GlobalAlloc(GMEM_MOVEABLE, cb) : NULL;
+                if (!hSrc)
+                    return DV_E_FORMATETC; /* nothing stored for this format (not an OOM) */
+                SIZE_T cb = GlobalSize(hSrc);
+                HGLOBAL hCopy = GlobalAlloc(GMEM_MOVEABLE, cb);
                 if (!hCopy)
                     return E_OUTOFMEMORY;
-                PVOID pSrc = GlobalLock(hSrc), pDst = GlobalLock(hCopy);
-                if (pSrc && pDst)
-                    CopyMemory(pDst, pSrc, cb);
-                if (pSrc)
-                    GlobalUnlock(hSrc);
-                if (pDst)
-                    GlobalUnlock(hCopy);
-                if (!pSrc || !pDst)
+                if (cb) /* a zero-size entry is legitimately empty: hand out an empty copy */
                 {
-                    GlobalFree(hCopy);
-                    return E_OUTOFMEMORY;
+                    PVOID pSrc = GlobalLock(hSrc), pDst = GlobalLock(hCopy);
+                    if (pSrc && pDst)
+                        CopyMemory(pDst, pSrc, cb);
+                    if (pSrc)
+                        GlobalUnlock(hSrc);
+                    if (pDst)
+                        GlobalUnlock(hCopy);
+                    if (!pSrc || !pDst)
+                    {
+                        GlobalFree(hCopy);
+                        return E_OUTOFMEMORY;
+                    }
                 }
                 pmedium->tymed = TYMED_HGLOBAL;
                 pmedium->hGlobal = hCopy;

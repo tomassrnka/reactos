@@ -201,7 +201,7 @@ static __inline BOOL SHELL_OsIsUnicode(void)
 }
 
 #ifdef __REACTOS__
-/* Runtime OS identity as (major << 8) | minor, e.g. 0x0502 (NT5.2), 0x0601 (Win7), 0x0A00 (Win10).
+/* Runtime EFFECTIVE (manifest-raised) process OS version as (major << 8) | minor, e.g. 0x0502 (NT5.2), 0x0601 (Win7), 0x0A00 (Win10).
  * Used to select behavior that changed between NT versions in a build that supports several
  * identities (VERBUMP_TIER). Same encoding as _WIN32_WINNT_xxx. */
 static __inline UINT SHELL_GetNTVersion(void)
