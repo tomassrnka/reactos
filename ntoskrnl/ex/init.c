@@ -782,10 +782,10 @@ ExpIsLoaderValid(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
     if (Extension->Size < LOADER_PARAMETER_EXTENSION_MIN_SIZE) return FALSE;
 
     /* Don't validate upper versions */
-    if (Extension->MajorVersion > 5 /* EXP: freeldr BootType=Windows2003 loader version */) return TRUE;
+    if (Extension->MajorVersion > 5 /* freeldr BootType=Windows2003 loader version */) return TRUE;
 
     /* Fail if this is NT 4 */
-    if (Extension->MajorVersion < 5 /* EXP: freeldr BootType=Windows2003 loader version */) return FALSE;
+    if (Extension->MajorVersion < 5 /* freeldr BootType=Windows2003 loader version */) return FALSE;
 
     /* Fail if this is XP */
     if (Extension->MinorVersion < 2) return FALSE;

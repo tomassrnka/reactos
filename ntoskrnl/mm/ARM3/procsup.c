@@ -746,7 +746,7 @@ MmCreatePeb(IN PEPROCESS Process,
         //
         Peb->OSMajorVersion = NtMajorVersion;
         Peb->OSMinorVersion = NtMinorVersion;
-        Peb->OSBuildNumber = (USHORT)(NtBuildNumber & 0xFFFF); /* EXP: build 19045 exceeds 14 bits */
+        Peb->OSBuildNumber = (USHORT)(NtBuildNumber & 0xFFFF); /* build 19045 exceeds 14 bits */
         Peb->OSPlatformId = VER_PLATFORM_WIN32_NT;
         Peb->OSCSDVersion = (USHORT)CmNtCSDVersion;
 

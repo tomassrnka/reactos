@@ -23,6 +23,15 @@
 // edited in this branch to MATCH VERBUMP_TIER and must be re-synced if the tier
 // is changed. See VERBUMP-01-kickoff-findings.md.
 //
+// SUPPORT SCOPE: only tier 100 (the default) is a fully consistent, supported
+// identity. The hive registry values (hivesft.inf ProductName/CurrentBuild,
+// hivesys.inf) and the hardcoded DLL FileVersion in version.rc stay at the Win10
+// (tier-100) values regardless of VERBUMP_TIER; only the ntverp.h-derived,
+// kernel/C-side version follows the tier. So tiers 62 and 0 are KERNEL-IDENTITY-
+// ONLY fallbacks (registry + DLL version remain Win10) -- an internally
+// inconsistent configuration that is NOT supported for release. Wiring version.rc
+// + the hives to derive from the tier is tracked as backlog ticket T-VERBUMP-TIERSYNC.
+//
 #ifndef VERBUMP_TIER
 #define VERBUMP_TIER 100
 #endif

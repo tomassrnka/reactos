@@ -23,6 +23,9 @@
 #define REACTOS_DEFAULT_STR_PRODUCT_NAME    "ReactOS Operating System"
 
 /* Set defaults for everything, unless overridden */
+/* DLL FileVersion is hardcoded to the Win10 22H2 (VERBUMP tier-100) identity.
+ * This is NOT derived from ntverp.h/VERBUMP_TIER: tiers 62/0 leave this at Win10
+ * (kernel-identity-only fallbacks, unsupported -- see ntverp.h SUPPORT SCOPE). */
 #ifndef REACTOS_FILEVERSION
 #ifdef REACTOS_VERSION_DLL
 #define REACTOS_FILEVERSION 10,0,19045,5247
