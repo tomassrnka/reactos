@@ -2639,11 +2639,13 @@ co_WinPosSendNcCalcSizeStateChanged(PWND Wnd)
     WINDOWPOS wp;
     PWND Parent = Wnd->spwndParent;
     RECTL ClientRect;
+    USER_REFERENCE_ENTRY ParentRef;
+    BOOL bChild = (Wnd->style & WS_CHILD) && Parent;
 
     params.rgrc[0] = Wnd->rcWindow;
     params.rgrc[1] = Wnd->rcWindow;
     params.rgrc[2] = Wnd->rcClient;
-    if ((Wnd->style & WS_CHILD) && Parent)
+    if (bChild)
     {
         RECTL_vOffsetRect(&params.rgrc[0], -Parent->rcClient.left, -Parent->rcClient.top);
         RECTL_vOffsetRect(&params.rgrc[1], -Parent->rcClient.left, -Parent->rcClient.top);
@@ -2659,17 +2661,26 @@ co_WinPosSendNcCalcSizeStateChanged(PWND Wnd)
     wp.flags = SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED;
     params.lppos = &wp;
 
+    /* Only the child holds a reference on its parent; the WM_NCCALCSIZE callback can run a
+       user-mode window proc that reparents or destroys windows, so keep Parent alive across it. */
+    if (bChild)
+        UserRefObjectCo(Parent, &ParentRef);
+
     co_IntSendMessage(wp.hwnd, WM_NCCALCSIZE, TRUE, (LPARAM)&params);
 
     /* If the window is still alive and the answer is sane, take over the client rectangle */
-    if (params.rgrc[0].left <= params.rgrc[0].right && params.rgrc[0].top <= params.rgrc[0].bottom)
+    if (!(Wnd->state & WNDS_DESTROYED) &&
+        params.rgrc[0].left <= params.rgrc[0].right && params.rgrc[0].top <= params.rgrc[0].bottom)
     {
         ClientRect = params.rgrc[0];
-        if ((Wnd->style & WS_CHILD) && Parent)
+        if (bChild)
             RECTL_vOffsetRect(&ClientRect, Parent->rcClient.left, Parent->rcClient.top);
         FixClientRect(&ClientRect, &Wnd->rcWindow);
         Wnd->rcClient = ClientRect;
     }
+
+    if (bChild)
+        UserDerefObjectCo(Parent);
 }
 
 void FASTCALL
