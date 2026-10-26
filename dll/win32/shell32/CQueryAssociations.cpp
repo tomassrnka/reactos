@@ -55,7 +55,9 @@ static HRESULT AssocCreateElementOnKeyInternal(_In_ REFCLSID rclsid, _In_ HKEY h
 static HRESULT SH32_AssocCreateElementOnKey(_In_ REFCLSID rclsid, _In_ HKEY hKey, _In_opt_ PCWSTR pszSubKey,
                                             _In_ REFIID riid, _Outptr_ PVOID *ppv)
 {
-#if DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA
+#if SHELL32_CAssocElement_Version >= _WIN32_WINNT_VISTA
+    /* Only offer the NT6 IQuerySource when the association elements can consume it: shlwapi exposes
+       IQuerySource once the OS identity is NT6+, and handing it to the NT5 elements crashes. */
     HRESULT hr = AssocCreateElementOnKeyInternal(rclsid, hKey, pszSubKey, riid, ppv, 6);
     if (SUCCEEDED(hr))
         return hr;
