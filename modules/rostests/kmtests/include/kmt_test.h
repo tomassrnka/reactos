@@ -554,6 +554,12 @@ static inline ULONG GetNTDDIVersion(VOID)
         case 9200: return NTDDI_WIN8;
 
         default:
+            /* Windows 10 identity (10.0.10240 .. 19045 ..): any build in the Win10 range maps to a
+             * Win10 NTDDI value instead of falling through to NTDDI_WS03 */
+            if (OSVersion.dwBuildNumber >= 19041)
+                return NTDDI_WIN10_VB;
+            if (OSVersion.dwBuildNumber >= 10240)
+                return NTDDI_WIN10;
             trace("Unknown build number: %lu\n", OSVersion.dwBuildNumber);
             return NTDDI_WS03;
     }

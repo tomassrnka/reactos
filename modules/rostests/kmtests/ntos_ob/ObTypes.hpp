@@ -145,6 +145,8 @@ template<> struct TOBJECT_TYPE_INITIALIZER<NTDDI_WS03> : public OBJECT_TYPE_INIT
 template<> struct TOBJECT_TYPE_INITIALIZER<NTDDI_VISTA> : public OBJECT_TYPE_INITIALIZER_VISTA {};
 template<> struct TOBJECT_TYPE_INITIALIZER<NTDDI_VISTASP1> : public OBJECT_TYPE_INITIALIZER_VISTASP1 {};
 template<> struct TOBJECT_TYPE_INITIALIZER<NTDDI_WIN7> : public OBJECT_TYPE_INITIALIZER_VISTASP1 {};
+// Win10 identity on the ReactOS kernel: the object type structures are still the ReactOS (WS03-style) ones
+template<> struct TOBJECT_TYPE_INITIALIZER<NTDDI_WIN10> : public OBJECT_TYPE_INITIALIZER_WS03 {};
 
 struct OBJECT_TYPE_WS03
 {
@@ -201,3 +203,4 @@ template<> struct TOBJECT_TYPE<NTDDI_WS03> : public OBJECT_TYPE_WS03 {};
 template<> struct TOBJECT_TYPE<NTDDI_VISTA> : public OBJECT_TYPE_WS03 {};
 template<> struct TOBJECT_TYPE<NTDDI_VISTASP1> : public OBJECT_TYPE_VISTASP1 {};
 template<> struct TOBJECT_TYPE<NTDDI_WIN7> : public OBJECT_TYPE_WIN7 {};
+template<> struct TOBJECT_TYPE<NTDDI_WIN10> : public OBJECT_TYPE_WS03 {};
