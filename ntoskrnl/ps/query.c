@@ -201,6 +201,327 @@ PspDumpThreadInfoClassName(
 }
 #endif // #if DBG
 
+
+/**
+ * @brief
+ * Returns whether a thread information class exists at the NT version
+ * currently reported by the kernel. Vista and later classes are rejected
+ * with STATUS_INVALID_INFO_CLASS below the version that introduced them, so
+ * that a 5.2 identity behaves exactly like Windows Server 2003.
+ **/
+static
+BOOLEAN
+PspIsThreadInfoClassAvailable(
+    _In_ ULONG ThreadInformationClass,
+    _In_ BOOLEAN IsSet)
+{
+    ULONG Version = (NtMajorVersion << 8) | NtMinorVersion;
+    ULONG MinVersion;
+
+    switch (ThreadInformationClass)
+    {
+        case ThreadHideFromDebugger:
+            /* Set exists since XP, Query only since Vista */
+            if (IsSet)
+                return TRUE;
+            MinVersion = 0x0600;
+            break;
+
+        case ThreadIoPriority:
+        case ThreadPagePriority:
+            MinVersion = 0x0600;
+            break;
+
+        case ThreadActualBasePriority:
+        case ThreadCSwitchPmu:
+#if !(defined(_M_AMD64) && defined(BUILD_WOW64_ENABLED))
+        case ThreadWow64Context: /* only a Set-probe placeholder without WoW64 */
+#endif
+        case ThreadGroupInformation:
+        case ThreadUmsInformation:
+        case ThreadCounterProfiling:
+        case ThreadIdealProcessorEx:
+            MinVersion = 0x0601;
+            break;
+
+        case ThreadCpuAccountingInformation:
+            MinVersion = 0x0602;
+            break;
+
+        case ThreadSuspendCount:
+            MinVersion = 0x0603;
+            break;
+
+        case ThreadNameInformation: /* ReactOS supports it at all versions */
+            return TRUE;
+
+        default:
+            if ((ThreadInformationClass >= ThreadHeterogeneousCpuPolicy) &&
+                (ThreadInformationClass <= ThreadEffectivePagePriority))
+            {
+                MinVersion = 0x0A00;
+                break;
+            }
+            return TRUE;
+    }
+
+    return (Version >= MinVersion);
+}
+
+/**
+ * @brief
+ * Queries one of the Vista+ thread information classes that need no
+ * per-class kernel state. The buffer size was already validated against
+ * PsThreadInfoClass by the caller.
+ **/
+static
+NTSTATUS
+PspQueryThreadInfoVista(
+    _In_ HANDLE ThreadHandle,
+    _In_ ULONG ThreadInformationClass,
+    _Out_ PVOID ThreadInformation,
+    _In_ ULONG ThreadInformationLength,
+    _Out_ PULONG Length,
+    _In_ KPROCESSOR_MODE PreviousMode)
+{
+    PETHREAD Thread;
+    NTSTATUS Status;
+    ACCESS_MASK Access = THREAD_QUERY_LIMITED_INFORMATION;
+    union
+    {
+        ULONG Ulong;
+        GUID Guid;
+        GROUP_AFFINITY GroupAffinity;
+        PROCESSOR_NUMBER ProcessorNumber;
+        SYSTEM_THREAD_INFORMATION SystemThread;
+    } Out;
+    ULONG Size;
+
+    RtlZeroMemory(&Out, sizeof(Out));
+
+    switch (ThreadInformationClass)
+    {
+        case ThreadIoPriority:
+            Size = sizeof(ULONG);
+            break;
+        case ThreadPagePriority:
+            Size = sizeof(ULONG);
+            break;
+        case ThreadActualBasePriority:
+        case ThreadSuspendCount:
+        case ThreadHeterogeneousCpuPolicy:
+        case ThreadDynamicCodePolicyInfo:
+        case ThreadExplicitCaseSensitivity:
+        case ThreadSubsystemInformation:
+            Size = sizeof(ULONG);
+            break;
+        case ThreadCpuAccountingInformation:
+            Access = THREAD_QUERY_INFORMATION;
+            Size = sizeof(ULONG);
+            break;
+        case ThreadGroupInformation:
+        case ThreadActualGroupAffinity:
+            Size = sizeof(GROUP_AFFINITY);
+            break;
+        case ThreadIdealProcessorEx:
+            Size = sizeof(PROCESSOR_NUMBER);
+            break;
+        case ThreadContainerId:
+            Size = sizeof(GUID);
+            break;
+        case ThreadSystemThreadInformation:
+            Size = sizeof(SYSTEM_THREAD_INFORMATION);
+            break;
+        case ThreadSelectedCpuSets:
+            /* No CPU sets are ever selected: zero-length list */
+            Size = 0;
+            break;
+        default:
+            return STATUS_INVALID_INFO_CLASS;
+    }
+
+    *Length = Size;
+    if ((ThreadInformationClass != ThreadSelectedCpuSets) &&
+        (ThreadInformationLength != Size))
+    {
+        return STATUS_INFO_LENGTH_MISMATCH;
+    }
+
+    Status = ObReferenceObjectByHandle(ThreadHandle,
+                                       Access,
+                                       PsThreadType,
+                                       PreviousMode,
+                                       (PVOID*)&Thread,
+                                       NULL);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    switch (ThreadInformationClass)
+    {
+        case ThreadIoPriority:
+            /* I/O priorities are not tracked: every thread is Normal */
+            Out.Ulong = IoPriorityNormal;
+            break;
+        case ThreadPagePriority:
+            /* Page priorities are not tracked: MEMORY_PRIORITY_NORMAL */
+            Out.Ulong = 5;
+            break;
+        case ThreadActualBasePriority:
+            Out.Ulong = (ULONG)Thread->Tcb.BasePriority;
+            break;
+        case ThreadSuspendCount:
+            Out.Ulong = (ULONG)Thread->Tcb.SuspendCount;
+            break;
+        case ThreadGroupInformation:
+        case ThreadActualGroupAffinity:
+            /* Only processor group 0 exists */
+            Out.GroupAffinity.Mask = Thread->Tcb.Affinity;
+            Out.GroupAffinity.Group = 0;
+            break;
+        case ThreadIdealProcessorEx:
+            Out.ProcessorNumber.Group = 0;
+            Out.ProcessorNumber.Number = (UCHAR)Thread->Tcb.IdealProcessor;
+            break;
+        case ThreadSystemThreadInformation:
+            Out.SystemThread.KernelTime.QuadPart = UInt32x32To64(Thread->Tcb.KernelTime, KeMaximumIncrement);
+            Out.SystemThread.UserTime.QuadPart = UInt32x32To64(Thread->Tcb.UserTime, KeMaximumIncrement);
+            Out.SystemThread.CreateTime = Thread->CreateTime;
+            Out.SystemThread.WaitTime = Thread->Tcb.WaitTime;
+            Out.SystemThread.StartAddress = (PVOID)Thread->StartAddress;
+            Out.SystemThread.ClientId = Thread->Cid;
+            Out.SystemThread.Priority = Thread->Tcb.Priority;
+            Out.SystemThread.BasePriority = Thread->Tcb.BasePriority;
+            Out.SystemThread.ContextSwitches = Thread->Tcb.ContextSwitches;
+            Out.SystemThread.ThreadState = Thread->Tcb.State;
+            Out.SystemThread.WaitReason = Thread->Tcb.WaitReason;
+            break;
+        default:
+            /* CpuAccounting, HeterogeneousCpuPolicy, ContainerId, CpuSets,
+             * DynamicCodePolicy, ExplicitCaseSensitivity: all zero. Win32
+             * subsystem (0) for SubsystemInformation. */
+            break;
+    }
+
+    ObDereferenceObject(Thread);
+
+    if (Size != 0)
+    {
+        _SEH2_TRY
+        {
+            RtlCopyMemory(ThreadInformation, &Out, Size);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+    }
+
+    return Status;
+}
+
+/**
+ * @brief
+ * Sets one of the Vista+ thread information classes. Buffer size and
+ * alignment were already validated against PsThreadInfoClass by the caller.
+ * The buffer is always touched first so that an invalid address reports
+ * STATUS_ACCESS_VIOLATION before any class-specific status.
+ **/
+static
+NTSTATUS
+PspSetThreadInfoVista(
+    _In_ HANDLE ThreadHandle,
+    _In_ ULONG ThreadInformationClass,
+    _In_ PVOID ThreadInformation,
+    _In_ ULONG ThreadInformationLength,
+    _In_ KPROCESSOR_MODE PreviousMode)
+{
+    PETHREAD Thread;
+    NTSTATUS Status = STATUS_SUCCESS;
+    ULONG Value = 0;
+    PROCESSOR_NUMBER ProcNumber = {0};
+
+    /* Variable-length list of ULONG CPU set IDs */
+    if ((ThreadInformationClass == ThreadSelectedCpuSets) &&
+        ((ThreadInformationLength % sizeof(ULONG)) != 0))
+    {
+        return STATUS_INFO_LENGTH_MISMATCH;
+    }
+
+    /* Capture (and thereby validate) the input */
+    _SEH2_TRY
+    {
+        if (ThreadInformationClass == ThreadIdealProcessorEx)
+            ProcNumber = *(volatile PROCESSOR_NUMBER*)ThreadInformation;
+        else if (ThreadInformationLength >= sizeof(ULONG))
+            Value = *(volatile ULONG*)ThreadInformation;
+        else if (ThreadInformationLength != 0)
+            Value = *(volatile UCHAR*)ThreadInformation;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        return _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    switch (ThreadInformationClass)
+    {
+        case ThreadIoPriority:
+        case ThreadPagePriority:
+        {
+            /* Valid ranges: IoPriorityVeryLow..IoPriorityCritical (0..4),
+             * page priority 0..7. The value is validated and accepted, but
+             * not stored: neither priority is honoured by the I/O or memory
+             * managers. */
+            if (Value > ((ThreadInformationClass == ThreadIoPriority) ? 4 : 7))
+                return STATUS_INVALID_PARAMETER;
+
+            Status = ObReferenceObjectByHandle(ThreadHandle,
+                                               THREAD_SET_INFORMATION,
+                                               PsThreadType,
+                                               PreviousMode,
+                                               (PVOID*)&Thread,
+                                               NULL);
+            if (NT_SUCCESS(Status))
+                ObDereferenceObject(Thread);
+            return Status;
+        }
+
+        case ThreadIdealProcessorEx:
+        {
+            /* Only processor group 0 exists */
+            if ((ProcNumber.Group != 0) || (ProcNumber.Number > MAXIMUM_PROCESSORS))
+                return STATUS_INVALID_PARAMETER;
+
+            Status = ObReferenceObjectByHandle(ThreadHandle,
+                                               THREAD_SET_INFORMATION,
+                                               PsThreadType,
+                                               PreviousMode,
+                                               (PVOID*)&Thread,
+                                               NULL);
+            if (!NT_SUCCESS(Status))
+                return Status;
+
+            Status = KeSetIdealProcessorThread(&Thread->Tcb, (CCHAR)ProcNumber.Number);
+            if (Thread->Tcb.Teb && ExAcquireRundownProtection(&Thread->RundownProtect))
+            {
+                Thread->Tcb.Teb->IdealProcessor = Thread->Tcb.IdealProcessor;
+                ExReleaseRundownProtection(&Thread->RundownProtect);
+            }
+            ObDereferenceObject(Thread);
+            return Status;
+        }
+
+        case ThreadCSwitchPmu:
+            /* Not a Win10 class */
+            return STATUS_INVALID_INFO_CLASS;
+
+        default:
+            /* Known to the table (so that probing works) but not implemented */
+            return STATUS_NOT_IMPLEMENTED;
+    }
+}
+
 /* PUBLIC FUNCTIONS **********************************************************/
 
 /*
@@ -255,6 +576,14 @@ NtQueryInformationProcess(
     ULONG Length = 0;
 
     PAGED_CODE();
+
+    /* ProcessTlsInformation has no query below Vista: a 5.2 identity must
+     * behave like Windows Server 2003, where the class does not exist */
+    if ((ProcessInformationClass == ProcessTlsInformation) &&
+        (NtMajorVersion < 6))
+    {
+        return STATUS_INVALID_INFO_CLASS;
+    }
 
     /* Validate the information class */
     Status = DefaultQueryInfoBufferCheck(ProcessInformationClass,
@@ -1547,6 +1876,28 @@ NtQueryInformationProcess(
             break;
         }
 
+        /* Known to the table (Vista+) so that probing matches, but there is
+         * nothing to query: TLS replacement is a set-only operation here */
+        case ProcessTlsInformation:
+            Status = STATUS_INVALID_INFO_CLASS;
+
+            /* The caller's buffer is still validated first, as on NT6+ */
+            if (PreviousMode != KernelMode)
+            {
+                _SEH2_TRY
+                {
+                    ProbeForWrite(ProcessInformation,
+                                  ProcessInformationLength,
+                                  sizeof(ULONG));
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    Status = _SEH2_GetExceptionCode();
+                }
+                _SEH2_END;
+            }
+            break;
+
         /* Not supported by Server 2003 */
         default:
 #if DBG
@@ -2792,6 +3143,18 @@ NtSetInformationThread(
 
     PAGED_CODE();
 
+    /* Reject Vista+ classes on an older NT version identity */
+    if (!PspIsThreadInfoClassAvailable(ThreadInformationClass, TRUE))
+        return STATUS_INVALID_INFO_CLASS;
+
+    /* Vista+ takes no buffer for ThreadHideFromDebugger: any length is
+     * rejected before the buffer (and its alignment) is looked at. */
+    if ((ThreadInformationClass == ThreadHideFromDebugger) &&
+        (NtMajorVersion >= 6) && (ThreadInformationLength != 0))
+    {
+        return STATUS_INFO_LENGTH_MISMATCH;
+    }
+
     /* Validate the information class */
     Status = DefaultSetInfoBufferCheck(ThreadInformationClass,
                                        PsThreadInfoClass,
@@ -3528,6 +3891,17 @@ NtSetInformationThread(
 
         /* Anything else */
         default:
+            /* Vista+ classes known to PsThreadInfoClass */
+            if (ThreadInformationClass >= ThreadIoPriority)
+            {
+                Status = PspSetThreadInfoVista(ThreadHandle,
+                                               ThreadInformationClass,
+                                               ThreadInformation,
+                                               ThreadInformationLength,
+                                               PreviousMode);
+                break;
+            }
+
             /* Not yet implemented */
 #if DBG
             DPRINT1("Not implemented: %s\n", PspDumpThreadInfoClassName(ThreadInformationClass));
@@ -3559,6 +3933,10 @@ NtQueryInformationThread(
     BOOLEAN DescriptorFailed = FALSE;
 
     PAGED_CODE();
+
+    /* Reject Vista+ classes on an older NT version identity */
+    if (!PspIsThreadInfoClassAvailable(ThreadInformationClass, FALSE))
+        return STATUS_INVALID_INFO_CLASS;
 
     /* Validate the information class */
     Status = DefaultQueryInfoBufferCheck(ThreadInformationClass,
@@ -4144,6 +4522,18 @@ NtQueryInformationThread(
 
         /* Anything else */
         default:
+            /* Vista+ classes known to PsThreadInfoClass */
+            if (ThreadInformationClass >= ThreadIoPriority)
+            {
+                Status = PspQueryThreadInfoVista(ThreadHandle,
+                                                 ThreadInformationClass,
+                                                 ThreadInformation,
+                                                 ThreadInformationLength,
+                                                 &Length,
+                                                 PreviousMode);
+                break;
+            }
+
             /* Not yet implemented */
 #if DBG
             DPRINT1("Not implemented: %s\n", PspDumpThreadInfoClassName(ThreadInformationClass));

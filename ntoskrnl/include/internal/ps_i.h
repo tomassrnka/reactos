@@ -308,12 +308,16 @@ static const INFORMATION_CLASS_INFO PsProcessInfoClass[] =
         ICIF_QUERY | ICIF_SET
     ),
 
-    /* ProcessTlsInformation */
+    /* ProcessTlsInformation
+     * Query is known to the table from Vista on so that buffer probing
+     * behaves as on NT6+; NtQueryInformationProcess rejects it with
+     * STATUS_INVALID_INFO_CLASS below that (runtime NT version gate) and has
+     * no data to return for it (VERBUMP). */
     IQS_SAME
     (
         PROCESS_TLS_INFORMATION,
         ULONG,
-        ICIF_SET | ICIF_SET_SIZE_VARIABLE
+        ICIF_QUERY | ICIF_SET | ICIF_SET_SIZE_VARIABLE
     ),
 
     /* ProcessCookie */
@@ -533,20 +537,16 @@ static const INFORMATION_CLASS_INFO PsThreadInfoClass[] =
         ICIF_QUERY
     ),
 
-    /* ThreadHideFromDebugger */
+    /* ThreadHideFromDebugger
+     * Query support exists on Vista and above only: NtQueryInformationThread
+     * returns STATUS_INVALID_INFO_CLASS below that (runtime NT version gate,
+     * see PspIsThreadInfoClassAvailable()). */
     {
-#if (NTDDI_VERSION >= NTDDI_VISTA)
-        sizeof(BOOLEAN), /* Query support only on Vista and above */
-#else
-        0,
-#endif
-        sizeof(ULONG), // UCHAR
+        sizeof(BOOLEAN),
+        sizeof(UCHAR),
         0, /* No size for Set */
         sizeof(ULONG),
-#if (NTDDI_VERSION >= NTDDI_VISTA)
-        ICIF_QUERY |
-#endif
-        ICIF_SET
+        ICIF_QUERY | ICIF_SET
     },
 
     /* ThreadBreakOnTermination */
@@ -576,8 +576,13 @@ static const INFORMATION_CLASS_INFO PsThreadInfoClass[] =
     /* ThreadLastSystemCall */
     IQS_NONE,
 
-    /* ThreadIoPriority */
-    IQS_NONE,
+    /* ThreadIoPriority (Vista+) */
+    IQS_SAME
+    (
+        ULONG,
+        ULONG,
+        ICIF_QUERY | ICIF_SET
+    ),
 
     /* ThreadCycleTime */
     IQS_SAME
@@ -587,11 +592,21 @@ static const INFORMATION_CLASS_INFO PsThreadInfoClass[] =
         ICIF_QUERY
     ),
 
-    /* ThreadPagePriority */
-    IQS_NONE,
+    /* ThreadPagePriority (Vista+) */
+    IQS_SAME
+    (
+        ULONG,
+        ULONG,
+        ICIF_QUERY | ICIF_SET
+    ),
 
-    /* ThreadActualBasePriority */
-    IQS_NONE,
+    /* ThreadActualBasePriority (Win7+) */
+    IQS_SAME
+    (
+        ULONG,
+        ULONG,
+        ICIF_QUERY
+    ),
 
     /* ThreadTebInformation */
     IQS_NONE,
@@ -603,36 +618,37 @@ static const INFORMATION_CLASS_INFO PsThreadInfoClass[] =
 // and adjust rostests/apitests/ntdll/probelib.c!QuerySetThreadValidator() as necessary.
 #if 1
     // Windows 7
-    /* ThreadCSwitchPmu */
-    IQS_NONE,
+    /* ThreadCSwitchPmu: set-probe only, no query (class is Win7-only) */
+    IQS_SAME(ULONG, ULONG, ICIF_SET),
     /* ThreadWow64Context */
 #if defined(_M_AMD64) && defined(BUILD_WOW64_ENABLED)
     IQS_SAME(WOW64_CONTEXT, ULONG, ICIF_QUERY | ICIF_SET),
 #else
-    IQS_NONE,
+    /* Not implemented here; known to the table so that Set probing works */
+    IQS_SAME(ULONG, ULONG, ICIF_SET),
 #endif
     /* ThreadGroupInformation */
-    IQS_NONE,
+    IQS_SAME(GROUP_AFFINITY, ULONG_PTR, ICIF_QUERY | ICIF_SET),
     /* ThreadUmsInformation */
-    IQS_NONE,
+    IQS_SAME(ULONG_PTR, ULONG_PTR, ICIF_SET),
     /* ThreadCounterProfiling */
-    IQS_NONE,
+    IQS_SAME(ULONG_PTR, ULONG_PTR, ICIF_SET),
     /* ThreadIdealProcessorEx */
-    IQS_NONE,
+    IQS_SAME(PROCESSOR_NUMBER, USHORT, ICIF_QUERY | ICIF_SET),
 
     // Windows 8
     /* ThreadCpuAccountingInformation */
-    IQS_NONE,
+    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_SET),
 
     // Windows 8.1
     /* ThreadSuspendCount */
-    IQS_NONE,
+    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_SET),
 
     // Windows 10
     /* ThreadHeterogeneousCpuPolicy */
-    IQS_NONE,
+    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_SET),
     /* ThreadContainerId */
-    IQS_NONE,
+    IQS_SAME(GUID, ULONG, ICIF_QUERY | ICIF_SET),
 
     /* ThreadNameInformation */
     IQS_SAME
@@ -643,39 +659,39 @@ static const INFORMATION_CLASS_INFO PsThreadInfoClass[] =
     ),
 
     /* ThreadSelectedCpuSets */
-    IQS_NONE,
+    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_SET | ICIF_QUERY_SIZE_VARIABLE | ICIF_SET_SIZE_VARIABLE),
     /* ThreadSystemThreadInformation */
-    IQS_NONE,
+    IQS_SAME(SYSTEM_THREAD_INFORMATION, ULONG_PTR, ICIF_QUERY | ICIF_SET),
     /* ThreadActualGroupAffinity */
-    IQS_NONE,
+    IQS_SAME(GROUP_AFFINITY, ULONG_PTR, ICIF_QUERY | ICIF_SET),
 
     /* ThreadDynamicCodePolicyInfo */
-    IQS_NONE,
+    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_SET),
     /* ThreadExplicitCaseSensitivity */
-    IQS_NONE,
+    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_SET),
     /* ThreadWorkOnBehalfTicket */
-    IQS_NONE,
+    IQS_SAME(GUID, ULONG_PTR, ICIF_SET),
     /* ThreadSubsystemInformation */
-    IQS_NONE,
+    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_SET),
     /* ThreadDbgkWerReportActive */
-    IQS_NONE,
+    IQS_SAME(ULONG, ULONG, ICIF_SET),
     /* ThreadAttachContainer */
-    IQS_NONE,
+    IQS_SAME(HANDLE, ULONG_PTR, ICIF_SET),
     /* ThreadManageWritesToExecutableMemory */
-    IQS_NONE,
+    IQS_SAME(ULONG, ULONG, ICIF_SET),
     /* ThreadPowerThrottlingState */
-    IQS_NONE,
+    IQS_SAME(ULONG[3], ULONG, ICIF_SET),
     /* ThreadWorkloadClass */
-    IQS_NONE,
+    IQS_SAME(ULONG, ULONG, ICIF_SET),
     /* ThreadCreateStateChange */
-    IQS_NONE,
+    IQS_SAME(ULONG, ULONG, ICIF_SET),
     /* ThreadApplyStateChange */
-    IQS_NONE,
+    IQS_SAME(ULONG, ULONG, ICIF_SET),
     /* ThreadStrongerBadHandleChecks */
-    IQS_NONE,
+    IQS_SAME(ULONG, ULONG, ICIF_SET),
     /* ThreadEffectiveIoPriority */
-    IQS_NONE,
+    IQS_SAME(ULONG, ULONG, ICIF_SET),
     /* ThreadEffectivePagePriority */
-    IQS_NONE,
+    IQS_SAME(ULONG, ULONG, ICIF_SET),
 #endif
 };

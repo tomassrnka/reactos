@@ -905,8 +905,10 @@ LdrpRunInitializeRoutines(IN PCONTEXT Context OPTIONAL)
             /* Save the Current DLL Initializer */
             LdrpCurrentDllInitializer = OldInitializer;
 
-            /* Mark the entry as processed */
-            LdrEntry->Flags |= LDRP_PROCESS_ATTACH_CALLED;
+            /* Mark the entry as processed. NT6+ does not send DLL_PROCESS_DETACH
+               to a module whose DLL_PROCESS_ATTACH failed (VERBUMP B5) */
+            if (DllStatus || (SharedUserData->NtMajorVersion < 6))
+                LdrEntry->Flags |= LDRP_PROCESS_ATTACH_CALLED;
 
             /* Fail if DLL init failed */
             if (!DllStatus)
@@ -1008,7 +1010,7 @@ LdrpRundownFls(VOID)
     {
         /* An index that FlsFree released (its callback may have raised) runs nothing */
         RtlAcquirePebLock();
-        lpCallback = RtlAreBitsSet(NtCurrentPeb()->FlsBitmap, n, 1) ? NtCurrentPeb()->FlsCallback[n] : NULL;
+        lpCallback = RtlAreBitsSet(NtCurrentPeb()->FlsBitmap, n, 1) ? RTL_FLS_CALLBACK_SLOT(NtCurrentPeb(), n) : NULL;
         RtlReleasePebLock();
         if (lpCallback && pFlsData->Data[n])
         {
