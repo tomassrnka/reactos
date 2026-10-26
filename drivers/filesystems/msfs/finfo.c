@@ -55,6 +55,30 @@ MsfsQueryMailslotInformation(PMSFS_FCB Fcb,
 
 
 static NTSTATUS
+MsfsQueryNameInformation(PMSFS_FCB Fcb,
+                         PFILE_NAME_INFORMATION Buffer,
+                         PULONG BufferLength)
+{
+    ULONG HeaderLength = FIELD_OFFSET(FILE_NAME_INFORMATION, FileName);
+    ULONG CopyLength;
+
+    if (*BufferLength < HeaderLength)
+        return STATUS_INFO_LENGTH_MISMATCH;
+
+    /* Report the mailslot name (including the leading backslash) and
+     * copy as much of it as fits */
+    Buffer->FileNameLength = Fcb->Name.Length;
+    CopyLength = min((ULONG)Fcb->Name.Length, *BufferLength - HeaderLength);
+    CopyLength &= ~(sizeof(WCHAR) - 1);
+    RtlCopyMemory(Buffer->FileName, Fcb->Name.Buffer, CopyLength);
+
+    *BufferLength -= HeaderLength + CopyLength;
+
+    return (CopyLength < Fcb->Name.Length) ? STATUS_BUFFER_OVERFLOW : STATUS_SUCCESS;
+}
+
+
+static NTSTATUS
 MsfsSetMailslotInformation(PMSFS_FCB Fcb,
                            PFILE_MAILSLOT_SET_INFORMATION Buffer,
                            PULONG BufferLength,
@@ -112,6 +136,24 @@ MsfsQueryInformation(PDEVICE_OBJECT DeviceObject,
     Ccb = (PMSFS_CCB)FileObject->FsContext2;
 
     DPRINT("Mailslot name: %wZ\n", &Fcb->Name);
+
+    /* the file name can be queried on both the server and the client side */
+    if (FileInformationClass == FileNameInformation)
+    {
+        ULONG NameBufferLength = IoStack->Parameters.QueryFile.Length;
+
+        Status = MsfsQueryNameInformation(Fcb,
+                                          Irp->AssociatedIrp.SystemBuffer,
+                                          &NameBufferLength);
+        Irp->IoStatus.Status = Status;
+        if (NT_SUCCESS(Status) || (Status == STATUS_BUFFER_OVERFLOW))
+            Irp->IoStatus.Information = IoStack->Parameters.QueryFile.Length - NameBufferLength;
+        else
+            Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+
+        return Status;
+    }
 
     /* querying information is not permitted on client side */
     if (Fcb->ServerCcb != Ccb)
