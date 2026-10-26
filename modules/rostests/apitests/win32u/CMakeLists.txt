@@ -86,6 +86,13 @@ list(APPEND SOURCE
     ntuser/NtUserSetWindowsHookExModule.c
     ntuser/NtUserSystemParametersInfo.c
     ntuser/NtUserThunkedMenuInfo.c
+    ntuser/NtUserGetMenuItemRectProbe.c
+    ntuser/NtUserMenuInfoItemBound.c
+    ntuser/NtUserMenuStaleIndexAfterRemove.c
+    ntuser/NtUserPopupMenuClassExtra.c
+    ntuser/NtUserRegisterUserApiHookGate.c
+    ntuser/NtUserGetWOWClassPtr.c
+    ntuser/NtUserCallNextHookZero.c
     ntuser/NtUserToUnicodeEx.c
     ntuser/NtUserUpdatePerUserSystemParameters.c
 

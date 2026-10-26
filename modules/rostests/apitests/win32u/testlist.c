@@ -87,6 +87,13 @@ extern void func_NtUserSetTimer(void);
 extern void func_NtUserSetWindowsHookExModule(void);
 extern void func_NtUserSystemParametersInfo(void);
 extern void func_NtUserThunkedMenuInfo(void);
+extern void func_NtUserGetMenuItemRectProbe(void);
+extern void func_NtUserMenuInfoItemBound(void);
+extern void func_NtUserMenuStaleIndexAfterRemove(void);
+extern void func_NtUserPopupMenuClassExtra(void);
+extern void func_NtUserRegisterUserApiHookGate(void);
+extern void func_NtUserGetWOWClassPtr(void);
+extern void func_NtUserCallNextHookZero(void);
 extern void func_NtUserToUnicodeEx(void);
 extern void func_NtUserUpdatePerUserSystemParameters(void);
 
@@ -180,6 +187,13 @@ const struct test winetest_testlist[] =
     { "NtUserSetWindowsHookExModule", func_NtUserSetWindowsHookExModule },
     { "NtUserSystemParametersInfo", func_NtUserSystemParametersInfo },
     { "NtUserThunkedMenuInfo", func_NtUserThunkedMenuInfo },
+    { "NtUserGetMenuItemRectProbe", func_NtUserGetMenuItemRectProbe },
+    { "NtUserMenuInfoItemBound", func_NtUserMenuInfoItemBound },
+    { "NtUserMenuStaleIndexAfterRemove", func_NtUserMenuStaleIndexAfterRemove },
+    { "NtUserPopupMenuClassExtra", func_NtUserPopupMenuClassExtra },
+    { "NtUserRegisterUserApiHookGate", func_NtUserRegisterUserApiHookGate },
+    { "NtUserGetWOWClassPtr", func_NtUserGetWOWClassPtr },
+    { "NtUserCallNextHookZero", func_NtUserCallNextHookZero },
     { "NtUserToUnicodeEx", func_NtUserToUnicodeEx },
     { "NtUserUpdatePerUserSystemParameters", func_NtUserUpdatePerUserSystemParameters },
 
