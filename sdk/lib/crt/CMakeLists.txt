@@ -37,6 +37,27 @@ add_library(user32_wsprintf
 add_dependencies(user32_wsprintf psdk)
 target_compile_definitions(user32_wsprintf PRIVATE _USER32_WSPRINTF)
 
+# The sprintf family as exported by ntdll: libcntpr's code plus the NT6+ argument
+# validation (kept out of libcntpr itself, which the kernel and drivers share)
+add_library(ntdll_printf_nt6
+    printf/_snprintf.c
+    printf/_snwprintf.c
+    printf/_swprintf.c
+    printf/_vsnprintf.c
+    printf/_vsnwprintf.c
+    printf/sprintf.c
+    printf/vsprintf.c)
+
+add_dependencies(ntdll_printf_nt6 psdk asm)
+target_compile_definitions(ntdll_printf_nt6 PRIVATE
+    NO_RTL_INLINES
+    _NTSYSTEM_
+    _NTDLLBUILD_
+    _LIBCNT_
+    __CRT__NO_INLINE
+    CRTDLL
+    _NTDLL_NT6_PRINTF)
+
 if(MSVC AND ARCH STREQUAL "i386")
     add_asm_files(ftol2_asm
         math/i386/ftol2_asm.s

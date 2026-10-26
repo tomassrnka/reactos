@@ -449,6 +449,13 @@ NtSetDefaultLocale(IN BOOLEAN UserProfile,
     /* Check that the passed locale ID is not bogus */
     if (DefaultLocaleId & BOGUS_LOCALE_ID)
     {
+        /* NT 10 accepts a bogus locale ID but does not apply it, NT 6.x-8.x
+         * treat it like any other locale that is not installed, and only NT5
+         * rejects it as an invalid parameter. */
+        if (NtMajorVersion >= 10)
+            return STATUS_SUCCESS;
+        if (NtMajorVersion >= 6)
+            return STATUS_OBJECT_NAME_NOT_FOUND;
         return STATUS_INVALID_PARAMETER;
     }
 

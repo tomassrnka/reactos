@@ -3446,6 +3446,14 @@ NtOpenSection(OUT PHANDLE SectionHandle,
     return Status;
 }
 
+/*
+ * NT 10 reports the parameter validation failures of NtMapViewOfSection that
+ * NT5/NT6 report as STATUS_INVALID_PARAMETER_n with the generic
+ * STATUS_INVALID_PARAMETER instead.
+ */
+#define MI_MAPVIEW_PARAM_STATUS(n) \
+    ((NtMajorVersion >= 10) ? STATUS_INVALID_PARAMETER : STATUS_INVALID_PARAMETER_##n)
+
 NTSTATUS
 NTAPI
 NtMapViewOfSection(
@@ -3489,7 +3497,7 @@ NtMapViewOfSection(
     if (AllocationType & ~ValidAllocationType)
     {
         DPRINT1("Invalid allocation type\n");
-        return STATUS_INVALID_PARAMETER_9;
+        return MI_MAPVIEW_PARAM_STATUS(9);
     }
 
     /* Convert the protection mask, and validate it */
@@ -3540,14 +3548,14 @@ NtMapViewOfSection(
     if (SafeBaseAddress > MM_HIGHEST_VAD_ADDRESS)
     {
         DPRINT1("Kernel base not allowed\n");
-        return STATUS_INVALID_PARAMETER_3;
+        return MI_MAPVIEW_PARAM_STATUS(3);
     }
 
     /* Check for range entering kernel-mode */
     if (((ULONG_PTR)MM_HIGHEST_VAD_ADDRESS - (ULONG_PTR)SafeBaseAddress) < SafeViewSize)
     {
         DPRINT1("Overflowing into kernel base not allowed\n");
-        return STATUS_INVALID_PARAMETER_3;
+        return MI_MAPVIEW_PARAM_STATUS(3);
     }
 
     if (!MiZeroBitsToHighestAddress(ZeroBits, &HighestAddress))
@@ -3559,7 +3567,7 @@ NtMapViewOfSection(
         if ((ZeroBits >= 32 && ((ULONG_PTR)SafeBaseAddress & ~ZeroBits)) ||
             (ULONG_PTR)SafeBaseAddress > HighestAddress ||
             (SafeViewSize && SafeViewSize - 1 > HighestAddress - (ULONG_PTR)SafeBaseAddress))
-            return STATUS_INVALID_PARAMETER_4;
+            return MI_MAPVIEW_PARAM_STATUS(4);
     }
 
     /* Reference the process */
