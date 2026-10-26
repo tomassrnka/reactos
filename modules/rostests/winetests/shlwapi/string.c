@@ -1204,6 +1204,16 @@ if (0)
         ok(!ret, "got %d.\n", ret);
         expect_eq(buf[0], 0, CHAR, "%x");
         expect_eq(buf[1], (CHAR)0xbf, CHAR, "%x");
+
+#ifdef __REACTOS__
+        /* Exact-fit: the output length equals the buffer size. wnsprintf
+         * must still NUL-terminate and report truncation. CORE / VBREG-B7. */
+        memset(buf, 0xbf, sizeof(buf));
+        ret = pwnsprintfA(buf, 4, "%s", "abcd");
+        ok(ret == -1, "exact-fit wnsprintfA: got %d, expected -1.\n", ret);
+        expect_eq(buf[3], 0, CHAR, "%x");
+        expect_eq(buf[4], (CHAR)0xbf, CHAR, "%x");
+#endif
     }
     else
         win_skip("wnsprintfA() is not available\n");
@@ -1246,6 +1256,15 @@ if (0)
         ok(!ret, "got %d.\n", ret);
         expect_eq(wbuf[0], 0, WCHAR, "%x");
         expect_eq(wbuf[1], (WCHAR)0xbfbf, WCHAR, "%x");
+
+#ifdef __REACTOS__
+        /* Exact-fit: see wnsprintfA above. CORE / VBREG-B7. */
+        memset(wbuf, 0xbf, sizeof(wbuf));
+        ret = pwnsprintfW(wbuf, 4, L"%s", L"abcd");
+        ok(ret == -1, "exact-fit wnsprintfW: got %d, expected -1.\n", ret);
+        expect_eq(wbuf[3], 0, WCHAR, "%x");
+        expect_eq(wbuf[4], (WCHAR)0xbfbf, WCHAR, "%x");
+#endif
     }
     else
         win_skip("wnsprintfW() is not available\n");

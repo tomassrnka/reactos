@@ -634,7 +634,18 @@ streamout(FILE *stream, const _TCHAR *format, va_list argptr)
                 break;
 
             default:
-                /* Treat anything else as a new character */
+                /* Treat anything else as a new character. A stray '%'
+                 * reaching this point comes from a malformed spec such as
+                 * "% %u": emit it literally (as msvcrt/UCRT do) but do NOT
+                 * rewind, or it would be re-read as the start of a new
+                 * conversion, process a spurious extra argument and read
+                 * past the va_list. */
+                if (chr == _T('%'))
+                {
+                    if ((written = streamout_char(stream, chr)) == 0) return -1;
+                    written_all += written;
+                    continue;
+                }
                 format--;
                 continue;
         }
