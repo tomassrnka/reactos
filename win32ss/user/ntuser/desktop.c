@@ -1528,7 +1528,23 @@ DesktopWindowProc(PWND Wnd, UINT Msg, WPARAM wParam, LPARAM lParam, LRESULT *lRe
         case WM_WINDOWPOSCHANGING:
         {
             PWINDOWPOS pWindowPos = (PWINDOWPOS)lParam;
-            if ((pWindowPos->flags & SWP_SHOWWINDOW) != 0)
+            BOOL bShow = FALSE;
+
+            /* SECURITY (ASTRA8-FU): lParam is a kernel-built WINDOWPOS from the
+               kernel's own sends, but a posted/queued message can carry a raw
+               user pointer. NtUserMessageCall captures it already; guard the
+               read so a bad pointer never faults the kernel. */
+            _SEH2_TRY
+            {
+                bShow = (pWindowPos->flags & SWP_SHOWWINDOW) != 0;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                ERR("DesktopWindowProc: bad WM_WINDOWPOSCHANGING lParam %p\n", pWindowPos);
+            }
+            _SEH2_END;
+
+            if (bShow)
             {
                 HDESK hdesk = UserOpenInputDesktop(0, FALSE, DESKTOP_ALL_ACCESS);
                 IntSetThreadDesktop(hdesk, FALSE);

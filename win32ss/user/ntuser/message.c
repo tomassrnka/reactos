@@ -2723,7 +2723,35 @@ NtUserMessageCall( HWND hWnd,
                  (The FNID_DEFWINDOWPROC case below already does this.) */
               UserRefObjectCo(Window, &Ref);
               //ERR("FNID_DESKTOP IN\n");
-              Ret = DesktopWindowProc(Window, Msg, wParam, lParam, &lResult);
+              if (Msg == WM_WINDOWPOSCHANGING)
+              {
+                 /* SECURITY (ASTRA8-FU): DesktopWindowProc reads lParam as a
+                    PWINDOWPOS. Here it is a raw user pointer: probe and capture
+                    it so a bad pointer fails gracefully instead of faulting. */
+                 WINDOWPOS CapturedPos;
+                 BOOL bCaptured = FALSE;
+
+                 _SEH2_TRY
+                 {
+                    ProbeForRead((PVOID)lParam, sizeof(WINDOWPOS), 1);
+                    CapturedPos = *(PWINDOWPOS)lParam;
+                    bCaptured = TRUE;
+                 }
+                 _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                 {
+                    ERR("NtUserMessageCall(FNID_DESKTOP): bad WM_WINDOWPOSCHANGING lParam\n");
+                 }
+                 _SEH2_END;
+
+                 if (bCaptured)
+                    Ret = DesktopWindowProc(Window, Msg, wParam, (LPARAM)&CapturedPos, &lResult);
+                 else
+                    EngSetLastError(ERROR_NOACCESS);
+              }
+              else
+              {
+                 Ret = DesktopWindowProc(Window, Msg, wParam, lParam, &lResult);
+              }
               //ERR("FNID_DESKTOP OUT\n");
               UserDerefObjectCo(Window);
            }
