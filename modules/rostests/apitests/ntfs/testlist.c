@@ -24,6 +24,7 @@ extern void func_NtfsPagingFile(void);
 extern void func_NtfsRelativeOpen(void);
 extern void func_NtfsRelativeOpenJunctionAcl(void);
 extern void func_NtfsRename(void);
+extern void func_NtfsReparseRouting(void);
 extern void func_NtfsSharing(void);
 extern void func_NtfsSystemFiles(void);
 extern void func_NtfsTraverse(void);
@@ -52,6 +53,7 @@ const struct test winetest_testlist[] =
     { "NtfsRelativeOpen", func_NtfsRelativeOpen },
     { "NtfsRelativeOpenJunctionAcl", func_NtfsRelativeOpenJunctionAcl },
     { "NtfsRename", func_NtfsRename },
+    { "NtfsReparseRouting", func_NtfsReparseRouting },
     { "NtfsSharing", func_NtfsSharing },
     { "NtfsSystemFiles", func_NtfsSystemFiles },
     { "NtfsTraverse", func_NtfsTraverse },
