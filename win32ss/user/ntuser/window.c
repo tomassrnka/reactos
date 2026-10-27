@@ -4455,8 +4455,20 @@ NtUserSetWindowFNID(HWND hWnd,
          own window to FNID_MENU/FNID_DESKTOP and then plant a fake context
          pointer in the extra bytes via SetWindowLongPtr -> type-confusion /
          arbitrary kernel write. Control classes (FNID_BUTTON and above) are
-         handled client-side and keep the historic behaviour. */
+         handled client-side and keep the historic behaviour.
+
+         FNID_SCROLLBAR is exempt: ScrollBarWndProc (user32 client proc) sets it
+         on whatever window the proc runs for, and a user class that subclasses
+         or wraps the system SCROLLBAR proc (CallWindowProc on WM_CREATE) is a
+         legitimate, documented path (user32 winetest scroll.c test_subclass).
+         The server-side ScrollBarWndProc only toggles pSBInfo->WSBflags on
+         WM_ENABLE, and every reader of the SBWND extra-byte tail
+         (IntGetSBData) checks cbwndExtra first; the extra bytes are plain
+         values, not a kernel-dereferenced pointer, so no type confusion is
+         reachable. The pointer-carrying server classes (MENU/DESKTOP/
+         MESSAGEWND) stay gated. */
       if (fnID <= FNID_SWITCH &&
+          fnID != FNID_SCROLLBAR &&
           !(Wnd->pcls &&
             (Wnd->pcls->CSF_flags & CSF_SYSTEMCLASS) &&
             Wnd->pcls->fnid == fnID))
