@@ -750,6 +750,36 @@ public:
         return m_FailedCount != 0;
     }
 
+    /* Error reporting that is suppressed in silent (/S) mode. A modal MessageBox
+     * raised on the worker thread has no owner able to dismiss it when RAPPS runs
+     * headless (e.g. launched by featmgr as "rapps /install /S <pkg>"), so it would
+     * block the worker forever and hang the caller (which waits on the process).
+     * Under DAF_SILENT we drop the dialog and let the failure propagate through the
+     * exit code / m_FailedCount instead. */
+    BOOL
+    ReportLastError(HWND hWndOwner, BOOL bInetError, DWORD dwLastError, LPCWSTR pszInsert = NULL)
+    {
+        return IsSilentDialog() ? FALSE : ShowLastError(hWndOwner, bInetError, dwLastError, pszInsert);
+    }
+    void
+    ReportErrorString(HWND hWndOwner, INT StringID)
+    {
+        if (!IsSilentDialog())
+            MessageBox_LoadString(hWndOwner, StringID);
+    }
+    void
+    ReportHttpStatusError(HWND hWndOwner, HINTERNET hFile, DWORD dwStatus)
+    {
+        if (!IsSilentDialog())
+            ShowHttpStatusError(hWndOwner, hFile, dwStatus);
+    }
+    void
+    ReportMessage(HWND hWndOwner, LPCWSTR pszText, LPCWSTR pszCaption)
+    {
+        if (!IsSilentDialog())
+            MessageBoxW(hWndOwner, pszText, pszCaption, MB_OK | MB_ICONERROR);
+    }
+
     void StartWorkerThread();
     void Add(const DownloadInfo &Info);
     void Show();
@@ -1055,7 +1085,7 @@ CDownloadManager::PerformDownloadAndInstall(const DownloadInfo &Info)
     {
         if (!GetStorageDirectory(Path))
         {
-            ShowLastError(hMainWnd, FALSE, GetLastError());
+            ReportLastError(hMainWnd, FALSE, GetLastError());
             goto end;
         }
     }
@@ -1070,7 +1100,7 @@ CDownloadManager::PerformDownloadAndInstall(const DownloadInfo &Info)
     // do we have a final slash separator?
     if (!p)
     {
-        MessageBox_LoadString(hMainWnd, IDS_UNABLE_PATH);
+        ReportErrorString(hMainWnd, IDS_UNABLE_PATH);
         goto end;
     }
 
@@ -1079,7 +1109,7 @@ CDownloadManager::PerformDownloadAndInstall(const DownloadInfo &Info)
     {
         if (!CreateDirectoryW(Path, NULL))
         {
-            ShowLastError(hMainWnd, FALSE, GetLastError());
+            ReportLastError(hMainWnd, FALSE, GetLastError());
             goto end;
         }
     }
@@ -1129,7 +1159,7 @@ CDownloadManager::PerformDownloadAndInstall(const DownloadInfo &Info)
 
     if (!hOpen)
     {
-        ShowLastError(hMainWnd, TRUE, GetLastError());
+        ReportLastError(hMainWnd, TRUE, GetLastError());
         goto end;
     }
 
@@ -1145,7 +1175,7 @@ CDownloadManager::PerformDownloadAndInstall(const DownloadInfo &Info)
 
     if (!InternetCrackUrlW(Info.szUrl, urlLength + 1, ICU_DECODE | ICU_ESCAPE, &urlComponents))
     {
-        ShowLastError(hMainWnd, TRUE, GetLastError());
+        ReportLastError(hMainWnd, TRUE, GetLastError());
         goto end;
     }
 
@@ -1162,7 +1192,7 @@ CDownloadManager::PerformDownloadAndInstall(const DownloadInfo &Info)
                 dwStatusLen = sizeof(dwStatus);
                 if (!HttpQueryInfoW(hFile, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &dwStatus, &dwStatusLen, NULL))
                 {
-                    ShowLastError(hMainWnd, TRUE, GetLastError());
+                    ReportLastError(hMainWnd, TRUE, GetLastError());
                     goto end;
                 }
                 if (dwStatus == HTTP_STATUS_OK)
@@ -1185,15 +1215,15 @@ CDownloadManager::PerformDownloadAndInstall(const DownloadInfo &Info)
             {
                 if (!hFile)
                 {
-                    if (!ShowLastError(hMainWnd, TRUE, dwError))
+                    if (!ReportLastError(hMainWnd, TRUE, dwError))
                     {
                         /* Workaround for CORE-17377 */
-                        MessageBox_LoadString(hMainWnd, IDS_UNABLE_TO_DOWNLOAD2);
+                        ReportErrorString(hMainWnd, IDS_UNABLE_TO_DOWNLOAD2);
                     }
                 }
                 else
                 {
-                    ShowHttpStatusError(hMainWnd, hFile, dwStatus);
+                    ReportHttpStatusError(hMainWnd, hFile, dwStatus);
                 }
                 goto end;
             }
@@ -1228,10 +1258,10 @@ CDownloadManager::PerformDownloadAndInstall(const DownloadInfo &Info)
             InternetOpenUrlW(hOpen, Info.szUrl, NULL, 0, dwUrlConnectFlags | INTERNET_FLAG_PASSIVE, 0);
         if (!hFile)
         {
-            if (!ShowLastError(hMainWnd, TRUE, GetLastError()))
+            if (!ReportLastError(hMainWnd, TRUE, GetLastError()))
             {
                 /* Workaround for CORE-17377 */
-                MessageBox_LoadString(hMainWnd, IDS_UNABLE_TO_DOWNLOAD2);
+                ReportErrorString(hMainWnd, IDS_UNABLE_TO_DOWNLOAD2);
             }
             goto end;
         }
@@ -1258,13 +1288,13 @@ CDownloadManager::PerformDownloadAndInstall(const DownloadInfo &Info)
             }
             else
             {
-                ShowLastError(hMainWnd, FALSE, GetLastError());
+                ReportLastError(hMainWnd, FALSE, GetLastError());
                 goto end;
             }
         }
         else
         {
-            ShowLastError(hMainWnd, FALSE, hr);
+            ReportLastError(hMainWnd, FALSE, hr);
             goto end;
         }
     }
@@ -1307,7 +1337,9 @@ CDownloadManager::PerformDownloadAndInstall(const DownloadInfo &Info)
 
         if (bAskQuestion)
         {
-            if (!AskContinueWithCert(hDlg, szMsgText, pSimpleChain))
+            /* Silent/headless: never prompt. Fail closed - do not continue past an
+             * unverified/mismatched certificate without a user to consent. */
+            if (IsSilentDialog() || !AskContinueWithCert(hDlg, szMsgText, pSimpleChain))
             {
                 goto end;
             }
@@ -1318,7 +1350,7 @@ CDownloadManager::PerformDownloadAndInstall(const DownloadInfo &Info)
     hOut = CreateFileW(Path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CREATE_ALWAYS, 0, NULL);
     if (hOut == INVALID_HANDLE_VALUE)
     {
-        ShowLastError(hDlg, FALSE, GetLastError());
+        ReportLastError(hDlg, FALSE, GetLastError());
         goto end;
     }
 
@@ -1331,13 +1363,13 @@ CDownloadManager::PerformDownloadAndInstall(const DownloadInfo &Info)
 
         if (!InternetReadFile(hFile, lpBuffer, _countof(lpBuffer), &dwBytesRead))
         {
-            ShowLastError(hDlg, TRUE, GetLastError());
+            ReportLastError(hDlg, TRUE, GetLastError());
             goto end;
         }
 
         if (!WriteFile(hOut, &lpBuffer[0], dwBytesRead, &dwBytesWritten, NULL))
         {
-            ShowLastError(hDlg, FALSE, GetLastError());
+            ReportLastError(hDlg, FALSE, GetLastError());
             goto end;
         }
 
@@ -1389,7 +1421,7 @@ CDownloadManager::PerformDownloadAndInstall(const DownloadInfo &Info)
                 goto end;
             }
 
-            MessageBoxW(hDlg, szMsgText, NULL, MB_OK | MB_ICONERROR);
+            ReportMessage(hDlg, szMsgText, NULL);
             goto end;
         }
     }
@@ -1434,7 +1466,7 @@ run:
             HRESULT hr = ExtractArchiveForExecution(Path, Info.szPackageName, tempdir, app);
             if (FAILED(hr))
             {
-                ShowLastError(hDlg, FALSE, hr);
+                ReportLastError(hDlg, FALSE, hr);
                 bSucceeded = FALSE;
                 goto end;
             }
@@ -1446,7 +1478,7 @@ run:
         {
             CStringW szMsgText;
             szMsgText.Format(IDS_UNABLE_TO_RUN_32BIT, Info.szName.GetString());
-            MessageBoxW(hDlg, szMsgText, NULL, MB_OK | MB_ICONERROR);
+            ReportMessage(hDlg, szMsgText, NULL);
             if (!tempdir.IsEmpty())
                 DeleteDirectoryTree(tempdir, hDlg);
             bSucceeded = FALSE;
@@ -1551,7 +1583,7 @@ run:
         {
             // shell32 does not always set the last error for a missing association
             DWORD dwError = (shExInfo.hInstApp == (HINSTANCE)SE_ERR_NOASSOC) ? ERROR_NO_ASSOCIATION : GetLastError();
-            ShowLastError(hMainWnd, FALSE, dwError, shExInfo.lpFile);
+            ReportLastError(hMainWnd, FALSE, dwError, shExInfo.lpFile);
             bSucceeded = FALSE;
         }
         else
@@ -1637,7 +1669,10 @@ VOID
 DownloadApplicationsDB(LPCWSTR lpUrl, BOOL IsOfficial)
 {
     CComPtr<CDownloadManager> pDM;
-    if (!CDownloadManager::CreateInstance(DAF_MODAL, pDM))
+    /* A headless/silent operation must not raise a modal dialog here either: an auto
+     * DB-update that fails or hits a cert prompt would otherwise block the caller. */
+    UINT flags = DAF_MODAL | (g_bSilentMode ? DAF_SILENT : 0);
+    if (!CDownloadManager::CreateInstance(flags, pDM))
         return;
 
     DownloadInfo DatabaseDLInfo;

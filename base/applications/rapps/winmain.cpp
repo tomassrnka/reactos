@@ -18,6 +18,7 @@ LONG g_Busy = 0;
 
 HWND hMainWnd = NULL;
 HINSTANCE hInst;
+BOOL g_bSilentMode = FALSE;
 SETTINGS_INFO SettingsInfo;
 
 BEGIN_OBJECT_MAP(ObjectMap)

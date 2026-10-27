@@ -351,11 +351,28 @@ ParseCmdAndExecute(LPWSTR lpCmdLine, BOOL bIsFirstLaunch, int nCmdShow)
 
     CAppDB db(CAppDB::GetDefaultPath());
 
+    /* Detect a silent/headless operation up front (before any DB work): a download-capable
+     * command (install/setup/geninst) with /S among its arguments. In this mode no modal
+     * dialog may appear, and we must not wipe a database that was staged for us (e.g. by
+     * featmgr) - that would force an online DB download whose dialogs would hang the caller. */
+    for (int i = 2; i < argc; i++)
+    {
+        if (!StrCmpIW(argv[i], L"/S") &&
+            (MatchCmdOption(argv[1], CMD_KEY_INSTALL) || MatchCmdOption(argv[1], CMD_KEY_SETUP) ||
+             MatchCmdOption(argv[1], CMD_KEY_GENINST)))
+        {
+            g_bSilentMode = TRUE;
+            break;
+        }
+    }
+
     BOOL bAppwizMode = (argc > 1 && MatchCmdOption(argv[1], CMD_KEY_APPWIZ));
     if (!bAppwizMode)
     {
         CUpdateDatabaseMutex lock;
-        if (SettingsInfo.bUpdateAtStart || bIsFirstLaunch)
+        /* Silent mode keeps whatever database is present (staged entries survive); an
+         * interactive run may refresh it. */
+        if (!g_bSilentMode && (SettingsInfo.bUpdateAtStart || bIsFirstLaunch))
             db.RemoveCached();
 
         db.UpdateAvailable();
