@@ -35,6 +35,13 @@ static LONG start_params(const WCHAR *params, HWND hwnd_parent)
     return FALSE;
 }
 
+/* Applets exposed by this .cpl: the classic software list, plus the Windows-
+ * native "Turn Windows features on or off" entry that hosts the two-tier
+ * optional-feature manager (optfeatures.exe, base/applications/featmgr). */
+#define APPWIZ_APPLET_PROGRAMS  0
+#define APPWIZ_APPLET_FEATURES  1
+#define APPWIZ_APPLET_COUNT     2
+
 /* Control Panel Callback */
 LONG CALLBACK
 CPlApplet(HWND hwndCPl, UINT uMsg, LPARAM lParam1, LPARAM lParam2)
@@ -47,7 +54,7 @@ CPlApplet(HWND hwndCPl, UINT uMsg, LPARAM lParam1, LPARAM lParam2)
             return TRUE;
 
         case CPL_GETCOUNT:
-            return 1;
+            return APPWIZ_APPLET_COUNT;
 
         case CPL_STARTWPARMSW:
             return start_params((const WCHAR *)lParam2, hwndCPl);
@@ -55,18 +62,40 @@ CPlApplet(HWND hwndCPl, UINT uMsg, LPARAM lParam1, LPARAM lParam2)
         case CPL_INQUIRE:
             CPlInfo = (CPLINFO*)lParam2;
             CPlInfo->lData = 0;
-            CPlInfo->idIcon = IDI_CPLSYSTEM;
-            CPlInfo->idName = IDS_CPLSYSTEMNAME;
-            CPlInfo->idInfo = IDS_CPLSYSTEMDESCRIPTION;
+            if (lParam1 == APPWIZ_APPLET_FEATURES)
+            {
+                CPlInfo->idIcon = IDI_CPLFEATURES;
+                CPlInfo->idName = IDS_FEATURESNAME;
+                CPlInfo->idInfo = IDS_FEATURESDESCRIPTION;
+            }
+            else
+            {
+                CPlInfo->idIcon = IDI_CPLSYSTEM;
+                CPlInfo->idName = IDS_CPLSYSTEMNAME;
+                CPlInfo->idInfo = IDS_CPLSYSTEMDESCRIPTION;
+            }
             break;
 
         case CPL_DBLCLK:
-            ShellExecuteW(NULL,
-                          NULL,
-                          L"rapps.exe",
-                          L"/appwiz",
-                          NULL,
-                          SW_SHOWNORMAL);
+            if (lParam1 == APPWIZ_APPLET_FEATURES)
+            {
+                /* "Turn Windows features on or off" -> hosted feature manager */
+                ShellExecuteW(NULL,
+                              L"open",
+                              L"optfeatures.exe",
+                              NULL,
+                              NULL,
+                              SW_SHOWNORMAL);
+            }
+            else
+            {
+                ShellExecuteW(NULL,
+                              NULL,
+                              L"rapps.exe",
+                              L"/appwiz",
+                              NULL,
+                              SW_SHOWNORMAL);
+            }
             break;
     }
 

@@ -2,3 +2,7 @@
 #define REACTOS_STR_INTERNAL_NAME     "optfeatures"
 #define REACTOS_STR_ORIGINAL_FILENAME "optfeatures.exe"
 #include <reactos/version.rc>
+
+/* v6 comctl32: themed list/checkboxes/buttons = the native "Windows Features" look */
+#include <winuser.h>
+#include <reactos/manifest_exe.rc>
