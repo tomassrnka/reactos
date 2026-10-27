@@ -464,6 +464,27 @@ PerformTest(
                         ExFreePool(TestContext);
                     }
                 }
+                else if (TestId == 5)
+                {
+                    /* No mapped BCB to convert: *Bcb == NULL on input. There is
+                     * no mapped BCB to release, and none must be dereferenced. */
+                    Ret = FALSE;
+                    PinBcb = NULL;
+                    Offset.QuadPart = 0;
+                    KmtStartSeh();
+                    Ret = CcPinMappedData(TestFileObject, &Offset, FileSizes.FileSize.QuadPart - Offset.QuadPart, PIN_WAIT, &PinBcb);
+                    KmtEndSeh(STATUS_SUCCESS);
+
+                    if (!skip(Ret == TRUE, "CcPinMappedData failed\n"))
+                    {
+                        ok(PinBcb != NULL, "No BCB returned\n");
+                        if (PinBcb != NULL)
+                        {
+                            ok(*(PUSHORT)PinBcb == 0x2FD, "Not a BCB: %x\n", *(PUSHORT)PinBcb);
+                            CcUnpinData(PinBcb);
+                        }
+                    }
+                }
             }
         }
     }

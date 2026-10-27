@@ -496,7 +496,11 @@ CcPinMappedData (
     ++CcPinMappedDataCount;
 
     Result = CcpPinData(SharedCacheMap, FileOffset, Length, Flags, Bcb, &Buffer);
-    if (Result)
+
+    /* Drop the reference of the mapped BCB that was passed in, if there was one.
+     * PFCB follows the ERESOURCE in INTERNAL_BCB, so &iBcb->PFCB of a NULL iBcb
+     * is not NULL and CcUnpinData would dereference garbage. */
+    if (Result && iBcb != NULL)
     {
         CcUnpinData(&iBcb->PFCB);
     }
