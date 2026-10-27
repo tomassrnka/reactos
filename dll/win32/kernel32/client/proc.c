@@ -2136,6 +2136,46 @@ BasepIsImageBaseAddress(IN HANDLE hProcess,
 }
 
 /*
+ * Picks the protection WriteProcessMemory temporarily applies to the target.
+ *
+ * A range that is currently executable must stay executable while it is
+ * writable: an in-process patcher (Chromium's chrome_elf patches ntdll syscall
+ * stubs this way, as do other hook libraries) writes into pages that the
+ * calling thread is itself executing from. NtProtectVirtualMemory and
+ * NtWriteVirtualMemory run through stubs on those very ntdll pages, so
+ * dropping the execute bit even briefly makes the thread fault on the return
+ * from the restoring NtProtectVirtualMemory and leaves the page non-executable.
+ *
+ * A range that is not executable never gains execute: the image-section
+ * maximum-protection ceiling rejects that on a non-executable image subsection.
+ */
+static
+ULONG
+BasepGetWriteProtect(IN HANDLE hProcess,
+                     IN PVOID lpBaseAddress)
+{
+    MEMORY_BASIC_INFORMATION MemoryInfo;
+    NTSTATUS Status;
+
+    Status = NtQueryVirtualMemory(hProcess,
+                                  lpBaseAddress,
+                                  MemoryBasicInformation,
+                                  &MemoryInfo,
+                                  sizeof(MemoryInfo),
+                                  NULL);
+    if (NT_SUCCESS(Status) &&
+        (MemoryInfo.Protect & (PAGE_EXECUTE |
+                               PAGE_EXECUTE_READ |
+                               PAGE_EXECUTE_READWRITE |
+                               PAGE_EXECUTE_WRITECOPY)))
+    {
+        return PAGE_EXECUTE_READWRITE;
+    }
+
+    return PAGE_READWRITE;
+}
+
+/*
  * @implemented
  */
 BOOL
@@ -2159,21 +2199,36 @@ WriteProcessMemory(IN HANDLE hProcess,
     /*
      * Make the target range writable.
      *
-     * Request read+write only, never execute: WriteProcessMemory only copies
-     * data in, and gaining execute on a non-executable image subsection would
-     * be a W^X / privilege escalation that the section maximum-protection
-     * ceiling rejects (STATUS_SECTION_PROTECTION, surfacing as
-     * ERROR_INVALID_PARAMETER). The page's original protection - including any
-     * execute bit - is restored after the write, and writes to copy-on-write
-     * image segments (every non-shared PE section: .text/.data/.bss/.rdata/
-     * .idata/.tls/.rsrc) are made private by the kernel, so neither the backing
-     * file nor other mappers of the image are affected.
+     * Never gain execute: WriteProcessMemory only copies data in, and gaining
+     * execute on a non-executable image subsection would be a W^X / privilege
+     * escalation that the section maximum-protection ceiling rejects
+     * (STATUS_SECTION_PROTECTION, surfacing as ERROR_INVALID_PARAMETER). But
+     * never lose it either: a range that is executable stays executable
+     * (see BasepGetWriteProtect), because the caller may be executing from it.
+     * The page's original protection is restored after the write, and writes
+     * to copy-on-write image segments (every non-shared PE section: .text/
+     * .data/.bss/.rdata/.idata/.tls/.rsrc) are made private by the kernel, so
+     * neither the backing file nor other mappers of the image are affected.
      */
     Status = NtProtectVirtualMemory(hProcess,
                                     &Base,
                                     &RegionSize,
-                                    PAGE_READWRITE,
+                                    BasepGetWriteProtect(hProcess, lpBaseAddress),
                                     &OldValue);
+    if (Status == STATUS_SECTION_PROTECTION)
+    {
+        /*
+         * The range runs from an executable region into a non-executable image
+         * subsection that cannot gain execute: fall back to read+write only.
+         */
+        Base = lpBaseAddress;
+        RegionSize = nSize;
+        Status = NtProtectVirtualMemory(hProcess,
+                                        &Base,
+                                        &RegionSize,
+                                        PAGE_READWRITE,
+                                        &OldValue);
+    }
     if (NT_SUCCESS(Status))
     {
         /* Check if we are unprotecting */
