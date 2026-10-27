@@ -83,9 +83,15 @@ IntGetSBData(PWND pwnd, INT Bar)
    switch (Bar)
    {
       case SB_HORZ:
-         return &pSBInfo->Horz;
       case SB_VERT:
-         return &pSBInfo->Vert;
+         /* pSBInfo exists only after IntCreateScrollBars succeeded; never
+          * return a pointer computed from NULL. */
+         if (!pSBInfo)
+         {
+            ERR("IntGetSBData No pSBInfo for window %p, bar %d\n", UserHMGetHandle(pwnd), Bar);
+            return NULL;
+         }
+         return (Bar == SB_HORZ) ? &pSBInfo->Horz : &pSBInfo->Vert;
       case SB_CTL:
          if (pwnd->cbwndExtra < (sizeof(SBWND)-sizeof(WND)))
          {
