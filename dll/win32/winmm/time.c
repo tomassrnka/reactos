@@ -48,9 +48,17 @@ static    LPWINE_TIMERENTRY 	TIME_TimersList;
 static    HANDLE                TIME_hKillEvent;
 static    HANDLE                TIME_hWakeEvent;
 static    BOOL                  TIME_TimeToDie = TRUE;
-/* Counts per millisecond while a period of 5 ms or less is requested, else 0; timeBeginPeriod, timeEndPeriod and
-   timeGetTime race, so it is only read and written with interlocked 64-bit operations */
-static    volatile LONGLONG     TIME_qpcFreq;
+/* The start of KUSER_SHARED_DATA, the page every process maps at 0x7ffe0000: InterruptTime is the time since boot
+   in 100 ns units, written by the clock interrupt as High2Time, LowPart, High1Time and read in the opposite order */
+typedef struct
+{
+    ULONG TickCountLowDeprecated;
+    ULONG TickCountMultiplier;
+    volatile ULONG InterruptTimeLow;
+    volatile LONG InterruptTimeHigh1;
+    volatile LONG InterruptTimeHigh2;
+} TIME_SHARED_DATA;
+static const TIME_SHARED_DATA * const TIME_SharedData = (const TIME_SHARED_DATA *)0x7ffe0000;
 
 /*
  * Some observations on the behavior of winmm on Windows.
@@ -441,20 +449,6 @@ static void TIME_UpdateResolution(void)
         if (finest != 0 && NtSetTimerResolution(finest * 10000, TRUE, &current) >= 0)
             TIME_HeldPeriod = finest;
     }
-
-    /*  High resolution timer requested, use QPC */
-    if (finest != 0 && finest <= 5)
-    {
-        LARGE_INTEGER qpcFreq;
-
-        if (InterlockedCompareExchange64(&TIME_qpcFreq, 0, 0) == 0 && QueryPerformanceFrequency(&qpcFreq))
-            InterlockedExchange64(&TIME_qpcFreq, qpcFreq.QuadPart / 1000);
-    }
-    else
-    {
-        /*  High resolution timer no longer requested, stop using QPC */
-        InterlockedExchange64(&TIME_qpcFreq, 0);
-    }
 }
 
 /**************************************************************************
@@ -471,7 +465,6 @@ void TIME_ReleaseResolution(void)
         NtSetTimerResolution(0, FALSE, &current);
         TIME_HeldPeriod = 0;
     }
-    InterlockedExchange64(&TIME_qpcFreq, 0);
     LeaveCriticalSection(&WINMM_cs);
 }
 
@@ -537,24 +530,19 @@ MMRESULT WINAPI timeEndPeriod(UINT wPeriod)
  */
 DWORD WINAPI timeGetTime(void)
 {
-    LARGE_INTEGER perfCount;
-    LONGLONG qpcFreq;
-#if defined(COMMENTOUTPRIORTODELETING)
-    DWORD       count;
+    ULONG High, Low;
 
-    /* FIXME: releasing the win16 lock here is a temporary hack (I hope)
-     * that lets mciavi.drv run correctly
-     */
-    if (pFnReleaseThunkLock) pFnReleaseThunkLock(&count);
-    if (pFnRestoreThunkLock) pFnRestoreThunkLock(count);
-#endif
-    /* Use QPC if a high-resolution timer was requested (<= 5ms) */
-    qpcFreq = InterlockedCompareExchange64(&TIME_qpcFreq, 0, 0);
-    if (qpcFreq != 0)
+    /* As on Windows, the interrupt time is the only clock: timeBeginPeriod makes the clock interrupt, and so this
+       value, finer, but never switches to another clock. The performance counter (used while a period of 5 ms or
+       less was held) and the tick count start at different times, so every timeEndPeriod made the value jump back,
+       by seconds on a virtual machine, and Chromium, which builds TimeTicks on it, stopped on a CHECK that its
+       timestamps never decrease. */
+    do
     {
-        QueryPerformanceCounter(&perfCount);
-        return (DWORD)(perfCount.QuadPart / qpcFreq);
+        High = TIME_SharedData->InterruptTimeHigh1;
+        Low = TIME_SharedData->InterruptTimeLow;
     }
-    /* Otherwise continue using GetTickCount */
-    return GetTickCount();
+    while (High != (ULONG)TIME_SharedData->InterruptTimeHigh2);
+
+    return (DWORD)((((ULONGLONG)High << 32) | Low) / 10000);
 }
