@@ -17,6 +17,49 @@
 
 /* DEFINES *******************************************************************/
 
+/*
+ * ws2_32 is built with _WIN32_WINNT 0x502, where the Vista+ headers hide the
+ * extended address info types. Their layout is the Windows ABI, so declare
+ * them here for the Win8-era GetAddrInfoEx family.
+ */
+#if (_WIN32_WINNT < 0x0600)
+typedef struct addrinfoexA
+{
+    int ai_flags;
+    int ai_family;
+    int ai_socktype;
+    int ai_protocol;
+    size_t ai_addrlen;
+    char *ai_canonname;
+    struct sockaddr *ai_addr;
+    void *ai_blob;
+    size_t ai_bloblen;
+    LPGUID ai_provider;
+    struct addrinfoexA *ai_next;
+} ADDRINFOEXA, *PADDRINFOEXA;
+
+typedef struct addrinfoexW
+{
+    int ai_flags;
+    int ai_family;
+    int ai_socktype;
+    int ai_protocol;
+    size_t ai_addrlen;
+    PWSTR ai_canonname;
+    struct sockaddr *ai_addr;
+    void *ai_blob;
+    size_t ai_bloblen;
+    LPGUID ai_provider;
+    struct addrinfoexW *ai_next;
+} ADDRINFOEXW, *PADDRINFOEXW;
+
+typedef void
+(CALLBACK *LPLOOKUPSERVICE_COMPLETION_ROUTINE)(
+    _In_ DWORD dwError,
+    _In_ DWORD dwBytes,
+    _In_ LPWSAOVERLAPPED lpOverlapped);
+#endif
+
 #define Swap(a, b, c)       { (c) = (a); (a) = (b); (b) = (c); }
 #define FreeAddrInfoW(a)    freeaddrinfo((LPADDRINFO)a)
 
@@ -697,7 +740,7 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
                 /* Allocate memory for a copy */
                 (*pptResult)->ai_canonname = HeapAlloc(WsSockHeap,
                                                        0,
-                                                       wcslen(CanonicalName));
+                                                       (wcslen(CanonicalName) + 1) * sizeof(WCHAR));
 
                 if (!(*pptResult)->ai_canonname)
                 {
@@ -709,7 +752,7 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
                     /* Duplicate the string */
                     RtlMoveMemory((*pptResult)->ai_canonname,
                                   CanonicalName,
-                                  wcslen(CanonicalName));
+                                  (wcslen(CanonicalName) + 1) * sizeof(WCHAR));
                 }
             }
         }
@@ -1085,9 +1128,221 @@ Quickie:
 }
 
 /*
+ * Free an ADDRINFOEXA/W chain built by GetAddrInfoExW. The A and W layouts
+ * are identical apart from the ai_canonname pointer type, so one routine
+ * serves both.
+ */
+static
+VOID
+FreeAddrInfoExChain(IN PADDRINFOEXW pAddrInfoEx)
+{
+    PADDRINFOEXW Next;
+
+    while (pAddrInfoEx)
+    {
+        Next = pAddrInfoEx->ai_next;
+        if (pAddrInfoEx->ai_canonname)
+            HeapFree(WsSockHeap, 0, pAddrInfoEx->ai_canonname);
+        if (pAddrInfoEx->ai_addr)
+            HeapFree(WsSockHeap, 0, pAddrInfoEx->ai_addr);
+        if (pAddrInfoEx->ai_blob)
+            HeapFree(WsSockHeap, 0, pAddrInfoEx->ai_blob);
+        HeapFree(WsSockHeap, 0, pAddrInfoEx);
+        pAddrInfoEx = Next;
+    }
+}
+
+/*
+ * @implemented
+ */
+VOID
+WSAAPI
+FreeAddrInfoExW(IN PADDRINFOEXW pAddrInfoEx)
+{
+    FreeAddrInfoExChain(pAddrInfoEx);
+}
+
+/*
+ * @implemented
+ */
+VOID
+WSAAPI
+FreeAddrInfoEx(IN PADDRINFOEXA pAddrInfoEx)
+{
+    FreeAddrInfoExChain((PADDRINFOEXW)pAddrInfoEx);
+}
+
+/* Convert an ADDRINFOW chain (from GetAddrInfoW) into an ADDRINFOEXW chain */
+static
+INT
+AddrInfoToAddrInfoEx(IN PADDRINFOW pSrc,
+                     OUT PADDRINFOEXW *ppResult)
+{
+    PADDRINFOEXW Head = NULL, *Tail = &Head, Node;
+
+    for (; pSrc; pSrc = pSrc->ai_next)
+    {
+        Node = HeapAlloc(WsSockHeap, HEAP_ZERO_MEMORY, sizeof(*Node));
+        if (!Node)
+            goto NoMemory;
+        *Tail = Node;
+        Tail = &Node->ai_next;
+
+        Node->ai_flags = pSrc->ai_flags;
+        Node->ai_family = pSrc->ai_family;
+        Node->ai_socktype = pSrc->ai_socktype;
+        Node->ai_protocol = pSrc->ai_protocol;
+        Node->ai_addrlen = pSrc->ai_addrlen;
+
+        if (pSrc->ai_addr && pSrc->ai_addrlen)
+        {
+            Node->ai_addr = HeapAlloc(WsSockHeap, 0, pSrc->ai_addrlen);
+            if (!Node->ai_addr)
+                goto NoMemory;
+            RtlCopyMemory(Node->ai_addr, pSrc->ai_addr, pSrc->ai_addrlen);
+        }
+        if (pSrc->ai_canonname)
+        {
+            SIZE_T Size = (wcslen(pSrc->ai_canonname) + 1) * sizeof(WCHAR);
+            Node->ai_canonname = HeapAlloc(WsSockHeap, 0, Size);
+            if (!Node->ai_canonname)
+                goto NoMemory;
+            RtlCopyMemory(Node->ai_canonname, pSrc->ai_canonname, Size);
+        }
+    }
+
+    *ppResult = Head;
+    return ERROR_SUCCESS;
+
+NoMemory:
+    FreeAddrInfoExChain(Head);
+    return WSA_NOT_ENOUGH_MEMORY;
+}
+
+/* APC trampoline: run a GetAddrInfoEx completion routine in the caller's thread */
+static
+VOID
+NTAPI
+GetAddrInfoExCompletionApc(IN ULONG_PTR Parameter)
+{
+    LPWSAOVERLAPPED Overlapped = (LPWSAOVERLAPPED)Parameter;
+    LPLOOKUPSERVICE_COMPLETION_ROUTINE Routine;
+
+    /* The routine pointer was parked in the (otherwise unused) InternalHigh */
+    Routine = (LPLOOKUPSERVICE_COMPLETION_ROUTINE)Overlapped->InternalHigh;
+    Overlapped->InternalHigh = 0;
+    Routine((DWORD)Overlapped->Internal, 0, Overlapped);
+}
+
+/*
  * @implemented
  *
- * GetAddrInfoExA and GetAddrInfoExW are stubs and start no asynchronous lookup, so no handle names a pending
+ * The lookup itself always runs synchronously on the calling thread (it is
+ * backed by GetAddrInfoW, which is IPv4 only here). The asynchronous calling
+ * convention is honoured on top of that: with an OVERLAPPED the call returns
+ * WSA_IO_PENDING, *ppResult is already filled, and completion is signalled
+ * through the OVERLAPPED's event or by queuing the completion routine as an
+ * APC on the calling thread (it runs at the next alertable wait, as on
+ * Windows). The result code is stored in Overlapped->Internal.
+ * TODO: a truly asynchronous lookup (worker thread + cancellation through
+ * lpHandle). *lpHandle is set to NULL, which GetAddrInfoExCancel rejects with
+ * WSA_INVALID_HANDLE since nothing is ever left pending.
+ */
+INT
+WSAAPI
+GetAddrInfoExW(IN PCWSTR pName,
+               IN PCWSTR pServiceName,
+               IN DWORD dwNameSpace,
+               IN LPGUID lpNspId,
+               IN const ADDRINFOEXW *hints,
+               OUT PADDRINFOEXW *ppResult,
+               IN struct timeval *timeout,
+               IN LPOVERLAPPED lpOverlapped,
+               IN LPLOOKUPSERVICE_COMPLETION_ROUTINE lpCompletionRoutine,
+               OUT LPHANDLE lpHandle)
+{
+    ADDRINFOW Hints, *pHints = NULL, *pResult = NULL;
+    INT Error;
+
+    UNREFERENCED_PARAMETER(lpNspId);
+    UNREFERENCED_PARAMETER(timeout);
+
+    if (lpHandle)
+        *lpHandle = NULL;
+
+    if (!ppResult)
+    {
+        SetLastError(WSAEINVAL);
+        return WSAEINVAL;
+    }
+    *ppResult = NULL;
+
+    /* Only the DNS-capable namespaces are served */
+    if (dwNameSpace != NS_ALL && dwNameSpace != NS_DNS)
+    {
+        SetLastError(WSAEINVAL);
+        return WSAEINVAL;
+    }
+
+    /* A completion routine is only meaningful with an OVERLAPPED */
+    if (lpCompletionRoutine && !lpOverlapped)
+    {
+        SetLastError(WSAEINVAL);
+        return WSAEINVAL;
+    }
+
+    if (hints)
+    {
+        RtlZeroMemory(&Hints, sizeof(Hints));
+        Hints.ai_flags = hints->ai_flags;
+        Hints.ai_family = hints->ai_family;
+        Hints.ai_socktype = hints->ai_socktype;
+        Hints.ai_protocol = hints->ai_protocol;
+        pHints = &Hints;
+    }
+
+    Error = GetAddrInfoW(pName, pServiceName, pHints, &pResult);
+    if (Error == ERROR_SUCCESS)
+    {
+        Error = AddrInfoToAddrInfoEx(pResult, ppResult);
+        if (pResult)
+            FreeAddrInfoW(pResult);
+    }
+
+    if (!lpOverlapped)
+    {
+        SetLastError(Error);
+        return Error;
+    }
+
+    /* Asynchronous convention, completed inline */
+    lpOverlapped->Internal = Error;
+    lpOverlapped->InternalHigh = 0;
+    if (lpCompletionRoutine)
+    {
+        lpOverlapped->InternalHigh = (ULONG_PTR)lpCompletionRoutine;
+        if (!QueueUserAPC(GetAddrInfoExCompletionApc,
+                          GetCurrentThread(),
+                          (ULONG_PTR)lpOverlapped))
+        {
+            lpOverlapped->InternalHigh = 0;
+            SetLastError(WSA_NOT_ENOUGH_MEMORY);
+            return WSA_NOT_ENOUGH_MEMORY;
+        }
+    }
+    else if (lpOverlapped->hEvent)
+    {
+        SetEvent((HANDLE)((ULONG_PTR)lpOverlapped->hEvent & ~(ULONG_PTR)1));
+    }
+
+    SetLastError(WSA_IO_PENDING);
+    return WSA_IO_PENDING;
+}
+
+/*
+ * @implemented
+ *
+ * GetAddrInfoExW completes every lookup inline, so no handle names a pending
  * one. Windows 10 (measured) returns WSA_INVALID_HANDLE for it without touching the last error.
  */
 INT
