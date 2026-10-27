@@ -3459,6 +3459,13 @@ WSPSetSockOpt(
         return SOCKET_ERROR;
     }
 
+    /* A negative length would pass every "optlen < sizeof(...)" check below,
+     * which compares against an unsigned size, and the value would be read. */
+    if (optlen < 0)
+    {
+        if (lpErrno) *lpErrno = WSAEFAULT;
+        return SOCKET_ERROR;
+    }
 
     /* FIXME: We should handle some more cases here */
     if (level == SOL_SOCKET)
