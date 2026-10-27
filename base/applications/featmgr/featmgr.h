@@ -47,6 +47,7 @@ typedef struct _FM_FEATURE
     WCHAR   ManifestPath[MAX_PATH];
     FM_TIER Tier;
     FM_STATE State;
+    BOOL    Removable;           /* Removable=0 in catalog: base component, disable refused */
     BOOL    PayloadAvailable;    /* every declared payload source present on disk */
 } FM_FEATURE;
 

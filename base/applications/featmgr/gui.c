@@ -61,7 +61,7 @@ static void UpdateButtons(void)
     if (i >= 0 && i < g_count)
     {
         if (g_arr[i].State == FM_STATE_ENABLED)
-            canRemove = TRUE;
+            canRemove = g_arr[i].Removable;
         else if (g_arr[i].PayloadAvailable)
             canInstall = TRUE;
         SetWindowTextW(g_hDesc, g_arr[i].Description);
