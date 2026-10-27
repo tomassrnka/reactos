@@ -1,7 +1,7 @@
 /*
  * PROJECT:     ReactOS API tests
  * LICENSE:     GPL-2.0+ (https://spdx.org/licenses/GPL-2.0+)
- * PURPOSE:     timeGetTime while other threads call timeBeginPeriod and timeEndPeriod
+ * PURPOSE:     timeGetTime while other threads call timeBeginPeriod and timeEndPeriod, and its clock
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -20,18 +20,29 @@
 
 static volatile LONG g_Stop;
 static volatile LONG g_Started;
-static volatile LONG g_DivZero, g_OtherFaults, g_Calls;
+static volatile LONG g_DivZero, g_OtherFaults, g_Calls, g_Backwards;
+static volatile LONG g_MaxBack;
 
 static DWORD WINAPI ReaderThread(LPVOID Parameter)
 {
     LONG Calls = 0;
+    DWORD Last, Now;
 
     InterlockedIncrement(&g_Started);
+    Last = timeGetTime();
     while (!g_Stop)
     {
         _SEH2_TRY
         {
-            timeGetTime();
+            /* One thread's readings never decrease, whatever period another thread holds */
+            Now = timeGetTime();
+            if ((LONG)(Now - Last) < 0)
+            {
+                InterlockedIncrement(&g_Backwards);
+                if ((LONG)(Last - Now) > g_MaxBack)
+                    InterlockedExchange(&g_MaxBack, (LONG)(Last - Now));
+            }
+            Last = Now;
             Calls++;
         }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
@@ -57,6 +68,49 @@ static VOID TestIncreases(VOID)
     ok(After - Before >= 150, "timeGetTime advanced by %lu ms during a 200 ms sleep\n", After - Before);
 }
 
+/* Windows reads timeGetTime from the interrupt time, the clock GetTickCount follows at the coarser tick, so the
+   two agree to about a tick whether or not a period is held. A timeGetTime that switches to the performance
+   counter while a period is held runs seconds away from the tick count, and jumps back on timeEndPeriod. */
+static VOID TestSameClockAsTickCount(PCSTR Mode)
+{
+    DWORD Start = GetTickCount(), Tgt, Gtc;
+    LONG Diff, MinDiff = MAXLONG, MaxDiff = MINLONG;
+
+    do
+    {
+        Tgt = timeGetTime();
+        Gtc = GetTickCount();
+        Diff = (LONG)(Tgt - Gtc);
+        MinDiff = min(MinDiff, Diff);
+        MaxDiff = max(MaxDiff, Diff);
+    } while (GetTickCount() - Start < 200);
+
+    ok(MinDiff >= -100 && MaxDiff <= 100, "%s: timeGetTime - GetTickCount ranged over [%ld, %ld] ms\n",
+       Mode, MinDiff, MaxDiff);
+}
+
+/* Ending a period never moves the clock back: read it just before and just after each timeEndPeriod */
+static VOID TestMonotonicAcrossEnd(VOID)
+{
+    DWORD Before, After, Worst = 0;
+    ULONG i, Back = 0;
+
+    for (i = 0; i < 200; i++)
+    {
+        ok(timeBeginPeriod(1) == TIMERR_NOERROR, "timeBeginPeriod(1) failed\n");
+        Sleep(1);
+        Before = timeGetTime();
+        ok(timeEndPeriod(1) == TIMERR_NOERROR, "timeEndPeriod(1) failed\n");
+        After = timeGetTime();
+        if ((LONG)(After - Before) < 0)
+        {
+            Back++;
+            Worst = max(Worst, Before - After);
+        }
+    }
+    ok(Back == 0, "timeGetTime went back across timeEndPeriod(1) %lu times of 200, by up to %lu ms\n", Back, Worst);
+}
+
 START_TEST(timeGetTime)
 {
     HANDLE hThreads[MAX_READERS];
@@ -70,6 +124,8 @@ START_TEST(timeGetTime)
 
     /* Plain tick mode, before anybody asked for a period */
     TestIncreases();
+    TestSameClockAsTickCount("no period");
+    TestMonotonicAcrossEnd();
 
     for (i = 0; i < Count; i++)
     {
@@ -119,10 +175,13 @@ START_TEST(timeGetTime)
     ok(g_Calls >= 1000, "The readers made only %ld calls\n", g_Calls);
     ok(g_DivZero == 0, "timeGetTime divided by zero %ld times\n", g_DivZero);
     ok(g_OtherFaults == 0, "timeGetTime raised %ld other exceptions\n", g_OtherFaults);
+    ok(g_Backwards == 0, "timeGetTime went back %ld times in one thread, by up to %ld ms\n", g_Backwards, g_MaxBack);
 
     /* High resolution mode, as timeBeginPeriod(1) selects */
     ok(timeBeginPeriod(1) == TIMERR_NOERROR, "timeBeginPeriod(1) failed\n");
     TestIncreases();
+    TestSameClockAsTickCount("period 1");
     ok(timeEndPeriod(1) == TIMERR_NOERROR, "timeEndPeriod(1) failed\n");
     TestIncreases();
+    TestSameClockAsTickCount("period ended");
 }
