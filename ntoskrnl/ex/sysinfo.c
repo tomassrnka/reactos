@@ -890,6 +890,13 @@ ExpQuerySystemProcessInformation(
 {
     const ULONG ThreadInfoSize = Extended ? sizeof(SYSTEM_EXTENDED_THREAD_INFORMATION) : sizeof(SYSTEM_THREAD_INFORMATION);
     PSYSTEM_PROCESS_INFORMATION SpiCurrent;
+    /* Tracks the last entry actually written to the buffer, so that the
+     * terminating NextEntryOffset = 0 is applied to the real last entry even
+     * when the enumeration ends on a skipped (zombie/exiting) process. Without
+     * this, a trailing zombie leaves the real last entry's NextEntryOffset
+     * pointing at offset == ReturnLength, and a consumer that asserts
+     * offset < ReturnLength (e.g. Firefox ProcInfo_win.cpp) overruns/crashes. */
+    PSYSTEM_PROCESS_INFORMATION SpiLast = NULL;
     PSYSTEM_THREAD_INFORMATION ThreadInfo;
     PSYSTEM_EXTENDED_THREAD_INFORMATION ThreadInfoEx;
     _SEH2_VOLATILE PEPROCESS Process = NULL;
@@ -1030,6 +1037,7 @@ ExpQuerySystemProcessInformation(
             if (!Overflow)
             {
                 SpiCurrent->NextEntryOffset = CurrentSize + ImageNameMaximumLength; // relative offset to the beginning of the next structure
+                SpiLast = SpiCurrent; // remember the last entry actually written
                 SpiCurrent->NumberOfThreads = ThreadsCount;
                 SpiCurrent->CreateTime = Process->CreateTime;
                 /* The cycles of the process' threads, as of their last context switch */
@@ -1166,8 +1174,13 @@ Skip:
             ThreadsCount = 0;
             if ((Process == SystemProcess) || (Process == NULL))
             {
-                if (!Overflow)
-                    SpiCurrent->NextEntryOffset = 0;
+                /* Terminate the chain on the last entry that was actually
+                 * written, not on SpiCurrent: when the enumeration ends on a
+                 * skipped (zombie) process, SpiCurrent points at an un-written
+                 * slot and the real last entry would otherwise keep a non-zero
+                 * NextEntryOffset pointing at offset == *ReqSize. */
+                if (!Overflow && SpiLast != NULL)
+                    SpiLast->NextEntryOffset = 0;
                 break;
             }
             else
