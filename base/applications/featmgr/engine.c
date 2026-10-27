@@ -196,6 +196,7 @@ static BOOL LoadManifest(LPCWSTR path, FM_FEATURE *f)
     GetPrivateProfileStringW(L"Feature", L"Dependencies", L"", f->Dependencies, FM_MAX_DEPS, path);
     GetPrivateProfileStringW(L"Feature", L"Tier", L"os", tmp, FM_MAX_DESC, path);
     f->Tier = ParseTier(tmp);
+    f->Removable = GetPrivateProfileIntW(L"Feature", L"Removable", 1, path) != 0;
     return TRUE;
 }
 
@@ -850,6 +851,14 @@ static void RevertState(HKEY state, FILE *log)
 HRESULT FmDisable(LPCWSTR id, FILE *log)
 {
     HKEY state = NULL;
+    FM_FEATURE feat;
+
+    /* Base components (catalog Removable=0) are part of the image: refuse. */
+    if (FmFindFeature(id, &feat) && !feat.Removable)
+    {
+        LOGF(log, L"error: '%s' is a base component of the system and cannot be disabled or removed\n", id);
+        return HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);
+    }
 
     if (OpenStateKey(id, FALSE, KEY_READ | KEY_WRITE, &state) != ERROR_SUCCESS
         || FmGetState(id) != FM_STATE_ENABLED)
