@@ -20,3 +20,15 @@ BOOL WINAPI GetNamedPipeClientProcessId( HANDLE pipe, ULONG *id )
                                           FSCTL_PIPE_GET_CONNECTION_ATTRIBUTE, (void *)"ClientProcessId",
                                           sizeof("ClientProcessId"), id, sizeof(*id) ));
 }
+
+/***********************************************************************
+ *           GetNamedPipeServerProcessId  (KERNEL32.@)
+ */
+BOOL WINAPI GetNamedPipeServerProcessId( HANDLE pipe, ULONG *id )
+{
+    IO_STATUS_BLOCK iosb;
+
+    return set_ntstatus( NtFsControlFile( pipe, NULL, NULL, NULL, &iosb,
+                                          FSCTL_PIPE_GET_CONNECTION_ATTRIBUTE, (void *)"ServerProcessId",
+                                          sizeof("ServerProcessId"), id, sizeof(*id) ));
+}

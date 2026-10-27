@@ -629,6 +629,8 @@ NpCreateExistingNamedPipe(IN PNP_FCB Fcb,
                                   &Ccb);
     if (!NT_SUCCESS(IoStatus.Status)) return IoStatus;
 
+    Ccb->ServerProcessId = PsGetProcessId(Process);
+
     IoStatus.Status = NpCancelWaiter(&NpVcb->WaitQueue,
                                      &Fcb->FullName,
                                      FALSE,
@@ -735,6 +737,8 @@ NpCreateNewNamedPipe(IN PNP_DCB Dcb,
         NpDeleteFcb(Fcb, List);
         goto Quickie;
     }
+
+    Ccb->ServerProcessId = PsGetProcessId(Process);
 
     SecurityContext = &AccessState->SubjectSecurityContext;
     SeLockSubjectContext(SecurityContext);
