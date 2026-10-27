@@ -1,0 +1,7 @@
+[Section]
+Name = Dep App
+Version = 2.0
+Description = Depends on testlib (present) and on a package absent from the DB (dropped from the catalog graph).
+Category = 12
+Dependencies = testlib|nosuchpkg*x64
+URLDownload = https://example.invalid/depapp.exe

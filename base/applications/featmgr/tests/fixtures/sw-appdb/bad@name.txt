@@ -1,0 +1,3 @@
+[Section]
+Name = Bad Package Name
+URLDownload = https://example.invalid/bad.exe

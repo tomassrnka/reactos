@@ -34,6 +34,14 @@ BOOL FmGetCatalogDir(LPWSTR buf, DWORD cch)
     return SUCCEEDED(StringCchPrintfW(buf, cch, L"%s\\Catalog", root));
 }
 
+BOOL FmGetSoftwareCatalogDir(LPWSTR buf, DWORD cch)
+{
+    WCHAR cat[MAX_PATH];
+    if (!FmGetCatalogDir(cat, MAX_PATH))
+        return FALSE;
+    return SUCCEEDED(StringCchPrintfW(buf, cch, L"%s\\Software", cat));
+}
+
 BOOL FmGetPayloadDir(LPCWSTR id, LPWSTR buf, DWORD cch)
 {
     WCHAR root[MAX_PATH];
@@ -197,7 +205,83 @@ static BOOL LoadManifest(LPCWSTR path, FM_FEATURE *f)
     GetPrivateProfileStringW(L"Feature", L"Tier", L"os", tmp, FM_MAX_DESC, path);
     f->Tier = ParseTier(tmp);
     f->Removable = GetPrivateProfileIntW(L"Feature", L"Removable", 1, path) != 0;
+    /* [Install] Provider= selects the software-tier install path. A software-tier
+     * manifest without it keeps the OS-tier mechanics ([Payload]/[Registry]/[Service]
+     * applied from a staged payload), so older/hand-written manifests still work. */
+    if (f->Tier == FM_TIER_SOFTWARE)
+        GetPrivateProfileStringW(L"Install", L"Provider", L"", f->Provider, ARRAYSIZE(f->Provider), path);
     return TRUE;
+}
+
+/* ---- software tier: command expansion + availability -------------------- */
+
+/* Expand %PAYLOAD% (the feature's staged payload dir) and %env% variables. */
+static void ExpandCmd(LPCWSTR id, LPCWSTR raw, LPWSTR out, DWORD cch)
+{
+    WCHAR tmp[2048], payload[MAX_PATH];
+    LPCWSTR p = raw;
+    DWORD n = 0;
+    FmGetPayloadDir(id, payload, MAX_PATH);
+    while (*p && n + 1 < ARRAYSIZE(tmp))
+    {
+        if (!_wcsnicmp(p, L"%PAYLOAD%", 9))
+        {
+            size_t l = wcslen(payload);
+            if (n + l + 1 >= ARRAYSIZE(tmp)) break;
+            memcpy(tmp + n, payload, l * sizeof(WCHAR));
+            n += (DWORD)l;
+            p += 9;
+        }
+        else
+            tmp[n++] = *p++;
+    }
+    tmp[n] = L'\0';
+    if (!ExpandEnvironmentStringsW(tmp, out, cch))
+        StringCchCopyW(out, cch, tmp);
+}
+
+static BOOL IsAbsPath(LPCWSTR s)
+{
+    return (s[0] && s[1] == L':') || (s[0] == L'\\');
+}
+
+static BOOL IsScript(LPCWSTR path)
+{
+    LPCWSTR ext = PathFindExtensionW(path);
+    return !_wcsicmp(ext, L".cmd") || !_wcsicmp(ext, L".bat");
+}
+
+/* Full path of the command-provider installer ([Install] Installer=). */
+static BOOL InstallerPath(const FM_FEATURE *f, LPWSTR out, DWORD cch)
+{
+    WCHAR raw[MAX_PATH], exp[MAX_PATH];
+    GetPrivateProfileStringW(L"Install", L"Installer", L"", raw, MAX_PATH, f->ManifestPath);
+    if (!raw[0]) return FALSE;
+    ExpandCmd(f->Id, raw, exp, MAX_PATH);
+    if (IsAbsPath(exp))
+        return SUCCEEDED(StringCchCopyW(out, cch, exp));
+    FmGetPayloadDir(f->Id, out, cch);
+    return SUCCEEDED(StringCchCatW(out, cch, L"\\")) && SUCCEEDED(StringCchCatW(out, cch, exp));
+}
+
+static BOOL RappsExePath(LPWSTR out, DWORD cch)
+{
+    WCHAR sys[MAX_PATH];
+    if (!GetSystemDirectoryW(sys, MAX_PATH)) return FALSE;
+    return SUCCEEDED(StringCchPrintfW(out, cch, L"%s\\rapps.exe", sys));
+}
+
+/* Can the install be attempted? rapps provider: rapps.exe present (the download
+ * happens at install time, so there is no staged payload to check). command
+ * provider: the installer file is staged. */
+static BOOL SoftwareAvailable(const FM_FEATURE *f)
+{
+    WCHAR p[MAX_PATH];
+    if (!_wcsicmp(f->Provider, L"command"))
+        return InstallerPath(f, p, MAX_PATH) && GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES;
+    if (_wcsicmp(f->Provider, L"rapps"))
+        return FALSE;                                   /* unknown provider */
+    return RappsExePath(p, MAX_PATH) && GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES;
 }
 
 /* Does every declared [Payload] source file exist on disk? */
@@ -206,6 +290,9 @@ static BOOL PayloadPresent(const FM_FEATURE *f)
     WCHAR payloadDir[MAX_PATH], src[MAX_PATH];
     WCHAR *sect, *p, *sep;
     BOOL ok = TRUE;
+
+    if (f->Tier == FM_TIER_SOFTWARE && f->Provider[0])
+        return SoftwareAvailable(f);
 
     sect = ReadSection(f->ManifestPath, L"Payload");
     if (!sect) return TRUE; /* no payload section => registry-only, always available */
@@ -256,42 +343,53 @@ static void ReadStateExtras(FM_FEATURE *f)
 
 /* ---- enumeration --------------------------------------------------------- */
 
-int FmEnumFeatures(FM_FEATURE **outArr)
+/* Append every valid manifest in dir (*.ini) to the growing array. */
+static void EnumDir(LPCWSTR dir, FM_FEATURE **parr, int *pcount, int *pcap)
 {
-    WCHAR catDir[MAX_PATH], glob[MAX_PATH], path[MAX_PATH];
+    WCHAR glob[MAX_PATH], path[MAX_PATH];
     WIN32_FIND_DATAW fd;
     HANDLE h;
-    FM_FEATURE *arr = NULL;
-    int count = 0, cap = 0;
 
-    *outArr = NULL;
-    if (!FmGetCatalogDir(catDir, MAX_PATH)) return 0;
-    StringCchPrintfW(glob, MAX_PATH, L"%s\\*.ini", catDir);
-
+    StringCchPrintfW(glob, MAX_PATH, L"%s\\*.ini", dir);
     h = FindFirstFileW(glob, &fd);
-    if (h == INVALID_HANDLE_VALUE) return 0;
+    if (h == INVALID_HANDLE_VALUE) return;
     do
     {
         FM_FEATURE f;
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        StringCchPrintfW(path, MAX_PATH, L"%s\\%s", catDir, fd.cFileName);
+        StringCchPrintfW(path, MAX_PATH, L"%s\\%s", dir, fd.cFileName);
         if (!LoadManifest(path, &f)) continue;
         f.State = FmGetState(f.Id);
         f.PayloadAvailable = PayloadPresent(&f);
         ReadStateExtras(&f);
 
-        if (count == cap)
+        if (*pcount == *pcap)
         {
-            int nc = cap ? cap * 2 : 8;
-            FM_FEATURE *na = (FM_FEATURE *)HeapReAlloc(GetProcessHeap(), 0, arr,
-                                                       nc * sizeof(FM_FEATURE));
-            if (!arr) na = (FM_FEATURE *)HeapAlloc(GetProcessHeap(), 0, nc * sizeof(FM_FEATURE));
+            int nc = *pcap ? *pcap * 2 : 8;
+            FM_FEATURE *na = *parr
+                ? (FM_FEATURE *)HeapReAlloc(GetProcessHeap(), 0, *parr, nc * sizeof(FM_FEATURE))
+                : (FM_FEATURE *)HeapAlloc(GetProcessHeap(), 0, nc * sizeof(FM_FEATURE));
             if (!na) break;
-            arr = na; cap = nc;
+            *parr = na; *pcap = nc;
         }
-        arr[count++] = f;
+        (*parr)[(*pcount)++] = f;
     } while (FindNextFileW(h, &fd));
     FindClose(h);
+}
+
+/* Catalog = in-image OS manifests (Catalog\*.ini) + the generated software
+ * cache (Catalog\Software\*.ini, written on demand by FmImportRapps). */
+int FmEnumFeatures(FM_FEATURE **outArr)
+{
+    WCHAR catDir[MAX_PATH], swDir[MAX_PATH];
+    FM_FEATURE *arr = NULL;
+    int count = 0, cap = 0;
+
+    *outArr = NULL;
+    if (!FmGetCatalogDir(catDir, MAX_PATH)) return 0;
+    EnumDir(catDir, &arr, &count, &cap);
+    if (FmGetSoftwareCatalogDir(swDir, MAX_PATH))
+        EnumDir(swDir, &arr, &count, &cap);
 
     *outArr = arr;
     return count;
@@ -307,6 +405,27 @@ BOOL FmFindFeature(LPCWSTR id, FM_FEATURE *out)
     FM_FEATURE *arr;
     int n, i;
     BOOL found = FALSE;
+    WCHAR dir[MAX_PATH], path[MAX_PATH];
+
+    /* fast path: manifest file named after the id (the software cache can hold
+     * hundreds of entries, do not parse them all for a single lookup) */
+    if (id[0] && !wcspbrk(id, L"\\/:*?\"<>|"))
+    {
+        int k;
+        for (k = 0; k < 2; k++)
+        {
+            if (!(k ? FmGetSoftwareCatalogDir(dir, MAX_PATH) : FmGetCatalogDir(dir, MAX_PATH))) continue;
+            StringCchPrintfW(path, MAX_PATH, L"%s\\%s.ini", dir, id);
+            if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) continue;
+            if (LoadManifest(path, out) && !_wcsicmp(out->Id, id))
+            {
+                out->State = FmGetState(out->Id);
+                out->PayloadAvailable = PayloadPresent(out);
+                ReadStateExtras(out);
+                return TRUE;
+            }
+        }
+    }
     n = FmEnumFeatures(&arr);
     for (i = 0; i < n; i++)
     {
@@ -663,6 +782,142 @@ static BOOL PendingRebootActive(HKEY state)
     return active;
 }
 
+/* ---- software tier: run installer / uninstaller ------------------------- */
+
+#define SW_RUN_TIMEOUT_MS (60u * 60u * 1000u)   /* download + install of a big app */
+
+/* Run a command line, wait, return its exit code in *code. A run that exceeds the
+ * timeout is terminated (exact process handle) and reported as ERROR_TIMEOUT. */
+static HRESULT RunAndWait(LPCWSTR cmdline, DWORD timeoutMs, DWORD *code, FILE *log)
+{
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    WCHAR cl[2048];
+    DWORD w;
+
+    *code = (DWORD)-1;
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    StringCchCopyW(cl, ARRAYSIZE(cl), cmdline);   /* CreateProcessW may modify its buffer */
+    LOGF(log, L"  run: %s\n", cl);
+    if (!CreateProcessW(NULL, cl, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
+    {
+        LOGF(log, L"  ERROR: cannot start command (%lu)\n", GetLastError());
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
+    CloseHandle(pi.hThread);
+    w = WaitForSingleObject(pi.hProcess, timeoutMs);
+    if (w == WAIT_TIMEOUT)
+    {
+        LOGF(log, L"  ERROR: command still running after %lu s; terminating pid %lu\n",
+             timeoutMs / 1000, pi.dwProcessId);
+        TerminateProcess(pi.hProcess, 1);
+        CloseHandle(pi.hProcess);
+        return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+    }
+    GetExitCodeProcess(pi.hProcess, code);
+    CloseHandle(pi.hProcess);
+    LOGF(log, L"  exit code: %lu\n", *code);
+    return S_OK;
+}
+
+/* Build the install + uninstall command lines for a software feature into
+ * inst/uninst (cch each). The uninstall line is recorded in the state key at
+ * install time so disable stays data-driven (same as the OS tier's undo lists). */
+static HRESULT BuildSoftwareCommands(const FM_FEATURE *f, LPWSTR inst, LPWSTR uninst, DWORD cch, FILE *log)
+{
+    WCHAR pkg[128], rapps[MAX_PATH];
+
+    inst[0] = uninst[0] = L'\0';
+    if (!_wcsicmp(f->Provider, L"command"))
+    {
+        WCHAR path[MAX_PATH], args[512], raw[1024];
+        if (!InstallerPath(f, path, MAX_PATH))
+        {
+            LOGF(log, L"error: '%s' has no [Install] Installer\n", f->Id);
+            return E_INVALIDARG;
+        }
+        GetPrivateProfileStringW(L"Install", L"SilentArgs", L"", raw, ARRAYSIZE(raw), f->ManifestPath);
+        ExpandCmd(f->Id, raw, args, ARRAYSIZE(args));
+        if (IsScript(path))
+            StringCchPrintfW(inst, cch, L"cmd.exe /c \"\"%s\" %s\"", path, args);
+        else
+            StringCchPrintfW(inst, cch, L"\"%s\" %s", path, args);
+        GetPrivateProfileStringW(L"Install", L"UninstallCmd", L"", raw, ARRAYSIZE(raw), f->ManifestPath);
+        if (raw[0])
+        {
+            ExpandCmd(f->Id, raw, args, ARRAYSIZE(args));
+            StringCchCopyW(uninst, cch, args);
+        }
+        return S_OK;
+    }
+
+    if (_wcsicmp(f->Provider, L"rapps"))
+    {
+        LOGF(log, L"error: '%s' has unknown install provider '%s'\n", f->Id, f->Provider);
+        return E_INVALIDARG;
+    }
+    /* rapps provider: pkg name from [Rapps] Pkg */
+    GetPrivateProfileStringW(L"Rapps", L"Pkg", L"", pkg, ARRAYSIZE(pkg), f->ManifestPath);
+    if (!pkg[0] || wcspbrk(pkg, L"\"\r\n"))
+    {
+        LOGF(log, L"error: '%s' has no valid [Rapps] Pkg\n", f->Id);
+        return E_INVALIDARG;
+    }
+    if (!RappsExePath(rapps, MAX_PATH)) return E_FAIL;
+    StringCchPrintfW(inst, cch, L"\"%s\" /install /S \"%s\"", rapps, pkg);
+    StringCchPrintfW(uninst, cch, L"\"%s\" /uninstall /S \"%s\"", rapps, pkg);
+    return S_OK;
+}
+
+/* Download + install. Returns S_OK only if the installer exited 0; on success the
+ * uninstall command line is recorded in the state key. */
+static HRESULT SoftwareInstall(const FM_FEATURE *f, HKEY state, FILE *log)
+{
+    WCHAR inst[2048], uninst[2048];
+    DWORD code;
+    HRESULT hr;
+
+    hr = BuildSoftwareCommands(f, inst, uninst, ARRAYSIZE(inst), log);
+    if (FAILED(hr)) return hr;
+    LOGF(log, L"  software install via '%s' provider\n", f->Provider);
+    hr = RunAndWait(inst, SW_RUN_TIMEOUT_MS, &code, log);
+    if (FAILED(hr)) return hr;
+    if (code != 0)
+    {
+        LOGF(log, L"error: installer for '%s' failed (exit code %lu)\n", f->Id, code);
+        return HRESULT_FROM_WIN32(ERROR_INSTALL_FAILURE);
+    }
+    SetStateSz(state, L"Provider", f->Provider);
+    SetStateSz(state, L"Uninstall", uninst);
+    return S_OK;
+}
+
+/* Run the uninstall command recorded at install time. S_OK if there is none. */
+static HRESULT SoftwareUninstall(HKEY state, FILE *log)
+{
+    WCHAR cmd[2048];
+    DWORD cb = sizeof(cmd) - sizeof(WCHAR), type = 0, code;
+    HRESULT hr;
+
+    cmd[0] = L'\0';
+    if (RegQueryValueExW(state, L"Uninstall", NULL, &type, (LPBYTE)cmd, &cb) != ERROR_SUCCESS
+        || type != REG_SZ || !cmd[0])
+    {
+        LOGF(log, L"  note: no uninstall command recorded; nothing to run\n");
+        return S_OK;
+    }
+    cmd[ARRAYSIZE(cmd) - 1] = L'\0';
+    hr = RunAndWait(cmd, SW_RUN_TIMEOUT_MS, &code, log);
+    if (FAILED(hr)) return hr;
+    if (code != 0)
+    {
+        LOGF(log, L"error: uninstaller failed (exit code %lu)\n", code);
+        return HRESULT_FROM_WIN32(ERROR_INSTALL_FAILURE);
+    }
+    return S_OK;
+}
+
 /* ---- enable / disable ---------------------------------------------------- */
 
 static HRESULT EnableDeps(const FM_FEATURE *f, FILE *log)
@@ -705,8 +960,12 @@ HRESULT FmEnable(LPCWSTR id, FILE *log)
     }
     if (!f.PayloadAvailable)
     {
-        LOGF(log, L"error: payload for '%s' is not staged on this system "
-                  L"(catalog entry present, payload deferred)\n", id);
+        if (f.Tier == FM_TIER_SOFTWARE && f.Provider[0])
+            LOGF(log, L"error: installer for '%s' is not available on this system "
+                      L"(provider '%s': rapps.exe or the staged installer is missing)\n", id, f.Provider);
+        else
+            LOGF(log, L"error: payload for '%s' is not staged on this system "
+                      L"(catalog entry present, payload deferred)\n", id);
         return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
     }
 
@@ -729,6 +988,33 @@ HRESULT FmEnable(LPCWSTR id, FILE *log)
 
     if (OpenStateKey(id, TRUE, KEY_READ | KEY_WRITE, &state) != ERROR_SUCCESS)
         return E_FAIL;
+
+    if (f.Tier == FM_TIER_SOFTWARE && f.Provider[0])
+    {
+        /* install != enable: fetch + run the installer instead of placing in-image bits */
+        hr = SoftwareInstall(&f, state, log);
+        if (FAILED(hr))
+        {
+            WCHAR sub[512];
+            LOGF(log, L"install FAILED (0x%08lx)\n", hr);
+            RegCloseKey(state);
+            if (f.State == FM_STATE_NOT_INSTALLED)  /* drop the empty record we just created */
+            {
+                StringCchPrintfW(sub, 512, L"%s\\%s", STATE_KEY, id);
+                RegDeleteKeyW(HKEY_LOCAL_MACHINE, sub);
+            }
+            return hr;
+        }
+        UtcNow(now, 32);
+        SetStateSz(state, L"State", L"Enabled");
+        SetStateSz(state, L"Name", f.Name);
+        SetStateSz(state, L"Version", f.Version);
+        SetStateSz(state, L"Tier", FmTierStr(f.Tier));
+        SetStateSz(state, L"InstallDate", now);
+        LOGF(log, L"'%s' installed.\n", id);
+        RegCloseKey(state);
+        return S_OK;
+    }
 
     /* fresh undo lists for this activation */
     RegDeleteValueW(state, L"Files");
@@ -875,7 +1161,7 @@ static void RevertState(HKEY state, FILE *log)
     RegDeleteValueW(state, L"Services");
 }
 
-static HRESULT DisableOne(LPCWSTR id, FILE *log)
+static HRESULT DisableOne(LPCWSTR id, DWORD flags, FILE *log)
 {
     HKEY state = NULL;
 
@@ -888,6 +1174,24 @@ static HRESULT DisableOne(LPCWSTR id, FILE *log)
     }
 
     LOGF(log, L"disabling '%s'\n", id);
+    {
+        /* software tier: disable == run the app's uninstaller */
+        FM_FEATURE sf;
+        if (FmFindFeature(id, &sf) && sf.Tier == FM_TIER_SOFTWARE && sf.Provider[0])
+        {
+            HRESULT shr = SoftwareUninstall(state, log);
+            if (FAILED(shr))
+            {
+                if (!(flags & FM_DISABLE_FORCE))
+                {
+                    LOGF(log, L"'%s' left enabled (use /force to forget it anyway)\n", id);
+                    RegCloseKey(state);
+                    return shr;
+                }
+                LOGF(log, L"warn: uninstaller failed but /force given; marking '%s' disabled\n", id);
+            }
+        }
+    }
     RegDeleteValueW(state, L"PendingFiles");
     RegDeleteValueW(state, L"PendingServices");
     RegDeleteValueW(state, L"PendingReboot");
@@ -974,7 +1278,7 @@ HRESULT FmDisableEx(LPCWSTR id, DWORD flags, FILE *log)
             if (FAILED(hr)) return hr;
         }
     }
-    return DisableOne(id, log);
+    return DisableOne(id, flags, log);
 }
 
 HRESULT FmDisable(LPCWSTR id, FILE *log)
@@ -983,6 +1287,11 @@ HRESULT FmDisable(LPCWSTR id, FILE *log)
 }
 
 HRESULT FmUninstall(LPCWSTR id, FILE *log)
+{
+    return FmUninstallEx(id, 0, log);
+}
+
+HRESULT FmUninstallEx(LPCWSTR id, DWORD flags, FILE *log)
 {
     HKEY state;
     HRESULT hr;
@@ -997,7 +1306,7 @@ HRESULT FmUninstall(LPCWSTR id, FILE *log)
         LOGF(log, L"feature '%s' is not installed; nothing to do\n", id);
         return S_OK;
     }
-    hr = FmDisable(id, log);   /* no-op if already Disabled */
+    hr = FmDisableEx(id, flags, log);   /* no-op if already Disabled */
     if (FAILED(hr)) return hr;
 
     if (OpenStateKey(id, FALSE, KEY_READ | KEY_WRITE, &state) == ERROR_SUCCESS)

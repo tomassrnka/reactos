@@ -1,0 +1,8 @@
+[Section]
+Name = Test Lib
+Version = 9.0
+License = Freeware
+Description = Dependency target.
+Category = 14
+URLDownload = https://example.invalid/testlib.exe
+SHA1 = fedcba9876543210fedcba9876543210fedcba98

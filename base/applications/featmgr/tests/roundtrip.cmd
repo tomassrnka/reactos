@@ -139,6 +139,145 @@ del /q %R%\Payload\fmt-sys\fmt-sys.txt %R%\Payload\fmt-sysdep\fmt-sysdep.txt 2>n
 rmdir %R%\Payload\fmt-sys 2>nul
 rmdir %R%\Payload\fmt-sysdep 2>nul
 
+rem ===== SOFTWARE TIER (FEATMGMT-01 software slice) =====
+rem --- A. /import-rapps: RAPPS appdb -> Tier=software catalog entries
+set SW=%R%\Catalog\Software
+rd /s /q %SW% 2>nul
+%FM% /import-rapps %FX%\sw-appdb /anyarch > %O%\imp.txt 2>&1
+call :rc0 "53 import-rapps rc0"
+type %O%\imp.txt >> %LOG%
+find "imported 5 RAPPS entries" %O%\imp.txt >nul
+call :rc0 "54 imported 5 (testapp testlib depapp archapp utf16app)"
+find "(2 skipped)" %O%\imp.txt >nul
+call :rc0 "55 2 skipped (no URL, unusable package name)"
+%FM% /list /tier:software > %O%\l.txt 2>&1
+find "rapps-testapp" %O%\l.txt >nul
+call :rc0 "56 imported entry listed in software tier"
+%FM% /list /tier:os > %O%\l.txt 2>&1
+find "rapps-testapp" %O%\l.txt >nul
+call :rc1 "57 imported entry absent from os tier"
+call :st rapps-testapp NotInstalled "58 imported entry NotInstalled"
+%FM% /query rapps-testapp > %O%\q.txt 2>&1
+type %O%\q.txt >> %LOG%
+find "Tier:         software" %O%\q.txt >nul
+call :rc0 "59 query: Tier=software"
+find "Provider:     rapps" %O%\q.txt >nul
+call :rc0 "60 query: Provider=rapps"
+find "Rapps.Pkg:    testapp" %O%\q.txt >nul
+call :rc0 "61 query: Rapps.Pkg"
+find "Version:      1.2.3" %O%\q.txt >nul
+call :rc0 "62 query: Version mapped"
+find "Source.Artifact: https://example.invalid/testapp-1.2.3.exe" %O%\q.txt >nul
+call :rc0 "63 query: URLDownload -> Source.Artifact"
+find "Source.ArtifactSHA1: 0123456789abcdef0123456789abcdef01234567" %O%\q.txt >nul
+call :rc0 "64 query: SHA1 -> Source.ArtifactSHA1"
+find "Source.License: Open Source (GPLv2)" %O%\q.txt >nul
+call :rc0 "65 query: License/LicenseType -> Source.License"
+find "Category:     Internet" %O%\q.txt >nul
+call :rc0 "66 query: numeric Category -> name"
+%FM% /query rapps-depapp > %O%\q.txt 2>&1
+find "Dependencies: rapps-testlib" %O%\q.txt >nul
+call :rc0 "67 RAPPS Dependencies -> catalog deps (present pkgs only)"
+find "nosuchpkg" %O%\q.txt >nul
+call :rc1 "68 dep absent from the DB not in the catalog graph"
+%FM% /query rapps-archapp > %O%\q.txt 2>&1
+find "Source.Artifact: https://example.invalid/arch-" %O%\q.txt >nul
+call :rc0 "69 [Section.<arch>] URLDownload overrides generic"
+%FM% /query rapps-utf16app > %O%\q.txt 2>&1
+call :rc0 "70 UTF-16LE+BOM RAPPS entry imported"
+%FM% /query rapps-nourl >nul 2>&1
+call :rc1 "71 entry without URLDownload not imported"
+rem re-run is additive/idempotent; /clean drops stale generated entries only
+echo [Feature]> %SW%\rapps-stale.ini
+echo Id=rapps-stale>> %SW%\rapps-stale.ini
+echo Tier=software>> %SW%\rapps-stale.ini
+%FM% /query rapps-stale >nul 2>&1
+call :rc0 "72 hand-made stale entry visible"
+%FM% /import-rapps %FX%\sw-appdb /anyarch > %O%\imp.txt 2>&1
+find "imported 5 RAPPS entries" %O%\imp.txt >nul
+call :rc0 "73 re-import idempotent"
+%FM% /query rapps-stale >nul 2>&1
+call :rc0 "74 re-import without /clean keeps other entries"
+%FM% /import-rapps %FX%\sw-appdb /anyarch /clean > %O%\imp.txt 2>&1
+%FM% /query rapps-stale >nul 2>&1
+call :rc1 "75 /clean removes stale generated entries"
+%FM% /import-rapps %R%\nonexistent-dir > %O%\imp.txt 2>&1
+call :rc1 "76 import from a missing dir fails (rc 3)"
+
+rem --- B. software-tier install semantics (command provider = controlled local installer)
+mkdir %R%\Payload\fmt-sw 2>nul
+mkdir %R%\Payload\fmt-swbad 2>nul
+mkdir %R%\Payload\fmt-swstuck 2>nul
+copy /y %FX%\fmt-sw.ini %R%\Catalog\ >nul
+copy /y %FX%\fmt-swbad.ini %R%\Catalog\ >nul
+copy /y %FX%\fmt-swstuck.ini %R%\Catalog\ >nul
+copy /y %FX%\fmt-sw-setup.cmd %R%\Payload\fmt-sw\ >nul
+copy /y %FX%\fmt-sw-uninst.cmd %R%\Payload\fmt-sw\ >nul
+copy /y %FX%\fmt-swbad-setup.cmd %R%\Payload\fmt-swbad\ >nul
+copy /y %FX%\fmt-swstuck-setup.cmd %R%\Payload\fmt-swstuck\ >nul
+copy /y %FX%\fmt-swstuck-uninst.cmd %R%\Payload\fmt-swstuck\ >nul
+call :st fmt-sw NotInstalled "77 sw initial"
+%FM% /install fmt-sw > %O%\i.txt 2>&1
+call :rc0 "78 install runs the installer (rc0)"
+type %O%\i.txt >> %LOG%
+call :st fmt-sw Enabled "79 sw Enabled after install"
+call :ex %R%\fmt-sw.installed 1 "80 installer ran (side-effect file)"
+reg query HKLM\SOFTWARE\ReactOS\Nitro\FmTest /v Sw >nul 2>&1
+call :rc0 "81 installer side-effect registry value"
+%FM% /list /state:enabled /tier:software > %O%\l.txt 2>&1
+find "fmt-sw" %O%\l.txt >nul
+call :rc0 "82 list shows installed software"
+%FM% /disable fmt-sw > %O%\i.txt 2>&1
+call :rc0 "83 disable runs the uninstaller (rc0)"
+type %O%\i.txt >> %LOG%
+call :st fmt-sw Disabled "84 sw Disabled"
+call :ex %R%\fmt-sw.installed 0 "85 uninstaller removed side-effect file"
+reg query HKLM\SOFTWARE\ReactOS\Nitro\FmTest /v Sw >nul 2>&1
+call :rc1 "86 uninstaller removed registry value"
+%FM% /enable fmt-sw >> %LOG% 2>&1
+call :rc0 "87 re-install from Disabled"
+call :st fmt-sw Enabled "88 sw Enabled again"
+%FM% /uninstall fmt-sw >> %LOG% 2>&1
+call :rc0 "89 uninstall (uninstaller + forget)"
+call :st fmt-sw NotInstalled "90 sw NotInstalled after uninstall"
+reg query HKLM\SOFTWARE\ReactOS\Nitro\OptionalFeatures\fmt-sw >nul 2>&1
+call :rc1 "91 sw state record deleted"
+call :ex %R%\fmt-sw.installed 0 "92 sw side-effect file gone"
+rem failing installer: feature stays NotInstalled, no record left behind
+%FM% /install fmt-swbad > %O%\i.txt 2>&1
+call :rc1 "93 failing installer -> install fails (rc3)"
+type %O%\i.txt >> %LOG%
+call :st fmt-swbad NotInstalled "94 failed install leaves NotInstalled"
+reg query HKLM\SOFTWARE\ReactOS\Nitro\OptionalFeatures\fmt-swbad >nul 2>&1
+call :rc1 "95 failed install leaves no state record"
+rem failing uninstaller: stays Enabled unless /force
+%FM% /install fmt-swstuck >> %LOG% 2>&1
+call :rc0 "96 swstuck installs"
+%FM% /disable fmt-swstuck > %O%\i.txt 2>&1
+call :rc1 "97 failing uninstaller -> disable refused"
+type %O%\i.txt >> %LOG%
+call :st fmt-swstuck Enabled "98 swstuck still Enabled"
+%FM% /uninstall fmt-swstuck >> %LOG% 2>&1
+call :rc1 "99 uninstall refused too"
+%FM% /uninstall fmt-swstuck /force >> %LOG% 2>&1
+call :rc0 "100 uninstall /force forgets it"
+call :st fmt-swstuck NotInstalled "101 swstuck NotInstalled after /force"
+rem installer not staged -> deferred, refused
+del /q %R%\Payload\fmt-sw\fmt-sw-setup.cmd
+%FM% /list /tier:software > %O%\l.txt 2>&1
+find "fmt-sw " %O%\l.txt | find "*" >nul
+call :rc0 "102 software entry with missing installer marked deferred (*)"
+%FM% /install fmt-sw >> %LOG% 2>&1
+call :rc1 "103 install refused when installer not staged"
+
+rem --- software-tier cleanup
+del /q %R%\Catalog\fmt-sw.ini %R%\Catalog\fmt-swbad.ini %R%\Catalog\fmt-swstuck.ini 2>nul
+del /q %R%\Payload\fmt-sw\*.* %R%\Payload\fmt-swbad\*.* %R%\Payload\fmt-swstuck\*.* 2>nul
+rmdir %R%\Payload\fmt-sw 2>nul
+rmdir %R%\Payload\fmt-swbad 2>nul
+rmdir %R%\Payload\fmt-swstuck 2>nul
+rd /s /q %SW% 2>nul
+
 rem --- cleanup fixtures
 del /q %R%\Catalog\fmt-base.ini %R%\Catalog\fmt-dep.ini 2>nul
 del /q %R%\Payload\fmt-base\fmt-base.txt %R%\Payload\fmt-dep\fmt-dep.txt 2>nul
