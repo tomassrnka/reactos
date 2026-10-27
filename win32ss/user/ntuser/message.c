@@ -3220,6 +3220,7 @@ NtUserMessageCall( HWND hWnd,
             PTHREADINFO pti;
             PCLIENTINFO ClientInfo;
             PHOOK NextObj, Hook;
+            USER_REFERENCE_ENTRY HookRef, NextRef;
 
             pti = GetW32ThreadInfo();
 
@@ -3227,7 +3228,14 @@ NtUserMessageCall( HWND hWnd,
 
             if (!Hook) break;
 
-            NextObj = Hook->phkNext;
+            /* SECURITY (ASTRA-hook-nexthook-uaf): derive the next hook with
+             * IntGetNextHookToCall() -- the live chain if Hook is still linked,
+             * else the phkNext snapshot -- so a Hook that was unhooked mid-walk
+             * (self or cross-thread) is not followed through stale Chain links.
+             * Hold a co_ reference on Hook and on the next hook across the
+             * user-mode callback so neither can be freed under us. */
+            UserRefObjectCo(Hook, &HookRef);
+            NextObj = IntGetNextHookToCall(Hook);
             ClientInfo = pti->pClientInfo;
             _SEH2_TRY
             {
@@ -3239,9 +3247,14 @@ NtUserMessageCall( HWND hWnd,
             }
             _SEH2_END;
 
-            if (!ClientInfo || !NextObj) break;
+            if (!ClientInfo || !NextObj)
+            {
+                UserDerefObjectCo(Hook);
+                break;
+            }
 
             NextObj->phkNext = IntGetNextHook(NextObj);
+            UserRefObjectCo(NextObj, &NextRef);
 
             if ( Hook->HookId == WH_CALLWNDPROC)
             {
@@ -3281,6 +3294,10 @@ NtUserMessageCall( HWND hWnd,
                                               Hook->Ansi,
                                               &Hook->ModuleName);
             }
+
+            /* Release in reverse order of acquisition (UserDerefObjectCo is LIFO). */
+            UserDerefObjectCo(NextObj);
+            UserDerefObjectCo(Hook);
         }
         break;
     }
