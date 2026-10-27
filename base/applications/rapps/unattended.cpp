@@ -359,7 +359,7 @@ ParseCmdAndExecute(LPWSTR lpCmdLine, BOOL bIsFirstLaunch, int nCmdShow)
     {
         if (!StrCmpIW(argv[i], L"/S") &&
             (MatchCmdOption(argv[1], CMD_KEY_INSTALL) || MatchCmdOption(argv[1], CMD_KEY_SETUP) ||
-             MatchCmdOption(argv[1], CMD_KEY_GENINST)))
+             MatchCmdOption(argv[1], CMD_KEY_GENINST) || MatchCmdOption(argv[1], CMD_KEY_UPDATEDB)))
         {
             g_bSilentMode = TRUE;
             break;
@@ -421,6 +421,14 @@ ParseCmdAndExecute(LPWSTR lpCmdLine, BOOL bIsFirstLaunch, int nCmdShow)
             CloseHandle(hMutex);
 
         return TRUE;
+    }
+
+    if (MatchCmdOption(argv[1], CMD_KEY_UPDATEDB))
+    {
+        /* Ensure the application database is present (UpdateAvailable above downloads
+         * it when missing, headless with /S). Succeeds iff entries are available; an
+         * existing database is kept, never wiped. Used by featmgr's catalog import. */
+        return db.GetAvailableCount() > 0;
     }
 
     if (MatchCmdOption(argv[1], CMD_KEY_INSTALL))

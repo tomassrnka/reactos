@@ -358,8 +358,8 @@ static void OnOpDone(HWND hwnd, OPCTX *c)
         else
         {
             StringCchCopyW(msg, ARRAYSIZE(msg),
-                L"Could not import the RAPPS catalog. Run RAPPS once to fetch its "
-                L"application database, then try again.");
+                L"Could not import the RAPPS catalog. The online catalog could not be "
+                L"downloaded: check the network connection (or run RAPPS once), then try again.");
             icon = MB_ICONWARNING;
         }
     }
@@ -644,11 +644,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
             ZeroMemory(&col, sizeof(col));
             col.mask = LVCF_TEXT | LVCF_WIDTH;
-            col.pszText = (LPWSTR)L"Feature";   col.cx = 180; ListView_InsertColumn(g_hList, 0, &col);
-            col.pszText = (LPWSTR)L"State";     col.cx = 110; ListView_InsertColumn(g_hList, 1, &col);
+            col.pszText = (LPWSTR)L"Feature";   col.cx = 215; ListView_InsertColumn(g_hList, 0, &col);
+            col.pszText = (LPWSTR)L"State";     col.cx = 145; ListView_InsertColumn(g_hList, 1, &col);
             col.pszText = (LPWSTR)L"Version";   col.cx = 60;  ListView_InsertColumn(g_hList, 2, &col);
-            col.pszText = (LPWSTR)L"Installed (UTC)"; col.cx = 130; ListView_InsertColumn(g_hList, 3, &col);
-            col.pszText = (LPWSTR)L"Notes";     col.cx = 130; ListView_InsertColumn(g_hList, 4, &col);
+            col.pszText = (LPWSTR)L"Installed (UTC)"; col.cx = 135; ListView_InsertColumn(g_hList, 3, &col);
+            col.pszText = (LPWSTR)L"Notes";     col.cx = 110; ListView_InsertColumn(g_hList, 4, &col);
 
             g_hDesc = CreateWindowExW(WS_EX_CLIENTEDGE, L"STATIC",
                 L"Select a feature to see its description.",
@@ -788,9 +788,22 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmd, int nShow)
     wc.hIcon = LoadIconW(NULL, (LPCWSTR)IDI_APPLICATION);
     RegisterClassExW(&wc);
 
-    hwnd = CreateWindowExW(0, wc.lpszClassName, L"Windows Features",
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, 760, 520, NULL, NULL, hInst, NULL);
+    /* Centre on the work area (CW_USEDEFAULT cascades from a fixed point and
+     * pushed the 760x520 window off the bottom/right of an 800x600 desktop,
+     * hiding the OK/Apply row). Clamp so the caption and buttons stay reachable. */
+    {
+        RECT wa;
+        int w = 760, h = 520, x, y;
+        if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0))
+            SetRect(&wa, 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+        if (w > wa.right - wa.left) w = wa.right - wa.left;
+        if (h > wa.bottom - wa.top) h = wa.bottom - wa.top;
+        x = wa.left + ((wa.right - wa.left) - w) / 2;
+        y = wa.top + ((wa.bottom - wa.top) - h) / 2;
+        hwnd = CreateWindowExW(0, wc.lpszClassName, L"Windows Features",
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+            x, y, w, h, NULL, NULL, hInst, NULL);
+    }
     if (!hwnd) return 1;
 
     ShowWindow(hwnd, nShow);
