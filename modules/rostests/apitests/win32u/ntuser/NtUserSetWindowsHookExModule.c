@@ -75,4 +75,44 @@ START_TEST(NtUserSetWindowsHookExModule)
     TEST(hHook != NULL);
     if (hHook)
         TEST(NtUserUnhookWindowsHookEx(hHook) == TRUE);
+
+    /* --- ModuleName longer than the kernel's fixed callback buffer
+     *     (512 WCHAR incl. NUL) must be rejected cleanly, even when
+     *     MaximumLength >= Length. Contract only: no hook is ever invoked. --- */
+    {
+        static WCHAR bigBuf[0x2000 / sizeof(WCHAR)];
+        UINT i;
+
+        for (i = 0; i < RTL_NUMBER_OF(bigBuf); i++)
+            bigBuf[i] = L'a';
+
+        mod.Buffer = bigBuf;
+        mod.MaximumLength = (USHORT)sizeof(bigBuf);
+        mod.Length = (USHORT)(sizeof(bigBuf) - sizeof(WCHAR));
+
+        SetLastError(0xdeadbeef);
+        hHook = NtUserSetWindowsHookEx(hInst, &mod, tid, WH_GETMESSAGE,
+                                       TestHookProc, FALSE);
+        TEST(hHook == NULL);
+        ok(GetLastError() == ERROR_INVALID_PARAMETER,
+           "oversized: expected ERROR_INVALID_PARAMETER, got %lu\n", GetLastError());
+        if (hHook)
+            NtUserUnhookWindowsHookEx(hHook);
+
+        /* 1024 bytes (512 WCHAR, no room for NUL) is rejected. */
+        mod.Length = 1024;
+        hHook = NtUserSetWindowsHookEx(hInst, &mod, tid, WH_GETMESSAGE,
+                                       TestHookProc, FALSE);
+        TEST(hHook == NULL);
+        if (hHook)
+            NtUserUnhookWindowsHookEx(hHook);
+
+        /* 1022 bytes (511 WCHAR + NUL) is the largest accepted. */
+        mod.Length = 1022;
+        hHook = NtUserSetWindowsHookEx(hInst, &mod, tid, WH_GETMESSAGE,
+                                       TestHookProc, FALSE);
+        TEST(hHook != NULL);
+        if (hHook)
+            TEST(NtUserUnhookWindowsHookEx(hHook) == TRUE);
+    }
 }

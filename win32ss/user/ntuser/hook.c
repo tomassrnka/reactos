@@ -1709,6 +1709,17 @@ NtUserSetWindowsHookEx( HINSTANCE Mod,
           goto Cleanup; // Return NULL
        }
 
+       /* The module name is later copied into the fixed-size ModuleName[]
+        * array of HOOKPROC_CALLBACK_ARGUMENTS (see co_IntCallHookProc).
+        * Reject names that do not fit there together with a terminating
+        * NUL, otherwise that copy overflows the callback allocation. */
+       if (ModuleName.Length > sizeof(((PHOOKPROC_CALLBACK_ARGUMENTS)0)->ModuleName) - sizeof(WCHAR))
+       {
+          IntRemoveHook(Hook);
+          EngSetLastError(ERROR_INVALID_PARAMETER);
+          goto Cleanup; // Return NULL
+       }
+
        Hook->ModuleName.Buffer = ExAllocatePoolWithTag( PagedPool,
                                                         ModuleName.MaximumLength,
                                                         TAG_HOOK);
