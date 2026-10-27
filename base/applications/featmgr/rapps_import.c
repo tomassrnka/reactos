@@ -209,6 +209,56 @@ static BOOL DefaultRappsDir(LPWSTR out, DWORD cch)
     return SUCCEEDED(StringCchPrintfW(out, cch, L"%s\\RApps\\appdb", base));
 }
 
+/* TRUE if dir holds at least one RAPPS entry (*.txt). */
+static BOOL HasRappsEntries(LPCWSTR dir)
+{
+    WCHAR glob[MAX_PATH];
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    StringCchPrintfW(glob, MAX_PATH, L"%s\\*.txt", dir);
+    h = FindFirstFileW(glob, &fd);
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
+    FindClose(h);
+    return TRUE;
+}
+
+#define FM_DBFETCH_TIMEOUT_MS (10 * 60 * 1000)
+
+/* No local RAPPS database yet: have rapps.exe download it headless
+ * ("rapps /updatedb /S" - the silent mode raises no dialog), then wait for it.
+ * Runs on the calling thread (the GUI calls this from its worker thread). */
+static BOOL FetchRappsDatabase(FILE *log)
+{
+    WCHAR sys[MAX_PATH], cmd[MAX_PATH + 40];
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    DWORD wr, code = 1;
+
+    if (!GetSystemDirectoryW(sys, MAX_PATH)) return FALSE;
+    StringCchPrintfW(cmd, ARRAYSIZE(cmd), L"\"%s\\rapps.exe\" /updatedb /S", sys);
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    LOGF(log, L"no local RAPPS database; fetching the online catalog: %s\n", cmd);
+    if (!CreateProcessW(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
+    {
+        LOGF(log, L"error: cannot start rapps.exe (%lu)\n", GetLastError());
+        return FALSE;
+    }
+    wr = WaitForSingleObject(pi.hProcess, FM_DBFETCH_TIMEOUT_MS);
+    if (wr == WAIT_OBJECT_0)
+        GetExitCodeProcess(pi.hProcess, &code);
+    else
+    {
+        LOGF(log, L"error: catalog download timed out\n");
+        TerminateProcess(pi.hProcess, 1);
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return wr == WAIT_OBJECT_0 && code == 0;
+}
+
 int FmImportRapps(LPCWSTR srcDir, DWORD flags, int *skipped, FILE *log)
 {
     WCHAR src[MAX_PATH], outDir[MAX_PATH], glob[MAX_PATH], file[MAX_PATH], outFile[MAX_PATH];
@@ -225,6 +275,9 @@ int FmImportRapps(LPCWSTR srcDir, DWORD flags, int *skipped, FILE *log)
         return -1;
     }
     PathRemoveBackslashW(src);
+    /* default location only: an explicit directory is the caller's to populate */
+    if (!(srcDir && srcDir[0]) && !HasRappsEntries(src))
+        FetchRappsDatabase(log);
     if (!FmGetSoftwareCatalogDir(outDir, MAX_PATH)) return -1;
     SHCreateDirectoryExW(NULL, outDir, NULL);
 
@@ -246,8 +299,8 @@ int FmImportRapps(LPCWSTR srcDir, DWORD flags, int *skipped, FILE *log)
     h = FindFirstFileW(glob, &fd);
     if (h == INVALID_HANDLE_VALUE)
     {
-        LOGF(log, L"error: no RAPPS entries (*.txt) in '%s'. Run rapps once to fetch its "
-                  L"database, or pass the directory.\n", src);
+        LOGF(log, L"error: no RAPPS entries (*.txt) in '%s'. Check the network connection, "
+                  L"run rapps once to fetch its database, or pass the directory.\n", src);
         return -1;
     }
     do
