@@ -719,6 +719,10 @@ co_UserCallNextHookEx(PHOOK Hook,
             {
                 lResult = co_HOOK_CallHookNext(Hook, Code, wParam, (LPARAM)&Msg);
 
+                /* SECURITY (ASTRA-hook-nexthook-uaf): this reads Hook after the
+                 * user-mode callback, which may have unhooked it. Safe because
+                 * the sole caller (NtUserCallNextHookEx) holds a co_ reference on
+                 * Hook across this whole function. */
                 if (lParam && (Hook->HookId == WH_GETMESSAGE))
                 {
                     _SEH2_TRY
@@ -1066,8 +1070,47 @@ IntGetNextHook(PHOOK Hook)
 
     pElem = Hook->Chain.Flink;
     if (pElem != pLastHead)
-       return CONTAINING_RECORD(pElem, HOOK, Chain);
+    {
+       PHOOK next = CONTAINING_RECORD(pElem, HOOK, Chain);
+       /* SECURITY (ASTRA-hook-nexthook-uaf): never hand back a hook that is being
+        * torn down. Removed hooks are unlinked from the live chain, so this
+        * should not normally trigger, but it keeps the walk from ever returning
+        * a hook whose storage is about to go away. */
+       if (next->flags & HOOK_FLAG_REMOVED)
+          return NULL;
+       return next;
+    }
     return NULL;
+}
+
+/* Pick the next hook to dispatch after Hook during a CallNextHookEx walk, safe
+ * against Hook (or its immediate successor) having been unhooked mid-walk.
+ *
+ * SECURITY (ASTRA-hook-nexthook-uaf): Hook is the hook whose proc is driving the
+ * walk; the dispatching frame holds a reference on Hook AND on its cached
+ * successor, so both are guaranteed allocated here (even under a concurrent or
+ * self unhook). If Hook is still linked we read the live chain. If Hook was
+ * removed (self-unhook, cross-thread unhook, or a nested-dispatch restore) its
+ * Chain links are stale, so we fall back to the successor snapshot captured in
+ * phkNext when Hook was dispatched. We never follow a chain of removed hooks:
+ * only the immediate successor is guaranteed referenced, so if it too was
+ * removed we stop the walk rather than dereference an unreferenced (possibly
+ * freed) pointer. */
+PHOOK
+FASTCALL
+IntGetNextHookToCall(PHOOK Hook)
+{
+    PHOOK next;
+
+    if (Hook->flags & HOOK_FLAG_REMOVED)
+       next = Hook->phkNext;     /* Chain links are stale; use the snapshot. */
+    else
+       next = IntGetNextHook(Hook);
+
+    if (next && (next->flags & HOOK_FLAG_REMOVED))
+       next = NULL;
+
+    return next;
 }
 
 /* Free a hook, removing it from its chain */
@@ -1076,6 +1119,18 @@ VOID
 FASTCALL
 IntFreeHook(PHOOK Hook)
 {
+    /* SECURITY (ASTRA-hook-nexthook-uaf): mark the hook removed BEFORE unlinking
+     * it, so an in-progress CallNextHookEx walk (which may be keeping this hook
+     * alive by a reference held across a user-mode callback, on this or another
+     * thread) can detect it and fall back to the successor snapshot in phkNext
+     * instead of following now-stale Chain links.
+     *
+     * We deliberately do NOT clear pti->sphkCurrent / ClientInfo->phkCurrent or
+     * Hook->phkNext here: a hook proc that unhooks itself and then calls
+     * CallNextHookEx must still run the rest of the chain (clearing sphkCurrent
+     * would truncate it), and phkNext is the snapshot the walk falls back to. */
+    Hook->flags |= HOOK_FLAG_REMOVED;
+
     RemoveEntryList(&Hook->Chain);
     if (Hook->ModuleName.Buffer)
     {
@@ -1159,14 +1214,14 @@ co_HOOK_CallHooks( INT HookId,
                    WPARAM wParam,
                    LPARAM lParam)
 {
-    PHOOK Hook, SaveHook;
+    PHOOK Hook, SaveHook, NextHook = NULL;
     PTHREADINFO pti;
     PCLIENTINFO ClientInfo;
     PLIST_ENTRY pLastHead;
     PDESKTOP pdo;
     BOOL Local = FALSE, Global = FALSE;
     LRESULT Result = 0;
-    USER_REFERENCE_ENTRY Ref;
+    USER_REFERENCE_ENTRY Ref, RefNext;
 
     ASSERT(WH_MINHOOK <= HookId && HookId <= WH_MAXHOOK);
 
@@ -1237,6 +1292,14 @@ co_HOOK_CallHooks( INT HookId,
        /* Load it for the next call. */
        pti->sphkCurrent = Hook;
        Hook->phkNext = IntGetNextHook(Hook);
+       /* SECURITY (ASTRA-hook-nexthook-uaf): keep both this hook and its cached
+        * successor alive across the user-mode callback. The hook proc may call
+        * CallNextHookEx (which reads sphkCurrent and its phkNext snapshot) and
+        * may unhook this hook or the next one; the references guarantee neither
+        * pointer is dangling when the walk inspects it. */
+       NextHook = Hook->phkNext;
+       if (NextHook)
+          UserRefObjectCo(NextHook, &RefNext);
        if (ClientInfo)
        {
           _SEH2_TRY
@@ -1273,6 +1336,9 @@ co_HOOK_CallHooks( INT HookId,
        }
        pti->sphkCurrent = SaveHook;
        Hook->phkNext = NULL;
+       /* Release in reverse order of acquisition (UserDerefObjectCo is LIFO). */
+       if (NextHook)
+          UserDerefObjectCo(NextHook);
        UserDerefObjectCo(Hook);
        IntDereferenceThreadInfo(pti);
        ObDereferenceObject(pti->pEThread);
@@ -1428,7 +1494,7 @@ NtUserCallNextHookEx( int Code,
                       BOOL Ansi)
 {
     PTHREADINFO pti;
-    PHOOK HookObj, NextObj;
+    PHOOK HookObj, NextObj, SaveHook, NextNext;
     PCLIENTINFO ClientInfo;
     LRESULT lResult = 0;
 
@@ -1442,8 +1508,21 @@ NtUserCallNextHookEx( int Code,
     if (!HookObj)
        goto Exit; // Return 0
 
-    NextObj = HookObj->phkNext;
+    /* SECURITY (ASTRA-hook-nexthook-uaf): HookObj is the hook whose proc is
+     * calling us. The dispatching frame (co_HOOK_CallHooks for the first hook,
+     * or an outer NtUserCallNextHookEx for a later one) holds a reference on
+     * HookObj and on its cached successor, so both are guaranteed allocated here
+     * even if HookObj (or its successor) was just unhooked -- by this proc or by
+     * another thread while the user lock was dropped for the callback.
+     *
+     * Derive the successor with IntGetNextHookToCall(): the live chain when
+     * HookObj is still linked, else the phkNext snapshot captured when HookObj
+     * was dispatched. We do NOT return 0 just because HookObj was unhooked: a
+     * hook that unhooks itself and then calls CallNextHookEx must still run the
+     * rest of the chain, matching Windows/base behaviour. */
+    NextObj = IntGetNextHookToCall(HookObj);
 
+    SaveHook = pti->sphkCurrent;
     pti->sphkCurrent = NextObj;
     ClientInfo = pti->pClientInfo;
     _SEH2_TRY
@@ -1459,9 +1538,44 @@ NtUserCallNextHookEx( int Code,
     /* Now in List run down. */
     if (ClientInfo && NextObj)
     {
+       USER_REFERENCE_ENTRY Ref, RefNext;
+
+       /* Snapshot the hook after NextObj, and keep BOTH NextObj and that
+        * successor alive across the user-mode callback. co_UserCallNextHookEx
+        * dereferences NextObj after the callback (e.g. Hook->HookId on the
+        * WH_GETMESSAGE path), and a nested CallNextHookEx will fall back to this
+        * snapshot if NextObj unhooks itself -- neither pointer may dangle. */
        NextObj->phkNext = IntGetNextHook(NextObj);
+       NextNext = NextObj->phkNext;
+       UserRefObjectCo(NextObj, &Ref);
+       if (NextNext)
+          UserRefObjectCo(NextNext, &RefNext);
+
        lResult = co_UserCallNextHookEx( NextObj, Code, wParam, lParam, NextObj->Ansi);
+
+       /* Release in reverse order of acquisition (UserDerefObjectCo is LIFO). */
+       if (NextNext)
+          UserDerefObjectCo(NextNext);
+       UserDerefObjectCo(NextObj);
     }
+
+    /* SECURITY (ASTRA-hook-nexthook-uaf): restore sphkCurrent / phkCurrent so
+     * that, after this hop returns, they again name this proc's (still
+     * referenced) hook rather than a deeper hook that is about to be
+     * dereferenced and freed. Without this a second CallNextHookEx from the same
+     * proc would read a dangling sphkCurrent. */
+    pti->sphkCurrent = SaveHook;
+    _SEH2_TRY
+    {
+       if (pti->pClientInfo)
+          pti->pClientInfo->phkCurrent = SaveHook;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+       /* Do nothing */
+       (void)0;
+    }
+    _SEH2_END;
 
 Exit:
     TRACE("Leave NtUserCallNextHookEx, ret=%i\n", lResult);

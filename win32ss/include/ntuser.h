@@ -239,6 +239,14 @@ struct _ETHREAD;
 
 #define WEF_SETBYWNDPTI 0x0001
 
+/* HOOK::flags (internal). HOOK_FLAG_REMOVED marks a hook that has been unhooked
+ * (unlinked from its chain) but may still be kept alive by a reference held
+ * across an in-flight CallNextHookEx user-mode callback. It lets a chain walker
+ * detect a hook whose Chain links are no longer valid and fall back to the
+ * successor snapshot in phkNext instead of dereferencing stale/freed pool
+ * (ASTRA-hook-nexthook-uaf). */
+#define HOOK_FLAG_REMOVED 0x00000001
+
 typedef struct tagHOOK
 {
     THRDESKHEAD head;
