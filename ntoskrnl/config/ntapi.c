@@ -1524,8 +1524,22 @@ NtNotifyChangeMultipleKeys(IN HANDLE MasterKeyHandle,
                            IN ULONG Length,
                            IN BOOLEAN Asynchronous)
 {
-    UNIMPLEMENTED_ONCE;
-    return STATUS_NOT_IMPLEMENTED;
+    /* Watching several keys at once (slave objects) is not supported yet */
+    if (Count != 0)
+    {
+        UNIMPLEMENTED_ONCE;
+        return STATUS_NOT_IMPLEMENTED;
+    }
+
+    /* The change data buffer is not used by the registry */
+    return CmpNotifyChangeKey(MasterKeyHandle,
+                              Event,
+                              ApcRoutine,
+                              ApcContext,
+                              IoStatusBlock,
+                              CompletionFilter,
+                              WatchTree,
+                              Asynchronous);
 }
 
 NTSTATUS

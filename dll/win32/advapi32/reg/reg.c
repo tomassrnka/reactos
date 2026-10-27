@@ -3506,7 +3506,7 @@ Cleanup:
 /************************************************************************
  *  RegNotifyChangeKeyValue
  *
- * @unimplemented
+ * @implemented
  */
 LONG WINAPI
 RegNotifyChangeKeyValue(HKEY hKey,
@@ -3543,7 +3543,10 @@ RegNotifyChangeKeyValue(HKEY hKey,
                                hEvent,
                                0,
                                0,
-                               &IoStatusBlock,
+                               /* An asynchronous request completes after we have
+                                * returned: no block of ours can outlive the call,
+                                * the caller gets the result through hEvent */
+                               fAsynchronous ? NULL : &IoStatusBlock,
                                dwNotifyFilter,
                                bWatchSubtree,
                                0,

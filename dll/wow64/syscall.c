@@ -1091,6 +1091,25 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         Status = NtCreateKey(&Cleanup->Handle, KeyAccess, OA(2), a[3], String32(&Class, P(4)), a[5], P(6));
         RETURN_HANDLE();
     }
+    case W64_NtNotifyChangeKey:
+    case W64_NtNotifyChangeMultipleKeys:
+    {
+        /* NtNotifyChangeMultipleKeys has two more leading arguments (count and
+         * slave objects); only the single key form is supported. The kernel
+         * completes the request later: it gets the explicit IOSB32 marker and
+         * the encoded APC routine, like NtReadFile, and writes the guest block. */
+        ULONG Skip = Number == W64_NtNotifyChangeKey ? 0 : 2;
+        PIO_APC_ROUTINE Routine = a[2 + Skip] ? (PIO_APC_ROUTINE)(ULONG_PTR)(-((LONG64)a[2 + Skip] << 2)) : NULL;
+        PVOID Iosb = NULL;
+        if (Skip && a[1]) UNSUPPORTED(OPERATION, a[1]);
+        if (a[4 + Skip])
+        {
+            ProbeOutput(a[4 + Skip], sizeof(WOW64_IOSB));
+            Iosb = (PVOID)(0x8000000000000000ULL | a[4 + Skip]);
+        }
+        return NtNotifyChangeMultipleKeys(H(0), 0, NULL, H(1 + Skip), Routine, P(3 + Skip), Iosb,
+                                          a[5 + Skip], (BOOLEAN)a[6 + Skip], NULL, 0, (BOOLEAN)a[9 + Skip]);
+    }
     case W64_NtQueryValueKey:
         return NtQueryValueKey(H(0), String32(&Name, P(1)), a[2], P(3), a[4], P(5));
     case W64_NtQueryKey: return NtQueryKey(H(0), a[1], P(2), a[3], P(4));
