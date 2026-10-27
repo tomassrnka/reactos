@@ -832,6 +832,9 @@ typedef struct _PFNCLIENT
     KFIELD(WNDPROC, pfnDispatchDefWindowProc);
     KFIELD(WNDPROC, pfnDispatchMessage);
     KFIELD(WNDPROC, pfnMDIActivateDlgProc);
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+    KFIELD(WNDPROC, pfnFilteredProcessRedirectingWndProc);
+#endif
 } PFNCLIENT, *PPFNCLIENT;
 
 /*

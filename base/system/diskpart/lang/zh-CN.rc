@@ -56,7 +56,7 @@ STRINGTABLE
 BEGIN
     IDS_CLEAN_FAIL "\nDiskPart was unable to clean the disk.\nThe data on this disk may be unrecoverable.\n"
     IDS_CLEAN_SUCCESS "\nDiskPart succeeded in cleaning the disk.\n"
-    IDS_CLEAN_SYSTEM "\nThe selected disk is neccessary to the operation of your computer, and may not be cleaned.\n"
+    IDS_CLEAN_SYSTEM "\nThe selected disk is necessary to the operation of your computer, and may not be cleaned.\n"
 END
 
 STRINGTABLE
@@ -80,7 +80,7 @@ STRINGTABLE
 BEGIN
     IDS_DELETE_PARTITION_FAIL "\nDiskPart failed to delete the selected partition.\nPlease make sure the selected partition is valid to delete.\n"
     IDS_DELETE_PARTITION_SUCCESS "\nDiskPart successfully deleted the selected partition.\n"
-    IDS_DELETE_PARTITION_SYSTEM "\nThe selected partition may be neccessary to the operation of your computer, and may not be deleted.\n"
+    IDS_DELETE_PARTITION_SYSTEM "\nThe selected partition may be necessary to the operation of your computer, and may not be deleted.\n"
 END
 
 /* Disk Information Labels */
@@ -125,7 +125,7 @@ END
 STRINGTABLE
 BEGIN
     IDS_FORMAT_FAIL "\nDiskPart failed to format the selected volume.\n"
-    IDS_FORMAT_SUCCESS "\nDiskPart successfully formated the selected volume.\n"
+    IDS_FORMAT_SUCCESS "\nDiskPart successfully formatted the selected volume.\n"
     IDS_FORMAT_PROGRESS "\r  %3lu percent completed"
     IDS_EXTEND_FAT_OFFLINE "\nThe FAT tables of this volume must grow first. DiskPart moves data and rewrites every\ndirectory of the volume for that. This step is not safe against a power failure or a disk\nerror: the volume can be lost. Back up its data before you extend it this way.\n"
     IDS_EXTEND_FAT_SYSTEM "\nThe FAT tables of this volume must grow, which cannot be done on the system or boot volume.\n"
