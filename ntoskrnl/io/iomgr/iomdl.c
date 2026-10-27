@@ -42,7 +42,15 @@ IoAllocateMdl(IN PVOID VirtualAddress,
         /* This is bigger then our fixed-size MDLs. Calculate real size */
         Size *= sizeof(PFN_NUMBER);
         Size += sizeof(MDL);
-        if (Size > MAXUSHORT) return NULL;
+
+        /*
+         * The MDL header has a 16-bit Size field, which used to cap a single MDL (and so a single
+         * locked buffer) at about 32 MB on x64. File systems lock the whole user buffer of an
+         * unbuffered request in one MDL, and Chrome's installer writes its 156 MB archive that way
+         * (FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED), which failed with
+         * STATUS_INSUFFICIENT_RESOURCES. Nothing in the kernel reads Size back: allocate the
+         * larger MDL and let the field wrap. The 2 GB length check above bounds the pool use.
+         */
     }
     else
     {

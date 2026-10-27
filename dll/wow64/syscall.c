@@ -331,6 +331,42 @@ typedef struct
     ULONG PagefileUsage, PeakPagefileUsage, PrivateUsage;
 } WOW64_VM_COUNTERS_EX;
 C_ASSERT(sizeof(WOW64_VM_COUNTERS_EX) == 48);
+
+/* QUOTA_LIMITS and QUOTA_LIMITS_EX as the 32-bit side lays them out: TimeLimit at offset 20
+ * (gcc: 28 and 52 bytes) or 24 (MSVC pads the LARGE_INTEGER: 32 and 56 bytes). All four lengths
+ * are accepted. GlobalMemoryStatusEx and Get/SetProcessWorkingSetSize go through this class
+ * (kernel32 passes the extended form). WOW64_QUOTA_LIMITS_EX is the unpadded extended form. */
+typedef struct
+{
+    ULONG PagedPoolLimit, NonPagedPoolLimit, MinimumWorkingSetSize, MaximumWorkingSetSize, PagefileLimit;
+    ULONG TimeLimitLow, TimeLimitHigh;
+    ULONG Reserved[4];
+    ULONG Flags, CpuRateLimit;
+} WOW64_QUOTA_LIMITS_EX;
+C_ASSERT(sizeof(WOW64_QUOTA_LIMITS_EX) == 52);
+#define WOW64_QUOTA_TIME_OFFSET 20
+
+static ULONG Narrow(SIZE_T Value);
+
+static BOOLEAN QuotaLength32(ULONG Length, BOOLEAN *Padded)
+{
+    switch (Length)
+    {
+    case 28: case 52: *Padded = FALSE; return TRUE;
+    case 32: case 56: *Padded = TRUE; return TRUE;
+    }
+    return FALSE;
+}
+
+/* The unlimited quota (native -1) stays -1 in 32 bits; a size above 4 GiB clamps */
+static ULONG NarrowQuota(SIZE_T Value)
+{
+    return Value == MAXULONG_PTR ? MAXULONG : Narrow(Value);
+}
+static SIZE_T WidenQuota(ULONG Value)
+{
+    return Value == MAXULONG ? MAXULONG_PTR : Value;
+}
 C_ASSERT(sizeof(IO_COUNTERS) == 48 && sizeof(KERNEL_USER_TIMES) == 32);
 C_ASSERT(RTL_FIELD_SIZE(PROCESS_DEVICEMAP_INFORMATION, Query) == 36);
 
@@ -350,6 +386,7 @@ static NTSTATUS QueryProcess32(HANDLE Process, ULONG Class, ULONG Buffer, ULONG 
         IO_COUNTERS Io;
         KERNEL_USER_TIMES Times;
         VM_COUNTERS_EX Vm;
+        QUOTA_LIMITS_EX Quota;
         PROCESS_DEVICEMAP_INFORMATION DeviceMap;
     } Native;
     ULONG Size;
@@ -368,6 +405,13 @@ static NTSTATUS QueryProcess32(HANDLE Process, ULONG Class, ULONG Buffer, ULONG 
         Size = Length == FIELD_OFFSET(WOW64_VM_COUNTERS_EX, PrivateUsage) ? Length : sizeof(WOW64_VM_COUNTERS_EX);
         break;
     case ProcessDeviceMap: Size = RTL_FIELD_SIZE(PROCESS_DEVICEMAP_INFORMATION, Query); break;
+    case ProcessQuotaLimits:
+    {
+        BOOLEAN Padded;
+        if (!QuotaLength32(Length, &Padded)) return STATUS_INFO_LENGTH_MISMATCH;
+        Size = Length;
+        break;
+    }
     case ProcessImageFileName:
     {
         /* The native MaximumLength is a USHORT: the scratch buffer holds any name */
@@ -425,6 +469,34 @@ static NTSTATUS QueryProcess32(HANDLE Process, ULONG Class, ULONG Buffer, ULONG 
         Guest.PeakPagefileUsage = Narrow(Native.Vm.PeakPagefileUsage);
         Guest.PrivateUsage = Narrow(Native.Vm.PrivateUsage);
         RtlCopyMemory(PTR32(Buffer), &Guest, Size);
+        break;
+    }
+    case ProcessQuotaLimits:
+    {
+        WOW64_QUOTA_LIMITS_EX Guest;
+        BOOLEAN Padded;
+        PUCHAR Out = PTR32(Buffer);
+        QuotaLength32(Size, &Padded);
+        Status = NtQueryInformationProcess(Process, Class, &Native.Quota, sizeof(Native.Quota), NULL);
+        if (!NT_SUCCESS(Status)) return Status;
+        RtlZeroMemory(&Guest, sizeof(Guest));
+        Guest.PagedPoolLimit = NarrowQuota(Native.Quota.PagedPoolLimit);
+        Guest.NonPagedPoolLimit = NarrowQuota(Native.Quota.NonPagedPoolLimit);
+        Guest.MinimumWorkingSetSize = NarrowQuota(Native.Quota.MinimumWorkingSetSize);
+        Guest.MaximumWorkingSetSize = NarrowQuota(Native.Quota.MaximumWorkingSetSize);
+        Guest.PagefileLimit = NarrowQuota(Native.Quota.PagefileLimit);
+        Guest.TimeLimitLow = Native.Quota.TimeLimit.LowPart;
+        Guest.TimeLimitHigh = Native.Quota.TimeLimit.HighPart;
+        Guest.Flags = Native.Quota.Flags;
+        Guest.CpuRateLimit = Native.Quota.CpuRateLimit.RateData;
+        if (!Padded) RtlCopyMemory(Out, &Guest, Size);
+        else
+        {
+            RtlCopyMemory(Out, &Guest, WOW64_QUOTA_TIME_OFFSET);
+            RtlZeroMemory(Out + WOW64_QUOTA_TIME_OFFSET, sizeof(ULONG));
+            RtlCopyMemory(Out + WOW64_QUOTA_TIME_OFFSET + sizeof(ULONG),
+                          (PUCHAR)&Guest + WOW64_QUOTA_TIME_OFFSET, Size - WOW64_QUOTA_TIME_OFFSET - sizeof(ULONG));
+        }
         break;
     }
     default:
@@ -1857,7 +1929,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         case ProcessSessionInformation: case ProcessBreakOnTermination: case ProcessCookie:
             return NtQueryInformationProcess(H(0), a[1], P(2), a[3], P(4));
         case ProcessIoCounters: case ProcessTimes: case ProcessVmCounters: case ProcessDeviceMap:
-        case ProcessImageFileName:
+        case ProcessImageFileName: case ProcessQuotaLimits:
             return QueryProcess32(H(0), a[1], a[2], a[3], a[4], Cleanup);
         default: UNSUPPORTED(CLASS, a[1]);
         }
@@ -1874,6 +1946,39 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         {
         case ProcessDefaultHardErrorMode: case ProcessExecuteFlags: case ProcessPriorityClass:
             return NtSetInformationProcess(H(0), a[1], P(2), a[3]);
+        case ProcessQuotaLimits:
+        {
+            WOW64_QUOTA_LIMITS_EX Guest;
+            QUOTA_LIMITS_EX Native;
+            BOOLEAN Padded;
+            PUCHAR In = P(2);
+            if (!QuotaLength32(a[3], &Padded)) return STATUS_INFO_LENGTH_MISMATCH;
+            if (!a[2] || !GuestSpan(a[2], a[3])) return STATUS_ACCESS_VIOLATION;
+            RtlZeroMemory(&Guest, sizeof(Guest));
+            if (!Padded) RtlCopyMemory(&Guest, In, a[3]);
+            else
+            {
+                RtlCopyMemory(&Guest, In, WOW64_QUOTA_TIME_OFFSET);
+                RtlCopyMemory((PUCHAR)&Guest + WOW64_QUOTA_TIME_OFFSET, In + WOW64_QUOTA_TIME_OFFSET + sizeof(ULONG),
+                              a[3] - WOW64_QUOTA_TIME_OFFSET - sizeof(ULONG));
+            }
+            /* 0xffffffff is the (SIZE_T)-1 of SetProcessWorkingSetSize(-1, -1), which trims the set */
+            RtlZeroMemory(&Native, sizeof(Native));
+            Native.PagedPoolLimit = WidenQuota(Guest.PagedPoolLimit);
+            Native.NonPagedPoolLimit = WidenQuota(Guest.NonPagedPoolLimit);
+            Native.MinimumWorkingSetSize = WidenQuota(Guest.MinimumWorkingSetSize);
+            Native.MaximumWorkingSetSize = WidenQuota(Guest.MaximumWorkingSetSize);
+            Native.PagefileLimit = WidenQuota(Guest.PagefileLimit);
+            Native.TimeLimit.LowPart = Guest.TimeLimitLow;
+            Native.TimeLimit.HighPart = Guest.TimeLimitHigh;
+            Native.Reserved1 = Guest.Reserved[0];
+            Native.Reserved2 = Guest.Reserved[1];
+            Native.Reserved3 = Guest.Reserved[2];
+            Native.Reserved4 = Guest.Reserved[3];
+            Native.Flags = Guest.Flags;
+            Native.CpuRateLimit.RateData = Guest.CpuRateLimit;
+            return NtSetInformationProcess(H(0), a[1], &Native, sizeof(Native));
+        }
         default: UNSUPPORTED(CLASS, a[1]);
         }
     case W64_NtSetInformationThread:

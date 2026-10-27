@@ -45,6 +45,7 @@ class CShellLink :
 //  public IFilter,
     public IObjectWithSite,
 //  public ICustomizeInfoTip,
+    public IPropertyStore,
     public IShellPropSheetExt
 {
 public:
@@ -96,6 +97,20 @@ private:
     LPWSTR sComponent;
 
     LPWSTR        m_sLinkPath;
+
+    /* Properties set through IPropertyStore (System.AppUserModel.ID and friends). They are kept for the life
+       of the object; they are not written to the .lnk file. */
+    struct LINKPROP
+    {
+        PROPERTYKEY key;
+        PROPVARIANT var;
+    };
+    LINKPROP     *m_pProps;
+    ULONG         m_cProps;
+    ULONG         m_cPropsAlloc;
+
+    VOID FreeProperties();
+    LINKPROP *FindProperty(REFPROPERTYKEY key);
 
     CComPtr<IUnknown>    m_site;
     CComPtr<IDropTarget> m_DropTarget;
@@ -208,6 +223,13 @@ public:
     STDMETHOD(SetSite)(IUnknown *punk) override;
     STDMETHOD(GetSite)(REFIID iid, void **ppvSite) override;
 
+    // IPropertyStore
+    STDMETHOD(GetCount)(DWORD *cProps) override;
+    STDMETHOD(GetAt)(DWORD iProp, PROPERTYKEY *pkey) override;
+    STDMETHOD(GetValue)(REFPROPERTYKEY key, PROPVARIANT *pv) override;
+    STDMETHOD(SetValue)(REFPROPERTYKEY key, REFPROPVARIANT propvar) override;
+    STDMETHOD(Commit)() override;
+
     // IDropTarget
     STDMETHOD(DragEnter)(IDataObject *pDataObject, DWORD dwKeyState, POINTL pt, DWORD *pdwEffect) override;
     STDMETHOD(DragOver)(DWORD dwKeyState, POINTL pt, DWORD *pdwEffect) override;
@@ -237,6 +259,7 @@ BEGIN_COM_MAP(CShellLink)
 //  COM_INTERFACE_ENTRY_IID(IID_IServiceProvider, IServiceProvider)
 //  COM_INTERFACE_ENTRY_IID(IID_IFilter, IFilter)
     COM_INTERFACE_ENTRY_IID(IID_IObjectWithSite, IObjectWithSite)
+    COM_INTERFACE_ENTRY_IID(IID_IPropertyStore, IPropertyStore)
 //  COM_INTERFACE_ENTRY_IID(IID_ICustomizeInfoTip, ICustomizeInfoTip)
     COM_INTERFACE_ENTRY_IID(IID_IShellPropSheetExt, IShellPropSheetExt)
 END_COM_MAP()

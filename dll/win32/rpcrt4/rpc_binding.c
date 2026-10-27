@@ -1983,3 +1983,33 @@ RPC_STATUS WINAPI I_RpcBindingInqLocalClientPID(RPC_BINDING_HANDLE ClientBinding
 
     return connection->ops->inquire_client_pid(connection, ClientPID);
 }
+
+/***********************************************************************
+ *             I_RpcOpenClientProcess (RPCRT4.@)
+ *
+ * Opens the process of a local RPC client (Windows 8 and later). Chrome's elevation
+ * service imports it, and fails to load without it.
+ */
+RPC_STATUS WINAPI I_RpcOpenClientProcess(RPC_BINDING_HANDLE ClientBinding, ULONG DesiredAccess, void **ClientProcess)
+{
+    ULONG pid;
+    RPC_STATUS status;
+    HANDLE process;
+
+    TRACE("%p %#lx %p\n", ClientBinding, DesiredAccess, ClientProcess);
+
+    if (!ClientProcess)
+        return RPC_S_INVALID_ARG;
+    *ClientProcess = NULL;
+
+    status = I_RpcBindingInqLocalClientPID(ClientBinding, &pid);
+    if (status != RPC_S_OK)
+        return status;
+
+    process = OpenProcess(DesiredAccess, FALSE, pid);
+    if (!process)
+        return GetLastError() == ERROR_ACCESS_DENIED ? ERROR_ACCESS_DENIED : RPC_S_SERVER_UNAVAILABLE;
+
+    *ClientProcess = process;
+    return RPC_S_OK;
+}

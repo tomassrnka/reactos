@@ -260,6 +260,8 @@ VOID CShellLink::Reset()
         SHFreeDataBlockList(m_pDBList);
     m_pDBList = NULL;
 
+    FreeProperties();
+
     /**/sProduct = sComponent = NULL;/**/
 }
 
@@ -297,6 +299,9 @@ CShellLink::CShellLink()
     m_bCommentChanged = FALSE;
     m_hIcon = NULL;
 
+    m_pProps = NULL;
+    m_cProps = m_cPropsAlloc = 0;
+
     m_sLinkPath = NULL;
 
     /**/sProduct = sComponent = NULL;/**/
@@ -317,6 +322,100 @@ CShellLink::~CShellLink()
     HeapFree(GetProcessHeap(), 0, m_sIcoPath);
     HeapFree(GetProcessHeap(), 0, m_sLinkPath);
     SHFreeDataBlockList(m_pDBList);
+    FreeProperties();
+}
+
+VOID CShellLink::FreeProperties()
+{
+    for (ULONG i = 0; i < m_cProps; ++i)
+        PropVariantClear(&m_pProps[i].var);
+    HeapFree(GetProcessHeap(), 0, m_pProps);
+    m_pProps = NULL;
+    m_cProps = m_cPropsAlloc = 0;
+}
+
+CShellLink::LINKPROP *CShellLink::FindProperty(REFPROPERTYKEY key)
+{
+    for (ULONG i = 0; i < m_cProps; ++i)
+    {
+        if (IsEqualGUID(m_pProps[i].key.fmtid, key.fmtid) && m_pProps[i].key.pid == key.pid)
+            return &m_pProps[i];
+    }
+    return NULL;
+}
+
+/* IPropertyStore: Chrome's installer sets System.AppUserModel.ID and ToastActivatorCLSID on every
+ * shortcut it creates and treats a missing interface as a failed shortcut. */
+HRESULT STDMETHODCALLTYPE CShellLink::GetCount(DWORD *cProps)
+{
+    if (!cProps)
+        return E_POINTER;
+    *cProps = m_cProps;
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE CShellLink::GetAt(DWORD iProp, PROPERTYKEY *pkey)
+{
+    if (!pkey)
+        return E_POINTER;
+    if (iProp >= m_cProps)
+        return E_INVALIDARG;
+    *pkey = m_pProps[iProp].key;
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE CShellLink::GetValue(REFPROPERTYKEY key, PROPVARIANT *pv)
+{
+    if (!pv)
+        return E_POINTER;
+    LINKPROP *prop = FindProperty(key);
+    if (!prop)
+    {
+        PropVariantInit(pv);
+        return S_OK;
+    }
+    return PropVariantCopy(pv, &prop->var);
+}
+
+HRESULT STDMETHODCALLTYPE CShellLink::SetValue(REFPROPERTYKEY key, REFPROPVARIANT propvar)
+{
+    LINKPROP *prop = FindProperty(key);
+    if (prop)
+    {
+        PROPVARIANT copy;
+        HRESULT hr = PropVariantCopy(&copy, &propvar);
+        if (FAILED(hr))
+            return hr;
+        PropVariantClear(&prop->var);
+        prop->var = copy;
+    }
+    else
+    {
+        if (m_cProps == m_cPropsAlloc)
+        {
+            ULONG cNew = m_cPropsAlloc ? m_cPropsAlloc * 2 : 8;
+            LINKPROP *pNew = (LINKPROP *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, cNew * sizeof(LINKPROP));
+            if (!pNew)
+                return E_OUTOFMEMORY;
+            if (m_pProps)
+                CopyMemory(pNew, m_pProps, m_cProps * sizeof(LINKPROP));
+            HeapFree(GetProcessHeap(), 0, m_pProps);
+            m_pProps = pNew;
+            m_cPropsAlloc = cNew;
+        }
+        HRESULT hr = PropVariantCopy(&m_pProps[m_cProps].var, &propvar);
+        if (FAILED(hr))
+            return hr;
+        m_pProps[m_cProps].key = key;
+        ++m_cProps;
+    }
+    m_bDirty = TRUE;
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE CShellLink::Commit()
+{
+    return S_OK;
 }
 
 HRESULT STDMETHODCALLTYPE CShellLink::GetClassID(CLSID *pclsid)
