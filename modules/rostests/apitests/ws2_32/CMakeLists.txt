@@ -16,6 +16,7 @@ list(APPEND SOURCE
     getpeername.c
     getservbyname.c
     getservbyport.c
+    getsockname.c
     helpers.c
     iocpskip.c
     ioctlsocket.c
