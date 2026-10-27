@@ -12,14 +12,9 @@
 
 DWORD RegisterDefaultClasses = FALSE;
 
-#ifdef W32K_WIDE_ACTIVE
 PFNCLIENT pfnClientA;
 PFNCLIENT pfnClientW;
-#else
-static PFNCLIENT pfnClientA;
-static PFNCLIENT pfnClientW;
-#endif
-static PFNCLIENTWORKER pfnClientWorker;
+PFNCLIENTWORKER pfnClientWorker;
 
 
 /***********************************************************************
@@ -97,7 +92,7 @@ BOOL WINAPI RegisterSystemControls(VOID)
 
         // Set Global bit!
         WndClass.style = g_SysClasses[i].desc->style|CS_GLOBALCLASS;
-        WndClass.lpfnWndProc = g_SysClasses[i].desc->procW;
+        WndClass.lpfnWndProc = *g_SysClasses[i].desc->procW;
         WndClass.cbWndExtra = g_SysClasses[i].desc->extra;
         WndClass.hCursor = LoadCursorW(NULL, g_SysClasses[i].desc->cursor);
         WndClass.hbrBackground= g_SysClasses[i].desc->brush;
@@ -208,6 +203,41 @@ BOOL WINAPI RegisterClientPFN(VOID)
   KSET(&pfnClientWorker, pfnImeWndProc, ImeWndProc_common);
   KSET(&pfnClientWorker, pfnGhostWndProc, GhostWndProc_common);
   KSET(&pfnClientWorker, pfnCtfHookProc, User32DefWindowProc);
+
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA) && !defined(W32K_WIDE_ACTIVE)
+    /*
+     * Fork: not for the wide WoW64 guest build. Its PFNCLIENT fields are 64 bits wide, so the sizes would not
+     * match ntdll's 32-bit PFN tables (RtlInitializeNtUserPfn would fail with STATUS_INVALID_PARAMETER).
+     */
+    /* Register the PFNs with ntdll */
+    Status = RtlInitializeNtUserPfn(&pfnClientA,
+                                    sizeof(pfnClientA),
+                                    &pfnClientW,
+                                    sizeof(pfnClientW),
+                                    &pfnClientWorker,
+                                    sizeof(pfnClientWorker));
+    if (!NT_SUCCESS(Status))
+    {
+        return FALSE;
+    }
+
+    /* Query the PFN thunks from ntdll */
+    PFNCLIENT* pfnNtdllClientA;
+    PFNCLIENT* pfnNtdllClientW;
+    PFNCLIENTWORKER* pfnNtdllClientWorker;
+    Status = RtlRetrieveNtUserPfn((LPCVOID*)&pfnNtdllClientA,
+                                  (LPCVOID*)&pfnNtdllClientW,
+                                  (LPCVOID*)&pfnNtdllClientWorker);
+    if (!NT_SUCCESS(Status))
+    {
+        return FALSE;
+    }
+
+    /* Now update the global PFNs */
+    KASSIGN(pfnClientA, *pfnNtdllClientA);
+    KASSIGN(pfnClientW, *pfnNtdllClientW);
+    KASSIGN(pfnClientWorker, *pfnNtdllClientWorker);
+#endif
 
   Status = NtUserInitializeClientPfnArrays( &pfnClientA,
                                             &pfnClientW,

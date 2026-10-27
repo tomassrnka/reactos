@@ -163,6 +163,7 @@ list(APPEND SOURCE
     RtlImageRvaToVa.c
     RtlInitializeContext.c
     RtlInitializeSidEx.c
+    RtlInitializeNtUserPfn.c
     RtlIsNameInExpression.c
     RtlIsNameLegalDOS8Dot3.c
     RtlLocale.c
@@ -186,6 +187,7 @@ list(APPEND SOURCE
     RtlSRWLockStress.c
     RtlSRWLockThroughput.c
     RtlSRWLockWait.c
+    RtlRetrieveNtUserPfn.c
     RtlUnhandledExceptionFilter.c
     RtlUnicodeStringToAnsiString.c
     RtlUnicodeStringToCountedOemString.c
@@ -265,7 +267,8 @@ set_target_properties(ntdll_apitest
 
 target_link_libraries(ntdll_apitest ntdll_crt_test_lib rtl_test_lib wine uuid ${PSEH_LIB})
 set_module_type(ntdll_apitest win32cui)
-add_importlibs(ntdll_apitest msvcrt advapi32 kernel32 ntdll)
+add_delay_importlibs(ntdll_apitest advapi32)
+add_importlibs(ntdll_apitest msvcrt kernel32 ntdll)
 add_dependencies(ntdll_apitest load_notifications empty_dll crtkeydtor crtkeydtor_static crtkeydtor_tls crtkeydtor_tls_static)
 
 add_rostests_file(TARGET ntdll_apitest)
