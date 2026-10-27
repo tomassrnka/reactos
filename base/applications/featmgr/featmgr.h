@@ -49,6 +49,8 @@ typedef struct _FM_FEATURE
     FM_STATE State;
     BOOL    Removable;           /* Removable=0 in catalog: base component, disable refused */
     BOOL    PayloadAvailable;    /* every declared payload source present on disk */
+    WCHAR   InstallDate[32];     /* UTC ISO-8601 of last enable, "" if never */
+    BOOL    PendingReboot;       /* disabled but some component awaits reboot-delete */
 } FM_FEATURE;
 
 /* Catalog / layout helpers. featmgr root = %SystemRoot%\Featmgr */
@@ -67,7 +69,18 @@ FM_STATE FmGetState(LPCWSTR id);
 
 /* Reversible operations. log may be NULL; progress is written there. */
 HRESULT FmEnable(LPCWSTR id, FILE *log);
-HRESULT FmDisable(LPCWSTR id, FILE *log);
+HRESULT FmDisable(LPCWSTR id, FILE *log);   /* refuses while enabled dependents exist */
+
+#define FM_DISABLE_CASCADE 0x1   /* also disable enabled features that depend on id */
+HRESULT FmDisableEx(LPCWSTR id, DWORD flags, FILE *log);
+
+/* Uninstall = disable + forget: the persisted record is deleted, so the
+ * feature returns to NotInstalled (DISM /Remove-Feature /Remove analogue).
+ * If a component is still pending reboot-delete the record is kept (Disabled). */
+HRESULT FmUninstall(LPCWSTR id, FILE *log);
+
+/* Enabled features whose Dependencies name id (comma-separated into buf). */
+int     FmGetDependents(LPCWSTR id, LPWSTR buf, DWORD cch);
 
 /* Utility: tier/state to display string. */
 LPCWSTR FmTierStr(FM_TIER t);

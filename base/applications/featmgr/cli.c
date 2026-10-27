@@ -28,19 +28,43 @@ static void Usage(void)
 {
     Out(L"featmgr - ReactOS-Nitro Optional Features manager (FEATMGMT-01)\n\n");
     Out(L"Usage:\n");
-    Out(L"  featmgr /list                list all catalog features + state\n");
+    Out(L"  featmgr /list [/state:<Enabled|Disabled|NotInstalled>] [/tier:<os|software>]\n");
+    Out(L"                               list catalog features + state (optionally filtered)\n");
+    Out(L"  featmgr /state   <id>        print just the state word (scripting)\n");
     Out(L"  featmgr /query   <id>        show one feature in detail\n");
     Out(L"  featmgr /enable  <id>        enable (install) an optional feature\n");
-    Out(L"  featmgr /disable <id>        disable (revert) an optional feature\n");
+    Out(L"  featmgr /disable <id> [/cascade]  disable (revert); refused while enabled\n");
+    Out(L"                               features depend on it unless /cascade\n");
     Out(L"  featmgr /install <id>        alias for /enable\n");
-    Out(L"  featmgr /uninstall <id>      alias for /disable\n");
+    Out(L"  featmgr /uninstall <id>      disable, then forget the record (-> NotInstalled)\n");
     Out(L"  featmgr /help                this text\n");
 }
 
-static int DoList(void)
+static int DoList(int argc, WCHAR **argv)
 {
     FM_FEATURE *arr;
-    int n, i;
+    int n, i, shown = 0, a;
+    int fState = -1, fTier = -1;
+
+    for (a = 2; a < argc; a++)
+    {
+        if (!_wcsnicmp(argv[a], L"/state:", 7))
+        {
+            LPCWSTR v = argv[a] + 7;
+            if (!_wcsicmp(v, L"Enabled")) fState = FM_STATE_ENABLED;
+            else if (!_wcsicmp(v, L"Disabled")) fState = FM_STATE_DISABLED;
+            else if (!_wcsicmp(v, L"NotInstalled")) fState = FM_STATE_NOT_INSTALLED;
+            else { Out(L"error: bad state filter '%s'\n", v); return 2; }
+        }
+        else if (!_wcsnicmp(argv[a], L"/tier:", 6))
+        {
+            LPCWSTR v = argv[a] + 6;
+            if (!_wcsicmp(v, L"os")) fTier = FM_TIER_OS;
+            else if (!_wcsicmp(v, L"software")) fTier = FM_TIER_SOFTWARE;
+            else { Out(L"error: bad tier filter '%s'\n", v); return 2; }
+        }
+        else { Out(L"error: unknown /list option '%s'\n", argv[a]); return 2; }
+    }
     n = FmEnumFeatures(&arr);
     Out(L"%-18s %-9s %-13s %-8s %s\n", L"ID", L"TIER", L"STATE", L"VERSION", L"NAME");
     Out(L"%-18s %-9s %-13s %-8s %s\n", L"------------------", L"---------",
@@ -48,12 +72,15 @@ static int DoList(void)
     for (i = 0; i < n; i++)
     {
         WCHAR state[32];
+        if (fState >= 0 && (int)arr[i].State != fState) continue;
+        if (fTier >= 0 && (int)arr[i].Tier != fTier) continue;
+        shown++;
         _snwprintf(state, 31, L"%s%s", FmStateStr(arr[i].State),
                    arr[i].PayloadAvailable ? L"" : L"*");
         Out(L"%-18s %-9s %-13s %-8s %s\n",
             arr[i].Id, FmTierStr(arr[i].Tier), state, arr[i].Version, arr[i].Name);
     }
-    Out(L"\n%d feature(s). '*' = payload not staged (catalog entry only).\n", n);
+    Out(L"\n%d feature(s). '*' = payload not staged (catalog entry only).\n", shown);
     FmFree(arr);
     return 0;
 }
@@ -71,6 +98,13 @@ static int DoQuery(LPCWSTR id)
     Out(L"Tier:         %s\n", FmTierStr(f.Tier));
     Out(L"Version:      %s\n", f.Version);
     Out(L"State:        %s\n", FmStateStr(f.State));
+    if (f.InstallDate[0]) Out(L"InstallDate:  %s\n", f.InstallDate);
+    if (f.PendingReboot) Out(L"PendingReboot: Yes (removal completes at next reboot)\n");
+    {
+        WCHAR dep[FM_MAX_DEPS * 2];
+        FmGetDependents(f.Id, dep, ARRAYSIZE(dep));
+        Out(L"EnabledDependents: %s\n", dep[0] ? dep : L"(none)");
+    }
     Out(L"Payload:      %s\n", f.PayloadAvailable ? L"staged" : L"NOT staged (deferred)");
     Out(L"Dependencies: %s\n", f.Dependencies[0] ? f.Dependencies : L"(none)");
     Out(L"Manifest:     %s\n", f.ManifestPath);
@@ -97,7 +131,7 @@ int wmain(int argc, WCHAR **argv)
     cmd = argv[1];
 
     if (!_wcsicmp(cmd, L"/list") || !_wcsicmp(cmd, L"list"))
-        return DoList();
+        return DoList(argc, argv);
 
     if (!_wcsicmp(cmd, L"/help") || !_wcsicmp(cmd, L"/?") || !_wcsicmp(cmd, L"help"))
     { Usage(); return 0; }
@@ -107,6 +141,14 @@ int wmain(int argc, WCHAR **argv)
     if (!_wcsicmp(cmd, L"/query") || !_wcsicmp(cmd, L"query"))
         return DoQuery(argv[2]);
 
+    if (!_wcsicmp(cmd, L"/state") || !_wcsicmp(cmd, L"state"))
+    {
+        FM_FEATURE f;
+        if (!FmFindFeature(argv[2], &f)) { Out(L"Unknown\n"); return 1; }
+        Out(L"%s\n", FmStateStr(f.State));
+        return 0;
+    }
+
     if (!_wcsicmp(cmd, L"/enable") || !_wcsicmp(cmd, L"/install")
         || !_wcsicmp(cmd, L"enable") || !_wcsicmp(cmd, L"install"))
     {
@@ -114,10 +156,17 @@ int wmain(int argc, WCHAR **argv)
         return SUCCEEDED(hr) ? 0 : 3;
     }
 
-    if (!_wcsicmp(cmd, L"/disable") || !_wcsicmp(cmd, L"/uninstall")
-        || !_wcsicmp(cmd, L"disable") || !_wcsicmp(cmd, L"uninstall"))
+    if (!_wcsicmp(cmd, L"/disable") || !_wcsicmp(cmd, L"disable"))
     {
-        hr = FmDisable(argv[2], stdout);
+        DWORD fl = 0;
+        if (argc > 3 && !_wcsicmp(argv[3], L"/cascade")) fl |= FM_DISABLE_CASCADE;
+        hr = FmDisableEx(argv[2], fl, stdout);
+        return SUCCEEDED(hr) ? 0 : 3;
+    }
+
+    if (!_wcsicmp(cmd, L"/uninstall") || !_wcsicmp(cmd, L"uninstall"))
+    {
+        hr = FmUninstall(argv[2], stdout);
         return SUCCEEDED(hr) ? 0 : 3;
     }
 

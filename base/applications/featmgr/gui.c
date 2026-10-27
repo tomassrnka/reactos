@@ -61,7 +61,11 @@ static void UpdateButtons(void)
     if (i >= 0 && i < g_count)
     {
         if (g_arr[i].State == FM_STATE_ENABLED)
-            canRemove = g_arr[i].Removable;
+        {
+            WCHAR dep[FM_MAX_DEPS * 2];
+            /* greyed if base component (Removable=0) or enabled dependents exist */
+            canRemove = g_arr[i].Removable && !FmGetDependents(g_arr[i].Id, dep, ARRAYSIZE(dep));
+        }
         else if (g_arr[i].PayloadAvailable)
             canInstall = TRUE;
         SetWindowTextW(g_hDesc, g_arr[i].Description);
@@ -89,6 +93,9 @@ static void DoAction(HWND hwnd, BOOL enable)
     if (SUCCEEDED(hr))
         StringCchPrintfW(msg, 512, L"'%s' %s.", g_arr[i].Name,
                          enable ? L"installed and enabled" : L"disabled and reverted");
+    else if (hr == HRESULT_FROM_WIN32(ERROR_DEPENDENT_SERVICES_RUNNING))
+        StringCchPrintfW(msg, 512, L"'%s' cannot be turned off while other enabled "
+                         L"features depend on it. Turn those off first.", g_arr[i].Name);
     else
         StringCchPrintfW(msg, 512, L"Operation failed (0x%08lx).\n\n"
                          L"If the payload is deferred, the feature cannot be enabled "
