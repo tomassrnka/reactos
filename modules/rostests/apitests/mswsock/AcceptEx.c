@@ -325,6 +325,70 @@ cleanup:
     }
 }
 
+/*
+ * AcceptEx locks its output buffer before it looks at the acceptor handle. A
+ * request that fails on the handle must unlock the pages again; if it does not,
+ * every failed call pins its buffer for good.
+ */
+static void TestAcceptExBadAcceptor(void)
+{
+    enum { Rounds = 400, BufferPages = 16 };
+    SOCKET Listener, Acceptor;
+    SOCKADDR_IN ListenAddress;
+    MEMORYSTATUSEX Before, After;
+    OVERLAPPED Overlapped;
+    DWORD Bytes, Round, Failed = 0;
+    ULONGLONG Lost;
+    UCHAR *Buffer;
+
+    if (!CreateListener(&Listener, &ListenAddress))
+        return;
+
+    ZeroMemory(&Overlapped, sizeof(Overlapped));
+    Overlapped.hEvent = WSACreateEvent();
+
+    /* Warm up allocations the first call makes, then measure */
+    Before.dwLength = After.dwLength = sizeof(Before);
+    for (Round = 0; Round < Rounds + 1; Round++)
+    {
+        if (Round == 1)
+            ok(GlobalMemoryStatusEx(&Before), "GlobalMemoryStatusEx failed: %lu\n", GetLastError());
+
+        Acceptor = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        Buffer = VirtualAlloc(NULL, BufferPages * 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (Acceptor == INVALID_SOCKET || !Buffer)
+        {
+            ok(0, "setup failed: %d, %lu\n", WSAGetLastError(), GetLastError());
+            if (Acceptor != INVALID_SOCKET)
+                closesocket(Acceptor);
+            break;
+        }
+        memset(Buffer, 0, BufferPages * 4096);
+
+        /* Closing the handle behind winsock's back leaves a socket it still trusts, with a dead handle */
+        CloseHandle((HANDLE)Acceptor);
+        Bytes = 0;
+        if (!AcceptEx(Listener, Acceptor, Buffer, BufferPages * 4096 - 2 * ADDRESS_LENGTH,
+                      ADDRESS_LENGTH, ADDRESS_LENGTH, &Bytes, &Overlapped))
+        {
+            if (WSAGetLastError() != ERROR_IO_PENDING)
+                Failed++;
+        }
+        VirtualFree(Buffer, 0, MEM_RELEASE);
+        closesocket(Acceptor);
+    }
+    ok(GlobalMemoryStatusEx(&After), "GlobalMemoryStatusEx failed: %lu\n", GetLastError());
+    ok(Failed == Round, "%lu of %lu AcceptEx calls with a dead acceptor failed\n", Failed, Round);
+
+    Lost = (Before.ullAvailPhys > After.ullAvailPhys) ? Before.ullAvailPhys - After.ullAvailPhys : 0;
+    trace("physical memory lost over %d failed AcceptEx calls: %I64u KB\n", Rounds, Lost / 1024);
+    ok(Lost < (ULONGLONG)Rounds * BufferPages * 4096 / 4,
+       "failed AcceptEx calls leak their locked buffer: %I64u KB lost\n", Lost / 1024);
+
+    WSACloseEvent(Overlapped.hEvent);
+    closesocket(Listener);
+}
+
 START_TEST(AcceptEx)
 {
     GUID AcceptExGuid = WSAID_ACCEPTEX, SockaddrsGuid = WSAID_GETACCEPTEXSOCKADDRS;
@@ -364,6 +428,9 @@ START_TEST(AcceptEx)
     }
     TestAcceptEx(AcceptEx, GetAcceptExSockaddrs, "mswsock", DATA_LENGTH, ADDRESS_LENGTH, SendAfterPost);
     TestAcceptEx(AcceptEx, GetAcceptExSockaddrs, "mswsock", 0, ADDRESS_LENGTH, SendAfterPost);
+
+    if (!TeardownHung)
+        TestAcceptExBadAcceptor();
 
     /* A close or a request that never finished leaves the stack in an unknown state */
     if (TeardownHung)
