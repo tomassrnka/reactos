@@ -11,6 +11,7 @@ list(APPEND SOURCE
     versionconflict.c
     sysmain.c
     manifestcompat.c
+    procparamflags.c
     versionlie.c
     verifyversion.c
     testlist.c
