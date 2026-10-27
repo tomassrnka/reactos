@@ -86,6 +86,7 @@ typedef struct _SERVICE
 
     /* The failures that count towards the next failure action */
     DWORD dwFailureCount;
+    BOOL bFailureOnNonCrash; /* FailureActionsOnNonCrashFailures, cached: set when loaded or changed */
     ULONGLONG ullLastFailureTime; /* 100 ns units since 1601 */
 
     PSECURITY_DESCRIPTOR pSecurityDescriptor;

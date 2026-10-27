@@ -5633,6 +5633,8 @@ RChangeServiceConfig2W(
                                      REG_DWORD,
                                      (LPBYTE)&dwFlag,
                                      sizeof(dwFlag));
+            if (dwError == ERROR_SUCCESS)
+                lpService->bFailureOnNonCrash = (dwFlag != 0);
         }
     }
 
