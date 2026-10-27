@@ -56,7 +56,18 @@ CcpFindBcb(
             (Bcb->PFCB.MappedFileOffset.QuadPart + Bcb->PFCB.MappedLength) >=
             (FileOffset->QuadPart + Length))
         {
-            if ((Pinned && Bcb->PinCount > 0) || (!Pinned && Bcb->PinCount == 0))
+            /* Discriminate pinned vs mapped BCBs by the stable per-BCB
+             * pin-type flag, not the live PinCount. PinCount transiently
+             * drops to 0 during an exclusive-pin ownership handoff (the old
+             * owner has unpinned and released the ERESOURCE, the next waiter
+             * has not yet re-incremented) while the BCB is still linked with
+             * RefCount > 0. Keying discovery off PinCount made a pinned BCB
+             * momentarily undiscoverable, so a concurrent pinner created a
+             * duplicate pinned BCB (its own ERESOURCE) for the same range and
+             * two "exclusive" owners ran at once (kmtest CcPinRead TestId 7
+             * PinRaceOverlaps). The flag is constant for the BCB's whole
+             * linked lifetime, closing that window. */
+            if ((Pinned && Bcb->Pinned) || (!Pinned && !Bcb->Pinned))
             {
                 Found = TRUE;
                 break;
@@ -147,6 +158,8 @@ CcpGetAppropriateBcb(
     iBcb->Vacb = Vacb;
     iBcb->PinCount = 0;
     iBcb->RefCount = 1;
+    /* Record the stable pin-type before the BCB can be linked and found. */
+    iBcb->Pinned = ToPin;
     ExInitializeResourceLite(&iBcb->Lock);
 
     KeAcquireSpinLock(&SharedCacheMap->BcbSpinLock, &OldIrql);

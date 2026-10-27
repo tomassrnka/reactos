@@ -263,6 +263,14 @@ typedef struct _INTERNAL_BCB
     ULONG PinCount;
     CSHORT RefCount; /* (At offset 0x34 on WinNT4) */
     LIST_ENTRY BcbEntry;
+    /* Stable pin-type attribute: TRUE for a BCB created by a pin
+     * (CcPinRead / CcPinMappedData), FALSE for one created by a plain map
+     * (CcMapData). Set before the BCB is linked into BcbList under
+     * BcbSpinLock and never changed while linked, so CcpFindBcb can tell
+     * pinned BCBs from mapped ones for the BCB's whole RefCount>0 lifetime,
+     * independent of the instantaneous PinCount (which legitimately hits 0
+     * during an exclusive-pin ownership handoff). */
+    BOOLEAN Pinned;
 } INTERNAL_BCB, *PINTERNAL_BCB;
 
 typedef struct _LAZY_WRITER
