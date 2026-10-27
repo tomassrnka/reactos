@@ -127,7 +127,7 @@ getxyDataEnt(IN OUT PCHAR *Results,
     WsaQuery->lpafpProtocols = afp;
 
     if (!IsEqualGUID(Type, &HostnameGuid))
-        dwControlFlags |= LUP_RETURN_BLOB;
+        dwControlFlags |= LUP_RETURN_BLOB | LUP_RETURN_ALIASES;
 
     /* Send the Query Request to find a Service */
     ErrorCode = WSALookupServiceBeginA(WsaQuery,
