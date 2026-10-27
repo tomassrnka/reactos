@@ -203,7 +203,13 @@ START_TEST(ZeroBits)
         Offset.QuadPart = 0;
         Status = NtMapViewOfSection(Section, NtCurrentProcess(), &Base, 0x1fffffff,
                                    0, &Offset, &Size, ViewUnmap, 0, PAGE_READWRITE);
-        ok_ntstatus(Status, STATUS_INVALID_PARAMETER_4);
+        /* Where masks are supported this is the explicit-base check, which NtMapViewOfSection
+           reports as the generic STATUS_INVALID_PARAMETER from Windows 10 on. Where they are not,
+           the mask itself is rejected first, as STATUS_INVALID_PARAMETER_4 on every version. */
+        if (MasksSupported && GetNTVersion() >= _WIN32_WINNT_WIN10)
+            ok_ntstatus(Status, STATUS_INVALID_PARAMETER);
+        else
+            ok_ntstatus(Status, STATUS_INVALID_PARAMETER_4);
         if (NT_SUCCESS(Status)) NtUnmapViewOfSection(NtCurrentProcess(), Base);
         NtClose(Section);
     }
