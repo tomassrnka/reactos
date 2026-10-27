@@ -5,6 +5,7 @@ list(APPEND SOURCE
     inherit.c
     notify.c
     relopen.c
+    reparse.c
     special.c
     util.c
     volume.c)
