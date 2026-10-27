@@ -64,6 +64,7 @@ KMT_TESTFUNC Test_IoVolume;
 KMT_TESTFUNC Test_KdSystemDebugControl;
 KMT_TESTFUNC Test_KeApc;
 KMT_TESTFUNC Test_KeApcDelivery;
+KMT_TESTFUNC Test_KeBugCheckCallback;
 KMT_TESTFUNC Test_KeDeviceQueue;
 KMT_TESTFUNC Test_KeDpc;
 KMT_TESTFUNC Test_KeEvent;
@@ -191,6 +192,7 @@ const KMT_TEST TestList[] =
     { "KdSystemDebugControl",               Test_KdSystemDebugControl },
     { "KeApc",                              Test_KeApc },
     { "KeApcDelivery",                      Test_KeApcDelivery },
+    { "-KeBugCheckCallback",                Test_KeBugCheckCallback },
     { "KeDeviceQueue",                      Test_KeDeviceQueue },
     { "KeDpc",                              Test_KeDpc },
     { "KeEvent",                            Test_KeEvent },
