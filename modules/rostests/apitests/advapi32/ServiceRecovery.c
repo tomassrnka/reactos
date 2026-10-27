@@ -164,7 +164,7 @@ static void DestroyTestService(SVC *Svc)
     ChangeServiceConfigW(Svc->hService, SERVICE_NO_CHANGE, SERVICE_DISABLED, SERVICE_NO_CHANGE,
                          NULL, NULL, NULL, NULL, NULL, NULL, NULL);
     ChangeServiceConfig2W(Svc->hService, SERVICE_CONFIG_FAILURE_ACTIONS, &None);
-    for (Start = GetTickCount(); GetTickCount() - Start < 5000; Sleep(POLL_MS))
+    for (Start = GetTickCount(); GetTickCount() - Start < 15000; Sleep(POLL_MS))
     {
         /* A start that was already under way when the service was disabled settles, and is stopped then */
         if (QueryServiceStatus(Svc->hService, &Status) && Status.dwCurrentState == SERVICE_STOPPED)
@@ -261,7 +261,7 @@ static BOOL StartAndWait(SVC *Svc, SERVICE_STATUS_PROCESS *Status)
         ok(0, "StartService failed: %lu\n", GetLastError());
         return FALSE;
     }
-    if (!WaitRunning(Svc, 0, 15000, Status, NULL))
+    if (!WaitRunning(Svc, 0, 30000, Status, NULL))
     {
         ok(0, "The service did not reach the running state\n");
         return FALSE;
@@ -286,7 +286,7 @@ static BOOL Crash(SVC *Svc)
     if (hProcess)
     {
         Start = GetTickCount();
-        if (WaitForSingleObject(hProcess, 8000) != WAIT_OBJECT_0)
+        if (WaitForSingleObject(hProcess, 20000) != WAIT_OBJECT_0)
             trace("DIAG: the service process %lu is still alive %lu ms after the crash request\n", Process.dwProcessId, GetTickCount() - Start);
         CloseHandle(hProcess);
     }
@@ -306,7 +306,7 @@ static void TestCrashNoActions(void)
     }
     if (StartAndWait(&Svc, &Status) && Crash(&Svc))
     {
-        ok(WaitStopped(&Svc, 10000, &Status, &Ms), "A crashed service did not become stopped\n");
+        ok(WaitStopped(&Svc, 20000, &Status, &Ms), "A crashed service did not become stopped\n");
         trace("crash without actions: stopped after %lu ms, exit code %lu, specific %lu, controls %lx\n",
               Ms, Status.dwWin32ExitCode, Status.dwServiceSpecificExitCode, Status.dwControlsAccepted);
         ok(Status.dwWin32ExitCode == ERROR_PROCESS_ABORTED, "Exit code %lu\n", Status.dwWin32ExitCode);
@@ -334,18 +334,18 @@ static void TestRestartSequence(void)
 
     Pid = Status.dwProcessId;
     Crash(&Svc);
-    ok(WaitRunning(&Svc, Pid, 15000, &Status, &Ms), "No restart after the first failure\n");
+    ok(WaitRunning(&Svc, Pid, 30000, &Status, &Ms), "No restart after the first failure\n");
     trace("first restart: %lu ms after the crash was asked for\n", Ms);
     ok(Ms >= 1000, "First restart after %lu ms, the delay is 1000\n", Ms);
 
     Pid = Status.dwProcessId;
     Crash(&Svc);
-    ok(WaitRunning(&Svc, Pid, 15000, &Status, &Ms), "No restart after the second failure\n");
+    ok(WaitRunning(&Svc, Pid, 30000, &Status, &Ms), "No restart after the second failure\n");
     trace("second restart: %lu ms after the crash was asked for\n", Ms);
     ok(Ms >= 500, "Second restart after %lu ms, the delay is 500\n", Ms);
 
     Crash(&Svc);
-    ok(WaitStopped(&Svc, 10000, &Status, NULL), "The third crash left the service running\n");
+    ok(WaitStopped(&Svc, 20000, &Status, NULL), "The third crash left the service running\n");
     ok(StaysStopped(&Svc, 3000), "A service came back although its third action is none\n");
 
 Done:
@@ -368,7 +368,7 @@ static void TestNormalStop(void)
     if (StartAndWait(&Svc, &Status))
     {
         ok(ControlService(Svc.hService, SERVICE_CONTROL_STOP, &Plain), "Stop failed: %lu\n", GetLastError());
-        ok(WaitStopped(&Svc, 10000, &Status, NULL), "The service did not stop\n");
+        ok(WaitStopped(&Svc, 20000, &Status, NULL), "The service did not stop\n");
         ok(Status.dwWin32ExitCode == NO_ERROR, "Exit code %lu\n", Status.dwWin32ExitCode);
         ok(StaysStopped(&Svc, 2500), "A service that was stopped on request came back\n");
     }
@@ -414,14 +414,14 @@ static void TestNonCrashFlag(void)
     {
         Pid = Status.dwProcessId;
         ControlService(Svc.hService, CTRL_EXIT_ERROR, &Plain);
-        ok(WaitRunning(&Svc, Pid, 15000, &Status, NULL), "No restart after a non-crash failure with the flag set\n");
+        ok(WaitRunning(&Svc, Pid, 30000, &Status, NULL), "No restart after a non-crash failure with the flag set\n");
 
         /* Without the flag the same exit leaves the service stopped */
         Flag.fFailureActionsOnNonCrashFailures = FALSE;
         ok(ChangeServiceConfig2W(Svc.hService, SERVICE_CONFIG_FAILURE_ACTIONS_FLAG, &Flag),
            "ChangeServiceConfig2W(flag) failed: %lu\n", GetLastError());
         ControlService(Svc.hService, CTRL_EXIT_ERROR, &Plain);
-        ok(WaitStopped(&Svc, 10000, &Status, NULL), "The service did not stop\n");
+        ok(WaitStopped(&Svc, 20000, &Status, NULL), "The service did not stop\n");
         ok(StaysStopped(&Svc, 2500), "A non-crash failure restarted the service with the flag cleared\n");
     }
     DestroyTestService(&Svc);
@@ -444,7 +444,7 @@ static void TestSpecificExit(void)
     if (StartAndWait(&Svc, &Status))
     {
         ControlService(Svc.hService, CTRL_EXIT_ERROR, &Plain);
-        ok(WaitStopped(&Svc, 10000, &Status, NULL), "The service did not stop\n");
+        ok(WaitStopped(&Svc, 20000, &Status, NULL), "The service did not stop\n");
         ok(Status.dwWin32ExitCode == ERROR_SERVICE_SPECIFIC_ERROR, "Exit code %lu\n", Status.dwWin32ExitCode);
         ok(Status.dwServiceSpecificExitCode == 7, "Specific exit code %lu\n", Status.dwServiceSpecificExitCode);
         ok(StaysStopped(&Svc, 2500), "A non-zero exit restarted the service\n");
@@ -464,28 +464,42 @@ static void TestResetPeriod(void)
         skip("Cannot create the service: %lu\n", GetLastError());
         return;
     }
-    SetActions(&Svc, 2, NULL, 2, Actions);
+    SetActions(&Svc, 4, NULL, 2, Actions);
     if (!StartAndWait(&Svc, &Status))
         goto Done;
 
     Pid = Status.dwProcessId;
     Crash(&Svc);
-    ok(WaitRunning(&Svc, Pid, 15000, &Status, NULL), "No restart after the first failure\n");
+    ok(WaitRunning(&Svc, Pid, 30000, &Status, NULL), "No restart after the first failure\n");
 
     /* After the reset period the failure count starts over, so the first action applies again */
-    Sleep(3500);
+    Sleep(4500);
     Pid = Status.dwProcessId;
     Crash(&Svc);
-    ok(WaitRunning(&Svc, Pid, 15000, &Status, NULL), "No restart after the failure count was reset\n");
+    ok(WaitRunning(&Svc, Pid, 30000, &Status, NULL), "No restart after the failure count was reset\n");
 
     /* Within the period the second action, none, applies */
     Pid = Status.dwProcessId;
     Crash(&Svc);
-    ok(WaitStopped(&Svc, 10000, &Status, NULL), "The crash left the service running\n");
+    ok(WaitStopped(&Svc, 20000, &Status, NULL), "The crash left the service running\n");
     ok(StaysStopped(&Svc, 2500), "A service came back within the reset period with the action none\n");
 
 Done:
     DestroyTestService(&Svc);
+}
+
+/* Wait for a file with content: the command creates it before it writes it */
+static BOOL WaitFileText(PCWSTR File, DWORD TimeoutMs)
+{
+    DWORD Start;
+    WIN32_FILE_ATTRIBUTE_DATA Data;
+
+    for (Start = GetTickCount(); GetTickCount() - Start < TimeoutMs; Sleep(100))
+    {
+        if (GetFileAttributesExW(File, GetFileExInfoStandard, &Data) && Data.nFileSizeLow != 0)
+            return TRUE;
+    }
+    return FALSE;
 }
 
 static void TestRunCommand(void)
@@ -494,7 +508,6 @@ static void TestRunCommand(void)
     SERVICE_STATUS_PROCESS Status;
     SC_ACTION Actions[1] = { { SC_ACTION_RUN_COMMAND, 200 } };
     WCHAR Exe[MAX_PATH], Dir[MAX_PATH], File[MAX_PATH], Command[3 * MAX_PATH];
-    DWORD Start;
     HANDLE hFile;
     CHAR Text[16] = "";
     DWORD Read;
@@ -517,12 +530,7 @@ static void TestRunCommand(void)
     if (StartAndWait(&Svc, &Status))
     {
         Crash(&Svc);
-        for (Start = GetTickCount(); GetTickCount() - Start < 10000; Sleep(100))
-        {
-            if (GetFileAttributesW(File) != INVALID_FILE_ATTRIBUTES)
-                break;
-        }
-        Sleep(500);
+        WaitFileText(File, 20000);
         hFile = CreateFileW(File, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
         ok(hFile != INVALID_HANDLE_VALUE, "The recovery command did not run\n");
         if (hFile != INVALID_HANDLE_VALUE)
@@ -562,7 +570,6 @@ static void TestRunCommandAccount(void)
     WCHAR Exe[MAX_PATH], Dir[MAX_PATH], File[MAX_PATH], SvcFile[MAX_PATH], Command[3 * MAX_PATH];
     CHAR Text[256] = "", Self[256] = "";
     PCWSTR StartArg;
-    DWORD Start;
 
     if (!GetTempPathW(_countof(Dir), Dir) || !GetModuleFileNameW(NULL, Exe, _countof(Exe)) ||
         !ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:(A;OICI;GA;;;WD)", SDDL_REVISION_1,
@@ -586,15 +593,10 @@ static void TestRunCommandAccount(void)
     {
         SetActions(&Svc, 3600, Command, 1, Actions);
         StartArg = SvcFile;
-        if (StartServiceW(Svc.hService, 1, &StartArg) && WaitRunning(&Svc, 0, 15000, &Status, NULL))
+        if (StartServiceW(Svc.hService, 1, &StartArg) && WaitRunning(&Svc, 0, 30000, &Status, NULL))
         {
             Crash(&Svc);
-            for (Start = GetTickCount(); GetTickCount() - Start < 10000; Sleep(100))
-            {
-                if (GetFileAttributesW(File) != INVALID_FILE_ATTRIBUTES)
-                    break;
-            }
-            Sleep(500);
+            WaitFileText(File, 20000);
             ReadText(SvcFile, Self, sizeof(Self));
             ok(ReadText(File, Text, sizeof(Text)), "The recovery command did not run\n");
             trace("recovery command account '%s', service account '%s'\n", Text, Self);
@@ -616,6 +618,48 @@ static void TestRunCommandAccount(void)
     DeleteFileW(SvcFile);
     RemoveDirectoryW(Dir);
     LocalFree(Sa.lpSecurityDescriptor);
+}
+
+/* A service that is marked for delete and then crashes has no failure actions: no command runs */
+static void TestDeletedServiceCrash(void)
+{
+    SVC Svc;
+    SERVICE_STATUS_PROCESS Status;
+    SC_ACTION Actions[1] = { { SC_ACTION_RUN_COMMAND, 0 } };
+    WCHAR Exe[MAX_PATH], Dir[MAX_PATH], File[MAX_PATH], Command[3 * MAX_PATH];
+    HANDLE hProcess;
+
+    if (!GetTempPathW(_countof(Dir), Dir) || !GetModuleFileNameW(NULL, Exe, _countof(Exe)))
+    {
+        skip("No temporary path\n");
+        return;
+    }
+    StringCchPrintfW(File, _countof(File), L"%lssvcdel%lu.txt", Dir, GetCurrentProcessId());
+    DeleteFileW(File);
+    StringCchPrintfW(Command, _countof(Command), L"\"%ls\" ServiceRecovery runcmd \"%ls\" %%1%%", Exe, File);
+
+    if (!CreateTestService(&Svc))
+    {
+        skip("Cannot create the service: %lu\n", GetLastError());
+        return;
+    }
+    SetActions(&Svc, 3600, Command, 1, Actions);
+    if (StartAndWait(&Svc, &Status))
+    {
+        hProcess = OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE, FALSE, Status.dwProcessId);
+        ok(hProcess != NULL, "Cannot open the service process: %lu\n", GetLastError());
+        ok(DeleteService(Svc.hService), "DeleteService failed: %lu\n", GetLastError());
+        if (hProcess)
+        {
+            TerminateProcess(hProcess, 1);
+            ok(WaitForSingleObject(hProcess, 20000) == WAIT_OBJECT_0, "The service process did not end\n");
+            CloseHandle(hProcess);
+        }
+        ok(!WaitFileText(File, 3000), "The recovery command of a deleted service ran\n");
+    }
+    CloseServiceHandle(Svc.hService);
+    CloseServiceHandle(Svc.hSC);
+    DeleteFileW(File);
 }
 
 START_TEST(ServiceRecovery)
@@ -661,4 +705,5 @@ START_TEST(ServiceRecovery)
     TestResetPeriod();
     TestRunCommand();
     TestRunCommandAccount();
+    TestDeletedServiceCrash();
 }

@@ -35,6 +35,7 @@ static DWORD ServiceTag = 0;
 
 /* Threads that touch the database on their own: the shutdown waits for them */
 static LONG ScmActiveWorkers = 0;
+static HANDLE hFailureShutdownEvent = NULL; /* Set at shutdown: ends the delay of the failure actions */
 
 /* The critical section synchronizes service control requests */
 static CRITICAL_SECTION ControlServiceCriticalSection;
@@ -799,11 +800,19 @@ ScmFailureActionThread(PVOID pParam)
     DWORD dwRemaining = pContext->dwDelay, dwSlice;
 
     /* The delay ends early when the system shuts down */
-    while (dwRemaining != 0 && !ScmShutdown)
+    if (hFailureShutdownEvent != NULL)
     {
-        dwSlice = min(100, dwRemaining);
-        Sleep(dwSlice);
-        dwRemaining -= dwSlice;
+        if (dwRemaining != 0 && !ScmShutdown)
+            WaitForSingleObject(hFailureShutdownEvent, dwRemaining);
+    }
+    else
+    {
+        while (dwRemaining != 0 && !ScmShutdown)
+        {
+            dwSlice = min(100, dwRemaining);
+            Sleep(dwSlice);
+            dwRemaining -= dwSlice;
+        }
     }
 
     /* The database goes away at shutdown: touch nothing of it then */
@@ -817,7 +826,8 @@ ScmFailureActionThread(PVOID pParam)
     if (pContext->Type == SC_ACTION_RESTART)
     {
         ScmLockDatabaseShared();
-        bStart = !Service->bDeleted &&
+        bStart = !ScmShutdown &&
+                 !Service->bDeleted &&
                  Service->dwStartType != SERVICE_DISABLED &&
                  Service->Status.dwCurrentState == SERVICE_STOPPED;
         ScmUnlockDatabase();
@@ -1054,9 +1064,6 @@ ScmProcessServiceFailure(PSERVICE Service, PSERVICE_IMAGE Image, PLIST_ENTRY pLo
 VOID
 ScmServiceStoppedWithError(PSERVICE Service, PSERVICE_IMAGE Image, PLIST_ENTRY pLogQueue)
 {
-    HKEY hServiceKey;
-    DWORD dwFlag = 0, dwSize = sizeof(dwFlag), dwType;
-
     if (ScmShutdown || Service->bDeleted)
         return;
 
@@ -1065,14 +1072,8 @@ ScmServiceStoppedWithError(PSERVICE Service, PSERVICE_IMAGE Image, PLIST_ENTRY p
          Service->Status.dwServiceSpecificExitCode == 0))
         return;
 
-    if (ScmOpenServiceKey(Service->lpServiceName, KEY_READ, &hServiceKey) != ERROR_SUCCESS)
-        return;
-    if (RegQueryValueExW(hServiceKey, L"FailureActionsOnNonCrashFailures", NULL, &dwType,
-                         (LPBYTE)&dwFlag, &dwSize) != ERROR_SUCCESS || dwType != REG_DWORD)
-        dwFlag = 0;
-    RegCloseKey(hServiceKey);
-
-    if (dwFlag != 0)
+    /* Only a service that asked for it has failure actions to run: no registry access for the others */
+    if (Service->bFailureOnNonCrash)
         ScmProcessServiceFailure(Service, Image, pLogQueue);
 }
 
@@ -1113,7 +1114,9 @@ ScmHandleServiceProcessExit(PSERVICE_PROCESS_WATCH pWatch, PLIST_ENTRY pLogQueue
         /* A restart makes a new image; this one goes when the services that still hold it let it go */
         Image->bProcessEnded = TRUE;
 
-        ScmProcessServiceFailure(Service, Image, pLogQueue);
+        /* A deleted service has no failure actions: it must not log a crash or run what its key still holds */
+        if (!Service->bDeleted)
+            ScmProcessServiceFailure(Service, Image, pLogQueue);
 
         Service->lpImage = NULL;
         Image->dwImageRunCount--;
@@ -1577,6 +1580,7 @@ CreateServiceListEntry(LPCWSTR lpServiceName,
     LPWSTR lpDisplayName = NULL;
     LPWSTR lpGroup = NULL;
     DWORD dwSize;
+    DWORD dwFlag, dwType;
     DWORD dwError;
     DWORD dwServiceType;
     DWORD dwStartType;
@@ -1689,6 +1693,12 @@ CreateServiceListEntry(LPCWSTR lpServiceName,
            lpService->Status.dwServiceType,
            lpService->dwTag,
            lpService->dwErrorControl);
+
+    dwSize = sizeof(DWORD);
+    dwFlag = 0;
+    if (RegQueryValueExW(hServiceKey, L"FailureActionsOnNonCrashFailures", NULL, &dwType,
+                         (LPBYTE)&dwFlag, &dwSize) == ERROR_SUCCESS && dwType == REG_DWORD)
+        lpService->bFailureOnNonCrash = (dwFlag != 0);
 
     if (ScmIsDeleteFlagSet(hServiceKey))
         lpService->bDeleted = TRUE;
@@ -1813,6 +1823,8 @@ ScmCreateServiceDatabase(VOID)
 
     DPRINT("ScmCreateServiceDatabase() called\n");
 
+    hFailureShutdownEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+
     /* Retrieve the NoInteractiveServies value */
     ScmGetNoInteractiveServicesValue();
 
@@ -1898,13 +1910,17 @@ ScmShutdownServiceDatabase(VOID)
      * A worker that began before the shutdown flag was set finishes first; wait for it outside the locks.
      * One that does not finish keeps the database: the process is ending anyway.
      */
+    if (hFailureShutdownEvent != NULL)
+        SetEvent(hFailureShutdownEvent);
     for (i = 0; i < 50 && InterlockedCompareExchange(&ScmActiveWorkers, 0, 0) != 0; i++)
         Sleep(100);
-    if (InterlockedCompareExchange(&ScmActiveWorkers, 0, 0) != 0)
-        return;
 
+    /* Marked services go in any case, or they come back after the reboot */
     ScmDeleteMarkedServices();
-    RtlDeleteResource(&DatabaseLock);
+
+    /* A worker that is still running keeps the lock: the process is ending anyway */
+    if (InterlockedCompareExchange(&ScmActiveWorkers, 0, 0) == 0)
+        RtlDeleteResource(&DatabaseLock);
 
     DPRINT("ScmShutdownServiceDatabase() done\n");
 }
