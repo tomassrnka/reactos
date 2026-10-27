@@ -1109,8 +1109,25 @@ PspTerminateThreadByPointer(IN PETHREAD Thread,
         }
         else
         {
-            /* Forcefully resume the thread and return */
+            /*
+             * Forcefully resume the thread so a suspended target runs its
+             * kill APC. A resume alone does not wake a thread blocked in an
+             * *alertable* wait inside a critical or guarded region
+             * (KernelApcDisable != 0): KiInsertQueueApc correctly defers the
+             * normal exit APC while APCs are disabled, and nothing else breaks
+             * the wait, so the thread never leaves its region, never runs the
+             * deferred exit APC, and never exits. A driver may park a worker in
+             * an alertable KernelMode wait (for example a user-mode file-system
+             * server blocked in its IOQ) and rely on termination interrupting
+             * it. Alert the terminating thread so any such alertable wait
+             * returns STATUS_ALERTED, letting the thread break out of its
+             * critical region so its deferred exit-APC can run. KeAlertThread
+             * only unwaits a thread already in an alertable wait of a
+             * compatible mode; otherwise it just records the alert, so
+             * non-alertable waiters are untouched.
+             */
             KeForceResumeThread(&Thread->Tcb);
+            KeAlertThread(&Thread->Tcb, KernelMode);
             return Status;
         }
     }
