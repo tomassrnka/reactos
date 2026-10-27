@@ -27,9 +27,15 @@
 #define IDC_CANCEL     1011
 #define IDC_APPLY      1012
 #define IDC_INSTR      1013
+#define IDC_IMPORT     1014
+
+/* A long software-tier install (download + run installer) must not run on the UI
+ * thread or the dialog freezes. The op runs on a worker thread that posts this
+ * message back with the heap OPCTX result when it finishes. */
+#define WM_APP_OPDONE  (WM_APP + 1)
 
 static HWND g_hTab, g_hList, g_hDesc, g_hInstr;
-static HWND g_hInstall, g_hEnable, g_hDisable, g_hUninstall;
+static HWND g_hInstall, g_hEnable, g_hDisable, g_hUninstall, g_hImport;
 static HWND g_hOK, g_hCancel, g_hApply, g_hRefresh, g_hClose;
 static HFONT g_hFont = NULL;
 static FM_FEATURE *g_arr = NULL;
@@ -37,6 +43,9 @@ static int g_count = 0;
 static int g_tier = FM_TIER_OS;   /* selected tab: 0 = OS features, 1 = Software */
 static BOOL g_populating = FALSE;  /* ignore list state notifications while (re)filling */
 static BOOL g_reverting = FALSE;   /* re-entrancy guard for check-state reverts */
+static HWND g_hwndMain = NULL;     /* top-level window, for the worker thread's PostMessage */
+static HANDLE g_opThread = NULL;   /* in-flight background op, NULL when idle */
+static BOOL g_busy = FALSE;        /* a background op is running; the UI is locked */
 
 /* Windows "Windows Features" instruction banner (OS tier). */
 static const WCHAR szOsInstr[] =
@@ -220,63 +229,180 @@ static void UpdateButtons(void)
 
 typedef enum { ACT_INSTALL, ACT_ENABLE, ACT_DISABLE, ACT_UNINSTALL } ACTION;
 
+#define OP_IMPORT 100   /* OPCTX.op value for the "Import from RAPPS" action */
+
+/* Work item handed to the background thread. Carries its own copies of the id /
+ * name so the UI may free + reload g_arr while the op runs. */
+typedef struct _OPCTX
+{
+    int     op;                  /* ACTION (install/enable/disable/uninstall) or OP_IMPORT */
+    WCHAR   id[FM_MAX_ID];
+    WCHAR   name[FM_MAX_NAME];
+    HRESULT hr;
+    int     importWritten;
+    int     importSkipped;
+} OPCTX;
+
+/* Lock / unlock every button while a background op runs. The caption bar close
+ * box stays, but WM_CLOSE is ignored while busy (see WndProc). */
+static void SetBusy(HWND hwnd, BOOL busy)
+{
+    g_busy = busy;
+    EnableWindow(g_hInstall, !busy);
+    EnableWindow(g_hEnable, !busy);
+    EnableWindow(g_hDisable, !busy);
+    EnableWindow(g_hUninstall, !busy);
+    EnableWindow(g_hImport, !busy);
+    EnableWindow(g_hRefresh, !busy);
+    EnableWindow(g_hClose, !busy);
+    EnableWindow(g_hOK, !busy);
+    EnableWindow(g_hCancel, !busy);
+    EnableWindow(g_hApply, !busy);
+    EnableWindow(g_hTab, !busy);
+    if (busy)
+        SetWindowTextW(g_hDesc,
+            L"Working... a download or install can take a while. Please wait.");
+    (void)hwnd;
+}
+
+/* Runs on the worker thread: performs the (possibly slow) engine op, then posts
+ * the result back to the UI thread. Never touches the ListView / g_arr. */
+static DWORD WINAPI OpThreadProc(LPVOID param)
+{
+    OPCTX *c = (OPCTX *)param;
+    switch (c->op)
+    {
+        case ACT_INSTALL:
+        case ACT_ENABLE:    c->hr = FmEnable(c->id, NULL); break;
+        case ACT_DISABLE:   c->hr = FmDisable(c->id, NULL); break;
+        case ACT_UNINSTALL: c->hr = FmUninstall(c->id, NULL); break;
+        case OP_IMPORT:
+            c->importWritten = FmImportRapps(NULL, 0, &c->importSkipped, NULL);
+            c->hr = (c->importWritten < 0) ? E_FAIL : S_OK;
+            break;
+        default:            c->hr = E_FAIL; break;
+    }
+    if (g_hwndMain)
+        PostMessageW(g_hwndMain, WM_APP_OPDONE, 0, (LPARAM)c);
+    else
+        HeapFree(GetProcessHeap(), 0, c);
+    return 0;
+}
+
+/* Start one op on the worker thread (UI stays responsive). Takes ownership of c. */
+static void StartOp(HWND hwnd, OPCTX *c)
+{
+    if (g_busy) { HeapFree(GetProcessHeap(), 0, c); return; }
+    SetBusy(hwnd, TRUE);
+    g_opThread = CreateThread(NULL, 0, OpThreadProc, c, 0, NULL);
+    if (!g_opThread)
+    {
+        /* no thread: run inline, the posted message is handled when we return */
+        OpThreadProc(c);
+    }
+}
+
 static void DoAction(HWND hwnd, ACTION act)
 {
     int i = SelectedIndex();
-    HRESULT hr;
-    WCHAR msg[768];
-    FM_FEATURE f;
-    UINT icon = MB_ICONWARNING;
+    OPCTX *c;
+    if (g_busy) return;
     if (i < 0 || i >= g_count) return;
-    f = g_arr[i];   /* g_arr is reloaded below */
 
     if (act == ACT_UNINSTALL)
     {
+        WCHAR msg[768];
         StringCchPrintfW(msg, ARRAYSIZE(msg),
             L"Uninstall '%s'?\n\nIt will be turned off and its record removed; "
-            L"it returns to Not installed.", f.Name);
+            L"it returns to Not installed.", g_arr[i].Name);
         if (MessageBoxW(hwnd, msg, L"Optional Features", MB_YESNO | MB_ICONQUESTION) != IDYES)
             return;
     }
 
-    switch (act)
-    {
-        case ACT_INSTALL:
-        case ACT_ENABLE:    hr = FmEnable(f.Id, NULL); break;
-        case ACT_DISABLE:   hr = FmDisable(f.Id, NULL); break;
-        default:            hr = FmUninstall(f.Id, NULL); break;
-    }
+    c = (OPCTX *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*c));
+    if (!c) return;
+    c->op = act;
+    StringCchCopyW(c->id, ARRAYSIZE(c->id), g_arr[i].Id);
+    StringCchCopyW(c->name, ARRAYSIZE(c->name), g_arr[i].Name);
+    StartOp(hwnd, c);
+}
 
-    if (hr == HRESULT_FROM_WIN32(ERROR_SUCCESS_REBOOT_REQUIRED))
+/* "Import from RAPPS": populate the Software tier from the per-user RAPPS database. */
+static void DoImport(HWND hwnd)
+{
+    OPCTX *c;
+    if (g_busy) return;
+    c = (OPCTX *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*c));
+    if (!c) return;
+    c->op = OP_IMPORT;
+    StartOp(hwnd, c);
+}
+
+/* UI-thread completion handler for a background op (WM_APP_OPDONE). */
+static void OnOpDone(HWND hwnd, OPCTX *c)
+{
+    WCHAR msg[768];
+    UINT icon = MB_ICONINFORMATION;
+    LPCWSTR caption = L"Optional Features";
+
+    if (g_opThread) { CloseHandle(g_opThread); g_opThread = NULL; }
+    SetBusy(hwnd, FALSE);
+
+    if (c->op == OP_IMPORT)
     {
-        StringCchPrintfW(msg, ARRAYSIZE(msg), L"'%s' was turned off, but some components "
-                         L"are removed at the next reboot. It stays listed until then.", f.Name);
-        icon = MB_ICONINFORMATION;
-    }
-    else if (SUCCEEDED(hr))
-    {
-        static const LPCWSTR done[] = { L"installed and enabled", L"enabled",
-                                        L"disabled and reverted", L"uninstalled" };
-        StringCchPrintfW(msg, ARRAYSIZE(msg), L"'%s' %s.", f.Name, done[act]);
-        icon = MB_ICONINFORMATION;
-    }
-    else if (hr == HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED) &&
-             (act == ACT_DISABLE || act == ACT_UNINSTALL))
-        StringCchPrintfW(msg, ARRAYSIZE(msg), L"'%s' is a base component of the system "
-                         L"and cannot be disabled or removed.", f.Name);
-    else if (hr == HRESULT_FROM_WIN32(ERROR_DEPENDENT_SERVICES_RUNNING))
-    {
-        WCHAR dep[FM_MAX_DEPS * 2];
-        FmGetDependents(f.Id, dep, ARRAYSIZE(dep));
-        StringCchPrintfW(msg, ARRAYSIZE(msg), L"'%s' cannot be turned off while other enabled "
-                         L"features depend on it (%s). Turn those off first.", f.Name, dep);
+        caption = L"Import from RAPPS";
+        if (SUCCEEDED(c->hr))
+            StringCchPrintfW(msg, ARRAYSIZE(msg),
+                L"Imported %d program(s) from the RAPPS catalog into the Software "
+                L"tab (%d skipped).", c->importWritten, c->importSkipped);
+        else
+        {
+            StringCchCopyW(msg, ARRAYSIZE(msg),
+                L"Could not import the RAPPS catalog. Run RAPPS once to fetch its "
+                L"application database, then try again.");
+            icon = MB_ICONWARNING;
+        }
     }
     else
-        StringCchPrintfW(msg, ARRAYSIZE(msg), L"Operation failed (0x%08lx).\n\n"
-                         L"If the payload is deferred, the feature cannot be enabled "
-                         L"on this system yet.", hr);
-    MessageBoxW(hwnd, msg, L"Optional Features", MB_OK | icon);
-    FillList();
+    {
+        ACTION act = (ACTION)c->op;
+        HRESULT hr = c->hr;
+        if (hr == HRESULT_FROM_WIN32(ERROR_SUCCESS_REBOOT_REQUIRED))
+            StringCchPrintfW(msg, ARRAYSIZE(msg), L"'%s' was turned off, but some components "
+                             L"are removed at the next reboot. It stays listed until then.", c->name);
+        else if (SUCCEEDED(hr))
+        {
+            static const LPCWSTR done[] = { L"installed and enabled", L"enabled",
+                                            L"disabled and reverted", L"uninstalled" };
+            StringCchPrintfW(msg, ARRAYSIZE(msg), L"'%s' %s.", c->name, done[act]);
+        }
+        else if (hr == HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED) &&
+                 (act == ACT_DISABLE || act == ACT_UNINSTALL))
+        {
+            StringCchPrintfW(msg, ARRAYSIZE(msg), L"'%s' is a base component of the system "
+                             L"and cannot be disabled or removed.", c->name);
+            icon = MB_ICONWARNING;
+        }
+        else if (hr == HRESULT_FROM_WIN32(ERROR_DEPENDENT_SERVICES_RUNNING))
+        {
+            WCHAR dep[FM_MAX_DEPS * 2];
+            FmGetDependents(c->id, dep, ARRAYSIZE(dep));
+            StringCchPrintfW(msg, ARRAYSIZE(msg), L"'%s' cannot be turned off while other enabled "
+                             L"features depend on it (%s). Turn those off first.", c->name, dep);
+            icon = MB_ICONWARNING;
+        }
+        else
+        {
+            StringCchPrintfW(msg, ARRAYSIZE(msg), L"Operation failed (0x%08lx).\n\n"
+                             L"For a software item the download or installer may have failed; "
+                             L"for a deferred OS feature the payload is not staged on this system yet.", hr);
+            icon = MB_ICONWARNING;
+        }
+    }
+
+    HeapFree(GetProcessHeap(), 0, c);
+    FillList();   /* reloads state + re-enables the per-row verbs */
+    MessageBoxW(hwnd, msg, caption, MB_OK | icon);
 }
 
 /* --- OS tier: commit the checkbox selection, Windows "Windows Features" style --- */
@@ -450,6 +576,7 @@ static void LayoutButtons(HWND hwnd)
     ShowWindow(g_hEnable,   os ? SW_HIDE : SW_SHOW);
     ShowWindow(g_hDisable,  os ? SW_HIDE : SW_SHOW);
     ShowWindow(g_hClose,    os ? SW_HIDE : SW_SHOW);
+    ShowWindow(g_hImport,   os ? SW_HIDE : SW_SHOW);
 
     if (os)
     {
@@ -465,6 +592,7 @@ static void LayoutButtons(HWND hwnd)
         MoveWindow(g_hEnable,    12 + (bw + gap),       y, bw, bh, TRUE);
         MoveWindow(g_hDisable,   12 + 2 * (bw + gap),   y, bw, bh, TRUE);
         MoveWindow(g_hUninstall, 12 + 3 * (bw + gap),   y, bw, bh, TRUE);
+        MoveWindow(g_hImport,    12 + 4 * (bw + gap),   y, bw, bh, TRUE);
         MoveWindow(g_hClose,  right - bw,               y, bw, bh, TRUE);
         MoveWindow(g_hRefresh, right - 2 * bw - gap,    y, bw, bh, TRUE);
     }
@@ -492,15 +620,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 g_hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
 
             hHdr = CreateWindowExW(0, L"STATIC", L"Turn ReactOS features on or off",
-                WS_CHILD | WS_VISIBLE, 12, 10, 620, 18, hwnd, NULL, NULL, NULL);
+                WS_CHILD | WS_VISIBLE, 12, 10, 708, 18, hwnd, NULL, NULL, NULL);
             g_hInstr = CreateWindowExW(0, L"STATIC", szOsInstr,
-                WS_CHILD | WS_VISIBLE, 12, 30, 620, 30, hwnd,
+                WS_CHILD | WS_VISIBLE, 12, 30, 708, 30, hwnd,
                 (HMENU)(INT_PTR)IDC_INSTR, NULL, NULL);
 
             /* two tiers = two tabs; one list shows the selected tier's features */
             g_hTab = CreateWindowExW(0, WC_TABCONTROLW, L"",
                 WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP,
-                12, 64, 628, 300, hwnd, (HMENU)(INT_PTR)IDC_TAB, NULL, NULL);
+                12, 64, 716, 300, hwnd, (HMENU)(INT_PTR)IDC_TAB, NULL, NULL);
             ZeroMemory(&ti, sizeof(ti));
             ti.mask = TCIF_TEXT;
             ti.pszText = (LPWSTR)L"OS features";
@@ -510,7 +638,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
             g_hList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
                 WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
-                18, 94, 616, 262, hwnd, (HMENU)(INT_PTR)IDC_LIST, NULL, NULL);
+                18, 94, 704, 262, hwnd, (HMENU)(INT_PTR)IDC_LIST, NULL, NULL);
             ListView_SetExtendedListViewStyle(g_hList,
                 LVS_EX_FULLROWSELECT | LVS_EX_CHECKBOXES);
 
@@ -524,7 +652,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
             g_hDesc = CreateWindowExW(WS_EX_CLIENTEDGE, L"STATIC",
                 L"Select a feature to see its description.",
-                WS_CHILD | WS_VISIBLE, 12, 372, 628, 62, hwnd, (HMENU)(INT_PTR)IDC_DESC, NULL, NULL);
+                WS_CHILD | WS_VISIBLE, 12, 372, 716, 62, hwnd, (HMENU)(INT_PTR)IDC_DESC, NULL, NULL);
 
             /* OS-tier commit row (Windows "Windows Features" style). */
             g_hOK = CreateWindowExW(0, L"BUTTON", L"OK",
@@ -556,6 +684,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             g_hClose = CreateWindowExW(0, L"BUTTON", L"&Close",
                 WS_CHILD | WS_TABSTOP, 0, 0, 90, 26, hwnd,
                 (HMENU)(INT_PTR)IDC_CLOSE, NULL, NULL);
+            /* Software-tier: populate the tab from the RAPPS database on demand. */
+            g_hImport = CreateWindowExW(0, L"BUTTON", L"I&mport RAPPS",
+                WS_CHILD | WS_TABSTOP, 0, 0, 90, 26, hwnd,
+                (HMENU)(INT_PTR)IDC_IMPORT, NULL, NULL);
 
             {
                 HWND c;
@@ -564,6 +696,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 UNREFERENCED_PARAMETER(hHdr);
             }
 
+            g_hwndMain = hwnd;
             FillList();
             LayoutButtons(hwnd);
             return 0;
@@ -598,12 +731,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         }
         case WM_COMMAND:
+            if (g_busy) return 0;   /* a background op is running; ignore new commands */
             switch (LOWORD(wp))
             {
                 case IDC_INSTALL:   DoAction(hwnd, ACT_INSTALL);   break;
                 case IDC_ENABLE:    DoAction(hwnd, ACT_ENABLE);    break;
                 case IDC_DISABLE:   DoAction(hwnd, ACT_DISABLE);   break;
                 case IDC_UNINSTALL: DoAction(hwnd, ACT_UNINSTALL); break;
+                case IDC_IMPORT:    DoImport(hwnd); break;
                 case IDC_REFRESH:   FillList(); break;
                 case IDC_OK:        CommitOs(hwnd, TRUE); break;
                 case IDC_APPLY:     CommitOs(hwnd, FALSE); break;
@@ -611,8 +746,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 case IDC_CLOSE:     DestroyWindow(hwnd); break;
             }
             return 0;
+        case WM_APP_OPDONE:
+            OnOpDone(hwnd, (OPCTX *)lp);
+            return 0;
+        case WM_CLOSE:
+            if (g_busy) return 0;   /* do not tear down while a worker op is in flight */
+            DestroyWindow(hwnd);
+            return 0;
         case WM_DESTROY:
             if (g_arr) { FmFree(g_arr); g_arr = NULL; }
+            if (g_opThread) { CloseHandle(g_opThread); g_opThread = NULL; }
             if (g_hFont && g_hFont != GetStockObject(DEFAULT_GUI_FONT))
                 DeleteObject(g_hFont);
             PostQuitMessage(0);
@@ -647,7 +790,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmd, int nShow)
 
     hwnd = CreateWindowExW(0, wc.lpszClassName, L"Windows Features",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, 672, 520, NULL, NULL, hInst, NULL);
+        CW_USEDEFAULT, CW_USEDEFAULT, 760, 520, NULL, NULL, hInst, NULL);
     if (!hwnd) return 1;
 
     ShowWindow(hwnd, nShow);
