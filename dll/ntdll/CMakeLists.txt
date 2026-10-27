@@ -67,7 +67,7 @@ list(APPEND SOURCE
     rtl/utf8.c)
 
 if(DLL_EXPORT_VERSION GREATER_EQUAL 0x601)
-    list(APPEND SOURCE rtl/sysinfoex.c)
+    list(APPEND SOURCE rtl/sysinfoex.c rtl/xcontext.c)
 endif()
 
 if(ARCH STREQUAL "i386")

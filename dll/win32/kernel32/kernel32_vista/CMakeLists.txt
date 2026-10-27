@@ -19,6 +19,7 @@ list(APPEND SOURCE
     GetTickCount64.c
     GetUserDefaultLocaleName.c
     InitOnce.c
+    IdealProcessorEx.c
     IoCompletion.c
     IsApiSetImplemented.c
     IsValidLocaleName.c
@@ -38,7 +39,8 @@ list(APPEND SOURCE
     UnmapViewOfFileEx.c
     threadpool.c
     vista.c
-    wer.c)
+    wer.c
+    XState.c)
 
 # These functions are not exported from kernel32_vista (yet).
 # They are only used when NT6 exports in kernel32 are enabled.

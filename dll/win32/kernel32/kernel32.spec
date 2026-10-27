@@ -102,6 +102,7 @@
 @ stdcall -stub -version=0x600+ ConvertSystemTimeToCalDateTime(ptr long ptr)
 @ stdcall ConvertThreadToFiber(ptr)
 @ stdcall ConvertThreadToFiberEx(ptr long)
+@ stdcall -version=0x601+ -arch=i386,x86_64 CopyContext(ptr long ptr)
 @ stdcall CopyFile2(wstr wstr ptr)
 @ stdcall CopyFileA(str str long)
 @ stdcall CopyFileExA(str str ptr ptr ptr long)
@@ -476,6 +477,7 @@
 @ stub -version=0x600+ GetDurationFormat
 @ stub -version=0x600+ GetDurationFormatEx
 @ stdcall -version=0x600+ GetDynamicTimeZoneInformation(ptr)
+@ stdcall -version=0x601+ -arch=i386,x86_64 -ret64 GetEnabledXStateFeatures()
 @ stdcall GetEnvironmentStrings()
 @ stdcall GetEnvironmentStringsA() GetEnvironmentStrings
 @ stdcall GetEnvironmentStringsW()
@@ -533,6 +535,8 @@
 @ stdcall GetPackagePath(ptr long ptr ptr)
 @ stdcall GetPackagePathByFullName(wstr ptr ptr)
 @ stdcall GetPackagesByPackageFamily(wstr ptr ptr ptr ptr)
+@ stdcall -version=0x600+ GetThreadIdealProcessorEx(long ptr)
+@ stdcall -version=0x601+ -arch=i386,x86_64 InitializeContext(ptr long ptr ptr)
 @ stdcall -version=0x600+ IsValidLocaleName(wstr)
 @ stdcall GetLogicalDriveStringsA(long ptr)
 @ stdcall GetLogicalDriveStringsW(long ptr)
@@ -836,6 +840,7 @@
 @ stdcall LCMapStringA(long long str long ptr long)
 @ stdcall -version=0x600+ LCMapStringEx(long long wstr long ptr long ptr ptr long)
 @ stdcall LCMapStringW(long long wstr long ptr long)
+@ stdcall -version=0x601+ -arch=i386,x86_64 LocateXStateFeature(ptr long ptr)
 @ stdcall LZClose(long)
 @ stdcall LZCloseFile(long)
 @ stdcall LZCopy(long long)
@@ -1181,6 +1186,7 @@
 @ stdcall SetThreadExecutionState(long)
 @ stdcall -version=0x601+ SetThreadGroupAffinity(ptr ptr ptr)
 @ stdcall SetThreadIdealProcessor(long long)
+@ stdcall -version=0x600+ SetThreadIdealProcessorEx(long ptr ptr)
 @ stdcall SetThreadInformation(long long ptr long)
 @ stdcall SetThreadLocale(long)
 @ stdcall -version=0x600+ SetThreadPreferredUILanguages(long wstr ptr)
@@ -1205,6 +1211,7 @@
 @ stdcall SetWaitableTimer(long ptr long ptr ptr long)
 @ stdcall -version=0x601+ SetWaitableTimerEx(long ptr long ptr ptr ptr long)
 @ stdcall SetupComm(long long long)
+@ stdcall -version=0x601+ -arch=i386,x86_64 SetXStateFeaturesMask(ptr int64)
 @ stdcall ShowConsoleCursor(long long)
 @ stdcall SignalObjectAndWait(long long long long)
 @ stdcall SizeofResource(long long)
