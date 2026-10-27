@@ -62,11 +62,12 @@ TestBufOption(
         ok(Length == sizeof(ReadBack), "%s: length %d after set %d\n", Name, Length, Requested);
 
         /* The contract Chrome depends on: the read-back is at least what was
-         * requested (Windows may round up, never down, and never reports the
-         * option as unchangeable). Compare against the saved request, not the
-         * (possibly mutated) option buffer. */
-        ok(ReadBack >= Requested,
-           "%s: set %d but read back %d (< requested) -- this is the -348 trigger\n",
+         * requested (never smaller, never reported as unchangeable: the -348
+         * trigger). The provider records the hint as given, so it must be exactly
+         * the request: a rounded value would show up here. Compare against the
+         * saved request, not the (possibly mutated) option buffer. */
+        ok(ReadBack == Requested,
+           "%s: set %d but read back %d\n",
            Name, Requested, ReadBack);
     }
 }
@@ -94,6 +95,31 @@ TestSocket(
     closesocket(Sock);
 }
 
+/* Set and read back one buffer option of a socket that already has a transport. */
+static
+VOID
+TestSocketBuffer(
+    _In_ SOCKET Sock,
+    _In_ INT Option,
+    _In_ PCSTR Label)
+{
+    INT Result;
+    const INT Requested = 1048576;
+    INT Value = Requested;
+    INT ReadBack = -1;
+    INT Length = sizeof(ReadBack);
+    PCSTR OptName = (Option == SO_RCVBUF) ? "SO_RCVBUF" : "SO_SNDBUF";
+
+    Result = setsockopt(Sock, SOL_SOCKET, Option, (PCHAR)&Value, sizeof(Value));
+    ok(Result == 0, "%s: setsockopt(%s,%d) failed, error %d\n", Label, OptName, Requested, WSAGetLastError());
+    ok(Value == Requested, "%s: setsockopt mutated the caller's buffer: %d -> %d\n", Label, Requested, Value);
+
+    Result = getsockopt(Sock, SOL_SOCKET, Option, (PCHAR)&ReadBack, &Length);
+    ok(Result == 0, "%s: getsockopt(%s) failed, error %d\n", Label, OptName, WSAGetLastError());
+    ok(ReadBack == Requested,
+       "%s: set %s %d but read back %d\n", Label, OptName, Requested, ReadBack);
+}
+
 static
 VOID
 TestBoundUdp(VOID)
@@ -101,10 +127,6 @@ TestBoundUdp(VOID)
     SOCKET Sock;
     SOCKADDR_IN Addr;
     INT Result;
-    const INT Requested = 1048576;
-    INT Value = Requested;
-    INT ReadBack = -1;
-    INT Length = sizeof(ReadBack);
 
     /* The real Chrome path sets SO_RCVBUF on a *bound* UDP socket (a transport
      * object is attached). That is exactly the case AFD refuses to resize, so
@@ -121,15 +143,8 @@ TestBoundUdp(VOID)
     Result = bind(Sock, (SOCKADDR *)&Addr, sizeof(Addr));
     ok(Result == 0, "bound-udp: bind failed, error %d\n", WSAGetLastError());
 
-    Result = setsockopt(Sock, SOL_SOCKET, SO_RCVBUF, (PCHAR)&Value, sizeof(Value));
-    ok(Result == 0, "bound-udp: setsockopt(SO_RCVBUF,%d) failed, error %d\n", Requested, WSAGetLastError());
-    ok(Value == Requested, "bound-udp: setsockopt mutated the caller's buffer: %d -> %d\n", Requested, Value);
-
-    Result = getsockopt(Sock, SOL_SOCKET, SO_RCVBUF, (PCHAR)&ReadBack, &Length);
-    ok(Result == 0, "bound-udp: getsockopt(SO_RCVBUF) failed, error %d\n", WSAGetLastError());
-    ok(ReadBack >= Requested,
-       "bound-udp: set SO_RCVBUF %d but read back %d (< requested) -- the -UNCHANGEABLE trigger\n",
-       Requested, ReadBack);
+    TestSocketBuffer(Sock, SO_RCVBUF, "bound-udp");
+    TestSocketBuffer(Sock, SO_SNDBUF, "bound-udp");
 
     closesocket(Sock);
 }
@@ -141,13 +156,11 @@ TestConnectedUdp(VOID)
     SOCKET Sock;
     SOCKADDR_IN Addr;
     INT Result;
-    const INT Requested = 1048576;
-    INT Value = Requested;
-    INT ReadBack = -1;
-    INT Length = sizeof(ReadBack);
 
     /* A connected datagram socket is the shape Chrome's QUIC uses (connect to
-     * the server, then size the receive buffer). Exercise that exact order. */
+     * the server, then size the receive buffer). Exercise that exact order.
+     * The peer is the loopback address: connecting a datagram socket only
+     * records the peer, and this works on a machine without a route out. */
     Sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     ok(Sock != INVALID_SOCKET, "conn-udp: socket failed, error %d\n", WSAGetLastError());
     if (Sock == INVALID_SOCKET)
@@ -155,20 +168,77 @@ TestConnectedUdp(VOID)
 
     ZeroMemory(&Addr, sizeof(Addr));
     Addr.sin_family = AF_INET;
-    Addr.sin_addr.s_addr = inet_addr("8.8.8.8");
+    Addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     Addr.sin_port = htons(443);
     Result = connect(Sock, (SOCKADDR *)&Addr, sizeof(Addr));
     ok(Result == 0, "conn-udp: connect failed, error %d\n", WSAGetLastError());
 
-    Result = setsockopt(Sock, SOL_SOCKET, SO_RCVBUF, (PCHAR)&Value, sizeof(Value));
-    ok(Result == 0, "conn-udp: setsockopt(SO_RCVBUF,%d) failed, error %d\n", Requested, WSAGetLastError());
-    ok(Value == Requested, "conn-udp: setsockopt mutated the caller's buffer: %d -> %d\n", Requested, Value);
+    TestSocketBuffer(Sock, SO_RCVBUF, "conn-udp");
+    TestSocketBuffer(Sock, SO_SNDBUF, "conn-udp");
 
-    Result = getsockopt(Sock, SOL_SOCKET, SO_RCVBUF, (PCHAR)&ReadBack, &Length);
-    ok(Result == 0, "conn-udp: getsockopt(SO_RCVBUF) failed, error %d\n", WSAGetLastError());
-    ok(ReadBack >= Requested,
-       "conn-udp: set SO_RCVBUF %d but read back %d (< requested)\n",
-       Requested, ReadBack);
+    closesocket(Sock);
+}
+
+static
+VOID
+TestEdgeValues(
+    _In_ INT Option,
+    _In_ PCSTR Name)
+{
+    SOCKET Sock;
+    INT Result;
+    INT Value;
+    INT ReadBack;
+    INT Length;
+    INT Previous;
+    static const UINT Edges[] = { 0, 0xFFFFFFFF };
+    SIZE_T i;
+
+    Sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    ok(Sock != INVALID_SOCKET, "%s edge: socket failed, error %d\n", Name, WSAGetLastError());
+    if (Sock == INVALID_SOCKET)
+        return;
+
+    /* The hint is stored as an unsigned value: 0xFFFFFFFF reads back through
+     * the signed INT of getsockopt as -1. */
+    for (i = 0; i < RTL_NUMBER_OF(Edges); i++)
+    {
+        Value = (INT)Edges[i];
+        Result = setsockopt(Sock, SOL_SOCKET, Option, (PCHAR)&Value, sizeof(Value));
+        ok(Result == 0, "%s edge: setsockopt(0x%x) failed, error %d\n", Name, Edges[i], WSAGetLastError());
+        ok(Value == (INT)Edges[i], "%s edge: setsockopt mutated the caller's buffer\n", Name);
+
+        ReadBack = 0x55555555;
+        Length = sizeof(ReadBack);
+        Result = getsockopt(Sock, SOL_SOCKET, Option, (PCHAR)&ReadBack, &Length);
+        ok(Result == 0, "%s edge: getsockopt after set 0x%x failed, error %d\n", Name, Edges[i], WSAGetLastError());
+        ok(ReadBack == (INT)Edges[i], "%s edge: set 0x%x but read back 0x%x\n", Name, Edges[i], ReadBack);
+    }
+
+    /* A length shorter than the option, or a negative one, is refused and does
+     * not change the stored value. */
+    Value = 12345;
+    Result = setsockopt(Sock, SOL_SOCKET, Option, (PCHAR)&Value, sizeof(Value));
+    ok(Result == 0, "%s edge: setsockopt(12345) failed, error %d\n", Name, WSAGetLastError());
+
+    Value = 54321;
+    WSASetLastError(0);
+    Result = setsockopt(Sock, SOL_SOCKET, Option, (PCHAR)&Value, sizeof(Value) - 1);
+    ok(Result == SOCKET_ERROR, "%s edge: short optlen: setsockopt returned %d\n", Name, Result);
+    if (Result == SOCKET_ERROR)
+        ok(WSAGetLastError() == WSAEFAULT, "%s edge: short optlen: error %d\n", Name, WSAGetLastError());
+
+    WSASetLastError(0);
+    Result = setsockopt(Sock, SOL_SOCKET, Option, (PCHAR)&Value, -1);
+    ok(Result == SOCKET_ERROR, "%s edge: negative optlen: setsockopt returned %d\n", Name, Result);
+    if (Result == SOCKET_ERROR)
+        ok(WSAGetLastError() == WSAEFAULT, "%s edge: negative optlen: error %d\n", Name, WSAGetLastError());
+
+    Previous = -1;
+    Length = sizeof(Previous);
+    Result = getsockopt(Sock, SOL_SOCKET, Option, (PCHAR)&Previous, &Length);
+    ok(Result == 0, "%s edge: getsockopt failed, error %d\n", Name, WSAGetLastError());
+    ok(Previous == 12345, "%s edge: a refused setsockopt changed the value to %d\n", Name, Previous);
 
     closesocket(Sock);
 }
@@ -187,6 +257,8 @@ START_TEST(rcvbuf)
     TestSocket(SOCK_STREAM, IPPROTO_TCP, "tcp");
     TestBoundUdp();
     TestConnectedUdp();
+    TestEdgeValues(SO_RCVBUF, "SO_RCVBUF");
+    TestEdgeValues(SO_SNDBUF, "SO_SNDBUF");
 
     WSACleanup();
 }
