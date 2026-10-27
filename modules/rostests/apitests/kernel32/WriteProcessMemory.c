@@ -10,10 +10,11 @@
  * .idata/.tls/.rsrc), which is copy-on-write: the write lands in a private
  * page and never reaches the backing file or other mappers.
  *
- * The section maximum-protection ceiling (W^X hardening) must NOT regress:
- * a user-mode attempt to gain EXECUTE on a non-executable image subsection
- * (turning a data page into RWX shellcode) must still be rejected. Both are
- * verified here against a real suspended child process.
+ * WriteProcessMemory itself must never leave a non-executable image page
+ * executable. (Reprotecting a copy-on-write image view to an execute protection
+ * by VirtualProtectEx is allowed, as on Windows - Inno Setup's loader depends on
+ * it - so that is not what is asserted here.) Both are verified here against a
+ * real suspended child process.
  */
 
 #include "precomp.h"
@@ -131,6 +132,7 @@ TestWriteSection(
     BYTE ReadBack[sizeof(TestPattern)];
     SIZE_T Bytes = 0;
     BOOL Success;
+    MEMORY_BASIC_INFORMATION Mbi;
 
     /* The headers must be readable even before writing. */
     if (!ReadProcessMemory(hProcess, RemoteAddress, Original, sizeof(Original), &Bytes) ||
@@ -164,6 +166,25 @@ TestWriteSection(
     if (Success)
         ok(memcmp(ReadBack, TestPattern, sizeof(TestPattern)) == 0,
            "%s: remote image data not updated by WriteProcessMemory\n", Name);
+
+    /* The original protection is restored, so a section that was not executable
+     * must not have gained execute from the write. */
+    ZeroMemory(&Mbi, sizeof(Mbi));
+    if (VirtualQueryEx(hProcess, RemoteAddress, &Mbi, sizeof(Mbi)) == sizeof(Mbi))
+    {
+        if (!(Chars & IMAGE_SCN_MEM_EXECUTE))
+            ok((Mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) == 0,
+               "%s (%s): non-executable section is executable after WriteProcessMemory: 0x%lx\n",
+               Name, ProtName(Chars), Mbi.Protect);
+        else
+            ok((Mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0,
+               "%s (%s): executable section lost execute in WriteProcessMemory: 0x%lx\n",
+               Name, ProtName(Chars), Mbi.Protect);
+    }
+    else
+    {
+        skip("%s: VirtualQueryEx after the write failed: %lu\n", Name, GetLastError());
+    }
 }
 
 /*
@@ -317,37 +338,48 @@ START_TEST(WriteProcessMemory)
     ok(FoundReadOnly, "No read-only image section found to exercise P2\n");
 
     /*
-     * W^X hardening must NOT regress: gaining EXECUTE on a non-executable
-     * read-only image subsection (RWX shellcode) must still be rejected with
-     * ERROR_INVALID_PARAMETER (STATUS_SECTION_PROTECTION). This holds both on
-     * the bare hardened kernel and after the WriteProcessMemory fix.
+     * Reprotecting a copy-on-write image view to an execute protection is
+     * allowed (it can only ever produce a private page; Windows permits it and
+     * Inno Setup's loader walks its own image doing exactly that). It used to
+     * be rejected with ERROR_INVALID_PARAMETER by the section maximum-protection
+     * ceiling; that ceiling was relaxed for write-copy views. The old protection
+     * must come back through the same call, and WriteProcessMemory must not be
+     * the one to leave execute behind (see TestWriteSection).
      */
     if (RoDataRemote != NULL)
     {
+        MEMORY_BASIC_INFORMATION Mbi;
+        ULONG Restore = 0;
+
         SetLastError(0xdeadbeef);
         OldProtect = 0;
         Success = VirtualProtectEx(hProcess, RoDataRemote, sizeof(TestPattern),
                                    PAGE_EXECUTE_READWRITE, &OldProtect);
-        ok(!Success,
-           "VirtualProtectEx(RWX) on non-exec image section (%s) succeeded - W^X escalation not blocked!\n",
-           ProtName(RoDataChars));
-        if (!Success)
-            ok(GetLastError() == ERROR_INVALID_PARAMETER,
-               "escalation rejected with error %lu, expected ERROR_INVALID_PARAMETER (87)\n",
-               GetLastError());
+        ok(Success, "VirtualProtectEx(RWX) on image section (%s) failed, error %lu\n",
+           ProtName(RoDataChars), GetLastError());
+        if (Success)
+        {
+            ok(OldProtect != 0 && !(OldProtect & (PAGE_EXECUTE | PAGE_EXECUTE_READ |
+                                                  PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)),
+               "old protection 0x%lx of the non-executable section\n", OldProtect);
 
-        /* PAGE_EXECUTE_READ (gaining execute without write) must also fail. */
-        SetLastError(0xdeadbeef);
-        OldProtect = 0;
-        Success = VirtualProtectEx(hProcess, RoDataRemote, sizeof(TestPattern),
-                                   PAGE_EXECUTE_READ, &OldProtect);
-        ok(!Success,
-           "VirtualProtectEx(RX) on non-exec image section (%s) succeeded - W^X escalation not blocked!\n",
-           ProtName(RoDataChars));
+            ZeroMemory(&Mbi, sizeof(Mbi));
+            if (VirtualQueryEx(hProcess, RoDataRemote, &Mbi, sizeof(Mbi)) == sizeof(Mbi))
+                ok(Mbi.Protect == PAGE_EXECUTE_READWRITE || Mbi.Protect == PAGE_EXECUTE_WRITECOPY,
+                   "protection after VirtualProtectEx(RWX) is 0x%lx\n", Mbi.Protect);
+
+            /* Put it back, as the loader does. */
+            ok(VirtualProtectEx(hProcess, RoDataRemote, sizeof(TestPattern), OldProtect, &Restore),
+               "restoring the protection 0x%lx failed, error %lu\n", OldProtect, GetLastError());
+            ZeroMemory(&Mbi, sizeof(Mbi));
+            if (VirtualQueryEx(hProcess, RoDataRemote, &Mbi, sizeof(Mbi)) == sizeof(Mbi))
+                ok(Mbi.Protect == OldProtect,
+                   "protection after the restore is 0x%lx, expected 0x%lx\n", Mbi.Protect, OldProtect);
+        }
     }
     else
     {
-        skip("No read-only non-executable image section found for the escalation test\n");
+        skip("No read-only non-executable image section found for the VirtualProtectEx test\n");
     }
 
     TerminateProcess(hProcess, 0);

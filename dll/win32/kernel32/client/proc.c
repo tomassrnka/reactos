@@ -2146,8 +2146,11 @@ BasepIsImageBaseAddress(IN HANDLE hProcess,
  * dropping the execute bit even briefly makes the thread fault on the return
  * from the restoring NtProtectVirtualMemory and leaves the page non-executable.
  *
- * A range that is not executable never gains execute: the image-section
- * maximum-protection ceiling rejects that on a non-executable image subsection.
+ * A range that is not executable never gains execute: WriteProcessMemory only
+ * copies data in, so asking for PAGE_EXECUTE_READWRITE there would be a W^X
+ * escalation of its own making. (The kernel no longer rejects execute on a
+ * copy-on-write image view - see the Mm image-view protection rules - so this
+ * is a choice made here, not something the section ceiling enforces.)
  */
 static
 ULONG
@@ -2199,11 +2202,9 @@ WriteProcessMemory(IN HANDLE hProcess,
     /*
      * Make the target range writable.
      *
-     * Never gain execute: WriteProcessMemory only copies data in, and gaining
-     * execute on a non-executable image subsection would be a W^X / privilege
-     * escalation that the section maximum-protection ceiling rejects
-     * (STATUS_SECTION_PROTECTION, surfacing as ERROR_INVALID_PARAMETER). But
-     * never lose it either: a range that is executable stays executable
+     * Never gain execute: WriteProcessMemory only copies data in, so a range
+     * that is not executable is only ever made PAGE_READWRITE. But never lose
+     * it either: a range that is executable stays executable
      * (see BasepGetWriteProtect), because the caller may be executing from it.
      * The page's original protection is restored after the write, and writes
      * to copy-on-write image segments (every non-shared PE section: .text/
@@ -2218,8 +2219,12 @@ WriteProcessMemory(IN HANDLE hProcess,
     if (Status == STATUS_SECTION_PROTECTION)
     {
         /*
-         * The range runs from an executable region into a non-executable image
-         * subsection that cannot gain execute: fall back to read+write only.
+         * Defensive fallback, not expected to run: copy-on-write image views
+         * accept PAGE_EXECUTE_READWRITE, and the protection is chosen from the
+         * first page only, so a range that starts executable stays within one
+         * view. If a ceiling ever rejects the execute request again (a range
+         * spanning views, a different Mm), fall back to read+write only.
+         * Not covered by a test: there is no way to provoke it from user mode.
          */
         Base = lpBaseAddress;
         RegionSize = nSize;
