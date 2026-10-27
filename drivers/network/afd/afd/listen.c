@@ -118,6 +118,19 @@ VOID FreeQueuedConnection(PAFD_TDI_OBJECT_QELT Qelt)
     ExFreePoolWithTag(Qelt, TAG_AFD_ACCEPT_QUEUE);
 }
 
+/* Release the AcceptEx output-buffer MDL kept in DriverContext[3], locked or not */
+static VOID AfdFreeAcceptMdl(PIRP Irp)
+{
+    PMDL Mdl = (PMDL)Irp->Tail.Overlay.DriverContext[3];
+
+    if (!Mdl)
+        return;
+    if (Mdl->MdlFlags & MDL_PAGES_LOCKED)
+        MmUnlockPages(Mdl);
+    IoFreeMdl(Mdl);
+    Irp->Tail.Overlay.DriverContext[3] = NULL;
+}
+
 static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT Qelt)
 {
     PFILE_OBJECT NewFileObject = (PFILE_OBJECT)Irp->Tail.Overlay.DriverContext[2];
@@ -132,7 +145,10 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
 
     BYTE *BufferPtr = MmGetSystemAddressForMdlSafe((PMDL)Irp->Tail.Overlay.DriverContext[3], NormalPagePriority);
     if (!BufferPtr)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
         goto end;
+    }
 
     /* The initial data goes first, then the local and the remote address */
     PCHAR ReceiveData = (PCHAR)BufferPtr;
@@ -157,21 +173,28 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
 
     _SEH2_TRY
     {
-        /* TCP eventually calls MmUnlockPages and IoFreeMdl*/
         MmProbeAndLockPages(Mdl, KernelMode, IoModifyAccess);
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
+        /* Nothing was locked and the MDL was never handed off: it is still ours */
         Status = _SEH2_GetExceptionCode();
+        IoFreeMdl(Mdl);
         ExFreePool(Buffer);
         goto end;
     }
     _SEH2_END;
 
+    /* TdiQueryInformation takes ownership of the locked MDL (see the note there):
+     * the transport request unlocks and frees it, on success and on failure.
+     * The query is synchronous, so Buffer is ours again when it returns. */
     Status = TdiQueryInformation(
         Qelt->Object.Object, TDI_QUERY_ADDRESS_INFO, Mdl);
     if (!NT_SUCCESS(Status))
+    {
+        ExFreePool(Buffer);
         goto end;
+    }
 
     /* Each address area holds a sockaddr (the address type and the address) and
      * ends in a USHORT with its length; an area too small for that gets nothing */
@@ -249,8 +272,7 @@ end:
             FCB2->SharedData.State = SOCKET_STATE_CREATED;
     }
     
-    MmUnlockPages((PMDL)Irp->Tail.Overlay.DriverContext[3]);
-    IoFreeMdl((PMDL)Irp->Tail.Overlay.DriverContext[3]); 
+    AfdFreeAcceptMdl(Irp);
     Irp->IoStatus.Information = 0;
     Irp->IoStatus.Status = Status;
     if( Irp->MdlAddress ) UnlockRequest( Irp, IoGetCurrentIrpStackLocation( Irp ) );
@@ -895,6 +917,8 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
         Status = _SEH2_GetExceptionCode();
+        /* The probe failed, so the pages are not locked, but the MDL is ours */
+        AfdFreeAcceptMdl(Irp);
         return UnlockAndMaybeComplete(Fcb, Status, Irp, 0);
     }
     _SEH2_END;
@@ -908,8 +932,8 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
         AcceptRequest->AcceptHandle, FILE_READ_DATA | FILE_WRITE_DATA, *IoFileObjectType, Irp->RequestorMode, (PVOID *)&NewFileObject, NULL);
     if (!NT_SUCCESS(Status))
     {
-        IoFreeMdl((PMDL)Irp->Tail.Overlay.DriverContext[3]);
-        Irp->Tail.Overlay.DriverContext[3] = NULL;
+        /* The output pages were probed and locked above */
+        AfdFreeAcceptMdl(Irp);
         return UnlockAndMaybeComplete(Fcb, Status, Irp, 0);
     }
 
@@ -917,10 +941,7 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     if (NewFileObject->DeviceObject != DeviceObject)
     {
         ObDereferenceObject(NewFileObject);
-        /* The output pages were probed and locked above; unlock before freeing the MDL */
-        MmUnlockPages((PMDL)Irp->Tail.Overlay.DriverContext[3]);
-        IoFreeMdl((PMDL)Irp->Tail.Overlay.DriverContext[3]);
-        Irp->Tail.Overlay.DriverContext[3] = NULL;
+        AfdFreeAcceptMdl(Irp);
         return UnlockAndMaybeComplete(Fcb, STATUS_INVALID_HANDLE, Irp, 0);
     }
 
@@ -929,14 +950,14 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     if (!SocketAcquireStateLock(Fcb2))
     {
         ObDereferenceObject(NewFileObject);
+        AfdFreeAcceptMdl(Irp);
         return LostSocket(Irp);
     }
 
     /* Verify that the acceptor socket has not been already binded/connected or that it has been used by AcceptEx */
     if (Fcb2->SharedData.State != SOCKET_STATE_CREATED)
     {
-        IoFreeMdl((PMDL)Irp->Tail.Overlay.DriverContext[3]);
-        Irp->Tail.Overlay.DriverContext[3] = NULL;
+        AfdFreeAcceptMdl(Irp);
         SocketStateUnlock(Fcb2);
         ObDereferenceObject(NewFileObject);
         return UnlockAndMaybeComplete(Fcb, STATUS_INVALID_PARAMETER, Irp, 0);
