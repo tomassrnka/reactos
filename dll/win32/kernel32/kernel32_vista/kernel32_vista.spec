@@ -77,6 +77,7 @@
 @ stdcall CreateThreadpoolWork(ptr ptr ptr)
 @ stdcall FreeLibraryWhenCallbackReturns(ptr ptr) ntdll_vista.TpCallbackUnloadDllOnCompletion
 @ stdcall GetNamedPipeClientProcessId(ptr ptr)
+@ stdcall GetNamedPipeServerProcessId(ptr ptr)
 @ stdcall GetProductInfo(long long long long ptr) ntdll_vista.RtlGetProductInfo
 @ stdcall GetSystemTimePreciseAsFileTime(ptr) kernel32.GetSystemTimePreciseAsFileTime
 @ stdcall GetThreadDescription(ptr ptr) # Win 10

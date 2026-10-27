@@ -829,6 +829,22 @@ NpGetConnectionAttribute(
 
     /* TODO: implement "extended attributes" support */
 
+    /* ServerProcessId is recorded when the server end is created and is
+     * defined for both ends in every state, unlike the client attributes. */
+    if (strncmp(SystemBuffer, "ServerProcessId", InputBufferLength) == 0)
+    {
+        if (OutputBufferLength < sizeof(ULONG))
+        {
+            Status = STATUS_BUFFER_TOO_SMALL;
+        }
+        else
+        {
+            *(PULONG)SystemBuffer = (ULONG)(ULONG_PTR)Ccb->ServerProcessId;
+            Irp->IoStatus.Information = sizeof(ULONG);
+        }
+        goto Cleanup;
+    }
+
     /* HACK: This should be set as an extended attribute by NpCreateClientEnd,
      * and we should query the EA instead of returning PID directly. */
 

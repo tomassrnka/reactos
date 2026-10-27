@@ -267,6 +267,7 @@ typedef struct _NP_CCB
     PNP_FCB Fcb;
     PFILE_OBJECT FileObject[2];
     PEPROCESS Process;
+    HANDLE ServerProcessId; /* Process that created the server end (CreateNamedPipe) */
     PVOID ClientSession;
     PNP_NONPAGED_CCB NonPagedCcb;
     NP_DATA_QUEUE DataQueue[2];

@@ -72,6 +72,7 @@ list(APPEND SOURCE
     GetLocaleInfo.c
     GetLogicalProcessorInformationEx.c
     GetModuleFileName.c
+    GetNamedPipeServerProcessId.c
     GetNumaProcessorNodeEx.c
     GetSystemCpuSetInformation.c
     GetOverlappedResultEx.c
