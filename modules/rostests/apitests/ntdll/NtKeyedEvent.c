@@ -11,7 +11,7 @@
  * with a timeout waits for a waiter.
  *
  * The race is made on purpose: both threads run on one processor, the late party runs at a
- * higher priority and spins past the other's deadline. The other thread's timer then fires
+ * strictly higher priority and spins past the other's deadline. The other thread's timer then fires
  * while it cannot run, and the late party arrives while the first is still queued.
  */
 
@@ -132,7 +132,11 @@ Race(BOOLEAN EarlyReleases, ULONG *Paired, ULONG *Unpaired)
             Sleep(1);
         Sleep(10);
 
-        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+        /* The early thread's wake-up from its timeout can boost it to the priority of a HIGHEST
+           thread. It then shares the processor with the spinning caller once the caller's quantum
+           ends, and the short quantum of a workstation ends within the spin. A TIME_CRITICAL
+           caller stays above any boost, so the early thread cannot run before the late call. */
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
         Deadline = Early.Started + QpcTicksForMs(RACE_TIMEOUT_MS + RACE_MARGIN_MS);
         while (QpcNow() < Deadline)
             YieldProcessor();
