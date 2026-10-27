@@ -43,6 +43,8 @@ typedef struct _SERVICE_GROUP
 } SERVICE_GROUP, *PSERVICE_GROUP;
 
 
+typedef struct _SERVICE_PROCESS_WATCH SERVICE_PROCESS_WATCH, *PSERVICE_PROCESS_WATCH;
+
 typedef struct _SERVICE_IMAGE
 {
     LIST_ENTRY ImageListEntry;
@@ -56,6 +58,8 @@ typedef struct _SERVICE_IMAGE
     DWORD dwProcessId;
     HANDLE hToken;
     HANDLE hProfile;
+    PSERVICE_PROCESS_WATCH pWatch;
+    BOOL bProcessEnded; /* Its process is gone: a new start makes a new image */
 } SERVICE_IMAGE, *PSERVICE_IMAGE;
 
 
@@ -79,6 +83,10 @@ typedef struct _SERVICE
     DWORD dwServiceTag;
 
     ULONG Flags;
+
+    /* The failures that count towards the next failure action */
+    DWORD dwFailureCount;
+    ULONGLONG ullLastFailureTime; /* 100 ns units since 1601 */
 
     PSECURITY_DESCRIPTOR pSecurityDescriptor;
 
@@ -192,6 +200,11 @@ DWORD ScmStartService(PSERVICE Service,
 DWORD ScmReferenceService(PSERVICE lpService);
 DWORD ScmDereferenceService(PSERVICE lpService);
 
+VOID ScmWatchServiceProcess(PSERVICE_IMAGE pServiceImage);
+VOID ScmCheckServiceProcessExited(PSERVICE Service);
+VOID ScmServiceStoppedWithError(PSERVICE Service, PSERVICE_IMAGE Image, PLIST_ENTRY pLogQueue);
+VOID ScmFlushFailureLog(PLIST_ENTRY pQueue);
+
 VOID ScmRemoveServiceImage(PSERVICE_IMAGE pServiceImage);
 PSERVICE ScmGetServiceEntryByName(LPCWSTR lpServiceName);
 PSERVICE ScmGetServiceEntryByDisplayName(LPCWSTR lpDisplayName);
@@ -271,6 +284,12 @@ VOID ScmQueryServiceLockStatusA(OUT LPQUERY_SERVICE_LOCK_STATUSA lpLockStatus);
 /* rpcserver.c */
 
 VOID ScmStartRpcServer(VOID);
+
+DWORD
+ScmReadFailureActions(HKEY hServiceKey,
+                      PDWORD pdwResetPeriod,
+                      PDWORD pcActions,
+                      LPSC_ACTION *ppActions);
 
 
 /* security.c */

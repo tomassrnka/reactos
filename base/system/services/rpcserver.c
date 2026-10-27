@@ -1651,6 +1651,7 @@ ScmStopThread(PVOID pParam)
     PSERVICE_IMAGE lpImage = Context->lpImage;
     WCHAR szLogBuffer[80];
     LPCWSTR lpLogStrings[2];
+    LIST_ENTRY LogQueue;
 
     HeapFree(GetProcessHeap(), 0, Context);
 
@@ -1669,6 +1670,10 @@ ScmStopThread(PVOID pParam)
 
     /* Lock the service database exclusively */
     ScmLockDatabaseExclusive();
+
+    /* A service that stopped with an error may have failure actions for that (before the image goes) */
+    InitializeListHead(&LogQueue);
+    ScmServiceStoppedWithError(lpService, lpImage, &LogQueue);
 
     /* Release the image the service ran in; a restarted service has its own reference */
     ScmReleaseStoppedImage(lpService, lpImage);
@@ -1706,6 +1711,9 @@ ScmStopThread(PVOID pParam)
 
     /* Unlock the service database */
     ScmUnlockDatabase();
+
+    /* The event log is a service too: write its events without the database lock */
+    ScmFlushFailureLog(&LogQueue);
 
     return 0;
 }
@@ -5069,6 +5077,16 @@ Done:
 }
 
 
+/* The levels of the service configuration the controller keeps: description, failure actions and their flag */
+static BOOL
+ScmIsSupportedConfigLevel(DWORD dwInfoLevel)
+{
+    return dwInfoLevel == SERVICE_CONFIG_DESCRIPTION ||
+           dwInfoLevel == SERVICE_CONFIG_FAILURE_ACTIONS ||
+           dwInfoLevel == SERVICE_CONFIG_FAILURE_ACTIONS_FLAG;
+}
+
+
 /* Function 36 */
 DWORD
 WINAPI
@@ -5083,8 +5101,7 @@ RChangeServiceConfig2A(
     DPRINT("RChangeServiceConfig2A() called\n");
     DPRINT("dwInfoLevel = %lu\n", Info.dwInfoLevel);
 
-    if ((Info.dwInfoLevel < SERVICE_CONFIG_DESCRIPTION) ||
-        (Info.dwInfoLevel > SERVICE_CONFIG_FAILURE_ACTIONS))
+    if (!ScmIsSupportedConfigLevel(Info.dwInfoLevel))
     {
         return ERROR_INVALID_LEVEL;
     }
@@ -5240,6 +5257,9 @@ RChangeServiceConfig2A(
         }
     }
 
+    if (InfoW.dwInfoLevel == SERVICE_CONFIG_FAILURE_ACTIONS_FLAG)
+        InfoW.psfaf = Info.psfaf;
+
     dwRet = RChangeServiceConfig2W(hService, InfoW);
 
     HeapFree(GetProcessHeap(), 0, ptr);
@@ -5256,7 +5276,7 @@ RChangeServiceConfig2A(
  */
 #define FAILURE_ACTIONS_HEADER_SIZE (5 * sizeof(DWORD))
 
-static DWORD
+DWORD
 ScmReadFailureActions(HKEY hServiceKey,
                       PDWORD pdwResetPeriod,
                       PDWORD pcActions,
@@ -5501,8 +5521,7 @@ RChangeServiceConfig2W(
     if (ScmShutdown)
         return ERROR_SHUTDOWN_IN_PROGRESS;
 
-    if ((Info.dwInfoLevel < SERVICE_CONFIG_DESCRIPTION) ||
-        (Info.dwInfoLevel > SERVICE_CONFIG_FAILURE_ACTIONS))
+    if (!ScmIsSupportedConfigLevel(Info.dwInfoLevel))
     {
         return ERROR_INVALID_LEVEL;
     }
@@ -5539,7 +5558,8 @@ RChangeServiceConfig2W(
     }
 
     /* Failure actions can only be set for Win32 services, not for drivers */
-    if (Info.dwInfoLevel == SERVICE_CONFIG_FAILURE_ACTIONS)
+    if (Info.dwInfoLevel == SERVICE_CONFIG_FAILURE_ACTIONS ||
+        Info.dwInfoLevel == SERVICE_CONFIG_FAILURE_ACTIONS_FLAG)
     {
         if (lpService->Status.dwServiceType & SERVICE_DRIVER)
             return ERROR_CANNOT_DETECT_DRIVER_FAILURE;
@@ -5600,6 +5620,21 @@ RChangeServiceConfig2W(
         dwError = ScmSetFailureActions(hServiceKey,
                                        (LPSERVICE_FAILURE_ACTIONSW)Info.psfa);
     }
+    else if (Info.dwInfoLevel == SERVICE_CONFIG_FAILURE_ACTIONS_FLAG)
+    {
+        /* Without a structure there is nothing to change */
+        if (Info.psfaf != NULL)
+        {
+            DWORD dwFlag = Info.psfaf->fFailureActionsOnNonCrashFailures ? 1 : 0;
+
+            dwError = RegSetValueExW(hServiceKey,
+                                     L"FailureActionsOnNonCrashFailures",
+                                     0,
+                                     REG_DWORD,
+                                     (LPBYTE)&dwFlag,
+                                     sizeof(dwFlag));
+        }
+    }
 
 done:
     if (hServiceKey != NULL)
@@ -5643,8 +5678,7 @@ RQueryServiceConfig2A(
     if (ScmShutdown)
         return ERROR_SHUTDOWN_IN_PROGRESS;
 
-    if ((dwInfoLevel < SERVICE_CONFIG_DESCRIPTION) ||
-        (dwInfoLevel > SERVICE_CONFIG_FAILURE_ACTIONS))
+    if (!ScmIsSupportedConfigLevel(dwInfoLevel))
     {
         return ERROR_INVALID_LEVEL;
     }
@@ -5808,6 +5842,29 @@ RQueryServiceConfig2A(
 
         dwError = ERROR_SUCCESS;
     }
+    else if (dwInfoLevel == SERVICE_CONFIG_FAILURE_ACTIONS_FLAG)
+    {
+        LPSERVICE_FAILURE_ACTIONS_FLAG lpFlag = (LPSERVICE_FAILURE_ACTIONS_FLAG)lpBuffer;
+        DWORD dwFlag = 0, dwSize = sizeof(dwFlag), dwType;
+
+        *pcbBytesNeeded = sizeof(SERVICE_FAILURE_ACTIONS_FLAG);
+        if (cbBufSize < *pcbBytesNeeded)
+        {
+            dwError = ERROR_INSUFFICIENT_BUFFER;
+            goto done;
+        }
+
+        if (RegQueryValueExW(hServiceKey,
+                             L"FailureActionsOnNonCrashFailures",
+                             NULL,
+                             &dwType,
+                             (LPBYTE)&dwFlag,
+                             &dwSize) != ERROR_SUCCESS || dwType != REG_DWORD)
+            dwFlag = 0;
+
+        lpFlag->fFailureActionsOnNonCrashFailures = (dwFlag != 0);
+        dwError = ERROR_SUCCESS;
+    }
 
 done:
     /* Unlock the service database */
@@ -5862,8 +5919,7 @@ RQueryServiceConfig2W(
     if (ScmShutdown)
         return ERROR_SHUTDOWN_IN_PROGRESS;
 
-    if ((dwInfoLevel < SERVICE_CONFIG_DESCRIPTION) ||
-        (dwInfoLevel > SERVICE_CONFIG_FAILURE_ACTIONS))
+    if (!ScmIsSupportedConfigLevel(dwInfoLevel))
     {
         return ERROR_INVALID_LEVEL;
     }
@@ -6003,6 +6059,29 @@ RQueryServiceConfig2W(
             /* lpStr += wcslen(lpStr) + 1; */
         }
 
+        dwError = ERROR_SUCCESS;
+    }
+    else if (dwInfoLevel == SERVICE_CONFIG_FAILURE_ACTIONS_FLAG)
+    {
+        LPSERVICE_FAILURE_ACTIONS_FLAG lpFlag = (LPSERVICE_FAILURE_ACTIONS_FLAG)lpBuffer;
+        DWORD dwFlag = 0, dwSize = sizeof(dwFlag), dwType;
+
+        *pcbBytesNeeded = sizeof(SERVICE_FAILURE_ACTIONS_FLAG);
+        if (cbBufSize < *pcbBytesNeeded)
+        {
+            dwError = ERROR_INSUFFICIENT_BUFFER;
+            goto done;
+        }
+
+        if (RegQueryValueExW(hServiceKey,
+                             L"FailureActionsOnNonCrashFailures",
+                             NULL,
+                             &dwType,
+                             (LPBYTE)&dwFlag,
+                             &dwSize) != ERROR_SUCCESS || dwType != REG_DWORD)
+            dwFlag = 0;
+
+        lpFlag->fFailureActionsOnNonCrashFailures = (dwFlag != 0);
         dwError = ERROR_SUCCESS;
     }
 

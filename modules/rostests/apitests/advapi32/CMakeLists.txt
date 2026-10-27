@@ -43,6 +43,7 @@ list(APPEND SOURCE
     ServiceArgs.c
     ServiceEnv.c
     ServiceFailureActions.c
+    ServiceRecovery.c
     ServiceNetwork.c
     SetEntriesInAclOld.c
     SetNamedSecurityInfoInherit.c
