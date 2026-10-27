@@ -228,6 +228,32 @@ static BOOL PayloadPresent(const FM_FEATURE *f)
     return ok;
 }
 
+/* InstallDate / PendingReboot from the persisted record. */
+static void ReadStateExtras(FM_FEATURE *f)
+{
+    HKEY k;
+    DWORD cb, type;
+    WCHAR v[32];
+
+    f->InstallDate[0] = L'\0';
+    f->PendingReboot = FALSE;
+    if (OpenStateKey(f->Id, FALSE, KEY_READ, &k) != ERROR_SUCCESS) return;
+    cb = sizeof(f->InstallDate) - sizeof(WCHAR);
+    if (RegQueryValueExW(k, L"InstallDate", NULL, &type, (LPBYTE)f->InstallDate, &cb) != ERROR_SUCCESS
+        || type != REG_SZ)
+        f->InstallDate[0] = L'\0';
+    f->InstallDate[31] = L'\0';
+    cb = sizeof(v) - sizeof(WCHAR);
+    v[0] = L'\0';
+    if (RegQueryValueExW(k, L"PendingReboot", NULL, &type, (LPBYTE)v, &cb) == ERROR_SUCCESS
+        && type == REG_SZ)
+    {
+        v[31] = L'\0';
+        if (!_wcsicmp(v, L"Yes")) f->PendingReboot = TRUE;
+    }
+    RegCloseKey(k);
+}
+
 /* ---- enumeration --------------------------------------------------------- */
 
 int FmEnumFeatures(FM_FEATURE **outArr)
@@ -252,6 +278,7 @@ int FmEnumFeatures(FM_FEATURE **outArr)
         if (!LoadManifest(path, &f)) continue;
         f.State = FmGetState(f.Id);
         f.PayloadAvailable = PayloadPresent(&f);
+        ReadStateExtras(&f);
 
         if (count == cap)
         {
@@ -848,17 +875,9 @@ static void RevertState(HKEY state, FILE *log)
     RegDeleteValueW(state, L"Services");
 }
 
-HRESULT FmDisable(LPCWSTR id, FILE *log)
+static HRESULT DisableOne(LPCWSTR id, FILE *log)
 {
     HKEY state = NULL;
-    FM_FEATURE feat;
-
-    /* Base components (catalog Removable=0) are part of the image: refuse. */
-    if (FmFindFeature(id, &feat) && !feat.Removable)
-    {
-        LOGF(log, L"error: '%s' is a base component of the system and cannot be disabled or removed\n", id);
-        return HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);
-    }
 
     if (OpenStateKey(id, FALSE, KEY_READ | KEY_WRITE, &state) != ERROR_SUCCESS
         || FmGetState(id) != FM_STATE_ENABLED)
@@ -885,5 +904,118 @@ HRESULT FmDisable(LPCWSTR id, FILE *log)
     SetStateSz(state, L"State", L"Disabled");
     LOGF(log, L"'%s' disabled.\n", id);
     RegCloseKey(state);
+    return S_OK;
+}
+
+/* ---- dependents / disable policy / uninstall ----------------------------- */
+
+/* Base components (catalog Removable=0) are part of the image: refuse to
+ * disable or uninstall them, regardless of dependents or current state. */
+static HRESULT CheckRemovable(LPCWSTR id, FILE *log)
+{
+    FM_FEATURE feat;
+    if (FmFindFeature(id, &feat) && !feat.Removable)
+    {
+        LOGF(log, L"error: '%s' is a base component of the system and cannot be disabled or removed\n", id);
+        return HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);
+    }
+    return S_OK;
+}
+
+static BOOL DepsContain(LPCWSTR deps, LPCWSTR id)
+{
+    WCHAR tmp[FM_MAX_DEPS];
+    WCHAR *ctx = NULL, *d;
+    StringCchCopyW(tmp, FM_MAX_DEPS, deps);
+    for (d = wcstok_s(tmp, L",; ", &ctx); d; d = wcstok_s(NULL, L",; ", &ctx))
+        if (!_wcsicmp(d, id)) return TRUE;
+    return FALSE;
+}
+
+int FmGetDependents(LPCWSTR id, LPWSTR buf, DWORD cch)
+{
+    FM_FEATURE *arr;
+    int n, i, cnt = 0;
+    if (cch) buf[0] = L'\0';
+    n = FmEnumFeatures(&arr);
+    for (i = 0; i < n; i++)
+    {
+        if (arr[i].State != FM_STATE_ENABLED || !_wcsicmp(arr[i].Id, id)) continue;
+        if (!DepsContain(arr[i].Dependencies, id)) continue;
+        if (cnt++ && cch) StringCchCatW(buf, cch, L",");
+        if (cch) StringCchCatW(buf, cch, arr[i].Id);
+    }
+    FmFree(arr);
+    return cnt;
+}
+
+HRESULT FmDisableEx(LPCWSTR id, DWORD flags, FILE *log)
+{
+    WCHAR deps[FM_MAX_DEPS * 2];
+    WCHAR *ctx = NULL, *d;
+    HRESULT hr;
+
+    hr = CheckRemovable(id, log);      /* first: base component guard (GFX-FU) */
+    if (FAILED(hr)) return hr;
+
+    if (FmGetDependents(id, deps, ARRAYSIZE(deps)))
+    {
+        if (!(flags & FM_DISABLE_CASCADE))
+        {
+            LOGF(log, L"error: cannot disable '%s': enabled feature(s) depend on it: %s "
+                      L"(disable those first, or use /cascade)\n", id, deps);
+            return HRESULT_FROM_WIN32(ERROR_DEPENDENT_SERVICES_RUNNING);
+        }
+        /* dependents first; each recursive call handles its own dependents */
+        for (d = wcstok_s(deps, L",", &ctx); d; d = wcstok_s(NULL, L",", &ctx))
+        {
+            LOGF(log, L"cascade: disabling dependent '%s'\n", d);
+            hr = FmDisableEx(d, flags, log);
+            if (FAILED(hr)) return hr;
+        }
+    }
+    return DisableOne(id, log);
+}
+
+HRESULT FmDisable(LPCWSTR id, FILE *log)
+{
+    return FmDisableEx(id, 0, log);
+}
+
+HRESULT FmUninstall(LPCWSTR id, FILE *log)
+{
+    HKEY state;
+    HRESULT hr;
+    WCHAR sub[512];
+    BOOL pending = FALSE;
+
+    hr = CheckRemovable(id, log);
+    if (FAILED(hr)) return hr;
+
+    if (FmGetState(id) == FM_STATE_NOT_INSTALLED)
+    {
+        LOGF(log, L"feature '%s' is not installed; nothing to do\n", id);
+        return S_OK;
+    }
+    hr = FmDisable(id, log);   /* no-op if already Disabled */
+    if (FAILED(hr)) return hr;
+
+    if (OpenStateKey(id, FALSE, KEY_READ | KEY_WRITE, &state) == ERROR_SUCCESS)
+    {
+        pending = PendingRebootActive(state);
+        RegCloseKey(state);
+    }
+    if (pending)
+    {
+        LOGF(log, L"note: '%s' still has components pending removal; record kept until reboot\n", id);
+        return HRESULT_FROM_WIN32(ERROR_SUCCESS_REBOOT_REQUIRED);
+    }
+    StringCchPrintfW(sub, 512, L"%s\\%s", STATE_KEY, id);
+    if (RegDeleteKeyW(HKEY_LOCAL_MACHINE, sub) != ERROR_SUCCESS)
+    {
+        LOGF(log, L"warn: could not delete state record for '%s'\n", id);
+        return E_FAIL;
+    }
+    LOGF(log, L"'%s' uninstalled (state record removed).\n", id);
     return S_OK;
 }
