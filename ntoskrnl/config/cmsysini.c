@@ -118,6 +118,10 @@ CmpDeleteKeyObject(PVOID DeletedObject)
     NTSTATUS Status;
     PAGED_CODE();
 
+    /* Nothing may wait on a key body that is about to be freed */
+    if (KeyBody->Type == CM_KEY_BODY_TYPE)
+        CmpFlushNotify(KeyBody, FALSE);
+
     /* First off, prepare the handle close information callback */
     PostOperationInfo.Object = KeyBody;
     KeyHandleCloseInfo.Object = KeyBody;
@@ -174,11 +178,8 @@ CmpCloseKeyObject(IN PEPROCESS Process OPTIONAL,
     /* Make sure we're a valid key body */
     if (KeyBody->Type == CM_KEY_BODY_TYPE)
     {
-        /* Don't do anything if we don't have a notify block */
-        if (!KeyBody->NotifyBlock) return;
-
-        /* This shouldn't happen yet */
-        ASSERT(FALSE);
+        /* Cancel what is still waiting for a change on this key */
+        CmpFlushNotify(KeyBody, FALSE);
     }
 }
 

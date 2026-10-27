@@ -641,6 +641,19 @@ CmpFlushNotify(
     IN BOOLEAN LockHeld
 );
 
+NTSTATUS
+NTAPI
+CmpNotifyChangeKey(
+    _In_ HANDLE KeyHandle,
+    _In_opt_ HANDLE EventHandle,
+    _In_opt_ PIO_APC_ROUTINE ApcRoutine,
+    _In_opt_ PVOID ApcContext,
+    _Out_ PIO_STATUS_BLOCK IoStatusBlock,
+    _In_ ULONG CompletionFilter,
+    _In_ BOOLEAN WatchTree,
+    _In_ BOOLEAN Asynchronous
+);
+
 CODE_SEG("INIT")
 VOID
 NTAPI
