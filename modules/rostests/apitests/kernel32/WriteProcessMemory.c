@@ -166,6 +166,64 @@ TestWriteSection(
            "%s: remote image data not updated by WriteProcessMemory\n", Name);
 }
 
+/*
+ * An in-process patcher (Chromium's chrome_elf patches ntdll syscall stubs this
+ * way) calls WriteProcessMemory on code the calling thread is executing from.
+ * The target here is NtProtectVirtualMemory's own syscall stub, which is on
+ * the page WriteProcessMemory itself needs in order to restore the protection:
+ * if the page loses PAGE_EXECUTE_* while it is writable, the thread faults on
+ * the return from that very call. Writing back the byte that is already there
+ * changes nothing, so this only exercises the protection handling.
+ */
+static
+VOID
+TestSelfPatchExecutedCode(VOID)
+{
+    MEMORY_BASIC_INFORMATION Before, After;
+    PBYTE Stub;
+    BYTE Original;
+    SIZE_T Written = 0;
+    BOOL Success;
+    PBYTE Private;
+    static const BYTE Patch[4] = { 0x90, 0x90, 0x90, 0xC3 };
+
+    Stub = (PBYTE)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtProtectVirtualMemory");
+    ok(Stub != NULL, "NtProtectVirtualMemory not found\n");
+    if (Stub)
+    {
+        ok(VirtualQuery(Stub, &Before, sizeof(Before)) == sizeof(Before), "VirtualQuery failed\n");
+        ok((Before.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0,
+           "ntdll stub page is not executable: 0x%lx\n", Before.Protect);
+
+        Original = *Stub;
+        Success = WriteProcessMemory(GetCurrentProcess(), Stub, &Original, 1, &Written);
+        ok(Success, "WriteProcessMemory into executed code failed: %lu\n", GetLastError());
+        ok(Written == 1, "Written = %lu\n", (ULONG)Written);
+
+        ok(VirtualQuery(Stub, &After, sizeof(After)) == sizeof(After), "VirtualQuery failed\n");
+        ok(After.Protect == Before.Protect,
+           "protection changed by WriteProcessMemory: 0x%lx -> 0x%lx\n", Before.Protect, After.Protect);
+        ok(*Stub == Original, "stub byte changed\n");
+    }
+
+    /* A private executable, non-writable page is patched and left executable. */
+    Private = VirtualAlloc(NULL, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    ok(Private != NULL, "VirtualAlloc failed: %lu\n", GetLastError());
+    if (Private)
+    {
+        ULONG Old;
+        ok(VirtualProtect(Private, 0x1000, PAGE_EXECUTE_READ, &Old), "VirtualProtect failed\n");
+        Written = 0;
+        Success = WriteProcessMemory(GetCurrentProcess(), Private, Patch, sizeof(Patch), &Written);
+        ok(Success, "WriteProcessMemory into PAGE_EXECUTE_READ failed: %lu\n", GetLastError());
+        ok(Written == sizeof(Patch), "Written = %lu\n", (ULONG)Written);
+        ok(memcmp(Private, Patch, sizeof(Patch)) == 0, "patch not applied\n");
+        ok(VirtualQuery(Private, &After, sizeof(After)) == sizeof(After), "VirtualQuery failed\n");
+        ok(After.Protect == PAGE_EXECUTE_READ, "protection not restored: 0x%lx\n", After.Protect);
+        VirtualFree(Private, 0, MEM_RELEASE);
+    }
+}
+
 START_TEST(WriteProcessMemory)
 {
     HANDLE hProcess;
@@ -189,6 +247,8 @@ START_TEST(WriteProcessMemory)
         /* Safeguard: the child is kept suspended and never actually runs. */
         return;
     }
+
+    TestSelfPatchExecutedCode();
 
     /* Parse our own (already loaded) image - the child is the same binary. */
     DosHeader = (PIMAGE_DOS_HEADER)GetModuleHandleW(NULL);
