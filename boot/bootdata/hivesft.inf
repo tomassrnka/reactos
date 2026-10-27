@@ -226,6 +226,15 @@ HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies",,0x00000012
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer",,0x00000012
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer","NoSimpleStartMenu",0x00010003,1
 
+; Google Chrome presents its window only through DirectComposition (dcomp.dll), which ReactOS does not
+; implement, so with GPU acceleration on it loads pages but never paints. Chrome's own policy turns
+; acceleration off and falls back to software compositing (GDI present). A policy, unlike a shortcut
+; argument, applies to every launch path (Start menu, default browser, start https://...) and
+; survives Chrome's updates.
+HKLM,"SOFTWARE\Policies\Google",,0x00000012
+HKLM,"SOFTWARE\Policies\Google\Chrome",,0x00000012
+HKLM,"SOFTWARE\Policies\Google\Chrome","HardwareAccelerationModeEnabled",0x00010001,0
+
 ; Application compatibility
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\ShellCompatibility",,0x00000012
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\ShellCompatibility\Applications",,0x00000012
