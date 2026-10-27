@@ -571,6 +571,9 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
     CHAR AnsiNodeName[256];
     DPRINT("GetAddrInfoW: %S, %S, %p, %p\n", pszNodeName, pszServiceName, ptHints, pptResult);
 
+    /* Check for WSAStartup */
+    if ((iError = WsQuickProlog()) != ERROR_SUCCESS) return iError;
+
     /* Assume error */
     *pptResult  = NULL;
 
