@@ -694,7 +694,11 @@ co_IntCallHookProc(INT HookId,
    Common->lParamSize = lParamSize;
    if (ModuleName->Buffer && ModuleName->Length)
    {
-      RtlCopyMemory(&Common->ModuleName, ModuleName->Buffer, ModuleName->Length);
+      /* Defense in depth: never copy more than the fixed array can hold,
+       * leaving room for the terminating NUL (the memory is zeroed). */
+      ULONG CopyLen = min((ULONG)ModuleName->Length,
+                          (ULONG)(sizeof(Common->ModuleName) - sizeof(WCHAR)));
+      RtlCopyMemory(&Common->ModuleName, ModuleName->Buffer, CopyLen);
       // If ModuleName->Buffer NULL while in destroy,
       //    this will make User32:Hook.c complain about not loading the library module.
       // Fix symptom for CORE-10549.
