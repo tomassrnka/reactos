@@ -29,6 +29,7 @@ extern void func_manysockets(void);
 extern void func_nonblocking(void);
 extern void func_nostartup(void);
 extern void func_open_osfhandle(void);
+extern void func_rcvbuf(void);
 extern void func_recv(void);
 extern void func_send(void);
 extern void func_sotimeout(void);
@@ -75,6 +76,7 @@ const struct test winetest_testlist[] =
     { "nonblocking", func_nonblocking },
     { "nostartup", func_nostartup },
     { "open_osfhandle", func_open_osfhandle },
+    { "rcvbuf", func_rcvbuf },
     { "recv", func_recv },
     { "send", func_send },
     { "sotimeout", func_sotimeout },

@@ -3528,6 +3528,12 @@ WSPSetSockOpt(
                   return SOCKET_ERROR;
               }
 
+              /* Symmetric with SO_RCVBUF below: SO_SNDBUF is an advisory hint.
+               * AFD never reports the caller's size back from
+               * AFD_INFO_SEND_WINDOW_SIZE, so storing the read-back made
+               * getsockopt(SO_SNDBUF) report the unchanged default (Chrome's
+               * QUIC path treats that as ERR_SOCKET_SEND_BUFFER_SIZE_UNCHANGEABLE,
+               * net error -349). Record the requested value as Windows does. */
               SetSocketInformation(Socket,
                                    AFD_INFO_SEND_WINDOW_SIZE,
                                    NULL,
@@ -3535,13 +3541,7 @@ WSPSetSockOpt(
                                    NULL,
                                    NULL,
                                    NULL);
-              GetSocketInformation(Socket,
-                                   AFD_INFO_SEND_WINDOW_SIZE,
-                                   NULL,
-                                   &Socket->SharedData->SizeOfSendBuffer,
-                                   NULL,
-                                   NULL,
-                                   NULL);
+              Socket->SharedData->SizeOfSendBuffer = *(PULONG)optval;
 
               return NO_ERROR;
 
@@ -3552,10 +3552,29 @@ WSPSetSockOpt(
                   return SOCKET_ERROR;
               }
 
-              /* FIXME: We should not have to limit the packet receive buffer size like this. workaround for CORE-15804 */
-              if (*(PULONG)optval > 0x2000)
-                  *(PULONG)optval = 0x2000;
-
+              /* SO_RCVBUF is an advisory receive-buffer hint. Match Windows:
+               * accept the requested size, record it as the value that
+               * getsockopt(SO_RCVBUF) reads back, and pass it to AFD as a hint.
+               *
+               * AFD keeps its own bounded receive window: it only (re)allocates
+               * within a small, safe range and never once a transport object is
+               * attached (drivers/network/afd/afd/info.c, AfdSetInfo), and its
+               * AFD_INFO_RECEIVE_WINDOW_SIZE query always reports that internal
+               * window, not the caller's requested size (see the windowsize
+               * apitest, which asserts the queried size never changes). So the
+               * old code -- which stored the AFD read-back into
+               * SizeOfRecvBuffer -- always reported the unchanged default,
+               * making getsockopt(SO_RCVBUF) look like the buffer size could
+               * not be changed. Chrome's QUIC path sets SO_RCVBUF, reads it
+               * back, and on a smaller-than-requested read-back fails the UDP
+               * socket with ERR_SOCKET_RECEIVE_BUFFER_SIZE_UNCHANGEABLE
+               * (net error -348), which aborts the QUIC handshake.
+               *
+               * Record the requested value in SharedData, exactly as Windows'
+               * provider records the hint, so getsockopt reads it back. The
+               * former clamp to 0x2000 (a CORE-15804 work-around that mutated
+               * the caller's buffer) is dropped: AFD already bounds any real
+               * allocation, so there is nothing for msafd to clamp. */
               SetSocketInformation(Socket,
                                    AFD_INFO_RECEIVE_WINDOW_SIZE,
                                    NULL,
@@ -3563,13 +3582,7 @@ WSPSetSockOpt(
                                    NULL,
                                    NULL,
                                    NULL);
-              GetSocketInformation(Socket,
-                                   AFD_INFO_RECEIVE_WINDOW_SIZE,
-                                   NULL,
-                                   &Socket->SharedData->SizeOfRecvBuffer,
-                                   NULL,
-                                   NULL,
-                                   NULL);
+              Socket->SharedData->SizeOfRecvBuffer = *(PULONG)optval;
 
               return NO_ERROR;
 

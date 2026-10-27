@@ -25,6 +25,7 @@ list(APPEND SOURCE
     nonblocking.c
     nostartup.c
     open_osfhandle.c
+    rcvbuf.c
     recv.c
     WSASendMsg.c
     send.c
