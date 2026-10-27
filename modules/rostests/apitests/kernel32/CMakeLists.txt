@@ -151,6 +151,7 @@ list(APPEND SOURCE
     Wow64Run.c
     Wow64SystemDlls.c
     WriteFile.c
+    XState.c
     ReadProcessMemory.c
     WriteProcessMemory.c
     SetFileInformationByHandle.c
