@@ -12,7 +12,7 @@
 
 PIP_INTERFACE Loopback = NULL;
 
-/* Looped TCP segments are received one at a time, in the order they were sent */
+/* Looped TCP segments and UDP datagrams are received one at a time, in the order they were sent */
 static CHEW_SERIAL_QUEUE LoopQueue;
 
 #define LOOP_QUEUE_LIMIT 1024
@@ -96,8 +96,12 @@ VOID LoopTransmit(
 
             Item->IPPacket.MappedHeader = TRUE;
 
-            /* As on a LAN adapter: TCP in order, everything else in a work item of its own */
-            if (PacketLength >= 10 && (PacketBuffer[0] & 0xF0) == 0x40 && PacketBuffer[9] == IPPROTO_TCP)
+            /* TCP in order, and UDP in order too: AFD keeps one datagram receive posted per
+               socket and posts the next one only when the previous completed, so two
+               datagrams delivered at the same time find no receive request and the second
+               is dropped. Everything else in a work item of its own */
+            if (PacketLength >= 10 && (PacketBuffer[0] & 0xF0) == 0x40 &&
+                (PacketBuffer[9] == IPPROTO_TCP || PacketBuffer[9] == IPPROTO_UDP))
                 Queued = ChewSerialInsert(&LoopQueue, &Item->ListEntry);
             else
                 Queued = ChewCreate(LoopPassiveWorkItem, Item);
