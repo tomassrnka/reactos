@@ -221,7 +221,8 @@ PipGetDriverTagPriority(IN HANDLE ServiceHandle)
         goto Quickie;
     }
 
-    /* Convert to unicode string */
+    /* Convert to unicode string. Passing Group.Buffer as a PWSTR value name below
+     * is only safe because of the REG_SZ and trailing-NUL checks. */
     Buffer = (PVOID)((ULONG_PTR)KeyValueInformation + KeyValueInformation->DataOffset);
     if (((PWCHAR)Buffer)[(KeyValueInformation->DataLength / sizeof(WCHAR)) - 1] != UNICODE_NULL)
     {
@@ -267,20 +268,27 @@ Quickie:
         GroupOrder = (PULONG)((ULONG_PTR)KeyValueInformationGroupOrderList +
                               KeyValueInformationGroupOrderList->DataOffset);
 
-        /* Get the count */
-        Count = *GroupOrder;
-        ASSERT(((Count + 1) * sizeof(ULONG)) <=
-               KeyValueInformationGroupOrderList->DataLength);
-
-        /* Now loop each tag */
-        GroupOrder++;
-        for (i = 1; i <= Count; i++)
+        /*
+         * Get the count. The value comes from the hive, so make sure it can
+         * really hold the count and that many tags before walking it;
+         * otherwise leave i at -1 (no priority).
+         */
+        if (KeyValueInformationGroupOrderList->DataLength >= sizeof(ULONG))
         {
-            /* If we found it, we're out */
-            if (Tag == *GroupOrder) break;
+            Count = *GroupOrder;
+            if (Count <= (KeyValueInformationGroupOrderList->DataLength / sizeof(ULONG)) - 1)
+            {
+                /* Now loop each tag */
+                GroupOrder++;
+                for (i = 1; i <= Count; i++)
+                {
+                    /* If we found it, we're out */
+                    if (Tag == *GroupOrder) break;
 
-            /* Try the next one */
-            GroupOrder++;
+                    /* Try the next one */
+                    GroupOrder++;
+                }
+            }
         }
     }
 
