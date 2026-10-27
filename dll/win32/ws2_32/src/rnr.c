@@ -252,9 +252,11 @@ WSALookupServiceBeginA(IN LPWSAQUERYSETA lpqsRestrictions,
 
     DPRINT("WSALookupServiceBeginA: %p\n", lpqsRestrictions);
 
-    /* Verify pointer */
+    /* Verify pointer. lpServiceClassId is optional (NLA/NS_NLA queries pass
+     * NULL), so only validate it when the caller supplied one. */
     if (IsBadReadPtr(lpqsRestrictions, sizeof(*lpqsRestrictions)) ||
-        IsBadReadPtr(lpqsRestrictions->lpServiceClassId, sizeof(*lpqsRestrictions->lpServiceClassId)))
+        ((lpqsRestrictions->lpServiceClassId != NULL) &&
+         IsBadReadPtr(lpqsRestrictions->lpServiceClassId, sizeof(*lpqsRestrictions->lpServiceClassId))))
     {
         /* Invalid */
         SetLastError(WSAEFAULT);
@@ -332,10 +334,13 @@ WSALookupServiceBeginW(IN LPWSAQUERYSETW lpqsRestrictions,
         return SOCKET_ERROR;
     }
 
-    /* Verify pointers */
+    /* Verify pointers. lpServiceClassId is optional (e.g. NLA/NS_NLA queries
+     * pass NULL to enumerate the current networks), so only validate it when
+     * the caller actually supplied one. */
     if (IsBadWritePtr(lphLookup, sizeof(*lphLookup)) ||
         IsBadReadPtr(lpqsRestrictions, sizeof(*lpqsRestrictions)) ||
-        IsBadReadPtr(lpqsRestrictions->lpServiceClassId, sizeof(*lpqsRestrictions->lpServiceClassId)))
+        ((lpqsRestrictions->lpServiceClassId != NULL) &&
+         IsBadReadPtr(lpqsRestrictions->lpServiceClassId, sizeof(*lpqsRestrictions->lpServiceClassId))))
     {
         /* They are invalid; fail */
         SetLastError(WSAEFAULT);
@@ -563,7 +568,7 @@ WSALookupServiceNextA(IN HANDLE hLookup,
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 INT
 WSPAPI
@@ -576,8 +581,73 @@ WSANSPIoctl(HANDLE hLookup,
             LPDWORD lpcbBytesReturned,
             LPWSACOMPLETION lpCompletion)
 {
+    PWSPROCESS Process;
+    PWSTHREAD Thread;
+    INT ErrorCode;
+    PNSQUERY Query = hLookup;
+    PNSQUERY_PROVIDER Provider;
+    WSATHREADID ThreadId;
+
     DPRINT("WSANSPIoctl: %lx\n", hLookup);
-    return 0;
+
+    /* Enter prolog */
+    if ((ErrorCode = WsApiProlog(&Process, &Thread)) != ERROR_SUCCESS)
+    {
+        SetLastError(ErrorCode);
+        return SOCKET_ERROR;
+    }
+
+    /* The bytes-returned pointer is mandatory */
+    if (IsBadWritePtr(lpcbBytesReturned, sizeof(*lpcbBytesReturned)))
+    {
+        SetLastError(WSAEFAULT);
+        return SOCKET_ERROR;
+    }
+
+    /* Check for a valid handle, then validate and reference it */
+    if (IsBadReadPtr(Query, sizeof(*Query)) || !WsNqValidateAndReference(Query))
+    {
+        SetLastError(WSA_INVALID_HANDLE);
+        return SOCKET_ERROR;
+    }
+
+    /* Pick the active provider (or the first one in the query) */
+    Provider = Query->ActiveProvider;
+    if (!Provider && !IsListEmpty(&Query->ProviderList))
+    {
+        Provider = CONTAINING_RECORD(Query->ProviderList.Flink,
+                                     NSQUERY_PROVIDER,
+                                     QueryLink);
+    }
+
+    /* Only new-style providers that expose NSPIoctl can service this */
+    if (!Provider || !Provider->Provider || !Provider->Provider->Service.NSPIoctl)
+    {
+        WsNqDereference(Query);
+        SetLastError(WSAEOPNOTSUPP);
+        return SOCKET_ERROR;
+    }
+
+    /* Describe the calling thread for the provider */
+    ThreadId.ThreadHandle = GetCurrentThread();
+    ThreadId.Reserved = 0;
+
+    /* Dispatch to the provider */
+    ErrorCode = Provider->Provider->Service.NSPIoctl(Provider->LookupHandle,
+                                                     dwControlCode,
+                                                     lpvInBuffer,
+                                                     cbInBuffer,
+                                                     lpvOutBuffer,
+                                                     cbOutBuffer,
+                                                     lpcbBytesReturned,
+                                                     lpCompletion,
+                                                     &ThreadId);
+
+    /* Remove the validation reference */
+    WsNqDereference(Query);
+
+    /* The provider has set its own last error (e.g. WSA_IO_PENDING) */
+    return ErrorCode;
 }
 
 /*

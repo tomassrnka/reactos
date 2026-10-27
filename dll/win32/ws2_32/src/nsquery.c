@@ -479,6 +479,18 @@ WsNqLookupServiceBegin(IN PNSQUERY NsQuery,
         }
     }
 
+    /*
+     * The query begins successfully as long as at least one provider accepted
+     * it. Providers that declined (e.g. the DNS provider for an NLA class, or
+     * the NLA provider for a DNS class) were already removed from the list in
+     * the loop above, so a non-empty list means success. We must not simply
+     * trust the last provider's ErrorCode: when several providers match a
+     * namespace (NS_ALL hits both the DNS and NLA providers), a trailing
+     * provider that declines would otherwise wrongly fail an already-satisfied
+     * query and tear down the working provider in the Exit path.
+     */
+    ErrorCode = IsListEmpty(&NsQuery->ProviderList) ? SOCKET_ERROR : ERROR_SUCCESS;
+
 Exit:
     /* Check if we had an error somewhere */
     if (ErrorCode == SOCKET_ERROR)
