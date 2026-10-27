@@ -1,0 +1,25 @@
+; RAPPS-format entry used to prove the RAPPS-S-dialog-hang fix: its URLDownload is an
+; unreachable (.invalid) host, so "rapps /install /S fmnohang" must FAIL PROMPTLY with a
+; non-zero exit code and NO modal dialog (which, headless, would block the featmgr child
+; up to the 60-min watchdog). Imported by featmgr /import-rapps into rapps-fmnohang.
+;
+; RAPPS drops the generic [Section] URLDownload on non-x86 and reads the arch-specific
+; one, so the download URL is given per arch: [Section] serves i386, [Section.amd64]/
+; [Section.arm64] serve 64-bit. All point at the same unreachable host.
+[Section]
+Name = FmNoHang Test
+Version = 1.0.0
+Category = 13
+URLDownload = https://nohang.invalid/fmnohang-1.0.0.exe
+SHA1 = 0000000000000000000000000000000000000000
+SizeBytes = 1024
+
+[Section.amd64]
+URLDownload = https://nohang.invalid/fmnohang-1.0.0-amd64.exe
+SHA1 = 0000000000000000000000000000000000000000
+SizeBytes = 1024
+
+[Section.arm64]
+URLDownload = https://nohang.invalid/fmnohang-1.0.0-arm64.exe
+SHA1 = 0000000000000000000000000000000000000000
+SizeBytes = 1024

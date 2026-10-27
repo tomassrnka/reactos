@@ -270,6 +270,32 @@ call :rc0 "102 software entry with missing installer marked deferred (*)"
 %FM% /install fmt-sw >> %LOG% 2>&1
 call :rc1 "103 install refused when installer not staged"
 
+rem ===== RAPPS-provider /S no-hang (RAPPS-S-dialog-hang fix) =====
+rem rapps.exe is only present in a full image. A failing silent download must return
+rem PROMPTLY with a non-zero code and no modal dialog; before the fix it popped a modal
+rem MessageBox on the (headless) worker thread and blocked featmgr up to the 60-min watchdog.
+rem The .invalid URLDownload fails fast whether or not the VM has network.
+if exist %SystemRoot%\system32\rapps.exe (
+  mkdir "%LOCALAPPDATA%\RApps\appdb" 2>nul
+  copy /y %FX%\nohang-appdb\fmnohang.txt "%LOCALAPPDATA%\RApps\appdb\" >nul
+  %FM% /import-rapps "%LOCALAPPDATA%\RApps\appdb" /clean /anyarch > %O%\nohang-imp.txt 2>&1
+  call :rc0 "104 import nohang rapps entry"
+  echo NOHANG-START %time% >> %LOG%
+  %FM% /install rapps-fmnohang > %O%\nohang.txt 2>&1
+  call :rc1 "105 rapps /S download failure returns non-zero (no modal hang)"
+  echo NOHANG-END %time% >> %LOG%
+  type %O%\nohang.txt >> %LOG%
+  rem control returned to the script => proven not hung
+  echo NOHANG-RETURNED ok >> %LOG%
+  call :st rapps-fmnohang NotInstalled "106 failed live install leaves NotInstalled"
+  reg query HKLM\SOFTWARE\ReactOS\Nitro\OptionalFeatures\rapps-fmnohang >nul 2>&1
+  call :rc1 "107 failed live install leaves no state record"
+  del "%LOCALAPPDATA%\RApps\appdb\fmnohang.txt" 2>nul
+  rd /s /q %SW% 2>nul
+) else (
+  echo SKIP 104-107 rapps.exe not present ^(module-only test image^) >> %LOG%
+)
+
 rem --- software-tier cleanup
 del /q %R%\Catalog\fmt-sw.ini %R%\Catalog\fmt-swbad.ini %R%\Catalog\fmt-swstuck.ini 2>nul
 del /q %R%\Payload\fmt-sw\*.* %R%\Payload\fmt-swbad\*.* %R%\Payload\fmt-swstuck\*.* 2>nul
