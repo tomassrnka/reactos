@@ -688,6 +688,17 @@ NTSTATUS TdiQueryDeviceControl(
 }
 
 
+/* An MDL handed to a query that was never sent: undo what the caller did */
+static VOID TdiReleaseUnsentMdl(
+    PMDL Mdl)
+{
+    if (!Mdl)
+        return;
+    if (Mdl->MdlFlags & MDL_PAGES_LOCKED)
+        MmUnlockPages(Mdl);
+    IoFreeMdl(Mdl);
+}
+
 NTSTATUS TdiQueryInformation(
     PFILE_OBJECT FileObject,
     LONG QueryType,
@@ -697,9 +708,14 @@ NTSTATUS TdiQueryInformation(
  *
  * @param    FileObject   = Pointer to file object
  * @param    QueryType    = Query type
- * @param    MdlBuffer    = Pointer to MDL buffer specific for query type
+ * @param    MdlBuffer    = Pointer to a locked MDL buffer specific for query type
  *
  * @return   Status of operation
+ *
+ * @note     The MDL always belongs to this call from here on: it is attached to
+ *           the transport request, whose completion unlocks and frees it on
+ *           success and on failure; if no request can be sent it is unlocked and
+ *           freed here. Callers must not unlock or free it afterwards.
  */
 {
     PDEVICE_OBJECT DeviceObject;
@@ -709,12 +725,14 @@ NTSTATUS TdiQueryInformation(
 
     if (!FileObject) {
         DPRINT("Bad file object.\n");
+        TdiReleaseUnsentMdl(MdlBuffer);
         return STATUS_INVALID_PARAMETER;
     }
 
     DeviceObject = IoGetRelatedDeviceObject(FileObject);
     if (!DeviceObject) {
         DPRINT("Bad device object.\n");
+        TdiReleaseUnsentMdl(MdlBuffer);
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -726,6 +744,7 @@ NTSTATUS TdiQueryInformation(
                                            &Event,
                                            &Iosb);
     if (!Irp) {
+        TdiReleaseUnsentMdl(MdlBuffer);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 

@@ -306,17 +306,19 @@ AfdGetSockName( PDEVICE_OBJECT DeviceObject, PIRP Irp,
         } _SEH2_END;
 
         if( NT_SUCCESS(Status) ) {
-                Status = TdiQueryInformation( FCB->Connection.Object
-                                                ? FCB->Connection.Object
-                                                : FCB->AddressFile.Object,
-                                              TDI_QUERY_ADDRESS_INFO,
-                                              Mdl );
-        }
-
-        /* Check if MmProbeAndLockPages or TdiQueryInformation failed and
-         * clean up Mdl */
-        if (!NT_SUCCESS(Status) && Irp->MdlAddress != Mdl)
+            /* TdiQueryInformation takes the locked MDL: the transport request
+             * unlocks and frees it when it completes, whether the query
+             * succeeds or fails. Freeing it here as well would put it on the
+             * MDL lookaside list twice. */
+            Status = TdiQueryInformation( FCB->Connection.Object
+                                            ? FCB->Connection.Object
+                                            : FCB->AddressFile.Object,
+                                          TDI_QUERY_ADDRESS_INFO,
+                                          Mdl );
+        } else {
+            /* The probe failed: the MDL is not locked and was never handed off */
             IoFreeMdl(Mdl);
+        }
     } else
         Status = STATUS_INSUFFICIENT_RESOURCES;
 
