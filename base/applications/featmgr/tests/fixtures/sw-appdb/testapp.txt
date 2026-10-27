@@ -1,0 +1,21 @@
+; RAPPS-format sample entry (FEATMGMT-01 software-tier import test fixture)
+[Section]
+Name = Test App
+Version = 1.2.3
+License = GPLv2
+LicenseType = 1
+Description = A sample RAPPS entry; the importer must map it onto a Tier=software manifest.
+SizeBytes = 123456
+Category = 5
+URLSite = https://example.invalid/testapp
+URLDownload = https://example.invalid/testapp-1.2.3.exe
+SHA1 = 0123456789abcdef0123456789abcdef01234567
+Publisher = Example Org
+RegName = Test App
+Installer = NSIS
+SilentParameters = /S
+NTVersion = 5.1+
+
+[Section.0419]
+Name = Test App (ru)
+Description = ignored by the importer (locale section)

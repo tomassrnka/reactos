@@ -33,10 +33,14 @@ static void Usage(void)
     Out(L"  featmgr /state   <id>        print just the state word (scripting)\n");
     Out(L"  featmgr /query   <id>        show one feature in detail\n");
     Out(L"  featmgr /enable  <id>        enable (install) an optional feature\n");
-    Out(L"  featmgr /disable <id> [/cascade]  disable (revert); refused while enabled\n");
-    Out(L"                               features depend on it unless /cascade\n");
-    Out(L"  featmgr /install <id>        alias for /enable\n");
-    Out(L"  featmgr /uninstall <id>      disable, then forget the record (-> NotInstalled)\n");
+    Out(L"  featmgr /disable <id> [/cascade] [/force]  disable (revert); refused while enabled\n");
+    Out(L"                               features depend on it unless /cascade. Software tier:\n");
+    Out(L"                               runs the app's uninstaller; /force = proceed if it fails\n");
+    Out(L"  featmgr /install <id>        alias for /enable (software tier: download + run installer)\n");
+    Out(L"  featmgr /uninstall <id> [/force]  disable, then forget the record (-> NotInstalled)\n");
+    Out(L"  featmgr /import-rapps [<appdb-dir>] [/clean] [/anyarch]\n");
+    Out(L"                               convert the RAPPS database (default %%LOCALAPPDATA%%\\RApps\\appdb)\n");
+    Out(L"                               into Tier=software catalog entries (Catalog\\Software)\n");
     Out(L"  featmgr /help                this text\n");
 }
 
@@ -111,15 +115,51 @@ static int DoQuery(LPCWSTR id)
     Out(L"Description:  %s\n", f.Description);
     {
         WCHAR v[512];
-        static const WCHAR *k[] = { L"Artifact", L"ArtifactSHA256", L"SizeBytes", L"License" };
+        static const WCHAR *k[] = { L"Artifact", L"ArtifactSHA256", L"ArtifactSHA1", L"SizeBytes",
+                                    L"License", L"Publisher", L"URLSite" };
         int i;
-        for (i = 0; i < 4; i++)
+        if (f.Provider[0]) Out(L"Provider:     %s\n", f.Provider);
+        GetPrivateProfileStringW(L"Rapps", L"Pkg", L"", v, 512, f.ManifestPath);
+        if (v[0]) Out(L"Rapps.Pkg:    %s\n", v);
+        GetPrivateProfileStringW(L"Rapps", L"Category", L"", v, 512, f.ManifestPath);
+        if (v[0]) Out(L"Category:     %s\n", v);
+        for (i = 0; i < 7; i++)
         {
             GetPrivateProfileStringW(L"Source", k[i], L"", v, 512, f.ManifestPath);
             if (v[0]) Out(L"Source.%s: %s\n", k[i], v);
         }
     }
     return 0;
+}
+
+static int DoImportRapps(int argc, WCHAR **argv)
+{
+    LPCWSTR dir = NULL;
+    DWORD fl = 0;
+    int a, n, skipped = 0;
+
+    for (a = 2; a < argc; a++)
+    {
+        if (!_wcsicmp(argv[a], L"/clean")) fl |= FM_IMPORT_CLEAN;
+        else if (!_wcsicmp(argv[a], L"/anyarch")) fl |= FM_IMPORT_ANYARCH;
+        else if (argv[a][0] != L'/' && !dir) dir = argv[a];
+        else { Out(L"error: unknown /import-rapps option '%s'\n", argv[a]); return 2; }
+    }
+    n = FmImportRapps(dir, fl, &skipped, stdout);
+    return n < 0 ? 3 : 0;
+}
+
+/* flags after the feature id: /cascade /force */
+static DWORD ParseDisableFlags(int argc, WCHAR **argv, int from)
+{
+    DWORD fl = 0;
+    int a;
+    for (a = from; a < argc; a++)
+    {
+        if (!_wcsicmp(argv[a], L"/cascade")) fl |= FM_DISABLE_CASCADE;
+        else if (!_wcsicmp(argv[a], L"/force")) fl |= FM_DISABLE_FORCE;
+    }
+    return fl;
 }
 
 int wmain(int argc, WCHAR **argv)
@@ -135,6 +175,9 @@ int wmain(int argc, WCHAR **argv)
 
     if (!_wcsicmp(cmd, L"/help") || !_wcsicmp(cmd, L"/?") || !_wcsicmp(cmd, L"help"))
     { Usage(); return 0; }
+
+    if (!_wcsicmp(cmd, L"/import-rapps") || !_wcsicmp(cmd, L"import-rapps"))
+        return DoImportRapps(argc, argv);
 
     if (argc < 3) { Out(L"error: missing feature id\n\n"); Usage(); return 2; }
 
@@ -158,15 +201,13 @@ int wmain(int argc, WCHAR **argv)
 
     if (!_wcsicmp(cmd, L"/disable") || !_wcsicmp(cmd, L"disable"))
     {
-        DWORD fl = 0;
-        if (argc > 3 && !_wcsicmp(argv[3], L"/cascade")) fl |= FM_DISABLE_CASCADE;
-        hr = FmDisableEx(argv[2], fl, stdout);
+        hr = FmDisableEx(argv[2], ParseDisableFlags(argc, argv, 3), stdout);
         return SUCCEEDED(hr) ? 0 : 3;
     }
 
     if (!_wcsicmp(cmd, L"/uninstall") || !_wcsicmp(cmd, L"uninstall"))
     {
-        hr = FmUninstall(argv[2], stdout);
+        hr = FmUninstallEx(argv[2], ParseDisableFlags(argc, argv, 3), stdout);
         return SUCCEEDED(hr) ? 0 : 3;
     }
 

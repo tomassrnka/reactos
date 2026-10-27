@@ -1,0 +1,4 @@
+[Section]
+Name = No URL App
+Version = 1.0
+Category = 5

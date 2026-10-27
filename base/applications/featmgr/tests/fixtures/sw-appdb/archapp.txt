@@ -1,0 +1,11 @@
+[Section]
+Name = Arch App
+Version = 1.0
+Category = 3
+URLDownload = https://example.invalid/generic-url.exe
+
+[Section.x86]
+URLDownload = https://example.invalid/arch-x86.exe
+
+[Section.amd64]
+URLDownload = https://example.invalid/arch-amd64.exe
