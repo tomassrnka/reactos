@@ -8,6 +8,7 @@ list(APPEND SOURCE
     close.c
     closerace.c
     connectex.c
+    GetAddrInfoEx.c
     getaddrinfo.c
     GetHostNameW.c
     gethostname.c

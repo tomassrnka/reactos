@@ -52,12 +52,12 @@
 500 stdcall WEP()
 
 @ stdcall WSApSetPostRoutine(ptr)
-@ stdcall -stub -version=0x600+ FreeAddrInfoEx(ptr)
-@ stdcall -stub -version=0x600+ FreeAddrInfoExW(ptr)
+@ stdcall -version=0x600+ FreeAddrInfoEx(ptr)
+@ stdcall -version=0x600+ FreeAddrInfoExW(ptr)
 @ stdcall FreeAddrInfoW(ptr) freeaddrinfo
 @ stdcall -version=0x601+ GetAddrInfoExCancel(ptr)
 @ stdcall -stub -version=0x600+ GetAddrInfoExA(str str long ptr ptr ptr ptr ptr ptr ptr)
-@ stdcall -stub -version=0x600+ GetAddrInfoExW(wstr wstr long ptr ptr ptr ptr ptr ptr ptr)
+@ stdcall -version=0x600+ GetAddrInfoExW(wstr wstr long ptr ptr ptr ptr ptr ptr ptr)
 @ stdcall GetAddrInfoW(wstr wstr ptr ptr)
 @ stdcall -version=0x601+ GetHostNameW(ptr long)
 @ stdcall GetNameInfoW(ptr long wstr long wstr long long)
