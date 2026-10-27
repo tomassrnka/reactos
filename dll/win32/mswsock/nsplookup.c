@@ -8,7 +8,9 @@
 #include <guiddef.h>
 #include <svcguid.h>
 #include <iptypes.h>
+#include <iphlpapi.h>
 #include <strsafe.h>
+#include <winnls.h>
 #include <winreg.h>
 
 #include "mswhelper.h"
@@ -20,6 +22,27 @@
 #define NSP_CALLID_HOSTNAME 0x0002
 #define NSP_CALLID_HOSTBYNAME 0x0003
 #define NSP_CALLID_SERVICEBYNAME 0x0004
+#define NSP_CALLID_NLA 0x0005
+
+/* NLA (Network Location Awareness) blob constants (from mswsock.h).
+ * Defined locally so we don't have to pull the whole mswsock.h into the
+ * provider implementation. */
+#ifndef NLA_CONNECTIVITY
+#define NLA_RAW_DATA           0
+#define NLA_INTERFACE          1
+#define NLA_802_1X_LOCATION    2
+#define NLA_CONNECTIVITY       3
+#define NLA_ICS                4
+
+#define NLA_NETWORK_AD_HOC     0
+#define NLA_NETWORK_MANAGED    1
+#define NLA_NETWORK_UNMANAGED  2
+#define NLA_NETWORK_UNKNOWN    3
+
+#define NLA_INTERNET_UNKNOWN   0
+#define NLA_INTERNET_NO        1
+#define NLA_INTERNET_YES       2
+#endif
 
 #ifndef BUFSIZ
 #define BUFSIZ 1024
@@ -47,6 +70,10 @@ typedef struct {
   DWORD CallID; /* List for LookupServiceNext-Calls */
   DWORD CallIDCounter; /* call-count of the current CallID. */
   WCHAR* hostnameW; /* hostbyname */
+  /* NLA (SIO_NSP_NOTIFY_CHANGE) connectivity-change notification state */
+  HANDLE hNotifyThread;               /* poll thread signalling on change */
+  HANDLE hNotifyStop;                 /* manual-reset event used to stop it */
+  LPWSAOVERLAPPED lpNotifyOverlapped; /* caller overlapped signalled on change */
 #ifdef NSP_REDIRECT
   HANDLE rdrLookup;
   NSP_ROUTINE rdrproc;
@@ -72,6 +99,14 @@ static const GUID guid_mswsock_NLA = {/*Data1:*/ 0x6642243A,
                                       /*Data2:*/ 0x3BA8,
                                       /*Data3:*/ 0x4AA6,
                                       /*Data4:*/ {0xBA, 0xA5, 0x2E, 0x0B, 0xD7, 0x1F, 0xDD, 0x83}};
+
+/* {0037E515-B5C9-4A43-BADA-8B48A87AD239} - NLA_SERVICE_CLASS_GUID */
+/* Service class queried by NLA-aware clients (e.g. Chrome's
+ * NetworkChangeNotifierWin) via WSALookupServiceBegin on the NLA namespace. */
+static const GUID guid_NLA_ServiceClass = {/*Data1:*/ 0x0037E515,
+                                           /*Data2:*/ 0xB5C9,
+                                           /*Data3:*/ 0x4A43,
+                                           /*Data4:*/ {0xBA, 0xDA, 0x8B, 0x48, 0xA8, 0x7A, 0xD2, 0x39}};
 
 #ifdef NSP_REDIRECT
 
@@ -125,7 +160,146 @@ NSP_GetServiceByNameHeapAllocW(
   _In_ DWORD dwControlFlags,
   _Out_ PWSHOSTINFOINTERN hostinfo);
 
+INT
+NSP_BuildNLAResultW(
+  _In_ PWSHANDLEINTERN data,
+  _Inout_ PMSW_BUFFER buf,
+  _Inout_ LPWSAQUERYSETW lpRes,
+  _Inout_ LPDWORD lpResLen);
+
 /* Implementations - Internal */
+
+#define NLA_POLL_INTERVAL_MS 2000
+
+/* Compute a cheap signature of the current connectivity state (non-loopback
+ * adapters, their addresses/gateways/DHCP). When it changes the network went
+ * up/down or an address changed - which is what NLA change notification
+ * reports. Also returns whether any connected adapter exists via *pConnected,
+ * and (optionally) the description of the first connected adapter. */
+static
+DWORD
+NlaConnectivitySignature(_Out_opt_ BOOL* pConnected,
+                         _Out_opt_ BOOL* pInternet,
+                         _Out_writes_opt_z_(cchName) WCHAR* pNameW,
+                         _In_ DWORD cchName)
+{
+    IP_ADAPTER_INFO* info = NULL;
+    IP_ADAPTER_INFO* p;
+    ULONG len = 0;
+    DWORD ret;
+    DWORD sig = 0;
+    BOOL connected = FALSE;
+    BOOL internet = FALSE;
+    const CHAR* pc;
+
+    if (pConnected)
+        *pConnected = FALSE;
+    if (pInternet)
+        *pInternet = FALSE;
+    if (pNameW && cchName)
+        pNameW[0] = L'\0';
+
+    ret = GetAdaptersInfo(NULL, &len);
+    if ((ret != ERROR_BUFFER_OVERFLOW) || (len == 0))
+        return 0;
+
+    info = HeapAlloc(GetProcessHeap(), 0, len);
+    if (!info)
+        return 0;
+
+    if (GetAdaptersInfo(info, &len) == NO_ERROR)
+    {
+        for (p = info; p != NULL; p = p->Next)
+        {
+            BOOL hasAddr;
+            BOOL hasGw;
+            BOOL isApipa;
+
+            if (p->Type == MIB_IF_TYPE_LOOPBACK)
+                continue;
+
+            hasAddr = (p->IpAddressList.IpAddress.String[0] != '\0') &&
+                      (strcmp(p->IpAddressList.IpAddress.String, "0.0.0.0") != 0);
+            hasGw = (p->GatewayList.IpAddress.String[0] != '\0') &&
+                    (strcmp(p->GatewayList.IpAddress.String, "0.0.0.0") != 0);
+            /* APIPA / link-local 169.254.0.0/16 means no real connectivity. */
+            isApipa = (strncmp(p->IpAddressList.IpAddress.String, "169.254.", 8) == 0);
+
+            /* fold adapter identity + addressing into the signature */
+            sig = (sig * 131) + p->Index;
+            for (pc = p->IpAddressList.IpAddress.String; *pc; pc++)
+                sig = (sig * 131) + (BYTE)*pc;
+            for (pc = p->GatewayList.IpAddress.String; *pc; pc++)
+                sig = (sig * 131) + (BYTE)*pc;
+            sig = (sig * 131) + (p->DhcpEnabled ? 1u : 0u);
+
+            /* A non-loopback adapter with a routable address counts as a
+             * connected network. "Internet" is only claimed when it also has a
+             * default gateway and is not an APIPA self-assigned (169.254.x)
+             * address - we must not overclaim NLA_INTERNET_YES. */
+            if (hasAddr && !connected)
+            {
+                connected = TRUE;
+                internet = hasGw && !isApipa;
+                if (pNameW && cchName)
+                {
+                    MultiByteToWideChar(CP_ACP, 0, p->Description, -1,
+                                        pNameW, cchName);
+                    pNameW[cchName - 1] = L'\0';
+                }
+            }
+        }
+    }
+
+    HeapFree(GetProcessHeap(), 0, info);
+
+    if (pConnected)
+        *pConnected = connected;
+    if (pInternet)
+        *pInternet = internet;
+
+    /* keep sig non-zero when connected so a 0<->connected transition is visible */
+    if (connected && sig == 0)
+        sig = 1;
+
+    return sig;
+}
+
+/* Poll thread: watches for a connectivity-signature change and then signals the
+ * caller-supplied overlapped event (one-shot; the client re-arms by issuing a
+ * fresh WSALookupServiceBegin + SIO_NSP_NOTIFY_CHANGE). */
+static
+DWORD
+WINAPI
+NlaNotifyThreadProc(_In_ LPVOID lpParam)
+{
+    PWSHANDLEINTERN pLook = (PWSHANDLEINTERN)lpParam;
+    DWORD baseline;
+
+    baseline = NlaConnectivitySignature(NULL, NULL, NULL, 0);
+
+    for (;;)
+    {
+        DWORD cur;
+
+        if (WaitForSingleObject(pLook->hNotifyStop, NLA_POLL_INTERVAL_MS) == WAIT_OBJECT_0)
+            return 0; /* stopped from mwsNSPLookupServiceEnd */
+
+        cur = NlaConnectivitySignature(NULL, NULL, NULL, 0);
+        if (cur != baseline)
+        {
+            LPWSAOVERLAPPED ov = pLook->lpNotifyOverlapped;
+            if (ov)
+            {
+                ov->Internal = 0;     /* STATUS_SUCCESS */
+                ov->InternalHigh = 0;
+                if (ov->hEvent)
+                    SetEvent(ov->hEvent);
+            }
+            return 0;
+        }
+    }
+}
 
 INT
 WSAAPI
@@ -155,12 +329,30 @@ mwsNSPLookupServiceBegin(_In_ LPGUID lpProviderId,
 
     if (IsEqualGUID(lpProviderId, &guid_mswsock_TcpIp))
     {
-        //OK
+        /* The DNS (TcpIp) provider needs a concrete service class. A NULL class
+         * (e.g. an NS_NLA query that also matched this entry) is not ours - fail
+         * before allocating so ws2_32 drops us and uses the NLA provider. This
+         * also avoids dereferencing a NULL class id in the IsEqualGUID chain
+         * below now that ws2_32 forwards NULL service-class ids. */
+        if (lpqsRestrictions->lpServiceClassId == NULL)
+        {
+            WSASetLastError(WSASERVICE_NOT_FOUND);
+            return SOCKET_ERROR;
+        }
     }
     else if (IsEqualGUID(lpProviderId, &guid_mswsock_NLA))
     {
-        WSASetLastError(WSASERVICE_NOT_FOUND);
-        return SOCKET_ERROR;
+        /* The NLA namespace provider answers NLA connectivity queries. NLA-aware
+         * clients pass either the NLA service class or (commonly) a NULL service
+         * class to enumerate the current networks; reject any other explicit
+         * class so ws2_32 drops this provider cleanly for non-NLA queries. */
+        if ((lpqsRestrictions->lpServiceClassId != NULL) &&
+            !IsEqualGUID(lpqsRestrictions->lpServiceClassId, &guid_NLA_ServiceClass))
+        {
+            WSASetLastError(WSASERVICE_NOT_FOUND);
+            return SOCKET_ERROR;
+        }
+        /* OK - handled as an NLA connectivity lookup below */
     }
     else
     {
@@ -221,7 +413,13 @@ mwsNSPLookupServiceBegin(_In_ LPGUID lpProviderId,
 #else /* NSP_REDIRECT */
 
     wsaErr = ERROR_CALL_NOT_IMPLEMENTED;
-    if (IsEqualGUID(lpqsRestrictions->lpServiceClassId, &guid_NULL))
+    if (IsEqualGUID(lpProviderId, &guid_mswsock_NLA))
+    {
+        /* NLA connectivity lookup (service class already validated above). */
+        pLook->CallID = NSP_CALLID_NLA;
+        wsaErr = NO_ERROR;
+    }
+    else if (IsEqualGUID(lpqsRestrictions->lpServiceClassId, &guid_NULL))
     {
         wsaErr = ERROR_CALL_NOT_IMPLEMENTED;
     }
@@ -258,6 +456,10 @@ mwsNSPLookupServiceBegin(_In_ LPGUID lpProviderId,
 
     if (wsaErr != NO_ERROR)
     {
+        /* Begin failed: ws2_32 deletes the provider without calling
+         * NSPLookupServiceEnd, so free our handle here to avoid a leak. */
+        HeapFree(GetProcessHeap(), 0, pLook);
+        *lphLookup = NULL;
         WSASetLastError(wsaErr);
         return SOCKET_ERROR;
     }
@@ -330,8 +532,94 @@ mwsNSPIoCtl(_In_ HANDLE hLookup,
             _In_opt_ LPWSACOMPLETION lpCompletion,
             _In_ LPWSATHREADID lpThreadId)
 {
-    WSASetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    PWSHANDLEINTERN pLook = (PWSHANDLEINTERN)hLookup;
+    LPWSAOVERLAPPED lpOverlapped;
+    DWORD threadId;
+
+    UNREFERENCED_PARAMETER(lpvInBuffer);
+    UNREFERENCED_PARAMETER(cbInBuffer);
+    UNREFERENCED_PARAMETER(lpvOutBuffer);
+    UNREFERENCED_PARAMETER(cbOutBuffer);
+    UNREFERENCED_PARAMETER(lpThreadId);
+
+    if (lpcbBytesReturned)
+        *lpcbBytesReturned = 0;
+
+    /* The only control code we support is the NLA connectivity-change
+     * notification used by NLA-aware clients to be woken on network up/down. */
+    if (dwControlCode != SIO_NSP_NOTIFY_CHANGE)
+    {
+        WSASetLastError(WSAEOPNOTSUPP);
+        return SOCKET_ERROR;
+    }
+
+    if ((pLook == NULL) || (pLook->CallID != NSP_CALLID_NLA))
+    {
+        WSASetLastError(WSAEOPNOTSUPP);
+        return SOCKET_ERROR;
+    }
+
+    /* We implement the overlapped/event completion form: the caller supplies an
+     * OVERLAPPED whose hEvent is signalled when connectivity changes - exactly
+     * the semantics NetworkChangeNotifierWin relies on to recover.
+     *
+     * Note: iphlpapi's NotifyAddrChange is a non-signalling stub here, so we
+     * drive the notification ourselves from a connectivity poll thread rather
+     * than depend on it. */
+    if ((lpCompletion == NULL) || (lpCompletion->Type != NSP_NOTIFY_EVENT))
+    {
+        /* Only the event form is implemented for now. */
+        WSASetLastError(WSAEOPNOTSUPP);
+        return SOCKET_ERROR;
+    }
+
+    lpOverlapped = lpCompletion->Parameters.Event.lpOverlapped;
+    if (lpOverlapped == NULL)
+    {
+        WSASetLastError(WSAEFAULT);
+        return SOCKET_ERROR;
+    }
+
+    /* Re-arm: stop any previously running notification on this handle. */
+    if (pLook->hNotifyThread != NULL)
+    {
+        SetEvent(pLook->hNotifyStop);
+        WaitForSingleObject(pLook->hNotifyThread, INFINITE);
+        CloseHandle(pLook->hNotifyThread);
+        pLook->hNotifyThread = NULL;
+    }
+
+    if (pLook->hNotifyStop == NULL)
+    {
+        pLook->hNotifyStop = CreateEventW(NULL, TRUE, FALSE, NULL);
+        if (pLook->hNotifyStop == NULL)
+        {
+            WSASetLastError(WSA_NOT_ENOUGH_MEMORY);
+            return SOCKET_ERROR;
+        }
+    }
+    else
+    {
+        ResetEvent(pLook->hNotifyStop);
+    }
+
+    /* Make sure the overlapped is in the pending state before we arm.
+     * (STATUS_PENDING; ntstatus.h is excluded via WIN32_NO_STATUS.) */
+    lpOverlapped->Internal = (ULONG_PTR)0x00000103L;
+    pLook->lpNotifyOverlapped = lpOverlapped;
+
+    pLook->hNotifyThread = CreateThread(NULL, 0, NlaNotifyThreadProc,
+                                        pLook, 0, &threadId);
+    if (pLook->hNotifyThread == NULL)
+    {
+        pLook->lpNotifyOverlapped = NULL;
+        WSASetLastError(WSA_NOT_ENOUGH_MEMORY);
+        return SOCKET_ERROR;
+    }
+
+    /* Change notification armed; completion will signal asynchronously. */
+    WSASetLastError(WSA_IO_PENDING);
+    return SOCKET_ERROR;
 }
 
 INT
@@ -349,6 +637,21 @@ mwsNSPLookupServiceEnd(_In_ HANDLE hLookup)
 #ifdef NSP_REDIRECT
     res = pLook->rdrproc.NSPLookupServiceEnd(pLook->rdrLookup);
 #endif
+
+    /* Tear down any armed NLA change notification. Stop and join the poll
+     * thread BEFORE freeing pLook so the thread can't touch freed memory. */
+    if (pLook->hNotifyThread != NULL)
+    {
+        SetEvent(pLook->hNotifyStop);
+        WaitForSingleObject(pLook->hNotifyThread, INFINITE);
+        CloseHandle(pLook->hNotifyThread);
+        pLook->hNotifyThread = NULL;
+    }
+    if (pLook->hNotifyStop != NULL)
+    {
+        CloseHandle(pLook->hNotifyStop);
+        pLook->hNotifyStop = NULL;
+    }
 
     if (pLook->hostnameW != NULL)
         HeapFree(hHeap, 0, pLook->hostnameW);
@@ -855,6 +1158,94 @@ End:
     return res;
 }
 
+/* Build the WSAQUERYSET describing current network connectivity for an NLA
+ * query. On success the result carries the NLA service class, the connected
+ * network's friendly name (LUP_RETURN_NAME) and an NLA_CONNECTIVITY blob
+ * (LUP_RETURN_BLOB). When no network is connected we report WSAENOMORE (no
+ * networks) rather than an error, which NLA-aware clients read as "offline". */
+INT
+NSP_BuildNLAResultW(_In_ PWSHANDLEINTERN data,
+                    _Inout_ PMSW_BUFFER buf,
+                    _Inout_ LPWSAQUERYSETW lpRes,
+                    _Inout_ LPDWORD lpResLen)
+{
+    BOOL connected = FALSE;
+    BOOL internet = FALSE;
+    WCHAR nameW[256];
+    struct
+    {
+        DWORD type;        /* NLA_CONNECTIVITY */
+        DWORD dwSize;      /* size of the data payload */
+        DWORD nextOffset;  /* 0 == last blob */
+        DWORD connType;    /* NLA_NETWORK_* */
+        DWORD internet;    /* NLA_INTERNET_* */
+    } connBlob;
+
+    lpRes->dwNameSpace = NS_NLA;
+
+    (void)NlaConnectivitySignature(&connected, &internet, nameW, ARRAYSIZE(nameW));
+    if (!connected)
+    {
+        /* No connected network -> no NLA entries to return. */
+        return WSAENOMORE;
+    }
+
+    if (nameW[0] == L'\0')
+        StringCchCopyW(nameW, ARRAYSIZE(nameW), L"Network");
+
+    /* Service class id (placed into the caller buffer). */
+    lpRes->lpServiceClassId = (LPGUID)mswBufferEndPtr(buf);
+    if (!mswBufferAppend(buf, (void*)&guid_NLA_ServiceClass, sizeof(GUID)))
+    {
+        lpRes->lpServiceClassId = NULL;
+        *lpResLen = buf->bytesUsed;
+        return WSAEFAULT;
+    }
+
+    /* Network (friendly) name. */
+    if (data->dwControlFlags & (LUP_RETURN_NAME | LUP_RETURN_ALL))
+    {
+        lpRes->lpszServiceInstanceName = (LPWSTR)mswBufferEndPtr(buf);
+        if (!mswBufferAppendStrW(buf, nameW))
+        {
+            lpRes->lpszServiceInstanceName = NULL;
+            *lpResLen = buf->bytesUsed;
+            return WSAEFAULT;
+        }
+    }
+
+    /* Connectivity blob. */
+    if (data->dwControlFlags & (LUP_RETURN_BLOB | LUP_RETURN_ALL))
+    {
+        lpRes->lpBlob = (LPBLOB)mswBufferEndPtr(buf);
+        if (!mswBufferIncUsed(buf, sizeof(*lpRes->lpBlob)))
+        {
+            lpRes->lpBlob = NULL;
+            *lpResLen = buf->bytesUsed;
+            return WSAEFAULT;
+        }
+
+        connBlob.type = NLA_CONNECTIVITY;
+        connBlob.dwSize = 2 * sizeof(DWORD); /* connType + internet */
+        connBlob.nextOffset = 0;
+        /* Only claim internet when a default gateway (non-APIPA) is present. */
+        connBlob.connType = internet ? NLA_NETWORK_MANAGED : NLA_NETWORK_UNMANAGED;
+        connBlob.internet = internet ? NLA_INTERNET_YES : NLA_INTERNET_NO;
+
+        lpRes->lpBlob->pBlobData = mswBufferEndPtr(buf);
+        if (!mswBufferAppend(buf, &connBlob, sizeof(connBlob)))
+        {
+            lpRes->lpBlob = NULL;
+            *lpResLen = buf->bytesUsed;
+            return WSAEFAULT;
+        }
+        lpRes->lpBlob->cbSize = sizeof(connBlob);
+    }
+
+    *lpResLen = buf->bytesUsed;
+    return ERROR_SUCCESS;
+}
+
 INT
 NSP_LookupServiceNextW(_In_ PWSHANDLEINTERN data,
                        _In_ DWORD dwControlFlags,
@@ -882,7 +1273,8 @@ NSP_LookupServiceNextW(_In_ PWSHANDLEINTERN data,
 
     if ((data->CallID == NSP_CALLID_HOSTNAME) ||
         (data->CallID == NSP_CALLID_HOSTBYNAME) ||
-        (data->CallID == NSP_CALLID_SERVICEBYNAME))
+        (data->CallID == NSP_CALLID_SERVICEBYNAME) ||
+        (data->CallID == NSP_CALLID_NLA))
     {
         if (data->CallIDCounter >= 1)
         {
@@ -896,6 +1288,13 @@ NSP_LookupServiceNextW(_In_ PWSHANDLEINTERN data,
         goto End;
     }
     data->CallIDCounter++;
+
+    if (data->CallID == NSP_CALLID_NLA)
+    {
+        /* NLA connectivity result is self-contained; build it and return. */
+        result = NSP_BuildNLAResultW(data, &buf, lpRes, lpResLen);
+        goto End;
+    }
 
     if (data->CallID == NSP_CALLID_HOSTNAME)
     {
@@ -1082,6 +1481,16 @@ NSPStartup(_In_ LPGUID lpProviderId,
     lpRout->NSPRemoveServiceClass = &mwsNSPRemoveServiceClass;
     lpRout->NSPGetServiceClassInfo = &mwsNSPGetServiceClassInfo;
     lpRout->NSPIoctl = NULL;// &mwsNSPIoCtl;
+
+    /* The NLA provider additionally supports SIO_NSP_NOTIFY_CHANGE (used by
+     * NLA-aware clients to be woken on connectivity change). Advertise the full
+     * routine table incl. NSPIoctl only for it, so the DNS (TcpIp) provider's
+     * v1 behaviour is unchanged. */
+    if ((lpProviderId != NULL) && IsEqualGUID(lpProviderId, &guid_mswsock_NLA))
+    {
+        lpRout->cbSize = sizeof(*lpRout);
+        lpRout->NSPIoctl = &mwsNSPIoCtl;
+    }
 
     ret = NO_ERROR;
 
