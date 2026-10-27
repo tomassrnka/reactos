@@ -105,6 +105,7 @@ list(APPEND SOURCE
     NtQuerySection.c
     NtQuerySystemEnvironmentValue.c
     NtQuerySystemInformation.c
+    NtQuerySystemProcessInformationTail.c
     NtQueryValueKey.c
     NtQueryVirtualMemory.c
     NtQueryVolumeInformationFile.c
