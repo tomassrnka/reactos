@@ -338,6 +338,26 @@ ScConnectControlPipe(HANDLE *hPipe)
  * both the Ansi and the Unicode versions including NULL terminator.
  */
 
+/*
+ * Size in bytes, including the terminator, of the NUL-terminated string at
+ * pszString, looking at no more than cbAvailable bytes. 0 if it has no NUL
+ * inside that range.
+ */
+static DWORD
+ScPacketStringBytes(PCWSTR pszString,
+                    DWORD cbAvailable)
+{
+    DWORD i, cchAvailable = cbAvailable / sizeof(WCHAR);
+
+    for (i = 0; i < cchAvailable; i++)
+    {
+        if (pszString[i] == UNICODE_NULL)
+            return (i + 1) * sizeof(WCHAR);
+    }
+    return 0;
+}
+
+
 static DWORD
 ScBuildUnicodeArgsVector(PSCM_CONTROL_PACKET ControlPacket,
                          LPDWORD lpArgCount,
@@ -358,9 +378,18 @@ ScBuildUnicodeArgsVector(PSCM_CONTROL_PACKET ControlPacket,
     *lpArgCount  = 0;
     *lpArgVector = NULL;
 
-    /* Retrieve and count the start command line (NULL-terminated) */
+    /* Retrieve and count the start command line (NULL-terminated, within the packet) */
+    if (ControlPacket->dwServiceNameOffset < sizeof(SCM_CONTROL_PACKET) ||
+        ControlPacket->dwServiceNameOffset >= ControlPacket->dwSize ||
+        (ControlPacket->dwServiceNameOffset & (sizeof(WCHAR) - 1)) != 0)
+    {
+        return ERROR_INVALID_PARAMETER;
+    }
     pszServiceName = (PWSTR)((ULONG_PTR)ControlPacket + ControlPacket->dwServiceNameOffset);
-    cbServiceName  = lstrlenW(pszServiceName) * sizeof(WCHAR) + sizeof(UNICODE_NULL);
+    cbServiceName  = ScPacketStringBytes(pszServiceName,
+                                         ControlPacket->dwSize - ControlPacket->dwServiceNameOffset);
+    if (cbServiceName == 0)
+        return ERROR_INVALID_PARAMETER;
 
     /*
      * The packet carries the arguments as dwArgumentsCount DWORD offsets
@@ -402,7 +431,11 @@ ScBuildUnicodeArgsVector(PSCM_CONTROL_PACKET ControlPacket,
 
         for (i = 0; i < ControlPacket->dwArgumentsCount; i++)
         {
-            if (pOffsets[i] < cbOffsets || pOffsets[i] - cbOffsets >= cbArguments)
+            /* The offset must be inside the strings and the string NUL-terminated inside the packet */
+            if (pOffsets[i] < cbOffsets || pOffsets[i] - cbOffsets >= cbArguments ||
+                ((pOffsets[i] - cbOffsets) & (sizeof(WCHAR) - 1)) != 0 ||
+                ScPacketStringBytes((PCWSTR)(pData + (pOffsets[i] - cbOffsets)),
+                                    cbArguments - (pOffsets[i] - cbOffsets)) == 0)
             {
                 HeapFree(GetProcessHeap(), 0, lpVector);
                 return ERROR_INVALID_PARAMETER;
@@ -494,6 +527,17 @@ ScStartService(PACTIVE_SERVICE lpService,
 
     TRACE("Size: %lu\n", ControlPacket->dwSize);
     TRACE("Service: %S\n", (PWSTR)((ULONG_PTR)ControlPacket + ControlPacket->dwServiceNameOffset));
+
+    /*
+     * The status handle is passed as 64 bits, but a 32-bit (WoW64) service
+     * process only has 32 bits for it. Never start a service with a handle
+     * that would be silently truncated.
+     */
+    if (ControlPacket->hServiceStatus != (ULONG_PTR)ControlPacket->hServiceStatus)
+    {
+        ERR("Service status handle %I64x does not fit in this process\n", ControlPacket->hServiceStatus);
+        return ERROR_INVALID_DATA;
+    }
 
     /* Set the service status handle */
     lpService->hServiceStatus = (SERVICE_STATUS_HANDLE)(ULONG_PTR)ControlPacket->hServiceStatus;
