@@ -38,6 +38,7 @@ typedef struct _MIB_NOTIFY
   HANDLE File;
   HANDLE IoEvent;
   DWORD ThreadId;
+  HMODULE Module;               /* this DLL, held for the worker */
   BOOL Detached;                /* a callback cancelled its own registration: the worker frees it */
   PVOID Rows;                   /* the last snapshot */
   ULONG Count;
@@ -207,13 +208,15 @@ static BOOL same_route_key(const void *A, const void *B)
   return X->InterfaceIndex == Y->InterfaceIndex &&
          X->DestinationPrefix.PrefixLength == Y->DestinationPrefix.PrefixLength &&
          X->DestinationPrefix.Prefix.Ipv4.sin_addr.s_addr == Y->DestinationPrefix.Prefix.Ipv4.sin_addr.s_addr &&
-         X->NextHop.Ipv4.sin_addr.s_addr == Y->NextHop.Ipv4.sin_addr.s_addr;
+         X->NextHop.Ipv4.sin_addr.s_addr == Y->NextHop.Ipv4.sin_addr.s_addr &&
+         X->Metric == Y->Metric;
 }
 
+/* A route whose metric changes is a deleted route and an added one: the metric is part of the key. */
 static BOOL same_route_data(const void *A, const void *B)
 {
   const MIB_IPFORWARD_ROW2 *X = A, *Y = B;
-  return X->Metric == Y->Metric && X->Protocol == Y->Protocol;
+  return X->Protocol == Y->Protocol;
 }
 
 static const KIND_OPS Kinds[] =
@@ -283,9 +286,8 @@ static void free_notify(MIB_NOTIFY *Notify)
   HeapFree(GetProcessHeap(), 0, Notify);
 }
 
-static DWORD WINAPI notify_worker(PVOID Parameter)
+static void notify_worker_main(MIB_NOTIFY *Notify)
 {
-  MIB_NOTIFY *Notify = Parameter;
   const KIND_OPS *Ops = &Kinds[Notify->Kind];
   IO_STATUS_BLOCK Iosb;
   NTSTATUS Status;
@@ -302,6 +304,12 @@ static DWORD WINAPI notify_worker(PVOID Parameter)
     Iosb.Status = STATUS_PENDING;
     Status = NtDeviceIoControlFile(Notify->File, Notify->IoEvent, NULL, NULL, &Iosb,
                                    Ops->IoControl, NULL, 0, NULL, 0);
+    if (Status == STATUS_NOT_IMPLEMENTED || Status == STATUS_NOT_SUPPORTED || Status == STATUS_INVALID_DEVICE_REQUEST)
+    {
+      /* an older tcpip.sys without this request: there is nothing to wait for, so do not poll */
+      WaitForSingleObject(Notify->Stop, INFINITE);
+      break;
+    }
     if (!NT_SUCCESS(Status))
     {
       /* nothing to wait on: look again in a second, or leave when stopped */
@@ -328,6 +336,19 @@ static DWORD WINAPI notify_worker(PVOID Parameter)
   LeaveCriticalSection(&RegistrationLock);
   if (Detached)
     free_notify(Notify);
+}
+
+/*
+ * The worker holds a reference of this DLL until it is done, and leaves through FreeLibraryAndExitThread: a
+ * FreeLibrary of the application cannot unmap the code of a worker that still runs. A registration that is not
+ * cancelled therefore keeps the DLL loaded.
+ */
+static DWORD WINAPI notify_worker(PVOID Parameter)
+{
+  HMODULE Module = ((MIB_NOTIFY *)Parameter)->Module;
+
+  notify_worker_main(Parameter);
+  FreeLibraryAndExitThread(Module, 0);
   return 0;
 }
 
@@ -387,10 +408,17 @@ static DWORD register_notify(int Kind, ADDRESS_FAMILY Family, PVOID Callback, PV
 
   if (Notify->File)
   {
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCWSTR)notify_worker, &Notify->Module))
+    {
+      Result = GetLastError();
+      free_notify(Notify);
+      return Result;
+    }
     Notify->Thread = CreateThread(NULL, 0, notify_worker, Notify, CREATE_SUSPENDED, &Notify->ThreadId);
     if (!Notify->Thread)
     {
       Result = GetLastError();
+      FreeLibrary(Notify->Module);
       free_notify(Notify);
       return Result;
     }

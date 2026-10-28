@@ -2752,7 +2752,7 @@ DWORD WINAPI IpRenewAddress(PIP_ADAPTER_INDEX_MAP AdapterInfo)
  *  GetOverlappedResult) until the same OVERLAPPED is registered or cancelled
  *  again after its request completed.
  */
-DWORD WINAPI NotifyAddrChange(PHANDLE Handle, LPOVERLAPPED overlapped)
+static DWORD notify_change(PHANDLE Handle, LPOVERLAPPED overlapped, ULONG IoControl)
 {
   UNICODE_STRING name;
   OBJECT_ATTRIBUTES attrs;
@@ -2773,7 +2773,7 @@ DWORD WINAPI NotifyAddrChange(PHANDLE Handle, LPOVERLAPPED overlapped)
     if (!NT_SUCCESS(status))
       return RtlNtStatusToDosError(status);
     status = NtDeviceIoControlFile(file, NULL, NULL, NULL, &iosb,
-                                   IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST,
+                                   IoControl,
                                    NULL, 0, NULL, 0);
     closeTcpFile(file);
     return NT_SUCCESS(status) ? NO_ERROR : RtlNtStatusToDosError(status);
@@ -2816,7 +2816,7 @@ DWORD WINAPI NotifyAddrChange(PHANDLE Handle, LPOVERLAPPED overlapped)
   overlapped->InternalHigh = 0;
   status = NtDeviceIoControlFile(file, overlapped->hEvent, NULL, NULL,
                                  (PIO_STATUS_BLOCK)overlapped,
-                                 IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST,
+                                 IoControl,
                                  NULL, 0, NULL, 0);
   if (status == STATUS_PENDING)
   {
@@ -2838,6 +2838,12 @@ DWORD WINAPI NotifyAddrChange(PHANDLE Handle, LPOVERLAPPED overlapped)
 }
 
 
+DWORD WINAPI NotifyAddrChange(PHANDLE Handle, LPOVERLAPPED overlapped)
+{
+  return notify_change(Handle, overlapped, IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST);
+}
+
+
 /******************************************************************
  *    NotifyRouteChange (IPHLPAPI.@)
  *
@@ -2848,16 +2854,16 @@ DWORD WINAPI NotifyAddrChange(PHANDLE Handle, LPOVERLAPPED overlapped)
  *  overlapped [In]  overlapped structure that notifies the caller
  *
  * RETURNS
- *  Success: NO_ERROR
+ *  Success: NO_ERROR (blocking form) or ERROR_IO_PENDING (overlapped form)
  *  Failure: error code from winerror.h
  *
- * FIXME
- *  Stub, returns ERROR_NOT_SUPPORTED.
+ * NOTES
+ *  Like NotifyAddrChange, with the route change request of tcpip.sys
+ *  (IOCTL_IP_ROUTECHANGE_NOTIFY_REQUEST). CancelIPChangeNotify cancels it too.
  */
 DWORD WINAPI NotifyRouteChange(PHANDLE Handle, LPOVERLAPPED overlapped)
 {
-  FIXME("(Handle %p, overlapped %p): stub\n", Handle, overlapped);
-  return ERROR_NOT_SUPPORTED;
+  return notify_change(Handle, overlapped, IOCTL_IP_ROUTECHANGE_NOTIFY_REQUEST);
 }
 
 

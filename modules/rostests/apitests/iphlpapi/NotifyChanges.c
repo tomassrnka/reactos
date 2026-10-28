@@ -239,6 +239,12 @@ static void test_changes(void)
     ULONG Context = 0, Instance = 0;
     BOOL Added = FALSE;
 
+    if (!is_reactos())
+    {
+        skip("A change of the network configuration is only made on ReactOS\n");
+        return;
+    }
+
     if (!find_interface(&Index))
     {
         skip("No interface with an address\n");
@@ -328,6 +334,12 @@ static void test_cancel_waits(void)
     HANDLE Handle = NULL, Thread;
     DWORD Index, Error, Wait;
     ULONG Context = 0, Instance = 0;
+
+    if (!is_reactos())
+    {
+        skip("A change of the network configuration is only made on ReactOS\n");
+        return;
+    }
 
     if (!find_interface(&Index))
     {
@@ -424,10 +436,140 @@ static void test_self_cancel(void)
     ok(Error != NO_ERROR, "Cancel of a cancelled registration succeeded\n");
 }
 
+/* ---- the process and the module with live registrations ---- */
+
+static void run_child(const char *Mode)
+{
+    STARTUPINFOA Startup;
+    PROCESS_INFORMATION Info;
+    char Path[MAX_PATH], Command[MAX_PATH + 32];
+    DWORD Wait, Code = 0xdead;
+
+    GetModuleFileNameA(NULL, Path, sizeof(Path));
+    sprintf(Command, "\"%s\" NotifyChanges", Path);
+    SetEnvironmentVariableA("NOTIFY_CHILD", Mode);
+    memset(&Startup, 0, sizeof(Startup));
+    Startup.cb = sizeof(Startup);
+    if (!CreateProcessA(NULL, Command, NULL, NULL, FALSE, 0, NULL, NULL, &Startup, &Info))
+    {
+        SetEnvironmentVariableA("NOTIFY_CHILD", NULL);
+        skip("Cannot start the child process: %lu\n", GetLastError());
+        return;
+    }
+    Wait = WaitForSingleObject(Info.hProcess, 30000);
+    SetEnvironmentVariableA("NOTIFY_CHILD", NULL);
+    ok(Wait == WAIT_OBJECT_0, "The child process (%s) did not exit\n", Mode);
+    if (Wait != WAIT_OBJECT_0)
+        TerminateProcess(Info.hProcess, 1);
+    else
+    {
+        GetExitCodeProcess(Info.hProcess, &Code);
+        ok(Code == 0, "The child process (%s) ended with %lu\n", Mode, Code);
+    }
+    CloseHandle(Info.hThread);
+    CloseHandle(Info.hProcess);
+}
+
+/* the child: registrations that are never cancelled, then the process ends */
+static void child_exit(void)
+{
+    static STATE State[3];
+    HANDLE Handle;
+    DWORD Error;
+    int i;
+
+    for (i = 0; i < 3; i++)
+    {
+        State[i].Expected = &State[i];
+        State[i].Kind = i;
+        State[i].RegisterThread = GetCurrentThreadId();
+    }
+    Error = pNotifyIpInterfaceChange(AF_UNSPEC, Callback, &State[0], TRUE, &Handle);
+    ok(Error == NO_ERROR, "NotifyIpInterfaceChange: %lu\n", Error);
+    Error = pNotifyUnicastIpAddressChange(AF_INET, Callback, &State[1], FALSE, &Handle);
+    ok(Error == NO_ERROR, "NotifyUnicastIpAddressChange: %lu\n", Error);
+    Error = pNotifyRouteChange2(AF_INET, Callback, &State[2], TRUE, &Handle);
+    ok(Error == NO_ERROR, "NotifyRouteChange2: %lu\n", Error);
+    Sleep(300);
+}
+
+/* the child: the module is released by the application while a registration lives */
+static void child_unload(void)
+{
+    static STATE State;
+    HMODULE Module = LoadLibraryW(L"iphlpapi.dll");
+    FN_Notify pNotify = (FN_Notify)GetProcAddress(Module, "NotifyIpInterfaceChange");
+    FN_Cancel pCancel = (FN_Cancel)GetProcAddress(Module, "CancelMibChangeNotify2");
+    HANDLE Handle = NULL;
+    DWORD Error;
+
+    State.Expected = &State;
+    Error = pNotify(AF_INET, Callback, &State, FALSE, &Handle);
+    ok(Error == NO_ERROR, "NotifyIpInterfaceChange: %lu\n", Error);
+    if (Error != NO_ERROR)
+        return;
+
+    /* drop the reference of LoadLibraryW and the one of the import: only the registration holds the DLL */
+    FreeLibrary(Module);
+    FreeLibrary(GetModuleHandleW(L"iphlpapi.dll"));
+    Sleep(500);
+    ok(GetModuleHandleW(L"iphlpapi.dll") != NULL, "The DLL was unmapped under a live registration\n");
+
+    Error = pCancel(Handle);
+    ok(Error == NO_ERROR, "Cancel: %lu\n", Error);
+    Sleep(1500);
+}
+
+/* the legacy NotifyRouteChange: pending until the route table changes */
+static void test_legacy_route_change(void)
+{
+    typedef DWORD (WINAPI *FN_Legacy)(PHANDLE, LPOVERLAPPED);
+    FN_Legacy pNotifyRouteChange = (FN_Legacy)GetProcAddress(GetModuleHandleW(L"iphlpapi.dll"), "NotifyRouteChange");
+    OVERLAPPED Overlapped;
+    HANDLE Handle = NULL;
+    DWORD Error, Index, Transferred;
+    ULONG Context = 0, Instance = 0;
+
+    ok(pNotifyRouteChange != NULL, "NotifyRouteChange is not exported\n");
+    if (!pNotifyRouteChange)
+        return;
+
+    memset(&Overlapped, 0, sizeof(Overlapped));
+    Overlapped.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    Error = pNotifyRouteChange(&Handle, &Overlapped);
+    ok(Error == ERROR_IO_PENDING, "NotifyRouteChange: %lu\n", Error);
+    if (Error != ERROR_IO_PENDING)
+    {
+        CloseHandle(Overlapped.hEvent);
+        return;
+    }
+    Sleep(300);
+    ok(WaitForSingleObject(Overlapped.hEvent, 0) == WAIT_TIMEOUT, "Signalled without a change\n");
+
+    if (is_reactos() && find_interface(&Index))
+    {
+        Error = AddIPAddress(inet_addr(TEST_ADDRESS), inet_addr(TEST_MASK), Index, &Context, &Instance);
+        ok(Error == NO_ERROR, "AddIPAddress: %lu\n", Error);
+        ok(WaitForSingleObject(Overlapped.hEvent, 10000) == WAIT_OBJECT_0, "Not signalled after a route change\n");
+        ok(GetOverlappedResult(Handle, &Overlapped, &Transferred, FALSE), "GetOverlappedResult: %lu\n", GetLastError());
+        if (Error == NO_ERROR)
+            DeleteIPAddress(Context);
+        Sleep(500);
+        restore_address();
+    }
+    else
+    {
+        CancelIPChangeNotify(&Overlapped);
+        ok(WaitForSingleObject(Overlapped.hEvent, 5000) == WAIT_OBJECT_0, "The cancelled request did not complete\n");
+    }
+    CloseHandle(Overlapped.hEvent);
+}
+
 START_TEST(NotifyChanges)
 {
     HMODULE hIphlpapi = GetModuleHandleW(L"iphlpapi.dll");
     WSADATA Data;
+    char Mode[16];
 
     WSAStartup(MAKEWORD(2, 2), &Data);
     pNotifyIpInterfaceChange = (FN_Notify)GetProcAddress(hIphlpapi, "NotifyIpInterfaceChange");
@@ -444,6 +586,15 @@ START_TEST(NotifyChanges)
     if (!pNotifyIpInterfaceChange || !pNotifyUnicastIpAddressChange || !pNotifyRouteChange2 || !pCancelMibChangeNotify2)
         return;
 
+    if (GetEnvironmentVariableA("NOTIFY_CHILD", Mode, sizeof(Mode)))
+    {
+        if (!strcmp(Mode, "exit"))
+            child_exit();
+        else if (!strcmp(Mode, "unload"))
+            child_unload();
+        return;
+    }
+
     test_initial("NotifyIpInterfaceChange", pNotifyIpInterfaceChange, 0);
     test_initial("NotifyUnicastIpAddressChange", pNotifyUnicastIpAddressChange, 1);
     test_initial("NotifyRouteChange2", pNotifyRouteChange2, 2);
@@ -451,4 +602,8 @@ START_TEST(NotifyChanges)
     test_cancel_waits();
     if (is_reactos())
         test_self_cancel();
+    test_legacy_route_change();
+    run_child("exit");
+    if (is_reactos())
+        run_child("unload");
 }
