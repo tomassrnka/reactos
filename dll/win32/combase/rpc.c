@@ -428,7 +428,9 @@ static DWORD start_local_service(const WCHAR *name, DWORD num, LPCWSTR *params)
 static HRESULT create_local_service(REFCLSID rclsid)
 {
     HRESULT hr;
-    WCHAR buf[CHARS_IN_GUID];
+    WCHAR *name = NULL, *params = NULL, *p;
+    LPCWSTR args[16];
+    DWORD num_args = 0;
     HKEY hkey;
     LONG r;
     DWORD type, sz;
@@ -439,39 +441,64 @@ static HRESULT create_local_service(REFCLSID rclsid)
     if (FAILED(hr))
         return hr;
 
-    /* read the LocalService and ServiceParameters values from the AppID key */
-    sz = sizeof buf;
-    r = RegQueryValueExW(hkey, L"LocalService", NULL, &type, (LPBYTE)buf, &sz);
+    /* Read the LocalService value from the AppID key. Service names are not
+     * limited to GUID length (e.g. "GoogleUpdaterInternalService157.0.8089.0"),
+     * so size the buffer from the registry. */
+    sz = 0;
+    r = RegQueryValueExW(hkey, L"LocalService", NULL, &type, NULL, &sz);
+    if (r == ERROR_SUCCESS && type == REG_SZ && sz)
+    {
+        name = calloc(1, sz + sizeof(WCHAR));
+        if (name)
+            r = RegQueryValueExW(hkey, L"LocalService", NULL, &type, (LPBYTE)name, &sz);
+        else
+            r = ERROR_OUTOFMEMORY;
+    }
+    else if (r == ERROR_SUCCESS)
+        r = ERROR_FILE_NOT_FOUND;
+
     if (r == ERROR_SUCCESS && type == REG_SZ)
     {
-        DWORD num_args = 0;
-        LPWSTR args[1] = { NULL };
+        /* Windows documents "ServiceParameters"; Wine used "ServiceParams".
+         * The string is split on spaces into service arguments. */
+        static const WCHAR *param_names[] = { L"ServiceParameters", L"ServiceParams" };
+        unsigned int i;
 
-        /*
-         * FIXME: I'm not really sure how to deal with the service parameters.
-         *        I suspect that the string returned from RegQueryValueExW
-         *        should be split into a number of arguments by spaces.
-         *        It would make more sense if ServiceParams contained a
-         *        REG_MULTI_SZ here, but it's a REG_SZ for the services
-         *        that I'm interested in for the moment.
-         */
-        r = RegQueryValueExW(hkey, L"ServiceParams", NULL, &type, NULL, &sz);
-        if (r == ERROR_SUCCESS && type == REG_SZ && sz)
+        for (i = 0; i < ARRAY_SIZE(param_names) && !params; i++)
         {
-            args[0] = calloc(1, sz);
-            num_args++;
-            RegQueryValueExW(hkey, L"ServiceParams", NULL, &type, (LPBYTE)args[0], &sz);
+            sz = 0;
+            r = RegQueryValueExW(hkey, param_names[i], NULL, &type, NULL, &sz);
+            if (r == ERROR_SUCCESS && type == REG_SZ && sz > sizeof(WCHAR))
+            {
+                params = calloc(1, sz + sizeof(WCHAR));
+                if (params && RegQueryValueExW(hkey, param_names[i], NULL, &type, (LPBYTE)params, &sz))
+                {
+                    free(params);
+                    params = NULL;
+                }
+            }
         }
-        r = start_local_service(buf, num_args, (LPCWSTR *)args);
+
+        for (p = params; p && *p && num_args < ARRAY_SIZE(args); )
+        {
+            while (*p == ' ') *p++ = 0;
+            if (!*p) break;
+            args[num_args++] = p;
+            while (*p && *p != ' ') p++;
+        }
+
+        TRACE("LocalService %s, %lu argument(s)\n", debugstr_w(name), num_args);
+        r = start_local_service(name, num_args, num_args ? args : NULL);
         if (r != ERROR_SUCCESS)
             hr = REGDB_E_CLASSNOTREG; /* FIXME: check retval */
-        free(args[0]);
     }
     else
     {
         WARN("No LocalService value\n");
         hr = REGDB_E_CLASSNOTREG; /* FIXME: check retval */
     }
+    free(name);
+    free(params);
     RegCloseKey(hkey);
 
     return hr;

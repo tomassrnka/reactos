@@ -47,6 +47,7 @@ list(APPEND SOURCE
     ServiceRecovery.c
     ServiceNetwork.c
     SetEntriesInAclOld.c
+    SetSecurityInfoKey.c
     SetNamedSecurityInfoInherit.c
     SddlRights.c
     ServiceProcess.c

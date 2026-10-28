@@ -2404,7 +2404,10 @@ RegisterWow64Dlls(VOID)
         L"browseui.dll", L"windowscodecs.dll", L"avifil32.dll", L"comdlg32.dll",
         L"ieframe.dll", L"shdocvw.dll", L"mlang.dll", L"msctf.dll", L"msi.dll",
         L"msimtf.dll", L"oleacc.dll", L"olepro32.dll", L"propsys.dll",
-        L"rpcrt4.dll", L"urlmon.dll"
+        L"rpcrt4.dll", L"urlmon.dll",
+        /* IServiceProvider proxy/stub: CoRegisterClassObject(CLSCTX_LOCAL_SERVER)
+         * marshals it, so 32-bit COM servers (Google Updater) need it */
+        L"actxprxy.dll"
     };
     WCHAR Directory[MAX_PATH], Application[MAX_PATH], Command[2 * MAX_PATH + 64];
     STARTUPINFOW Startup = {sizeof(Startup)};

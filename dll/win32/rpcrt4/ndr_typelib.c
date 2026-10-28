@@ -182,6 +182,8 @@ static unsigned int type_memsize(ITypeInfo *typeinfo, TYPEDESC *desc, unsigned i
     case VT_BSTR:
     case VT_SAFEARRAY:
     case VT_PTR:
+    case VT_LPSTR:
+    case VT_LPWSTR:
     case VT_UNKNOWN:
     case VT_DISPATCH:
         size = align = sizeof(void *);
@@ -809,6 +811,16 @@ static size_t write_type_tfs(ITypeInfo *typeinfo, unsigned char *str,
         return write_pointer_tfs(typeinfo, str, len, desc->lptdesc, toplevel, onstack);
     case VT_CARRAY:
         return write_array_tfs(typeinfo, str, len, desc->lpadesc);
+    case VT_LPSTR:
+    case VT_LPWSTR:
+        /* A [string] parameter (e.g. "[in, string] const WCHAR *" in an
+         * oleautomation interface): a reference pointer to a conformant string. */
+        off = *len;
+        WRITE_CHAR(str, *len, toplevel ? FC_RP : FC_UP);
+        WRITE_CHAR(str, *len, FC_SIMPLE_POINTER);
+        WRITE_CHAR(str, *len, desc->vt == VT_LPWSTR ? FC_C_WSTRING : FC_C_CSTRING);
+        WRITE_CHAR(str, *len, FC_PAD);
+        break;
     case VT_USERDEFINED:
         ITypeInfo_GetRefTypeInfo(typeinfo, desc->hreftype, &refinfo);
         ITypeInfo_GetTypeAttr(refinfo, &attr);
@@ -1019,6 +1031,8 @@ static HRESULT get_param_info(ITypeInfo *typeinfo, TYPEDESC *tdesc, int is_in,
     case VT_UNKNOWN:
     case VT_DISPATCH:
     case VT_CARRAY:
+    case VT_LPSTR:
+    case VT_LPWSTR:
         *flags |= MustFree;
         break;
     case VT_PTR:

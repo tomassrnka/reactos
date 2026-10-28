@@ -768,6 +768,8 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         if (a[3]) { RETURN_HANDLE_AT(3); }
         return Status;
     case W64_NtSuspendThread: return NtSuspendThread(H(0), P(1));
+    case W64_NtSuspendProcess: return NtSuspendProcess(H(0));
+    case W64_NtResumeProcess: return NtResumeProcess(H(0));
     case W64_NtResumeThread: return NtResumeThread(H(0), P(1));
     case W64_NtAlertThread: return NtAlertThread(H(0));
     case W64_NtAlertResumeThread: return NtAlertResumeThread(H(0), P(1));
@@ -2116,6 +2118,152 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
                 G->ProcessorMask = (ULONG)Native[i].ProcessorMask;
                 G->Relationship = Native[i].Relationship;
                 RtlCopyMemory(G->Union, &Native[i].ProcessorCore, sizeof(G->Union));
+            }
+            return STATUS_SUCCESS;
+        }
+        case SystemProcessInformation:
+        {
+            /* Toolhelp32 snapshots, psapi/EnumProcesses and most process
+             * enumerators use this class. Query the native list (growing the
+             * buffer as processes come and go), then narrow every process and
+             * thread entry to the 32-bit layout (0xB8 + 0x40 per thread) and
+             * copy the image name after the threads, 8-byte aligned, as the
+             * 32-bit kernel lays it out. */
+            typedef struct
+            {
+                LARGE_INTEGER KernelTime, UserTime, CreateTime;
+                ULONG WaitTime, StartAddress, UniqueProcess, UniqueThread;
+                LONG Priority, BasePriority;
+                ULONG ContextSwitches, ThreadState, WaitReason, Pad;
+            } WOW64_SYSTEM_THREAD_INFORMATION;
+            typedef struct
+            {
+                ULONG NextEntryOffset, NumberOfThreads;
+                LARGE_INTEGER WorkingSetPrivateSize;
+                ULONG HardFaultCount, NumberOfThreadsHighWatermark;
+                ULONGLONG CycleTime;
+                LARGE_INTEGER CreateTime, UserTime, KernelTime;
+                WOW64_STRING ImageName;
+                LONG BasePriority;
+                ULONG UniqueProcessId, InheritedFromUniqueProcessId, HandleCount, SessionId, PageDirectoryBase;
+                ULONG PeakVirtualSize, VirtualSize, PageFaultCount, PeakWorkingSetSize, WorkingSetSize;
+                ULONG QuotaPeakPagedPoolUsage, QuotaPagedPoolUsage, QuotaPeakNonPagedPoolUsage, QuotaNonPagedPoolUsage;
+                ULONG PagefileUsage, PeakPagefileUsage, PrivatePageCount;
+                LARGE_INTEGER ReadOperationCount, WriteOperationCount, OtherOperationCount;
+                LARGE_INTEGER ReadTransferCount, WriteTransferCount, OtherTransferCount;
+            } WOW64_SYSTEM_PROCESS_INFORMATION;
+            SYSTEM_PROCESS_INFORMATION *Np;
+            PUCHAR Native = NULL, Guest;
+            ULONG NativeSize = 0x10000, Offset, GuestNeeded, GuestOffset, i, Retries = 0;
+            C_ASSERT(sizeof(WOW64_SYSTEM_THREAD_INFORMATION) == 0x40);
+            C_ASSERT(sizeof(WOW64_SYSTEM_PROCESS_INFORMATION) == 0xB8);
+            if (NativeSystemInformation) UNSUPPORTED(CLASS, a[0]);
+            if (a[3]) PROBE(3);
+            for (;;)
+            {
+                if (Native) RtlFreeHeap(RtlGetProcessHeap(), 0, Native);
+                Native = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, NativeSize);
+                if (!Native) return STATUS_NO_MEMORY;
+                Status = NtQuerySystemInformation(a[0], Native, NativeSize, &Offset);
+                if (Status != STATUS_INFO_LENGTH_MISMATCH || ++Retries > 16) break;
+                NativeSize = max(NativeSize * 2, Offset + 0x4000);
+            }
+            if (!NT_SUCCESS(Status)) return Status;
+            /* Size of the 32-bit form */
+            GuestNeeded = 0;
+            for (Offset = 0;;)
+            {
+                Np = (SYSTEM_PROCESS_INFORMATION *)(Native + Offset);
+                GuestNeeded += sizeof(WOW64_SYSTEM_PROCESS_INFORMATION) +
+                               Np->NumberOfThreads * sizeof(WOW64_SYSTEM_THREAD_INFORMATION);
+                if (Np->ImageName.Buffer)
+                    GuestNeeded += ALIGN_UP_BY(Np->ImageName.MaximumLength ? Np->ImageName.MaximumLength :
+                                               Np->ImageName.Length + sizeof(WCHAR), 8);
+                if (!Np->NextEntryOffset) break;
+                Offset += Np->NextEntryOffset;
+            }
+            if (a[3]) U(3) = GuestNeeded;
+            if (a[2] < GuestNeeded) return STATUS_INFO_LENGTH_MISMATCH;
+            if (!GuestSpan(a[1], GuestNeeded)) return STATUS_ACCESS_VIOLATION;
+            ProbeOutput(a[1], GuestNeeded);
+            Guest = PTR32(a[1]);
+            for (Offset = 0, GuestOffset = 0;;)
+            {
+                WOW64_SYSTEM_PROCESS_INFORMATION *Gp = (WOW64_SYSTEM_PROCESS_INFORMATION *)(Guest + GuestOffset);
+                SYSTEM_THREAD_INFORMATION *Nt;
+                WOW64_SYSTEM_THREAD_INFORMATION *Gt;
+                ULONG Size;
+                Np = (SYSTEM_PROCESS_INFORMATION *)(Native + Offset);
+                Nt = (SYSTEM_THREAD_INFORMATION *)(Np + 1);
+                Gt = (WOW64_SYSTEM_THREAD_INFORMATION *)(Gp + 1);
+                RtlZeroMemory(Gp, sizeof(*Gp));
+                Gp->NumberOfThreads = Np->NumberOfThreads;
+                Gp->WorkingSetPrivateSize = Np->WorkingSetPrivateSize;
+                Gp->HardFaultCount = Np->HardFaultCount;
+                Gp->NumberOfThreadsHighWatermark = Np->NumberOfThreadsHighWatermark;
+                Gp->CycleTime = Np->CycleTime;
+                Gp->CreateTime = Np->CreateTime;
+                Gp->UserTime = Np->UserTime;
+                Gp->KernelTime = Np->KernelTime;
+                Gp->BasePriority = Np->BasePriority;
+                Gp->UniqueProcessId = HandleToUlong(Np->UniqueProcessId);
+                Gp->InheritedFromUniqueProcessId = HandleToUlong(Np->InheritedFromUniqueProcessId);
+                Gp->HandleCount = Np->HandleCount;
+                Gp->SessionId = Np->SessionId;
+                Gp->PageDirectoryBase = (ULONG)Np->PageDirectoryBase;
+#define CLAMP32(x) ((ULONG)min((SIZE_T)(x), (SIZE_T)MAXULONG))
+                Gp->PeakVirtualSize = CLAMP32(Np->PeakVirtualSize);
+                Gp->VirtualSize = CLAMP32(Np->VirtualSize);
+                Gp->PageFaultCount = Np->PageFaultCount;
+                Gp->PeakWorkingSetSize = CLAMP32(Np->PeakWorkingSetSize);
+                Gp->WorkingSetSize = CLAMP32(Np->WorkingSetSize);
+                Gp->QuotaPeakPagedPoolUsage = CLAMP32(Np->QuotaPeakPagedPoolUsage);
+                Gp->QuotaPagedPoolUsage = CLAMP32(Np->QuotaPagedPoolUsage);
+                Gp->QuotaPeakNonPagedPoolUsage = CLAMP32(Np->QuotaPeakNonPagedPoolUsage);
+                Gp->QuotaNonPagedPoolUsage = CLAMP32(Np->QuotaNonPagedPoolUsage);
+                Gp->PagefileUsage = CLAMP32(Np->PagefileUsage);
+                Gp->PeakPagefileUsage = CLAMP32(Np->PeakPagefileUsage);
+                Gp->PrivatePageCount = CLAMP32(Np->PrivatePageCount);
+#undef CLAMP32
+                Gp->ReadOperationCount = Np->ReadOperationCount;
+                Gp->WriteOperationCount = Np->WriteOperationCount;
+                Gp->OtherOperationCount = Np->OtherOperationCount;
+                Gp->ReadTransferCount = Np->ReadTransferCount;
+                Gp->WriteTransferCount = Np->WriteTransferCount;
+                Gp->OtherTransferCount = Np->OtherTransferCount;
+                for (i = 0; i < Np->NumberOfThreads; ++i)
+                {
+                    Gt[i].KernelTime = Nt[i].KernelTime;
+                    Gt[i].UserTime = Nt[i].UserTime;
+                    Gt[i].CreateTime = Nt[i].CreateTime;
+                    Gt[i].WaitTime = Nt[i].WaitTime;
+                    Gt[i].StartAddress = (ULONG)(ULONG_PTR)Nt[i].StartAddress;
+                    Gt[i].UniqueProcess = HandleToUlong(Nt[i].ClientId.UniqueProcess);
+                    Gt[i].UniqueThread = HandleToUlong(Nt[i].ClientId.UniqueThread);
+                    Gt[i].Priority = Nt[i].Priority;
+                    Gt[i].BasePriority = Nt[i].BasePriority;
+                    Gt[i].ContextSwitches = Nt[i].ContextSwitches;
+                    Gt[i].ThreadState = Nt[i].ThreadState;
+                    Gt[i].WaitReason = Nt[i].WaitReason;
+                    Gt[i].Pad = 0;
+                }
+                Size = sizeof(*Gp) + Np->NumberOfThreads * sizeof(*Gt);
+                if (Np->ImageName.Buffer)
+                {
+                    ULONG Max = Np->ImageName.MaximumLength ? Np->ImageName.MaximumLength :
+                                Np->ImageName.Length + sizeof(WCHAR);
+                    PUCHAR Name = (PUCHAR)Gp + Size;
+                    RtlZeroMemory(Name, ALIGN_UP_BY(Max, 8));
+                    RtlCopyMemory(Name, Np->ImageName.Buffer, min(Np->ImageName.Length, Max));
+                    Gp->ImageName.Length = Np->ImageName.Length;
+                    Gp->ImageName.MaximumLength = (USHORT)Max;
+                    Gp->ImageName.Buffer = (ULONG)(ULONG_PTR)Name;
+                    Size += ALIGN_UP_BY(Max, 8);
+                }
+                if (!Np->NextEntryOffset) break;
+                Gp->NextEntryOffset = Size;
+                GuestOffset += Size;
+                Offset += Np->NextEntryOffset;
             }
             return STATUS_SUCCESS;
         }
