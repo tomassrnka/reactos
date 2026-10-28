@@ -622,6 +622,29 @@ MiniSendResourcesAvailable(
 }
 
 
+/* Completes a transfer to the protocol it was for, and drops the reference it held (see ProTransferData):
+   NdisCloseAdapter may free the binding from here on */
+static
+VOID
+MiniCompleteTransfer(
+    PADAPTER_BINDING AdapterBinding,
+    PNDIS_PACKET     Packet,
+    NDIS_STATUS      Status,
+    UINT             BytesTransferred)
+{
+    KIRQL OldIrql;
+
+    KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+    if (AdapterBinding->ProtocolBinding->Chars.TransferDataCompleteHandler)
+        (*AdapterBinding->ProtocolBinding->Chars.TransferDataCompleteHandler)(
+            AdapterBinding->NdisOpenBlock.ProtocolBindingContext,
+            Packet,
+            Status,
+            BytesTransferred);
+    ProLeaveBinding(AdapterBinding);
+    KeLowerIrql(OldIrql);
+}
+
 VOID NTAPI
 MiniTransferDataComplete(
     IN  NDIS_HANDLE     MiniportAdapterHandle,
@@ -629,23 +652,105 @@ MiniTransferDataComplete(
     IN  NDIS_STATUS     Status,
     IN  UINT            BytesTransferred)
 {
+    PLOGICAL_ADAPTER Adapter = (PLOGICAL_ADAPTER)MiniportAdapterHandle;
     PADAPTER_BINDING AdapterBinding;
+    PPENDING_TRANSFER Transfer = NULL, Entry;
+    PLIST_ENTRY CurrentEntry;
+    BOOLEAN Free = FALSE;
     KIRQL OldIrql;
 
     NDIS_DbgPrint(DEBUG_MINIPORT, ("Called.\n"));
 
-    AdapterBinding = (PADAPTER_BINDING)Packet->Reserved[1];
+    /* The one that takes the transfer off the list completes it: this, or the halt (MiniFailPendingTransfers) */
+    KeAcquireSpinLock(&Adapter->TransferLock, &OldIrql);
+    for (CurrentEntry = Adapter->TransferList.Flink;
+         CurrentEntry != &Adapter->TransferList;
+         CurrentEntry = CurrentEntry->Flink)
+    {
+        Entry = CONTAINING_RECORD(CurrentEntry, PENDING_TRANSFER, ListEntry);
+        if (Entry->Packet == Packet)
+        {
+            Transfer = Entry;
+            break;
+        }
+    }
+    if (!Transfer)
+    {
+        KeReleaseSpinLock(&Adapter->TransferLock, OldIrql);
+        NDIS_DbgPrint(MIN_TRACE, ("Completion of a transfer that is not pending (already failed at halt: a miniport bug), ignored\n"));
+        return;
+    }
+    RemoveEntryList(&Transfer->ListEntry);
+    AdapterBinding = Transfer->AdapterBinding;
+    if (Transfer->InHandler)
+        Transfer->Completed = TRUE; /* ProTransferData frees it when the handler returns */
+    else
+        Free = TRUE;
+    KeReleaseSpinLock(&Adapter->TransferLock, OldIrql);
 
-    KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
-    (*AdapterBinding->ProtocolBinding->Chars.TransferDataCompleteHandler)(
-        AdapterBinding->NdisOpenBlock.ProtocolBindingContext,
-        Packet,
-        Status,
-        BytesTransferred);
+    if (Free)
+        ExFreePool(Transfer);
 
-    /* The transfer is done (see ProTransferData); NdisCloseAdapter may free the binding from here on */
-    ProLeaveBinding(AdapterBinding);
-    KeLowerIrql(OldIrql);
+    MiniCompleteTransfer(AdapterBinding, Packet, Status, BytesTransferred);
+}
+
+/* The miniport is about to be halted: a transfer started from now on fails at once */
+static
+VOID
+MiniCloseTransfers(
+    PLOGICAL_ADAPTER Adapter)
+{
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&Adapter->TransferLock, &OldIrql);
+    Adapter->TransfersClosed = TRUE;
+    KeReleaseSpinLock(&Adapter->TransferLock, OldIrql);
+}
+
+VOID
+MiniFailPendingTransfers(
+    PLOGICAL_ADAPTER Adapter)
+{
+    LIST_ENTRY Failed;
+    PLIST_ENTRY CurrentEntry, NextEntry;
+    PPENDING_TRANSFER Transfer;
+    PADAPTER_BINDING AdapterBinding;
+    PNDIS_PACKET Packet;
+    KIRQL OldIrql;
+
+    InitializeListHead(&Failed);
+
+    KeAcquireSpinLock(&Adapter->TransferLock, &OldIrql);
+    Adapter->TransfersClosed = TRUE;
+    for (CurrentEntry = Adapter->TransferList.Flink;
+         CurrentEntry != &Adapter->TransferList;
+         CurrentEntry = NextEntry)
+    {
+        NextEntry = CurrentEntry->Flink;
+        Transfer = CONTAINING_RECORD(CurrentEntry, PENDING_TRANSFER, ListEntry);
+        if (Transfer->InHandler)
+        {
+            /* Still inside the miniport's handler: ProTransferData fails it when that returns */
+            Transfer->FailAtReturn = TRUE;
+        }
+        else
+        {
+            RemoveEntryList(CurrentEntry);
+            InsertTailList(&Failed, CurrentEntry);
+        }
+    }
+    KeReleaseSpinLock(&Adapter->TransferLock, OldIrql);
+
+    while (!IsListEmpty(&Failed))
+    {
+        Transfer = CONTAINING_RECORD(RemoveHeadList(&Failed), PENDING_TRANSFER, ListEntry);
+        AdapterBinding = Transfer->AdapterBinding;
+        Packet = Transfer->Packet;
+        ExFreePool(Transfer);
+
+        NDIS_DbgPrint(MIN_TRACE, ("Failing a transfer the halted miniport did not complete\n"));
+        MiniCompleteTransfer(AdapterBinding, Packet, NDIS_STATUS_FAILURE, 0);
+    }
 }
 
 
@@ -1748,6 +1853,7 @@ MiniShutdownAdapter(
 
     /* Halt the miniport before unbinding: its in-flight sends complete here */
     MiniSetHalted(Adapter, TRUE);
+    MiniCloseTransfers(Adapter);
     if (Started)
     {
         MiniStopSends(Adapter);
@@ -1757,8 +1863,9 @@ MiniShutdownAdapter(
     MiniFailQueuedWork(Adapter, TRUE, NULL);
     MiniAbortPendingRequest(Adapter, NDIS_STATUS_FAILURE, TRUE);
     MiniEndPendingResetAtHalt(Adapter);
+    MiniFailPendingTransfers(Adapter);
 
-    /* The sends, requests and resets have been completed or failed: the protocols' unbind drains at once */
+    /* The sends, requests, transfers and resets have been completed or failed: the protocols' unbind drains at once */
     ProUnbindAdapter(Adapter);
 
     if (Adapter->NdisMiniportBlock.EthDB)
@@ -2879,6 +2986,13 @@ NdisIPnPStartDevice(
 
   /* The miniport runs again from MiniportInitialize on, and takes requests (after a stop) */
   MiniSetHalted(Adapter, FALSE);
+  {
+    KIRQL TransferIrql;
+
+    KeAcquireSpinLock(&Adapter->TransferLock, &TransferIrql);
+    Adapter->TransfersClosed = FALSE;
+    KeReleaseSpinLock(&Adapter->TransferLock, TransferIrql);
+  }
   Adapter->Removing = FALSE;
   Adapter->Torndown = FALSE;
 
@@ -3202,6 +3316,7 @@ NdisIPnPStopDevice(
 
   KeCancelTimer(&Adapter->NdisMiniportBlock.WakeUpDpcTimer.Timer);
   MiniSetHalted(Adapter, TRUE);
+  MiniCloseTransfers(Adapter);
   MiniStopSends(Adapter);
 
   /* Set this here so MiniportISR will be forced to run for interrupts generated in MiniportHalt */
@@ -3215,6 +3330,7 @@ NdisIPnPStopDevice(
      behind a request it never completed, across a restart */
   MiniAbortPendingRequest(Adapter, NDIS_STATUS_FAILURE, TRUE);
   MiniEndPendingResetAtHalt(Adapter);
+  MiniFailPendingTransfers(Adapter);
 
   IoSetDeviceInterfaceState(&Adapter->NdisMiniportBlock.SymbolicLinkName, FALSE);
   ProUnbindAdapter(Adapter);
@@ -3607,6 +3723,9 @@ NdisIAddDevice(
   KeInitializeSpinLock(&Adapter->NdisMiniportBlock.Lock);
   InitializeListHead(&Adapter->ProtocolListHead);
   InitializeListHead(&Adapter->ResetWaiters);
+  KeInitializeSpinLock(&Adapter->TransferLock);
+  InitializeListHead(&Adapter->TransferList);
+  Adapter->TransfersClosed = FALSE;
   /* Empty until NdisIPnPStartDevice links them, so MiniUnlinkAdapter's IsListEmpty check is valid
      for an adapter that is removed before it ever started */
   InitializeListHead(&Adapter->ListEntry);

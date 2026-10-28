@@ -64,8 +64,10 @@ static struct
         PNDIS_PACKET Packet;
         UINT ByteOffset;
         UINT BytesToTransfer;
+        BOOLEAN Never;      /* FAKEMP_XFER_NEVER: the halt forgets it */
     } HeldXfers[FAKEMP_MAX_HELD_XFERS];
     ULONG HeldXferCount;
+    volatile LONG FailFilter;       /* sets of the packet filter still to fail */
 } G;
 
 static const UCHAR AdapterAddress[6] = { 0x02, 0xFA, 0xCE, 0x4D, 0x50, FAKEMP_LAST_BYTE };
@@ -454,6 +456,13 @@ MpSetInformation(
                 Status = NDIS_STATUS_INVALID_LENGTH;
                 break;
             }
+            if (G.FailFilter > 0)
+            {
+                InterlockedDecrement(&G.FailFilter);
+                G.St.FilterFailures++;
+                Status = NDIS_STATUS_FAILURE;
+                break;
+            }
             G.PacketFilter = *(PULONG)InformationBuffer;
             *BytesRead = sizeof(ULONG);
             Status = NDIS_STATUS_SUCCESS;
@@ -722,8 +731,11 @@ MpTransferData(
 
     Lock(&OldIrql);
     G.St.Transfers++;
-    if (G.TransferMode == FAKEMP_XFER_HOLD && G.HeldXferCount < FAKEMP_MAX_HELD_XFERS)
+    if ((G.TransferMode == FAKEMP_XFER_HOLD || G.TransferMode == FAKEMP_XFER_NEVER) && G.HeldXferCount < FAKEMP_MAX_HELD_XFERS)
     {
+        G.HeldXfers[G.HeldXferCount].Never = (G.TransferMode == FAKEMP_XFER_NEVER);
+        if (G.TransferMode == FAKEMP_XFER_NEVER)
+            G.St.TransfersNever++;
         G.HeldXfers[G.HeldXferCount].Packet = Packet;
         G.HeldXfers[G.HeldXferCount].ByteOffset = ByteOffset;
         G.HeldXfers[G.HeldXferCount].BytesToTransfer = BytesToTransfer;
@@ -736,6 +748,25 @@ MpTransferData(
 
     *BytesTransferred = CopyToPacket(Packet, ByteOffset, BytesToTransfer);
     return NDIS_STATUS_SUCCESS;
+}
+
+/* The halt: transfers pended in FAKEMP_XFER_NEVER mode are forgotten, never completed (NDIS must fail them) */
+static
+VOID
+ForgetNeverTransfers(VOID)
+{
+    KIRQL OldIrql;
+    ULONG i, Kept = 0;
+
+    Lock(&OldIrql);
+    for (i = 0; i < G.HeldXferCount; i++)
+    {
+        if (!G.HeldXfers[i].Never)
+            G.HeldXfers[Kept++] = G.HeldXfers[i];
+    }
+    G.HeldXferCount = Kept;
+    G.St.TransfersHeld = Kept;
+    Unlock(OldIrql);
 }
 
 /* Completes the held transfers: copied, or failed in the halt. Returns how many */
@@ -837,6 +868,7 @@ MpHalt(
     /* ... but the sends it holds are completed now (some NICs complete a send only here) */
     NdisMCancelTimer(&G.SendTimer, &Cancelled);
     CompleteSends(FAKEMP_COMPLETE_ALL, NDIS_STATUS_FAILURE, TRUE);
+    ForgetNeverTransfers();
     CompleteTransfers(TRUE);
 
     Lock(&OldIrql);
@@ -974,6 +1006,8 @@ ControlIoctl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             G.St.Transfers = 0;
             G.St.TransfersCompleted = 0;
             G.St.TransfersCompletedAtHalt = 0;
+            G.St.TransfersNever = 0;
+            G.St.FilterFailures = 0;
             Unlock(OldIrql);
             break;
 
@@ -1018,6 +1052,15 @@ ControlIoctl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
                 break;
             }
             Status = Indicate((PFAKEMP_INDICATE)Buffer);
+            break;
+
+        case FAKEMP_IOCTL_FAIL_FILTER:
+            if (InLength < sizeof(ULONG))
+            {
+                Status = STATUS_BUFFER_TOO_SMALL;
+                break;
+            }
+            InterlockedExchange(&G.FailFilter, (LONG)*(PULONG)Buffer);
             break;
 
         case FAKEMP_IOCTL_COMPLETE_TRANSFERS:
