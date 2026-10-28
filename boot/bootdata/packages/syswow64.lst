@@ -74,6 +74,10 @@ SysWOW64/olepro32.dll
 # Proxy/stubs for IServiceProvider and the other ActiveX interfaces: a 32-bit COM
 # LocalServer/LocalService registers its class objects through IServiceProvider.
 SysWOW64/actxprxy.dll
+# Task Scheduler 2.0 client (ITaskService) and its XML parser: 32-bit updaters
+# (Google Updater) register their wake tasks through it.
+SysWOW64/taskschd.dll
+SysWOW64/xmllite.dll
 SysWOW64/stdole2.tlb
 SysWOW64/stdole32.tlb
 SysWOW64/rpcrt4.dll
