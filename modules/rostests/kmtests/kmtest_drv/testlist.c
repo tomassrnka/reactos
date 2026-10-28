@@ -74,6 +74,8 @@ KMT_TESTFUNC Test_KeFastFail;
 KMT_TESTFUNC Test_KeFloatPointState;
 KMT_TESTFUNC Test_KeGenericCallDpc;
 KMT_TESTFUNC Test_KeGuardedMutex;
+KMT_TESTFUNC Test_KeFreezeBreakDpc;
+KMT_TESTFUNC Test_KeFreezeBugCheckDpc;
 KMT_TESTFUNC Test_KeIrql;
 KMT_TESTFUNC Test_KeMutex;
 KMT_TESTFUNC Test_KePriority;
@@ -204,6 +206,8 @@ const KMT_TEST TestList[] =
     { "KeFloatPointState",                  Test_KeFloatPointState },
     { "KeGenericCallDpc",                   Test_KeGenericCallDpc },
     { "KeGuardedMutex",                     Test_KeGuardedMutex },
+    { "-KeFreezeBreakDpc",                Test_KeFreezeBreakDpc },
+    { "-KeFreezeBugCheckDpc",             Test_KeFreezeBugCheckDpc },
     { "KeIrql",                             Test_KeIrql },
     { "KeMutex",                            Test_KeMutex },
     { "KePriority",                         Test_KePriority },

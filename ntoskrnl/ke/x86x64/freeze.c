@@ -38,6 +38,12 @@
 PKPRCB KiFreezeOwner;
 static KAFFINITY KiFreezeTargetSet;
 
+/* Number of nested freezes by the owner, which has frozen the others once */
+static ULONG KiFreezeDepth;
+
+/* Number of NMIs dropped because a freeze was in progress */
+static volatile LONG KiNmiDropped;
+
 /* FUNCTIONS *****************************************************************/
 
 BOOLEAN
@@ -101,7 +107,112 @@ KiProcessorFreezeHandler(
     return TRUE;
 }
 
+BOOLEAN
+KiHandleNmiDuringFreeze(
+    _In_ PKTRAP_FRAME TrapFrame,
+    _In_ PKEXCEPTION_FRAME ExceptionFrame,
+    _Out_ PBOOLEAN Frozen)
+{
+    PKPRCB CurrentPrcb = KeGetCurrentPrcb();
+
+    *Frozen = FALSE;
+
+    /*
+     * A kernel without a second processor keeps no IpiFrozen state: the freeze
+     * flag tells that the debugger runs on this one, and an NMI that reaches
+     * it there must not enter the debugger again from inside the session.
+     */
+    if (KeNumberProcessors == 1 && KiFreezeFlag != 0)
+    {
+        InterlockedIncrement(&KiNmiDropped);
+        return TRUE;
+    }
+
+    /*
+     * An NMI that is not a freeze request reaches a processor that already is
+     * part of a freeze: a repeated NMI (or one that hit all processors at
+     * once, like QEMU's inject-nmi) while the debugger runs. The freeze owner,
+     * a frozen processor and one that is thawing already stand where the NMI
+     * would take them; reporting it would enter the debugger a second time,
+     * from inside the freeze, and its thaw would then find processors in the
+     * wrong state. Drop the NMI.
+     */
+    if (CurrentPrcb->IpiFrozen != IPI_FROZEN_STATE_RUNNING)
+    {
+        /* A real NMI (parity, IOCHK) must not be lost: see KiCheckDroppedNmi.
+           Nothing is printed here: that enters the debugger, which a frozen
+           processor must not do while the owner waits for it */
+        InterlockedIncrement(&KiNmiDropped);
+        return TRUE;
+    }
+
+    /*
+     * The debugger runs on another processor, which freezes this one next
+     * (or has just done so). This NMI cannot be reported to the HAL while the
+     * owner waits for this processor, and the freeze NMI cannot interrupt the
+     * handler that already runs: serve the freeze request from here, then
+     * drop the NMI.
+     */
+    if (KiFreezeOwner != NULL && KiFreezeOwner != CurrentPrcb)
+    {
+        while (KiFreezeOwner != NULL)
+        {
+            if (KiProcessorFreezeHandler(TrapFrame, ExceptionFrame))
+            {
+                *Frozen = TRUE;
+                break;
+            }
+
+            YieldProcessor();
+            KeMemoryBarrier();
+        }
+
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+ULONG
+KiCheckDroppedNmi(
+    VOID)
+{
+    ULONG Count;
+
+    /* Called by the processor that ended a freeze. NMIs that arrived during it
+       were dropped; one that the hardware reports (parity error, IOCHK) is
+       still pending in the system control port and gets its normal handling.
+       NMIs from QEMU and IPIs set no reason bit and are done. */
+    Count = InterlockedExchange(&KiNmiDropped, 0);
+    if (Count == 0)
+        return 0;
+
+#if !defined(SARCH_PC98) && !defined(SARCH_XBOX)
+    if ((READ_PORT_UCHAR((PUCHAR)0x61) & 0xC0) == 0)
+        return Count;
+
+    if (!KiHandleNmi())
+        HalHandleNMI(NULL);
+#endif
+
+    return Count;
+}
+
 VOID
+KiHandleLostNmi(
+    VOID)
+{
+    KIRQL OldIrql;
+
+    /* An NMI that could not run its handler (see the i386 NMI TSS fault): count
+       it and check, as at the end of a freeze, whether the hardware reports it */
+    InterlockedIncrement(&KiNmiDropped);
+    KeRaiseIrql(HIGH_LEVEL, &OldIrql);
+    KiCheckDroppedNmi();
+    KeLowerIrql(OldIrql);
+}
+
+BOOLEAN
 NTAPI
 KxFreezeExecution(
     VOID)
@@ -111,7 +222,9 @@ KxFreezeExecution(
     /* Avoid blocking on recursive debug action */
     if (KiFreezeOwner == CurrentPrcb)
     {
-        return;
+        /* The matching KxThawExecution must not thaw the others yet */
+        KiFreezeDepth++;
+        return FALSE;
     }
 
     /* Try to acquire the freeze owner */
@@ -127,6 +240,7 @@ KxFreezeExecution(
     }
 
     /* We are the owner now and active */
+    KiFreezeDepth = 0;
     CurrentPrcb->IpiFrozen = IPI_FROZEN_STATE_OWNER | IPI_FROZEN_FLAG_ACTIVE;
 
     /* A starting processor joins KeActiveProcessors at any time; request,
@@ -168,15 +282,24 @@ KxFreezeExecution(
     }
 
     /* All targets are frozen, we can continue */
+    return TRUE;
 }
 
-VOID
+BOOLEAN
 NTAPI
 KxThawExecution(
     VOID)
 {
     PKPRCB CurrentPrcb = KeGetCurrentPrcb();
+    KAFFINITY ThawSet = 0;
     ASSERT(CurrentPrcb->IpiFrozen & IPI_FROZEN_FLAG_ACTIVE);
+
+    /* A nested freeze of the owner leaves the others frozen for the outer one */
+    if (KiFreezeDepth != 0)
+    {
+        KiFreezeDepth--;
+        return FALSE;
+    }
 
     /* Loop all frozen processors */
     for (ULONG i = 0; i < MAXIMUM_PROCESSORS; i++)
@@ -185,10 +308,16 @@ KxThawExecution(
         {
             PKPRCB TargetPrcb = KiProcessorBlock[i];
 
+            /* A processor that already runs has nothing to wait for. Any
+               other state is not expected here, but must still be woken */
+            if (TargetPrcb->IpiFrozen == IPI_FROZEN_STATE_RUNNING)
+                continue;
+
             /* Make sure they are still frozen */
             ASSERT(TargetPrcb->IpiFrozen == IPI_FROZEN_STATE_FROZEN);
 
             /* Request target to thaw */
+            ThawSet |= AFFINITY_MASK(i);
             TargetPrcb->IpiFrozen = IPI_FROZEN_STATE_THAW;
         }
     }
@@ -196,7 +325,7 @@ KxThawExecution(
     /* Wait for all targets to be running */
     for (ULONG i = 0; i < MAXIMUM_PROCESSORS; i++)
     {
-        if (KiFreezeTargetSet & AFFINITY_MASK(i))
+        if (ThawSet & AFFINITY_MASK(i))
         {
             PKPRCB TargetPrcb = KiProcessorBlock[i];
 
@@ -214,6 +343,7 @@ KxThawExecution(
 
     /* Release the freeze owner */
     InterlockedExchangePointer((PVOID*)&KiFreezeOwner, NULL);
+    return TRUE;
 }
 
 KCONTINUE_STATUS

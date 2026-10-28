@@ -124,7 +124,7 @@ KiNmiInterruptHandler(
     _In_ PKTRAP_FRAME TrapFrame,
     _In_ PKEXCEPTION_FRAME ExceptionFrame)
 {
-    BOOLEAN ManualSwapGs = FALSE;
+    BOOLEAN ManualSwapGs = FALSE, Frozen;
 
     /* Check if the NMI came from kernel mode */
     if ((TrapFrame->SegCs & MODE_MASK) == 0)
@@ -144,6 +144,13 @@ KiNmiInterruptHandler(
     if (KiProcessorFreezeHandler(TrapFrame, ExceptionFrame))
     {
         /* NMI was handled */
+        goto Exit;
+    }
+
+    /* An NMI that reaches a processor of a running freeze (or a second one
+       while the debugger runs on this one) is dropped, see there */
+    if (KiHandleNmiDuringFreeze(TrapFrame, ExceptionFrame, &Frozen))
+    {
         goto Exit;
     }
 

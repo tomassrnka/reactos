@@ -464,6 +464,8 @@ KiTrap02Handler(VOID)
     KTRAP_FRAME TrapFrame;
     KIRQL OldIrql;
     BOOLEAN Frozen;
+    USHORT PreviousTask;
+    BOOLEAN Served;
 
     /*
      * In some sort of strange recursion case, we might end up here with the IF
@@ -495,6 +497,7 @@ KiTrap02Handler(VOID)
      * need to update the PCR to reflect this.
      */
     KeGetPcr()->TSS = NmiTss;
+    PreviousTask = NmiTss->Backlink;
     __writeeflags(__readeflags() &~ EFLAGS_NESTED_TASK);
     TssGdt->HighWord.Bits.Dpl = 0;
     TssGdt->HighWord.Bits.Pres = 1;
@@ -536,6 +539,11 @@ KiTrap02Handler(VOID)
     if (Frozen)
         goto Handled;
 
+    /* An NMI that reaches a processor of a running freeze (or a second one
+       while the debugger runs on this one) is dropped, see there */
+    if (KiHandleNmiDuringFreeze(&TrapFrame, NULL, &Frozen))
+        goto Handled;
+
     /* Store the trap frame in the KPRCB */
     KiSaveProcessorState(&TrapFrame, NULL);
 
@@ -553,14 +561,24 @@ KiTrap02Handler(VOID)
         KeGetPcr()->Irql = HIGH_LEVEL;
 
         /* An NMI can reach all processors at once. One of them reports it,
-           the others wait here, so that the HAL runs only once. */
+           the others wait here, so that the HAL runs only once. They still
+           answer the freeze requests of the debugger that the reporting
+           processor enters. The NMI that carries the freeze request is held
+           until this handler returns, or lost if the hypervisor delivers it
+           into the running NMI task: the polling serves the request either
+           way. */
         {
             static LONG ReportOwner;
 
             if (InterlockedCompareExchange(&ReportOwner, 1, 0) != 0)
             {
                 while (TRUE)
+                {
+                    if (KiProcessorFreezeHandler(&TrapFrame, NULL))
+                        KeGetCurrentPrcb()->IpiFrozen = IPI_FROZEN_STATE_RUNNING;
+
                     YieldProcessor();
+                }
             }
         }
 
@@ -574,13 +592,41 @@ Handled:
      * totally changed things.
      *
      * We have to make sure we're still in our original NMI -- a nested NMI
-     * will point back to the NMI TSS, and in that case we're hosed.
+     * will point back to the NMI TSS.
+     *
+     * While this handler runs, the NMI TSS is available, and a hypervisor can
+     * deliver an NMI that was pending (one that hit all processors at once, or
+     * a repeated one) before this handler returns. The task switch goes from
+     * the NMI TSS to itself: it saves and reloads the state of this very
+     * handler, so the handler just goes on, and only the return link now
+     * points to the NMI task. The NMI is lost, which is fine for a dropped one.
+     * A freeze request that it carried is still marked in IpiFrozen, and is
+     * served here. Put the return link of the interrupted task back; the
+     * system is only lost if that was the NMI task as well.
+     *
+     * Serving a freeze request can wait for the debugger for long, during
+     * which more NMIs can switch into the NMI task. So the return link is
+     * checked after the wait, and the wait is repeated if a freeze request is
+     * pending again; nothing that waits runs between the last check and the
+     * point where the NMI TSS is made busy.
      */
-    if (KeGetPcr()->TSS->Backlink == KGDT_NMI_TSS)
+    do
     {
-        /* Unhandled: crash the system */
-        KiSystemFatalException(EXCEPTION_NMI, NULL);
-    }
+        Served = KiProcessorFreezeHandler(&TrapFrame, NULL);
+        if (Served)
+            Frozen = TRUE;
+
+        if (NmiTss->Backlink == KGDT_NMI_TSS)
+        {
+            if (PreviousTask == KGDT_NMI_TSS)
+            {
+                /* Unhandled: crash the system */
+                KiSystemFatalException(EXCEPTION_NMI, NULL);
+            }
+
+            NmiTss->Backlink = PreviousTask;
+        }
+    } while (Served);
 
     /* Restore original TSS */
     KeGetPcr()->TSS = Tss;
@@ -1010,12 +1056,34 @@ KiTrap0DHandler(IN PKTRAP_FRAME TrapFrame)
     /* Save trap frame */
     KiEnterTrap(TrapFrame);
 
-    /* A freeze NMI that arrived while the NMI handler was returning (see KiTrap02Handler) */
-    if ((TrapFrame->ErrCode == (KGDT_NMI_TSS | 1)) &&
-        (Ke386GetTr() == KGDT_NMI_TSS) &&
-        KiProcessorFreezeHandler(TrapFrame, NULL))
+    /* An NMI that arrived while the NMI handler was returning, or while the
+       debugger runs in it (see KiTrap02Handler), faults on the busy NMI TSS.
+       The processor may already have left the NMI task: only a failed NMI
+       delivery has this selector with the external flag as the error code */
+    if (TrapFrame->ErrCode == (KGDT_NMI_TSS | 1))
     {
-        KeGetCurrentPrcb()->IpiFrozen = IPI_FROZEN_STATE_RUNNING;
+        BOOLEAN Frozen;
+
+        /* A freeze request */
+        if (KiProcessorFreezeHandler(TrapFrame, NULL))
+        {
+            KeGetCurrentPrcb()->IpiFrozen = IPI_FROZEN_STATE_RUNNING;
+            KiTrapReturn(TrapFrame);
+        }
+
+        /* Any other NMI is dropped while this processor is part of a freeze,
+           and so is one that finds no freeze any more: there is no NMI task
+           to run it in */
+        if (KiHandleNmiDuringFreeze(TrapFrame, NULL, &Frozen))
+        {
+            if (Frozen)
+                KeGetCurrentPrcb()->IpiFrozen = IPI_FROZEN_STATE_RUNNING;
+        }
+        else
+        {
+            /* No freeze: the NMI is not lost, a hardware reason is looked up */
+            KiHandleLostNmi();
+        }
         KiTrapReturn(TrapFrame);
     }
 
