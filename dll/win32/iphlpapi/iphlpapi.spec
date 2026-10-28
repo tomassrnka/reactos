@@ -15,16 +15,16 @@
 @ stub CancelSecurityHealthChangeNotify
 @ stdcall -stub -version=0x600+ ConvertGuidToStringA(ptr ptr long)
 @ stdcall -stub -version=0x600+ ConvertGuidToStringW(ptr ptr long)
-@ stdcall -stub -version=0x600+ ConvertInterfaceAliasToLuid(wstr ptr)
-@ stdcall -stub -version=0x600+ ConvertInterfaceGuidToLuid(ptr ptr)
-@ stdcall -stub -version=0x600+ ConvertInterfaceIndexToLuid(long ptr)
-@ stdcall -stub -version=0x600+ ConvertInterfaceLuidToAlias(ptr ptr long)
-@ stdcall -stub -version=0x600+ ConvertInterfaceLuidToGuid(ptr ptr)
-@ stdcall -stub -version=0x600+ ConvertInterfaceLuidToIndex(ptr ptr)
-@ stdcall -stub -version=0x600+ ConvertInterfaceLuidToNameA(ptr ptr long)
-@ stdcall -stub -version=0x600+ ConvertInterfaceLuidToNameW(ptr ptr long)
-@ stdcall -stub -version=0x600+ ConvertInterfaceNameToLuidA(str ptr)
-@ stdcall -stub -version=0x600+ ConvertInterfaceNameToLuidW(wstr ptr)
+@ stdcall -version=0x600+ ConvertInterfaceAliasToLuid(wstr ptr)
+@ stdcall -version=0x600+ ConvertInterfaceGuidToLuid(ptr ptr)
+@ stdcall -version=0x600+ ConvertInterfaceIndexToLuid(long ptr)
+@ stdcall -version=0x600+ ConvertInterfaceLuidToAlias(ptr ptr long)
+@ stdcall -version=0x600+ ConvertInterfaceLuidToGuid(ptr ptr)
+@ stdcall -version=0x600+ ConvertInterfaceLuidToIndex(ptr ptr)
+@ stdcall -version=0x600+ ConvertInterfaceLuidToNameA(ptr ptr long)
+@ stdcall -version=0x600+ ConvertInterfaceLuidToNameW(ptr ptr long)
+@ stdcall -version=0x600+ ConvertInterfaceNameToLuidA(str ptr)
+@ stdcall -version=0x600+ ConvertInterfaceNameToLuidW(wstr ptr)
 @ stdcall -version=0x600+ ConvertLengthToIpv4Mask(long ptr)
 @ stdcall -stub -version=0x600+ ConvertStringToGuidW(wstr ptr)
 @ stdcall CreateIpForwardEntry(ptr)
@@ -73,6 +73,8 @@
 @ stdcall GetIpForwardTable(ptr ptr long)
 @ stdcall -version=0x600+ GetIpForwardTable2(long ptr)
 @ stub GetIpForwardTableFromStack
+@ stdcall -version=0x600+ GetIpInterfaceEntry(ptr)
+@ stdcall -version=0x600+ GetIpInterfaceTable(long ptr)
 @ stdcall GetIpNetTable(ptr ptr long)
 @ stdcall -version=0x600+ GetIpNetTable2(long ptr)
 @ stub GetIpNetTableFromStack
@@ -113,8 +115,9 @@
 @ stdcall IcmpParseReplies(ptr long)
 @ stdcall IcmpSendEcho2(ptr ptr ptr ptr long ptr long ptr ptr long long)
 @ stdcall IcmpSendEcho(ptr long ptr long ptr ptr long long)
-@ stdcall -stub -version=0x600+ if_indextoname(long ptr)
-@ stdcall -stub -version=0x600+ if_nametoindex(str)
+@ stdcall -version=0x600+ if_indextoname(long ptr)
+@ stdcall -version=0x600+ if_nametoindex(str)
+@ stdcall -version=0x600+ InitializeIpInterfaceEntry(ptr)
 @ stub InternalCreateIpForwardEntry
 @ stub InternalCreateIpNetEntry
 @ stub InternalDeleteIpForwardEntry
