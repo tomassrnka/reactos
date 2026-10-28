@@ -20,6 +20,7 @@ extern void func_DrawIconEx(void);
 extern void func_DrawText(void);
 extern void func_EditInk(void);
 extern void func_desktop(void);
+extern void func_DesktopHeapNonInteractive(void);
 extern void func_ClipboardSynthBitmap(void);
 extern void func_ConsoleClipText(void);
 extern void func_EmptyClipboard(void);
@@ -128,6 +129,7 @@ const struct test winetest_testlist[] =
     { "DrawText", func_DrawText },
     { "EditInk", func_EditInk },
     { "desktop", func_desktop },
+    { "DesktopHeapNonInteractive", func_DesktopHeapNonInteractive },
     { "ClipboardSynthBitmap", func_ClipboardSynthBitmap },
     { "ConsoleClipText", func_ConsoleClipText },
     { "EmptyClipboard", func_EmptyClipboard },
