@@ -69,6 +69,7 @@ Wait_thread_proc(LPVOID Arg)
         if (Status == STATUS_WAIT_1 || Status == STATUS_TIMEOUT)
         {
             BOOLEAN TimerOrWaitFired;
+            BOOLEAN Failed = FALSE;
 
             if (Status == STATUS_WAIT_1)
             {
@@ -90,10 +91,22 @@ Wait_thread_proc(LPVOID Arg)
                                             WAIT_IDLE ) != WAIT_IDLE)
                 break;
 
-            Wait->Callback( Wait->Context, TimerOrWaitFired );
+            /* As on a thread of the pool, an exception in the callback ends only the wait. It must
+               not skip the rest: RtlDeregisterWaitEx counts on the callback state and on the
+               handshake below, or it blocks for good and the wait leaks */
+            _SEH2_TRY
+            {
+                Wait->Callback( Wait->Context, TimerOrWaitFired );
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                DPRINT1("Exception 0x%x in the callback of wait %p\n", _SEH2_GetExceptionCode(), Wait);
+                Failed = TRUE;
+            }
+            _SEH2_END;
             InterlockedCompareExchange( &Wait->CallbackState, WAIT_IDLE, WAIT_IN_CALLBACK );
 
-            if (Wait->Flags & WT_EXECUTEONLYONCE)
+            if (Failed || (Wait->Flags & WT_EXECUTEONLYONCE))
                 break;
         }
         else if (Status != STATUS_USER_APC)
@@ -150,31 +163,24 @@ Wait_thread_start(PVOID Arg)
 
     for (;;)
     {
-        /* As on a thread of the pool, an exception in the callback ends only the wait */
-        _SEH2_TRY
-        {
-            Wait_thread_proc(Wait);
-        }
-        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-        {
-            DPRINT1("Exception 0x%x in wait thread %p\n", _SEH2_GetExceptionCode(), Wait);
-        }
-        _SEH2_END;
+        Wait_thread_proc(Wait);
 
         InterlockedIncrement(&WaitThreadsIdle);
         Timeout.QuadPart = WAIT_THREAD_IDLE_TIMEOUT;
-        Status = NtRemoveIoCompletion(WaitThreadPort, (PVOID*)&Wait, &Unused, &IoStatusBlock, &Timeout);
-        if (Status == STATUS_SUCCESS)
-            continue;
+        for (;;)
+        {
+            Status = NtRemoveIoCompletion(WaitThreadPort, (PVOID*)&Wait, &Unused, &IoStatusBlock, &Timeout);
+            if (Status == STATUS_SUCCESS)
+                break;
 
-        /* Leave, unless a new wait was handed over meanwhile: then it is on its way */
-        if (RtlpTakeIdleWaitThread())
-            break;
-        Status = NtRemoveIoCompletion(WaitThreadPort, (PVOID*)&Wait, &Unused, &IoStatusBlock, NULL);
-        if (Status != STATUS_SUCCESS)
-            break;
+            /* Leave, unless every idle thread is promised a wait already: then one of the waiting threads,
+               maybe this one, gets it any moment, so go back to waiting with a timeout */
+            if (RtlpTakeIdleWaitThread())
+                goto Exit;
+        }
     }
 
+Exit:
     RtlpExitThreadFunc(STATUS_SUCCESS);
     return 0;
 }

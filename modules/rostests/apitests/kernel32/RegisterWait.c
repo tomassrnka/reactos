@@ -303,6 +303,144 @@ Cleanup:
     if (Objects) HeapFree(GetProcessHeap(), 0, Objects);
 }
 
+
+/* A wait thread whose wait is gone stays idle for 10 seconds, then exits; a wait registered while it
+   exits must still run and complete. Register and unregister across that boundary */
+static void
+TestIdleLingerBoundary(void)
+{
+    static const DWORD Pauses[] = { 9700, 9900, 10000, 10100, 10400 };
+    HANDLE Object, Fired, Wait;
+    DWORD Result;
+    BOOL Ret;
+    int Round, i;
+
+    Object = CreateEventW(NULL, FALSE, FALSE, NULL);
+    Fired = CreateEventW(NULL, FALSE, FALSE, NULL);
+    ok(Object && Fired, "CreateEventW failed: %lu\n", GetLastError());
+    if (!Object || !Fired)
+        goto Cleanup;
+
+    for (Round = 0; Round < (int)(sizeof(Pauses) / sizeof(Pauses[0])); Round++)
+    {
+        /* A burst: the waits reuse idle wait threads and start new ones */
+        for (i = 0; i < 20; i++)
+        {
+            Ret = RegisterWaitForSingleObject(&Wait, Object, SetEventCallback, Fired,
+                                              INFINITE, WT_EXECUTEINWAITTHREAD | WT_EXECUTEONLYONCE);
+            ok(Ret, "RegisterWaitForSingleObject failed: %lu\n", GetLastError());
+            if (!Ret)
+                continue;
+            SetEvent(Object);
+            Result = WaitForSingleObject(Fired, 5000);
+            ok(Result == WAIT_OBJECT_0, "Round %d, wait %d did not fire: %lu\n", Round, i, Result);
+            Ret = UnregisterWaitEx(Wait, INVALID_HANDLE_VALUE);
+            ok(Ret, "UnregisterWaitEx failed: %lu\n", GetLastError());
+        }
+
+        /* Everything is idle now. Let the threads reach the end of their 10 seconds */
+        Sleep(Pauses[Round]);
+
+        Ret = RegisterWaitForSingleObject(&Wait, Object, SetEventCallback, Fired,
+                                          INFINITE, WT_EXECUTEINWAITTHREAD | WT_EXECUTEONLYONCE);
+        ok(Ret, "RegisterWaitForSingleObject failed: %lu\n", GetLastError());
+        if (!Ret)
+            continue;
+        SetEvent(Object);
+        Result = WaitForSingleObject(Fired, 5000);
+        ok(Result == WAIT_OBJECT_0, "Round %d: wait after a pause of %lu ms did not fire: %lu\n",
+           Round, Pauses[Round], Result);
+        Ret = UnregisterWaitEx(Wait, INVALID_HANDLE_VALUE);
+        ok(Ret, "UnregisterWaitEx failed: %lu\n", GetLastError());
+    }
+
+Cleanup:
+    if (Fired) CloseHandle(Fired);
+    if (Object) CloseHandle(Object);
+}
+
+static volatile LONG s_Raised;
+
+static VOID CALLBACK
+RaiseCallback(PVOID Context, BOOLEAN TimerOrWaitFired)
+{
+    InterlockedIncrement(&s_Raised);
+    /* Nothing catches this in the test: the wait must contain it, as a pool thread contains the
+       exception of a work item */
+    RaiseException(0xE0000001, 0, 0, NULL);
+}
+
+static DWORD WINAPI
+UnregisterThread(PVOID Context)
+{
+    return UnregisterWaitEx((HANDLE)Context, INVALID_HANDLE_VALUE);
+}
+
+static void
+TestCallbackException(ULONG Flags)
+{
+    HANDLE Object, Completion, Wait, Thread;
+    DWORD Result;
+    BOOL Ret;
+    int i;
+
+    Object = CreateEventW(NULL, TRUE, FALSE, NULL);
+    Completion = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ok(Object && Completion, "CreateEventW failed: %lu\n", GetLastError());
+    if (!Object || !Completion)
+        goto Cleanup;
+
+    /* Blocking unregister of a wait whose callback raised: it must return */
+    s_Raised = 0;
+    Ret = RegisterWaitForSingleObject(&Wait, Object, RaiseCallback, NULL, INFINITE, Flags);
+    ok(Ret, "RegisterWaitForSingleObject failed: %lu\n", GetLastError());
+    if (Ret)
+    {
+        SetEvent(Object);
+        for (i = 0; i < 50 && !s_Raised; i++)
+            Sleep(100);
+        ok(s_Raised >= 1, "Callback did not run\n");
+        Sleep(100);
+
+        /* On a thread of its own: a hang here ends in the timeout, not in a stuck test */
+        Thread = CreateThread(NULL, 0, UnregisterThread, Wait, 0, NULL);
+        ok(Thread != NULL, "CreateThread failed: %lu\n", GetLastError());
+        if (Thread)
+        {
+            Result = WaitForSingleObject(Thread, 10000);
+            ok(Result == WAIT_OBJECT_0, "UnregisterWaitEx(INVALID_HANDLE_VALUE) did not return: %lu\n", Result);
+            if (Result == WAIT_OBJECT_0)
+            {
+                GetExitCodeThread(Thread, &Result);
+                ok(Result == TRUE, "UnregisterWaitEx failed\n");
+            }
+            CloseHandle(Thread);
+        }
+    }
+
+    /* Unregister with an event of a wait whose callback raised: the event is signalled */
+    ResetEvent(Object);
+    s_Raised = 0;
+    Ret = RegisterWaitForSingleObject(&Wait, Object, RaiseCallback, NULL, INFINITE, Flags);
+    ok(Ret, "RegisterWaitForSingleObject failed: %lu\n", GetLastError());
+    if (Ret)
+    {
+        SetEvent(Object);
+        for (i = 0; i < 50 && !s_Raised; i++)
+            Sleep(100);
+        ok(s_Raised >= 1, "Callback did not run\n");
+        Sleep(100);
+        Ret = UnregisterWaitEx(Wait, Completion);
+        ok(Ret || GetLastError() == ERROR_IO_PENDING, "UnregisterWaitEx failed: %lu\n", GetLastError());
+        Result = WaitForSingleObject(Completion, 5000);
+        ok(Result == WAIT_OBJECT_0, "Completion event not signalled: %lu\n", Result);
+    }
+
+Cleanup:
+    if (Completion) CloseHandle(Completion);
+    if (Object) CloseHandle(Object);
+}
+
 START_TEST(RegisterWait)
 {
     TestCompletionEventWithoutCallback();
@@ -310,4 +448,7 @@ START_TEST(RegisterWait)
     TestNonBlockingUnregister();
     TestHandleBeforeCallback();
     TestManyWaits();
+    TestCallbackException(WT_EXECUTEINWAITTHREAD);
+    TestCallbackException(WT_EXECUTEINIOTHREAD);
+    TestIdleLingerBoundary();
 }
