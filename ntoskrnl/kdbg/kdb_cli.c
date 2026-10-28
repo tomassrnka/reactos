@@ -3237,6 +3237,17 @@ KdbRegisterCliCallback(
 {
     ULONG i;
 
+    /* Registering a callback again must not take another entry. At boot the
+       table held ten copies of one driver's callback, and nothing else fitted */
+    if (!Deregister)
+    {
+        for (i = 0; i < _countof(KdbCliCallbacks); i++)
+        {
+            if (KdbCliCallbacks[i] == Callback)
+                return TRUE;
+        }
+    }
+
     /* Loop all entries */
     for (i = 0; i < _countof(KdbCliCallbacks); i++)
     {

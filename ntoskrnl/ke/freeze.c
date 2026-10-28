@@ -75,7 +75,7 @@ VOID
 NTAPI
 KeThawExecution(IN BOOLEAN Enable)
 {
-    ULONG Dropped = 0;
+    ULONG Dropped = 0, GraceDropped = 0;
 
     /* A nested freeze of the owner ends with the others still frozen */
 #ifdef CONFIG_SMP
@@ -95,6 +95,7 @@ KeThawExecution(IN BOOLEAN Enable)
 #if defined(_M_IX86) || defined(_M_AMD64)
     /* Give an NMI that was dropped during the freeze its normal handling */
     Dropped = KiCheckDroppedNmi();
+    GraceDropped = KiCheckGraceDroppedNmi();
 #endif
 
     /* Restore the old IRQL */
@@ -111,6 +112,12 @@ KeThawExecution(IN BOOLEAN Enable)
        that a print through the debugger can overflow */
     if ((Dropped != 0) && (KeGetCurrentIrql() < HIGH_LEVEL))
         DbgPrint("KE: %lu NMI(s) arrived during the debugger freeze and were dropped\n", Dropped);
+
+    /* The NMIs held by a frozen processor and taken right after its thaw, within
+       the grace window, and dropped as belonging to the freeze: counted by
+       the NMI handler, which cannot print, and said here at the next thaw */
+    if ((GraceDropped != 0) && (KeGetCurrentIrql() < HIGH_LEVEL))
+        DbgPrint("KE: %lu NMI(s) held across a debugger thaw were dropped in the post-thaw grace window\n", GraceDropped);
 }
 
 /* EOF */

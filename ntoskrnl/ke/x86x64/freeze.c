@@ -42,7 +42,11 @@ static KAFFINITY KiFreezeTargetSet;
 static ULONG KiFreezeDepth;
 
 /* The frames of a processor that reports an unclaimed NMI, which runs the
-   debugger from inside its NMI handler: no freeze NMI can interrupt it there */
+   debugger from inside its NMI handler: no freeze NMI can interrupt it there.
+   The HAL's NMI handler does not return (it halts the system after the report,
+   "Hardware Malfunction", and the debugger session it opens ends in the halt
+   too), so in practice the frames stay registered until the system stops: the
+   processor keeps serving freeze requests from the spin loops. */
 static struct
 {
     PKTRAP_FRAME TrapFrame;
@@ -54,10 +58,17 @@ static struct
  * An NMI that arrives while a processor is frozen is held until the processor
  * returns from its NMI handler, and is taken right after that, when the freeze
  * is over. It belongs to the freeze. A processor that leaves its freeze notes
- * the time up to which the NMI that follows is still dropped.
+ * the time up to which the NMI that follows is still dropped. The window is
+ * about a millisecond of TSC ticks, from the processor's frequency, so that a
+ * virtual processor that loses the host for a while still finds it open.
  */
-#define KI_NMI_GRACE_TICKS 200000ULL
+#define KI_NMI_GRACE_US         1000ULL
+#define KI_NMI_GRACE_FALLBACK_MHZ 1000ULL
 static volatile ULONG64 KiNmiGraceEnd[MAXIMUM_PROCESSORS];
+
+/* Number of NMIs dropped inside that window, after the freeze: reported
+   separately, at the next thaw, which is the next place that can print */
+static volatile LONG KiNmiGraceDropped;
 #endif
 
 /* Number of NMIs dropped because a freeze was in progress */
@@ -122,7 +133,8 @@ KiProcessorFreezeHandler(
     CurrentPrcb->IpiFrozen = IPI_FROZEN_STATE_RUNNING;
 
     /* An NMI that was held meanwhile comes right after the return */
-    KiNmiGraceEnd[CurrentPrcb->Number] = __rdtsc() + KI_NMI_GRACE_TICKS;
+    KiNmiGraceEnd[CurrentPrcb->Number] = __rdtsc() +
+        KI_NMI_GRACE_US * (CurrentPrcb->MHz ? CurrentPrcb->MHz : KI_NMI_GRACE_FALLBACK_MHZ);
 #endif
 
     /* Return TRUE to signal that we handled the freeze */
@@ -156,11 +168,17 @@ KiHandleNmiDuringFreeze(
     if (KiNmiGraceEnd[CurrentPrcb->Number] != 0)
     {
         BOOLEAN Grace = __rdtsc() < KiNmiGraceEnd[CurrentPrcb->Number];
+        BOOLEAN Reason = FALSE;
 
         KiNmiGraceEnd[CurrentPrcb->Number] = 0;
-        if (Grace && (READ_PORT_UCHAR((PUCHAR)0x61) & 0xC0) == 0)
+#if !defined(SARCH_PC98) && !defined(SARCH_XBOX)
+        if (Grace)
+            Reason = (READ_PORT_UCHAR((PUCHAR)0x61) & 0xC0) != 0;
+#endif
+        if (Grace && !Reason)
         {
-            InterlockedIncrement(&KiNmiDropped);
+            /* Not part of the freeze count: it came after the thaw */
+            InterlockedIncrement(&KiNmiGraceDropped);
             return TRUE;
         }
     }
@@ -236,6 +254,17 @@ KiCheckDroppedNmi(
     return Count;
 }
 
+ULONG
+KiCheckGraceDroppedNmi(
+    VOID)
+{
+#ifndef _M_IX86
+    return InterlockedExchange(&KiNmiGraceDropped, 0);
+#else
+    return 0;
+#endif
+}
+
 VOID
 KiBeginNmiReport(
     _In_ PKTRAP_FRAME TrapFrame,
@@ -251,6 +280,7 @@ VOID
 KiEndNmiReport(
     VOID)
 {
+    /* Only reached if the HAL's NMI handler returns, which the x86 HAL does not */
     KiNmiReport[KeGetCurrentPrcb()->Number].TrapFrame = NULL;
 }
 
