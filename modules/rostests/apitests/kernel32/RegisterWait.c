@@ -208,10 +208,106 @@ TestHandleBeforeCallback(void)
     CloseHandle(Object);
 }
 
+static VOID CALLBACK
+SetEventCallback(PVOID Context, BOOLEAN TimerOrWaitFired)
+{
+    SetEvent((HANDLE)Context);
+}
+
+/* More registered waits than the worker pool has threads, as the Chrome sandbox broker has (a wait per
+   IPC channel of every child): each wait still fires, and unregistering one with an event completes */
+#define MANY_WAITS 300
+
+static void
+TestManyWaits(void)
+{
+    HANDLE *Objects, *Waits, Object, Fired, Completion, Wait;
+    LONG Count = 0;
+    int i, Registered = 0;
+    DWORD Result;
+    BOOL Ret;
+
+    Objects = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, MANY_WAITS * sizeof(HANDLE));
+    Waits = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, MANY_WAITS * sizeof(HANDLE));
+    Object = CreateEventW(NULL, FALSE, FALSE, NULL);
+    Fired = CreateEventW(NULL, TRUE, FALSE, NULL);
+    Completion = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ok(Objects && Waits && Object && Fired && Completion, "Allocation failed: %lu\n", GetLastError());
+    if (!Objects || !Waits || !Object || !Fired || !Completion)
+        goto Cleanup;
+
+    for (i = 0; i < MANY_WAITS; i++)
+    {
+        Objects[i] = CreateEventW(NULL, TRUE, FALSE, NULL);
+        if (!Objects[i])
+            break;
+        if (!RegisterWaitForSingleObject(&Waits[i], Objects[i], CountCallback, &Count,
+                                         INFINITE, WT_EXECUTEINWAITTHREAD | WT_EXECUTEONLYONCE))
+        {
+            CloseHandle(Objects[i]);
+            Objects[i] = NULL;
+            break;
+        }
+        Registered++;
+    }
+    ok(Registered == MANY_WAITS, "Registered %d of %d waits: %lu\n", Registered, MANY_WAITS, GetLastError());
+
+    /* A wait registered after all the others fires */
+    Ret = RegisterWaitForSingleObject(&Wait, Object, SetEventCallback, Fired,
+                                      INFINITE, WT_EXECUTEINWAITTHREAD | WT_EXECUTEONLYONCE);
+    ok(Ret, "RegisterWaitForSingleObject failed: %lu\n", GetLastError());
+    if (Ret)
+    {
+        SetEvent(Object);
+        Result = WaitForSingleObject(Fired, 5000);
+        ok(Result == WAIT_OBJECT_0, "Wait registered after %d others did not fire: %lu\n", Registered, Result);
+        Ret = UnregisterWaitEx(Wait, INVALID_HANDLE_VALUE);
+        ok(Ret, "UnregisterWaitEx failed: %lu\n", GetLastError());
+    }
+
+    /* Unregistering a wait with no callback running completes at once, whether or not its thread ran */
+    ResetEvent(Object);
+    Ret = RegisterWaitForSingleObject(&Wait, Object, SetEventCallback, Fired,
+                                      INFINITE, WT_EXECUTEINWAITTHREAD | WT_EXECUTEONLYONCE);
+    ok(Ret, "RegisterWaitForSingleObject failed: %lu\n", GetLastError());
+    if (Ret)
+    {
+        Ret = UnregisterWaitEx(Wait, Completion);
+        ok(Ret, "UnregisterWaitEx failed: %lu\n", GetLastError());
+        Result = WaitForSingleObject(Completion, 5000);
+        ok(Result == WAIT_OBJECT_0, "Completion event not signalled: %lu\n", Result);
+    }
+
+    /* The first and the last of the many waits fire */
+    if (Registered == MANY_WAITS)
+    {
+        SetEvent(Objects[0]);
+        SetEvent(Objects[MANY_WAITS - 1]);
+        for (i = 0; i < 50 && Count < 2; i++)
+            Sleep(100);
+        ok(Count == 2, "%ld of 2 signalled waits fired\n", Count);
+    }
+
+    for (i = 0; i < Registered; i++)
+    {
+        Ret = UnregisterWaitEx(Waits[i], INVALID_HANDLE_VALUE);
+        ok(Ret, "UnregisterWaitEx(%d) failed: %lu\n", i, GetLastError());
+        CloseHandle(Objects[i]);
+    }
+
+Cleanup:
+    if (Completion) CloseHandle(Completion);
+    if (Fired) CloseHandle(Fired);
+    if (Object) CloseHandle(Object);
+    if (Waits) HeapFree(GetProcessHeap(), 0, Waits);
+    if (Objects) HeapFree(GetProcessHeap(), 0, Objects);
+}
+
 START_TEST(RegisterWait)
 {
     TestCompletionEventWithoutCallback();
     TestBlockingUnregister();
     TestNonBlockingUnregister();
     TestHandleBeforeCallback();
+    TestManyWaits();
 }
