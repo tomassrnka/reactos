@@ -113,6 +113,18 @@ ExpRaiseHardError(IN NTSTATUS ErrorStatus,
 
     PAGED_CODE();
 
+    /*
+     * Response options Windows does not know are not an error at this level
+     * (NtRaiseHardError rejects them from user mode with
+     * STATUS_INVALID_PARAMETER_4): the request is dropped without reaching
+     * the error port and the caller is simply told to return to the caller.
+     */
+    if (ValidResponseOptions > OptionCancelTryContinue)
+    {
+        *Response = ResponseReturnToCaller;
+        return STATUS_SUCCESS;
+    }
+
     /* Check if this error will shutdown the system */
     if (ValidResponseOptions == OptionShutdownSystem)
     {
@@ -129,8 +141,8 @@ ExpRaiseHardError(IN NTSTATUS ErrorStatus,
         if (!SeSinglePrivilegeCheck(SeTcbPrivilege, PreviousMode) ||
             !SeSinglePrivilegeCheck(SeShutdownPrivilege, PreviousMode))
         {
-            /* No rights */
-            *Response = ResponseNotHandled;
+            /* No rights; Windows leaves the response at "return to caller" */
+            *Response = ResponseReturnToCaller;
             return STATUS_PRIVILEGE_NOT_HELD;
         }
 
