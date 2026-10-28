@@ -612,7 +612,12 @@ VOID NTAPI ProtocolTransferDataComplete(
     TransferDataCompleteCalled++;
     ASSERT(TransferDataCompleteCalled <= TransferDataCalled);
 
-    if( Status != NDIS_STATUS_SUCCESS ) return;
+    /* The packet is ours (ProtocolReceive allocated it for the transfer): a failed transfer,
+       such as one that NDIS fails at the halt of the miniport, frees it too */
+    if( Status != NDIS_STATUS_SUCCESS ) {
+        FreeNdisPacket(Packet);
+        return;
+    }
 
     if (!LanSubmitReceiveWork(BindingContext,
                               Packet,
