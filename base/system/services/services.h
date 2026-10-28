@@ -82,6 +82,10 @@ typedef struct _SERVICE
     DWORD dwServiceBits;
     DWORD dwServiceTag;
 
+    /* The service status handle given to the service process: a 32-bit cookie, never 0.
+     * Not a pointer, so it survives truncation in a WoW64 (32-bit) service process */
+    DWORD dwStatusHandle;
+
     ULONG Flags;
 
     /* The failures that count towards the next failure action */
@@ -230,7 +234,7 @@ ScmControlServiceEx(
     _In_ HANDLE hControlPipe,
     _In_ PCWSTR pServiceName,
     _In_ DWORD dwControl,
-    _In_ SERVICE_STATUS_HANDLE hServiceStatus,
+    _In_ DWORD dwStatusHandle,
     _In_opt_ DWORD dwServiceTag,
     _In_opt_ DWORD argc,
     _In_reads_opt_(argc) const PCWSTR* argv);
@@ -240,7 +244,9 @@ ScmControlService(
     _In_ HANDLE hControlPipe,
     _In_ PCWSTR pServiceName,
     _In_ DWORD dwControl,
-    _In_ SERVICE_STATUS_HANDLE hServiceStatus);
+    _In_ DWORD dwStatusHandle);
+
+PSERVICE ScmGetServiceByStatusHandle(_In_ ULONG64 hServiceStatus);
 
 BOOL ScmLockDatabaseExclusive(VOID);
 BOOL ScmLockDatabaseShared(VOID);

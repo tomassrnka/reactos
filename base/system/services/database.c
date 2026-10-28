@@ -30,6 +30,7 @@ LIST_ENTRY ServiceListHead;
 
 static RTL_RESOURCE DatabaseLock;
 static DWORD ResumeCount = 1;
+static LONG StatusHandleCount = 0;
 static DWORD NoInteractiveServices = 0;
 static DWORD ServiceTag = 0;
 
@@ -1413,6 +1414,12 @@ ScmCreateNewServiceRecord(LPCWSTR lpServiceName,
     /* Set the resume count */
     lpService->dwResumeCount = ResumeCount++;
 
+    /* Give the service its status handle cookie (never 0) */
+    do
+    {
+        lpService->dwStatusHandle = (DWORD)InterlockedIncrement(&StatusHandleCount);
+    } while (lpService->dwStatusHandle == 0);
+
     /* Append service record */
     InsertTailList(&ServiceListHead,
                    &lpService->ServiceListEntry);
@@ -1429,6 +1436,40 @@ ScmCreateNewServiceRecord(LPCWSTR lpServiceName,
         (dwServiceType & SERVICE_DRIVER) ? 0 : 2000; /* 2 seconds */
 
     return ERROR_SUCCESS;
+}
+
+
+/*
+ * Map a service status handle, as handed out to the service process and
+ * returned by it, back to the service record. The handle is a 32-bit cookie
+ * rather than the record address, so that a WoW64 (32-bit) service process,
+ * which keeps it in a 32-bit SERVICE_STATUS_HANDLE, cannot truncate it.
+ * Returns NULL if no service has that handle.
+ */
+PSERVICE
+ScmGetServiceByStatusHandle(_In_ ULONG64 hServiceStatus)
+{
+    PLIST_ENTRY ServiceEntry;
+    PSERVICE CurrentService, Found = NULL;
+
+    if (hServiceStatus == 0 || hServiceStatus > MAXDWORD)
+        return NULL;
+
+    ScmLockDatabaseShared();
+    for (ServiceEntry = ServiceListHead.Flink;
+         ServiceEntry != &ServiceListHead;
+         ServiceEntry = ServiceEntry->Flink)
+    {
+        CurrentService = CONTAINING_RECORD(ServiceEntry, SERVICE, ServiceListEntry);
+        if (CurrentService->dwStatusHandle == (DWORD)hServiceStatus)
+        {
+            Found = CurrentService;
+            break;
+        }
+    }
+    ScmUnlockDatabase();
+
+    return Found;
 }
 
 
@@ -2138,7 +2179,7 @@ ScmControlServiceEx(
     _In_ HANDLE hControlPipe,
     _In_ PCWSTR pServiceName,
     _In_ DWORD dwControl,
-    _In_ SERVICE_STATUS_HANDLE hServiceStatus,
+    _In_ DWORD dwStatusHandle,
     _In_opt_ DWORD dwServiceTag,
     _In_opt_ DWORD argc,
     _In_reads_opt_(argc) const PCWSTR* argv)
@@ -2186,7 +2227,7 @@ ScmControlServiceEx(
 
     ControlPacket->dwSize = PacketSize;
     ControlPacket->dwControl = dwControl;
-    ControlPacket->hServiceStatus = (ULONG_PTR)hServiceStatus;
+    ControlPacket->hServiceStatus = dwStatusHandle;
     ControlPacket->dwServiceTag = dwServiceTag;
 
     /* Copy the start command line */
@@ -2241,7 +2282,7 @@ ScmControlService(
     _In_ HANDLE hControlPipe,
     _In_ PCWSTR pServiceName,
     _In_ DWORD dwControl,
-    _In_ SERVICE_STATUS_HANDLE hServiceStatus)
+    _In_ DWORD dwStatusHandle)
 {
     DWORD dwError = ERROR_SUCCESS;
     PSCM_CONTROL_PACKET ControlPacket;
@@ -2262,7 +2303,7 @@ ScmControlService(
 
     ControlPacket->dwSize = PacketSize;
     ControlPacket->dwControl = dwControl;
-    ControlPacket->hServiceStatus = (ULONG_PTR)hServiceStatus;
+    ControlPacket->hServiceStatus = dwStatusHandle;
 
     /* Copy the service name */
     ControlPacket->dwServiceNameOffset = sizeof(SCM_CONTROL_PACKET);
@@ -2608,7 +2649,7 @@ Quit:
                                Service->lpServiceName,
                                (Service->Status.dwServiceType & SERVICE_WIN32_OWN_PROCESS)
                                   ? SERVICE_CONTROL_START_OWN : SERVICE_CONTROL_START_SHARE,
-                               (SERVICE_STATUS_HANDLE)Service,
+                               Service->dwStatusHandle,
                                Service->dwServiceTag,
                                argc, argv);
 }
@@ -3031,7 +3072,7 @@ ScmAutoShutdownServices(VOID)
             ScmControlService(CurrentService->lpImage->hControlPipe,
                               CurrentService->lpServiceName,
                               SERVICE_CONTROL_SHUTDOWN,
-                              (SERVICE_STATUS_HANDLE)CurrentService);
+                              CurrentService->dwStatusHandle);
         }
 
         ServiceEntry = ServiceEntry->Flink;
