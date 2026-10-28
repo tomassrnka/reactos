@@ -74,13 +74,31 @@ static BOOLEAN GuestRange(ULONG Address, ULONG64 Size)
     return Address && (ULONG64)Address + Size <= (ULONG64)Wow64HighestUserAddress + 1;
 }
 
+/* Widens a guest handle array attribute (handle list, job list) into a native
+ * array the caller frees */
+static NTSTATUS CaptureHandles(UPDATE_ATTRIBUTE Update, LPPROC_THREAD_ATTRIBUTE_LIST List,
+                               const PROC_THREAD_ATTRIBUTE_ENTRY32 *Entry, HANDLE **Handles)
+{
+    const ULONG *Guest = PTR32(Entry->Value);
+    ULONG Number = Entry->Size / sizeof(ULONG), j;
+    if (*Handles || !Number || Entry->Size % sizeof(ULONG) || Number > ROS_PS_MAX_HANDLE_COUNT ||
+        !GuestRange(Entry->Value, Entry->Size))
+        return STATUS_INVALID_PARAMETER;
+    *Handles = RtlAllocateHeap(RtlGetProcessHeap(), 0, (SIZE_T)Number * sizeof(HANDLE));
+    if (!*Handles) return STATUS_NO_MEMORY;
+    for (j = 0; j < Number; ++j) (*Handles)[j] = HANDLE32(Guest[j]);
+    if (!Update(List, 0, Entry->Attribute, *Handles, (SIZE_T)Number * sizeof(HANDLE), NULL, NULL))
+        return STATUS_INVALID_PARAMETER;
+    return STATUS_SUCCESS;
+}
+
 /* A native copy of the guest's attribute list. The guest kernel32 accepted it
- * (handle list, ideal processor, mitigation policy). Every guest range is
- * checked and read once: handle values widen into *Handles, the small values
- * (no pointers) are copied into storage after the native list, which is one
- * allocation (*List). */
+ * (handle list, job list, ideal processor, mitigation, child process and
+ * component filter policies). Every guest range is checked and read once:
+ * handle values widen into *Handles and *Jobs, the small values (no pointers)
+ * are copied into storage after the native list, which is one allocation (*List). */
 static NTSTATUS CaptureAttributeList(PVOID Module, ULONG Address, LPPROC_THREAD_ATTRIBUTE_LIST *List, HANDLE **Handles,
-                                     BOOLEAN *Reported)
+                                     HANDLE **Jobs, BOOLEAN *Reported)
 {
     PROC_THREAD_ATTRIBUTE_LIST32 *From = PTR32(Address);
     ANSI_STRING InitializeName = RTL_CONSTANT_STRING("InitializeProcThreadAttributeList");
@@ -90,11 +108,12 @@ static NTSTATUS CaptureAttributeList(PVOID Module, ULONG Address, LPPROC_THREAD_
     PROC_THREAD_ATTRIBUTE_ENTRY32 Entry;
     ULONGLONG (*Values)[2];
     SIZE_T Size = 0, ListSize;
-    ULONG Count, i, j;
+    ULONG Count, i;
     NTSTATUS Status;
 
     *List = NULL;
     *Handles = NULL;
+    *Jobs = NULL;
     if (!From) return STATUS_SUCCESS;
     Status = LdrGetProcedureAddress(Module, &InitializeName, 0, (PVOID *)&Initialize);
     if (NT_SUCCESS(Status)) Status = LdrGetProcedureAddress(Module, &UpdateName, 0, (PVOID *)&Update);
@@ -115,19 +134,19 @@ static NTSTATUS CaptureAttributeList(PVOID Module, ULONG Address, LPPROC_THREAD_
         Entry = From->Attributes[i];
         if (Entry.Attribute == PROC_THREAD_ATTRIBUTE_HANDLE_LIST)
         {
-            const ULONG *Guest = PTR32(Entry.Value);
-            ULONG Number = Entry.Size / sizeof(ULONG);
-            if (*Handles || !Number || Entry.Size % sizeof(ULONG) || Number > ROS_PS_MAX_HANDLE_COUNT ||
-                !GuestRange(Entry.Value, Entry.Size))
-                return STATUS_INVALID_PARAMETER;
-            *Handles = RtlAllocateHeap(RtlGetProcessHeap(), 0, (SIZE_T)Number * sizeof(HANDLE));
-            if (!*Handles) return STATUS_NO_MEMORY;
-            for (j = 0; j < Number; ++j) (*Handles)[j] = HANDLE32(Guest[j]);
-            if (!Update(*List, 0, Entry.Attribute, *Handles, (SIZE_T)Number * sizeof(HANDLE), NULL, NULL))
-                return STATUS_INVALID_PARAMETER;
+            Status = CaptureHandles(Update, *List, &Entry, Handles);
+            if (!NT_SUCCESS(Status)) return Status;
+        }
+        else if (Entry.Attribute == PROC_THREAD_ATTRIBUTE_JOB_LIST)
+        {
+            /* Chromium's sandbox passes the target's job here on Windows 10 */
+            Status = CaptureHandles(Update, *List, &Entry, Jobs);
+            if (!NT_SUCCESS(Status)) return Status;
         }
         else if (Entry.Attribute == PROC_THREAD_ATTRIBUTE_IDEAL_PROCESSOR ||
-                 Entry.Attribute == PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY)
+                 Entry.Attribute == PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY ||
+                 Entry.Attribute == PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY ||
+                 Entry.Attribute == PROC_THREAD_ATTRIBUTE_COMPONENT_FILTER)
         {
             /* PROCESSOR_NUMBER and the DWORD/DWORD64 policies: no pointers, at most 16 bytes */
             if (!Entry.Size || Entry.Size > sizeof(Values[i]) || !GuestRange(Entry.Value, Entry.Size))
@@ -152,7 +171,7 @@ NTSTATUS Wow64CreateProcess(PVOID Buffer, BOOLEAN *Reported)
     STARTUPINFO32 In;
     STARTUPINFOEXW Startup = {{sizeof(Startup.StartupInfo)}};
     LPPROC_THREAD_ATTRIBUTE_LIST AttributeList = NULL;
-    HANDLE *ListHandles = NULL;
+    HANDLE *ListHandles = NULL, *ListJobs = NULL;
     SECURITY_ATTRIBUTES ProcessSecurity, ThreadSecurity, *Ps, *Ts;
     SECURITY_DESCRIPTOR ProcessSd, ThreadSd;
     PROCESS_INFORMATION Info = {0};
@@ -249,7 +268,8 @@ NTSTATUS Wow64CreateProcess(PVOID Buffer, BOOLEAN *Reported)
         if (Request.CreationFlags & EXTENDED_STARTUPINFO_PRESENT)
         {
             Startup.StartupInfo.cb = sizeof(Startup);
-            Status = CaptureAttributeList(Module, Request.AttributeList, &AttributeList, &ListHandles, Reported);
+            Status = CaptureAttributeList(Module, Request.AttributeList, &AttributeList, &ListHandles, &ListJobs,
+                                          Reported);
             if (!NT_SUCCESS(Status)) _SEH2_LEAVE;
             Startup.lpAttributeList = AttributeList;
         }
@@ -289,6 +309,7 @@ NTSTATUS Wow64CreateProcess(PVOID Buffer, BOOLEAN *Reported)
     if (NewToken) NtClose(NewToken);
     if (AttributeList) RtlFreeHeap(RtlGetProcessHeap(), 0, AttributeList);
     if (ListHandles) RtlFreeHeap(RtlGetProcessHeap(), 0, ListHandles);
+    if (ListJobs) RtlFreeHeap(RtlGetProcessHeap(), 0, ListJobs);
     if (Application) RtlFreeHeap(RtlGetProcessHeap(), 0, Application);
     if (Redirected) RtlFreeHeap(RtlGetProcessHeap(), 0, Redirected);
     RtlFreeUnicodeString(&Path);
