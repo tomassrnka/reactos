@@ -24,6 +24,7 @@ extern void func_getservbyport(void);
 extern void func_getsockname(void);
 extern void func_iocpskip(void);
 extern void func_ioctlsocket(void);
+extern void func_killpendingio(void);
 extern void func_listen(void);
 extern void func_udpconnreset(void);
 extern void func_manysockets(void);
@@ -72,6 +73,7 @@ const struct test winetest_testlist[] =
     { "getsockname", func_getsockname },
     { "iocpskip", func_iocpskip },
     { "ioctlsocket", func_ioctlsocket },
+    { "killpendingio", func_killpendingio },
     { "listen", func_listen },
     { "udpconnreset", func_udpconnreset },
     { "manysockets", func_manysockets },
