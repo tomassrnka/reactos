@@ -2305,6 +2305,16 @@ KdSystemDebugControl(
             break;
     }
 
+    /*
+     * Windows Vista and later refuse every command, supported or not,
+     * when no kernel debugger is active.
+     */
+    if ((NtMajorVersion >= 6) &&
+        (KdPitchDebugger || KdDebuggerNotPresent))
+    {
+        return STATUS_DEBUGGER_INACTIVE;
+    }
+
     switch (Command)
     {
         case SysDbgQueryVersion:
