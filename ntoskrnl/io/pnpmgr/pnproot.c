@@ -1340,6 +1340,17 @@ PnpRootPdoPnpControl(
         case IRP_MN_REMOVE_DEVICE:
         {
             PPNPROOT_DEVICE DeviceInfo;
+            PDEVICE_NODE DeviceNode = IopGetDeviceNode(DeviceObject);
+
+            /* A disabled device stays: the PnP manager keeps its device node, and the
+             * device is started again, with the same PDO, when it is enabled */
+            if (DeviceNode &&
+                (DeviceNode->UserFlags & DNUF_DISABLED) &&
+                !(DeviceNode->Flags & DNF_DEVICE_GONE))
+            {
+                Status = STATUS_SUCCESS;
+                break;
+            }
 
             /* Take the device info out of the device list and the extension.
              * The PnP manager can send a second remove request for this

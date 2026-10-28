@@ -557,6 +557,7 @@ typedef enum _DEVICE_ACTION
 typedef struct _PIP_QUERY_REMOVE_CONTEXT
 {
     BOOLEAN Force;                         // skip the query phase (forced removal)
+    BOOLEAN Disable;                       // disable the device: keep its node (problem CM_PROB_DISABLED), do not delete it
     BOOLEAN Vetoed;                        // a device vetoed the query-remove
     PNP_VETO_TYPE VetoType;                // reason reported by/for the vetoing device
     WCHAR VetoName[PNP_VETO_NAME_LENGTH];  // instance path of the vetoing device

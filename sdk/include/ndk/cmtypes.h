@@ -498,6 +498,9 @@ typedef struct _PLUGPLAY_CONTROL_DEVICE_CONTROL_DATA
 } PLUGPLAY_CONTROL_DEVICE_CONTROL_DATA, *PPLUGPLAY_CONTROL_DEVICE_CONTROL_DATA;
 
 // PlugPlayControlQueryAndRemoveDevice (0x06)
+// ReactOS: Flags bit asking to disable the device (CM_Disable_DevNode) instead of removing it: the stack is
+// torn down, but the device node stays in the tree with the CM_PROB_DISABLED problem so it can be started again.
+#define PNP_QUERY_REMOVE_DISABLE 0x80000000
 typedef struct _PLUGPLAY_CONTROL_QUERY_REMOVE_DATA
 {
     UNICODE_STRING DeviceInstance;

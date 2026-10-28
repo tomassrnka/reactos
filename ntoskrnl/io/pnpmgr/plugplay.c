@@ -1344,6 +1344,16 @@ PiControlQueryRemoveDevice(
     RtlZeroMemory(&VetoContext, sizeof(VetoContext));
     // TODO: honor CM_REMOVE_* bits in ControlData->Flags (e.g. forced removal).
     VetoContext.Force = FALSE;
+    _SEH2_TRY
+    {
+        VetoContext.Disable = !!(ControlData->Flags & PNP_QUERY_REMOVE_DISABLE);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        ObDereferenceObject(DeviceObject);
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
 
     Status = PiPerformSyncQueryRemoveDevice(DeviceObject, &VetoContext);
 

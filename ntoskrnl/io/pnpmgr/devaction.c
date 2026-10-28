@@ -1728,6 +1728,173 @@ IopUpdateResourceMapForPnPDevice(
 
 static
 VOID
+IopFreeRemovedChildNodes(
+    _In_ PDEVICE_NODE ParentNode);
+
+static
+VOID
+NTAPI
+IopSendRemoveDevice(IN PDEVICE_OBJECT DeviceObject);
+
+/**
+ * @brief   Tells whether a device node is in the "disabled" state: its stack is gone,
+ *          the node stays in the tree and waits to be started again.
+ */
+static
+BOOLEAN
+IopIsDeviceNodeDisabled(
+    _In_ PDEVICE_NODE DeviceNode)
+{
+    return DeviceNode->State == DeviceNodeInitialized &&
+           (DeviceNode->UserFlags & DNUF_DISABLED) &&
+           (DeviceNode->Flags & DNF_HAS_PROBLEM) &&
+           DeviceNode->Problem == CM_PROB_DISABLED;
+}
+
+/* Marks the node disabled. Only the PnP manager does this (the flag is what the root
+ * enumerator trusts to keep a PDO), never a problem code that user mode could set */
+static
+VOID
+IopMarkDeviceNodeDisabled(
+    _In_ PDEVICE_NODE DeviceNode)
+{
+    PiSetDevNodeProblem(DeviceNode, CM_PROB_DISABLED);
+    DeviceNode->UserFlags |= DNUF_DISABLED;
+}
+
+static
+VOID
+IopClearDeviceNodeDisabled(
+    _In_ PDEVICE_NODE DeviceNode)
+{
+    DeviceNode->UserFlags &= ~DNUF_DISABLED;
+    PiClearDevNodeProblem(DeviceNode);
+}
+
+/* Brings a node that was removed, but whose PDO is still there, back as a disabled device:
+ * the state a device waits in for an enable. Gives the node back the PDO reference that its
+ * removal dropped and frees the resource lists that the removal only emptied.
+ * Returns FALSE if the PDO is being deleted. */
+static
+BOOLEAN
+IopReviveNodeAsDisabled(
+    _In_ PDEVICE_NODE DeviceNode)
+{
+    PDEVICE_OBJECT Pdo = DeviceNode->PhysicalDeviceObject;
+
+    if (IoGetDevObjExtension(Pdo)->ExtensionFlags & DOE_DELETE_PENDING)
+        return FALSE;
+
+    ObReferenceObject(Pdo);
+
+    if (DeviceNode->ResourceList)
+    {
+        ExFreePool(DeviceNode->ResourceList);
+        DeviceNode->ResourceList = NULL;
+    }
+    if (DeviceNode->ResourceListTranslated)
+    {
+        ExFreePool(DeviceNode->ResourceListTranslated);
+        DeviceNode->ResourceListTranslated = NULL;
+    }
+    DeviceNode->Flags &= ~(DNF_REENUMERATE |
+                           DNF_RESOURCE_REQUIREMENTS_CHANGED |
+                           DNF_NON_STOPPED_REBALANCE |
+                           DNF_NO_RESOURCE_REQUIRED);
+
+    IopMarkDeviceNodeDisabled(DeviceNode);
+    PiSetDevNodeState(DeviceNode, DeviceNodeInitialized);
+    return TRUE;
+}
+
+/* Deletes the device nodes below a node whose children were all sent IRP_MN_REMOVE_DEVICE
+ * (state DeviceNodeRemoved), as the deletion of their PDOs would. A bus that still has a
+ * PDO reports it again when it is enabled, and gets a new node. */
+static
+VOID
+IopFreeRemovedChildNodes(
+    _In_ PDEVICE_NODE ParentNode)
+{
+    PDEVICE_NODE Child, Next;
+
+    /* The tree is walked without IopDeviceTreeLock: its shape only changes on the device action
+     * worker (enumeration, removal), which is where this runs, or when the last reference to a
+     * PDO goes and its node is freed. Those PDOs are the ones this very request removed and
+     * that the caller keeps referenced. */
+    Child = ParentNode->Child;
+    while (Child != NULL)
+    {
+        Next = Child->Sibling;
+
+        IopFreeRemovedChildNodes(Child);
+
+        if (Child->Child == NULL &&
+            Child->State == DeviceNodeRemoved &&
+            IsListEmpty(&Child->TargetDeviceNotify))
+        {
+            IopFreeDeviceNode(Child);
+        }
+        else
+        {
+            DPRINT1("Cannot delete the child node %wZ (state 0x%x)\n",
+                    &Child->InstancePath, Child->State);
+        }
+        Child = Next;
+    }
+}
+
+/**
+ * @brief   Disables a device whose subtree has already accepted the query-remove.
+ *
+ * Like IopSendRemoveDevice, it sends IRP_MN_REMOVE_DEVICE to the device stack. Unlike it, the
+ * device node (and the PDO it references) stays in the tree: it gets the CM_PROB_DISABLED
+ * problem and goes back to DeviceNodeInitialized, with no drivers added and no resources
+ * assigned, so that a later start request runs AddDevice and IRP_MN_START_DEVICE again.
+ *
+ * The problem is set before the IRP is sent: a bus driver that deletes the PDOs it reports
+ * on removal (the root enumerator) must keep this one.
+ */
+static
+VOID
+IopDisableDevice(
+    _In_ PDEVICE_OBJECT DeviceObject)
+{
+    PDEVICE_NODE DeviceNode = IopGetDeviceNode(DeviceObject);
+
+    ASSERT(DeviceNode->State == DeviceNodeAwaitingQueuedRemoval);
+
+    IopMarkDeviceNodeDisabled(DeviceNode);
+
+    PiIrpSendRemoveCheckVpb(DeviceObject, IRP_MN_REMOVE_DEVICE);
+
+    /* The children were removed by the caller: their nodes go too */
+    IopFreeRemovedChildNodes(DeviceNode);
+
+    /* Give back the resources: update the resource map, then drop the lists
+     * (a start assigns them anew) */
+    if (DeviceNode->ResourceList)
+    {
+        ASSERT(DeviceNode->ResourceListTranslated);
+        DeviceNode->ResourceList->Count = 0;
+        DeviceNode->ResourceListTranslated->Count = 0;
+        IopUpdateResourceMapForPnPDevice(DeviceNode);
+        ExFreePool(DeviceNode->ResourceList);
+        ExFreePool(DeviceNode->ResourceListTranslated);
+        DeviceNode->ResourceList = NULL;
+        DeviceNode->ResourceListTranslated = NULL;
+    }
+
+    DeviceNode->Flags &= ~(DNF_REENUMERATE |
+                           DNF_RESOURCE_REQUIREMENTS_CHANGED |
+                           DNF_NON_STOPPED_REBALANCE |
+                           DNF_NO_RESOURCE_REQUIRED);
+
+    PiSetDevNodeState(DeviceNode, DeviceNodeInitialized);
+    PiNotifyTargetDeviceChange(&GUID_TARGET_DEVICE_REMOVE_COMPLETE, DeviceObject, NULL);
+}
+
+static
+VOID
 NTAPI
 IopSendRemoveDevice(IN PDEVICE_OBJECT DeviceObject)
 {
@@ -1747,6 +1914,10 @@ IopSendRemoveDevice(IN PDEVICE_OBJECT DeviceObject)
         IopUpdateResourceMapForPnPDevice(DeviceNode);
     }
     /* End of HACK */
+
+    /* The children were removed before the device: their nodes cannot outlive it
+     * (a PDO that the bus keeps would leave its node behind) */
+    IopFreeRemovedChildNodes(DeviceNode);
 
     PiSetDevNodeState(DeviceNode, DeviceNodeRemoved);
     PiNotifyTargetDeviceChange(&GUID_TARGET_DEVICE_REMOVE_COMPLETE, DeviceObject, NULL);
@@ -2207,11 +2378,44 @@ IopQueryAndRemoveDevice(
     ASSERT(DeviceNode);
     ASSERT(VetoContext);
 
+    if (VetoContext->Disable && !IopIsDeviceNodeDisabled(DeviceNode))
+    {
+        /* A device that never started has no stack to tear down: disabling it only marks it */
+        if (DeviceNode->State == DeviceNodeInitialized)
+        {
+            IopMarkDeviceNodeDisabled(DeviceNode);
+            return STATUS_SUCCESS;
+        }
+
+        /* A device that failed (CM_PROB_FAILED_START, ...) and was removed for it: its PDO is
+         * still there, so it can be disabled and enabled again like any other */
+        if (DeviceNode->State == DeviceNodeRemoved &&
+            (DeviceNode->Flags & DNF_HAS_PROBLEM) &&
+            !(DeviceNode->Flags & DNF_DEVICE_GONE) &&
+            IopReviveNodeAsDisabled(DeviceNode))
+        {
+            return STATUS_SUCCESS;
+        }
+    }
+
     /* A device that is already gone needs no teardown: report success so that
      * repeated disable/uninstall requests remain idempotent. */
     if (DeviceNode->State == DeviceNodeRemoved ||
         DeviceNode->State == DeviceNodeDeleted)
     {
+        return STATUS_SUCCESS;
+    }
+
+    /* A disabled device has no stack left: disabling it again is a no-op. Removing it for
+     * real (uninstall) only has the PDO left to remove. */
+    if (IopIsDeviceNodeDisabled(DeviceNode))
+    {
+        if (VetoContext->Disable)
+            return STATUS_SUCCESS;
+
+        IopClearDeviceNodeDisabled(DeviceNode);
+        PiSetDevNodeState(DeviceNode, DeviceNodeAwaitingQueuedRemoval);
+        IopSendRemoveDevice(DeviceObject);
         return STATUS_SUCCESS;
     }
 
@@ -2250,7 +2454,10 @@ IopQueryAndRemoveDevice(
 
     /* The subtree released the device: finish by removing the target itself.
      * Note: this dereferences the PDO, so DeviceNode must not be touched afterwards. */
-    IopSendRemoveDevice(DeviceObject);
+    if (VetoContext->Disable)
+        IopDisableDevice(DeviceObject);
+    else
+        IopSendRemoveDevice(DeviceObject);
 
     return STATUS_SUCCESS;
 }
@@ -2754,12 +2961,47 @@ PipDeviceActionWorker(
                 break;
 
             case PiActionStartDevice:
+            {
                 // This action is triggered from usermode, when a driver is installed
-                // for a non-critical PDO
+                // for a non-critical PDO, or when a disabled device is enabled
+                BOOLEAN enabling = IopIsDeviceNodeDisabled(deviceNode);
+
+                if (enabling)
+                {
+                    // enabling: clear the problem and start the stack again. DNUF_DISABLED stays
+                    // until the device has started: if the start fails and the device is
+                    // removed for it, the root enumerator must still keep the PDO.
+                    PiClearDevNodeProblem(deviceNode);
+                }
+
                 if (deviceNode->State == DeviceNodeInitialized &&
                     !(deviceNode->Flags & DNF_HAS_PROBLEM))
                 {
                     PiDevNodeStateMachine(deviceNode);
+
+                    // An enable reports a start that failed; a device that was set up
+                    // (installed) keeps behaving as before
+                    if (enabling)
+                    {
+                        if (deviceNode->State == DeviceNodeStarted)
+                        {
+                            deviceNode->UserFlags &= ~DNUF_DISABLED;
+                        }
+                        else
+                        {
+                            DPRINT1("Failed to enable %wZ (state 0x%x, problem %u)\n",
+                                    &deviceNode->InstancePath, deviceNode->State, deviceNode->Problem);
+                            status = STATUS_UNSUCCESSFUL;
+
+                            // The device stays in the tree, disabled, and can be enabled again
+                            if (deviceNode->State == DeviceNodeRemoved)
+                                IopReviveNodeAsDisabled(deviceNode);
+                            else if (deviceNode->State == DeviceNodeInitialized)
+                                IopMarkDeviceNodeDisabled(deviceNode);
+                            else
+                                deviceNode->UserFlags &= ~DNUF_DISABLED;
+                        }
+                    }
                 }
                 else
                 {
@@ -2768,6 +3010,7 @@ PipDeviceActionWorker(
                     status = STATUS_UNSUCCESSFUL;
                 }
                 break;
+            }
 
             case PiActionQueryState:
                 // This action is only valid for started devices. If the device is not yet

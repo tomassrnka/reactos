@@ -216,6 +216,7 @@ extern POBJECT_TYPE NTSYSAPI IoDriverObjectType;
 #define DNUF_NOT_DISABLEABLE                    0x0008
 #define DNUF_SHUTDOWN_QUERIED                   0x0010
 #define DNUF_SHUTDOWN_SUBTREE_DONE              0x0020
+#define DNUF_DISABLED                           0x0040 /* ReactOS: disabled by IopDisableDevice, the node waits for an enable */
 
 //
 // Internal Option Flags
