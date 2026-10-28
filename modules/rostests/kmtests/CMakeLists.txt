@@ -76,6 +76,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ex/ExTimer.c
     ntos_ex/ExTimerResolution.c
     ntos_ex/ExUuid.c
+    ntos_ex/ExWorkQueue.c
     ntos_ex/ProbeCapture.c
     ntos_fsrtl/FsRtlDissect.c
     ntos_fsrtl/FsRtlEcp.c
