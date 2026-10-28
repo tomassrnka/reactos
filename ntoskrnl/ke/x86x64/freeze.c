@@ -41,6 +41,25 @@ static KAFFINITY KiFreezeTargetSet;
 /* Number of nested freezes by the owner, which has frozen the others once */
 static ULONG KiFreezeDepth;
 
+/* The frames of a processor that reports an unclaimed NMI, which runs the
+   debugger from inside its NMI handler: no freeze NMI can interrupt it there */
+static struct
+{
+    PKTRAP_FRAME TrapFrame;
+    PKEXCEPTION_FRAME ExceptionFrame;
+} volatile KiNmiReport[MAXIMUM_PROCESSORS];
+
+#ifndef _M_IX86
+/*
+ * An NMI that arrives while a processor is frozen is held until the processor
+ * returns from its NMI handler, and is taken right after that, when the freeze
+ * is over. It belongs to the freeze. A processor that leaves its freeze notes
+ * the time up to which the NMI that follows is still dropped.
+ */
+#define KI_NMI_GRACE_TICKS 200000ULL
+static volatile ULONG64 KiNmiGraceEnd[MAXIMUM_PROCESSORS];
+#endif
+
 /* Number of NMIs dropped because a freeze was in progress */
 static volatile LONG KiNmiDropped;
 
@@ -101,6 +120,9 @@ KiProcessorFreezeHandler(
 #ifndef _M_IX86
     /* We are running again now */
     CurrentPrcb->IpiFrozen = IPI_FROZEN_STATE_RUNNING;
+
+    /* An NMI that was held meanwhile comes right after the return */
+    KiNmiGraceEnd[CurrentPrcb->Number] = __rdtsc() + KI_NMI_GRACE_TICKS;
 #endif
 
     /* Return TRUE to signal that we handled the freeze */
@@ -127,6 +149,22 @@ KiHandleNmiDuringFreeze(
         InterlockedIncrement(&KiNmiDropped);
         return TRUE;
     }
+
+#ifndef _M_IX86
+    /* The NMI that was held while this processor was frozen, unless the
+       hardware reports a reason for it */
+    if (KiNmiGraceEnd[CurrentPrcb->Number] != 0)
+    {
+        BOOLEAN Grace = __rdtsc() < KiNmiGraceEnd[CurrentPrcb->Number];
+
+        KiNmiGraceEnd[CurrentPrcb->Number] = 0;
+        if (Grace && (READ_PORT_UCHAR((PUCHAR)0x61) & 0xC0) == 0)
+        {
+            InterlockedIncrement(&KiNmiDropped);
+            return TRUE;
+        }
+    }
+#endif
 
     /*
      * An NMI that is not a freeze request reaches a processor that already is
@@ -199,6 +237,24 @@ KiCheckDroppedNmi(
 }
 
 VOID
+KiBeginNmiReport(
+    _In_ PKTRAP_FRAME TrapFrame,
+    _In_ PKEXCEPTION_FRAME ExceptionFrame)
+{
+    ULONG Number = KeGetCurrentPrcb()->Number;
+
+    KiNmiReport[Number].ExceptionFrame = ExceptionFrame;
+    KiNmiReport[Number].TrapFrame = TrapFrame;
+}
+
+VOID
+KiEndNmiReport(
+    VOID)
+{
+    KiNmiReport[KeGetCurrentPrcb()->Number].TrapFrame = NULL;
+}
+
+VOID
 KiHandleLostNmi(
     VOID)
 {
@@ -231,9 +287,20 @@ KxFreezeExecution(
     while (InterlockedCompareExchangePointer((PVOID*)&KiFreezeOwner, CurrentPrcb, NULL))
     {
         /* Someone else was faster. We expect an NMI to freeze any time.
-           Spin here until the freeze owner is available. */
+           Spin here until the freeze owner is available. A processor in its
+           NMI handler (an NMI report enters the debugger there) gets no NMI,
+           and the owner waits for it: it serves the freeze request itself. */
         while (KiFreezeOwner != NULL)
         {
+            PKTRAP_FRAME ReportFrame = KiNmiReport[CurrentPrcb->Number].TrapFrame;
+
+            if (ReportFrame != NULL &&
+                CurrentPrcb->IpiFrozen == IPI_FROZEN_STATE_TARGET_FREEZE &&
+                KiProcessorFreezeHandler(ReportFrame, KiNmiReport[CurrentPrcb->Number].ExceptionFrame))
+            {
+                CurrentPrcb->IpiFrozen = IPI_FROZEN_STATE_RUNNING;
+            }
+
             YieldProcessor();
             KeMemoryBarrier();
         }

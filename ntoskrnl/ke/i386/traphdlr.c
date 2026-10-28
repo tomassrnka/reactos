@@ -582,7 +582,9 @@ KiTrap02Handler(VOID)
             }
         }
 
+        KiBeginNmiReport(&TrapFrame, NULL);
         HalHandleNMI(NULL);
+        KiEndNmiReport();
         KeGetPcr()->Irql = OldIrql;
     }
 

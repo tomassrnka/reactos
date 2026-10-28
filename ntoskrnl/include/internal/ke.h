@@ -1129,6 +1129,15 @@ VOID
 KiHandleLostNmi(
     VOID);
 
+VOID
+KiBeginNmiReport(
+    _In_ PKTRAP_FRAME TrapFrame,
+    _In_ PKEXCEPTION_FRAME ExceptionFrame);
+
+VOID
+KiEndNmiReport(
+    VOID);
+
 BOOLEAN
 NTAPI
 KeFreezeExecution(IN PKTRAP_FRAME TrapFrame,

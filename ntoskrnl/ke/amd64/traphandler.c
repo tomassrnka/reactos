@@ -168,7 +168,9 @@ KiNmiInterruptHandler(
            the kernel debugger sends, since no further NMI reaches them. */
         if (InterlockedCompareExchange(&ReportOwner, 1, 0) == 0)
         {
+            KiBeginNmiReport(TrapFrame, ExceptionFrame);
             HalHandleNMI(NULL);
+            KiEndNmiReport();
         }
         else
         {
