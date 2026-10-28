@@ -1037,7 +1037,13 @@ IopDeviceStatus(PPLUGPLAY_CONTROL_STATUS_DATA StatusData)
              * that the PnP manager would act on */
             if ((DeviceStatus & DN_HAS_PROBLEM) && DeviceProblem != 0)
             {
-                PiSetDevNodeProblem(DeviceNode, DeviceProblem);
+                /* Windows refuses to put a problem on a device that runs (measured with
+                 * CM_Set_DevNode_Problem: CR_INVALID_DATA, nothing changes), and CM_PROB_DISABLED
+                 * is the PnP manager's: set from here it would strand a node that is not parked */
+                if (PiIsDevNodeStarted(DeviceNode) || DeviceProblem == CM_PROB_DISABLED)
+                    Status = STATUS_INVALID_PARAMETER;
+                else
+                    PiSetDevNodeProblem(DeviceNode, DeviceProblem);
             }
             break;
 

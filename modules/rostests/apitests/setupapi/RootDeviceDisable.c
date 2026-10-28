@@ -20,6 +20,7 @@
 #include <setupapi.h>
 #include <regstr.h>
 #include <shlwapi.h>
+#include <lm.h>
 
 #include "fakemp.h"
 
@@ -413,6 +414,78 @@ TestFailedDevice(void)
     RegCloseKey(EnumKey);
 }
 
+#define NOADMIN_USER L"rtdisuser"
+#define NOADMIN_PASS L"RtDis-Pass#1x"
+/* The device state calls take an administrator: the same calls from a user get
+ * CR_ACCESS_DENIED. The calls are on the running test device, and are harmless for an
+ * administrator (enabling a device that runs, a problem refused for a device that runs): only
+ * the disable would do something, so it is only made by the user, who must be refused.
+ * A new connection (CM_Connect_Machine) is made under the identity of the caller. */
+static
+void
+CheckStateCalls(PCSTR Who, BOOL ExpectDenied)
+{
+    HMACHINE Machine;
+    DEVINST Dev;
+    CONFIGRET Cr;
+
+    Cr = CM_Connect_MachineW(NULL, &Machine);
+    ok(Cr == CR_SUCCESS, "%s: CM_Connect_MachineW failed: 0x%lx\n", Who, Cr);
+    if (Cr != CR_SUCCESS)
+        return;
+    Cr = CM_Locate_DevNode_ExW(&Dev, (DEVINSTID_W)DEVICE_INSTANCE, CM_LOCATE_DEVNODE_NORMAL, Machine);
+    ok(Cr == CR_SUCCESS, "%s: CM_Locate_DevNode_ExW failed: 0x%lx\n", Who, Cr);
+    if (Cr == CR_SUCCESS)
+    {
+        if (ExpectDenied)
+        {
+            Cr = CM_Disable_DevNode_Ex(Dev, 0, Machine);
+            ok(Cr == CR_ACCESS_DENIED, "%s: CM_Disable_DevNode: 0x%lx\n", Who, Cr);
+        }
+        Cr = CM_Enable_DevNode_Ex(Dev, 0, Machine);
+        ok(ExpectDenied ? Cr == CR_ACCESS_DENIED : Cr == CR_SUCCESS, "%s: CM_Enable_DevNode: 0x%lx\n", Who, Cr);
+        Cr = CM_Set_DevNode_Problem_Ex(Dev, CM_PROB_FAILED_INSTALL, CM_SET_DEVNODE_PROBLEM_NORMAL, Machine);
+        ok(Cr == (ExpectDenied ? CR_ACCESS_DENIED : CR_INVALID_DATA), "%s: CM_Set_DevNode_Problem: 0x%lx\n", Who, Cr);
+    }
+    CM_Disconnect_Machine(Machine);
+}
+
+static
+void
+TestNonAdmin(void)
+{
+    USER_INFO_1 Info;
+    DWORD Err = 0;
+    NET_API_STATUS Ns;
+    HANDLE Token;
+
+    CheckStateCalls("administrator", FALSE);
+
+    ZeroMemory(&Info, sizeof(Info));
+    Info.usri1_name = (LPWSTR)NOADMIN_USER;
+    Info.usri1_password = (LPWSTR)NOADMIN_PASS;
+    Info.usri1_priv = USER_PRIV_USER;
+    Info.usri1_flags = UF_SCRIPT | UF_DONT_EXPIRE_PASSWD;
+    NetUserDel(NULL, NOADMIN_USER);
+    Ns = NetUserAdd(NULL, 1, (LPBYTE)&Info, &Err);
+    if (Ns != NERR_Success)
+    {
+        skip("NetUserAdd failed: %lu\n", Ns);
+        return;
+    }
+    if (!LogonUserW(NOADMIN_USER, L".", NOADMIN_PASS, LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &Token) ||
+        !ImpersonateLoggedOnUser(Token))
+    {
+        skip("Cannot log on and impersonate the test user: %lu\n", GetLastError());
+        NetUserDel(NULL, NOADMIN_USER);
+        return;
+    }
+    CheckStateCalls("user", TRUE);
+    RevertToSelf();
+    CloseHandle(Token);
+    NetUserDel(NULL, NOADMIN_USER);
+}
+
 /* A device that the system boots from (its driver is a boot-start driver) cannot be disabled:
  * setupapi refuses, and ConfigFlags is not touched, so the next boot has it */
 static
@@ -544,6 +617,12 @@ START_TEST(RootDeviceDisable)
         return;
     }
 
+    if (is_reactos())
+    {
+        TestNonAdmin();
+        ok(Locate(&DevInst) && WaitRunning(DevInst, "after the calls of a user"), "The device is not running after the calls of a user\n");
+    }
+
     St = Stats();
     ok(St.Initializes == 1, "%lu initializes after install\n", St.Initializes);
     ok(St.Halted == 0, "Halted after install\n");
@@ -611,22 +690,62 @@ START_TEST(RootDeviceDisable)
         CheckConfigFlags(0, "after DICS_ENABLE");
     }
 
-    /* The status of a node can be set and cleared from user mode, but a problem that user mode
-     * sets is only that: it neither disables the device nor makes the PnP manager keep its node */
+    /* A problem cannot be set on a device that runs (Windows: CR_INVALID_DATA, measured), and
+     * CM_PROB_DISABLED is not for a caller to set. Clearing a problem that is not there is not
+     * an error, and does not touch a node that the PnP manager has parked */
     if (is_reactos())
     {
         ULONG Status = 0, Problem = 0;
 
         Cr = CM_Set_DevNode_Problem(DevInst, CM_PROB_FAILED_INSTALL, CM_SET_DEVNODE_PROBLEM_NORMAL);
-        ok(Cr == CR_SUCCESS, "CM_Set_DevNode_Problem failed: 0x%lx\n", Cr);
+        ok(Cr == CR_INVALID_DATA, "CM_Set_DevNode_Problem of a running device: 0x%lx\n", Cr);
+        Cr = CM_Set_DevNode_Problem(DevInst, CM_PROB_DISABLED, CM_SET_DEVNODE_PROBLEM_NORMAL);
+        ok(Cr == CR_INVALID_DATA, "CM_Set_DevNode_Problem(CM_PROB_DISABLED): 0x%lx\n", Cr);
         Cr = CM_Get_DevNode_Status(&Status, &Problem, DevInst, 0);
-        ok(Cr == CR_SUCCESS && (Status & DN_HAS_PROBLEM) && Problem == CM_PROB_FAILED_INSTALL,
-           "after CM_Set_DevNode_Problem: status 0x%lx, problem %lu, cr 0x%lx\n", Status, Problem, Cr);
+        ok(Cr == CR_SUCCESS && (Status & DN_STARTED) && !(Status & DN_HAS_PROBLEM) && Problem == 0,
+           "after the refused calls: status 0x%lx, problem %lu, cr 0x%lx\n", Status, Problem, Cr);
         Cr = CM_Set_DevNode_Problem(DevInst, 0, CM_SET_DEVNODE_PROBLEM_OVERRIDE);
-        ok(Cr == CR_SUCCESS, "Clearing the problem failed: 0x%lx\n", Cr);
+        ok(Cr == CR_SUCCESS, "Clearing no problem failed: 0x%lx\n", Cr);
+
+        /* A parked node keeps its problem */
+        Cr = CM_Disable_DevNode(DevInst, 0);
+        ok(Cr == CR_SUCCESS, "CM_Disable_DevNode failed: 0x%lx\n", Cr);
+        Cr = CM_Set_DevNode_Problem(DevInst, 0, CM_SET_DEVNODE_PROBLEM_OVERRIDE);
+        ok(Cr == CR_SUCCESS, "Clearing the problem of a disabled device failed: 0x%lx\n", Cr);
         Cr = CM_Get_DevNode_Status(&Status, &Problem, DevInst, 0);
-        ok(Cr == CR_SUCCESS && !(Status & DN_HAS_PROBLEM) && Problem == 0,
-           "after clearing the problem: status 0x%lx, problem %lu, cr 0x%lx\n", Status, Problem, Cr);
+        ok(Cr == CR_SUCCESS && !(Status & DN_STARTED) && Problem == CM_PROB_DISABLED,
+           "after clearing the problem of a disabled device: status 0x%lx, problem %lu, cr 0x%lx\n", Status, Problem, Cr);
+        Cr = CM_Enable_DevNode(DevInst, 0);
+        ok(Cr == CR_SUCCESS, "CM_Enable_DevNode failed: 0x%lx\n", Cr);
+        if (WaitRunning(DevInst, "after the parked clear"))
+        {
+            St = Stats();
+            ok(St.Initializes == 6, "%lu initializes, expected 6\n", St.Initializes);
+        }
+    }
+
+    /* Other ConfigFlags bits stay as they are through a disable and an enable */
+    {
+        HKEY Key;
+
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, ENUM_ROOT_KEY L"\\" ENUM_NAME L"\\0000", 0, KEY_SET_VALUE, &Key) == ERROR_SUCCESS)
+        {
+            SetDword(Key, L"ConfigFlags", 0x400);
+            RegCloseKey(Key);
+        }
+        if (ChangeState(DICS_DISABLE))
+        {
+            DWORD Flags = 0;
+
+            ReadConfigFlags(&Flags);
+            ok(Flags == (0x400 | CONFIGFLAG_DISABLED), "ConfigFlags 0x%lx after the disable, expected 0x401\n", Flags);
+            if (ChangeState(DICS_ENABLE))
+            {
+                WaitRunning(DevInst, "after the second DICS_ENABLE");
+                ReadConfigFlags(&Flags);
+                ok(Flags == 0x400, "ConfigFlags 0x%lx after the enable, expected 0x400\n", Flags);
+            }
+        }
     }
 
     /* Removing a disabled device removes its node */
@@ -646,7 +765,7 @@ START_TEST(RootDeviceDisable)
         ok(Cr != CR_SUCCESS || !(Status & DN_STARTED), "The removed device is started: 0x%lx\n", Status);
     }
     St = Stats();
-    ok(St.Halted == 1 && St.Initializes == 5, "The removed device was initialized again: %lu, halted %lu\n",
+    ok(St.Halted == 1 && St.Initializes == 7, "The removed device was initialized again: %lu, halted %lu\n",
        St.Initializes, St.Halted);
 
     TestFailedDevice();
