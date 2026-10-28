@@ -403,6 +403,8 @@ TestFailedDevice(void)
                 Cr = CM_Get_DevNode_Status(&Status, &Problem, DevInst, 0);
                 ok(Cr == CR_SUCCESS && !(Status & DN_STARTED) && (Status & DN_HAS_PROBLEM) && Problem != 0,
                    "Attempt %lu: status 0x%lx, problem %lu, cr 0x%lx\n", i, Status, Problem, Cr);
+                /* The problem is the failure, not the disable that came before it */
+                ok(Problem != CM_PROB_DISABLED, "Attempt %lu: problem %lu: still reported as disabled\n", i, Problem);
             }
         }
     }

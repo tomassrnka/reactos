@@ -197,20 +197,23 @@ CheckDisabled(DEVINST Bus, PCSTR When)
     ok(Children(Bus, &Running) == 0, "%s: the disabled bus still has child device nodes\n", When);
 }
 
-/* The bus driver fails IRP_MN_START_DEVICE while this value is set */
+/* The bus driver fails IRP_MN_START_DEVICE while FailStart is set, and refuses
+ * IRP_MN_QUERY_REMOVE_DEVICE while FailQueryRemove is */
 static
 void
-SetFailStart(DWORD Value)
+SetParameter(PCWSTR Name, DWORD Value)
 {
     HKEY Key;
 
     if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, SERVICE_KEY L"\\Parameters", 0, NULL, 0, KEY_ALL_ACCESS,
                         NULL, &Key, NULL) == ERROR_SUCCESS)
     {
-        SetDword(Key, L"FailStart", Value);
+        SetDword(Key, Name, Value);
         RegCloseKey(Key);
     }
 }
+
+#define SetFailStart(Value) SetParameter(L"FailStart", Value)
 
 static
 void
@@ -293,11 +296,37 @@ START_TEST(RootBusDisable)
             Cr = CM_Get_DevNode_Status(&Status, &Problem, Bus, 0);
             ok(Cr == CR_SUCCESS && !(Status & DN_STARTED) && (Status & DN_HAS_PROBLEM),
                "Attempt %lu: status 0x%lx, problem %lu, cr 0x%lx\n", i, Status, Problem, Cr);
+            /* As on Windows (measured), the problem is the failed start, not "disabled" */
+            ok(Problem == CM_PROB_FAILED_START, "Attempt %lu: problem %lu, expected %u\n", i, Problem, CM_PROB_FAILED_START);
         }
         SetFailStart(0);
         Cr = CM_Enable_DevNode(Bus, 0);
         ok(Cr == CR_SUCCESS, "CM_Enable_DevNode failed once the bus can start: 0x%lx\n", Cr);
         WaitRunning(Bus, "after the failed enables");
+
+        /* The stack that fails to start also refuses to be removed for it: the device is still
+         * taken down, and keeps its PDO. It is not left half removed, to lose its PDO to a
+         * removal that comes later (here, a reenumeration, once the stack allows it) */
+        Cr = CM_Disable_DevNode(Bus, 0);
+        ok(Cr == CR_SUCCESS, "CM_Disable_DevNode failed: 0x%lx\n", Cr);
+        SetFailStart(1);
+        SetParameter(L"FailQueryRemove", 1);
+        Cr = CM_Enable_DevNode(Bus, 0);
+        ok(Cr != CR_SUCCESS, "CM_Enable_DevNode of a bus that fails to start and to be removed succeeded\n");
+        SetFailStart(0);
+        SetParameter(L"FailQueryRemove", 0);
+        ReenumerateRoot();
+        ok(LocateBus(&Bus), "The bus node is gone after the reenumeration\n");
+        {
+            ULONG Status = 0, Problem = 0;
+
+            Cr = CM_Get_DevNode_Status(&Status, &Problem, Bus, 0);
+            ok(Cr == CR_SUCCESS && !(Status & DN_STARTED) && Problem == CM_PROB_FAILED_START,
+               "status 0x%lx, problem %lu, cr 0x%lx\n", Status, Problem, Cr);
+        }
+        Cr = CM_Enable_DevNode(Bus, 0);
+        ok(Cr == CR_SUCCESS, "CM_Enable_DevNode failed once the bus can start: 0x%lx\n", Cr);
+        WaitRunning(Bus, "after the vetoed removal");
     }
 
     Cleanup();
