@@ -36,9 +36,11 @@ add_wow64_apitest(ntdll StackOverflowDispatch
     RtlDetermineDosPathNameType RtlUnicodeStringToAnsiString StackOverflow StackOverflowThread StackDeepRecursion SystemCallStubs
     Wow64SystemProcessInformation)
 add_wow64_apitest(advapi32
-    ServiceArgs SetSecurityInfoKey RegCreateKeyEx RegOpenKeyExW RegQueryValueExW RegEnumValueW RegWow64 RegWow64Unicode RegWow64Views RegWow64SharedCreate RegWow64Matrix RegWow64LongName RegWow64SharedLongName RegWow64Volatile RegWow64Aliases TokenLogonSid RestrictedSidsCopy TokenDefaultDacl)
+    ServiceArgs SetSecurityInfoKey RegCreateKeyEx RegOpenKeyExW RegQueryValueExW RegEnumValueW RegWow64 RegWow64Unicode RegWow64Views RegWow64SharedCreate RegWow64Matrix RegWow64LongName RegWow64SharedLongName RegWow64Volatile RegWow64Aliases TokenLogonSid RestrictedSidsCopy TokenDefaultDacl LogonUser)
 
 target_sources(advapi32_wow64_apitest PRIVATE ../advapi32/RegWow64Review.c)
+# LogonUser creates its test user through the SAM
+add_importlibs(advapi32_wow64_apitest netapi32)
 
 if(ARCH STREQUAL "i386")
     # Explicit smoke-test target; do not change default image contents.
