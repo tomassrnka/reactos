@@ -5806,6 +5806,20 @@ SetupDiChangeState(
                     goto cleanup;
             }
 
+            /* A device that cannot be disabled (the boot disk's stack, the buses it is on) is not
+             * marked disabled: the next boot would not have it. As on Windows, refuse. */
+            if (PropChange->StateChange == DICS_DISABLE)
+            {
+                ULONG ulStatus, ulProblem;
+
+                if (CM_Get_DevNode_Status_Ex(&ulStatus, &ulProblem, deviceInfo->dnDevInst, 0, set->hMachine) == CR_SUCCESS &&
+                    !(ulStatus & DN_DISABLEABLE))
+                {
+                    SetLastError(ERROR_NOT_DISABLEABLE);
+                    goto cleanup;
+                }
+            }
+
             /* Enable/disable device in registry: ConfigFlags (global) or CSConfigFlags (profile)
              * of the device's instance key, where the PnP manager reads them at boot */
             hKey = SETUPDI_OpenDevKey(hRootKey, deviceInfo, KEY_QUERY_VALUE | KEY_SET_VALUE);

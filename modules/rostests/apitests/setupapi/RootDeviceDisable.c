@@ -413,6 +413,84 @@ TestFailedDevice(void)
     RegCloseKey(EnumKey);
 }
 
+/* A device that the system boots from (its driver is a boot-start driver) cannot be disabled:
+ * setupapi refuses, and ConfigFlags is not touched, so the next boot has it */
+static
+void
+TestBootDeviceNotDisableable(void)
+{
+    HDEVINFO Set;
+    SP_DEVINFO_DATA DevInfo;
+    DWORD Index, Tried = 0;
+
+    Set = SetupDiGetClassDevsW(NULL, NULL, NULL, DIGCF_ALLCLASSES | DIGCF_PRESENT);
+    ok(Set != INVALID_HANDLE_VALUE, "SetupDiGetClassDevsW failed: %lu\n", GetLastError());
+    if (Set == INVALID_HANDLE_VALUE)
+        return;
+    DevInfo.cbSize = sizeof(DevInfo);
+    for (Index = 0; SetupDiEnumDeviceInfo(Set, Index, &DevInfo) && Tried < 3; Index++)
+    {
+        WCHAR Service[MAX_PATH], Path[MAX_PATH + 64], Id[MAX_PATH];
+        DWORD Start = 3, Size = sizeof(Start), Flags = 0, FlagsBefore, Type;
+        ULONG Status = 0, Problem = 0;
+        SP_PROPCHANGE_PARAMS Params;
+        HKEY Key;
+        BOOL Ret;
+
+        if (!SetupDiGetDeviceRegistryPropertyW(Set, &DevInfo, SPDRP_SERVICE, NULL, (PBYTE)Service, sizeof(Service), NULL))
+            continue;
+        FormatW(Path, L"SYSTEM\\CurrentControlSet\\Services\\%s", Service);
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, Path, 0, KEY_QUERY_VALUE, &Key) != ERROR_SUCCESS)
+            continue;
+        if (RegQueryValueExW(Key, L"Start", NULL, &Type, (PBYTE)&Start, &Size) != ERROR_SUCCESS || Start != 0)
+        {
+            RegCloseKey(Key);
+            continue;
+        }
+        RegCloseKey(Key);
+        if (CM_Get_DevNode_Status(&Status, &Problem, DevInfo.DevInst, 0) != CR_SUCCESS || !(Status & DN_STARTED))
+            continue;
+        if (!SetupDiGetDeviceInstanceIdW(Set, &DevInfo, Id, ARRAYSIZE(Id), NULL))
+            continue;
+
+        Tried++;
+        FormatW(Path, L"SYSTEM\\CurrentControlSet\\Enum\\%s", Id);
+        FlagsBefore = 0;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, Path, 0, KEY_QUERY_VALUE, &Key) == ERROR_SUCCESS)
+        {
+            Size = sizeof(FlagsBefore);
+            RegQueryValueExW(Key, L"ConfigFlags", NULL, &Type, (PBYTE)&FlagsBefore, &Size);
+            RegCloseKey(Key);
+        }
+
+        ZeroMemory(&Params, sizeof(Params));
+        Params.ClassInstallHeader.cbSize = sizeof(SP_CLASSINSTALL_HEADER);
+        Params.ClassInstallHeader.InstallFunction = DIF_PROPERTYCHANGE;
+        Params.StateChange = DICS_DISABLE;
+        Params.Scope = DICS_FLAG_GLOBAL;
+        SetupDiSetClassInstallParamsW(Set, &DevInfo, &Params.ClassInstallHeader, sizeof(Params));
+        SetLastError(0);
+        Ret = SetupDiCallClassInstaller(DIF_PROPERTYCHANGE, Set, &DevInfo);
+        ok(!Ret && GetLastError() == ERROR_NOT_DISABLEABLE, "%ls (service %ls): disabling the boot device: ret %d, error 0x%lx\n",
+           Id, Service, Ret, GetLastError());
+
+        Flags = 0xDEAD;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, Path, 0, KEY_QUERY_VALUE, &Key) == ERROR_SUCCESS)
+        {
+            Size = sizeof(Flags);
+            if (RegQueryValueExW(Key, L"ConfigFlags", NULL, &Type, (PBYTE)&Flags, &Size) != ERROR_SUCCESS)
+                Flags = 0;
+            RegCloseKey(Key);
+        }
+        ok(Flags == FlagsBefore, "%ls: ConfigFlags changed from 0x%lx to 0x%lx\n", Id, FlagsBefore, Flags);
+        Status = 0;
+        CM_Get_DevNode_Status(&Status, &Problem, DevInfo.DevInst, 0);
+        ok((Status & DN_STARTED) && !(Status & DN_HAS_PROBLEM), "%ls: status 0x%lx, problem %lu after the refused disable\n", Id, Status, Problem);
+    }
+    ok(Tried > 0, "No started device with a boot-start driver found\n");
+    SetupDiDestroyDeviceInfoList(Set);
+}
+
 START_TEST(RootDeviceDisable)
 {
     DEVINST DevInst, RootDevInst;
@@ -421,6 +499,9 @@ START_TEST(RootDeviceDisable)
     PNP_VETO_TYPE Veto = PNP_VetoTypeUnknown;
     WCHAR VetoName[MAX_PATH] = L"";
     ULONG i;
+
+    if (is_reactos())
+        TestBootDeviceNotDisableable();
 
     /* A device whose ConfigFlags say that it is disabled (as it is after a reboot, when it was
      * disabled before) comes up disabled: the driver is not loaded, and a reenumeration does not

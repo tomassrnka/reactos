@@ -962,7 +962,8 @@ IopGetDeviceNodeStatus(
     if (DeviceNode->UserFlags & DNUF_DONT_SHOW_IN_UI)
         Output |= DN_NO_SHOW_IN_DM;
 
-    if (!(DeviceNode->UserFlags & DNUF_NOT_DISABLEABLE))
+    if (!(DeviceNode->UserFlags & DNUF_NOT_DISABLEABLE) &&
+        !IopIsBootCriticalNode(DeviceNode))
         Output |= DN_DISABLEABLE;
 
     return Output;

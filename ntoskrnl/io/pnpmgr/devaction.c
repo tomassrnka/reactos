@@ -1204,6 +1204,88 @@ VOID
 IopMarkDeviceNodeDisabled(
     _In_ PDEVICE_NODE DeviceNode);
 
+/* Tells whether a service is a boot-start driver (Start == SERVICE_BOOT_START) */
+static
+BOOLEAN
+IopIsBootStartService(
+    _In_ PUNICODE_STRING ServiceName)
+{
+    static const UNICODE_STRING ServicesPath =
+        RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\");
+    UNICODE_STRING KeyName;
+    PKEY_VALUE_FULL_INFORMATION kvInfo;
+    HANDLE Key;
+    BOOLEAN BootStart = FALSE;
+
+    if (ServiceName == NULL || ServiceName->Length == 0)
+        return FALSE;
+
+    KeyName.MaximumLength = ServicesPath.Length + ServiceName->Length + sizeof(UNICODE_NULL);
+    KeyName.Length = 0;
+    KeyName.Buffer = ExAllocatePoolWithTag(PagedPool, KeyName.MaximumLength, TAG_IO);
+    if (KeyName.Buffer == NULL)
+        return FALSE;
+    RtlCopyUnicodeString(&KeyName, (PUNICODE_STRING)&ServicesPath);
+    RtlAppendUnicodeStringToString(&KeyName, ServiceName);
+    KeyName.Buffer[KeyName.Length / sizeof(WCHAR)] = UNICODE_NULL;
+
+    if (NT_SUCCESS(IopOpenRegistryKeyEx(&Key, NULL, &KeyName, KEY_READ)))
+    {
+        if (NT_SUCCESS(IopGetRegistryValue(Key, L"Start", &kvInfo)))
+        {
+            BootStart = kvInfo->Type == REG_DWORD &&
+                        kvInfo->DataLength == sizeof(ULONG) &&
+                        *(PULONG)((ULONG_PTR)kvInfo + kvInfo->DataOffset) == SERVICE_BOOT_START;
+            ExFreePool(kvInfo);
+        }
+        ZwClose(Key);
+    }
+    ExFreePoolWithTag(KeyName.Buffer, TAG_IO);
+    return BootStart;
+}
+
+/* Tells whether a node is part of what the system boots from: its driver is a boot-start
+ * driver (the disk, the volume, the storage controller, PCI, ACPI, the display...). Such a
+ * device is not disabled, and a disable that is recorded for it is not honored at boot. */
+BOOLEAN
+IopIsBootCriticalNode(
+    _In_ PDEVICE_NODE DeviceNode)
+{
+    UNICODE_STRING EnumRoot = RTL_CONSTANT_STRING(ENUM_ROOT);
+    PKEY_VALUE_FULL_INFORMATION kvInfo;
+    HANDLE EnumKey, InstanceKey;
+    BOOLEAN BootCritical = FALSE;
+
+    if (IopIsBootStartService(&DeviceNode->ServiceName))
+        return TRUE;
+
+    /* The node may not know its service (it is only set once the service's Enum key is
+     * updated): the Service value of the instance key says it too */
+    if (DeviceNode->InstancePath.Length == 0 ||
+        !NT_SUCCESS(IopOpenRegistryKeyEx(&EnumKey, NULL, &EnumRoot, KEY_READ)))
+        return FALSE;
+
+    if (NT_SUCCESS(IopOpenRegistryKeyEx(&InstanceKey, EnumKey, &DeviceNode->InstancePath, KEY_READ)))
+    {
+        if (NT_SUCCESS(IopGetRegistryValue(InstanceKey, L"Service", &kvInfo)))
+        {
+            if (kvInfo->Type == REG_SZ && kvInfo->DataLength > sizeof(UNICODE_NULL))
+            {
+                UNICODE_STRING ServiceName;
+
+                ServiceName.Buffer = (PWSTR)((ULONG_PTR)kvInfo + kvInfo->DataOffset);
+                ServiceName.Length = (USHORT)(kvInfo->DataLength - sizeof(UNICODE_NULL));
+                ServiceName.MaximumLength = ServiceName.Length;
+                BootCritical = IopIsBootStartService(&ServiceName);
+            }
+            ExFreePool(kvInfo);
+        }
+        ZwClose(InstanceKey);
+    }
+    ZwClose(EnumKey);
+    return BootCritical;
+}
+
 /* Tells whether the instance key says that the device is disabled: CONFIGFLAG_DISABLED in
  * its ConfigFlags, which SetupDiChangeState(DICS_DISABLE, DICS_FLAG_GLOBAL) sets and the
  * enable clears. The device is not started until then, even after a reboot. */
@@ -1371,8 +1453,34 @@ PiInitializeDevNode(
      * (CM_PROB_DISABLED, like a device that is disabled while the system runs) */
     if (IopIsDeviceConfigDisabled(InstanceKey))
     {
-        DPRINT("%wZ is disabled (CONFIGFLAG_DISABLED)\n", &DeviceNode->InstancePath);
-        IopMarkDeviceNodeDisabled(DeviceNode);
+        PKEY_VALUE_FULL_INFORMATION ServiceInfo;
+        BOOLEAN BootCritical = FALSE;
+
+        if (NT_SUCCESS(IopGetRegistryValue(InstanceKey, L"Service", &ServiceInfo)))
+        {
+            if (ServiceInfo->Type == REG_SZ && ServiceInfo->DataLength > sizeof(UNICODE_NULL))
+            {
+                UNICODE_STRING ServiceName;
+
+                ServiceName.Buffer = (PWSTR)((ULONG_PTR)ServiceInfo + ServiceInfo->DataOffset);
+                ServiceName.Length = (USHORT)(ServiceInfo->DataLength - sizeof(UNICODE_NULL));
+                ServiceName.MaximumLength = ServiceName.Length;
+                BootCritical = IopIsBootStartService(&ServiceName);
+            }
+            ExFreePool(ServiceInfo);
+        }
+
+        if (BootCritical)
+        {
+            /* A disable that was recorded for a device the system boots from would make the
+             * system unbootable: leave the device enabled */
+            DPRINT1("%wZ is marked disabled but is a boot device: not disabled\n", &DeviceNode->InstancePath);
+        }
+        else
+        {
+            DPRINT("%wZ is disabled (CONFIGFLAG_DISABLED)\n", &DeviceNode->InstancePath);
+            IopMarkDeviceNodeDisabled(DeviceNode);
+        }
     }
 
     ZwClose(InstanceKey);
@@ -2422,6 +2530,13 @@ IopQueryAndRemoveDevice(
 
     if (VetoContext->Disable && !IopIsDeviceNodeDisabled(DeviceNode))
     {
+        /* The boot device's stack cannot be disabled (a drive that is gone at the next boot) */
+        if (!VetoContext->Force && IopIsBootCriticalNode(DeviceNode))
+        {
+            IopCaptureVeto(VetoContext, DeviceNode, PNP_VetoNonDisableable);
+            return STATUS_PLUGPLAY_QUERY_VETOED;
+        }
+
         /* A device that never started has no stack to tear down: disabling it only marks it */
         if (DeviceNode->State == DeviceNodeInitialized)
         {

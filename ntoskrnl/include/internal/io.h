@@ -646,6 +646,10 @@ PiSetDevNodeState(
     _In_ PDEVICE_NODE DeviceNode,
     _In_ PNP_DEVNODE_STATE NewState);
 
+BOOLEAN
+IopIsBootCriticalNode(
+    _In_ PDEVICE_NODE DeviceNode);
+
 VOID
 PiSetDevNodeProblem(
     _In_ PDEVICE_NODE DeviceNode,
