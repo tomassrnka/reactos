@@ -23,6 +23,15 @@ extern "C" {
 #define _64K (64 * _1KB)
 
 /*
+ * NT 10 reports the parameter validation failures of NtMapViewOfSection and
+ * NtAllocateVirtualMemory that NT5/NT6 report as STATUS_INVALID_PARAMETER_n
+ * with the generic STATUS_INVALID_PARAMETER instead (Windows 10 oracle,
+ * x86 and x64, including every invalid ZeroBits value).
+ */
+#define MI_PARAM_STATUS(n) \
+    ((NtMajorVersion >= 10) ? STATUS_INVALID_PARAMETER : STATUS_INVALID_PARAMETER_##n)
+
+/*
  * ZeroBits is a count in the 32-bit address space for values 1..21.
  * On a 64-bit kernel, values >= 32 describe the leading zeroes of a mask;
  * holes below its highest set bit do not restrict an automatically chosen VA.

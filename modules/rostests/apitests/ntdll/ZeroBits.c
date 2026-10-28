@@ -6,6 +6,15 @@
 
 #include "precomp.h"
 
+/* From Windows 10 on, every invalid ZeroBits is the generic STATUS_INVALID_PARAMETER (x86 and x64
+   oracle, NtMapViewOfSection data and image, and NtAllocateVirtualMemory); earlier versions report
+   the numbered status of the argument. */
+static NTSTATUS
+ParamStatus(NTSTATUS Numbered)
+{
+    return GetNTVersion() >= _WIN32_WINNT_WIN10 ? STATUS_INVALID_PARAMETER : Numbered;
+}
+
 static VOID
 CheckLimit(PVOID Base, SIZE_T Size, ULONG_PTR Limit)
 {
@@ -60,7 +69,7 @@ TestPlacement(HANDLE Section, BOOLEAN MasksSupported)
               Section ? "map" : "allocate", Cases[i].ZeroBits, TopDown, Status, Base);
         if (Cases[i].ZeroBits >= 32 && !MasksSupported)
         {
-            ok_ntstatus(Status, Section ? STATUS_INVALID_PARAMETER_4 : STATUS_INVALID_PARAMETER_3);
+            ok_ntstatus(Status, ParamStatus(Section ? STATUS_INVALID_PARAMETER_4 : STATUS_INVALID_PARAMETER_3));
         }
         else
         {
@@ -91,12 +100,13 @@ TestInvalidAndTiny(HANDLE Section, BOOLEAN MasksSupported)
     SIZE_T Size, FreeSize;
     LARGE_INTEGER Offset;
     NTSTATUS Status, Expected;
+    BOOLEAN Rejected;
     ULONG i;
 
     for (i = 0; i < RTL_NUMBER_OF(Values); ++i)
     {
-        Expected = (Values[i] == 21 || (MasksSupported && Values[i] >= 32)) ?
-                   STATUS_NO_MEMORY : STATUS_INVALID_PARAMETER_4;
+        Rejected = !(Values[i] == 21 || (MasksSupported && Values[i] >= 32));
+        Expected = Rejected ? ParamStatus(STATUS_INVALID_PARAMETER_4) : STATUS_NO_MEMORY;
         Base = NULL;
         Size = PAGE_SIZE;
         Offset.QuadPart = 0;
@@ -105,8 +115,8 @@ TestInvalidAndTiny(HANDLE Section, BOOLEAN MasksSupported)
         ok_ntstatus(Status, Expected);
         if (NT_SUCCESS(Status)) NtUnmapViewOfSection(NtCurrentProcess(), Base);
 
-        if (Expected == STATUS_INVALID_PARAMETER_4 || Values[i] == 63)
-            Expected = STATUS_INVALID_PARAMETER_3;
+        if (Rejected || Values[i] == 63)
+            Expected = ParamStatus(STATUS_INVALID_PARAMETER_3);
         Base = NULL;
         Size = PAGE_SIZE;
         Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Base, Values[i], &Size,
@@ -148,7 +158,7 @@ TestBasedSection(BOOLEAN MasksSupported)
         if (i == 0 || MasksSupported)
             ok_ntstatus(Status, STATUS_NO_MEMORY);
         else
-            ok_ntstatus(Status, STATUS_INVALID_PARAMETER_4);
+            ok_ntstatus(Status, ParamStatus(STATUS_INVALID_PARAMETER_4));
         if (NT_SUCCESS(Status)) NtUnmapViewOfSection(NtCurrentProcess(), Base);
     }
 
@@ -203,13 +213,10 @@ START_TEST(ZeroBits)
         Offset.QuadPart = 0;
         Status = NtMapViewOfSection(Section, NtCurrentProcess(), &Base, 0x1fffffff,
                                    0, &Offset, &Size, ViewUnmap, 0, PAGE_READWRITE);
-        /* Where masks are supported this is the explicit-base check, which NtMapViewOfSection
-           reports as the generic STATUS_INVALID_PARAMETER from Windows 10 on. Where they are not,
-           the mask itself is rejected first, as STATUS_INVALID_PARAMETER_4 on every version. */
-        if (MasksSupported && GetNTVersion() >= _WIN32_WINNT_WIN10)
-            ok_ntstatus(Status, STATUS_INVALID_PARAMETER);
-        else
-            ok_ntstatus(Status, STATUS_INVALID_PARAMETER_4);
+        /* Where masks are supported this is the explicit-base check; where they are not, the mask
+           itself is rejected first. Both are STATUS_INVALID_PARAMETER_4 before Windows 10 and the
+           generic STATUS_INVALID_PARAMETER from Windows 10 on. */
+        ok_ntstatus(Status, ParamStatus(STATUS_INVALID_PARAMETER_4));
         if (NT_SUCCESS(Status)) NtUnmapViewOfSection(NtCurrentProcess(), Base);
         NtClose(Section);
     }
@@ -260,7 +267,7 @@ START_TEST(ZeroBits)
     if (MasksSupported)
         ok(NT_SUCCESS(Status), "Image mapping failed: %08lx\n", Status);
     else
-        ok_ntstatus(Status, STATUS_INVALID_PARAMETER_4);
+        ok_ntstatus(Status, ParamStatus(STATUS_INVALID_PARAMETER_4));
     if (NT_SUCCESS(Status))
     {
         CheckLimit(Base, Size, 0x7fffffff);
