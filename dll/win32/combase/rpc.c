@@ -365,17 +365,18 @@ HRESULT WINAPI InternalIrotRevoke(IrotCookie cookie, IrotContextHandle *ctxt_han
     RPCSS_CALL_END
 }
 
-static HRESULT rpcss_server_register(REFCLSID clsid, DWORD flags, MInterfacePointer *obj, unsigned int *cookie)
+static HRESULT rpcss_server_register(REFCLSID clsid, DWORD flags, MInterfacePointer *obj, unsigned int *cookie,
+        void **ctxt_handle)
 {
     RPCSS_CALL_START
-    hr = irpcss_server_register(get_irpcss_handle(), clsid, flags, obj, cookie);
+    hr = irpcss_server_register(get_irpcss_handle(), clsid, flags, obj, cookie, ctxt_handle);
     RPCSS_CALL_END
 }
 
-HRESULT rpc_revoke_local_server(unsigned int cookie)
+HRESULT rpc_revoke_local_server(unsigned int cookie, void **ctxt_handle)
 {
     RPCSS_CALL_START
-    hr = irpcss_server_revoke(get_irpcss_handle(), cookie);
+    hr = irpcss_server_revoke(get_irpcss_handle(), cookie, ctxt_handle);
     RPCSS_CALL_END
 }
 
@@ -664,7 +665,7 @@ static HRESULT create_surrogate_server(REFCLSID rclsid, HANDLE *process)
     return S_OK;
 }
 
-HRESULT rpc_get_local_class_object(REFCLSID rclsid, REFIID riid, void **obj)
+static HRESULT rpc_get_local_class_object_once(REFCLSID rclsid, REFIID riid, void **obj)
 {
     PMInterfacePointer objref = NULL;
     IServiceProvider *local_server;
@@ -736,7 +737,30 @@ HRESULT rpc_get_local_class_object(REFCLSID rclsid, REFIID riid, void **obj)
     return hr;
 }
 
-HRESULT rpc_register_local_server(REFCLSID clsid, IStream *stream, DWORD flags, unsigned int *cookie)
+/* The server of a registration that rpcss has not purged yet is dead: its endpoint is gone. */
+static BOOL is_dead_server_error(HRESULT hr)
+{
+    return hr == HRESULT_FROM_WIN32(RPC_S_SERVER_UNAVAILABLE) || hr == HRESULT_FROM_WIN32(RPC_S_CALL_FAILED) ||
+           hr == HRESULT_FROM_WIN32(RPC_S_CALL_FAILED_DNE) || hr == RPC_E_DISCONNECTED;
+}
+
+HRESULT rpc_get_local_class_object(REFCLSID rclsid, REFIID riid, void **obj)
+{
+    int retries = 0;
+    HRESULT hr;
+
+    /* rpcss drops the registrations of a process when it dies, which can take a moment
+     * after the process is gone; the next try then finds nothing and starts a new server. */
+    while (is_dead_server_error(hr = rpc_get_local_class_object_once(rclsid, riid, obj)) && retries++ < 50)
+    {
+        TRACE("server of %s is gone (%#lx), trying again\n", debugstr_guid(rclsid), hr);
+        Sleep(100);
+    }
+    return hr;
+}
+
+HRESULT rpc_register_local_server(REFCLSID clsid, IStream *stream, DWORD flags, unsigned int *cookie,
+        void **ctxt_handle)
 {
     MInterfacePointer *obj;
     const void *ptr;
@@ -757,7 +781,7 @@ HRESULT rpc_register_local_server(REFCLSID clsid, IStream *stream, DWORD flags, 
     memcpy(obj->abData, ptr, size);
     GlobalUnlock(hmem);
 
-    hr = rpcss_server_register(clsid, flags, obj, cookie);
+    hr = rpcss_server_register(clsid, flags, obj, cookie, ctxt_handle);
 
     free(obj);
 

@@ -937,13 +937,16 @@ HRESULT marshal_object(struct apartment *apt, STDOBJREF *stdobjref, REFIID riid,
     if (!tablemarshal)
     {
         stdobjref->cPublicRefs = NORMALEXTREFS;
-        stub_manager_ext_addref(manager, stdobjref->cPublicRefs, FALSE);
+        if (mshlflags & MSHLFLAGSP_REMUNKNOWN)
+            stub_manager_ext_addref_internal(manager, stdobjref->cPublicRefs);
+        else
+            stub_manager_ext_addref(manager, stdobjref->cPublicRefs, FALSE);
     }
     else
     {
         stdobjref->cPublicRefs = 0;
         if (mshlflags & MSHLFLAGS_TABLESTRONG)
-            stub_manager_ext_addref(manager, 1, FALSE);
+            stub_manager_ext_addref_internal(manager, 1);
         else
             stub_manager_ext_addref(manager, 0, TRUE);
     }

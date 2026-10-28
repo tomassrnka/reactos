@@ -402,8 +402,43 @@ struct stub_manager * get_stub_manager(struct apartment *apt, OID oid)
     return result;
 }
 
-/* add some external references (ie from a client that unmarshaled an ifptr) */
-ULONG stub_manager_ext_addref(struct stub_manager *m, ULONG refs, BOOL tableweak)
+/* External references held by clients on objects of this process, table-strong
+ * references excluded. When a surrogate is registered and the count drops back
+ * to zero, the last client is gone and the surrogate is asked to exit. */
+static LONG surrogate_extrefs;
+static ISurrogate *process_surrogate;
+static CRITICAL_SECTION surrogate_cs = { NULL, -1, 0, 0, 0, 0 };
+
+void stub_manager_set_surrogate(ISurrogate *surrogate)
+{
+    ISurrogate *old;
+
+    if (surrogate) ISurrogate_AddRef(surrogate);
+    EnterCriticalSection(&surrogate_cs);
+    old = process_surrogate;
+    process_surrogate = surrogate;
+    LeaveCriticalSection(&surrogate_cs);
+    if (old) ISurrogate_Release(old);
+}
+
+static void surrogate_extrefs_changed(LONG delta)
+{
+    ISurrogate *surrogate = NULL;
+
+    if (InterlockedExchangeAdd(&surrogate_extrefs, delta) + delta != 0 || delta > 0)
+        return;
+
+    EnterCriticalSection(&surrogate_cs);
+    if ((surrogate = process_surrogate)) ISurrogate_AddRef(surrogate);
+    LeaveCriticalSection(&surrogate_cs);
+    if (!surrogate) return;
+
+    TRACE("last external reference gone, freeing surrogate %p\n", surrogate);
+    ISurrogate_FreeSurrogate(surrogate);
+    ISurrogate_Release(surrogate);
+}
+
+static ULONG ext_addref(struct stub_manager *m, ULONG refs, BOOL tableweak, BOOL table)
 {
     BOOL first_extern_ref;
     ULONG rc;
@@ -421,6 +456,9 @@ ULONG stub_manager_ext_addref(struct stub_manager *m, ULONG refs, BOOL tableweak
 
     LeaveCriticalSection(&m->lock);
 
+    if (!table && refs)
+        InterlockedExchangeAdd(&surrogate_extrefs, refs);
+
     TRACE("added %lu refs to %p (oid %s), rc is now %lu\n", refs, m, wine_dbgstr_longlong(m->oid), rc);
 
     /*
@@ -433,8 +471,20 @@ ULONG stub_manager_ext_addref(struct stub_manager *m, ULONG refs, BOOL tableweak
     return rc;
 }
 
-/* remove some external references */
-ULONG stub_manager_ext_release(struct stub_manager *m, ULONG refs, BOOL tableweak, BOOL last_unlock_releases)
+/* add some external references (ie from a client that unmarshaled an ifptr) */
+ULONG stub_manager_ext_addref(struct stub_manager *m, ULONG refs, BOOL tableweak)
+{
+    return ext_addref(m, refs, tableweak, FALSE);
+}
+
+/* references of the process itself (the table-strong marshal of a class registration,
+ * the apartment's IRemUnknown), which are not a client's */
+ULONG stub_manager_ext_addref_internal(struct stub_manager *m, ULONG refs)
+{
+    return ext_addref(m, refs, FALSE, TRUE);
+}
+
+static ULONG ext_release(struct stub_manager *m, ULONG refs, BOOL tableweak, BOOL last_unlock_releases, BOOL table)
 {
     BOOL last_extern_ref;
     ULONG rc;
@@ -454,6 +504,9 @@ ULONG stub_manager_ext_release(struct stub_manager *m, ULONG refs, BOOL tablewea
 
     LeaveCriticalSection(&m->lock);
 
+    if (!table && refs)
+        surrogate_extrefs_changed(-(LONG)refs);
+
     TRACE("removed %lu refs from %p (oid %s), rc is now %lu\n", refs, m, wine_dbgstr_longlong(m->oid), rc);
 
     if (last_extern_ref && m->extern_conn)
@@ -464,6 +517,12 @@ ULONG stub_manager_ext_release(struct stub_manager *m, ULONG refs, BOOL tablewea
             stub_manager_int_release(m);
 
     return rc;
+}
+
+/* remove some external references */
+ULONG stub_manager_ext_release(struct stub_manager *m, ULONG refs, BOOL tableweak, BOOL last_unlock_releases)
+{
+    return ext_release(m, refs, tableweak, last_unlock_releases, FALSE);
 }
 
 /* gets the stub manager associated with an ipid - caller must have
@@ -623,7 +682,7 @@ void stub_manager_release_marshal_data(struct stub_manager *m, ULONG refs, const
     else if (ifstub->flags & MSHLFLAGS_TABLESTRONG)
         refs = 1;
 
-    stub_manager_ext_release(m, refs, tableweak, !tableweak);
+    ext_release(m, refs, tableweak, !tableweak, !!(ifstub->flags & MSHLFLAGS_TABLESTRONG));
 }
 
 /* is an ifstub table marshaled? */

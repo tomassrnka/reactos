@@ -18,5 +18,8 @@
 
 #pragma makedep client
 
+/* The included IDL files are not dependencies of the generated client stubs: touch this file
+ * when wine/irpcss.idl changes (last: context handle for class registrations). */
+
 #include "wine/irot.idl"
 #include "wine/irpcss.idl"

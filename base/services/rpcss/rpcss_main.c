@@ -56,25 +56,55 @@ struct registered_class
 static CRITICAL_SECTION registered_classes_cs = { NULL, -1, 0, 0, 0, 0 };
 static struct list registered_classes = LIST_INIT(registered_classes);
 
+/* The context handle of a registration; the RPC runtime runs its rundown routine when the
+ * registering process goes away. It names the registration by cookie, as the registration
+ * can be gone already (revoked, or a single-use class that has been handed out). */
+struct class_context
+{
+    unsigned int cookie;
+};
+
+static void scm_revoke_cookie(unsigned int cookie);
+
+void __RPC_USER IrpcssContextHandle_rundown(IrpcssContextHandle ctxt_handle)
+{
+    struct class_context *context = ctxt_handle;
+
+    /* Windows' SCM drops the class objects of a dead server, so that the next
+     * activation of the class starts a new server. */
+    scm_revoke_cookie(context->cookie);
+    free(context);
+}
+
 HRESULT __cdecl irpcss_server_register(handle_t h, const GUID *clsid, unsigned int flags,
-        PMInterfacePointer object, unsigned int *cookie)
+        PMInterfacePointer object, unsigned int *cookie, IrpcssContextHandle *ctxt_handle)
 {
     struct registered_class *entry;
+    struct class_context *context;
     static LONG next_cookie;
+
+    *ctxt_handle = NULL;
 
     if (!(entry = calloc(1, sizeof(*entry))))
         return E_OUTOFMEMORY;
+    if (!(context = malloc(sizeof(*context))))
+    {
+        free(entry);
+        return E_OUTOFMEMORY;
+    }
 
     entry->clsid = *clsid;
     entry->single_use = !(flags & (REGCLS_MULTIPLEUSE | REGCLS_MULTI_SEPARATE));
     if (!(entry->object = malloc(FIELD_OFFSET(MInterfacePointer, abData[object->ulCntData]))))
     {
+        free(context);
         free(entry);
         return E_OUTOFMEMORY;
     }
     entry->object->ulCntData = object->ulCntData;
     memcpy(&entry->object->abData, object->abData, object->ulCntData);
-    *cookie = entry->cookie = InterlockedIncrement(&next_cookie);
+    *cookie = entry->cookie = context->cookie = InterlockedIncrement(&next_cookie);
+    *ctxt_handle = context;
 
     EnterCriticalSection(&registered_classes_cs);
     list_add_tail(&registered_classes, &entry->entry);
@@ -90,7 +120,7 @@ static void scm_revoke_class(struct registered_class *_class)
     free(_class);
 }
 
-HRESULT __cdecl irpcss_server_revoke(handle_t h, unsigned int cookie)
+static void scm_revoke_cookie(unsigned int cookie)
 {
     struct registered_class *cur;
 
@@ -106,6 +136,15 @@ HRESULT __cdecl irpcss_server_revoke(handle_t h, unsigned int cookie)
     }
 
     LeaveCriticalSection(&registered_classes_cs);
+}
+
+HRESULT __cdecl irpcss_server_revoke(handle_t h, unsigned int cookie, IrpcssContextHandle *ctxt_handle)
+{
+    scm_revoke_cookie(cookie);
+
+    /* Destroys the context; the rundown routine does not run for it. */
+    free(*ctxt_handle);
+    *ctxt_handle = NULL;
 
     return S_OK;
 }
