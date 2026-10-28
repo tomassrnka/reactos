@@ -576,25 +576,33 @@ MiniSendComplete(
 
     if (Adapter->NdisMiniportBlock.ScatterGatherListSize != 0)
     {
-        NDIS_DbgPrint(MAX_TRACE, ("Freeing Scatter/Gather list\n"));
-
         SGList = NDIS_PER_PACKET_INFO_FROM_PACKET(Packet,
                                                   ScatterGatherListPacketInfo);
 
-        Adapter->NdisMiniportBlock.SystemAdapterObject->
-            DmaOperations->PutScatterGatherList(
-                           Adapter->NdisMiniportBlock.SystemAdapterObject,
-                           SGList,
-                           TRUE);
+        /* A send that failed before ProSend built a scatter/gather list for it (the adapter being
+           removed, or a queued send failed) has none: there is nothing to put back */
+        if (SGList != NULL)
+        {
+            NDIS_DbgPrint(MAX_TRACE, ("Freeing Scatter/Gather list\n"));
 
-        NDIS_PER_PACKET_INFO_FROM_PACKET(Packet,
-                                         ScatterGatherListPacketInfo) = NULL;
+            Adapter->NdisMiniportBlock.SystemAdapterObject->
+                DmaOperations->PutScatterGatherList(
+                               Adapter->NdisMiniportBlock.SystemAdapterObject,
+                               SGList,
+                               TRUE);
+
+            NDIS_PER_PACKET_INFO_FROM_PACKET(Packet,
+                                             ScatterGatherListPacketInfo) = NULL;
+        }
     }
 
     (*AdapterBinding->ProtocolBinding->Chars.SendCompleteHandler)(
         AdapterBinding->NdisOpenBlock.ProtocolBindingContext,
         Packet,
         Status);
+
+    /* The send is done (see ProSend); NdisCloseAdapter may free the binding from here on */
+    ProLeaveBinding(AdapterBinding);
 
     KeLowerIrql(OldIrql);
 
@@ -1348,6 +1356,8 @@ MiniCompleteRequest(
     KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
     if (MacBlock->Binding != NULL)
     {
+        PADAPTER_BINDING AdapterBinding = CONTAINING_RECORD(MacBlock->Binding, ADAPTER_BINDING, NdisOpenBlock);
+
         if (MacBlock->Binding->RequestCompleteHandler != NULL)
         {
             (*MacBlock->Binding->RequestCompleteHandler)(
@@ -1355,6 +1365,9 @@ MiniCompleteRequest(
                 Request,
                 Status);
         }
+
+        /* The request is done (see ProRequest); NdisCloseAdapter may free the binding from here on */
+        ProLeaveBinding(AdapterBinding);
     }
     else if (MacBlock->Unknown1 == NULL)
     {
@@ -1490,11 +1503,28 @@ MiniSetHalted(
     KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
 }
 
+/* The send or request of a work item is the binding's */
+static
+BOOLEAN
+MiniWorkIsBinding(
+    NDIS_WORK_ITEM_TYPE Type,
+    PVOID               Context,
+    PADAPTER_BINDING    AdapterBinding)
+{
+    if (Type == NdisWorkItemSend)
+        return (PADAPTER_BINDING)((PNDIS_PACKET)Context)->Reserved[1] == AdapterBinding;
+    if (Type == NdisWorkItemRequest)
+        return ((PNDIS_REQUEST_MAC_BLOCK)((PNDIS_REQUEST)Context)->MacReserved)->Binding == &AdapterBinding->NdisOpenBlock;
+    return FALSE;
+}
+
+/* With AdapterBinding, only the sends and requests of that binding are failed (NdisCloseAdapter) */
 static
 VOID
 MiniFailQueuedWork(
     PLOGICAL_ADAPTER Adapter,
-    BOOLEAN          Removing)
+    BOOLEAN          Removing,
+    PADAPTER_BINDING AdapterBinding)
 {
     PNDIS_MINIPORT_WORK_ITEM Item, Prev;
     NDIS_WORK_ITEM_TYPE Type;
@@ -1509,7 +1539,9 @@ MiniFailQueuedWork(
     {
         Found = TRUE;
         KeAcquireSpinLock(&Adapter->NdisMiniportBlock.Lock, &OldIrql);
-        if (!Deserialized && Adapter->NdisMiniportBlock.FirstPendingPacket)
+        if (Adapter->NdisMiniportBlock.FirstPendingPacket &&
+            (AdapterBinding ? MiniWorkIsBinding(NdisWorkItemSend, Adapter->NdisMiniportBlock.FirstPendingPacket, AdapterBinding)
+                            : !Deserialized))
         {
             Type = NdisWorkItemSend;
             Context = Adapter->NdisMiniportBlock.FirstPendingPacket;
@@ -1520,7 +1552,12 @@ MiniFailQueuedWork(
             Prev = NULL;
             for (Item = Adapter->WorkQueueHead; Item; Item = (PNDIS_MINIPORT_WORK_ITEM)Item->Link.Next)
             {
-                if ((!Deserialized && (Item->WorkItemType == NdisWorkItemSend)) ||
+                if (AdapterBinding)
+                {
+                    if (MiniWorkIsBinding(Item->WorkItemType, Item->WorkItemContext, AdapterBinding))
+                        break;
+                }
+                else if ((!Deserialized && (Item->WorkItemType == NdisWorkItemSend)) ||
                     ((Removing || Deserialized) && ((Item->WorkItemType == NdisWorkItemRequest) ||
                                   (Item->WorkItemType == NdisWorkItemResetRequested))))
                     break;
@@ -1550,6 +1587,133 @@ MiniFailQueuedWork(
             MiniFailRequest((PNDIS_REQUEST)Context);
         else
             MiniFailReset(Adapter);
+    }
+}
+
+/* Called at PASSIVE_LEVEL by NdisCloseAdapter: the binding's sends and requests that wait for the
+   miniport fail; the ones the miniport has are completed by it */
+VOID
+MiniFailBindingWork(
+    PLOGICAL_ADAPTER Adapter,
+    PADAPTER_BINDING AdapterBinding)
+{
+    MiniFailQueuedWork(Adapter, FALSE, AdapterBinding);
+}
+
+/*
+ * Called at PASSIVE_LEVEL when the adapter is stopped or removed, before the protocols are
+ * unbound (ProUnbindAdapter) and the miniport is halted: from here on its sends and requests
+ * fail, the queued ones fail now and the request the miniport has is aborted, so that no
+ * protocol's unbind waits for a miniport that is going away. Its late completion is ignored
+ * (MiniRequestComplete); MiniportHalt ends the rest.
+ */
+static
+VOID
+MiniStartRemoving(
+    PLOGICAL_ADAPTER Adapter)
+{
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&Adapter->NdisMiniportBlock.Lock, &OldIrql);
+    Adapter->Removing = TRUE;
+    KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
+
+    MiniFailQueuedWork(Adapter, TRUE, NULL);
+    MiniAbortPendingRequest(Adapter, NDIS_STATUS_FAILURE, TRUE);
+}
+
+/* Takes a started adapter off the adapter lists, once: nothing finds or binds it any more */
+static
+VOID
+MiniUnlinkAdapter(
+    PLOGICAL_ADAPTER Adapter)
+{
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&Adapter->NdisMiniportBlock.DriverHandle->Lock, &OldIrql);
+    if (!IsListEmpty(&Adapter->MiniportListEntry))
+    {
+        RemoveEntryList(&Adapter->MiniportListEntry);
+        InitializeListHead(&Adapter->MiniportListEntry);
+    }
+    KeReleaseSpinLock(&Adapter->NdisMiniportBlock.DriverHandle->Lock, OldIrql);
+
+    KeAcquireSpinLock(&AdapterListLock, &OldIrql);
+    if (!IsListEmpty(&Adapter->ListEntry))
+    {
+        RemoveEntryList(&Adapter->ListEntry);
+        InitializeListHead(&Adapter->ListEntry);
+    }
+    KeReleaseSpinLock(&AdapterListLock, OldIrql);
+}
+
+/*
+ * The remove / surprise-remove teardown, run once: the adapter leaves the adapter lists, its sends and
+ * requests start failing, the miniport is halted, and only then are the protocols unbound. Halting first
+ * is what lets NdisCloseAdapter in a protocol's unbind drain without hanging: a send the miniport still
+ * holds (some complete only at halt) is completed by the halt before the unbind waits for it. A stopped
+ * adapter was already unbound (NdisIPnPStopDevice); its re-start binds the protocols again.
+ */
+static
+VOID
+MiniShutdownAdapter(
+    PLOGICAL_ADAPTER Adapter)
+{
+    BOOLEAN Started, First;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&Adapter->NdisMiniportBlock.Lock, &OldIrql);
+    First = !Adapter->Torndown;
+    Adapter->Torndown = TRUE;
+    KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
+    if (!First)
+        return;
+
+    Started = (Adapter->NdisMiniportBlock.PnPDeviceState == NdisPnPDeviceStarted);
+
+    if (Started)
+        MiniUnlinkAdapter(Adapter);
+    MiniStartRemoving(Adapter);
+
+    if (Adapter->NdisMiniportBlock.SymbolicLinkName.Buffer)
+    {
+        IoSetDeviceInterfaceState(&Adapter->NdisMiniportBlock.SymbolicLinkName, FALSE);
+        RtlFreeUnicodeString(&Adapter->NdisMiniportBlock.SymbolicLinkName);
+    }
+
+    /* Halt the miniport before unbinding: its in-flight sends complete here */
+    MiniSetHalted(Adapter, TRUE);
+    if (Started)
+    {
+        MiniStopSends(Adapter);
+        KeCancelTimer(&Adapter->NdisMiniportBlock.WakeUpDpcTimer.Timer);
+        Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.HaltHandler(Adapter->NdisMiniportBlock.MiniportAdapterContext);
+    }
+    MiniFailQueuedWork(Adapter, TRUE, NULL);
+    MiniAbortPendingRequest(Adapter, NDIS_STATUS_FAILURE, TRUE);
+
+    /* The sends and requests have been completed or failed: the protocols' unbind drains at once */
+    ProUnbindAdapter(Adapter);
+
+    if (Adapter->NdisMiniportBlock.EthDB)
+    {
+        EthDeleteFilter(Adapter->NdisMiniportBlock.EthDB);
+        Adapter->NdisMiniportBlock.EthDB = NULL;
+    }
+    if (Adapter->NdisMiniportBlock.Resources)
+    {
+        ExFreePool(Adapter->NdisMiniportBlock.Resources);
+        Adapter->NdisMiniportBlock.Resources = NULL;
+    }
+    if (Adapter->NdisMiniportBlock.AllocatedResources)
+    {
+        ExFreePool(Adapter->NdisMiniportBlock.AllocatedResources);
+        Adapter->NdisMiniportBlock.AllocatedResources = NULL;
+    }
+    if (Adapter->NdisMiniportBlock.AllocatedResourcesTranslated)
+    {
+        ExFreePool(Adapter->NdisMiniportBlock.AllocatedResourcesTranslated);
+        Adapter->NdisMiniportBlock.AllocatedResourcesTranslated = NULL;
     }
 }
 
@@ -1617,6 +1781,12 @@ MiniStartRequest(
     BOOLEAN Queued = FALSE;
 
     KeAcquireSpinLock(&Adapter->NdisMiniportBlock.Lock, &OldIrql);
+    /* The adapter is going away: MiniStartRemoving failed the queue, nothing joins it */
+    if (Adapter->Removing)
+    {
+        KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
+        return NDIS_STATUS_ADAPTER_REMOVED;
+    }
     if (Adapter->NdisMiniportBlock.PendingRequest ||
         MiniGetFirstWorkItem(Adapter, NdisWorkItemRequest))
     {
@@ -2641,8 +2811,10 @@ NdisIPnPStartDevice(
   PLIST_ENTRY CurrentEntry;
   PPROTOCOL_BINDING ProtocolBinding;
 
-  /* The miniport runs again from MiniportInitialize on */
+  /* The miniport runs again from MiniportInitialize on, and takes requests (after a stop) */
   MiniSetHalted(Adapter, FALSE);
+  Adapter->Removing = FALSE;
+  Adapter->Torndown = FALSE;
 
   /*
    * Prepare wrapper context used by HW and configuration routines.
@@ -2956,11 +3128,11 @@ NdisIPnPStopDevice(
 {
   PLOGICAL_ADAPTER Adapter = (PLOGICAL_ADAPTER)DeviceObject->DeviceExtension;
 
-  /* Remove adapter from adapter list for this miniport */
-  ExInterlockedRemoveEntryList(&Adapter->MiniportListEntry, &Adapter->NdisMiniportBlock.DriverHandle->Lock);
-
-  /* Remove adapter from global adapter list */
-  ExInterlockedRemoveEntryList(&Adapter->ListEntry, &AdapterListLock);
+  /* Off the adapter lists and the miniport stopped taking work, then halted so its in-flight sends
+     complete, and only then the protocols let go of it (so NdisCloseAdapter in their unbind does not
+     wait for a send the halt has not completed yet); NdisIPnPStartDevice binds them again */
+  MiniUnlinkAdapter(Adapter);
+  MiniStartRemoving(Adapter);
 
   KeCancelTimer(&Adapter->NdisMiniportBlock.WakeUpDpcTimer.Timer);
   MiniSetHalted(Adapter, TRUE);
@@ -2972,11 +3144,13 @@ NdisIPnPStopDevice(
 
   (*Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.HaltHandler)(Adapter->NdisMiniportBlock.MiniportAdapterContext);
 
-  IoSetDeviceInterfaceState(&Adapter->NdisMiniportBlock.SymbolicLinkName, FALSE);
-  MiniFailQueuedWork(Adapter, FALSE);
+  MiniFailQueuedWork(Adapter, FALSE, NULL);
   /* The halted miniport completes nothing any more: the adapter must not stay stalled
      behind a request it never completed, across a restart */
   MiniAbortPendingRequest(Adapter, NDIS_STATUS_FAILURE, TRUE);
+
+  IoSetDeviceInterfaceState(&Adapter->NdisMiniportBlock.SymbolicLinkName, FALSE);
+  ProUnbindAdapter(Adapter);
 
   if (Adapter->NdisMiniportBlock.AllocatedResources)
     {
@@ -3128,63 +3302,20 @@ NdisIPnPRemoveDevice(
 {
     NTSTATUS Status;
     PLOGICAL_ADAPTER Adapter = DeviceObject->DeviceExtension;
-    
-    if (Adapter->NdisMiniportBlock.SymbolicLinkName.Buffer)
-    {
-        IoSetDeviceInterfaceState(&Adapter->NdisMiniportBlock.SymbolicLinkName, FALSE);
-        RtlFreeUnicodeString(&Adapter->NdisMiniportBlock.SymbolicLinkName);
-    }
 
+    /* Unbind the protocols and halt the miniport (idempotent: a surprise removal already did it) */
+    MiniShutdownAdapter(Adapter);
+
+    MiniFreeWorkItem(Adapter);
+
+    /* The miniport is halted: the lower drivers remove the device now */
     Irp->IoStatus.Status = STATUS_SUCCESS;
     IoSkipCurrentIrpStackLocation(Irp);
     Status = IoCallDriver(Adapter->NdisMiniportBlock.NextDeviceObject, Irp);
 
     IoDetachDevice(Adapter->NdisMiniportBlock.NextDeviceObject);
-        
+
     RtlFreeUnicodeString(&Adapter->NdisMiniportBlock.MiniportName);
-
-    MiniSetHalted(Adapter, TRUE);
-    if (Adapter->NdisMiniportBlock.PnPDeviceState == NdisPnPDeviceStarted)
-    {
-        /* Remove adapter from adapter list for this miniport */
-        ExInterlockedRemoveEntryList(&Adapter->MiniportListEntry, &Adapter->NdisMiniportBlock.DriverHandle->Lock);
-
-        /* Remove adapter from global adapter list */
-        ExInterlockedRemoveEntryList(&Adapter->ListEntry, &AdapterListLock);
-        MiniStopSends(Adapter);
-
-        KeCancelTimer(&Adapter->NdisMiniportBlock.WakeUpDpcTimer.Timer);
-
-        Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.HaltHandler(Adapter->NdisMiniportBlock.MiniportAdapterContext);
-    }
-    MiniFailQueuedWork(Adapter, TRUE);
-    MiniAbortPendingRequest(Adapter, NDIS_STATUS_FAILURE, TRUE);
-
-    if (Adapter->NdisMiniportBlock.EthDB)
-    {
-        EthDeleteFilter(Adapter->NdisMiniportBlock.EthDB);
-        Adapter->NdisMiniportBlock.EthDB = NULL;
-    }
-
-    if (Adapter->NdisMiniportBlock.Resources)
-    {
-        ExFreePool(Adapter->NdisMiniportBlock.Resources);
-        Adapter->NdisMiniportBlock.Resources = NULL;
-    }
-
-    if (Adapter->NdisMiniportBlock.AllocatedResources)
-    {
-        ExFreePool(Adapter->NdisMiniportBlock.AllocatedResources);
-        Adapter->NdisMiniportBlock.AllocatedResources = NULL;
-    }
-
-    if (Adapter->NdisMiniportBlock.AllocatedResourcesTranslated)
-    {
-        ExFreePool(Adapter->NdisMiniportBlock.AllocatedResourcesTranslated);
-        Adapter->NdisMiniportBlock.AllocatedResourcesTranslated = NULL;
-    }
-
-    MiniFreeWorkItem(Adapter);
 
     IoDeleteDevice(DeviceObject);
 
@@ -3253,6 +3384,13 @@ NdisIDispatchPnp(
         Status = NDIS_STATUS_SUCCESS;
         Irp->IoStatus.Status = Status;
         Irp->IoStatus.Information |= Adapter->NdisMiniportBlock.PnPFlags;
+        break;
+
+      case IRP_MN_SURPRISE_REMOVAL:
+        /* The hardware is gone: halt the miniport and unbind the protocols now (IRP_MN_REMOVE_DEVICE
+           finds the teardown already done) */
+        MiniShutdownAdapter(Adapter);
+        Irp->IoStatus.Status = STATUS_SUCCESS;
         break;
 
       case IRP_MN_REMOVE_DEVICE:
@@ -3401,6 +3539,10 @@ NdisIAddDevice(
   Adapter = (PLOGICAL_ADAPTER)DeviceObject->DeviceExtension;
   KeInitializeSpinLock(&Adapter->NdisMiniportBlock.Lock);
   InitializeListHead(&Adapter->ProtocolListHead);
+  /* Empty until NdisIPnPStartDevice links them, so MiniUnlinkAdapter's IsListEmpty check is valid
+     for an adapter that is removed before it ever started */
+  InitializeListHead(&Adapter->ListEntry);
+  InitializeListHead(&Adapter->MiniportListEntry);
 
   /* The worker's work item lives as long as the adapter, see MiniScheduleWorker */
   Adapter->IoWorkItem = IoAllocateWorkItem(DeviceObject);

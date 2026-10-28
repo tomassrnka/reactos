@@ -224,19 +224,60 @@ EXPORT
 NdisCompleteUnbindAdapter(
     IN  NDIS_HANDLE UnbindAdapterContext,
     IN  NDIS_STATUS Status)
+/*
+ * FUNCTION: Completes an unbind that the protocol's UnbindAdapterHandler pended
+ * ARGUMENTS:
+ *     UnbindAdapterContext = The UnbindContext NDIS gave the handler (see ProUnbindAdapter)
+ *     Status               = Status of the unbind
+ */
 {
-  /* We probably need to do more here but for now we just do
-   * the opposite of what NdisCompleteBindAdapter does
-   */
+  PNDIS_UNBIND_CONTEXT Context = (PNDIS_UNBIND_CONTEXT)UnbindAdapterContext;
 
-  PROTOCOL_BINDING *Protocol = (PROTOCOL_BINDING *)UnbindAdapterContext;
-
-  if (!NT_SUCCESS(Status)) {
+  if (!NT_SUCCESS(Status))
       NDIS_DbgPrint(MIN_TRACE, ("Unbinding failed (%x)\n", Status));
-      return;
-  }
 
-  ExInterlockedRemoveEntryList(&Protocol->ListEntry, &ProtocolListLock);
+  /* ProUnbindAdapter waits for this */
+  Context->Status = Status;
+  KeSetEvent(&Context->Event, IO_NO_INCREMENT, FALSE);
+}
+
+/*
+ * Drops a reference on the binding. The binding is open with one reference (held until
+ * NdisCloseAdapter) and takes one more per send or request in flight; the last reference
+ * dropped frees it, whether that is NdisCloseAdapter or a completion that came in after it.
+ */
+VOID
+ProLeaveBinding(
+    PADAPTER_BINDING AdapterBinding)
+{
+    if (InterlockedDecrement(&AdapterBinding->Outstanding) == 0)
+    {
+        /* NdisCloseAdapter has unlinked it from both lists by now */
+        ExFreePool(AdapterBinding);
+    }
+}
+
+/*
+ * A send or request of the binding starts: it takes a reference until it is done (ProLeaveBinding),
+ * so that the binding is not freed under it. FALSE when it must fail at once (NdisCloseAdapter runs,
+ * or the adapter is going away); the reference is taken then too, and its caller drops it as usual.
+ */
+static
+BOOLEAN
+ProEnterBinding(
+    PADAPTER_BINDING AdapterBinding)
+{
+    /* Counted before the checks: NdisCloseAdapter sets Closing before it drops the open reference */
+    InterlockedIncrement(&AdapterBinding->Outstanding);
+    return !AdapterBinding->Closing && !AdapterBinding->Adapter->Removing;
+}
+
+static
+NDIS_STATUS
+ProBindingStatus(
+    PADAPTER_BINDING AdapterBinding)
+{
+    return AdapterBinding->Closing ? NDIS_STATUS_CLOSING : NDIS_STATUS_ADAPTER_REMOVED;
 }
 
 NDIS_STATUS
@@ -320,6 +361,7 @@ ProRequest(
   PADAPTER_BINDING AdapterBinding;
   PLOGICAL_ADAPTER Adapter;
   PNDIS_REQUEST_MAC_BLOCK MacBlock = (PNDIS_REQUEST_MAC_BLOCK)NdisRequest->MacReserved;
+  NDIS_STATUS Status;
 
   NDIS_DbgPrint(MAX_TRACE, ("Called.\n"));
 
@@ -331,15 +373,28 @@ ProRequest(
 
   MacBlock->Binding = &AdapterBinding->NdisOpenBlock;
 
+  /* Done when it is completed to the protocol (MiniCompleteRequest), or returned here */
+  if (!ProEnterBinding(AdapterBinding))
+  {
+      ProLeaveBinding(AdapterBinding);
+      return ProBindingStatus(AdapterBinding);
+  }
+
   /* A serialized miniport that is being halted takes no request, see MiniStopSends */
   if (!(Adapter->NdisMiniportBlock.Flags & NDIS_ATTRIBUTE_DESERIALIZE) && Adapter->Stopping)
+  {
+      ProLeaveBinding(AdapterBinding);
       return NDIS_STATUS_FAILURE;
+  }
 
 #if WORKER_TEST
   MiniQueueWorkItem(Adapter, NdisWorkItemRequest, NdisRequest, FALSE);
   return NDIS_STATUS_PENDING;
 #else
-  return MiniStartRequest(Adapter, NdisRequest);
+  Status = MiniStartRequest(Adapter, NdisRequest);
+  if (Status != NDIS_STATUS_PENDING)
+      ProLeaveBinding(AdapterBinding);
+  return Status;
 #endif
 }
 
@@ -485,8 +540,9 @@ proSendPacketToMiniport(PLOGICAL_ADAPTER Adapter, PNDIS_PACKET Packet)
 #endif
 }
 
-NDIS_STATUS NTAPI
-ProSend(
+static
+NDIS_STATUS
+ProSendToAdapter(
     IN  NDIS_HANDLE     MacBindingHandle,
     IN  PNDIS_PACKET    Packet)
 /*
@@ -589,6 +645,32 @@ ProSend(
     }
 }
 
+NDIS_STATUS NTAPI
+ProSend(
+    IN  NDIS_HANDLE     MacBindingHandle,
+    IN  PNDIS_PACKET    Packet)
+/*
+ * FUNCTION: Forwards a request to send a packet to an NDIS miniport
+ * RETURNS:
+ *     The status of a send done at once, or NDIS_STATUS_PENDING: MiniSendComplete completes it
+ */
+{
+    PADAPTER_BINDING AdapterBinding = GET_ADAPTER_BINDING(MacBindingHandle);
+    NDIS_STATUS NdisStatus;
+
+    /* Done when it is completed to the protocol (MiniSendComplete), or returned here */
+    if (!ProEnterBinding(AdapterBinding))
+    {
+        ProLeaveBinding(AdapterBinding);
+        return ProBindingStatus(AdapterBinding);
+    }
+
+    NdisStatus = ProSendToAdapter(MacBindingHandle, Packet);
+    if (NdisStatus != NDIS_STATUS_PENDING)
+        ProLeaveBinding(AdapterBinding);
+    return NdisStatus;
+}
+
 VOID NTAPI
 ProSendPackets(
     IN  NDIS_HANDLE     NdisBindingHandle,
@@ -600,6 +682,22 @@ ProSendPackets(
     KIRQL RaiseOldIrql;
     NDIS_STATUS NdisStatus;
     UINT i;
+    BOOLEAN Fail = FALSE;
+
+    /* Each packet is done when MiniSendComplete completes it to the protocol, which finds the
+       binding in the packet as for ProSend */
+    for (i = 0; i < NumberOfPackets; i++)
+    {
+        PacketArray[i]->Reserved[1] = (ULONG_PTR)AdapterBinding;
+        if (!ProEnterBinding(AdapterBinding))
+            Fail = TRUE;
+    }
+    if (Fail)
+    {
+        for (i = 0; i < NumberOfPackets; i++)
+            MiniSendComplete(Adapter, PacketArray[i], ProBindingStatus(AdapterBinding));
+        return;
+    }
 
     /* A serialized miniport takes one send at a time, see MiniEnterSerialized */
     if (!(Adapter->NdisMiniportBlock.Flags & NDIS_ATTRIBUTE_DESERIALIZE))
@@ -739,18 +837,139 @@ NdisCloseAdapter(
  */
 {
     PADAPTER_BINDING AdapterBinding = GET_ADAPTER_BINDING(NdisBindingHandle);
+    PLOGICAL_ADAPTER Adapter = AdapterBinding->Adapter;
+    LARGE_INTEGER Delay;
+    ULONG Waited;
+    KIRQL OldIrql;
 
     NDIS_DbgPrint(MAX_TRACE, ("Called.\n"));
+
+    /* Called at PASSIVE_LEVEL, by the protocol's UnbindAdapterHandler too (ProUnbindAdapter holds no lock then) */
+    PAGED_CODE();
+
+    /* The binding takes no new send or request; the ones queued for the miniport fail now */
+    InterlockedExchange(&AdapterBinding->Closing, TRUE);
+    MiniFailBindingWork(Adapter, AdapterBinding);
+
+    /* Wait, but not forever, for the sends and requests in the miniport to complete, so that the
+       protocol can free the context they complete to once this returns. The adapter is halted before
+       this runs on a remove or stop, so the miniport has completed them (its halt does); the wait is
+       the margin for one still on another processor. A miniport that never completes a send (surprise
+       removal of hardware that only completes on halt) must not hang the PnP thread: after the wait the
+       binding is unlinked and its open reference dropped, and the late completion frees it (ProLeaveBinding)
+       instead of this. */
+    Delay.QuadPart = -10000; /* 1 ms */
+    for (Waited = 0; AdapterBinding->Outstanding != 1 && Waited < 2000; Waited++)
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+
+    if (AdapterBinding->Outstanding != 1)
+        NDIS_DbgPrint(MIN_TRACE, ("%wZ: %ld sends/requests of the binding to %wZ did not complete; freeing the binding when they do\n",
+                                  &AdapterBinding->ProtocolBinding->Chars.Name, AdapterBinding->Outstanding - 1,
+                                  &Adapter->NdisMiniportBlock.MiniportName));
 
     /* Remove from protocol's bound adapters list */
     ExInterlockedRemoveEntryList(&AdapterBinding->ProtocolListEntry, &AdapterBinding->ProtocolBinding->Lock);
 
-    /* Remove protocol from adapter's bound protocols list */
-    ExInterlockedRemoveEntryList(&AdapterBinding->AdapterListEntry, &AdapterBinding->Adapter->NdisMiniportBlock.Lock);
+    /* Remove protocol from adapter's bound protocols list. The receive and status indications walk
+       it under the miniport lock: none is in the protocol for this binding afterwards */
+    KeAcquireSpinLock(&Adapter->NdisMiniportBlock.Lock, &OldIrql);
+    RemoveEntryList(&AdapterBinding->AdapterListEntry);
+    KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
 
-    ExFreePool(AdapterBinding);
+    /* Drop the open reference; if nothing is still in flight this frees the binding now, otherwise the
+       last completion frees it (it is off both lists already) */
+    ProLeaveBinding(AdapterBinding);
 
     *Status = NDIS_STATUS_SUCCESS;
+}
+
+/* The binding is still on the adapter's list (the pointer is only compared) */
+static
+BOOLEAN
+ProAdapterHasBinding(
+    PLOGICAL_ADAPTER Adapter,
+    PADAPTER_BINDING AdapterBinding)
+{
+    PLIST_ENTRY CurrentEntry;
+    BOOLEAN Found = FALSE;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&Adapter->NdisMiniportBlock.Lock, &OldIrql);
+    for (CurrentEntry = Adapter->ProtocolListHead.Flink;
+         CurrentEntry != &Adapter->ProtocolListHead;
+         CurrentEntry = CurrentEntry->Flink)
+    {
+        if (CurrentEntry == &AdapterBinding->AdapterListEntry)
+        {
+            Found = TRUE;
+            break;
+        }
+    }
+    KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
+
+    return Found;
+}
+
+/*
+ * FUNCTION: Unbinds every protocol from an adapter that is stopped or removed, as Windows does:
+ *           each protocol's UnbindAdapterHandler closes its binding (NdisCloseAdapter), and may
+ *           pend and finish with NdisCompleteUnbindAdapter
+ * NOTES:
+ *     - Called at PASSIVE_LEVEL, before the miniport is halted, after MiniStartRemoving: the
+ *       adapter is off the adapter list, so nothing binds to it again, and its sends and
+ *       requests fail, so no protocol waits for the miniport here
+ *     - A binding the protocol did not close is closed here: the adapter goes away regardless
+ */
+VOID
+ProUnbindAdapter(
+    PLOGICAL_ADAPTER Adapter)
+{
+    PADAPTER_BINDING AdapterBinding;
+    PPROTOCOL_BINDING Protocol;
+    NDIS_UNBIND_CONTEXT UnbindContext;
+    NDIS_STATUS Status;
+    KIRQL OldIrql;
+
+    PAGED_CODE();
+
+    for (;;)
+    {
+        KeAcquireSpinLock(&Adapter->NdisMiniportBlock.Lock, &OldIrql);
+        if (IsListEmpty(&Adapter->ProtocolListHead))
+        {
+            KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
+            break;
+        }
+        AdapterBinding = CONTAINING_RECORD(Adapter->ProtocolListHead.Flink, ADAPTER_BINDING, AdapterListEntry);
+        KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
+
+        Protocol = AdapterBinding->ProtocolBinding;
+        NDIS_DbgPrint(MID_TRACE, ("Unbinding %wZ from %wZ\n", &Protocol->Chars.Name, &Adapter->NdisMiniportBlock.MiniportName));
+
+        Status = NDIS_STATUS_NOT_SUPPORTED;
+        if (Protocol->Chars.UnbindAdapterHandler)
+        {
+            KeInitializeEvent(&UnbindContext.Event, NotificationEvent, FALSE);
+            UnbindContext.Status = NDIS_STATUS_SUCCESS;
+            Status = NDIS_STATUS_SUCCESS;
+
+            (*Protocol->Chars.UnbindAdapterHandler)(&Status,
+                                                    AdapterBinding->NdisOpenBlock.ProtocolBindingContext,
+                                                    &UnbindContext);
+            if (Status == NDIS_STATUS_PENDING)
+            {
+                KeWaitForSingleObject(&UnbindContext.Event, Executive, KernelMode, FALSE, NULL);
+                Status = UnbindContext.Status;
+            }
+        }
+
+        if (ProAdapterHasBinding(Adapter, AdapterBinding))
+        {
+            NDIS_DbgPrint(MIN_TRACE, ("%wZ did not close its binding to %wZ (0x%x), closing it\n",
+                                      &Protocol->Chars.Name, &Adapter->NdisMiniportBlock.MiniportName, Status));
+            NdisCloseAdapter(&Status, AdapterBinding);
+        }
+    }
 }
 
 
@@ -822,6 +1041,7 @@ NdisOpenAdapter(
   PLOGICAL_ADAPTER Adapter;
   PADAPTER_BINDING AdapterBinding;
   PPROTOCOL_BINDING Protocol = GET_PROTOCOL_BINDING(NdisProtocolHandle);
+  KIRQL OldIrql;
 
   NDIS_DbgPrint(MAX_TRACE, ("Called.\n"));
 
@@ -871,6 +1091,8 @@ NdisOpenAdapter(
 
   RtlZeroMemory(AdapterBinding, sizeof(ADAPTER_BINDING));
 
+  /* The open holds one reference, dropped by NdisCloseAdapter (see ProLeaveBinding) */
+  AdapterBinding->Outstanding            = 1;
   AdapterBinding->ProtocolBinding        = Protocol;
   AdapterBinding->Adapter                = Adapter;
   AdapterBinding->NdisOpenBlock.ProtocolBindingContext = ProtocolBindingContext;
@@ -889,12 +1111,26 @@ NdisOpenAdapter(
   AdapterBinding->NdisOpenBlock.RequestCompleteHandler =
     Protocol->Chars.RequestCompleteHandler;
 
-  /* Put on protocol's bound adapters list */
+  /* On the protocol's bound-adapters list first, so that once the binding is on the adapter's list
+     below (where ProUnbindAdapter and NdisCloseAdapter find it) its ProtocolListEntry is already valid */
   ExInterlockedInsertTailList(&Protocol->AdapterListHead, &AdapterBinding->ProtocolListEntry, &Protocol->Lock);
 
-  /* Put protocol on adapter's bound protocols list */
+  /* Put protocol on adapter's bound protocols list, unless the adapter is being removed: the check and
+     the insertion are one critical section, so a bind cannot race a remove and leave a binding on an
+     adapter that ProUnbindAdapter has already walked (the original use-after-free) */
   NDIS_DbgPrint(MAX_TRACE, ("acquiring miniport block lock\n"));
-  ExInterlockedInsertTailList(&Adapter->ProtocolListHead, &AdapterBinding->AdapterListEntry, &Adapter->NdisMiniportBlock.Lock);
+  KeAcquireSpinLock(&Adapter->NdisMiniportBlock.Lock, &OldIrql);
+  if (Adapter->Removing)
+  {
+      KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
+      NDIS_DbgPrint(MIN_TRACE, ("Adapter %wZ is being removed\n", &Adapter->NdisMiniportBlock.MiniportName));
+      ExInterlockedRemoveEntryList(&AdapterBinding->ProtocolListEntry, &Protocol->Lock);
+      ExFreePool(AdapterBinding);
+      *Status = NDIS_STATUS_ADAPTER_REMOVED;
+      return;
+  }
+  InsertTailList(&Adapter->ProtocolListHead, &AdapterBinding->AdapterListEntry);
+  KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
 
   *NdisBindingHandle = (NDIS_HANDLE)AdapterBinding;
 

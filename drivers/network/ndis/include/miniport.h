@@ -114,6 +114,8 @@ typedef struct _LOGICAL_ADAPTER
     PIO_WORKITEM               IoWorkItem;             /* The worker's one work item, allocated with the adapter so that scheduling cannot fail */
     PKTHREAD                   SendThread;             /* A serialized miniport's send thread, see MiniLeaveSerialized */
     KEVENT                     SendTurnEvent;
+    BOOLEAN                    Removing;               /* The adapter is stopped or removed: the protocols are being unbound, sends and requests fail (MiniStartRemoving) */
+    BOOLEAN                    Torndown;               /* The remove/surprise-remove teardown ran once (MiniShutdownAdapter is idempotent) */
 } LOGICAL_ADAPTER, *PLOGICAL_ADAPTER;
 
 #define GET_LOGICAL_ADAPTER(Handle)((PLOGICAL_ADAPTER)Handle)
@@ -244,5 +246,10 @@ VOID
 MiniLeaveSerialized(
     PLOGICAL_ADAPTER  Adapter,
     MINI_LEAVE_CALLER Caller);
+
+VOID
+MiniFailBindingWork(
+    PLOGICAL_ADAPTER        Adapter,
+    struct _ADAPTER_BINDING *AdapterBinding);
 
 /* EOF */
