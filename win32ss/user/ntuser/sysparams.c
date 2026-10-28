@@ -79,6 +79,7 @@ static const WCHAR* VAL_FONTSMOOTHINGCONTRAST = L"FontSmoothingGamma";
 static const WCHAR* VAL_FONTSMOOTHINGORIENTATION = L"FontSmoothingOrientation";
 static const WCHAR* VAL_SCRLLLINES = L"WheelScrollLines";
 static const WCHAR* VAL_CLICKLOCKTIME = L"ClickLockTime";
+static const WCHAR* VAL_FGLOCKTIMEOUT = L"ForegroundLockTimeout";
 static const WCHAR* VAL_PAINTDESKVER = L"PaintDesktopVersion";
 static const WCHAR* VAL_CARETRATE = L"CursorBlinkRate";
 static const WCHAR* VAL_CARETWIDTH = L"CaretWidth";
@@ -301,6 +302,7 @@ SpiUpdatePerUserSystemParameters(VOID)
     /* Load desktop settings */
     gspv.bDragFullWindows = SpiLoadInt(KEY_DESKTOP, VAL_DRAG, 0);
     gspv.iWheelScrollLines = SpiLoadInt(KEY_DESKTOP, VAL_SCRLLLINES, 3);
+    gspv.dwForegroundLockTimeout = SpiLoadDWord(KEY_DESKTOP, VAL_FGLOCKTIMEOUT, 200000);
     gspv.dwMouseClickLockTime = SpiLoadDWord(KEY_DESKTOP, VAL_CLICKLOCKTIME, 1200);
     if (gpsi)
         gpsi->dtCaretBlink = SpiLoadInt(KEY_DESKTOP, VAL_CARETRATE, 530);
@@ -1764,7 +1766,7 @@ SpiGetSet(UINT uiAction, UINT uiParam, PVOID pvParam, FLONG fl)
             return SpiGetInt(pvParam, &gspv.dwForegroundLockTimeout, fl);
 
         case SPI_SETFOREGROUNDLOCKTIMEOUT:
-            return SpiSetInt(&gspv.dwForegroundLockTimeout, uiParam, KEY_MOUSE, L"", fl);
+            return SpiSetDWord(&gspv.dwForegroundLockTimeout, PtrToUlong(pvParam), KEY_DESKTOP, VAL_FGLOCKTIMEOUT, fl);
 
         case SPI_GETACTIVEWNDTRKTIMEOUT:
             return SpiGetInt(pvParam, &gspv.dwActiveTrackingTimeout, fl);
