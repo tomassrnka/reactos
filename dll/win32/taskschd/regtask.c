@@ -185,8 +185,19 @@ static HRESULT WINAPI regtask_put_Enabled(IRegisteredTask *iface, VARIANT_BOOL e
 
 static HRESULT WINAPI regtask_Run(IRegisteredTask *iface, VARIANT params, IRunningTask **task)
 {
-    FIXME("%p,%s,%p: stub\n", iface, debugstr_variant(&params), task);
-    return E_NOTIMPL;
+    RegisteredTask *regtask = impl_from_IRegisteredTask(iface);
+    GUID guid;
+    HRESULT hr;
+
+    TRACE("%p,%s,%p\n", iface, debugstr_variant(&params), task);
+
+    if (V_VT(&params) != VT_EMPTY && V_VT(&params) != VT_NULL && V_VT(&params) != VT_ERROR)
+        FIXME("parameters %s are ignored\n", debugstr_variant(&params));
+
+    hr = SchRpcRun(regtask->path, 0, NULL, 0, 0, NULL, &guid);
+    /* FIXME: no IRunningTask */
+    if (task) *task = NULL;
+    return hr;
 }
 
 static HRESULT WINAPI regtask_RunEx(IRegisteredTask *iface, VARIANT params, LONG flags,
@@ -196,10 +207,135 @@ static HRESULT WINAPI regtask_RunEx(IRegisteredTask *iface, VARIANT params, LONG
     return E_NOTIMPL;
 }
 
+/* the service does not track running instances: an empty collection */
+typedef struct
+{
+    IRunningTaskCollection IRunningTaskCollection_iface;
+    LONG ref;
+} RunningTaskCollection;
+
+static inline RunningTaskCollection *impl_from_IRunningTaskCollection(IRunningTaskCollection *iface)
+{
+    return CONTAINING_RECORD(iface, RunningTaskCollection, IRunningTaskCollection_iface);
+}
+
+static HRESULT WINAPI running_tasks_QueryInterface(IRunningTaskCollection *iface, REFIID riid, void **obj)
+{
+    if (!riid || !obj) return E_INVALIDARG;
+
+    TRACE("%p,%s,%p\n", iface, debugstr_guid(riid), obj);
+
+    if (IsEqualGUID(riid, &IID_IRunningTaskCollection) ||
+        IsEqualGUID(riid, &IID_IDispatch) ||
+        IsEqualGUID(riid, &IID_IUnknown))
+    {
+        IRunningTaskCollection_AddRef(iface);
+        *obj = iface;
+        return S_OK;
+    }
+
+    FIXME("interface %s is not implemented\n", debugstr_guid(riid));
+    *obj = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI running_tasks_AddRef(IRunningTaskCollection *iface)
+{
+    RunningTaskCollection *tasks = impl_from_IRunningTaskCollection(iface);
+    return InterlockedIncrement(&tasks->ref);
+}
+
+static ULONG WINAPI running_tasks_Release(IRunningTaskCollection *iface)
+{
+    RunningTaskCollection *tasks = impl_from_IRunningTaskCollection(iface);
+    LONG ref = InterlockedDecrement(&tasks->ref);
+
+    if (!ref) free(tasks);
+    return ref;
+}
+
+static HRESULT WINAPI running_tasks_GetTypeInfoCount(IRunningTaskCollection *iface, UINT *count)
+{
+    FIXME("%p,%p: stub\n", iface, count);
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI running_tasks_GetTypeInfo(IRunningTaskCollection *iface, UINT index, LCID lcid, ITypeInfo **info)
+{
+    FIXME("%p,%u,%lu,%p: stub\n", iface, index, lcid, info);
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI running_tasks_GetIDsOfNames(IRunningTaskCollection *iface, REFIID riid, LPOLESTR *names,
+                                                  UINT count, LCID lcid, DISPID *dispid)
+{
+    FIXME("%p,%s,%p,%u,%lu,%p: stub\n", iface, debugstr_guid(riid), names, count, lcid, dispid);
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI running_tasks_Invoke(IRunningTaskCollection *iface, DISPID dispid, REFIID riid, LCID lcid,
+                                           WORD flags, DISPPARAMS *params, VARIANT *result, EXCEPINFO *excepinfo,
+                                           UINT *argerr)
+{
+    FIXME("%p,%ld,%s,%04lx,%04x,%p,%p,%p,%p: stub\n", iface, dispid, debugstr_guid(riid), lcid, flags,
+          params, result, excepinfo, argerr);
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI running_tasks_get_Count(IRunningTaskCollection *iface, LONG *count)
+{
+    TRACE("%p,%p\n", iface, count);
+
+    if (!count) return E_POINTER;
+
+    *count = 0;
+    return S_OK;
+}
+
+static HRESULT WINAPI running_tasks_get_Item(IRunningTaskCollection *iface, VARIANT index, IRunningTask **task)
+{
+    TRACE("%p,%s,%p\n", iface, debugstr_variant(&index), task);
+
+    if (!task) return E_POINTER;
+
+    *task = NULL;
+    return E_INVALIDARG;
+}
+
+static HRESULT WINAPI running_tasks_get__NewEnum(IRunningTaskCollection *iface, IUnknown **penum)
+{
+    FIXME("%p,%p: stub\n", iface, penum);
+    return E_NOTIMPL;
+}
+
+static const IRunningTaskCollectionVtbl RunningTaskCollection_vtbl =
+{
+    running_tasks_QueryInterface,
+    running_tasks_AddRef,
+    running_tasks_Release,
+    running_tasks_GetTypeInfoCount,
+    running_tasks_GetTypeInfo,
+    running_tasks_GetIDsOfNames,
+    running_tasks_Invoke,
+    running_tasks_get_Count,
+    running_tasks_get_Item,
+    running_tasks_get__NewEnum
+};
+
 static HRESULT WINAPI regtask_GetInstances(IRegisteredTask *iface, LONG flags, IRunningTaskCollection **tasks)
 {
-    FIXME("%p,%lx,%p: stub\n", iface, flags, tasks);
-    return E_NOTIMPL;
+    RunningTaskCollection *collection;
+
+    TRACE("%p,%lx,%p\n", iface, flags, tasks);
+
+    if (!tasks) return E_POINTER;
+
+    if (!(collection = malloc(sizeof(*collection)))) return E_OUTOFMEMORY;
+    collection->IRunningTaskCollection_iface.lpVtbl = &RunningTaskCollection_vtbl;
+    collection->ref = 1;
+
+    *tasks = &collection->IRunningTaskCollection_iface;
+    return S_OK;
 }
 
 static HRESULT WINAPI regtask_get_LastRunTime(IRegisteredTask *iface, DATE *date)
