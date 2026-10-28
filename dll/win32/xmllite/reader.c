@@ -1463,7 +1463,8 @@ static HRESULT reader_parse_comment(xmlreader *reader)
         }
 
         reader_skipn(reader, 1);
-        ptr++;
+        /* skipping the last buffered character reads more and may move the buffer */
+        ptr = reader_get_ptr(reader);
     }
 
     return S_OK;
