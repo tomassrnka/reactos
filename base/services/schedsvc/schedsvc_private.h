@@ -30,10 +30,27 @@ void check_task_time(void);
 void load_at_tasks(void);
 void check_missed_task_time(void);
 #ifdef __REACTOS__
-void schedsvc_task_registered(const WCHAR *path, const WCHAR *xml);
-void schedsvc_task_deleted(const WCHAR *path);
-HRESULT schedsvc_run_task(const WCHAR *path, GUID *guid);
+/* the caller of an RPC call, from its impersonation token */
+struct caller
+{
+    WCHAR *sid;         /* string SID */
+    BOOL privileged;    /* LocalSystem or an administrator */
+};
+
+HRESULT schedsvc_begin_call(struct caller *caller);
+void schedsvc_end_call(struct caller *caller);
+HRESULT schedsvc_check_owner(const struct caller *caller, const WCHAR *path);
+HRESULT schedsvc_check_quota(const struct caller *caller);
+void schedsvc_lock(void);
+void schedsvc_unlock(void);
+BOOL schedsvc_binding_is_local(RPC_BINDING_HANDLE binding);
+RPC_STATUS CALLBACK schedsvc_if_callback(RPC_IF_HANDLE iface, void *context);
+HRESULT schedsvc_task_registered(const struct caller *caller, const WCHAR *path, const WCHAR *xml);
+HRESULT schedsvc_task_deleted(const WCHAR *path);
+HRESULT schedsvc_run_task(const struct caller *caller, const WCHAR *path, GUID *guid);
 BOOL schedsvc_valid_path(const WCHAR *path);
+LONG schedsvc_log_fault(EXCEPTION_POINTERS *info);
+HRESULT schedsvc_open_xml(const WCHAR *xml, IStream **stream);
 #endif
 
 #endif /* __WINE_SCHEDSVC_PRIVATE_H__ */

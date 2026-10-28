@@ -32,6 +32,7 @@
 
 /* schrpc_s.c; schrpc.h needs the COM headers */
 extern RPC_IF_HANDLE ITaskSchedulerService_v1_0_s_ifspec;
+extern RPC_STATUS CALLBACK schedsvc_if_callback(RPC_IF_HANDLE iface, void *context);
 
 WINE_DEFAULT_DEBUG_CHANNEL(schedsvc);
 
@@ -65,7 +66,11 @@ RpcThreadRoutine(
     if (Status != RPC_S_OK)
         ERR("RpcServerUseProtseqEpW(ncalrpc) failed (Status %lx)\n", Status);
 
-    Status = RpcServerRegisterIf(ITaskSchedulerService_v1_0_s_ifspec, NULL, NULL);
+    /* local only; this rpcrt4 does not call the callback or check the flag, so every entry point
+       of the interface checks its transport as well (schedsvc_begin_call) */
+    Status = RpcServerRegisterIfEx(ITaskSchedulerService_v1_0_s_ifspec, NULL, NULL,
+                                   RPC_IF_ALLOW_LOCAL_ONLY, RPC_C_LISTEN_MAX_CALLS_DEFAULT,
+                                   schedsvc_if_callback);
     if (Status != RPC_S_OK)
         ERR("RpcServerRegisterIf(ITaskSchedulerService) failed (Status %lx)\n", Status);
 

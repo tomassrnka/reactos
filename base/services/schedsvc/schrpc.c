@@ -19,6 +19,9 @@
  */
 
 #include <stdarg.h>
+#ifdef __REACTOS__
+#include <pseh/pseh2.h>
+#endif
 
 #define COBJMACROS
 
@@ -36,6 +39,18 @@ WINE_DEFAULT_DEBUG_CHANNEL(schedsvc);
 
 static const char bom_utf8[] = { 0xef,0xbb,0xbf };
 
+/* the largest task XML the service takes: 64 KB of UTF-16 */
+#define MAX_XML_CHARS (32 * 1024)
+
+static BOOL xml_too_long(const WCHAR *xml)
+{
+    SIZE_T len;
+
+    for (len = 0; xml[len]; len++)
+        if (len >= MAX_XML_CHARS) return TRUE;
+    return FALSE;
+}
+
 struct task_info
 {
     BOOL enabled;
@@ -43,8 +58,18 @@ struct task_info
 
 HRESULT __cdecl SchRpcHighestVersion(DWORD *version)
 {
+#ifdef __REACTOS__
+    struct caller caller;
+    HRESULT hr;
+#endif
+
     TRACE("%p\n", version);
 
+#ifdef __REACTOS__
+    /* the connection check of taskschd.dll: local, identified callers only */
+    if (FAILED(hr = schedsvc_begin_call(&caller))) return hr;
+    schedsvc_end_call(&caller);
+#endif
     *version = MAKELONG(3, 1);
     return S_OK;
 }
@@ -118,56 +143,61 @@ static HRESULT write_xml_utf8(const WCHAR *name, DWORD disposition, const WCHAR 
 {
     static const char comment[] = "<!-- Task definition created by Wine -->\n";
     HANDLE hfile;
-    DWORD size;
-    char *xml;
+    DWORD size, written;
+    char *xml, *out;
+    const char *body;
     HRESULT hr = S_OK;
+
+    size = WideCharToMultiByte(CP_UTF8, 0, xmlW, -1, NULL, 0, NULL, NULL);
+    if (!size) return HRESULT_FROM_WIN32(GetLastError());
+    xml = malloc(size);
+    if (!xml) return E_OUTOFMEMORY;
+    if (!WideCharToMultiByte(CP_UTF8, 0, xmlW, -1, xml, size, NULL, NULL))
+    {
+        free(xml);
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
+
+    /* skip XML declaration with UTF-16 specifier */
+    body = xml;
+    if (!memcmp(xml, "<?xml", 5))
+    {
+        const char *p = strchr(xml, '>');
+        if (p++) while (isspace((unsigned char)*p)) p++;
+        else p = xml;
+        body = p;
+    }
+
+    /* build the whole file first, so a failed update does not leave half of it */
+    size = sizeof(bom_utf8) + strlen(comment) + strlen(body);
+    out = malloc(size + 1); /* strcat adds a terminator that is not written */
+    if (!out)
+    {
+        free(xml);
+        return E_OUTOFMEMORY;
+    }
+    memcpy(out, bom_utf8, sizeof(bom_utf8));
+    strcpy(out + sizeof(bom_utf8), comment);
+    strcat(out, body);
+    free(xml);
 
     hfile = CreateFileW(name, GENERIC_WRITE, 0, NULL, disposition, 0, 0);
     if (hfile == INVALID_HANDLE_VALUE)
     {
+        free(out);
         if (GetLastError() == ERROR_FILE_EXISTS)
             return HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS);
 
         return HRESULT_FROM_WIN32(GetLastError());
     }
 
-    size = WideCharToMultiByte(CP_UTF8, 0, xmlW, -1, NULL, 0, NULL, NULL);
-    xml = malloc(size);
-    if (!xml)
-    {
-        CloseHandle(hfile);
-        return E_OUTOFMEMORY;
-    }
-    WideCharToMultiByte(CP_UTF8, 0, xmlW, -1, xml, size, NULL, NULL);
-
-    if (!WriteFile(hfile, bom_utf8, sizeof(bom_utf8), &size, NULL))
-    {
+    if (!WriteFile(hfile, out, size, &written, NULL) || written != size)
+        hr = HRESULT_FROM_WIN32(GetLastError() ? GetLastError() : ERROR_WRITE_FAULT);
+    /* an update may be shorter than the file it replaces */
+    else if (!SetEndOfFile(hfile))
         hr = HRESULT_FROM_WIN32(GetLastError());
-        goto failed;
-    }
-    if (!WriteFile(hfile, comment, strlen(comment), &size, NULL))
-    {
-        hr = HRESULT_FROM_WIN32(GetLastError());
-        goto failed;
-    }
 
-    /* skip XML declaration with UTF-16 specifier */
-    if (!memcmp(xml, "<?xml", 5))
-    {
-        const char *p = strchr(xml, '>');
-        if (p++) while (isspace(*p)) p++;
-        else p = xml;
-        if (!WriteFile(hfile, p, strlen(p), &size, NULL))
-            hr = HRESULT_FROM_WIN32(GetLastError());
-    }
-    else
-    {
-        if (!WriteFile(hfile, xml, strlen(xml), &size, NULL))
-            hr = HRESULT_FROM_WIN32(GetLastError());
-    }
-
-failed:
-    free(xml);
+    free(out);
     CloseHandle(hfile);
     return hr;
 }
@@ -176,8 +206,10 @@ HRESULT __cdecl SchRpcRegisterTask(const WCHAR *path, const WCHAR *xml, DWORD fl
                                    DWORD task_logon_type, DWORD n_creds, const TASK_USER_CRED *creds,
                                    WCHAR **actual_path, TASK_XML_ERROR_INFO **xml_error_info)
 {
-    WCHAR *full_name, *relative_path;
+    WCHAR *full_name = NULL, *relative_path, *norm_path = NULL, *p;
     DWORD disposition;
+    BOOL existed;
+    struct caller caller;
     HRESULT hr;
 
     TRACE("%s,%s,%#lx,%s,%lu,%lu,%p,%p,%p\n", debugstr_w(path), debugstr_w(xml), flags,
@@ -186,43 +218,23 @@ HRESULT __cdecl SchRpcRegisterTask(const WCHAR *path, const WCHAR *xml, DWORD fl
     *actual_path = NULL;
     *xml_error_info = NULL;
 
-    /* FIXME: assume that validation is performed on the client side */
-    if (flags & TASK_VALIDATE_ONLY) return S_OK;
-
-    if (path)
-    {
 #ifdef __REACTOS__
-        if (!schedsvc_valid_path(path)) return HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
-#endif
-        full_name = get_full_name(path, &relative_path);
-        if (!full_name) return E_OUTOFMEMORY;
+    if (FAILED(hr = schedsvc_begin_call(&caller))) return hr;
 
-        if (wcschr(path, '\\') || wcschr(path, '/'))
-        {
-            WCHAR *p = wcsrchr(full_name, '/');
-            if (!p) p = wcsrchr(full_name, '\\');
-            *p = 0;
-            hr = create_directory(full_name);
-            if (hr != S_OK && hr != HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS))
-            {
-                free(full_name);
-                return hr;
-            }
-            *p = '\\';
-        }
-    }
-    else
+    /* the service keeps and parses what it is given: bound it */
+    if (xml_too_long(xml))
     {
-        IID iid;
-        WCHAR uuid_str[39];
+        WARN("refusing a task of more than %u characters\n", MAX_XML_CHARS);
+        hr = HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE);
+        goto done;
+    }
+#endif
 
-        UuidCreate(&iid);
-        StringFromGUID2(&iid, uuid_str, 39);
-
-        full_name = get_full_name(uuid_str, &relative_path);
-        if (!full_name) return E_OUTOFMEMORY;
-        /* skip leading '\' */
-        relative_path++;
+    /* FIXME: assume that validation is performed on the client side */
+    if (flags & TASK_VALIDATE_ONLY)
+    {
+        hr = S_OK;
+        goto done;
     }
 
     switch (flags & (TASK_CREATE | TASK_UPDATE))
@@ -241,17 +253,108 @@ HRESULT __cdecl SchRpcRegisterTask(const WCHAR *path, const WCHAR *xml, DWORD fl
         break;
     }
 
+    if (path)
+    {
+#ifdef __REACTOS__
+        if (!schedsvc_valid_path(path) || !*path)
+        {
+            hr = HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
+            goto done;
+        }
+        /* '/' and '\\' both separate; a task name does not end with one */
+        if (!(norm_path = wcsdup(path)))
+        {
+            hr = E_OUTOFMEMORY;
+            goto done;
+        }
+        for (p = norm_path; *p; p++) if (*p == '/') *p = '\\';
+        if (norm_path[lstrlenW(norm_path) - 1] == '\\')
+        {
+            hr = HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
+            goto done;
+        }
+        path = norm_path;
+#endif
+        full_name = get_full_name(path, &relative_path);
+        if (!full_name)
+        {
+            hr = E_OUTOFMEMORY;
+            goto done;
+        }
+    }
+    else
+    {
+        IID iid;
+        WCHAR uuid_str[39];
+
+        UuidCreate(&iid);
+        StringFromGUID2(&iid, uuid_str, 39);
+
+        full_name = get_full_name(uuid_str, &relative_path);
+        if (!full_name)
+        {
+            hr = E_OUTOFMEMORY;
+            goto done;
+        }
+        /* skip leading '\' */
+        relative_path++;
+    }
+
+#ifdef __REACTOS__
+    /* the check and the write are one step: nobody replaces a task in between */
+    schedsvc_lock();
+    existed = GetFileAttributesW(full_name) != INVALID_FILE_ATTRIBUTES;
+    if (existed && disposition != CREATE_NEW)
+        hr = schedsvc_check_owner(&caller, relative_path); /* only the owner or an administrator replaces a task */
+    else if (!existed)
+        hr = schedsvc_check_quota(&caller);
+    else
+        hr = S_OK;
+    if (FAILED(hr))
+    {
+        schedsvc_unlock();
+        goto done;
+    }
+#else
+    existed = TRUE;
+#endif
+
+    if (path && wcschr(path, '\\'))
+    {
+        /* a task in a folder: create the folder */
+        p = wcsrchr(full_name, '\\');
+        *p = 0;
+        hr = create_directory(full_name);
+        *p = '\\';
+        if (hr != S_OK && hr != HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS))
+        {
+#ifdef __REACTOS__
+            schedsvc_unlock();
+#endif
+            goto done;
+        }
+    }
+
     hr = write_xml_utf8(full_name, disposition, xml);
     if (hr == S_OK)
     {
-        *actual_path = wcsdup(relative_path);
         schedsvc_auto_start();
 #ifdef __REACTOS__
-        schedsvc_task_registered(relative_path, xml);
+        hr = schedsvc_task_registered(&caller, relative_path, xml);
+        if (hr != S_OK && !existed) DeleteFileW(full_name); /* no record, no task */
 #endif
+        if (hr == S_OK) *actual_path = wcsdup(relative_path);
     }
+#ifdef __REACTOS__
+    schedsvc_unlock();
+#endif
 
+done:
+    free(norm_path);
     free(full_name);
+#ifdef __REACTOS__
+    schedsvc_end_call(&caller);
+#endif
     return hr;
 }
 
@@ -292,6 +395,12 @@ static HRESULT read_xml(const WCHAR *name, WCHAR **xml)
         return HRESULT_FROM_WIN32(GetLastError());
 
     size = GetFileSize(hfile, NULL);
+    /* a stored task is at most MAX_XML_CHARS characters; UTF-8 takes up to 3 bytes of each */
+    if (size == INVALID_FILE_SIZE || size > MAX_XML_CHARS * 3)
+    {
+        CloseHandle(hfile);
+        return HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE);
+    }
     buff = src = malloc(size + 2);
     if (!src)
     {
@@ -302,8 +411,16 @@ static HRESULT read_xml(const WCHAR *name, WCHAR **xml)
     src[size] = 0;
     src[size + 1] = 0;
 
-    ReadFile(hfile, src, size, &size, NULL);
+    if (!ReadFile(hfile, src, size, &size, NULL))
+    {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        CloseHandle(hfile);
+        free(src);
+        return hr;
+    }
     CloseHandle(hfile);
+    src[size] = 0;
+    src[size + 1] = 0;
 
     cp = detect_encoding(src, size);
     if (cp < 0)
@@ -473,18 +590,44 @@ static HRESULT read_task_info(IXmlReader *reader, struct task_info *info)
 
 }
 
+static HRESULT read_task_root(IXmlReader *reader, struct task_info *info)
+{
+    const WCHAR *name;
+    XmlNodeType type;
+    HRESULT hr = S_OK;
+
+    while (IXmlReader_Read(reader, &type) == S_OK)
+    {
+        if (type != XmlNodeType_Element) continue;
+        if (FAILED(hr = IXmlReader_GetLocalName(reader, &name, NULL)))
+            return hr;
+
+        TRACE("Element: %s\n", debugstr_w(name));
+        if (wcscmp(name, L"Task"))
+            continue;
+
+        hr = read_task_info(reader, info);
+        break;
+    }
+    return hr;
+}
+
 static HRESULT read_task_info_from_xml(const WCHAR *xml, struct task_info *info)
 {
     IXmlReader *reader;
-    const WCHAR *name;
-    XmlNodeType type;
     IStream *stream;
+#ifndef __REACTOS__
     HGLOBAL hmem;
-    HRESULT hr;
     void *buf;
+#endif
+    volatile HRESULT hr;
+    volatile BOOL faulted = FALSE;
 
     memset(info, 0, sizeof(*info));
 
+#ifdef __REACTOS__
+    if (FAILED(hr = schedsvc_open_xml(xml, &stream))) return hr;
+#else
     if (!(hmem = GlobalAlloc(0, wcslen(xml) * sizeof(WCHAR))))
         return E_OUTOFMEMORY;
 
@@ -497,6 +640,7 @@ static HRESULT read_task_info_from_xml(const WCHAR *xml, struct task_info *info)
         GlobalFree(hmem);
         return hr;
     }
+#endif
 
     if (FAILED(hr = CreateXmlReader(&IID_IXmlReader, (void **)&reader, NULL)))
     {
@@ -507,23 +651,28 @@ static HRESULT read_task_info_from_xml(const WCHAR *xml, struct task_info *info)
     if (FAILED(hr = IXmlReader_SetInput(reader, (IUnknown *)stream)))
         goto done;
 
-    while (IXmlReader_Read(reader, &type) == S_OK)
+#ifdef __REACTOS__
+    /* the XML is what a user registered: a fault in the parser fails the call, not the service */
+    _SEH2_TRY
     {
-        if (type != XmlNodeType_Element) continue;
-        if (FAILED(hr = IXmlReader_GetLocalName(reader, &name, NULL)))
-            goto done;
-
-        TRACE("Element: %s\n", debugstr_w(name));
-        if (wcscmp(name, L"Task"))
-            continue;
-
-        hr = read_task_info(reader, info);
-        break;
+        hr = read_task_root(reader, info);
     }
+    _SEH2_EXCEPT(schedsvc_log_fault(_SEH2_GetExceptionInformation()))
+    {
+        hr = E_FAIL;
+        faulted = TRUE;
+    }
+    _SEH2_END;
+#else
+    hr = read_task_root(reader, info);
+#endif
 
 done:
-    IXmlReader_Release(reader);
-    IStream_Release(stream);
+    if (!faulted)
+    {
+        IXmlReader_Release(reader);
+        IStream_Release(stream);
+    }
     if (FAILED(hr))
     {
         WARN("Failed parsing xml, hr %#lx.\n", hr);
@@ -535,12 +684,20 @@ done:
 HRESULT __cdecl SchRpcRetrieveTask(const WCHAR *path, const WCHAR *languages, ULONG *n_languages, WCHAR **xml)
 {
     WCHAR *full_name;
+    struct caller caller;
     HRESULT hr;
 
     TRACE("%s,%s,%p,%p\n", debugstr_w(path), debugstr_w(languages), n_languages, xml);
 
+    *xml = NULL;
 #ifdef __REACTOS__
-    if (!schedsvc_valid_path(path)) return HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
+    if (FAILED(hr = schedsvc_begin_call(&caller))) return hr;
+    if (!schedsvc_valid_path(path))
+        hr = HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
+    else /* the XML of a task is for its owner and the administrators */
+        hr = schedsvc_check_owner(&caller, path);
+    schedsvc_end_call(&caller);
+    if (FAILED(hr)) return hr;
 #endif
     full_name = get_full_name(path, NULL);
     if (!full_name) return E_OUTOFMEMORY;
@@ -555,6 +712,7 @@ HRESULT __cdecl SchRpcRetrieveTask(const WCHAR *path, const WCHAR *languages, UL
 HRESULT __cdecl SchRpcCreateFolder(const WCHAR *path, const WCHAR *sddl, DWORD flags)
 {
     WCHAR *full_name;
+    struct caller caller;
     HRESULT hr;
 
     TRACE("%s,%s,%#lx\n", debugstr_w(path), debugstr_w(sddl), flags);
@@ -562,6 +720,8 @@ HRESULT __cdecl SchRpcCreateFolder(const WCHAR *path, const WCHAR *sddl, DWORD f
     if (flags) return E_INVALIDARG;
 
 #ifdef __REACTOS__
+    if (FAILED(hr = schedsvc_begin_call(&caller))) return hr;
+    schedsvc_end_call(&caller);
     if (!schedsvc_valid_path(path)) return HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
 #endif
     full_name = get_full_name(path, NULL);
@@ -625,6 +785,7 @@ HRESULT __cdecl SchRpcEnumFolders(const WCHAR *path, DWORD flags, DWORD *start_i
     HANDLE handle;
     DWORD allocated, count, index;
     TASK_NAMES list;
+    struct caller caller;
 
     TRACE("%s,%#lx,%lu,%lu,%p,%p\n", debugstr_w(path), flags, *start_index, n_requested, n_names, names);
 
@@ -636,6 +797,8 @@ HRESULT __cdecl SchRpcEnumFolders(const WCHAR *path, DWORD flags, DWORD *start_i
     if (!n_requested) n_requested = ~0u;
 
 #ifdef __REACTOS__
+    if (FAILED(hr = schedsvc_begin_call(&caller))) return hr;
+    schedsvc_end_call(&caller);
     if (!schedsvc_valid_path(path)) return HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
 #endif
     full_name = get_full_name(path, NULL);
@@ -736,6 +899,7 @@ HRESULT __cdecl SchRpcEnumTasks(const WCHAR *path, DWORD flags, DWORD *start_ind
     HANDLE handle;
     DWORD allocated, count, index;
     TASK_NAMES list;
+    struct caller caller;
 
     TRACE("%s,%#lx,%lu,%lu,%p,%p\n", debugstr_w(path), flags, *start_index, n_requested, n_names, names);
 
@@ -747,6 +911,8 @@ HRESULT __cdecl SchRpcEnumTasks(const WCHAR *path, DWORD flags, DWORD *start_ind
     if (!n_requested) n_requested = ~0u;
 
 #ifdef __REACTOS__
+    if (FAILED(hr = schedsvc_begin_call(&caller))) return hr;
+    schedsvc_end_call(&caller);
     if (!schedsvc_valid_path(path)) return HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
 #endif
     full_name = get_full_name(path, NULL);
@@ -866,9 +1032,19 @@ HRESULT __cdecl SchRpcRun(const WCHAR *path, DWORD n_args, const WCHAR **args, D
                           DWORD session_id, const WCHAR *user, GUID *guid)
 {
 #ifdef __REACTOS__
+    struct caller caller;
+    HRESULT hr;
+
     TRACE("%s,%lu,%p,%#lx,%#lx,%s,%p\n", debugstr_w(path), n_args, args, flags,
           session_id, debugstr_w(user), guid);
-    return schedsvc_run_task(path, guid);
+    memset(guid, 0, sizeof(*guid));
+    if (FAILED(hr = schedsvc_begin_call(&caller))) return hr;
+    if (!schedsvc_valid_path(path))
+        hr = HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
+    else
+        hr = schedsvc_run_task(&caller, path, guid);
+    schedsvc_end_call(&caller);
+    return hr;
 #else
     FIXME("%s,%lu,%p,%#lx,%#lx,%s,%p: stub\n", debugstr_w(path), n_args, args, flags,
           session_id, debugstr_w(user), guid);
@@ -880,31 +1056,70 @@ HRESULT __cdecl SchRpcDelete(const WCHAR *path, DWORD flags)
 {
     WCHAR *full_name;
     HRESULT hr = S_OK;
+    struct caller caller;
+    DWORD attrs;
 
     TRACE("%s,%#lx\n", debugstr_w(path), flags);
 
     if (flags) return E_INVALIDARG;
 
+#ifdef __REACTOS__
+    if (FAILED(hr = schedsvc_begin_call(&caller))) return hr;
+#endif
     while (*path == '\\' || *path == '/') path++;
-    if (!*path) return E_ACCESSDENIED;
+    if (!*path)
+    {
+        hr = E_ACCESSDENIED;
+        goto done;
+    }
 
 #ifdef __REACTOS__
-    if (!schedsvc_valid_path(path)) return HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
+    if (!schedsvc_valid_path(path))
+    {
+        hr = HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
+        goto done;
+    }
 #endif
     full_name = get_full_name(path, NULL);
-    if (!full_name) return E_OUTOFMEMORY;
+    if (!full_name)
+    {
+        hr = E_OUTOFMEMORY;
+        goto done;
+    }
 
+#ifdef __REACTOS__
+    schedsvc_lock();
+    attrs = GetFileAttributesW(full_name);
+    if (attrs == INVALID_FILE_ATTRIBUTES)
+        hr = HRESULT_FROM_WIN32(GetLastError());
+    else if (attrs & FILE_ATTRIBUTE_DIRECTORY)
+    {
+        /* a folder has no owner; only an empty one goes */
+        if (!RemoveDirectoryW(full_name)) hr = HRESULT_FROM_WIN32(GetLastError());
+    }
+    else
+    {
+        /* only the owner or an administrator deletes a task; the record goes first, so a task
+           whose file cannot be deleted stops running */
+        hr = schedsvc_check_owner(&caller, path);
+        if (hr == S_OK) hr = schedsvc_task_deleted(path);
+        if (hr == S_OK && !DeleteFileW(full_name)) hr = HRESULT_FROM_WIN32(GetLastError());
+    }
+    schedsvc_unlock();
+#else
     if (!RemoveDirectoryW(full_name))
     {
         hr = HRESULT_FROM_WIN32(GetLastError());
         if (hr == HRESULT_FROM_WIN32(ERROR_DIRECTORY))
             hr = DeleteFileW(full_name) ? S_OK : HRESULT_FROM_WIN32(GetLastError());
     }
-#ifdef __REACTOS__
-    if (hr == S_OK) schedsvc_task_deleted(path);
 #endif
 
     free(full_name);
+done:
+#ifdef __REACTOS__
+    schedsvc_end_call(&caller);
+#endif
     return hr;
 }
 
@@ -932,12 +1147,19 @@ HRESULT __cdecl SchRpcGetTaskInfo(const WCHAR *path, DWORD flags, DWORD *enabled
 {
     WCHAR *full_name, *xml;
     struct task_info info;
+    struct caller caller;
     HRESULT hr;
 
     FIXME("%s,%#lx,%p,%p: stub\n", debugstr_w(path), flags, enabled, task_state);
 
 #ifdef __REACTOS__
-    if (!schedsvc_valid_path(path)) return HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
+    if (FAILED(hr = schedsvc_begin_call(&caller))) return hr;
+    if (!schedsvc_valid_path(path))
+        hr = HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
+    else
+        hr = schedsvc_check_owner(&caller, path);
+    schedsvc_end_call(&caller);
+    if (FAILED(hr)) return hr;
 #endif
     full_name = get_full_name(path, NULL);
     if (!full_name) return E_OUTOFMEMORY;

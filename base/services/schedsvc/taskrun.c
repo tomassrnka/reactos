@@ -17,6 +17,16 @@
  * them; a task registered by anybody else runs only as that same user. A user task needs the
  * user to be logged on: its process gets the token of the user's shell (no stored passwords).
  *
+ * Known issue (registry ACLs): the TaskCache record is trusted because only this service is
+ * supposed to write it. This kernel does not enforce registry ACLs (every key is effectively
+ * Everyone:GENERIC_ALL), so the record protects against callers of the RPC interface, not
+ * against a local user who writes the registry directly. Until key ACLs are enforced, a local
+ * user can still forge a "Privileged" record.
+ *
+ * The RPC interface is local only (ncalrpc): remote and anonymous callers are refused, a task can
+ * be updated, deleted or read only by whoever registered it or by an administrator, and the
+ * request size, the path shape and the number of tasks per user are limited.
+ *
  * Triggers: TimeTrigger and CalendarTrigger/ScheduleByDay (with Repetition, StartBoundary and
  * EndBoundary), LogonTrigger and BootTrigger (with Delay). The other trigger types are ignored.
  */
@@ -35,6 +45,7 @@
 #include <tlhelp32.h>
 #include <userenv.h>
 #include <rpc.h>
+#include <pseh/pseh2.h>
 #include <xmllite.h>
 #include <taskschd.h>
 
@@ -56,6 +67,18 @@ VOID TaskSchedulerStop(VOID);
 #define MAX_ACTIONS 32
 #define MAX_DEPTH 16
 /* boot triggers, and logons that predate the service, only count this soon after boot */
+/* limits on what a caller may register */
+#define MAX_XML_BYTES (64 * 1024)
+#define MAX_TASK_PATH 238
+#define MAX_COMPONENT 255
+#define MAX_PATH_DEPTH 16
+#define MAX_TASKS_PER_USER 64
+#define MAX_TASKS_TOTAL 1024
+#define MAX_INSTANCES 64
+/* the longest period, delay or repetition kept; longer ones are clamped */
+#define MAX_SECONDS (100ULL * 365 * 86400)
+#define MIN_REPETITION_SECONDS 60
+#define MAX_DAYS_INTERVAL 36500
 #define BOOT_WINDOW_MS (10 * 60 * 1000)
 #define LOGON_POLL_MS 5000
 #define MAX_WAIT_MS 60000
@@ -166,7 +189,15 @@ static BOOL parse_datetime(const WCHAR *str, ULONGLONG *time)
     return TRUE;
 }
 
-/* ISO 8601 duration "PnYnMnWnDTnHnMnS", in 100 ns units; 0 if invalid */
+/* seconds + n * unit, saturating at MAX_SECONDS */
+static ULONGLONG add_seconds(ULONGLONG seconds, ULONGLONG n, ULONGLONG unit)
+{
+    if (n > MAX_SECONDS / unit) return MAX_SECONDS;
+    seconds += n * unit;
+    return seconds > MAX_SECONDS ? MAX_SECONDS : seconds;
+}
+
+/* ISO 8601 duration "PnYnMnWnDTnHnMnS", in 100 ns units; 0 if invalid; clamped to MAX_SECONDS */
 static ULONGLONG parse_duration(const WCHAR *str)
 {
     ULONGLONG seconds = 0, n;
@@ -182,17 +213,19 @@ static ULONGLONG parse_duration(const WCHAR *str)
             str++;
             continue;
         }
+        /* digits only: wcstoul takes a sign, and a negative number must not wrap */
+        if (*str < '0' || *str > '9') return 0;
         n = wcstoul(str, &end, 10);
         if (end == str) return 0;
         str = end;
         switch (*str++)
         {
-        case 'Y': seconds += n * 365 * 86400; break;
-        case 'M': seconds += time_part ? n * 60 : n * 30 * 86400; break;
-        case 'W': seconds += n * 7 * 86400; break;
-        case 'D': seconds += n * 86400; break;
-        case 'H': seconds += n * 3600; break;
-        case 'S': seconds += n; break;
+        case 'Y': seconds = add_seconds(seconds, n, 365 * 86400); break;
+        case 'M': seconds = add_seconds(seconds, n, time_part ? 60 : 30 * 86400); break;
+        case 'W': seconds = add_seconds(seconds, n, 7 * 86400); break;
+        case 'D': seconds = add_seconds(seconds, n, 86400); break;
+        case 'H': seconds = add_seconds(seconds, n, 3600); break;
+        case 'S': seconds = add_seconds(seconds, n, 1); break;
         default: return 0;
         }
     }
@@ -211,6 +244,8 @@ static ULONGLONG trigger_next_run(const struct trigger *trigger, ULONGLONG after
 
     if (!trigger->supported || !trigger->enabled || !trigger->start) return NO_TIME;
     if (trigger->type != TASK_TRIGGER_TIME && trigger->type != TASK_TRIGGER_DAILY) return NO_TIME;
+    /* the period and the interval divide below: a task must never get a zero one */
+    if (trigger->type == TASK_TRIGGER_DAILY && !trigger->period) return NO_TIME;
 
     if (after < trigger->start)
         next = trigger->start;
@@ -365,13 +400,21 @@ static void element_text(struct task *task, const WCHAR **names, unsigned int de
         }
         else if (depth == 5 && !wcscmp(names[3], L"Repetition"))
         {
-            if (!wcscmp(name, L"Interval")) trigger->rep_interval = parse_duration(value);
+            if (!wcscmp(name, L"Interval"))
+            {
+                trigger->rep_interval = parse_duration(value);
+                /* Windows refuses an interval below one minute */
+                if (trigger->rep_interval && trigger->rep_interval < MIN_REPETITION_SECONDS * TICKS_PER_SECOND)
+                    trigger->rep_interval = MIN_REPETITION_SECONDS * TICKS_PER_SECOND;
+            }
             else if (!wcscmp(name, L"Duration")) trigger->rep_duration = parse_duration(value);
         }
         else if (depth == 5 && !wcscmp(names[3], L"ScheduleByDay") && !wcscmp(name, L"DaysInterval"))
         {
-            int days = _wtoi(value);
-            if (days > 0) trigger->period = days * 86400 * TICKS_PER_SECOND;
+            /* 64-bit math: days * 86400 wrapped an int to 0 and the period divided by it */
+            LONGLONG days = _wtoi64(value);
+            if (days > MAX_DAYS_INTERVAL) days = MAX_DAYS_INTERVAL;
+            if (days > 0) trigger->period = (ULONGLONG)days * 86400 * TICKS_PER_SECOND;
         }
     }
     else if (depth == 4 && !wcscmp(names[1], L"Actions") && !wcscmp(names[2], L"Exec") &&
@@ -395,39 +438,35 @@ static void element_text(struct task *task, const WCHAR **names, unsigned int de
     }
 }
 
-static HRESULT parse_task_xml(struct task *task, const WCHAR *xml)
+/* the filter of the guards around the XML parser: log where it faulted, then fail the parse */
+LONG schedsvc_log_fault(EXCEPTION_POINTERS *info)
+{
+    const EXCEPTION_RECORD *rec = info->ExceptionRecord;
+    WCHAR module[MAX_PATH] = L"?";
+    HMODULE base = NULL;
+
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           rec->ExceptionAddress, &base))
+        GetModuleFileNameW(base, module, ARRAYSIZE(module));
+    ERR("the XML parser faulted: %#lx at %p in %s, offset %#lx (%lu %p)\n", rec->ExceptionCode, rec->ExceptionAddress,
+        debugstr_w(module), (DWORD)((char *)rec->ExceptionAddress - (char *)base),
+        rec->NumberParameters > 0 ? (DWORD)rec->ExceptionInformation[0] : 0,
+        rec->NumberParameters > 1 ? (void *)rec->ExceptionInformation[1] : NULL);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+struct parse_state
 {
     WCHAR *names[MAX_DEPTH];
-    unsigned int depth = 0, skip = 0, i;
-    IXmlReader *reader = NULL;
-    IStream *stream = NULL;
+    unsigned int depth, skip;
+};
+
+/* reads every node; the elements go to begin_element and element_text */
+static HRESULT parse_nodes(struct task *task, IXmlReader *reader, struct parse_state *state)
+{
     XmlNodeType type;
     const WCHAR *name, *value;
-    HGLOBAL hmem;
-    SIZE_T size;
-    HRESULT hr;
-
-    task->enabled = TRUE;
-
-    size = wcslen(xml) * sizeof(WCHAR);
-    if (!(hmem = GlobalAlloc(GMEM_MOVEABLE, size ? size : 1))) return E_OUTOFMEMORY;
-    memcpy(GlobalLock(hmem), xml, size);
-    GlobalUnlock(hmem);
-    hr = CreateStreamOnHGlobal(hmem, TRUE, &stream);
-    if (FAILED(hr))
-    {
-        GlobalFree(hmem);
-        return hr;
-    }
-    /* the stream is shorter than the buffer GlobalAlloc may have rounded up to */
-    {
-        ULARGE_INTEGER len;
-        len.QuadPart = size;
-        IStream_SetSize(stream, len);
-    }
-
-    hr = CreateXmlReader(&IID_IXmlReader, (void **)&reader, NULL);
-    if (SUCCEEDED(hr)) hr = IXmlReader_SetInput(reader, (IUnknown *)stream);
+    HRESULT hr = S_OK;
 
     while (SUCCEEDED(hr) && IXmlReader_Read(reader, &type) == S_OK)
     {
@@ -438,46 +477,125 @@ static HRESULT parse_task_xml(struct task *task, const WCHAR *xml)
             BOOL empty = IXmlReader_IsEmptyElement(reader);
 
             if (FAILED(hr = IXmlReader_GetLocalName(reader, &name, NULL))) break;
-            if (skip || depth >= MAX_DEPTH)
+            if (state->skip || state->depth >= MAX_DEPTH)
             {
-                if (!empty) skip++;
+                if (!empty) state->skip++;
                 break;
             }
-            if (!(names[depth] = wcsdup(name)))
+            if (!(state->names[state->depth] = wcsdup(name)))
             {
                 hr = E_OUTOFMEMORY;
                 break;
             }
-            depth++;
-            if (wcscmp(names[0], L"Task"))
+            state->depth++;
+            if (wcscmp(state->names[0], L"Task"))
             {
                 hr = SCHED_E_MALFORMEDXML;
                 break;
             }
-            begin_element(task, (const WCHAR **)names, depth);
-            if (empty) free(names[--depth]);
+            begin_element(task, (const WCHAR **)state->names, state->depth);
+            if (empty) free(state->names[--state->depth]);
             break;
         }
         case XmlNodeType_EndElement:
-            if (skip) skip--;
-            else if (depth) free(names[--depth]);
+            if (state->skip) state->skip--;
+            else if (state->depth) free(state->names[--state->depth]);
             break;
 
         case XmlNodeType_Text:
         case XmlNodeType_CDATA:
-            if (skip || !depth) break;
+            if (state->skip || !state->depth) break;
             if (FAILED(hr = IXmlReader_GetValue(reader, &value, NULL))) break;
-            element_text(task, (const WCHAR **)names, depth, value);
+            element_text(task, (const WCHAR **)state->names, state->depth, value);
             break;
 
         default:
             break;
         }
     }
+    return hr;
+}
 
-    for (i = 0; i < depth; i++) free(names[i]);
-    if (reader) IXmlReader_Release(reader);
-    IStream_Release(stream);
+/*
+ * An in-memory stream of the XML as UTF-8, without its XML declaration. xmllite reads UTF-8 in
+ * chunks reliably; its UTF-16 input keeps the raw chunks and copies them again with every read,
+ * which breaks a document longer than one chunk (and wrote past its buffer on 60 KB of comment).
+ */
+HRESULT schedsvc_open_xml(const WCHAR *xml, IStream **stream)
+{
+    HGLOBAL hmem;
+    ULARGE_INTEGER len;
+    int size;
+    char *utf8;
+    HRESULT hr;
+
+    if (*xml == 0xfeff) xml++;
+    if (!wcsncmp(xml, L"<?xml", 5))
+    {
+        const WCHAR *end = wcsstr(xml, L"?>");
+        if (end) xml = end + 2;
+    }
+
+    size = WideCharToMultiByte(CP_UTF8, 0, xml, -1, NULL, 0, NULL, NULL);
+    if (size <= 0) return HRESULT_FROM_WIN32(GetLastError());
+    if (!(hmem = GlobalAlloc(GMEM_MOVEABLE, size))) return E_OUTOFMEMORY;
+    if (!(utf8 = GlobalLock(hmem)))
+    {
+        GlobalFree(hmem);
+        return E_OUTOFMEMORY;
+    }
+    WideCharToMultiByte(CP_UTF8, 0, xml, -1, utf8, size, NULL, NULL);
+    GlobalUnlock(hmem);
+
+    hr = CreateStreamOnHGlobal(hmem, TRUE, stream);
+    if (FAILED(hr))
+    {
+        GlobalFree(hmem);
+        return hr;
+    }
+    /* without the terminator, and not as long as the buffer GlobalAlloc may have rounded up to */
+    len.QuadPart = size - 1;
+    IStream_SetSize(*stream, len);
+    return S_OK;
+}
+
+static HRESULT parse_task_xml(struct task *task, const WCHAR *xml)
+{
+    struct parse_state state = { { 0 } };
+    IXmlReader *reader = NULL;
+    IStream *stream = NULL;
+    volatile HRESULT hr;
+    volatile BOOL crashed = FALSE;
+    unsigned int i;
+
+    task->enabled = TRUE;
+
+    hr = schedsvc_open_xml(xml, &stream);
+    if (FAILED(hr)) return hr;
+
+    hr = CreateXmlReader(&IID_IXmlReader, (void **)&reader, NULL);
+    if (SUCCEEDED(hr)) hr = IXmlReader_SetInput(reader, (IUnknown *)stream);
+
+    /* a task XML is whatever a user registered: a fault in the parser fails that task, not the service */
+    _SEH2_TRY
+    {
+        if (SUCCEEDED(hr)) hr = parse_nodes(task, reader, &state);
+    }
+    _SEH2_EXCEPT(schedsvc_log_fault(_SEH2_GetExceptionInformation()))
+    {
+        ERR("task %s did not parse\n", debugstr_w(task->path));
+        crashed = TRUE;
+        hr = SCHED_E_MALFORMEDXML;
+    }
+    _SEH2_END;
+
+    for (i = 0; i < state.depth; i++) free(state.names[i]);
+    /* after a fault the reader's state is not to be trusted: leak it */
+    if (!crashed)
+    {
+        if (reader) IXmlReader_Release(reader);
+        IStream_Release(stream);
+    }
     if (FAILED(hr)) WARN("%s: failed to parse the task, hr %#lx\n", debugstr_w(task->path), hr);
     return FAILED(hr) ? hr : S_OK;
 }
@@ -489,6 +607,7 @@ static WCHAR *cache_name(const WCHAR *path)
 
     while (*path == '\\' || *path == '/') path++;
     if (!*path || !(name = wcsdup(path))) return NULL;
+    for (p = name + wcslen(name); p > name && (p[-1] == '\\' || p[-1] == '/'); p--) p[-1] = 0;
     for (p = name; *p; p++)
         if (*p == '\\' || *p == '/') *p = '|';
     return name;
@@ -546,6 +665,17 @@ static struct task *load_task(HKEY cache, const WCHAR *name)
     }
     free(xml);
     return task;
+}
+
+static BOOL task_registrant_is(const struct task *task, const WCHAR *sid_str)
+{
+    WCHAR *str;
+    BOOL same;
+
+    if (!task->registrant || !ConvertSidToStringSidW(task->registrant, &str)) return FALSE;
+    same = !wcsicmp(str, sid_str);
+    LocalFree(str);
+    return same;
 }
 
 static void load_tasks(void)
@@ -699,17 +829,37 @@ static HANDLE get_user_token(PSID sid)
     return find.token;
 }
 
+#define MAX_EXPANDED 32768
+
+/* the string with its environment variables expanded; NULL if it is too long or on failure */
 static WCHAR *expand_string(HANDLE token, const WCHAR *str)
 {
     WCHAR *buffer;
-    DWORD size = 4096;
+    DWORD size, needed;
 
     if (!str) return NULL;
-    if (!(buffer = malloc(size * sizeof(WCHAR)))) return NULL;
-    if (token ? !ExpandEnvironmentStringsForUserW(token, str, buffer, size)
-              : !ExpandEnvironmentStringsW(str, buffer, size))
-        lstrcpynW(buffer, str, size);
-    return buffer;
+    if (!token)
+    {
+        needed = ExpandEnvironmentStringsW(str, NULL, 0);
+        if (!needed || needed > MAX_EXPANDED) return NULL;
+        if (!(buffer = malloc(needed * sizeof(WCHAR)))) return NULL;
+        if (ExpandEnvironmentStringsW(str, buffer, needed) != needed)
+        {
+            free(buffer);
+            return NULL;
+        }
+        return buffer;
+    }
+
+    for (size = 1024; size <= MAX_EXPANDED; size *= 2)
+    {
+        if (!(buffer = malloc(size * sizeof(WCHAR)))) return NULL;
+        if (ExpandEnvironmentStringsForUserW(token, str, buffer, size)) return buffer;
+        free(buffer);
+        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) break;
+    }
+    /* no expansion for that user: use the text as it is, never a truncated copy */
+    return wcslen(str) < MAX_EXPANDED ? wcsdup(str) : NULL;
 }
 
 static HANDLE start_action(const struct task *task, const struct action *action, HANDLE token)
@@ -1057,6 +1207,52 @@ static DWORD WINAPI scheduler_thread_proc(void *arg)
     return 0;
 }
 
+static CRITICAL_SECTION *get_store_lock(void)
+{
+    static CRITICAL_SECTION *lock;
+    CRITICAL_SECTION *new;
+
+    if (!lock && (new = malloc(sizeof(*new))))
+    {
+        InitializeCriticalSection(new);
+        if (InterlockedCompareExchangePointer((void **)&lock, new, NULL))
+        {
+            DeleteCriticalSection(new);
+            free(new);
+        }
+    }
+    return lock;
+}
+
+/* one writer at a time: the check that a task may be replaced or deleted and the change itself */
+void schedsvc_lock(void)
+{
+    EnterCriticalSection(get_store_lock());
+}
+
+void schedsvc_unlock(void)
+{
+    LeaveCriticalSection(get_store_lock());
+}
+
+/* TRUE if the binding of a call came in over ncalrpc: no other transport, so no remote caller */
+BOOL schedsvc_binding_is_local(RPC_BINDING_HANDLE binding)
+{
+    RPC_WSTR str = NULL;
+    BOOL local;
+
+    if (!binding || RpcBindingToStringBindingW(binding, &str) != RPC_S_OK || !str) return FALSE;
+    local = !wcsnicmp((const WCHAR *)str, L"ncalrpc:", 8);
+    RpcStringFreeW(&str);
+    return local;
+}
+
+/* the security callback of the interface (this rpcrt4 does not call it, so every call checks too) */
+RPC_STATUS CALLBACK schedsvc_if_callback(RPC_IF_HANDLE iface, void *context)
+{
+    return schedsvc_binding_is_local(context) ? RPC_S_OK : RPC_S_ACCESS_DENIED;
+}
+
 /* who is calling the RPC server: their SID and whether they are LocalSystem or an administrator */
 static void get_caller(WCHAR **sid_str, BOOL *privileged)
 {
@@ -1094,17 +1290,98 @@ static void get_caller(WCHAR **sid_str, BOOL *privileged)
     RpcRevertToSelf();
 }
 
-void schedsvc_task_registered(const WCHAR *path, const WCHAR *xml)
+/* every RPC entry point starts here: local, identified callers only */
+HRESULT schedsvc_begin_call(struct caller *caller)
 {
-    WCHAR *name, *sid;
-    BOOL privileged;
+    caller->sid = NULL;
+    caller->privileged = FALSE;
+
+    if (!schedsvc_binding_is_local(I_RpcGetCurrentCallHandle()))
+    {
+        WARN("refusing a call that did not come in over ncalrpc\n");
+        return E_ACCESSDENIED;
+    }
+    get_caller(&caller->sid, &caller->privileged);
+    if (!caller->sid || !wcscmp(caller->sid, L"S-1-5-7"))
+    {
+        WARN("refusing an anonymous or unidentified caller\n");
+        schedsvc_end_call(caller);
+        return E_ACCESSDENIED;
+    }
+    return S_OK;
+}
+
+void schedsvc_end_call(struct caller *caller)
+{
+    LocalFree(caller->sid);
+    caller->sid = NULL;
+    caller->privileged = FALSE;
+}
+
+/* S_OK if the caller is an administrator or registered the task; a task with no record is theirs alone */
+HRESULT schedsvc_check_owner(const struct caller *caller, const WCHAR *path)
+{
+    WCHAR *name, *registrant = NULL;
+    HRESULT hr = E_ACCESSDENIED;
+    HKEY cache, key;
+
+    if (caller->privileged) return S_OK;
+    if (!caller->sid || !(name = cache_name(path))) return E_ACCESSDENIED;
+    if (!RegOpenKeyExW(HKEY_LOCAL_MACHINE, TASKCACHE_KEY, 0, KEY_READ, &cache))
+    {
+        if (!RegOpenKeyExW(cache, name, 0, KEY_READ, &key))
+        {
+            registrant = reg_get_string(key, L"Registrant");
+            RegCloseKey(key);
+        }
+        RegCloseKey(cache);
+    }
+    if (registrant && !wcsicmp(registrant, caller->sid)) hr = S_OK;
+    else WARN("%s belongs to %s, not to %s\n", debugstr_w(path), debugstr_w(registrant), debugstr_w(caller->sid));
+    free(registrant);
+    free(name);
+    return hr;
+}
+
+/* a new task is refused when the caller has too many, or the store is full */
+HRESULT schedsvc_check_quota(const struct caller *caller)
+{
+    WCHAR name[256], *registrant;
+    DWORD index, len, mine = 0, total = 0;
+    HKEY cache, key;
+
+    if (!RegOpenKeyExW(HKEY_LOCAL_MACHINE, TASKCACHE_KEY, 0, KEY_READ, &cache)) 
+    {
+        for (index = 0; len = ARRAYSIZE(name), !RegEnumKeyExW(cache, index, name, &len, NULL, NULL, NULL, NULL); index++)
+        {
+            total++;
+            if (caller->privileged || RegOpenKeyExW(cache, name, 0, KEY_READ, &key)) continue;
+            if ((registrant = reg_get_string(key, L"Registrant")))
+            {
+                if (caller->sid && !wcsicmp(registrant, caller->sid)) mine++;
+                free(registrant);
+            }
+            RegCloseKey(key);
+        }
+        RegCloseKey(cache);
+    }
+    if (total >= MAX_TASKS_TOTAL || (!caller->privileged && mine >= MAX_TASKS_PER_USER))
+    {
+        WARN("too many tasks (%lu, %lu of %s)\n", total, mine, debugstr_w(caller->sid));
+        return HRESULT_FROM_WIN32(ERROR_NOT_ENOUGH_QUOTA);
+    }
+    return S_OK;
+}
+
+HRESULT schedsvc_task_registered(const struct caller *caller, const WCHAR *path, const WCHAR *xml)
+{
+    WCHAR *name;
     DWORD value;
     HKEY cache, key;
     LONG ret;
 
-    if (!(name = cache_name(path))) return;
-    get_caller(&sid, &privileged);
-    TRACE("%s registered by %s, privileged %d\n", debugstr_w(path), debugstr_w(sid), privileged);
+    if (!(name = cache_name(path))) return E_INVALIDARG;
+    TRACE("%s registered by %s, privileged %d\n", debugstr_w(path), debugstr_w(caller->sid), caller->privileged);
 
     ret = RegCreateKeyExW(HKEY_LOCAL_MACHINE, TASKCACHE_KEY, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &cache, NULL);
     if (!ret)
@@ -1113,46 +1390,101 @@ void schedsvc_task_registered(const WCHAR *path, const WCHAR *xml)
         ret = RegCreateKeyExW(cache, name, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &key, NULL);
         if (!ret)
         {
-            value = privileged;
-            RegSetValueExW(key, L"Xml", 0, REG_SZ, (const BYTE *)xml, (wcslen(xml) + 1) * sizeof(WCHAR));
-            if (sid)
-                RegSetValueExW(key, L"Registrant", 0, REG_SZ, (const BYTE *)sid, (wcslen(sid) + 1) * sizeof(WCHAR));
-            RegSetValueExW(key, L"Privileged", 0, REG_DWORD, (const BYTE *)&value, sizeof(value));
+            value = caller->privileged;
+            ret = RegSetValueExW(key, L"Xml", 0, REG_SZ, (const BYTE *)xml, (wcslen(xml) + 1) * sizeof(WCHAR));
+            if (!ret)
+                ret = RegSetValueExW(key, L"Registrant", 0, REG_SZ, (const BYTE *)caller->sid,
+                                     (wcslen(caller->sid) + 1) * sizeof(WCHAR));
+            if (!ret)
+                ret = RegSetValueExW(key, L"Privileged", 0, REG_DWORD, (const BYTE *)&value, sizeof(value));
             RegCloseKey(key);
+            /* a half written record would run with a wrong owner: drop it */
+            if (ret) RegDeleteKeyW(cache, name);
         }
         RegCloseKey(cache);
     }
-    if (ret) ERR("failed to record task %s (%ld)\n", debugstr_w(path), ret);
-
-    LocalFree(sid);
     free(name);
+    if (ret)
+    {
+        ERR("failed to record task %s (%ld)\n", debugstr_w(path), ret);
+        return HRESULT_FROM_WIN32(ret);
+    }
     if (update_event) SetEvent(update_event);
+    return S_OK;
 }
 
-void schedsvc_task_deleted(const WCHAR *path)
+HRESULT schedsvc_task_deleted(const WCHAR *path)
 {
     WCHAR *name;
     HKEY cache;
+    LONG ret;
 
-    if (!(name = cache_name(path))) return;
-    if (!RegOpenKeyExW(HKEY_LOCAL_MACHINE, TASKCACHE_KEY, 0, KEY_ALL_ACCESS, &cache))
+    if (!(name = cache_name(path))) return E_INVALIDARG;
+    ret = RegOpenKeyExW(HKEY_LOCAL_MACHINE, TASKCACHE_KEY, 0, KEY_ALL_ACCESS, &cache);
+    if (!ret)
     {
-        RegDeleteKeyW(cache, name);
+        ret = RegDeleteKeyW(cache, name);
         RegCloseKey(cache);
     }
     free(name);
+    if (ret == ERROR_FILE_NOT_FOUND || ret == ERROR_PATH_NOT_FOUND) ret = ERROR_SUCCESS;
+    if (ret)
+    {
+        ERR("failed to remove the record of %s (%ld)\n", debugstr_w(path), ret);
+        return HRESULT_FROM_WIN32(ret);
+    }
     if (update_event) SetEvent(update_event);
+    return S_OK;
+}
+
+/* the last instance started by IRegisteredTask::Run of each task, so that Run cannot pile them up */
+static struct { WCHAR *name; HANDLE process; } instances[MAX_INSTANCES];
+
+/* a slot for the task: its own, else an empty or a finished one; -1 if the task still runs or none is free */
+static int find_instance_slot(const WCHAR *name, BOOL *running)
+{
+    int i, free_slot = -1;
+
+    *running = FALSE;
+    for (i = 0; i < MAX_INSTANCES; i++)
+    {
+        if (instances[i].name && !wcsicmp(instances[i].name, name))
+        {
+            if (WaitForSingleObject(instances[i].process, 0) == WAIT_TIMEOUT) *running = TRUE;
+            return i;
+        }
+    }
+    for (i = 0; i < MAX_INSTANCES; i++)
+    {
+        if (!instances[i].name) return i;
+        if (free_slot < 0 && WaitForSingleObject(instances[i].process, 0) != WAIT_TIMEOUT) free_slot = i;
+    }
+    return free_slot;
+}
+
+static void clear_instances(void)
+{
+    int i;
+
+    for (i = 0; i < MAX_INSTANCES; i++)
+    {
+        free(instances[i].name);
+        if (instances[i].process) CloseHandle(instances[i].process);
+        instances[i].name = NULL;
+        instances[i].process = NULL;
+    }
 }
 
 /* IRegisteredTask::Run: only the registering user or an administrator may start a task */
-HRESULT schedsvc_run_task(const WCHAR *path, GUID *guid)
+HRESULT schedsvc_run_task(const struct caller *caller, const WCHAR *path, GUID *guid)
 {
     struct task *task = NULL;
-    WCHAR *name, *sid_str;
-    PSID caller = NULL;
-    BOOL privileged;
+    WCHAR *name;
     HANDLE process;
     HKEY cache;
+    BOOL running;
+    HRESULT hr;
+    int slot;
 
     memset(guid, 0, sizeof(*guid));
     if (!(name = cache_name(path))) return E_INVALIDARG;
@@ -1161,55 +1493,99 @@ HRESULT schedsvc_run_task(const WCHAR *path, GUID *guid)
         task = load_task(cache, name);
         RegCloseKey(cache);
     }
-    free(name);
-    if (!task) return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
-
-    get_caller(&sid_str, &privileged);
-    if (sid_str && !ConvertStringSidToSidW(sid_str, &caller)) caller = NULL;
-    LocalFree(sid_str);
-
-    if (!privileged && (!caller || !task->registrant || !EqualSid(caller, task->registrant)))
+    if (!task)
     {
-        LocalFree(caller);
-        free_task(task);
-        return E_ACCESSDENIED;
+        free(name);
+        return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
     }
-    LocalFree(caller);
 
+    if (!caller->privileged && (!caller->sid || !task->registrant || !task_registrant_is(task, caller->sid)))
+    {
+        hr = E_ACCESSDENIED;
+        goto done;
+    }
     if (!task->enabled)
     {
-        free_task(task);
-        return SCHED_E_TASK_DISABLED;
+        hr = SCHED_E_TASK_DISABLED;
+        goto done;
     }
 
-    process = run_task(task);
+    schedsvc_lock();
+    slot = find_instance_slot(name, &running);
+    if (running)
+        hr = SCHED_E_ALREADY_RUNNING;
+    else if (slot < 0)
+        hr = HRESULT_FROM_WIN32(ERROR_BUSY);
+    else if (!(process = run_task(task)))
+        hr = E_FAIL;
+    else
+    {
+        if (instances[slot].process) CloseHandle(instances[slot].process);
+        free(instances[slot].name);
+        instances[slot].name = name;
+        instances[slot].process = process;
+        name = NULL;
+        UuidCreate(guid);
+        hr = S_OK;
+    }
+    schedsvc_unlock();
+
+done:
+    free(name);
     free_task(task);
-    if (!process) return E_FAIL;
-    CloseHandle(process);
-    UuidCreate(guid);
-    return S_OK;
+    return hr;
 }
 
-/* a task or folder path stays inside the task store: no "." or ".." components, no streams or devices */
+static BOOL is_separator(WCHAR c)
+{
+    return c == '\\' || c == '/';
+}
+
+/* CON, PRN, AUX, NUL, COM1-9, LPT1-9, CONIN$ and CONOUT$, with or without an extension */
+static BOOL is_device_name(const WCHAR *name, SIZE_T len)
+{
+    SIZE_T n = 0;
+
+    while (n < len && name[n] != '.') n++;
+    while (n && name[n - 1] == ' ') n--;
+    if (n == 3)
+        return !wcsnicmp(name, L"CON", 3) || !wcsnicmp(name, L"PRN", 3) ||
+               !wcsnicmp(name, L"AUX", 3) || !wcsnicmp(name, L"NUL", 3);
+    if (n == 4)
+        return (!wcsnicmp(name, L"COM", 3) || !wcsnicmp(name, L"LPT", 3)) && name[3] >= '1' && name[3] <= '9';
+    if (n == 6) return !wcsnicmp(name, L"CONIN$", 6);
+    if (n == 7) return !wcsnicmp(name, L"CONOUT$", 7);
+    return FALSE;
+}
+
+/*
+ * A task or folder path stays inside the task store: at most MAX_PATH_DEPTH components of
+ * 1 to MAX_COMPONENT characters, no "." or ".." (nor any component ending in a dot or a space,
+ * which Win32 strips), no empty components, streams, wildcards, control characters, '|' (the
+ * TaskCache separator) or device names. Leading and one trailing separator are fine.
+ */
 BOOL schedsvc_valid_path(const WCHAR *path)
 {
     const WCHAR *p, *start;
+    SIZE_T len, depth = 0;
 
     if (!path) return TRUE;
+    if (wcslen(path) > MAX_TASK_PATH) return FALSE;
 
-    for (start = p = path; ; p++)
+    p = path;
+    while (is_separator(*p)) p++;
+    while (*p)
     {
-        if (!*p || *p == '\\' || *p == '/')
-        {
-            if ((p - start == 1 && start[0] == '.') ||
-                (p - start == 2 && start[0] == '.' && start[1] == '.'))
-                return FALSE;
-            if (!*p) return TRUE;
-            start = p + 1;
-        }
-        else if (*p < 32 || wcschr(L":*?\"<>|", *p))
-            return FALSE;
+        for (start = p; *p && !is_separator(*p); p++)
+            if (*p < 32 || wcschr(L":*?\"<>|", *p)) return FALSE;
+        len = p - start;
+        if (!len || len > MAX_COMPONENT) return FALSE;
+        if (start[len - 1] == '.' || start[len - 1] == ' ') return FALSE;
+        if (is_device_name(start, len)) return FALSE;
+        if (++depth > MAX_PATH_DEPTH) return FALSE;
+        if (*p) p++;
     }
+    return TRUE;
 }
 
 void schedsvc_auto_start(void)
@@ -1247,4 +1623,7 @@ VOID TaskSchedulerStop(VOID)
         CloseHandle(scheduler_thread);
         scheduler_thread = NULL;
     }
+    schedsvc_lock();
+    clear_instances();
+    schedsvc_unlock();
 }
