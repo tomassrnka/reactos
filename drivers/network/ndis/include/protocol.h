@@ -42,6 +42,25 @@ typedef struct _NDIS_UNBIND_CONTEXT {
     NDIS_STATUS Status;
 } NDIS_UNBIND_CONTEXT, *PNDIS_UNBIND_CONTEXT;
 
+/* An NdisTransferData the miniport has (ProTransferData) and has not completed to the protocol. Whoever takes it
+   off the adapter's TransferList, under TransferLock, completes it to the protocol: the miniport (MiniTransferDataComplete)
+   or the halt (MiniFailPendingTransfers), never both, and a completion that comes in after the halt failed it finds
+   nothing and is ignored. The entry holds a reference on the binding until then. */
+typedef struct _PENDING_TRANSFER {
+    LIST_ENTRY       ListEntry;
+    PNDIS_PACKET     Packet;
+    PADAPTER_BINDING AdapterBinding;
+    BOOLEAN          InHandler;     /* ProTransferData has not seen the miniport's handler return yet */
+    BOOLEAN          FailAtReturn;  /* The halt came while it was in the handler: ProTransferData fails it when that returns */
+    BOOLEAN          Completed;     /* The miniport completed it while it was in the handler: ProTransferData frees the entry */
+} PENDING_TRANSFER, *PPENDING_TRANSFER;
+
+/* The miniport is halted and takes no more calls: the transfers it pended and has not completed fail, so that the
+   protocols are not left waiting for them (an unbind waits for the protocol's own references) */
+VOID
+MiniFailPendingTransfers(
+    PLOGICAL_ADAPTER Adapter);
+
 /* A send or request of the binding is done (completed to the protocol or returned synchronously), or the
    binding is closed: drops a reference, and the last one frees the binding */
 VOID

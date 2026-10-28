@@ -116,6 +116,9 @@ typedef struct _LOGICAL_ADAPTER
     KEVENT                     SendTurnEvent;
     BOOLEAN                    Removing;               /* The adapter is stopped or removed: the protocols are being unbound, sends and requests fail (MiniStartRemoving) */
     BOOLEAN                    Torndown;               /* The remove/surprise-remove teardown ran once (MiniShutdownAdapter is idempotent) */
+    KSPIN_LOCK                 TransferLock;           /* Protects TransferList and TransfersClosed. An indication holds the miniport lock while the protocol starts a transfer: this is taken under it, never the other way round */
+    LIST_ENTRY                 TransferList;           /* PENDING_TRANSFERs: NdisTransferData calls that have not completed to the protocol */
+    BOOLEAN                    TransfersClosed;        /* The miniport is halted and its transfers failed (MiniFailPendingTransfers): a new one fails */
     LIST_ENTRY                 ResetWaiters;           /* Bindings whose NdisReset pends (ADAPTER_BINDING.ResetEntry), under the miniport lock: each holds a reference until a reset ends (MiniEndResetWaits) */
 } LOGICAL_ADAPTER, *PLOGICAL_ADAPTER;
 

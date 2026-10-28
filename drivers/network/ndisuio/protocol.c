@@ -576,6 +576,21 @@ BindAdapterByName(PNDIS_STRING DeviceName)
         return Status;
     }
 
+    /* The largest frame a write may send. A miniport that does not say gets the Ethernet default */
+    NduInitRequest(&Request);
+    AdapterContext->MaxTotalSize = 0;
+    Request.Request.RequestType = NdisRequestQueryInformation;
+    Request.Request.DATA.QUERY_INFORMATION.Oid = OID_GEN_MAXIMUM_TOTAL_SIZE;
+    Request.Request.DATA.QUERY_INFORMATION.InformationBuffer = &AdapterContext->MaxTotalSize;
+    Request.Request.DATA.QUERY_INFORMATION.InformationBufferLength = sizeof(ULONG);
+    Status = NduIssueRequest(AdapterContext->BindingHandle, &Request);
+    if (Status != NDIS_STATUS_SUCCESS || AdapterContext->MaxTotalSize < NDISUIO_ETH_HEADER_SIZE)
+    {
+        DPRINT1("Maximum frame size query failed (0x%x, %lu), assuming %u\n",
+                Status, AdapterContext->MaxTotalSize, NDISUIO_DEFAULT_MAX_TOTAL_SIZE);
+        AdapterContext->MaxTotalSize = NDISUIO_DEFAULT_MAX_TOTAL_SIZE;
+    }
+
     /* Add the adapter context to the global list */
     ExInterlockedInsertTailList(&GlobalAdapterList,
                                 &AdapterContext->ListEntry,

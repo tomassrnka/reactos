@@ -19,21 +19,11 @@ ReadIrpCancel(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     /* The read holds a reference on the adapter (NduDispatchRead) while its cancel routine is set. The
        read takes the cancel spin lock to remove the routine before it drops that reference, so the
        adapter stays as long as this holds the lock: it is released only once the adapter is not used */
-    PNDISUIO_ADAPTER_CONTEXT AdapterContext = Irp->Tail.Overlay.DriverContext[0];
-    PNDISUIO_PACKET_ENTRY PacketEntry;
+    PKEVENT CancelEvent = Irp->Tail.Overlay.DriverContext[1];
 
-    /* Indicate a 0-byte packet on the queue to cancel the read */
-    PacketEntry = ExAllocatePool(NonPagedPool, sizeof(NDISUIO_PACKET_ENTRY));
-    if (PacketEntry)
-    {
-        PacketEntry->PacketLength = 0;
-
-        ExInterlockedInsertHeadList(&AdapterContext->PacketList,
-                                    &PacketEntry->ListEntry,
-                                    &AdapterContext->Spinlock);
-
-        KeSetEvent(&AdapterContext->PacketReadEvent, IO_NO_INCREMENT, FALSE);
-    }
+    /* Wake this read alone (its event is on its stack, and stays while the cancel spin lock is held): a
+       0-byte packet on the adapter's list woke whichever read got to it first, and needed memory */
+    KeSetEvent(CancelEvent, IO_NO_INCREMENT, FALSE);
 
     /* Release the cancel spin lock */
     IoReleaseCancelSpinLock(Irp->CancelIrql);
@@ -52,7 +42,8 @@ NduDispatchRead(PDEVICE_OBJECT DeviceObject,
     PLIST_ENTRY ListEntry;
     PNDISUIO_PACKET_ENTRY PacketEntry = NULL;
     ULONG BytesCopied = 0;
-    PVOID WaitObjects[2];
+    PVOID WaitObjects[3];
+    KEVENT CancelEvent;
 
     ASSERT(DeviceObject == GlobalDeviceObject);
 
@@ -69,9 +60,12 @@ NduDispatchRead(PDEVICE_OBJECT DeviceObject,
 
         return STATUS_INVALID_PARAMETER;
     }
+    KeInitializeEvent(&CancelEvent, NotificationEvent, FALSE);
     Irp->Tail.Overlay.DriverContext[0] = AdapterContext;
+    Irp->Tail.Overlay.DriverContext[1] = &CancelEvent;
     WaitObjects[0] = &AdapterContext->PacketReadEvent;
     WaitObjects[1] = &AdapterContext->UnbindingEvent;
+    WaitObjects[2] = &CancelEvent;
 
     /* Make the read cancellable */
     IoAcquireCancelSpinLock(&OldCancelIrql);
@@ -103,7 +97,7 @@ NduDispatchRead(PDEVICE_OBJECT DeviceObject,
             KeReleaseSpinLock(&AdapterContext->Spinlock, OldIrql);
 
             /* Wait for a packet (in the context of the calling user thread), or the unbind */
-            Status = KeWaitForMultipleObjects(2,
+            Status = KeWaitForMultipleObjects(3,
                                               WaitObjects,
                                               WaitAny,
                                               UserRequest,
@@ -113,6 +107,8 @@ NduDispatchRead(PDEVICE_OBJECT DeviceObject,
                                               NULL);
             if (Status == STATUS_WAIT_1)
                 Status = STATUS_DEVICE_REMOVED;
+            else if (Status == STATUS_WAIT_2)
+                Status = STATUS_SUCCESS; /* Cancelled: a 0 byte read, as before */
             if (Status != STATUS_WAIT_0)
             {
                 /* Remove the cancel routine */
@@ -193,6 +189,20 @@ NduDispatchWrite(PDEVICE_OBJECT DeviceObject,
     AdapterContext = ReferenceFileAdapter(IrpSp->FileObject, NULL);
     if (AdapterContext == NULL)
     {
+        Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /* One whole frame, as the miniport reads it: its header at least (a 0 byte write has no buffer to map),
+       and no more than the adapter takes */
+    if (IrpSp->Parameters.Write.Length < NDISUIO_ETH_HEADER_SIZE ||
+        IrpSp->Parameters.Write.Length > AdapterContext->MaxTotalSize)
+    {
+        DereferenceAdapterContext(AdapterContext);
+
         Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
         Irp->IoStatus.Information = 0;
         IoCompleteRequest(Irp, IO_NO_INCREMENT);

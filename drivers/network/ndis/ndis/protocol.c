@@ -415,7 +415,7 @@ ProReset(
     PLOGICAL_ADAPTER Adapter = AdapterBinding->Adapter;
     NDIS_STATUS Status;
     KIRQL OldIrql;
-    BOOLEAN Mine;
+    BOOLEAN KeepReference = FALSE, DropResetReference = FALSE;
 
     /* FIXME: Wait for all packets to be sent */
 
@@ -437,20 +437,37 @@ ProReset(
     InsertTailList(&Adapter->ResetWaiters, &AdapterBinding->ResetEntry);
     KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
 
-    Status = MiniReset(Adapter);
-    if (Status == NDIS_STATUS_PENDING)
-        return Status;
+    /* This call's own reference: the end of another reset (MiniEndResetWaits) may drain the entry above and
+       drop the reset's reference while MiniReset runs, and an NdisCloseAdapter of the binding then frees it */
+    InterlockedIncrement(&AdapterBinding->Outstanding);
 
-    /* Done at once. The end of another reset may have dropped the reference already */
+    Status = MiniReset(Adapter);
+
     KeAcquireSpinLock(&Adapter->NdisMiniportBlock.Lock, &OldIrql);
-    Mine = AdapterBinding->ResetPending;
-    if (Mine)
+    if (Status == NDIS_STATUS_PENDING)
     {
+        /* The entry was drained before the miniport took this reset (the end of an earlier one), and this one
+           is still going: put the binding back on the list, with this call's reference as the reset's */
+        if (!AdapterBinding->ResetPending && !AdapterBinding->Closing &&
+            Adapter->NdisMiniportBlock.ResetStatus == NDIS_STATUS_PENDING)
+        {
+            AdapterBinding->ResetPending = TRUE;
+            InsertTailList(&Adapter->ResetWaiters, &AdapterBinding->ResetEntry);
+            KeepReference = TRUE;
+        }
+    }
+    else if (AdapterBinding->ResetPending)
+    {
+        /* Done at once. The end of another reset may have dropped the reset's reference already */
         AdapterBinding->ResetPending = FALSE;
         RemoveEntryList(&AdapterBinding->ResetEntry);
+        DropResetReference = TRUE;
     }
     KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
-    if (Mine)
+
+    if (DropResetReference)
+        ProLeaveBinding(AdapterBinding);
+    if (!KeepReference)
         ProLeaveBinding(AdapterBinding);
 
     return Status;
@@ -828,6 +845,7 @@ ProTransferData(
 {
     PADAPTER_BINDING AdapterBinding = GET_ADAPTER_BINDING(MacBindingHandle);
     PLOGICAL_ADAPTER Adapter        = AdapterBinding->Adapter;
+    PPENDING_TRANSFER Transfer;
     NDIS_STATUS Status;
     KIRQL OldIrql;
 
@@ -850,14 +868,37 @@ ProTransferData(
 
     ASSERT(Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.TransferDataHandler);
 
-    /* Done when it is completed to the protocol (MiniTransferDataComplete, which finds the binding in
-       the packet as for a send), or returned here */
-    Packet->Reserved[1] = (ULONG_PTR)AdapterBinding;
+    /* Done when it is completed to the protocol (MiniTransferDataComplete or the halt, which find it on the
+       adapter's list), or returned here */
     if (!ProEnterBinding(AdapterBinding))
     {
         ProLeaveBinding(AdapterBinding);
         return ProBindingStatus(AdapterBinding);
     }
+
+    Transfer = ExAllocatePool(NonPagedPool, sizeof(*Transfer));
+    if (!Transfer)
+    {
+        ProLeaveBinding(AdapterBinding);
+        return NDIS_STATUS_RESOURCES;
+    }
+    Transfer->Packet = Packet;
+    Transfer->AdapterBinding = AdapterBinding;
+    Transfer->InHandler = TRUE;
+    Transfer->FailAtReturn = FALSE;
+    Transfer->Completed = FALSE;
+
+    /* A miniport that is halted completes nothing: the transfer would wait for good (the halt fails the pending ones once) */
+    KeAcquireSpinLock(&Adapter->TransferLock, &OldIrql);
+    if (Adapter->TransfersClosed)
+    {
+        KeReleaseSpinLock(&Adapter->TransferLock, OldIrql);
+        ExFreePool(Transfer);
+        ProLeaveBinding(AdapterBinding);
+        return NDIS_STATUS_ADAPTER_REMOVED;
+    }
+    InsertTailList(&Adapter->TransferList, &Transfer->ListEntry);
+    KeReleaseSpinLock(&Adapter->TransferLock, OldIrql);
 
     KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
 
@@ -871,10 +912,28 @@ ProTransferData(
 
     KeLowerIrql(OldIrql);
 
-    if (Status != NDIS_STATUS_PENDING)
-        ProLeaveBinding(AdapterBinding);
+    KeAcquireSpinLock(&Adapter->TransferLock, &OldIrql);
+    if (Transfer->Completed)
+    {
+        /* The miniport completed it from inside the handler: that dropped the reference, and told the protocol */
+        KeReleaseSpinLock(&Adapter->TransferLock, OldIrql);
+        ExFreePool(Transfer);
+        return Status;
+    }
+    if (Status == NDIS_STATUS_PENDING && !Transfer->FailAtReturn)
+    {
+        /* From here the miniport or the halt completes it */
+        Transfer->InHandler = FALSE;
+        KeReleaseSpinLock(&Adapter->TransferLock, OldIrql);
+        return Status;
+    }
+    RemoveEntryList(&Transfer->ListEntry);
+    KeReleaseSpinLock(&Adapter->TransferLock, OldIrql);
+    ExFreePool(Transfer);
+    ProLeaveBinding(AdapterBinding);
 
-    return Status;
+    /* Done at once, or pended and then failed by the halt before the handler returned */
+    return (Status == NDIS_STATUS_PENDING) ? NDIS_STATUS_ADAPTER_REMOVED : Status;
 }
 
 

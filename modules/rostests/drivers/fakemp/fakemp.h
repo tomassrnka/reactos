@@ -44,6 +44,8 @@
 #define FAKEMP_RX_FRAME_SIZE    128
 #define FAKEMP_XFER_SYNC        0   /* Copies in the handler */
 #define FAKEMP_XFER_HOLD        1   /* NDIS_STATUS_PENDING, copies and completes on FAKEMP_IOCTL_COMPLETE_TRANSFERS or in the halt (fails) */
+#define FAKEMP_XFER_NEVER       2   /* NDIS_STATUS_PENDING, held like HOLD for FAKEMP_IOCTL_COMPLETE_TRANSFERS, but the halt does NOT
+                                       complete it: it is forgotten there, as a miniport that never completes a transfer */
 #define FAKEMP_MAX_HELD_XFERS   8
 
 typedef struct _FAKEMP_INDICATE
@@ -94,6 +96,8 @@ typedef struct _FAKEMP_STATS
     ULONG TransfersHeld;        /* ... pended and not completed yet */
     ULONG TransfersCompleted;   /* ... completed after pending them */
     ULONG TransfersCompletedAtHalt;
+    ULONG FilterFailures;       /* OID_GEN_CURRENT_PACKET_FILTER sets failed (FAKEMP_IOCTL_FAIL_FILTER) */
+    ULONG TransfersNever;       /* Transfers pended in FAKEMP_XFER_NEVER mode (forgotten at the halt) */
 } FAKEMP_STATS, *PFAKEMP_STATS;
 
 #define FAKEMP_IOCTL_SET_CONFIG     CTL_CODE(FILE_DEVICE_NETWORK, 0x900, METHOD_BUFFERED, FILE_ANY_ACCESS) /* in: FAKEMP_CONFIG */
@@ -105,6 +109,7 @@ typedef struct _FAKEMP_STATS
 #define FAKEMP_IOCTL_RELEASE_SPIN   CTL_CODE(FILE_DEVICE_NETWORK, 0x906, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define FAKEMP_IOCTL_INDICATE       CTL_CODE(FILE_DEVICE_NETWORK, 0x908, METHOD_BUFFERED, FILE_ANY_ACCESS) /* in: FAKEMP_INDICATE */
 #define FAKEMP_IOCTL_COMPLETE_TRANSFERS CTL_CODE(FILE_DEVICE_NETWORK, 0x909, METHOD_BUFFERED, FILE_ANY_ACCESS) /* completes the held transfers */
+#define FAKEMP_IOCTL_FAIL_FILTER    CTL_CODE(FILE_DEVICE_NETWORK, 0x90A, METHOD_BUFFERED, FILE_ANY_ACCESS) /* in: ULONG n: the next n sets of the packet filter fail (kept across a halt and re-add: makes a protocol's bind fail after its media indication) */
 #define FAKEMP_IOCTL_COMPLETE_SEND  CTL_CODE(FILE_DEVICE_NETWORK, 0x907, METHOD_BUFFERED, FILE_ANY_ACCESS) /* in: ULONG FAKEMP_COMPLETE_*; out (optional): ULONG sends completed */
 
 
