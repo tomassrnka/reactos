@@ -1200,6 +1200,35 @@ PiSetDevNodeText(
 }
 
 static
+VOID
+IopMarkDeviceNodeDisabled(
+    _In_ PDEVICE_NODE DeviceNode);
+
+/* Tells whether the instance key says that the device is disabled: CONFIGFLAG_DISABLED in
+ * its ConfigFlags, which SetupDiChangeState(DICS_DISABLE, DICS_FLAG_GLOBAL) sets and the
+ * enable clears. The device is not started until then, even after a reboot. */
+static
+BOOLEAN
+IopIsDeviceConfigDisabled(
+    _In_ HANDLE InstanceKey)
+{
+    PKEY_VALUE_FULL_INFORMATION kvInfo;
+    BOOLEAN Disabled = FALSE;
+    NTSTATUS Status;
+
+    Status = IopGetRegistryValue(InstanceKey, REGSTR_VAL_CONFIGFLAGS, &kvInfo);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+
+    if (kvInfo->Type == REG_DWORD && kvInfo->DataLength == sizeof(ULONG))
+    {
+        Disabled = !!(*(PULONG)((ULONG_PTR)kvInfo + kvInfo->DataOffset) & CONFIGFLAG_DISABLED);
+    }
+    ExFreePool(kvInfo);
+    return Disabled;
+}
+
+static
 NTSTATUS
 PiInitializeDevNode(
     _In_ PDEVICE_NODE DeviceNode)
@@ -1337,6 +1366,14 @@ PiInitializeDevNode(
     // That allows us to start devices during an early boot
     IopInstallCriticalDevice(DeviceNode);
     IopSetServiceEnumData(DeviceNode, InstanceKey);
+
+    /* A disabled device keeps its node, but no driver is added and it is not started
+     * (CM_PROB_DISABLED, like a device that is disabled while the system runs) */
+    if (IopIsDeviceConfigDisabled(InstanceKey))
+    {
+        DPRINT("%wZ is disabled (CONFIGFLAG_DISABLED)\n", &DeviceNode->InstancePath);
+        IopMarkDeviceNodeDisabled(DeviceNode);
+    }
 
     ZwClose(InstanceKey);
 

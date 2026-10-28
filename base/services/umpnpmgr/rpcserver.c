@@ -3394,6 +3394,63 @@ done:
 }
 
 
+/* Tells whether CONFIGFLAG_DISABLED is set in the ConfigFlags of the device's instance key */
+static BOOL
+IsDeviceConfigDisabled(
+    _In_ HKEY hDeviceKey)
+{
+    DWORD dwConfigFlags, dwSize = sizeof(dwConfigFlags), dwType;
+
+    return RegQueryValueExW(hDeviceKey,
+                            L"ConfigFlags",
+                            NULL,
+                            &dwType,
+                            (LPBYTE)&dwConfigFlags,
+                            &dwSize) == ERROR_SUCCESS &&
+           dwType == REG_DWORD &&
+           (dwConfigFlags & CONFIGFLAG_DISABLED);
+}
+
+
+/* Enabling a device also takes back the global disable that SetupDiChangeState(DICS_DISABLE)
+ * recorded in its instance key, so that the device starts at the next boot too (Windows does
+ * the same for CM_Enable_DevNode) */
+static VOID
+ClearDeviceConfigDisabled(
+    _In_ LPWSTR pszDeviceInstance)
+{
+    HKEY hDeviceKey;
+    DWORD dwConfigFlags, dwSize = sizeof(dwConfigFlags), dwType;
+
+    if (RegOpenKeyExW(hEnumKey,
+                      pszDeviceInstance,
+                      0,
+                      KEY_QUERY_VALUE | KEY_SET_VALUE,
+                      &hDeviceKey) != ERROR_SUCCESS)
+        return;
+
+    if (RegQueryValueExW(hDeviceKey,
+                         L"ConfigFlags",
+                         NULL,
+                         &dwType,
+                         (LPBYTE)&dwConfigFlags,
+                         &dwSize) == ERROR_SUCCESS &&
+        dwType == REG_DWORD &&
+        (dwConfigFlags & CONFIGFLAG_DISABLED))
+    {
+        dwConfigFlags &= ~CONFIGFLAG_DISABLED;
+        RegSetValueExW(hDeviceKey,
+                       L"ConfigFlags",
+                       0,
+                       REG_DWORD,
+                       (LPBYTE)&dwConfigFlags,
+                       sizeof(dwConfigFlags));
+    }
+
+    RegCloseKey(hDeviceKey);
+}
+
+
 static CONFIGRET
 SetupDeviceInstance(
     _In_ LPWSTR pszDeviceInstance,
@@ -3437,6 +3494,12 @@ SetupDeviceInstance(
                                &dwSize);
     if ((dwError == ERROR_SUCCESS) &&
         (dwDisableCount > 0))
+    {
+        goto done;
+    }
+
+    /* A disabled device is not started by an installation or a driver update */
+    if (IsDeviceConfigDisabled(hDeviceKey))
     {
         goto done;
     }
@@ -3487,6 +3550,8 @@ EnableDeviceInstance(
     NTSTATUS Status;
 
     DPRINT("Enable device instance %S\n", pszDeviceInstance);
+
+    ClearDeviceConfigDisabled(pszDeviceInstance);
 
     /* Nothing to do for a device that is running */
     if (GetDeviceStatus(pszDeviceInstance, &ulStatus, &ulProblem) == CR_SUCCESS &&
