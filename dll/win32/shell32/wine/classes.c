@@ -79,6 +79,40 @@ HRESULT HCR_GetProgIdKeyOfExtension(PCWSTR szExtension, PHKEY phKey, BOOL AllowF
     return HRESULT_FROM_WIN32(err);
 }
 
+/*
+ * The ProgId the user picked as the handler of a URL protocol (http, https, ...):
+ * HKCU\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\<protocol>\UserChoice, "Progid".
+ * This is what IApplicationAssociationRegistration::SetAppAsDefault writes, and what Windows consults
+ * before the machine wide HKCR\<protocol>\shell\open\command. A choice that does not name an
+ * existing class with a shell key (an uninstalled browser) is ignored.
+ */
+BOOL HCR_GetUserChoiceOfUrlProtocol(PCWSTR pszProtocol, PWSTR pszProgId, UINT cchProgId)
+{
+    static const WCHAR szPrefix[] = L"Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\";
+    WCHAR szKey[ARRAYSIZE(szPrefix) + 64 + 11];
+    WCHAR szShell[MAX_PATH + 8];
+    HKEY hKey;
+    LONG err;
+
+    if (!pszProtocol || !*pszProtocol || wcschr(pszProtocol, L'\\') || wcslen(pszProtocol) > 64)
+        return FALSE;
+    wcscpy(szKey, szPrefix);
+    wcscat(szKey, pszProtocol);
+    wcscat(szKey, L"\\UserChoice");
+
+    err = GetRegString(HKEY_CURRENT_USER, szKey, L"Progid", pszProgId, cchProgId);
+    if (err || !*pszProgId || wcslen(pszProgId) >= MAX_PATH)
+        return FALSE;
+
+    wcscpy(szShell, pszProgId);
+    wcscat(szShell, L"\\shell");
+    err = RegOpenKeyExW(HKEY_CLASSES_ROOT, szShell, 0, KEY_READ, &hKey);
+    if (err)
+        return FALSE;
+    RegCloseKey(hKey);
+    return TRUE;
+}
+
 BOOL HCR_MapTypeToValueW(LPCWSTR szExtension, LPWSTR szFileType, LONG len, BOOL bPrependDot)
 {	
 	HKEY	hkey;

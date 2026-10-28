@@ -264,7 +264,24 @@ static HRESULT OpenClassKey(ASSOCF fA, const WCHAR *const pszSource, HKEY *phKey
     LONG err = RegOpenKeyExW(cr.hKey, pszSourcePath, 0, KEY_READ, &hSourceKey);
     if (err)
         return HResultFromWin32(err);
-    HRESULT hr = OpenClassKey(fA, pszSource, cr.hKey, hSourceKey, phKey);
+
+    // A URL protocol is handled by the ProgId the user chose for it (the browser picked as the default)
+    WCHAR szUserChoice[MAX_PATH];
+    PCWSTR pszClassSource = pszSource;
+    if (*pszSource != L'.' && *pszSource != L'{' && !(fA & (ASSOCF_NOUSERSETTINGS | ASSOCF_PER_MACHINE_ONLY)) &&
+        RegQueryValueExW(hSourceKey, L"URL Protocol", NULL, NULL, NULL, NULL) == ERROR_SUCCESS &&
+        HCR_GetUserChoiceOfUrlProtocol(pszSource, szUserChoice, _countof(szUserChoice)))
+    {
+        HKEY hChosenKey;
+        if (RegOpenKeyExW(cr.hKey, szUserChoice, 0, KEY_READ, &hChosenKey) == ERROR_SUCCESS)
+        {
+            RegCloseKey(hSourceKey);
+            hSourceKey = hChosenKey;
+            pszClassSource = szUserChoice;
+        }
+    }
+
+    HRESULT hr = OpenClassKey(fA, pszClassSource, cr.hKey, hSourceKey, phKey);
     RegCloseKey(hSourceKey);
     return hr;
 }
