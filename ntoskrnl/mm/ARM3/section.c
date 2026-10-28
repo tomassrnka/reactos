@@ -2733,11 +2733,12 @@ MmMapViewOfArm3Section(
     ASSERT(Section->u.Flags.WriteCombined == 0);
     ASSERT(ControlArea->u.Flags.PhysicalMemory == 0);
 
-    /* FIXME */
+    /* MEM_RESERVE only applies to file views: a paging file section refuses it
+     * (Windows 10 oracle: STATUS_INVALID_PARAMETER, x64 and x86) */
     if ((AllocationType & MEM_RESERVE) != 0)
     {
-        DPRINT1("MmMapViewOfArm3Section called with MEM_RESERVE, this is not implemented yet!!!\n");
-        return STATUS_NOT_IMPLEMENTED;
+        DPRINT1("MEM_RESERVE cannot be used with a pagefile-backed section\n");
+        return MI_PARAM_STATUS(9);
     }
 
     /* Check if the mapping protection is compatible with the create */
@@ -2769,6 +2770,13 @@ MmMapViewOfArm3Section(
         /* Compute it for the caller */
         CalculatedViewSize = Section->SizeOfSection.QuadPart -
                              SectionOffset->QuadPart;
+
+        /* A view that starts at the end of the section has nothing to map */
+        if (CalculatedViewSize == 0)
+        {
+            DPRINT1("Section offset is at the end of the section\n");
+            return STATUS_INVALID_VIEW_SIZE;
+        }
 
         /* Check if it's larger than 4GB or overflows into kernel-mode */
         if (!NT_SUCCESS(RtlULongLongToSIZET(CalculatedViewSize, ViewSize)) ||
