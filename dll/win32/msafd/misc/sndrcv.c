@@ -668,6 +668,94 @@ WSPRecvFrom(SOCKET Handle,
 }
 
 
+/*
+ * WSARecvMsg, handed out through SIO_GET_EXTENSION_FUNCTION_POINTER(WSAID_WSARECVMSG). Windows
+ * implements it in its provider and ws2_32 does not export it; Chrome's UDP sockets fetch it
+ * (the read path of a socket that asked for IP_RECVTOS), and a refused lookup fails every UDP
+ * read of the QUIC session with ERR_FAILED.
+ *
+ * The message is received as a datagram receive with the message's own address buffer, flags and
+ * buffers. AFD has no ancillary data, so the control buffer is returned empty (as Windows does
+ * for a socket that enabled no packet information). The message must stay valid until an
+ * overlapped receive completes, as on Windows: the address length is written there.
+ */
+INT
+WSPAPI
+WSPRecvMsg(
+    _In_ SOCKET Handle,
+    _Inout_ LPWSAMSG lpMsg,
+    _Out_opt_ LPDWORD lpNumberOfBytesRecvd,
+    _Inout_opt_ LPWSAOVERLAPPED lpOverlapped,
+    _In_opt_ LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
+{
+    DWORD Flags;
+    INT Errno = NO_ERROR;
+    INT Ret;
+    PSOCKET_INFORMATION Socket;
+
+    if (!lpMsg)
+    {
+        SetLastError(WSAEFAULT);
+        return SOCKET_ERROR;
+    }
+
+    Socket = GetSocketStructure(Handle);
+    if (!Socket)
+    {
+        SetLastError(WSAENOTSOCK);
+        return SOCKET_ERROR;
+    }
+
+    /* Only datagram and raw sockets, as on Windows (an unconnected stream socket: WSAEINVAL) */
+    if (!(Socket->SharedData->ServiceFlags1 & XP1_CONNECTIONLESS))
+    {
+        SetLastError(WSAEINVAL);
+        return SOCKET_ERROR;
+    }
+
+    lpMsg->Control.len = 0;
+    Flags = lpMsg->dwFlags;
+    lpMsg->dwFlags = 0;
+
+    if (lpMsg->name)
+    {
+        Ret = WSPRecvFrom(Handle,
+                          lpMsg->lpBuffers,
+                          lpMsg->dwBufferCount,
+                          lpNumberOfBytesRecvd,
+                          &Flags,
+                          lpMsg->name,
+                          &lpMsg->namelen,
+                          lpOverlapped,
+                          lpCompletionRoutine,
+                          NULL,
+                          &Errno);
+    }
+    else
+    {
+        Ret = WSPRecv(Handle,
+                      lpMsg->lpBuffers,
+                      lpMsg->dwBufferCount,
+                      lpNumberOfBytesRecvd,
+                      &Flags,
+                      lpOverlapped,
+                      lpCompletionRoutine,
+                      NULL,
+                      &Errno);
+    }
+
+    if (Ret == NO_ERROR)
+    {
+        lpMsg->dwFlags = Flags;
+        return NO_ERROR;
+    }
+
+    if (Errno == WSAEMSGSIZE)
+        lpMsg->dwFlags = MSG_TRUNC;
+    SetLastError(Errno ? Errno : WSASYSCALLFAILURE);
+    return SOCKET_ERROR;
+}
+
 int
 WSPAPI
 WSPSend(SOCKET Handle,
