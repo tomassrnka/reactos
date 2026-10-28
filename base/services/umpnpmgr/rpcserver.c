@@ -307,7 +307,8 @@ DisableDeviceInstance(
     RtlInitUnicodeString(&QueryRemoveData.DeviceInstance,
                          pszDeviceInstance);
 
-    QueryRemoveData.Flags = 0;
+    /* Disable: the stack goes away, the devnode stays with the CM_PROB_DISABLED problem */
+    QueryRemoveData.Flags = PNP_QUERY_REMOVE_DISABLE;
     QueryRemoveData.VetoType = 0;
     QueryRemoveData.VetoName = pszVetoName;
     QueryRemoveData.NameLength = ulNameLength;
@@ -3481,11 +3482,18 @@ EnableDeviceInstance(
     _In_ LPWSTR pszDeviceInstance)
 {
     PLUGPLAY_CONTROL_DEVICE_CONTROL_DATA ControlData;
+    DWORD ulStatus, ulProblem;
     CONFIGRET ret = CR_SUCCESS;
     NTSTATUS Status;
 
     DPRINT("Enable device instance %S\n", pszDeviceInstance);
 
+    /* Nothing to do for a device that is running */
+    if (GetDeviceStatus(pszDeviceInstance, &ulStatus, &ulProblem) == CR_SUCCESS &&
+        (ulStatus & DN_STARTED))
+        return CR_SUCCESS;
+
+    /* The kernel clears the CM_PROB_DISABLED problem of a disabled device and starts it again */
     RtlInitUnicodeString(&ControlData.DeviceInstance, pszDeviceInstance);
     Status = NtPlugPlayControl(PlugPlayControlStartDevice, &ControlData, sizeof(ControlData));
     if (!NT_SUCCESS(Status))
