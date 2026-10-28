@@ -165,7 +165,12 @@ KiNmiInterruptHandler(
 
         /* An NMI can reach all processors at once. One of them reports it,
            the others stay here and still answer the freeze requests that
-           the kernel debugger sends, since no further NMI reaches them. */
+           the kernel debugger sends, since no further NMI reaches them.
+           HalHandleNMI does not return: it halts the system after the
+           report ("Hardware Malfunction"), also after the debugger session
+           that it opens is continued. That halt is intended for an unclaimed
+           NMI; ReportOwner is therefore never reset, and KiEndNmiReport
+           only runs for a HAL whose handler returns. */
         if (InterlockedCompareExchange(&ReportOwner, 1, 0) == 0)
         {
             KiBeginNmiReport(TrapFrame, ExceptionFrame);

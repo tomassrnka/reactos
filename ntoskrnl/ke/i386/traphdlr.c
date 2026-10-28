@@ -566,7 +566,9 @@ KiTrap02Handler(VOID)
            processor enters. The NMI that carries the freeze request is held
            until this handler returns, or lost if the hypervisor delivers it
            into the running NMI task: the polling serves the request either
-           way. */
+           way. HalHandleNMI does not return: the halt after the report of an
+           unclaimed NMI is intended, ReportOwner is never reset, and
+           KiEndNmiReport only runs for a HAL whose handler returns. */
         {
             static LONG ReportOwner;
 

@@ -1125,6 +1125,10 @@ ULONG
 KiCheckDroppedNmi(
     VOID);
 
+ULONG
+KiCheckGraceDroppedNmi(
+    VOID);
+
 VOID
 KiHandleLostNmi(
     VOID);
