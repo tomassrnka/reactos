@@ -1,7 +1,8 @@
 /*
  * PROJECT:     ReactOS API tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
- * PURPOSE:     Tests for LogonUser of a new non-administrator user in several processes
+ * PURPOSE:     Tests for LogonUser of a new non-administrator user in several processes, and for the other
+ *              LSA client calls: logon sessions, policy change notification, NetUserChangePassword
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -179,8 +180,10 @@ typedef NTSTATUS (NTAPI *LSA_LOOKUP)(HANDLE, PLSA_STRING, PULONG);
 typedef NTSTATUS (NTAPI *LSA_CALL)(HANDLE, ULONG, PVOID, ULONG, PVOID *, PULONG, PNTSTATUS);
 typedef NTSTATUS (NTAPI *LSA_CLOSE)(PVOID);
 
-/* LsaCallAuthenticationPackage carries package specific buffers that may hold pointers. The WoW64
- * layer translates none of them yet: a 32-bit process gets STATUS_NOT_SUPPORTED, a known gap. */
+/* LsaCallAuthenticationPackage carries package specific buffers that may hold pointers. The WoW64 layer
+ * translates MsV1_0ChangePassword only (NetUserChangePassword); any other message type, such as this
+ * challenge request, gets STATUS_NOT_SUPPORTED in a 32-bit process, which Windows 10 also returns there.
+ * A known gap. */
 static VOID CallAuthenticationPackage(VOID)
 {
     HMODULE Secur32 = LoadLibraryW(L"secur32.dll");
@@ -285,6 +288,213 @@ START_TEST(LogonUser)
         ok(Code == 0, "Process %lu: exit code %lu\n", i + 1, Code);
         CloseHandle(Pi.hProcess);
     }
+
+    Call.Add = FALSE;
+    Call.Name = User;
+    if (TimedNetCall(&Call))
+        ok(Call.Status == NERR_Success, "NetUserDel(%ls) failed: %lu\n", User, Call.Status);
+}
+
+
+/* LsaGetLogonSessionData, LsaEnumerateLogonSessions and the policy change notification, which a 32-bit
+ * process reaches through the WoW64 translation of the LSA port. */
+typedef NTSTATUS (NTAPI *LSA_ENUM_SESSIONS)(PULONG, PLUID *);
+typedef NTSTATUS (NTAPI *LSA_GET_SESSION)(PLUID, PSECURITY_LOGON_SESSION_DATA *);
+typedef NTSTATUS (NTAPI *LSA_POLICY_NOTIFY)(POLICY_NOTIFICATION_INFORMATION_CLASS, HANDLE);
+
+static FARPROC GetLsaProc(PCSTR Name)
+{
+    FARPROC Proc = NULL;
+    HMODULE Module = LoadLibraryW(L"secur32.dll");
+
+    if (Module)
+        Proc = GetProcAddress(Module, Name);
+    if (!Proc)
+    {
+        Module = LoadLibraryW(L"advapi32.dll");
+        if (Module)
+            Proc = GetProcAddress(Module, Name);
+    }
+    return Proc;
+}
+
+static BOOL StringInBlock(PCUNICODE_STRING String, PVOID Block)
+{
+    PWCHAR Chars = String->Buffer;
+    ULONG i;
+
+    if (!String->MaximumLength)
+        return String->Length == 0;
+    if (String->Length > String->MaximumLength || !Chars)
+        return FALSE;
+    for (i = 0; i < String->Length / sizeof(WCHAR); i++)
+        if (Chars[i] == UNICODE_NULL)
+            return FALSE;
+    return (ULONG_PTR)Chars > (ULONG_PTR)Block;
+}
+
+static VOID CheckSessionData(PLUID LogonId, LSA_GET_SESSION GetSession, LSA_CLOSE FreeBuffer, BOOL Trace)
+{
+    PSECURITY_LOGON_SESSION_DATA Data = NULL;
+    NTSTATUS Status;
+
+    Status = GetSession(LogonId, &Data);
+    ok(Status == STATUS_SUCCESS, "LsaGetLogonSessionData(%lx:%lx) returned %08lx\n", LogonId->HighPart, LogonId->LowPart, Status);
+    if (!NT_SUCCESS(Status) || !Data)
+        return;
+    ok(Data->Size == sizeof(*Data), "Size is %lu, expected %lu\n", Data->Size, (ULONG)sizeof(*Data));
+    ok(Data->LogonId.LowPart == LogonId->LowPart && Data->LogonId.HighPart == LogonId->HighPart, "LogonId %lx:%lx\n",
+       Data->LogonId.HighPart, Data->LogonId.LowPart);
+    ok(StringInBlock(&Data->UserName, Data), "UserName %p %u/%u\n", Data->UserName.Buffer, Data->UserName.Length, Data->UserName.MaximumLength);
+    ok(StringInBlock(&Data->LogonDomain, Data), "LogonDomain %p\n", Data->LogonDomain.Buffer);
+    ok(StringInBlock(&Data->AuthenticationPackage, Data), "AuthenticationPackage %p\n", Data->AuthenticationPackage.Buffer);
+    ok(StringInBlock(&Data->LogonServer, Data), "LogonServer %p\n", Data->LogonServer.Buffer);
+    ok(StringInBlock(&Data->DnsDomainName, Data), "DnsDomainName %p\n", Data->DnsDomainName.Buffer);
+    ok(StringInBlock(&Data->Upn, Data), "Upn %p\n", Data->Upn.Buffer);
+    ok(!Data->Sid || (IsValidSid(Data->Sid) && (ULONG_PTR)Data->Sid > (ULONG_PTR)Data), "Sid %p\n", Data->Sid);
+    if (Trace)
+        trace("session %lx:%lx user '%.*ls' domain '%.*ls' package '%.*ls' type %lu session %lu sid %s server '%.*ls'\n",
+              LogonId->HighPart, LogonId->LowPart,
+              Data->UserName.Length / 2, Data->UserName.Buffer ? Data->UserName.Buffer : L"",
+              Data->LogonDomain.Length / 2, Data->LogonDomain.Buffer ? Data->LogonDomain.Buffer : L"",
+              Data->AuthenticationPackage.Length / 2, Data->AuthenticationPackage.Buffer ? Data->AuthenticationPackage.Buffer : L"",
+              Data->LogonType, Data->Session, Data->Sid ? "yes" : "no",
+              Data->LogonServer.Length / 2, Data->LogonServer.Buffer ? Data->LogonServer.Buffer : L"");
+    FreeBuffer(Data);
+}
+
+START_TEST(LsaLogonSession)
+{
+    LSA_ENUM_SESSIONS Enum = (LSA_ENUM_SESSIONS)GetLsaProc("LsaEnumerateLogonSessions");
+    LSA_GET_SESSION GetSession = (LSA_GET_SESSION)GetLsaProc("LsaGetLogonSessionData");
+    LSA_CLOSE FreeBuffer = (LSA_CLOSE)GetLsaProc("LsaFreeReturnBuffer");
+    LSA_POLICY_NOTIFY Register = (LSA_POLICY_NOTIFY)GetLsaProc("LsaRegisterPolicyChangeNotification");
+    LSA_POLICY_NOTIFY Unregister = (LSA_POLICY_NOTIFY)GetLsaProc("LsaUnregisterPolicyChangeNotification");
+    TOKEN_STATISTICS Statistics;
+    HANDLE Token, Event;
+    PLUID Sessions = NULL;
+    ULONG Count = 0, Length, i;
+    NTSTATUS Status;
+    BOOL FoundOwn = FALSE;
+    LUID Bad = { 0xdead, 0x7eef };
+    PSECURITY_LOGON_SESSION_DATA Data = NULL;
+
+    if (!Enum || !GetSession || !FreeBuffer)
+    {
+        skip("The LSA logon session functions are missing\n");
+        return;
+    }
+
+    Status = Enum(&Count, &Sessions);
+    ok(Status == STATUS_SUCCESS, "LsaEnumerateLogonSessions returned %08lx\n", Status);
+    if (NT_SUCCESS(Status))
+    {
+        ok(Count > 0 && Sessions != NULL, "%lu sessions, list %p\n", Count, Sessions);
+        ok(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &Token), "OpenProcessToken failed\n");
+        ok(GetTokenInformation(Token, TokenStatistics, &Statistics, sizeof(Statistics), &Length),
+           "GetTokenInformation failed: %lu\n", GetLastError());
+        for (i = 0; Sessions && i < Count; i++)
+        {
+            if (Sessions[i].LowPart == Statistics.AuthenticationId.LowPart &&
+                Sessions[i].HighPart == Statistics.AuthenticationId.HighPart)
+                FoundOwn = TRUE;
+            CheckSessionData(&Sessions[i], GetSession, FreeBuffer, TRUE);
+        }
+        ok(FoundOwn, "The session %lx:%lx of this process is not listed\n", Statistics.AuthenticationId.HighPart,
+           Statistics.AuthenticationId.LowPart);
+        CloseHandle(Token);
+        if (Sessions)
+            FreeBuffer(Sessions);
+    }
+
+    Status = GetSession(&Bad, &Data);
+    ok(Status == STATUS_NO_SUCH_LOGON_SESSION, "LsaGetLogonSessionData of a bad LUID returned %08lx\n", Status);
+
+    if (!Register || !Unregister)
+    {
+        skip("The policy change notification functions are missing\n");
+        return;
+    }
+    Event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    Status = Register(PolicyNotifyAuditEventsInformation, Event);
+    ok(Status == STATUS_SUCCESS, "LsaRegisterPolicyChangeNotification returned %08lx\n", Status);
+    Status = Unregister(PolicyNotifyAuditEventsInformation, Event);
+    ok(Status == STATUS_SUCCESS, "LsaUnregisterPolicyChangeNotification returned %08lx\n", Status);
+    Status = Unregister(PolicyNotifyAuditEventsInformation, Event);
+    trace("a second LsaUnregisterPolicyChangeNotification returned %08lx\n", Status);
+    CloseHandle(Event);
+}
+
+static WCHAR NewPassword[] = L"Logon-User-New-2026!";
+
+static VOID ChildChangePassword(PCSTR UserA)
+{
+    WCHAR User[32], Computer[MAX_COMPUTERNAME_LENGTH + 1];
+    DWORD Size = RTL_NUMBER_OF(Computer);
+    HANDLE Token;
+    NET_API_STATUS Status;
+    BOOL Ok;
+
+    MultiByteToWideChar(CP_ACP, 0, UserA, -1, User, RTL_NUMBER_OF(User));
+    ok(GetComputerNameW(Computer, &Size), "GetComputerNameW failed\n");
+
+    Status = NetUserChangePassword(Computer, User, TestPassword, NewPassword);
+    ok(Status == NERR_Success, "NetUserChangePassword returned %lu\n", Status);
+    if (Status != NERR_Success)
+        return;
+
+    Token = NULL;
+    Ok = LogonUserW(User, L".", NewPassword, LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &Token);
+    ok(Ok, "LogonUserW with the new password failed: %lu\n", GetLastError());
+    if (Ok)
+        CloseHandle(Token);
+    SetLastError(0xdeadbeef);
+    Ok = LogonUserW(User, L".", TestPassword, LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &Token);
+    ok(!Ok, "LogonUserW with the old password succeeded\n");
+    ok(GetLastError() == ERROR_LOGON_FAILURE, "LogonUserW with the old password: error %lu\n", GetLastError());
+    if (Ok)
+        CloseHandle(Token);
+}
+
+START_TEST(NetUserChangePassword)
+{
+    static WCHAR User[32];
+    CHAR UserA[32], CommandLine[MAX_PATH + 64];
+    STARTUPINFOA Si;
+    PROCESS_INFORMATION Pi;
+    static NET_CALL Call;
+    DWORD Wait, Code;
+    int argc;
+    char **argv;
+
+    argc = winetest_get_mainargs(&argv);
+    if (argc >= 3)
+    {
+        ChildChangePassword(argv[2]);
+        return;
+    }
+
+    if (!CreateTestUser(User, RTL_NUMBER_OF(User)))
+        return;
+    WideCharToMultiByte(CP_ACP, 0, User, -1, UserA, sizeof(UserA), NULL, NULL);
+
+    /* In a process of its own, as for LogonUser */
+    StringCchPrintfA(CommandLine, RTL_NUMBER_OF(CommandLine), "\"%s\" NetUserChangePassword %s", argv[0], UserA);
+    ZeroMemory(&Si, sizeof(Si));
+    Si.cb = sizeof(Si);
+    if (CreateProcessA(NULL, CommandLine, NULL, NULL, TRUE, 0, NULL, NULL, &Si, &Pi))
+    {
+        CloseHandle(Pi.hThread);
+        Wait = WaitForSingleObject(Pi.hProcess, CALL_TIMEOUT_MS);
+        ok(Wait == WAIT_OBJECT_0, "The child did not finish: %lu\n", Wait);
+        if (Wait != WAIT_OBJECT_0)
+            TerminateProcess(Pi.hProcess, 1);
+        else if (GetExitCodeProcess(Pi.hProcess, &Code))
+            ok(Code == 0, "The child's exit code is %lu\n", Code);
+        CloseHandle(Pi.hProcess);
+    }
+    else
+        ok(0, "CreateProcessA failed: %lu\n", GetLastError());
 
     Call.Add = FALSE;
     Call.Name = User;
