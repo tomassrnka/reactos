@@ -144,10 +144,42 @@ RouteChangeNotify(VOID)
     ChangeQueueNotify(&RouteChangeQueue);
 }
 
+/* The most requests one file object keeps waiting, in both queues together: the pool is not charged to anyone */
+#define MAX_PENDING_PER_FILE 64
+
+static
+BOOLEAN
+ChangeQueueIsFull(PIRP Irp)
+{
+    PFILE_OBJECT FileObject = IoGetCurrentIrpStackLocation(Irp)->FileObject;
+    CHANGE_QUEUE *Queues[2] = { &AddrChangeQueue, &RouteChangeQueue };
+    ULONG Count = 0, i;
+    KIRQL OldIrql;
+    PLIST_ENTRY Entry;
+
+    for (i = 0; i < 2; i++)
+    {
+        KeAcquireSpinLock(&Queues[i]->Lock, &OldIrql);
+        for (Entry = Queues[i]->List.Flink; Entry != &Queues[i]->List; Entry = Entry->Flink)
+        {
+            PIRP Pending = CONTAINING_RECORD(Entry, IRP, Tail.Overlay.ListEntry);
+
+            if (IoGetCurrentIrpStackLocation(Pending)->FileObject == FileObject)
+                Count++;
+        }
+        KeReleaseSpinLock(&Queues[i]->Lock, OldIrql);
+    }
+
+    return Count >= MAX_PENDING_PER_FILE;
+}
+
 /* IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST: queue the request until the next change */
 NTSTATUS
 DispAddrChangeNotifyRequest(PIRP Irp)
 {
+    if (ChangeQueueIsFull(Irp))
+        return STATUS_INSUFFICIENT_RESOURCES;
+
     /* The request carries no data; this is a plain pend, so any buffers are ignored */
     Irp->IoStatus.Information = 0;
     IoCsqInsertIrp(&AddrChangeQueue.Csq, Irp, NULL);
@@ -158,6 +190,9 @@ DispAddrChangeNotifyRequest(PIRP Irp)
 NTSTATUS
 DispRouteChangeNotifyRequest(PIRP Irp)
 {
+    if (ChangeQueueIsFull(Irp))
+        return STATUS_INSUFFICIENT_RESOURCES;
+
     Irp->IoStatus.Information = 0;
     IoCsqInsertIrp(&RouteChangeQueue.Csq, Irp, NULL);
     return STATUS_PENDING;

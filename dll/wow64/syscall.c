@@ -1460,6 +1460,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         case IOCTL_DELETE_IP_ADDRESS: /* DeleteIPAddress: one integer. */
         case IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST: /* NotifyAddrChange: no data; pends with the guest IOSB. */
         case IOCTL_IP_ADDCHANGE_CANCEL_REQUEST: /* CancelIPChangeNotify: no data. */
+        case IOCTL_IP_ROUTECHANGE_NOTIFY_REQUEST: /* NotifyRouteChange: no data; pends with the guest IOSB. */
         case IOCTL_AFD_BIND:
         case IOCTL_AFD_CONNECT:
         case IOCTL_AFD_START_LISTEN:
