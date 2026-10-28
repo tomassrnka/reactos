@@ -197,6 +197,13 @@ static const char *config_list_get_value(const char *string, const char *key, si
     return NULL;
 }
 
+#ifdef __REACTOS__
+/* Machine-wide fallbacks: HKLM\Software\Wine\Direct3D and
+ * HKLM\Software\Wine\AppDefaults\app.exe\Direct3D, consulted only for values
+ * absent from the HKCU keys, so a per-app option installed once applies to every user. */
+static HKEY hklm_defkey, hklm_appkey;
+#endif
+
 static DWORD get_config_key(HKEY defkey, HKEY appkey, const char *env, const char *name, char *buffer, DWORD size)
 {
     const char *env_value;
@@ -210,6 +217,10 @@ static DWORD get_config_key(HKEY defkey, HKEY appkey, const char *env, const cha
     }
     if (appkey && !RegQueryValueExA(appkey, name, 0, NULL, (BYTE *)buffer, &size)) return 0;
     if (defkey && !RegQueryValueExA(defkey, name, 0, NULL, (BYTE *)buffer, &size)) return 0;
+#ifdef __REACTOS__
+    if (hklm_appkey && !RegQueryValueExA(hklm_appkey, name, 0, NULL, (BYTE *)buffer, &size)) return 0;
+    if (hklm_defkey && !RegQueryValueExA(hklm_defkey, name, 0, NULL, (BYTE *)buffer, &size)) return 0;
+#endif
     return ERROR_FILE_NOT_FOUND;
 }
 
@@ -230,6 +241,12 @@ static DWORD get_config_key_dword(HKEY defkey, HKEY appkey, const char *env, con
     if (appkey && !RegQueryValueExA(appkey, name, 0, &type, (BYTE *)&data, &size) && type == REG_DWORD) goto success;
     size = sizeof(data);
     if (defkey && !RegQueryValueExA(defkey, name, 0, &type, (BYTE *)&data, &size) && type == REG_DWORD) goto success;
+#ifdef __REACTOS__
+    size = sizeof(data);
+    if (hklm_appkey && !RegQueryValueExA(hklm_appkey, name, 0, &type, (BYTE *)&data, &size) && type == REG_DWORD) goto success;
+    size = sizeof(data);
+    if (hklm_defkey && !RegQueryValueExA(hklm_defkey, name, 0, &type, (BYTE *)&data, &size) && type == REG_DWORD) goto success;
+#endif
 
     return ERROR_FILE_NOT_FOUND;
 
@@ -321,18 +338,36 @@ static BOOL wined3d_dll_init(HINSTANCE hInstDLL)
 
     /* @@ Wine registry key: HKCU\Software\Wine\Direct3D */
     if ( RegOpenKeyA( HKEY_CURRENT_USER, "Software\\Wine\\Direct3D", &hkey ) ) hkey = 0;
+#ifdef __REACTOS__
+    /* @@ Wine registry key: HKLM\Software\Wine\Direct3D */
+    if (RegOpenKeyA(HKEY_LOCAL_MACHINE, "Software\\Wine\\Direct3D", &hklm_defkey)) hklm_defkey = 0;
+#endif
 
     if (wined3d_get_app_name(buffer, ARRAY_SIZE(buffer)))
     {
         HKEY tmpkey;
         /* @@ Wine registry key: HKCU\Software\Wine\AppDefaults\app.exe\Direct3D */
+#ifdef __REACTOS__
+        strcat(buffer, "\\Direct3D");
+        TRACE("Application name %s.\n", buffer);
+#endif
         if (!RegOpenKeyA(HKEY_CURRENT_USER, "Software\\Wine\\AppDefaults", &tmpkey))
         {
+#ifndef __REACTOS__
             strcat(buffer, "\\Direct3D");
             TRACE("Application name %s.\n", buffer);
+#endif
             if (RegOpenKeyA(tmpkey, buffer, &appkey)) appkey = 0;
             RegCloseKey(tmpkey);
         }
+#ifdef __REACTOS__
+        /* @@ Wine registry key: HKLM\Software\Wine\AppDefaults\app.exe\Direct3D */
+        if (!RegOpenKeyA(HKEY_LOCAL_MACHINE, "Software\\Wine\\AppDefaults", &tmpkey))
+        {
+            if (RegOpenKeyA(tmpkey, buffer, &hklm_appkey)) hklm_appkey = 0;
+            RegCloseKey(tmpkey);
+        }
+#endif
     }
 
     /* Allow modifying settings using the WINE_D3D_CONFIG environment variable,
@@ -342,7 +377,11 @@ static BOOL wined3d_dll_init(HINSTANCE hInstDLL)
      */
     env = getenv("WINE_D3D_CONFIG");
 
+#ifdef __REACTOS__
+    if (hkey || appkey || hklm_defkey || hklm_appkey || env)
+#else
     if (hkey || appkey || env)
+#endif
     {
         if (!get_config_key_dword(hkey, appkey, env, "csmt", &wined3d_settings.cs_multithreaded))
             ERR_(winediag)("Setting multithreaded command stream to %#x.\n", wined3d_settings.cs_multithreaded);
@@ -474,6 +513,11 @@ static BOOL wined3d_dll_init(HINSTANCE hInstDLL)
 
     if (appkey) RegCloseKey( appkey );
     if (hkey) RegCloseKey( hkey );
+#ifdef __REACTOS__
+    if (hklm_appkey) RegCloseKey(hklm_appkey);
+    if (hklm_defkey) RegCloseKey(hklm_defkey);
+    hklm_appkey = hklm_defkey = 0;
+#endif
 
     if (!getenv( "VKD3D_DEBUG" ))
     {

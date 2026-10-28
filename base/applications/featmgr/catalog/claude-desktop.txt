@@ -7,7 +7,8 @@
 ; The package is a Squirrel .nupkg (a zip). The app files are in lib\net45\ and run
 ; as-is (no Squirrel Update.exe needed). To move to a newer release, update Version,
 ; URLDownload, SHA1 and SizeBytes from https://downloads.claude.ai/releases/win32/x64/RELEASES
-; (line format: <SHA1> <file> <size>) and the same three fields in Catalog\claude-desktop.ini.
+; (line format: <SHA1> <file> <size>) and the same fields in Catalog\claude-desktop.ini
+; (Version, Artifact URL, ArtifactSHA1, SizeBytes). The file name in both URLs carries the version.
 [Section]
 Name = Claude Desktop
 Version = 4.29.0
