@@ -813,28 +813,51 @@ HandleReadIrp(
     IN PIRP Irp OPTIONAL)
 {
     NTSTATUS Status;
-    KIRQL OldIrql;
+    KIRQL OldIrql, CancelIrql;
     BOOLEAN IsNewRequest = FALSE;
 
     TRACE_(CLASS_NAME, "HandleReadIrp(DeviceObject %p, ReadData %p, Irp %p)\n", DeviceObject, ReadData, Irp);
 
+    /*
+     * Fork (input-stall fix): every decision about PendingIrp / InputCount is made with ReadData->SpinLock held.
+     * The upstream rewrite read PendingIrp and InputCount unlocked, which allowed
+     *  - a concurrent producer (the port DPC can run on two CPUs under host load) to complete one pending IRP
+     *    twice / clear PendingIrp of an IRP that was just pended (that IRP is then never completed and the
+     *    raw input thread stops reading for good),
+     *  - the T55 busy check to see the previous IRP still in PendingIrp while its completion APC had already
+     *    started the next read (completed with STATUS_DEVICE_BUSY, win32k does not re-issue),
+     *  - a lost wakeup: data queued between the "no input" test and PendingIrp being set.
+     * PendingIrp is also cleared before the IRP is completed.
+     */
+    KeAcquireSpinLock(&ReadData->SpinLock, &OldIrql);
+
     if (!Irp)
     {
+        /* Resume the pending request: claim it */
         Irp = ReadData->PendingIrp;
-        if (!Irp)
+        if (!Irp || ReadData->InputCount == 0)
+        {
+            KeReleaseSpinLock(&ReadData->SpinLock, OldIrql);
             return STATUS_SUCCESS;
+        }
+        if (IoSetCancelRoutine(Irp, NULL) == NULL)
+        {
+            /* Already being cancelled: ClassCancelRoutine owns it and finds it in PendingIrp */
+            KeReleaseSpinLock(&ReadData->SpinLock, OldIrql);
+            return STATUS_SUCCESS;
+        }
+        ReadData->PendingIrp = NULL;
     }
     else
     {
         /*
          * Fork (T55): only one read may be pending at a time. A different IRP arriving while one is already
-         * pending must not overwrite PendingIrp (that would orphan the first IRP: never completed, and
-         * ClassCancelRoutine could no longer find it). Reject the newcomer and leave the first one pending.
-         * (Only a caller-supplied IRP is a new request; a NULL Irp resumes the pending one.)
+         * pending must not overwrite PendingIrp (that would orphan the first IRP).
          */
         IsNewRequest = TRUE;
         if (ReadData->PendingIrp != NULL && ReadData->PendingIrp != Irp)
         {
+            KeReleaseSpinLock(&ReadData->SpinLock, OldIrql);
             Irp->IoStatus.Status = STATUS_DEVICE_BUSY;
             Irp->IoStatus.Information = 0;
             IoCompleteRequest(Irp, IO_NO_INCREMENT);
@@ -854,7 +877,6 @@ HandleReadIrp(
         else
             Destination = Irp->UserBuffer;
 
-        KeAcquireSpinLock(&ReadData->SpinLock, &OldIrql);
         NumberOfEntries = MIN(
             ReadData->InputCount,
             IoGetCurrentIrpStackLocation(Irp)->Parameters.Read.Length / sizeof(KEYBOARD_INPUT_DATA));
@@ -880,23 +902,20 @@ HandleReadIrp(
             Irp->IoStatus.Information = NumberOfEntries * sizeof(KEYBOARD_INPUT_DATA);
         }
 
-        /* Go to next packet and complete this request */
+        /* Go to next packet and complete this request (PendingIrp is already clear) */
         Irp->IoStatus.Status = Status;
 
         (VOID)IoSetCancelRoutine(Irp, NULL);
         IoCompleteRequest(Irp, IO_KEYBOARD_INCREMENT);
-        if (ReadData->PendingIrp == Irp)
-            ReadData->PendingIrp = NULL;
         KeReleaseSpinLock(&ReadData->SpinLock, OldIrql);
 
         return Status;
     }
 
-    IoAcquireCancelSpinLock(&OldIrql);
+    /* Nothing to read: pend (new requests only; the resume path above never gets here) */
+    IoAcquireCancelSpinLock(&CancelIrql);
     if (Irp->Cancel)
     {
-        if (ReadData->PendingIrp == Irp)
-            ReadData->PendingIrp = NULL;
         Status = STATUS_CANCELLED;
     }
     else
@@ -906,7 +925,8 @@ HandleReadIrp(
         (VOID)IoSetCancelRoutine(Irp, ClassCancelRoutine);
         Status = STATUS_PENDING;
     }
-    IoReleaseCancelSpinLock(OldIrql);
+    IoReleaseCancelSpinLock(CancelIrql);
+    KeReleaseSpinLock(&ReadData->SpinLock, OldIrql);
 
     if (Status == STATUS_CANCELLED && IsNewRequest)
     {
