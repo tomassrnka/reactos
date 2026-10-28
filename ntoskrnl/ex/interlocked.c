@@ -27,6 +27,15 @@
 
 /* FUNCTIONS ****************************************************************/
 
+/*
+ * The lock of an ExInterlocked operation may also be taken with
+ * KeAcquireSpinLock, and its holder may wait for every processor to take an
+ * IPI, e.g. a TLB flush when it frees memory. A processor that spins on the
+ * busy lock with interrupts disabled never takes that IPI, and both hang. So
+ * like the NT implementation, spin on a busy lock with the caller's interrupt
+ * state and only disable interrupts to take the free lock; the protected
+ * operation still runs with interrupts disabled.
+ */
 FORCEINLINE
 BOOLEAN
 _ExiDisableInterruptsAndAcquireSpinlock(
@@ -34,11 +43,45 @@ _ExiDisableInterruptsAndAcquireSpinlock(
 {
     BOOLEAN Enabled;
 
+#if DBG
+    /* Make sure that we don't own the lock already */
+    if (((KSPIN_LOCK)KeGetCurrentThread() | 1) == *Lock)
+    {
+        /* We do, bugcheck! */
+        KeBugCheckEx(SPIN_LOCK_ALREADY_OWNED, (ULONG_PTR)Lock, 0, 0, 0);
+    }
+#endif
+
     /* Disable interrupts */
     Enabled = KeDisableInterrupts();
 
-    /* Acquire the spinlock (inline) */
-    KxAcquireSpinLock(Lock);
+#ifdef CONFIG_SMP
+    /* Try to acquire the lock */
+    while (InterlockedBitTestAndSet((PLONG)Lock, 0))
+    {
+        /* It's busy: restore the caller's interrupt state while waiting */
+        KeRestoreInterrupts(Enabled);
+
+        /* Spin until it's unlocked */
+        while (*(volatile KSPIN_LOCK *)Lock & 1)
+        {
+            /* Yield and keep looping */
+            YieldProcessor();
+        }
+
+        /* Disable interrupts again and retry */
+        KeDisableInterrupts();
+    }
+#endif
+
+    /* Add an explicit memory barrier to prevent the compiler from reordering
+       memory accesses across the borders of spinlocks */
+    KeMemoryBarrierWithoutFence();
+
+#if DBG
+    /* On debug builds, we OR in the KTHREAD */
+    *Lock = (KSPIN_LOCK)KeGetCurrentThread() | 1;
+#endif
 
     return Enabled;
 }
