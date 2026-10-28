@@ -1855,8 +1855,22 @@ ObpCloseHandle(IN HANDLE Handle,
     OBTRACE(OB_HANDLE_DEBUG,
             "%s - Closing handle: %p\n", __FUNCTION__, Handle);
 
-    if (AccessMode == KernelMode && Handle == (HANDLE)-1)
+    if (NtMajorVersion >= 10)
+    {
+        /*
+         * Windows 10 treats closing a pseudo handle (-1 .. -6: current
+         * process, current thread, session, process/thread/effective token)
+         * as a successful no-op, for every caller mode, instead of failing
+         * the lookup. Anything else below -6 is an ordinary invalid handle.
+         */
+        if ((ULONG_PTR)Handle >= (ULONG_PTR)-6)
+            return STATUS_SUCCESS;
+    }
+    else if (AccessMode == KernelMode && Handle == (HANDLE)-1)
+    {
+        /* Before Windows 10 even the process pseudo handle is invalid here */
         return STATUS_INVALID_HANDLE;
+    }
 
     /* Check if we're dealing with a kernel handle */
     if (ObpIsKernelHandle(Handle, AccessMode))
