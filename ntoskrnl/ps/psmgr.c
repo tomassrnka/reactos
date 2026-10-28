@@ -48,6 +48,7 @@ UNICODE_STRING PsNtDllPathName =
 #if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
 /* The i386 ntdll and its preferred base, when SysWOW64 is installed */
 static PVOID PspSystemDllSection32;
+static volatile LONG PspSystemDllRetry32;
 static PVOID PspSystemDllBase32;
 static UNICODE_STRING PsNtDll32PathName =
     RTL_CONSTANT_STRING(L"\\SystemRoot\\SysWOW64\\ntdll.dll");
@@ -198,7 +199,7 @@ PspMapSystemDll(IN PEPROCESS Process,
  * process starts. A process whose preferred base is taken gets none; wow64.dll
  * then reports the conflict as before.
  */
-CODE_SEG("INIT")
+/* Not INIT: PspMapSystemDll32 may retry it once after boot */
 static
 VOID
 PspLocateSystemDll32(VOID)
@@ -211,6 +212,7 @@ PspLocateSystemDll32(VOID)
     PVOID Section, Base = NULL;
     PIMAGE_NT_HEADERS32 NtHeaders;
     NTSTATUS Status;
+    KAPC_STATE ApcState;
 
     InitializeObjectAttributes(&ObjectAttributes,
                                &PsNtDll32PathName,
@@ -224,7 +226,12 @@ PspLocateSystemDll32(VOID)
                         FILE_SHARE_READ,
                         0);
     if (!NT_SUCCESS(Status))
+    {
+        DbgPrint("PS: WOW64 ntdll32 view unavailable: cannot open %wZ (status %08lx); "
+                 "32-bit processes will have no kernel ntdll32 view\n",
+                 &PsNtDll32PathName, Status);
         return;
+    }
     Status = ZwCreateSection(&SectionHandle,
                              SECTION_ALL_ACCESS,
                              NULL,
@@ -234,7 +241,11 @@ PspLocateSystemDll32(VOID)
                              FileHandle);
     ZwClose(FileHandle);
     if (!NT_SUCCESS(Status))
+    {
+        DbgPrint("PS: WOW64 ntdll32 view unavailable: cannot create an image section of %wZ (status %08lx)\n",
+                 &PsNtDll32PathName, Status);
         return;
+    }
     Status = ObReferenceObjectByHandle(SectionHandle,
                                        SECTION_ALL_ACCESS,
                                        MmSectionObjectType,
@@ -243,12 +254,17 @@ PspLocateSystemDll32(VOID)
                                        NULL);
     ZwClose(SectionHandle);
     if (!NT_SUCCESS(Status))
+    {
+        DbgPrint("PS: WOW64 ntdll32 view unavailable: cannot reference the section of %wZ (status %08lx)\n",
+                 &PsNtDll32PathName, Status);
         return;
+    }
 
     /* Find the preferred base: map it once into this process, which is not a
      * WOW64 process (so the i386 image maps with a machine mismatch status) */
+    KeStackAttachProcess(&PsInitialSystemProcess->Pcb, &ApcState);
     Status = MmMapViewOfSection(Section,
-                                PsGetCurrentProcess(),
+                                PsInitialSystemProcess,
                                 &Base,
                                 0,
                                 0,
@@ -259,8 +275,10 @@ PspLocateSystemDll32(VOID)
                                 PAGE_READWRITE);
     if (Status != STATUS_SUCCESS && Status != STATUS_IMAGE_MACHINE_TYPE_MISMATCH)
     {
-        if (NT_SUCCESS(Status)) MmUnmapViewOfSection(PsGetCurrentProcess(), Base);
-        DPRINT1("Cannot map %wZ: %lx\n", &PsNtDll32PathName, Status);
+        if (NT_SUCCESS(Status)) MmUnmapViewOfSection(PsInitialSystemProcess, Base);
+        KeUnstackDetachProcess(&ApcState);
+        DbgPrint("PS: WOW64 ntdll32 view unavailable: cannot map %wZ (status %08lx)\n",
+                 &PsNtDll32PathName, Status);
         ObDereferenceObject(Section);
         return;
     }
@@ -270,12 +288,18 @@ PspLocateSystemDll32(VOID)
         NtHeaders->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC &&
         NtHeaders->OptionalHeader.ImageBase == (ULONG_PTR)Base)
     {
+        /* Publish the base before the section: readers test the section */
         PspSystemDllBase32 = Base;
-        PspSystemDllSection32 = Section;
+        InterlockedExchangePointer(&PspSystemDllSection32, Section);
     }
-    MmUnmapViewOfSection(PsGetCurrentProcess(), Base);
+    MmUnmapViewOfSection(PsInitialSystemProcess, Base);
+    KeUnstackDetachProcess(&ApcState);
     if (!PspSystemDllSection32)
+    {
+        DbgPrint("PS: WOW64 ntdll32 view unavailable: %wZ is not an i386 image at its preferred base\n",
+                 &PsNtDll32PathName);
         ObDereferenceObject(Section);
+    }
 }
 
 VOID
@@ -284,11 +308,33 @@ PspMapSystemDll32(IN PEPROCESS Process)
 {
     LARGE_INTEGER Offset = {{0, 0}};
     SIZE_T ViewSize = 0;
-    PVOID Base = PspSystemDllBase32;
+    PVOID Base;
     NTSTATUS Status;
 
-    if (!PspSystemDllSection32 || !Process->Wow64Process)
+    if (!Process->Wow64Process)
         return;
+    if (!PspSystemDllSection32)
+    {
+        /* Boot-time lookup failed: retry it once. 0 = not retried, 1 = in progress, 2 = done */
+        if (InterlockedCompareExchange(&PspSystemDllRetry32, 1, 0) == 0)
+        {
+            if (KeGetCurrentIrql() == PASSIVE_LEVEL)
+                PspLocateSystemDll32();
+            else
+                DbgPrint("PS: WOW64 ntdll32 view retry skipped: IRQL %u\n", KeGetCurrentIrql());
+            InterlockedExchange(&PspSystemDllRetry32, 2);
+        }
+        else
+        {
+            LARGE_INTEGER Delay;
+            Delay.QuadPart = -10 * 1000 * 10; /* 10 ms */
+            while (PspSystemDllRetry32 == 1 && KeGetCurrentIrql() == PASSIVE_LEVEL)
+                KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+        }
+        if (!PspSystemDllSection32)
+            return;
+    }
+    Base = PspSystemDllBase32;
     Status = MmMapViewOfSection(PspSystemDllSection32,
                                 Process,
                                 &Base,
