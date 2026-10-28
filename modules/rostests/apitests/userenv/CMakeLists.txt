@@ -1,5 +1,6 @@
 
 list(APPEND SOURCE
+    AppContainerRegisterSid.c
     DeleteProfile.c
     DeriveAppContainerSid.c
     GetProfileDirs.c
