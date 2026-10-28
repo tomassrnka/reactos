@@ -88,6 +88,7 @@ list(APPEND SOURCE
     IsApiSetImplemented.c
     IsDBCSLeadByteEx.c
     JapaneseCalendar.c
+    JobList.c
     JobObject.c
     LCMapString.c
     LoadString.c

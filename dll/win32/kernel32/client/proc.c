@@ -5117,14 +5117,29 @@ StartScan:
         }
     }
 
-    /* PROC_THREAD_ATTRIBUTE_JOB_LIST is validated and accepted above. Assigning
-     * the new process to the supplied job object here is intentionally NOT done
-     * yet: doing so regresses modern sandboxed apps. A Firefox 158 content
-     * process is torn down once it becomes a member of the sandbox job, which
-     * points at incomplete job completion-port / kill-on-close behaviour that
-     * must be fixed first. Accepting the attribute is enough for CreateProcess
-     * to succeed; honouring it is deferred to that follow-up. */
-    (void)JobListAttribute;
+    /* PROC_THREAD_ATTRIBUTE_JOB_LIST: the child joins each listed job before its
+     * first thread runs, as it does with NtCreateUserProcess on Windows. Chromium's
+     * sandbox relies on this: it frees a target's resources only when the job
+     * completion port reports the process gone, and a child that never joined the
+     * job leaks them (and its registered waits) for the life of the browser. */
+    if (JobListAttribute)
+    {
+        ULONG JobCount = JobListAttribute->Size / sizeof(HANDLE), JobIndex;
+        PHANDLE JobList = (PHANDLE)JobListAttribute->Value;
+
+        for (JobIndex = 0; JobIndex < JobCount; JobIndex++)
+        {
+            Status = NtAssignProcessToJobObject(JobList[JobIndex], ProcessHandle);
+            if (!NT_SUCCESS(Status))
+            {
+                DPRINT1("Failed to assign process to listed job: %lx\n", Status);
+                NtTerminateProcess(ProcessHandle, STATUS_ACCESS_DENIED);
+                BaseSetLastNTError(Status);
+                Result = FALSE;
+                goto Quickie;
+            }
+        }
+    }
 
     /* Finally, resume the thread to actually get the process started */
     if (!(dwCreationFlags & CREATE_SUSPENDED))

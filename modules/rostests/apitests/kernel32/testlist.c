@@ -91,6 +91,7 @@ extern void func_interlck(void);
 extern void func_IsApiSetImplemented(void);
 extern void func_IsDBCSLeadByteEx(void);
 extern void func_JapaneseCalendar(void);
+extern void func_JobList(void);
 extern void func_JobObject(void);
 extern void func_LCMapString(void);
 extern void func_LoadString(void);
@@ -250,6 +251,7 @@ const struct test winetest_testlist[] =
     { "IsApiSetImplemented",         func_IsApiSetImplemented },
     { "IsDBCSLeadByteEx",            func_IsDBCSLeadByteEx },
     { "JapaneseCalendar",            func_JapaneseCalendar },
+    { "JobList",                    func_JobList },
     { "JobObject",                   func_JobObject },
     { "LCMapString",                 func_LCMapString },
     { "LoadString", func_LoadString },
