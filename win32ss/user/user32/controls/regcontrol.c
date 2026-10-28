@@ -204,11 +204,7 @@ BOOL WINAPI RegisterClientPFN(VOID)
   KSET(&pfnClientWorker, pfnGhostWndProc, GhostWndProc_common);
   KSET(&pfnClientWorker, pfnCtfHookProc, User32DefWindowProc);
 
-#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA) && !defined(W32K_WIDE_ACTIVE)
-    /*
-     * Fork: not for the wide WoW64 guest build. Its PFNCLIENT fields are 64 bits wide, so the sizes would not
-     * match ntdll's 32-bit PFN tables (RtlInitializeNtUserPfn would fail with STATUS_INVALID_PARAMETER).
-     */
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA)
     /* Register the PFNs with ntdll */
     Status = RtlInitializeNtUserPfn(&pfnClientA,
                                     sizeof(pfnClientA),

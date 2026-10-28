@@ -29,10 +29,17 @@ EXTERN RtlpNtUserPfns:QWORD
 
 #if defined(_M_IX86)
 
+/* Fork: the WoW64 guest ntdll has 64-bit table entries; the low dword of each is the address (little endian) */
+#ifdef SYSWOW64_GUEST
+#define NTUSER_PFN_ENTRY_SIZE 8
+#else
+#define NTUSER_PFN_ENTRY_SIZE 4
+#endif
+
 MACRO(DEFINE_NTUSER_PFN_THUNK, Index)
     ALIGN 16
     RtlpNtUserPfnDispatch&Index:
-        jmp dword ptr _RtlpNtUserPfns[Index * 4]
+        jmp dword ptr _RtlpNtUserPfns[Index * NTUSER_PFN_ENTRY_SIZE]
 ENDM
 
 #elif defined(_M_AMD64)
@@ -96,6 +103,12 @@ ENDR
 #ifdef _WIN64
 MACRO(DEFINE_NTUSER_PFN_REF, Index)
     .quad RtlpNtUserPfnDispatch&Index
+ENDM
+#elif defined(SYSWOW64_GUEST)
+/* Zero-extended to 64 bits, like the table of registered PFNs */
+MACRO(DEFINE_NTUSER_PFN_REF, Index)
+    .long RtlpNtUserPfnDispatch&Index
+    .long 0
 ENDM
 #else
 MACRO(DEFINE_NTUSER_PFN_REF, Index)
