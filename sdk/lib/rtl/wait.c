@@ -16,6 +16,9 @@
 #define NDEBUG
 #include <debug.h>
 
+extern PRTL_START_POOL_THREAD RtlpStartThreadFunc;
+extern PRTL_EXIT_POOL_THREAD RtlpExitThreadFunc;
+
 #define WAIT_IDLE         0
 #define WAIT_IN_CALLBACK  1
 #define WAIT_CANCELLED    2
@@ -109,6 +112,114 @@ Wait_thread_proc(LPVOID Arg)
 }
 
 
+/* A wait blocks the thread it runs on until the object is signalled, possibly for good, so it does
+   not take a thread of the worker pool: the pool has a fixed number of threads, and once registered
+   waits hold all of them, a new wait never starts and every work item of the process starves.
+   Windows does not limit the number of registered waits either. Waits run on wait threads of their
+   own instead, which are not limited; a wait thread whose wait is gone stays a while for the next
+   one, so that a new wait reuses it, as on Windows. */
+static HANDLE WaitThreadPort;          /* hands waits to idle wait threads */
+static volatile LONG WaitThreadsIdle;  /* idle wait threads not yet promised a wait */
+#define WAIT_THREAD_IDLE_TIMEOUT (-10 * 1000 * 10000LL) /* 10 seconds */
+
+/* Takes one of the idle wait threads, if there is one */
+static BOOLEAN
+RtlpTakeIdleWaitThread(VOID)
+{
+    LONG Idle;
+
+    do
+    {
+        Idle = WaitThreadsIdle;
+        if (Idle == 0)
+            return FALSE;
+    } while (InterlockedCompareExchange(&WaitThreadsIdle, Idle - 1, Idle) != Idle);
+
+    return TRUE;
+}
+
+static ULONG
+NTAPI
+Wait_thread_start(PVOID Arg)
+{
+    PRTLP_WAIT Wait = (PRTLP_WAIT)Arg;
+    IO_STATUS_BLOCK IoStatusBlock;
+    LARGE_INTEGER Timeout;
+    PVOID Unused;
+    NTSTATUS Status;
+
+    for (;;)
+    {
+        /* As on a thread of the pool, an exception in the callback ends only the wait */
+        _SEH2_TRY
+        {
+            Wait_thread_proc(Wait);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            DPRINT1("Exception 0x%x in wait thread %p\n", _SEH2_GetExceptionCode(), Wait);
+        }
+        _SEH2_END;
+
+        InterlockedIncrement(&WaitThreadsIdle);
+        Timeout.QuadPart = WAIT_THREAD_IDLE_TIMEOUT;
+        Status = NtRemoveIoCompletion(WaitThreadPort, (PVOID*)&Wait, &Unused, &IoStatusBlock, &Timeout);
+        if (Status == STATUS_SUCCESS)
+            continue;
+
+        /* Leave, unless a new wait was handed over meanwhile: then it is on its way */
+        if (RtlpTakeIdleWaitThread())
+            break;
+        Status = NtRemoveIoCompletion(WaitThreadPort, (PVOID*)&Wait, &Unused, &IoStatusBlock, NULL);
+        if (Status != STATUS_SUCCESS)
+            break;
+    }
+
+    RtlpExitThreadFunc(STATUS_SUCCESS);
+    return 0;
+}
+
+/* The flags that need a thread of the pool: an I/O or persistent thread outlives the callback, so
+   that I/O it started is not cancelled, and the pool hands the impersonation token over */
+#define WAIT_POOL_FLAGS (WT_EXECUTEINIOTHREAD | WT_EXECUTEINPERSISTENTTHREAD | WT_TRANSFER_IMPERSONATION)
+
+static NTSTATUS
+RtlpStartWait(PRTLP_WAIT Wait, ULONG Flags)
+{
+    HANDLE Port, Thread;
+    NTSTATUS Status;
+
+    if (Flags & WAIT_POOL_FLAGS)
+        return RtlQueueWorkItem(Wait_thread_proc, Wait, Flags);
+
+    if (!WaitThreadPort)
+    {
+        /* No limit on how many wait threads run at once */
+        Status = NtCreateIoCompletion(&Port, IO_COMPLETION_ALL_ACCESS, NULL, MAXLONG);
+        if (!NT_SUCCESS(Status))
+            return Status;
+        if (InterlockedCompareExchangePointer(&WaitThreadPort, Port, NULL) != NULL)
+            NtClose(Port);
+    }
+
+    if (RtlpTakeIdleWaitThread())
+    {
+        Status = NtSetIoCompletion(WaitThreadPort, Wait, NULL, STATUS_SUCCESS, 0);
+        if (NT_SUCCESS(Status))
+            return STATUS_SUCCESS;
+        /* Give the idle thread back and start a new one */
+        InterlockedIncrement(&WaitThreadsIdle);
+    }
+
+    Status = RtlpStartThreadFunc(Wait_thread_start, Wait, &Thread);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    NtResumeThread(Thread, NULL);
+    NtClose(Thread);
+    return STATUS_SUCCESS;
+}
+
 /* FUNCTIONS ***************************************************************/
 
 
@@ -179,12 +290,10 @@ RtlRegisterWait(PHANDLE NewWaitObject,
     Flags = Flags & (WT_EXECUTEINIOTHREAD | WT_EXECUTEINPERSISTENTTHREAD |
                      WT_EXECUTELONGFUNCTION | WT_TRANSFER_IMPERSONATION);
 
-    /* The callback may run, and use the handle, before RtlQueueWorkItem returns */
+    /* The callback may run, and use the handle, before RtlpStartWait returns */
     *NewWaitObject = Wait;
 
-    Status = RtlQueueWorkItem( Wait_thread_proc,
-                               Wait,
-                               Flags );
+    Status = RtlpStartWait( Wait, Flags );
 
     if (Status != STATUS_SUCCESS)
     {
@@ -238,11 +347,19 @@ RtlDeregisterWaitEx(HANDLE WaitHandle,
 
     CallbackInProgress = (InterlockedExchange( &Wait->CallbackState,
                                                WAIT_CANCELLED ) == WAIT_IN_CALLBACK);
-    if (LocalEvent && !CallbackInProgress)
+    if (!CallbackInProgress)
     {
-        /* No callback can start any more, so do not wait for the wait thread */
-        NtClose( LocalEvent );
-        LocalEvent = NULL;
+        /* No callback can start any more, so the wait is complete now, as on Windows: do not leave the
+           event to the wait thread, which may not even have started yet */
+        if (LocalEvent)
+        {
+            NtClose( LocalEvent );
+            LocalEvent = NULL;
+        }
+        else if (CompletionEvent)
+        {
+            NtSetEvent( CompletionEvent, NULL );
+        }
         CompletionEvent = NULL;
     }
 
