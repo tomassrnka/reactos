@@ -11,11 +11,23 @@
 #define NDEBUG
 #include <debug.h>
 
+/*
+ * Fork: the 32-bit WoW64 guest ntdll (SYSWOW64_GUEST) works with the wide PFNCLIENT that the guest user32 shares
+ * with the 64-bit win32k, where every pointer is 64 bits wide (as it is for a 32-bit process on Windows 10 WoW64).
+ * So all tables here have 64-bit entries holding zero-extended addresses; see ntuserdisp.s for the thunks and
+ * the stub table. Native i386 and amd64 builds keep pointer-sized entries.
+ */
+#ifdef SYSWOW64_GUEST
+typedef ULONG64 NTUSER_PFN_ENTRY;
+#else
+typedef PVOID NTUSER_PFN_ENTRY;
+#endif
+
 typedef struct _NTUSER_PFN
 {
-    PVOID WndProcsA[RTLP_NUMBER_OF_NTUSER_WNDPROCS];
-    PVOID WndProcsW[RTLP_NUMBER_OF_NTUSER_WNDPROCS];
-    PVOID WorkerProcs[RTLP_NUMBER_OF_NTUSER_WORKERPROCS];
+    NTUSER_PFN_ENTRY WndProcsA[RTLP_NUMBER_OF_NTUSER_WNDPROCS];
+    NTUSER_PFN_ENTRY WndProcsW[RTLP_NUMBER_OF_NTUSER_WNDPROCS];
+    NTUSER_PFN_ENTRY WorkerProcs[RTLP_NUMBER_OF_NTUSER_WORKERPROCS];
 } NTUSER_PFN, *PNTUSER_PFN;
 
 const NTUSER_PFN RtlpNtUserPfns = { 0 };

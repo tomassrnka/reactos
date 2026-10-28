@@ -11,11 +11,11 @@ typedef
 NTSTATUS
 NTAPI
 FN_RtlInitializeNtUserPfn(
-    PVOID* ProcsA,
+    PVOID ProcsA,
     SIZE_T SizeOfProcsA,
-    PVOID* ProcsW,
+    PVOID ProcsW,
     SIZE_T SizeOfProcsW,
-    PVOID* OtherProcs,
+    PVOID OtherProcs,
     SIZE_T SizeOfOtherProcs);
 
 FN_RtlInitializeNtUserPfn* pRtlInitializeNtUserPfn;
@@ -31,10 +31,16 @@ START_TEST(RtlInitializeNtUserPfn)
     }
 
     NTSTATUS Status;
-    PVOID ProcsA[24] = { 0 };
-    PVOID ProcsW[24] = { 0 };
-    PVOID OtherProcs[11] = { 0 };
+    /* The entries are 64 bits wide for a 32-bit process under WoW64 (the arrays are sized for that) */
+    ULONG64 ProcsA[24] = { 0 };
+    ULONG64 ProcsW[24] = { 0 };
+    ULONG64 OtherProcs[11] = { 0 };
     ULONG Count1, Count2;
+    BOOL IsWow64 = FALSE;
+    SIZE_T FieldSize;
+
+    IsWow64Process(GetCurrentProcess(), &IsWow64);
+    FieldSize = IsWow64 ? sizeof(ULONG64) : sizeof(PVOID);
 
     Status = pRtlInitializeNtUserPfn(NULL, 1, NULL, 0, NULL, 0);
     ok_ntstatus(Status, STATUS_INVALID_PARAMETER);
@@ -63,41 +69,41 @@ START_TEST(RtlInitializeNtUserPfn)
     }
 
     /* Try different variants of too large sizes */
-    Status = pRtlInitializeNtUserPfn(ProcsA, (Count1 + 1) * sizeof(PVOID), ProcsW, Count1 * sizeof(PVOID), OtherProcs, Count2 * sizeof(PVOID));
+    Status = pRtlInitializeNtUserPfn(ProcsA, (Count1 + 1) * FieldSize, ProcsW, Count1 * FieldSize, OtherProcs, Count2 * FieldSize);
     ok_ntstatus(Status, STATUS_INVALID_PARAMETER);
-    Status = pRtlInitializeNtUserPfn(ProcsA, Count1 * sizeof(PVOID), ProcsW, (Count1 + 1) * sizeof(PVOID), OtherProcs, Count2 * sizeof(PVOID));
+    Status = pRtlInitializeNtUserPfn(ProcsA, Count1 * FieldSize, ProcsW, (Count1 + 1) * FieldSize, OtherProcs, Count2 * FieldSize);
     ok_ntstatus(Status, STATUS_INVALID_PARAMETER);
-    Status = pRtlInitializeNtUserPfn(ProcsA, (Count1 + 1) * sizeof(PVOID), ProcsW, (Count1 + 1) * sizeof(PVOID), OtherProcs, Count2 * sizeof(PVOID));
+    Status = pRtlInitializeNtUserPfn(ProcsA, (Count1 + 1) * FieldSize, ProcsW, (Count1 + 1) * FieldSize, OtherProcs, Count2 * FieldSize);
     ok_ntstatus(Status, STATUS_INVALID_PARAMETER);
-    Status = pRtlInitializeNtUserPfn(ProcsA, Count1 * sizeof(PVOID), ProcsW, Count1 * sizeof(PVOID), OtherProcs, (Count2 + 1) * sizeof(PVOID));
+    Status = pRtlInitializeNtUserPfn(ProcsA, Count1 * FieldSize, ProcsW, Count1 * FieldSize, OtherProcs, (Count2 + 1) * FieldSize);
     ok_ntstatus(Status, STATUS_INVALID_PARAMETER);
 
     if (GetNTVersion() < _WIN32_WINNT_WIN10)
     {
         /* Try different variants of too small sizes (these succeed on Windows 10) */
-        Status = pRtlInitializeNtUserPfn(ProcsA, (Count1 - 1) * sizeof(PVOID), ProcsW, Count1 * sizeof(PVOID), OtherProcs, Count2 * sizeof(PVOID));
+        Status = pRtlInitializeNtUserPfn(ProcsA, (Count1 - 1) * FieldSize, ProcsW, Count1 * FieldSize, OtherProcs, Count2 * FieldSize);
         ok_ntstatus(Status, STATUS_INVALID_PARAMETER);
-        Status = pRtlInitializeNtUserPfn(ProcsA, Count1 * sizeof(PVOID), ProcsW, (Count1 - 1) * sizeof(PVOID), OtherProcs, Count2 * sizeof(PVOID));
+        Status = pRtlInitializeNtUserPfn(ProcsA, Count1 * FieldSize, ProcsW, (Count1 - 1) * FieldSize, OtherProcs, Count2 * FieldSize);
         ok_ntstatus(Status, STATUS_INVALID_PARAMETER);
-        Status = pRtlInitializeNtUserPfn(ProcsA, (Count1 - 1) * sizeof(PVOID), ProcsW, (Count1 - 1) * sizeof(PVOID), OtherProcs, Count2 * sizeof(PVOID));
+        Status = pRtlInitializeNtUserPfn(ProcsA, (Count1 - 1) * FieldSize, ProcsW, (Count1 - 1) * FieldSize, OtherProcs, Count2 * FieldSize);
         ok_ntstatus(Status, STATUS_INVALID_PARAMETER);
-        Status = pRtlInitializeNtUserPfn(ProcsA, Count1 * sizeof(PVOID), ProcsW, Count1 * sizeof(PVOID), OtherProcs, (Count2 - 1) * sizeof(PVOID));
+        Status = pRtlInitializeNtUserPfn(ProcsA, Count1 * FieldSize, ProcsW, Count1 * FieldSize, OtherProcs, (Count2 - 1) * FieldSize);
         ok_ntstatus(Status, STATUS_INVALID_PARAMETER);
     }
 
     /* Try unaligned sizes */
-    Status = pRtlInitializeNtUserPfn(ProcsA, (Count1 * sizeof(PVOID)) - 1, ProcsW, Count1 * sizeof(PVOID), OtherProcs, Count2 * sizeof(PVOID));
+    Status = pRtlInitializeNtUserPfn(ProcsA, (Count1 * FieldSize) - 1, ProcsW, Count1 * FieldSize, OtherProcs, Count2 * FieldSize);
     ok_ntstatus(Status, STATUS_INVALID_PARAMETER);
-    Status = pRtlInitializeNtUserPfn(ProcsA, Count1 * sizeof(PVOID), ProcsW, (Count1 * sizeof(PVOID)) - 1, OtherProcs, Count2 * sizeof(PVOID));
+    Status = pRtlInitializeNtUserPfn(ProcsA, Count1 * FieldSize, ProcsW, (Count1 * FieldSize) - 1, OtherProcs, Count2 * FieldSize);
     ok_ntstatus(Status, STATUS_INVALID_PARAMETER);
-    Status = pRtlInitializeNtUserPfn(ProcsA, Count1 * sizeof(PVOID), ProcsW, Count1 * sizeof(PVOID), OtherProcs, (Count2 * sizeof(PVOID)) - 1);
+    Status = pRtlInitializeNtUserPfn(ProcsA, Count1 * FieldSize, ProcsW, Count1 * FieldSize, OtherProcs, (Count2 * FieldSize) - 1);
     ok_ntstatus(Status, STATUS_INVALID_PARAMETER);
 
     /* Pass the expected sizes */
-    Status = pRtlInitializeNtUserPfn(ProcsA, Count1 * sizeof(PVOID), ProcsW, Count1 * sizeof(PVOID), OtherProcs, Count2 * sizeof(PVOID));
+    Status = pRtlInitializeNtUserPfn(ProcsA, Count1 * FieldSize, ProcsW, Count1 * FieldSize, OtherProcs, Count2 * FieldSize);
     ok_ntstatus(Status, STATUS_SUCCESS);
 
     /* Try to initialize again */
-    Status = pRtlInitializeNtUserPfn(ProcsA, Count1 * sizeof(PVOID), ProcsW, Count1 * sizeof(PVOID), OtherProcs, Count2 * sizeof(PVOID));
+    Status = pRtlInitializeNtUserPfn(ProcsA, Count1 * FieldSize, ProcsW, Count1 * FieldSize, OtherProcs, Count2 * FieldSize);
     ok_ntstatus(Status, STATUS_INVALID_PARAMETER);
 }
