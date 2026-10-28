@@ -152,13 +152,45 @@ NduRequestComplete(NDIS_HANDLE ProtocolBindingContext,
                    PNDIS_REQUEST NdisRequest,
                    NDIS_STATUS Status)
 {
-    PNDISUIO_ADAPTER_CONTEXT AdapterContext = ProtocolBindingContext;
+    PNDISUIO_REQUEST Request = CONTAINING_RECORD(NdisRequest, NDISUIO_REQUEST, Request);
+
+    UNREFERENCED_PARAMETER(ProtocolBindingContext);
 
     DPRINT("Asynchronous adapter request completed\n");
 
-    /* Store the final status and signal the event */
-    AdapterContext->AsyncStatus = Status;
-    KeSetEvent(&AdapterContext->AsyncEvent, IO_NO_INCREMENT, FALSE);
+    /* Store the status of this request and wake the one waiting for it */
+    Request->Status = Status;
+    KeSetEvent(&Request->Event, IO_NO_INCREMENT, FALSE);
+}
+
+VOID
+NduInitRequest(PNDISUIO_REQUEST Request)
+{
+    RtlZeroMemory(&Request->Request, sizeof(Request->Request));
+    KeInitializeEvent(&Request->Event, NotificationEvent, FALSE);
+    Request->Status = NDIS_STATUS_SUCCESS;
+}
+
+/* Sends the request and waits for it. The request and the buffers it points
+   to belong to the caller's frame until this returns. */
+NDIS_STATUS
+NduIssueRequest(NDIS_HANDLE BindingHandle,
+                PNDISUIO_REQUEST Request)
+{
+    NDIS_STATUS Status;
+
+    NdisRequest(&Status, BindingHandle, &Request->Request);
+    if (Status == NDIS_STATUS_PENDING)
+    {
+        KeWaitForSingleObject(&Request->Event,
+                              Executive,
+                              KernelMode,
+                              FALSE,
+                              NULL);
+        Status = Request->Status;
+    }
+
+    return Status;
 }
 
 NDIS_STATUS
@@ -387,7 +419,7 @@ BindAdapterByName(PNDIS_STRING DeviceName)
     NDIS_MEDIUM SupportedMedia[1] = {NdisMedium802_3};
     UINT SelectedMedium;
     NDIS_STATUS Status;
-    NDIS_REQUEST Request;
+    NDISUIO_REQUEST Request;
     ULONG NameLength;
 
     /* Allocate the adapter context */
@@ -491,24 +523,12 @@ BindAdapterByName(PNDIS_STRING DeviceName)
     }
 
     /* Get the MAC options */
-    Request.RequestType = NdisRequestQueryInformation;
-    Request.DATA.QUERY_INFORMATION.Oid = OID_GEN_MAC_OPTIONS;
-    Request.DATA.QUERY_INFORMATION.InformationBuffer = &AdapterContext->MacOptions;
-    Request.DATA.QUERY_INFORMATION.InformationBufferLength = sizeof(ULONG);
-    NdisRequest(&Status,
-                AdapterContext->BindingHandle,
-                &Request);
-
-    /* Wait for a pending request */
-    if (Status == NDIS_STATUS_PENDING)
-    {
-        KeWaitForSingleObject(&AdapterContext->AsyncEvent,
-                              Executive,
-                              KernelMode,
-                              FALSE,
-                              NULL);
-        Status = AdapterContext->AsyncStatus;
-    }
+    NduInitRequest(&Request);
+    Request.Request.RequestType = NdisRequestQueryInformation;
+    Request.Request.DATA.QUERY_INFORMATION.Oid = OID_GEN_MAC_OPTIONS;
+    Request.Request.DATA.QUERY_INFORMATION.InformationBuffer = &AdapterContext->MacOptions;
+    Request.Request.DATA.QUERY_INFORMATION.InformationBufferLength = sizeof(ULONG);
+    Status = NduIssueRequest(AdapterContext->BindingHandle, &Request);
 
     /* Check the final status */
     if (Status != NDIS_STATUS_SUCCESS)
