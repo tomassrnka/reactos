@@ -71,6 +71,9 @@ SysWOW64/normaliz.dll
 SysWOW64/ole32.dll
 SysWOW64/oleaut32.dll
 SysWOW64/olepro32.dll
+# Proxy/stubs for IServiceProvider and the other ActiveX interfaces: a 32-bit COM
+# LocalServer/LocalService registers its class objects through IServiceProvider.
+SysWOW64/actxprxy.dll
 SysWOW64/stdole2.tlb
 SysWOW64/stdole32.tlb
 SysWOW64/rpcrt4.dll
