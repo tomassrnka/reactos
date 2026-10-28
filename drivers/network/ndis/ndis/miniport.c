@@ -907,16 +907,35 @@ MiniCheckForHang( PLOGICAL_ADAPTER Adapter )
    return Ret;
 }
 
+/* A request NDIS makes for itself and does not wait for: it frees itself when it completes (MiniCompleteRequest) */
+typedef struct _MINI_ASYNC_REQUEST
+{
+    NDIS_REQUEST Request;
+    ULONG        Value;
+} MINI_ASYNC_REQUEST, *PMINI_ASYNC_REQUEST;
+
 VOID
 MiniDoAddressingReset(PLOGICAL_ADAPTER Adapter)
 {
-   ULONG BytesRead;
+   PMINI_ASYNC_REQUEST Async;
 
-   MiniSetInformation(Adapter,
-                      OID_GEN_CURRENT_LOOKAHEAD,
-                      sizeof(ULONG),
-                      &Adapter->NdisMiniportBlock.CurrentLookahead,
-                      &BytesRead);
+   /* The reset completes at DISPATCH_LEVEL, or while a request that the reset itself is going
+      to abort is still pending: waiting for the miniport here would never end (or is not
+      allowed). The request waits its turn in the queue like any other. */
+   Async = ExAllocatePool(NonPagedPool, sizeof(*Async));
+   if (!Async)
+       return;
+
+   RtlZeroMemory(Async, sizeof(*Async));
+   Async->Value = Adapter->NdisMiniportBlock.CurrentLookahead;
+   Async->Request.RequestType = NdisRequestSetInformation;
+   Async->Request.DATA.SET_INFORMATION.Oid = OID_GEN_CURRENT_LOOKAHEAD;
+   Async->Request.DATA.SET_INFORMATION.InformationBuffer = &Async->Value;
+   Async->Request.DATA.SET_INFORMATION.InformationBufferLength = sizeof(ULONG);
+
+   /* No binding, no event: nobody is waiting */
+   if (MiniStartRequest(Adapter, &Async->Request) != NDIS_STATUS_PENDING)
+       ExFreePool(Async);
 
    /* FIXME: Set more stuff */
 }
@@ -1337,9 +1356,13 @@ MiniCompleteRequest(
                 Status);
         }
     }
+    else if (MacBlock->Unknown1 == NULL)
+    {
+        /* NDIS's own request that nobody waits for (MiniDoAddressingReset) */
+        ExFreePool(Request);
+    }
     else
     {
-        ASSERT(MacBlock->Unknown1 != NULL);
         ASSERT(MacBlock->Unknown3 == NULL);
         MacBlock->Unknown3 = UlongToPtr(Status);
         KeSetEvent(MacBlock->Unknown1, IO_NO_INCREMENT, FALSE);
