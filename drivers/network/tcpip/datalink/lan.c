@@ -204,6 +204,18 @@ VOID FreeAdapter(
     ExFreePoolWithTag(Adapter, LAN_ADAPTER_TAG);
 }
 
+/* The IP interface's release routine: the adapter goes with the interface's last reference
+   (at <= DISPATCH_LEVEL). The binding is closed and the receive queue run down by then */
+static VOID LanReleaseAdapter(
+    PVOID Context)
+{
+    PLAN_ADAPTER Adapter = Context;
+
+    ASSERT(!Adapter->NdisHandle && !Adapter->ReceiveQueue.WorkItem);
+
+    ExFreePoolWithTag(Adapter, LAN_ADAPTER_TAG);
+}
+
 
 VOID UnbindAdapter(
     PLAN_ADAPTER Adapter);
@@ -260,9 +272,12 @@ VOID DenyOpenAdapter(
     while (Adapter->ReceiveWorkItems != 0)
         KeDelayExecutionThread(KernelMode, FALSE, &Delay);
 
-    UnbindAdapter(Adapter);
-
-    FreeAdapter(Adapter);
+    if (Adapter->Context) {
+        /* The interface frees the adapter with its last reference */
+        UnbindAdapter(Adapter);
+    } else {
+        FreeAdapter(Adapter);
+    }
 }
 
 
@@ -1637,6 +1652,7 @@ BOOLEAN BindAdapter(
     BindInfo.Address       = (PUCHAR)&Adapter->HWAddress;
     BindInfo.AddressLength = Adapter->HWAddressLength;
     BindInfo.Transmit      = LANTransmit;
+    BindInfo.Release       = LanReleaseAdapter;
 
     IF = IPCreateInterface(&BindInfo);
 
@@ -1644,6 +1660,10 @@ BOOLEAN BindAdapter(
         TI_DbgPrint(MIN_TRACE, ("Insufficient resources.\n"));
         return FALSE;
     }
+
+    /* The interface owns the adapter from now on: on a failure below, DenyOpenAdapter
+       removes the interface (UnbindAdapter), and the adapter goes with its last reference */
+    Adapter->Context = IF;
 
     /*
      * Query per-adapter configuration from the registry
@@ -1658,8 +1678,9 @@ BOOLEAN BindAdapter(
 
     Status = FindDeviceDescForAdapter( &IF->Name, &IF->Description );
     if (!NT_SUCCESS(Status)) {
-        TI_DbgPrint(MIN_TRACE, ("Failed to get device description.\n"));
-        IPDestroyInterface(IF);
+        /* No Linkage\RootDevice for it in the network class key: DenyOpenAdapter removes
+           the interface (never registered, so IPUnregisterInterface is a no-op on it) */
+        DbgPrint("TCPIP: no device description for %wZ (0x%lx), not binding to it\n", &IF->Name, Status);
         return FALSE;
     }
 
@@ -1668,9 +1689,6 @@ BOOLEAN BindAdapter(
 
     /* Register interface with IP layer */
     IPRegisterInterface(IF);
-
-    /* Store adapter context */
-    Adapter->Context = IF;
 
     /* Get the media state */
     NdisStatus = NDISCall(Adapter,
@@ -1721,15 +1739,20 @@ VOID UnbindAdapter(
     TI_DbgPrint(DEBUG_DATALINK, ("Called.\n"));
 
     /* BindAdapter registered the interface whatever the media state: a disconnected
-       adapter's interface must go as well, with every route and neighbor on it */
+       adapter's interface must go as well, with every route and neighbor on it.
+       Adapter->Context keeps pointing to it: the interface frees the adapter, so a sender
+       still holding a neighbour of the interface reaches a valid adapter (LANTransmit fails
+       on the closed binding) */
     if (IF) {
-        Adapter->Context = NULL;
-
+        /* Off the interface list, and no neighbour or route is added to it any more */
         IPUnregisterInterface(IF);
 
+        /* The routes drop their neighbours; the neighbours leave the cache */
         RouterRemoveRoutesForInterface(IF);
         NBDestroyNeighborsForInterface(IF);
 
+        /* Drops the reference of the binding: interface and adapter go when the last
+           neighbour or caller still using them lets go */
         IPDestroyInterface(IF);
     }
 }
@@ -1935,10 +1958,12 @@ NDIS_STATUS LANUnregisterAdapter(
     while (Adapter->ReceiveWorkItems != 0)
         KeDelayExecutionThread(KernelMode, FALSE, &Delay);
 
-    /* Unbind adapter from IP layer */
-    UnbindAdapter(Adapter);
-
-    FreeAdapter(Adapter);
+    /* Unbind adapter from IP layer; the interface frees the adapter with its last reference */
+    if (Adapter->Context) {
+        UnbindAdapter(Adapter);
+    } else {
+        FreeAdapter(Adapter);
+    }
 
     return NdisStatus;
 }

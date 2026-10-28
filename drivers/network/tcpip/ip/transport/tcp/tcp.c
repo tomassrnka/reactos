@@ -352,6 +352,7 @@ NTSTATUS TCPConnect
         }
 
         bindaddr.addr = NCE->Interface->Unicast.Address.IPv4Address;
+        NBDereferenceNeighbor(NCE);
     }
     else
     {

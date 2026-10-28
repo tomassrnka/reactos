@@ -24,9 +24,20 @@ typedef struct NEIGHBOR_CACHE_TABLE {
     KSPIN_LOCK Lock;                    /* Protecting lock */
 } NEIGHBOR_CACHE_TABLE, *PNEIGHBOR_CACHE_TABLE;
 
-/* Information about a neighbor */
+/*
+ * Information about a neighbor
+ *
+ * Lifetime: RefCount counts the cache (while the NCE is linked in its hash bucket), each FIB
+ * entry routing through it, and each caller that got it from NBAddNeighbor, NBLocateNeighbor,
+ * NBFindOrCreateNeighbor, RouterGetRoute or RouteGetRouteToDestination (NBDereferenceNeighbor
+ * when done). The NCE holds a reference to its interface. Unlinked is set, under the bucket
+ * lock, when the NCE leaves the cache; an unresolved one takes no packets then (nothing would
+ * resolve it), and the last reference completes whatever is still queued.
+ */
 typedef struct NEIGHBOR_CACHE_ENTRY {
     struct NEIGHBOR_CACHE_ENTRY *Next;  /* Pointer to next entry */
+    volatile LONG RefCount;             /* See above */
+    BOOLEAN Unlinked;                   /* Out of the cache (bucket lock) */
     UCHAR State;                        /* State of NCE */
     UINT EventTimer;                    /* Ticks since last event */
     UINT EventCount;                    /* Number of events */
@@ -105,6 +116,12 @@ BOOLEAN NBQueuePacketLimited(
     UINT UnresolvedLimit);
 
 VOID NBRemoveNeighbor(
+    PNEIGHBOR_CACHE_ENTRY NCE);
+
+VOID NBReferenceNeighbor(
+    PNEIGHBOR_CACHE_ENTRY NCE);
+
+VOID NBDereferenceNeighbor(
     PNEIGHBOR_CACHE_ENTRY NCE);
 
 ULONG NBCopyNeighbors(

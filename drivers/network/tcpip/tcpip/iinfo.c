@@ -255,17 +255,22 @@ TDI_STATUS InfoTdiSetArptableMIB(PIP_INTERFACE IF, PVOID Buffer, UINT BufferSize
     AddrInitIPv4(&Address, ArpEntry->LogAddr);
 
     if ((NCE = NBLocateNeighbor(&Address, IF)))
+    {
         NBRemoveNeighbor(NCE);
+        NBDereferenceNeighbor(NCE);
+    }
 
-    if (NBAddNeighbor(IF,
-                      &Address,
-                      ArpEntry->PhysAddr,
-                      ArpEntry->AddrSize,
-                      NUD_PERMANENT,
-                      0))
-        return TDI_SUCCESS;
-    else
+    NCE = NBAddNeighbor(IF,
+                        &Address,
+                        ArpEntry->PhysAddr,
+                        ArpEntry->AddrSize,
+                        NUD_PERMANENT,
+                        0);
+    if (!NCE)
         return TDI_INVALID_PARAMETER;
+
+    NBDereferenceNeighbor(NCE);
+    return TDI_SUCCESS;
 }
 
 /* All three entities appear together or not at all: a query can never see

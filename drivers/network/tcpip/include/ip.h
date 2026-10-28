@@ -122,6 +122,9 @@ typedef VOID (*LL_TRANSMIT_ROUTINE)(
     PVOID LinkAddress,
     USHORT Type);
 
+/* Frees the link layer context when the last reference to its interface goes; at <= DISPATCH_LEVEL */
+typedef VOID (*LL_RELEASE_ROUTINE)(PVOID Context);
+
 /* Link layer to IP binding information */
 typedef struct _LLIP_BIND_INFO {
     PVOID Context;                /* Pointer to link layer context information */
@@ -130,6 +133,7 @@ typedef struct _LLIP_BIND_INFO {
     PUCHAR Address;               /* Pointer to interface address */
     UINT  AddressLength;          /* Length of address in bytes */
     LL_TRANSMIT_ROUTINE Transmit; /* Transmit function for this interface */
+    LL_RELEASE_ROUTINE Release;   /* Frees Context with the interface (NULL: nothing to free) */
 } LLIP_BIND_INFO, *PLLIP_BIND_INFO;
 
 typedef struct _SEND_RECV_STATS {
@@ -146,11 +150,24 @@ typedef struct _SEND_RECV_STATS {
     UINT OutErrors;
 } SEND_RECV_STATS, *PSEND_RECV_STATS;
 
-/* Information about an IP interface */
+/*
+ * Information about an IP interface
+ *
+ * Lifetime: RefCount starts at 1, the reference of the link layer that created the interface
+ * (LAN binding or loopback), which IPDestroyInterface drops. Each neighbor (NCE) on the interface
+ * holds one, and so does every caller that got the interface from a lookup that references it
+ * (FindOnLinkInterface, AddrLocateInterface, IPReferenceDefaultInterface, an interface entity of the
+ * information requests). The memory, and the link layer context with it (Release), goes with the
+ * last reference, so Context stays valid (NULL only for loopback) as long as the interface is.
+ * Once Unbound is set (IPUnregisterInterface), no neighbor or route is added to the interface.
+ */
 typedef struct _IP_INTERFACE {
     LIST_ENTRY ListEntry;         /* Entry on list */
     OBJECT_FREE_ROUTINE Free;     /* Routine used to free resources used by the object */
     KSPIN_LOCK Lock;              /* Spin lock for this object */
+    volatile LONG RefCount;       /* See above */
+    volatile LONG Unbound;        /* Unregistered: no neighbor or route is added to it any more */
+    LL_RELEASE_ROUTINE Release;   /* Frees Context with the interface */
     PVOID Context;                /* Pointer to link layer context information */
     UINT  HeaderSize;             /* Size of link level header */
     UINT  MinFrameSize;           /* Minimum frame size in bytes */
@@ -223,6 +240,12 @@ VOID IPRemoveInterfaceRoute(
     PIP_INTERFACE IF);
 
 VOID IPDestroyInterface(
+    PIP_INTERFACE IF);
+
+VOID IPReferenceInterface(
+    PIP_INTERFACE IF);
+
+VOID IPDereferenceInterface(
     PIP_INTERFACE IF);
 
 BOOLEAN IPRegisterInterface(

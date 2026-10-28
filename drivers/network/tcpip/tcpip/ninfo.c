@@ -43,7 +43,9 @@ TDI_STATUS InfoTdiQueryGetRouteTable( PIP_INTERFACE IF, PNDIS_BUFFER Buffer, PUI
 
     RtlZeroMemory( RouteEntries, Size );
 
-    RtCount = CopyFIBs( IF, RCache );
+    /* Each copy references its router's NCE; the FIB may have changed since the count */
+    RtCount = CopyFIBs( IF, RCache, RtCount );
+    Size = sizeof( IPROUTE_ENTRY ) * RtCount;
 
     while( RtCurrent < RouteEntries + RtCount ) {
 	ASSERT(RCacheCur->Router);
@@ -81,6 +83,8 @@ TDI_STATUS InfoTdiQueryGetRouteTable( PIP_INTERFACE IF, PNDIS_BUFFER Buffer, PUI
             RtCurrent->Index = 0;
 
 	TcpipReleaseSpinLock(&EntityListLock, OldIrql);
+
+	NBDereferenceNeighbor(RCacheCur->Router);
 
 	RtCurrent++; RCacheCur++;
     }

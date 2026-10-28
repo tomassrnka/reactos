@@ -268,6 +268,7 @@ NTSTATUS UDPSendDatagram(
     if (!NT_SUCCESS(Status))
     {
         UnlockObject(AddrFile);
+        NBDereferenceNeighbor(NCE);
         return Status;
     }
 
@@ -287,6 +288,7 @@ NTSTATUS UDPSendDatagram(
                                        BufferData,
                                        DataSize)))
         {
+            NBDereferenceNeighbor(LoopNCE);
             LoopNCE = NULL;
         }
     }
@@ -294,9 +296,13 @@ NTSTATUS UDPSendDatagram(
     UnlockObject(AddrFile);
 
     Status = IPSendDatagram(&Packet, NCE);
+    NBDereferenceNeighbor(NCE);
 
     if (LoopNCE != NULL)
+    {
         IPSendDatagram(&LoopPacket, LoopNCE);
+        NBDereferenceNeighbor(LoopNCE);
+    }
 
     if (!NT_SUCCESS(Status))
         return Status;

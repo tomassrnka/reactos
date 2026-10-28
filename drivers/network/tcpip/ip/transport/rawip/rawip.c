@@ -247,11 +247,15 @@ NTSTATUS RawIPSendDatagram(
     UnlockObject(AddrFile);
 
     if( !NT_SUCCESS(Status) )
+    {
+        NBDereferenceNeighbor(NCE);
         return Status;
+    }
 
     TI_DbgPrint(MID_TRACE,("About to send datagram\n"));
 
     Status = IPSendDatagram(&Packet, NCE);
+    NBDereferenceNeighbor(NCE);
     if (!NT_SUCCESS(Status))
         return Status;
 

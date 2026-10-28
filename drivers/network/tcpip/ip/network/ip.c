@@ -211,7 +211,12 @@ PIP_INTERFACE IPCreateInterface(
 
 	RtlZeroMemory(IF, sizeof(IP_INTERFACE));
 
+    /* IPUnregisterInterface may run for an interface that was never registered */
+    InitializeListHead(&IF->ListEntry);
+
     IF->Free       = FreeIF;
+    IF->RefCount   = 1;
+    IF->Release    = BindInfo->Release;
     IF->Context    = BindInfo->Context;
     IF->HeaderSize = BindInfo->HeaderSize;
     IF->MinFrameSize = BindInfo->MinFrameSize;
@@ -248,12 +253,49 @@ PIP_INTERFACE IPCreateInterface(
 }
 
 
+VOID IPReferenceInterface(
+    PIP_INTERFACE IF)
+{
+    LONG RefCount = InterlockedIncrement(&IF->RefCount);
+
+    ASSERT(RefCount > 1);
+    UNREFERENCED_PARAMETER(RefCount);
+}
+
+VOID IPDereferenceInterface(
+    PIP_INTERFACE IF)
+/*
+ * FUNCTION: Drops a reference to an interface, and frees it with the last one
+ * NOTES:
+ *     At <= DISPATCH_LEVEL, also under the neighbor cache and FIB locks: the interface is
+ *     off every list and its TCP and TDI parts are gone (IPDestroyInterface) by then
+ */
+{
+    LONG RefCount = InterlockedDecrement(&IF->RefCount);
+
+    ASSERT(RefCount >= 0);
+    if (RefCount != 0)
+        return;
+
+    TI_DbgPrint(DEBUG_IP, ("Freeing IF (0x%X).\n", IF));
+
+    if (IF->Release)
+        IF->Release(IF->Context);
+
+    ExFreePool(IF->TCPContext);
+    IF->Free(IF);
+}
+
 VOID IPDestroyInterface(
     PIP_INTERFACE IF)
 /*
  * FUNCTION: Destroys an IP interface
  * ARGUMENTS:
  *     IF = Pointer to interface to destroy
+ * NOTES:
+ *     At PASSIVE_LEVEL, after IPUnregisterInterface and the removal of its routes and
+ *     neighbors, or before IPRegisterInterface. Drops the reference of the link layer:
+ *     the memory goes when the last neighbor or caller still using it lets go
  */
 {
     TI_DbgPrint(DEBUG_IP, ("Called. IF (0x%X).\n", IF));
@@ -262,8 +304,7 @@ VOID IPDestroyInterface(
 
     TCPUnregisterInterface(IF);
 
-    ExFreePool(IF->TCPContext);
-    ExFreePoolWithTag(IF, IP_INTERFACE_TAG);
+    IPDereferenceInterface(IF);
 }
 
 VOID IPAddInterfaceRoute( PIP_INTERFACE IF ) {
@@ -284,6 +325,8 @@ VOID IPAddInterfaceRoute( PIP_INTERFACE IF ) {
     if (!RouterAddRoute(&NetworkAddress, &IF->Netmask, NCE, 1)) {
 	TI_DbgPrint(MIN_TRACE, ("Could not add route due to insufficient resources.\n"));
     }
+
+    NBDereferenceNeighbor(NCE);
 
     /* Send a gratuitous ARP packet to update the route caches of
      * other computers */
@@ -352,6 +395,7 @@ VOID IPRemoveInterfaceRoute( PIP_INTERFACE IF ) {
        RouterRemoveRoute(&GeneralRoute, &IF->Unicast);
 
        NBRemoveNeighbor(NCE);
+       NBDereferenceNeighbor(NCE);
     }
 }
 
@@ -367,10 +411,19 @@ VOID IPUnregisterInterface(
 
     TI_DbgPrint(DEBUG_IP, ("Called. IF (0x%X).\n", IF));
 
+    /* No neighbor or route is added to it from now on: NBAddNeighbor and RouterAddRoute check
+       this under the locks that NBDestroyNeighborsForInterface and RouterRemoveRoutesForInterface
+       take afterwards, so these find whatever was added meanwhile */
+    InterlockedExchange(&IF->Unbound, TRUE);
+
     IPRemoveInterfaceRoute( IF );
 
+    /* Self-linked if it was never registered (a failed bind) */
     TcpipAcquireSpinLock(&InterfaceListLock, &OldIrql3);
-    RemoveEntryList(&IF->ListEntry);
+    if (!IsListEmpty(&IF->ListEntry)) {
+        RemoveEntryList(&IF->ListEntry);
+        InitializeListHead(&IF->ListEntry);
+    }
     TcpipReleaseSpinLock(&InterfaceListLock, OldIrql3);
 
     AddrChangeNotify();

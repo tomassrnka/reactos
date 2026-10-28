@@ -99,6 +99,9 @@ VOID DestroyFIBE(
     /* Unlink the FIB entry from the list */
     RemoveEntryList(&FIBE->ListEntry);
 
+    /* Its reference to the router's NCE (maybe the last one) */
+    NBDereferenceNeighbor(FIBE->Router);
+
     /* And free the FIB entry */
     FreeFIB(FIBE);
 }
@@ -133,6 +136,9 @@ UINT CountFIBs(PIP_INTERFACE IF) {
     PLIST_ENTRY CurrentEntry;
     PLIST_ENTRY NextEntry;
     PFIB_ENTRY Current;
+    KIRQL OldIrql;
+
+    TcpipAcquireSpinLock(&FIBLock, &OldIrql);
 
     CurrentEntry = FIBListHead.Flink;
     while (CurrentEntry != &FIBListHead) {
@@ -143,27 +149,37 @@ UINT CountFIBs(PIP_INTERFACE IF) {
         CurrentEntry = NextEntry;
     }
 
+    TcpipReleaseSpinLock(&FIBLock, OldIrql);
+
     return FibCount;
 }
 
 
-UINT CopyFIBs( PIP_INTERFACE IF, PFIB_ENTRY Target ) {
+/* Copies at most Capacity routes of IF: the FIB can grow after CountFIBs. Each copy references
+   its router's NCE; the caller dereferences them (NBDereferenceNeighbor) */
+UINT CopyFIBs( PIP_INTERFACE IF, PFIB_ENTRY Target, UINT Capacity ) {
     UINT FibCount = 0;
     PLIST_ENTRY CurrentEntry;
     PLIST_ENTRY NextEntry;
     PFIB_ENTRY Current;
+    KIRQL OldIrql;
+
+    TcpipAcquireSpinLock(&FIBLock, &OldIrql);
 
     CurrentEntry = FIBListHead.Flink;
-    while (CurrentEntry != &FIBListHead) {
+    while (CurrentEntry != &FIBListHead && FibCount < Capacity) {
         NextEntry = CurrentEntry->Flink;
 	Current = CONTAINING_RECORD(CurrentEntry, FIB_ENTRY, ListEntry);
         if (Current->Router->Interface == IF)
         {
 	    Target[FibCount] = *Current;
+	    NBReferenceNeighbor(Current->Router);
 	    FibCount++;
         }
         CurrentEntry = NextEntry;
     }
+
+    TcpipReleaseSpinLock(&FIBLock, OldIrql);
 
     return FibCount;
 }
@@ -231,12 +247,13 @@ PFIB_ENTRY RouterAddRoute(
  * RETURNS:
  *     Pointer to FIB entry if the route was added, NULL if not
  * NOTES:
- *     The FIB entry references the NetworkAddress, Netmask and
- *     the NCE of the router. The caller is responsible for providing
- *     these references
+ *     The FIB entry copies NetworkAddress and Netmask and takes its own
+ *     reference to the router's NCE. No route is added through an NCE
+ *     of an unregistered interface
  */
 {
     PFIB_ENTRY FIBE;
+    KIRQL OldIrql;
 
     TI_DbgPrint(DEBUG_ROUTER, ("Called. NetworkAddress (0x%X)  Netmask (0x%X) "
         "Router (0x%X)  Metric (%d).\n", NetworkAddress, Netmask, Router, Metric));
@@ -259,8 +276,18 @@ PFIB_ENTRY RouterAddRoute(
     FIBE->Router         = Router;
     FIBE->Metric         = Metric;
 
-    /* Add FIB to the forward information base */
-    TcpipInterlockedInsertTailList(&FIBListHead, &FIBE->ListEntry, &FIBLock);
+    /* Add FIB to the forward information base. RouterRemoveRoutesForInterface takes the lock
+       after the interface was unregistered: it finds the route if the flag was clear here */
+    TcpipAcquireSpinLock(&FIBLock, &OldIrql);
+    if (Router->Interface->Unbound)
+    {
+        TcpipReleaseSpinLock(&FIBLock, OldIrql);
+        FreeFIB(FIBE);
+        return NULL;
+    }
+    NBReferenceNeighbor(Router);
+    InsertTailList(&FIBListHead, &FIBE->ListEntry);
+    TcpipReleaseSpinLock(&FIBLock, OldIrql);
 
     return FIBE;
 }
@@ -274,7 +301,7 @@ PNEIGHBOR_CACHE_ENTRY RouterGetRoute(PIP_ADDRESS Destination)
  * RETURNS:
  *     Pointer to NCE for router, NULL if none was found
  * NOTES:
- *     If found the NCE is referenced
+ *     If found the NCE is referenced (NBDereferenceNeighbor)
  */
 {
     KIRQL OldIrql;
@@ -316,6 +343,9 @@ PNEIGHBOR_CACHE_ENTRY RouterGetRoute(PIP_ADDRESS Destination)
         CurrentEntry = NextEntry;
     }
 
+    if( BestNCE )
+        NBReferenceNeighbor(BestNCE);
+
     TcpipReleaseSpinLock(&FIBLock, OldIrql);
 
     if( BestNCE ) {
@@ -336,8 +366,8 @@ PNEIGHBOR_CACHE_ENTRY RouteGetRouteToDestination(PIP_ADDRESS Destination)
  * RETURNS:
  *     Status of operation
  * NOTES:
- *     The RCN is referenced for the caller. The caller is responsible
- *     for dereferencing it after use
+ *     The NCE is referenced for the caller. The caller is responsible
+ *     for dereferencing it after use (NBDereferenceNeighbor)
  */
 {
     PNEIGHBOR_CACHE_ENTRY NCE = NULL;
@@ -357,6 +387,7 @@ PNEIGHBOR_CACHE_ENTRY RouteGetRouteToDestination(PIP_ADDRESS Destination)
     if (Interface) {
 	/* The destination address is on-link. Check our neighbor cache */
 	NCE = NBFindOrCreateNeighbor(Interface, Destination, FALSE);
+	IPDereferenceInterface(Interface);
     } else {
 	/* Destination is not on any subnets we're on. Find a router to use */
 	NCE = RouterGetRoute(Destination);
@@ -499,11 +530,16 @@ PFIB_ENTRY RouterCreateRoute(
     NCE = NBFindOrCreateNeighbor(Interface, RouterAddress, TRUE);
 
     if (!NCE) {
-        /* Not enough free resources */
+        /* Not enough free resources, or the interface went away */
         return NULL;
     }
 
-    return RouterAddRoute(NetworkAddress, Netmask, NCE, ProcessAutoMetric(Interface));
+    /* The FIB entry takes its own reference. The result is only tested by the callers:
+       it is not used after the lock is released */
+    Current = RouterAddRoute(NetworkAddress, Netmask, NCE, ProcessAutoMetric(Interface));
+    NBDereferenceNeighbor(NCE);
+
+    return Current;
 }
 
 
