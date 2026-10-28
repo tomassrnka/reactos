@@ -254,11 +254,33 @@ START_TEST(ObHandle)
         else
             ok_eq_hex(Status, STATUS_INVALID_HANDLE);
         DPRINT("Closing 123 handle (NtClose)\n");
-        Status = NtClose(LongToHandle(123));
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
-            ok_eq_hex(Status, STATUS_SUCCESS);
-        else if (GetNTVersion() != _WIN32_WINNT_WS03)
-            ok_eq_hex(Status, STATUS_INVALID_HANDLE);
+        /*
+         * The low two bits of a handle are tag bits and are ignored by the
+         * lookup, so 123 is handle 120. NT6.2+ happens to report success here
+         * because the test process has a handle 120 open, which this call then
+         * closes; a never-used handle fails with STATUS_INVALID_HANDLE
+         * (Windows 10 22H2 oracle probe: NtClose(123) = STATUS_SUCCESS only while
+         * handle 120 is open, STATUS_INVALID_HANDLE afterwards and for
+         * unused values like 0x1230). Expect what the handle table says.
+         */
+        {
+            PVOID Handle120Object = NULL;
+            BOOLEAN Handle120Open = FALSE;
+
+            if (NT_SUCCESS(ObReferenceObjectByHandle(LongToHandle(120),
+                                                     0,
+                                                     NULL,
+                                                     KernelMode,
+                                                     &Handle120Object,
+                                                     NULL)))
+            {
+                Handle120Open = TRUE;
+                ObDereferenceObject(Handle120Object);
+            }
+            Status = NtClose(LongToHandle(123));
+            if (GetNTVersion() != _WIN32_WINNT_WS03)
+                ok_eq_hex(Status, Handle120Open ? STATUS_SUCCESS : STATUS_INVALID_HANDLE);
+        }
         DPRINT("Closing 123 kernel handle (NtClose)\n");
         Status = NtClose(LongToHandle(123 | 0x80000000));
         ok_eq_hex(Status, STATUS_INVALID_HANDLE);

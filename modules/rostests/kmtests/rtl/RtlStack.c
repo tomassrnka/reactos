@@ -10,6 +10,19 @@
 
 static PVOID ReturnAddresses[4];
 
+/*
+ * The nested TestStackWalkN helpers must keep their own stack frames: with
+ * optimization the compiler turns the final call of each into a tail call
+ * (a jmp), so all of them share one return address and the recorded
+ * ReturnAddresses[] no longer describe distinct frames, whatever the
+ * unwinder does. A compiler barrier after the call prevents the tail call.
+ */
+#ifdef __GNUC__
+#define PREVENT_TAIL_CALL() __asm__ __volatile__("" ::: "memory")
+#else
+#define PREVENT_TAIL_CALL() _ReadWriteBarrier()
+#endif
+
 static
 VOID
 TestStackWalk3(VOID);
@@ -121,6 +134,7 @@ TestStackWalk3(VOID)
 {
     ReturnAddresses[2] = _ReturnAddress();
     TestStackWalk4();
+    PREVENT_TAIL_CALL();
 }
 
 DECLSPEC_NOINLINE
@@ -130,6 +144,7 @@ TestStackWalk2(VOID)
 {
     ReturnAddresses[1] = _ReturnAddress();
     TestStackWalk3();
+    PREVENT_TAIL_CALL();
 }
 
 DECLSPEC_NOINLINE
@@ -139,6 +154,7 @@ TestStackWalk1(VOID)
 {
     ReturnAddresses[0] = _ReturnAddress();
     TestStackWalk2();
+    PREVENT_TAIL_CALL();
 }
 
 #ifdef _M_AMD64
