@@ -63,8 +63,38 @@ typedef struct
         WOW64_LSA_LOGON_REPLY LogonReply;
         struct { ULONG PackageNameLength; CHAR PackageName[LSASS_MAX_PACKAGE_NAME_LENGTH + 1]; } LookupRequest;
         struct { ULONG Package; } LookupReply;
+        struct { ULONG AuthenticationPackage, ProtocolSubmitBuffer, SubmitBufferLength; } CallRequest;
+        struct { ULONG ProtocolReturnBuffer, ReturnBufferLength; LONG ProtocolStatus; } CallReply;
+        struct { LUID LogonId; } SessionRequest;
+        struct { ULONG SessionDataBuffer; } SessionReply;
+        struct { ULONG Dummy; } EnumRequest;
+        struct { ULONG LogonSessionCount, LogonSessionBuffer; } EnumReply;
+        struct { ULONG InformationClass, NotificationEventHandle; BOOLEAN Register; } PolicyRequest;
     };
 } WOW64_LSA_BODY;
+C_ASSERT(FIELD_OFFSET(WOW64_LSA_BODY, LogonRequest) == 8);
+
+/* SECURITY_LOGON_SESSION_DATA for i386: the string buffers and the SID hold offsets from the start of the block */
+typedef struct
+{
+    ULONG Size;
+    LUID LogonId;
+    WOW64_STRING UserName, LogonDomain, AuthenticationPackage;
+    ULONG LogonType, Session, Sid;
+    LONGLONG LogonTime;
+    WOW64_STRING LogonServer, DnsDomainName, Upn;
+} WOW64_SESSION_DATA;
+C_ASSERT(FIELD_OFFSET(WOW64_SESSION_DATA, LogonTime) == 48);
+C_ASSERT(sizeof(WOW64_SESSION_DATA) == 80);
+
+/* MSV1_0_CHANGEPASSWORD_REQUEST for i386 */
+typedef struct
+{
+    ULONG MessageType;
+    WOW64_STRING DomainName, AccountName, OldPassword, NewPassword;
+    BOOLEAN Impersonating;
+} WOW64_MSV1_0_CHANGEPASSWORD_REQUEST;
+C_ASSERT(sizeof(WOW64_MSV1_0_CHANGEPASSWORD_REQUEST) == 40);
 
 /* MSV1_0_INTERACTIVE_LOGON and MSV1_0_INTERACTIVE_PROFILE for i386 */
 typedef struct
@@ -467,8 +497,381 @@ Done:
     return Status;
 }
 
+/* The Size bytes at Base, lsass's allocation in this process, lie within one committed region */
+static BOOLEAN NativeBlockHolds(PVOID Base, ULONG64 Size)
+{
+    MEMORY_BASIC_INFORMATION Info;
+
+    if (!NT_SUCCESS(NtQueryVirtualMemory(NtCurrentProcess(), Base, MemoryBasicInformation, &Info, sizeof(Info), NULL)) ||
+        Info.State != MEM_COMMIT)
+        return FALSE;
+    return (ULONG64)(ULONG_PTR)Base + Size <= (ULONG64)(ULONG_PTR)Info.BaseAddress + Info.RegionSize;
+}
+
+static VOID FreeBlock(PVOID Block)
+{
+    SIZE_T Zero = 0;
+    if (Block) NtFreeVirtualMemory(NtCurrentProcess(), &Block, &Zero, MEM_RELEASE);
+}
+
+/* Fills a request for an API without pointers */
+static VOID InitNative(LSA_API_MSG *Native, ULONG Api, ULONG DataLength)
+{
+    RtlZeroMemory(Native, sizeof(*Native));
+    Native->ApiNumber = Api;
+    Native->h.u1.s1.DataLength = DataLength;
+    Native->h.u1.s1.TotalLength = LSA_PORT_MESSAGE_SIZE;
+}
+
+/* LsaEnumerateLogonSessions: the LUID array lsass allocated in this process is copied below the guest's
+ * limit, as for the profile of a logon */
+static NTSTATUS RequestEnumSessions(HANDLE Port, WOW64_LSA_BODY *Body, LSA_API_MSG *Native)
+{
+    NTSTATUS Status, Result, Written = STATUS_SUCCESS;
+    ULONG Count = 0, Guest = 0;
+
+    InitNative(Native, LSASS_REQUEST_ENUM_LOGON_SESSIONS, LSA_PORT_DATA_SIZE(Native->EnumLogonSessions));
+    Status = NtRequestWaitReplyPort(Port, &Native->h, &Native->h);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    Result = Native->Status;
+    if (NT_SUCCESS(Result))
+    {
+        PVOID Block = Native->EnumLogonSessions.Reply.LogonSessionBuffer;
+        Count = Native->EnumLogonSessions.Reply.LogonSessionCount;
+        if (!Block || Count > WOW64_MAX_ARRAY_COUNT || !NativeBlockHolds(Block, (ULONG64)Count * sizeof(LUID)))
+            Result = STATUS_INVALID_PARAMETER;
+        else
+        {
+            PVOID Copy;
+            Result = Wow64Allocate((SIZE_T)Count * sizeof(LUID), &Copy);
+            if (NT_SUCCESS(Result))
+            {
+                RtlCopyMemory(Copy, Block, (SIZE_T)Count * sizeof(LUID));
+                Guest = PtrToUlong(Copy);
+            }
+        }
+        FreeBlock(Block);
+    }
+    _SEH2_TRY
+    {
+        Body->Status = Result;
+        Body->EnumReply.LogonSessionCount = NT_SUCCESS(Result) ? Count : 0;
+        Body->EnumReply.LogonSessionBuffer = Guest;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Written = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+    if (!NT_SUCCESS(Written))
+    {
+        FreeBlock(UlongToPtr(Guest));
+        return Written;
+    }
+    return STATUS_SUCCESS;
+}
+
+/* The session data lsass built in this process, as a guest SECURITY_LOGON_SESSION_DATA with its strings and
+ * SID in a new block below the guest's limit; offsets stay offsets from the start of the block */
+static NTSTATUS SessionDataTo32(PVOID Native, ULONG *Guest)
+{
+    PSECURITY_LOGON_SESSION_DATA From = Native;
+    const UNICODE_STRING *Source[6];
+    WOW64_STRING *Target[6];
+    WOW64_SESSION_DATA *To;
+    ULONG Size = sizeof(*To), SidOffset = 0, SidLength = 0, Offset, i;
+    NTSTATUS Status = STATUS_SUCCESS;
+    PVOID Block = NULL;
+
+    *Guest = 0;
+    _SEH2_TRY
+    {
+        if (!NativeBlockHolds(Native, sizeof(*From)))
+            Status = STATUS_INVALID_PARAMETER;
+        Source[0] = &From->UserName;
+        Source[1] = &From->LogonDomain;
+        Source[2] = &From->AuthenticationPackage;
+        Source[3] = &From->LogonServer;
+        Source[4] = &From->DnsDomainName;
+        Source[5] = &From->Upn;
+        for (i = 0; NT_SUCCESS(Status) && i < 6; ++i)
+        {
+            if (Source[i]->Length > Source[i]->MaximumLength) { Status = STATUS_INVALID_PARAMETER; break; }
+            if (!Source[i]->MaximumLength) continue;
+            Offset = (ULONG)(ULONG_PTR)Source[i]->Buffer;
+            if ((ULONG_PTR)Source[i]->Buffer > MAXULONG || Offset < sizeof(*From) ||
+                !NativeBlockHolds(Native, (ULONG64)Offset + Source[i]->MaximumLength))
+            {
+                Status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+            Size += ALIGN_UP_BY(Source[i]->MaximumLength, sizeof(ULONG));
+        }
+        if (NT_SUCCESS(Status) && From->Sid)
+        {
+            SidOffset = (ULONG)(ULONG_PTR)From->Sid;
+            if ((ULONG_PTR)From->Sid > MAXULONG || SidOffset < sizeof(*From) ||
+                !NativeBlockHolds(Native, (ULONG64)SidOffset + FIELD_OFFSET(SID, SubAuthority)))
+                Status = STATUS_INVALID_PARAMETER;
+            else
+            {
+                SidLength = RtlLengthRequiredSid(((PISID)((PUCHAR)Native + SidOffset))->SubAuthorityCount);
+                if (!NativeBlockHolds(Native, (ULONG64)SidOffset + SidLength)) Status = STATUS_INVALID_PARAMETER;
+                Size += ALIGN_UP_BY(SidLength, sizeof(ULONG));
+            }
+        }
+        if (NT_SUCCESS(Status)) Status = Wow64Allocate(Size, &Block);
+        if (NT_SUCCESS(Status))
+        {
+            PUCHAR Next;
+            To = Block;
+            To->Size = sizeof(*To);
+            To->LogonId = From->LogonId;
+            To->LogonType = From->LogonType;
+            To->Session = From->Session;
+            To->LogonTime = From->LogonTime.QuadPart;
+            Target[0] = &To->UserName;
+            Target[1] = &To->LogonDomain;
+            Target[2] = &To->AuthenticationPackage;
+            Target[3] = &To->LogonServer;
+            Target[4] = &To->DnsDomainName;
+            Target[5] = &To->Upn;
+            Next = (PUCHAR)(To + 1);
+            for (i = 0; i < 6; ++i)
+            {
+                Target[i]->Length = Source[i]->Length;
+                Target[i]->MaximumLength = Source[i]->MaximumLength;
+                if (!Source[i]->MaximumLength) continue;
+                RtlCopyMemory(Next, (PUCHAR)Native + (ULONG)(ULONG_PTR)Source[i]->Buffer, Source[i]->MaximumLength);
+                Target[i]->Buffer = (ULONG)(Next - (PUCHAR)To);
+                Next += ALIGN_UP_BY(Source[i]->MaximumLength, sizeof(ULONG));
+            }
+            if (From->Sid)
+            {
+                RtlCopyMemory(Next, (PUCHAR)Native + SidOffset, SidLength);
+                To->Sid = (ULONG)(Next - (PUCHAR)To);
+            }
+            *Guest = PtrToUlong(Block);
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+    if (!NT_SUCCESS(Status))
+    {
+        FreeBlock(Block);
+        *Guest = 0;
+    }
+    return Status;
+}
+
+static NTSTATUS RequestSessionData(HANDLE Port, WOW64_LSA_BODY *Body, LSA_API_MSG *Native)
+{
+    NTSTATUS Status, Result, Written = STATUS_SUCCESS;
+    ULONG Guest = 0;
+
+    InitNative(Native, LSASS_REQUEST_GET_LOGON_SESSION_DATA, LSA_PORT_DATA_SIZE(Native->GetLogonSessionData));
+    Native->GetLogonSessionData.Request.LogonId = Body->SessionRequest.LogonId;
+    Status = NtRequestWaitReplyPort(Port, &Native->h, &Native->h);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    Result = Native->Status;
+    if (NT_SUCCESS(Result))
+    {
+        PVOID Block = Native->GetLogonSessionData.Reply.SessionDataBuffer;
+        Result = Block ? SessionDataTo32(Block, &Guest) : STATUS_INVALID_PARAMETER;
+        FreeBlock(Block);
+    }
+    _SEH2_TRY
+    {
+        Body->Status = Result;
+        Body->SessionReply.SessionDataBuffer = Guest;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Written = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+    if (!NT_SUCCESS(Written))
+    {
+        FreeBlock(UlongToPtr(Guest));
+        return Written;
+    }
+    return STATUS_SUCCESS;
+}
+
+/* LsaRegisterPolicyChangeNotification and LsaUnregisterPolicyChangeNotification: an information class and
+ * an event handle, which lsass duplicates out of this process by its value */
+static NTSTATUS RequestPolicyNotify(HANDLE Port, WOW64_LSA_BODY *Body, LSA_API_MSG *Native)
+{
+    NTSTATUS Status;
+
+    InitNative(Native, LSASS_REQUEST_POLICY_CHANGE_NOTIFY, LSA_PORT_DATA_SIZE(Native->PolicyChangeNotify));
+    Native->PolicyChangeNotify.Request.InformationClass = Body->PolicyRequest.InformationClass;
+    Native->PolicyChangeNotify.Request.NotificationEventHandle = HANDLE32(Body->PolicyRequest.NotificationEventHandle);
+    Native->PolicyChangeNotify.Request.Register = Body->PolicyRequest.Register;
+    Status = NtRequestWaitReplyPort(Port, &Native->h, &Native->h);
+    if (NT_SUCCESS(Status))
+        Body->Status = Native->Status;
+    return Status;
+}
+
+/* The id of the MSV1_0 package, the only one LsaCallAuthenticationPackage is translated for */
+static NTSTATUS Msv1_0PackageId(HANDLE Port, ULONG *Id)
+{
+    LSA_API_MSG Message;
+    NTSTATUS Status;
+
+    InitNative(&Message, LSASS_REQUEST_LOOKUP_AUTHENTICATION_PACKAGE, LSA_PORT_DATA_SIZE(Message.LookupAuthenticationPackage));
+    Message.LookupAuthenticationPackage.Request.PackageNameLength = sizeof(MSV1_0_PACKAGE_NAME) - 1;
+    RtlCopyMemory(Message.LookupAuthenticationPackage.Request.PackageName, MSV1_0_PACKAGE_NAME, sizeof(MSV1_0_PACKAGE_NAME));
+    Status = NtRequestWaitReplyPort(Port, &Message.h, &Message.h);
+    if (NT_SUCCESS(Status)) Status = Message.Status;
+    if (NT_SUCCESS(Status)) *Id = Message.LookupAuthenticationPackage.Reply.Package;
+    return Status;
+}
+
+/* The guest's MSV1_0_CHANGEPASSWORD_REQUEST in the native layout, in one heap block with its strings (both
+ * passwords: wiped before it is freed) */
+static NTSTATUS ChangePasswordFrom32(ULONG Guest, ULONG Length, PVOID *Native, ULONG *NativeLength)
+{
+    WOW64_MSV1_0_CHANGEPASSWORD_REQUEST Request;
+    const WOW64_STRING *From[4];
+    UNICODE_STRING *To[4];
+    PMSV1_0_CHANGEPASSWORD_REQUEST Blob;
+    PUCHAR Next;
+    ULONG Size = sizeof(MSV1_0_CHANGEPASSWORD_REQUEST), i;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    if (Length < sizeof(Request) || !InGuest(Guest, Length))
+        return STATUS_INVALID_PARAMETER;
+    _SEH2_TRY
+    {
+        RtlCopyMemory(&Request, PTR32(Guest), sizeof(Request));
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+    if (!NT_SUCCESS(Status)) return Status;
+    From[0] = &Request.DomainName;
+    From[1] = &Request.AccountName;
+    From[2] = &Request.OldPassword;
+    From[3] = &Request.NewPassword;
+    for (i = 0; i < 4; ++i)
+    {
+        if (From[i]->Length > From[i]->MaximumLength || (From[i]->Length & 1) ||
+            (From[i]->Length && (!From[i]->Buffer || !InGuest(From[i]->Buffer, From[i]->Length))))
+            return STATUS_INVALID_PARAMETER;
+        Size += From[i]->Length + sizeof(WCHAR);
+    }
+    Blob = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, Size);
+    if (!Blob) return STATUS_NO_MEMORY;
+    Blob->MessageType = MsV1_0ChangePassword;
+    Blob->Impersonating = Request.Impersonating;
+    To[0] = &Blob->DomainName;
+    To[1] = &Blob->AccountName;
+    To[2] = &Blob->OldPassword;
+    To[3] = &Blob->NewPassword;
+    Next = (PUCHAR)(Blob + 1);
+    _SEH2_TRY
+    {
+        for (i = 0; i < 4; ++i)
+        {
+            To[i]->Length = From[i]->Length;
+            To[i]->MaximumLength = From[i]->Length + sizeof(WCHAR);
+            To[i]->Buffer = (PWSTR)Next;
+            if (From[i]->Length) RtlCopyMemory(Next, PTR32(From[i]->Buffer), From[i]->Length);
+            Next += From[i]->Length + sizeof(WCHAR);
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+    if (!NT_SUCCESS(Status))
+    {
+        RtlSecureZeroMemory(Blob, Size);
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Blob);
+        return Status;
+    }
+    *Native = Blob;
+    *NativeLength = Size;
+    return STATUS_SUCCESS;
+}
+
+/* LsaCallAuthenticationPackage for the MSV1_0 message types that 32-bit callers use: MsV1_0ChangePassword
+ * (NetUserChangePassword), which has no reply buffer. The others, and the other packages, are refused. */
+static NTSTATUS RequestCallPackage(ULONG Number, HANDLE Port, WOW64_LSA_BODY *Body, LSA_API_MSG *Native,
+                                   BOOLEAN *Reported)
+{
+    ULONG Package, Length, Buffer, MessageType = 0, Msv1_0 = 0, NativeLength = 0;
+    PVOID Submit = NULL;
+    NTSTATUS Status = STATUS_SUCCESS, Written = STATUS_SUCCESS, Result;
+
+    Package = Body->CallRequest.AuthenticationPackage;
+    Buffer = Body->CallRequest.ProtocolSubmitBuffer;
+    Length = Body->CallRequest.SubmitBufferLength;
+    if (Length < sizeof(ULONG) || !InGuest(Buffer, Length))
+        return STATUS_INVALID_PARAMETER;
+    _SEH2_TRY
+    {
+        MessageType = *(ULONG *)PTR32(Buffer);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+    if (!NT_SUCCESS(Status)) return Status;
+    Status = Msv1_0PackageId(Port, &Msv1_0);
+    if (!NT_SUCCESS(Status)) return Status;
+    if (Package != Msv1_0 || MessageType != MsV1_0ChangePassword)
+    {
+        /* Reported with the message type, or 0xffffffff for another package */
+        return Wow64Unsupported(Number, WOW64_UNSUPPORTED_CLASS, Package != Msv1_0 ? 0xffffffff : MessageType,
+                                Reported);
+    }
+    Status = ChangePasswordFrom32(Buffer, Length, &Submit, &NativeLength);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    InitNative(Native, LSASS_REQUEST_CALL_AUTHENTICATION_PACKAGE, LSA_PORT_DATA_SIZE(Native->CallAuthenticationPackage));
+    Native->CallAuthenticationPackage.Request.AuthenticationPackage = Package;
+    Native->CallAuthenticationPackage.Request.ProtocolSubmitBuffer = Submit;
+    Native->CallAuthenticationPackage.Request.SubmitBufferLength = NativeLength;
+    Status = NtRequestWaitReplyPort(Port, &Native->h, &Native->h);
+    RtlSecureZeroMemory(Submit, NativeLength);
+    RtlFreeHeap(RtlGetProcessHeap(), 0, Submit);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    Result = Native->Status;
+    /* MSV1_0 returns nothing for a password change; whatever came back is released, not converted */
+    if (NT_SUCCESS(Result) && Native->CallAuthenticationPackage.Reply.ProtocolReturnBuffer)
+        FreeBlock(Native->CallAuthenticationPackage.Reply.ProtocolReturnBuffer);
+    _SEH2_TRY
+    {
+        Body->Status = Result;
+        Body->CallReply.ProtocolReturnBuffer = 0;
+        Body->CallReply.ReturnBufferLength = 0;
+        Body->CallReply.ProtocolStatus = Native->CallAuthenticationPackage.Reply.ProtocolStatus;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Written = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+    return NT_SUCCESS(Written) ? STATUS_SUCCESS : Written;
+}
+
 /* NtRequestWaitReplyPort(PortHandle, PPORT_MESSAGE LpcRequest, PPORT_MESSAGE LpcReply): the request
  * and the reply of an LSA call share one message, as lsalib sends it. */
+#define NEEDED(Member) (sizeof(WOW64_PORT_MESSAGE) + FIELD_OFFSET(WOW64_LSA_BODY, Member) + sizeof(((WOW64_LSA_BODY *)0)->Member))
+
 NTSTATUS Wow64LpcRequest(ULONG Number, ULONG Handle, ULONG Request, ULONG Reply, BOOLEAN *Reported)
 {
     WOW64_PORT_MESSAGE Header;
@@ -520,8 +923,25 @@ NTSTATUS Wow64LpcRequest(ULONG Number, ULONG Handle, ULONG Request, ULONG Reply,
         if (NT_SUCCESS(Status))
             Body->Status = Native.Status;
         break;
+    case LSASS_REQUEST_CALL_AUTHENTICATION_PACKAGE:
+        if (Header.TotalLength < NEEDED(CallReply)) return STATUS_INVALID_PARAMETER;
+        Status = RequestCallPackage(Number, HANDLE32(Handle), Body, &Native, Reported);
+        if (!NT_SUCCESS(Status)) return Status;
+        break;
+    case LSASS_REQUEST_ENUM_LOGON_SESSIONS:
+        if (Header.TotalLength < NEEDED(EnumReply)) return STATUS_INVALID_PARAMETER;
+        Status = RequestEnumSessions(HANDLE32(Handle), Body, &Native);
+        break;
+    case LSASS_REQUEST_GET_LOGON_SESSION_DATA:
+        if (Header.TotalLength < NEEDED(SessionRequest)) return STATUS_INVALID_PARAMETER;
+        Status = RequestSessionData(HANDLE32(Handle), Body, &Native);
+        break;
+    case LSASS_REQUEST_POLICY_CHANGE_NOTIFY:
+        if (Header.TotalLength < NEEDED(PolicyRequest)) return STATUS_INVALID_PARAMETER;
+        Status = RequestPolicyNotify(HANDLE32(Handle), Body, &Native);
+        break;
     default:
-        /* LsaCallAuthenticationPackage carries package specific buffers with pointers of their own */
+        /* Not an LSA request this layer knows */
         return Wow64Unsupported(Number, WOW64_UNSUPPORTED_CLASS, Api, Reported);
     }
 
