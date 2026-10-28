@@ -79,6 +79,8 @@ list(APPEND SOURCE
     systray.cpp
     CApplicationAssociationRegistration.cpp
     CApplicationAssociationRegistration.h
+    CDestinationList.cpp
+    CDestinationList.h
     CUserEventTimer.cpp
     CUserEventTimer.h
     CUserNotification.cpp

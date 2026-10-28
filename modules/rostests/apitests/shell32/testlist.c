@@ -28,6 +28,7 @@ extern void func_ILCreateFromPath(void);
 extern void func_ILIsEqual(void);
 extern void func_Int64ToString(void);
 extern void func_IApplicationAssociationRegistration(void);
+extern void func_IDestinationList(void);
 extern void func_IQueryAssociations(void);
 extern void func_IShellFolderViewCB(void);
 extern void func_LockServer(void);
@@ -109,6 +110,7 @@ const struct test winetest_testlist[] =
     { "ILIsEqual", func_ILIsEqual },
     { "Int64ToString", func_Int64ToString },
     { "IApplicationAssociationRegistration", func_IApplicationAssociationRegistration },
+    { "IDestinationList", func_IDestinationList },
     { "IQueryAssociations", func_IQueryAssociations },
     { "IShellFolderViewCB", func_IShellFolderViewCB },
     { "LockServer", func_LockServer },
