@@ -106,6 +106,12 @@ typedef struct _LOGICAL_ADAPTER
     volatile BOOLEAN           SendThreadStop;
     BOOLEAN                    Stopping;               /* A serialized miniport is being halted, see MiniStopSends */
     BOOLEAN                    BusyByDpc;              /* MiniportBusy is held by the interrupt DPC */
+    PNDIS_REQUEST              InHandlerRequest;       /* The request inside the miniport's query/set handler (by pointer: a completion on another CPU can let the next request in before the handler returns) */
+    PNDIS_REQUEST              AbortRequest;           /* A reset wanted this request aborted while it was in the handler: MiniDoRequest does it when the handler returns pending */
+    NDIS_STATUS                AbortStatus;            /* ... with this status */
+    BOOLEAN                    Halted;                 /* MiniportHalt is about to run or has: the worker runs nothing */
+    BOOLEAN                    RequestClaimed;         /* Someone is completing PendingRequest: the miniport or an abort, never both */
+    PIO_WORKITEM               IoWorkItem;             /* The worker's one work item, allocated with the adapter so that scheduling cannot fail */
     PKTHREAD                   SendThread;             /* A serialized miniport's send thread, see MiniLeaveSerialized */
     KEVENT                     SendTurnEvent;
 } LOGICAL_ADAPTER, *PLOGICAL_ADAPTER;
