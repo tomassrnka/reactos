@@ -3,6 +3,7 @@
  * LICENSE:     LGPL-2.1-or-later
  * PURPOSE:     PROC_THREAD_ATTRIBUTE_JOB_LIST: the child is a member of the job from creation;
  *              the Chromium sandbox's attribute list (handle list, job list, child process policy)
+ *              and the primary token assigned to the suspended target (ProcessAccessToken)
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  *
  * Chromium's sandbox passes the target job with this attribute and frees the
@@ -234,6 +235,95 @@ TestSandboxList(VOID)
     CloseHandle(Port);
 }
 
+/* CreateProcessAsUser of the guest advapi32 (and of Windows before Vista) creates
+ * the child suspended and then assigns its primary token with
+ * NtSetInformationProcess(ProcessAccessToken). A 32-bit sandbox broker under WoW64
+ * makes that call for every target, here with the job list and child process
+ * policy of TestSandboxList */
+static VOID
+TestAccessToken(VOID)
+{
+    NTSTATUS (NTAPI *pSet)(HANDLE, PROCESSINFOCLASS, PVOID, ULONG);
+    JOBOBJECT_ASSOCIATE_COMPLETION_PORT Assoc;
+    PROCESS_ACCESS_TOKEN Access;
+    STARTUPINFOEXW Si;
+    PROCESS_INFORMATION Pi;
+    WCHAR Cmd[MAX_PATH + 32];
+    HANDLE Job, Port, Token = NULL, Restricted = NULL;
+    DWORD Policy = PROCESS_CREATION_CHILD_PROCESS_RESTRICTED, Exit = 0, Before, After;
+    SIZE_T Size = 0;
+    NTSTATUS Status;
+    BOOL InJob = FALSE, Ret;
+
+    pSet = (PVOID)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtSetInformationProcess");
+    Job = CreateJobObjectW(NULL, NULL);
+    Port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 1);
+    ok(pSet && Job && Port, "token: Create: %lu\n", GetLastError());
+    if (!pSet || !Job || !Port) return;
+    /* A child token of the caller's: no privilege is needed to assign it */
+    ok(OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &Token) &&
+       CreateRestrictedToken(Token, DISABLE_MAX_PRIVILEGE, 0, NULL, 0, NULL, 0, NULL, &Restricted),
+       "token: restricted token: %lu\n", GetLastError());
+    Assoc.CompletionKey = (PVOID)KEY;
+    Assoc.CompletionPort = Port;
+    ok(SetInformationJobObject(Job, JobObjectAssociateCompletionPortInformation, &Assoc, sizeof(Assoc)),
+       "token: associate: %lu\n", GetLastError());
+
+    ZeroMemory(&Si, sizeof(Si));
+    Si.StartupInfo.cb = sizeof(Si);
+    GetModuleFileNameW(NULL, Cmd, MAX_PATH);
+    StringCchCatW(Cmd, _countof(Cmd), L" JobList child");
+    pInitialize(NULL, 2, 0, &Size);
+    Si.lpAttributeList = HeapAlloc(GetProcessHeap(), 0, Size);
+    ok(Si.lpAttributeList && pInitialize(Si.lpAttributeList, 2, 0, &Size), "token: initialize: %lu\n", GetLastError());
+    ok(pUpdate(Si.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, &Job, sizeof(Job), NULL, NULL),
+       "token: job list: %lu\n", GetLastError());
+    if (!pUpdate(Si.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY, &Policy, sizeof(Policy),
+                 NULL, NULL))
+    {
+        /* Windows 10 version 1511 and later */
+        skip("token: child process policy: %lu\n", GetLastError());
+    }
+    else if (!Restricted)
+    {
+        skip("token: no restricted token\n");
+    }
+    else
+    {
+        Ret = CreateProcessW(NULL, Cmd, NULL, NULL, FALSE, EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED,
+                             NULL, NULL, &Si.StartupInfo, &Pi);
+        ok(Ret, "token: CreateProcess failed %lu\n", GetLastError());
+        if (Ret)
+        {
+            ok(IsProcessInJob(Pi.hProcess, Job, &InJob) && InJob, "token: child is not in the job\n");
+            Before = PrivilegeCount(Pi.hProcess);
+            Access.Token = Restricted;
+            Access.Thread = Pi.hThread;
+            Status = pSet(Pi.hProcess, ProcessAccessToken, &Access, sizeof(Access) - 1);
+            ok(Status == STATUS_INFO_LENGTH_MISMATCH, "token: short length: 0x%lx\n", Status);
+            Status = pSet(Pi.hProcess, ProcessAccessToken, &Access, sizeof(Access));
+            ok(Status == STATUS_SUCCESS, "token: ProcessAccessToken: 0x%lx\n", Status);
+            After = PrivilegeCount(Pi.hProcess);
+            ok(After < Before, "token: child has %lu privileges, %lu before\n", After, Before);
+            ResumeThread(Pi.hThread);
+            ok(WaitForSingleObject(Pi.hProcess, 20000) == WAIT_OBJECT_0, "token: child did not exit\n");
+            ok(GetExitCodeProcess(Pi.hProcess, &Exit) && Exit == CHILD_EXIT, "token: exit code %lu\n", Exit);
+            CheckMessages(Port, Pi.dwProcessId, "token");
+            CloseHandle(Pi.hThread);
+            CloseHandle(Pi.hProcess);
+        }
+    }
+    if (Si.lpAttributeList)
+    {
+        pDelete(Si.lpAttributeList);
+        HeapFree(GetProcessHeap(), 0, Si.lpAttributeList);
+    }
+    if (Restricted) CloseHandle(Restricted);
+    if (Token) CloseHandle(Token);
+    CloseHandle(Job);
+    CloseHandle(Port);
+}
+
 static VOID
 TestJob(BOOL Limits)
 {
@@ -313,4 +403,5 @@ START_TEST(JobList)
     TestJob(FALSE);
     TestJob(TRUE);
     TestSandboxList();
+    TestAccessToken();
 }
