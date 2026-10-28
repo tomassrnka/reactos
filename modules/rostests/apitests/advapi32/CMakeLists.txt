@@ -30,6 +30,7 @@ list(APPEND SOURCE
     RegEnumKeyClass.c
     RegEnumValueW.c
     RegFlushKey.c
+    RegNotifyChangeKeyValue.c
     RegLoadKey.c
     RegOpenKeyExW.c
     RegQueryInfoKey.c

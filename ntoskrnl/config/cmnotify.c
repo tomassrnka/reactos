@@ -385,6 +385,13 @@ CmpNotifyChangeKey(
         return STATUS_KEY_DELETED;
     }
 
+    /* Arming a request resets its event, as for NtReadFile and friends. Callers
+     * with a manual-reset event (Chrome re-arms its registry watchers on the one
+     * event it waits on) rely on it: a left-over signal would complete the wait at
+     * once, and the caller would re-arm in a tight loop, piling up requests. */
+    if (Request->Event)
+        KeClearEvent(Request->Event);
+
     KeAcquireSpinLock(&CmpNotifyLock, &OldIrql);
     InsertTailList(&CmpNotifyList, &Request->Link);
     KeReleaseSpinLock(&CmpNotifyLock, OldIrql);
