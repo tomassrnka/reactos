@@ -60,8 +60,26 @@ void Test_CloseDuplicatedSocket()
 
 #define THREAD_PROC_LOOPS 5
 
-#define LISTEN_PORT 22222
 #define LISTEN_BACKLOG 5
+
+/* Bind to any free port and check that one was assigned. A fixed port can still be held for a moment by
+   the previous listener or by TIME-WAIT connections of an earlier test run in the same boot. */
+static void BindAnyPort(SOCKET sock)
+{
+    struct sockaddr_in addrin;
+    int err, len = sizeof(addrin);
+
+    memset(&addrin, 0, sizeof(struct sockaddr_in));
+    addrin.sin_family = AF_INET;
+    addrin.sin_addr.s_addr = inet_addr("127.0.0.1");
+    addrin.sin_port = 0;
+
+    err = bind(sock, (struct sockaddr*)(&addrin), sizeof(struct sockaddr_in));
+    ok(err == 0, "bind err = %d %d\n", err, WSAGetLastError());
+    err = getsockname(sock, (struct sockaddr*)(&addrin), &len);
+    ok(err == 0, "getsockname err = %d %d\n", err, WSAGetLastError());
+    ok(addrin.sin_port != 0, "bound to port 0\n");
+}
 
 DWORD WINAPI thread_proc(void* param)
 {
@@ -89,7 +107,6 @@ void Test_CloseWhileSelectSameSocket()
 {
     int err;
     SOCKET sock;
-    struct sockaddr_in addrin;
     HANDLE hthread;
 
     /* Create the socket */
@@ -100,13 +117,7 @@ void Test_CloseWhileSelectSameSocket()
         return;
     }
 
-    memset(&addrin, 0, sizeof(struct sockaddr_in));
-    addrin.sin_family = AF_INET;
-    addrin.sin_addr.s_addr = inet_addr("127.0.0.1");
-    addrin.sin_port = htons(LISTEN_PORT);
-
-    err = bind(sock, (struct sockaddr*)(&addrin), sizeof(struct sockaddr_in));
-    ok(err == 0, "bind err = %d %d\n", err, WSAGetLastError());
+    BindAnyPort(sock);
     err = listen(sock, LISTEN_BACKLOG);
     ok(err == 0, "listen err = %d %d\n", err, WSAGetLastError());
 
@@ -127,7 +138,6 @@ void Test_CloseWhileSelectDuplicatedSocket()
     int err;
     SOCKET sock, dup_sock;
     WSAPROTOCOL_INFOW ProtocolInfo;
-    struct sockaddr_in addrin;
     HANDLE hthread;
 
     /* Create the socket */
@@ -138,13 +148,7 @@ void Test_CloseWhileSelectDuplicatedSocket()
         return;
     }
 
-    memset(&addrin, 0, sizeof(struct sockaddr_in));
-    addrin.sin_family = AF_INET;
-    addrin.sin_addr.s_addr = inet_addr("127.0.0.1");
-    addrin.sin_port = htons(LISTEN_PORT);
-
-    err = bind(sock, (struct sockaddr*)(&addrin), sizeof(struct sockaddr_in));
-    ok(err == 0, "bind err = %d %d\n", err, WSAGetLastError());
+    BindAnyPort(sock);
     err = listen(sock, LISTEN_BACKLOG);
     ok(err == 0, "listen err = %d %d\n", err, WSAGetLastError());
 
