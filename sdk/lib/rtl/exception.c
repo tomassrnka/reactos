@@ -151,19 +151,32 @@ RtlCaptureStackBackTrace(IN ULONG FramesToSkip,
     /* Make sure we're not skipping all of them */
     if (FrameCount <= FramesToSkip) return 0;
 
-    /* Loop all the frames */
-    for (i = 0; i < FramesToCapture; i++)
+    /*
+     * The caller's buffers are not validated, so guard the writes: Windows
+     * (NT6+) swallows the access violation and returns 0 instead of faulting
+     * when BackTrace (or BackTraceHash) is invalid, e.g. NULL.
+     */
+    _SEH2_TRY
     {
-        /* Don't go past the limit */
-        if ((FramesToSkip + i) >= FrameCount) break;
+        /* Loop all the frames */
+        for (i = 0; i < FramesToCapture; i++)
+        {
+            /* Don't go past the limit */
+            if ((FramesToSkip + i) >= FrameCount) break;
 
-        /* Save this entry and hash it */
-        BackTrace[i] = Frames[FramesToSkip + i];
-        Hash += PtrToUlong(BackTrace[i]);
+            /* Save this entry and hash it */
+            BackTrace[i] = Frames[FramesToSkip + i];
+            Hash += PtrToUlong(BackTrace[i]);
+        }
+
+        /* Write the hash */
+        if (BackTraceHash) *BackTraceHash = Hash;
     }
-
-    /* Write the hash */
-    if (BackTraceHash) *BackTraceHash = Hash;
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        i = 0;
+    }
+    _SEH2_END;
 
     /* Clear the other entries and return count */
     RtlFillMemoryUlong(Frames, 128, 0);
