@@ -1944,6 +1944,8 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         {
         case ProcessDefaultHardErrorMode: case ProcessExecuteFlags: case ProcessPriorityClass:
         case ProcessSessionInformation: case ProcessBreakOnTermination: case ProcessCookie:
+        case ProcessHandleCount: case 58 /* ProcessHandleTable, Windows 8.1 */:
+            /* A ULONG, and the handle values as a ULONG array */
             return NtQueryInformationProcess(H(0), a[1], P(2), a[3], P(4));
         case ProcessIoCounters: case ProcessTimes: case ProcessVmCounters: case ProcessDeviceMap:
         case ProcessImageFileName: case ProcessQuotaLimits:

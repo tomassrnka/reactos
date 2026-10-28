@@ -1,6 +1,8 @@
 /* NtQueryInformationProcess from a 32-bit process: I/O counters, times, memory counters,
- * device map and image file name (GetProcessIoCounters, GetProcessTimes,
- * GetProcessMemoryInfo, GetLogicalDrives' process map, GetProcessImageFileName). Expected
+ * device map, image file name and handle count (GetProcessIoCounters, GetProcessTimes,
+ * GetProcessMemoryInfo, GetLogicalDrives' process map, GetProcessImageFileName,
+ * GetProcessHandleCount) and handle table (the Chromium sandbox checks its target's handles
+ * with it; sandboxed Firefox content processes exit when either fails). Expected
  * values measured on Windows Server 2008 R2 and Windows 10 WoW64.
  * SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "precomp.h"
@@ -187,6 +189,51 @@ static void TestImageFileName(void)
        (PWSTR)(Buffer + sizeof(UNICODE_STRING)));
 }
 
+static void TestHandleCount(void)
+{
+    static const ULONG Wrong[] = { 0, 2, 3, 5, 16 };
+    ULONG Count = 0, After = 0, Ret;
+    NTSTATUS Status;
+    HANDLE Event;
+
+    Status = Query(ProcessHandleCount, &Count, sizeof(Count), &Ret);
+    ok(Status == STATUS_SUCCESS, "Handle count: 0x%lx\n", Status);
+    ok(Ret == sizeof(ULONG), "Handle count: return length %lu\n", Ret);
+    ok(Count > 0, "Handle count: %lu\n", Count);
+    Event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    ok(Event != NULL, "CreateEvent: %lu\n", GetLastError());
+    Status = Query(ProcessHandleCount, &After, sizeof(After), &Ret);
+    ok(Status == STATUS_SUCCESS && After == Count + 1, "Handle count with an event: 0x%lx, %lu after %lu\n",
+       Status, After, Count);
+    if (Event) CloseHandle(Event);
+    WrongLengths(ProcessHandleCount, Wrong, RTL_NUMBER_OF(Wrong), "Handle count");
+}
+
+/* ProcessHandleTable (Windows 8.1 and later): the handle values as ULONGs */
+#define ProcessHandleTableClass ((PROCESSINFOCLASS)58)
+static void TestHandleTable(void)
+{
+    ULONG Table[4096], Ret, i;
+    BOOL Found = FALSE;
+    NTSTATUS Status;
+    HANDLE Event;
+
+    if (GetNTVersion() < _WIN32_WINNT_WINBLUE)
+    {
+        skip("ProcessHandleTable is Windows 8.1 and later\n");
+        return;
+    }
+    Event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    ok(Event != NULL, "CreateEvent: %lu\n", GetLastError());
+    Status = Query(ProcessHandleTableClass, Table, sizeof(Table), &Ret);
+    ok(Status == STATUS_SUCCESS, "Handle table: 0x%lx\n", Status);
+    ok(Ret % sizeof(ULONG) == 0 && Ret > sizeof(ULONG) && Ret <= sizeof(Table), "Handle table: return length %lu\n", Ret);
+    for (i = 0; Status == STATUS_SUCCESS && i < Ret / sizeof(ULONG); ++i)
+        if (Table[i] == HandleToUlong(Event)) Found = TRUE;
+    ok(Found, "Handle table: event %p not listed\n", Event);
+    if (Event) CloseHandle(Event);
+}
+
 START_TEST(Wow64QueryInformationProcess)
 {
     BOOL Wow64 = FALSE;
@@ -203,4 +250,6 @@ START_TEST(Wow64QueryInformationProcess)
     TestVmCounters();
     TestDeviceMap();
     TestImageFileName();
+    TestHandleCount();
+    TestHandleTable();
 }
