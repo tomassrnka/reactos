@@ -33,9 +33,19 @@ pointer-sized optional-header fields as native fields. It then loads
 maps i386 ntdll, and enters its loader on a separate low-address stack.
 The ordinary i386 loader loads kernel32 and the executable's imports.
 
-The i386 (guest) syscall stubs have the NT 5.2 x64 WOW64 layout
-(`mov eax, id; xor ecx, ecx; lea edx, [esp + 4]; call dword ptr fs:[0C0h]; ret n`)
-and call the gate in `TEB.WOW32Reserved`, which wow64.dll sets before any guest code runs.
+The i386 (guest) syscall stubs have the WOW64 layout of the reported Windows
+version (`VERBUMP_TIER`), because system-call hooks such as the Chromium sandbox
+pick the layout they accept by version: on Windows 10
+`mov eax, id; mov edx, Wow64SystemServiceCall; call edx; ret n`, where the helper is
+`jmp dword ptr fs:[0C0h]`; on Windows 8 `mov eax, id; call dword ptr fs:[0C0h]; ret n`;
+on NT 5.2 `mov eax, id; xor ecx, ecx; lea edx, [esp + 4]; call dword ptr fs:[0C0h]; ret n`.
+All of them enter the gate in `TEB.WOW32Reserved`, which wow64.dll sets before any guest
+code runs, with the stub's return address on the stack.
+
+As on Windows, the kernel maps the i386 ntdll at its preferred base and fills the
+PEB32 image base when it creates a WOW64 process, so the creator of a suspended
+process can find its image and read or patch its ntdll (the Chromium sandbox does).
+wow64.dll runs that view instead of mapping a second copy.
 A WoW64 thread uses a read/execute gate
 which makes a far jump into 64-bit user mode, then jumps to `wow64cpu.dll`.
 The native TEB reserves TLS slot 1 for the CPU state. Each call switches to
