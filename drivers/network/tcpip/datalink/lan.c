@@ -27,6 +27,15 @@ UINT TransferDataCompleteCalled = 0;
    receive buffers do not run out while the worker is busy */
 #define LAN_MAX_HELD_PACKETS 32
 
+/* One NDIS request and its own completion. NDIS completes a pending request
+   through ProtocolRequestComplete with that request, so the waiter is found
+   from it: several requests can be pending on one adapter at a time. */
+typedef struct _LAN_REQUEST {
+    NDIS_REQUEST Request;
+    KEVENT Event;
+    NDIS_STATUS Status;
+} LAN_REQUEST, *PLAN_REQUEST;
+
 typedef struct _LAN_WQ_ITEM {
     LIST_ENTRY ListEntry;
     PNDIS_PACKET Packet;
@@ -64,34 +73,37 @@ NDIS_STATUS NDISCall(
  *     Status of operation
  */
 {
-    NDIS_REQUEST Request;
+    LAN_REQUEST Request;
     NDIS_STATUS NdisStatus;
 
-    Request.RequestType = Type;
+    RtlZeroMemory(&Request.Request, sizeof(Request.Request));
+    KeInitializeEvent(&Request.Event, NotificationEvent, FALSE);
+    Request.Request.RequestType = Type;
     if (Type == NdisRequestSetInformation) {
-        Request.DATA.SET_INFORMATION.Oid                     = OID;
-        Request.DATA.SET_INFORMATION.InformationBuffer       = Buffer;
-        Request.DATA.SET_INFORMATION.InformationBufferLength = Length;
+        Request.Request.DATA.SET_INFORMATION.Oid                     = OID;
+        Request.Request.DATA.SET_INFORMATION.InformationBuffer       = Buffer;
+        Request.Request.DATA.SET_INFORMATION.InformationBufferLength = Length;
     } else {
-        Request.DATA.QUERY_INFORMATION.Oid                     = OID;
-        Request.DATA.QUERY_INFORMATION.InformationBuffer       = Buffer;
-        Request.DATA.QUERY_INFORMATION.InformationBufferLength = Length;
+        Request.Request.DATA.QUERY_INFORMATION.Oid                     = OID;
+        Request.Request.DATA.QUERY_INFORMATION.InformationBuffer       = Buffer;
+        Request.Request.DATA.QUERY_INFORMATION.InformationBufferLength = Length;
     }
 
     if (Adapter->State != LAN_STATE_RESETTING) {
-        NdisRequest(&NdisStatus, Adapter->NdisHandle, &Request);
+        NdisRequest(&NdisStatus, Adapter->NdisHandle, &Request.Request);
     } else {
         NdisStatus = NDIS_STATUS_NOT_ACCEPTED;
     }
 
-    /* Wait for NDIS to complete the request */
+    /* Wait for NDIS to complete this request: the request and the buffer
+       belong to this frame until then */
     if (NdisStatus == NDIS_STATUS_PENDING) {
-        KeWaitForSingleObject(&Adapter->Event,
+        KeWaitForSingleObject(&Request.Event,
                               UserRequest,
                               KernelMode,
                               FALSE,
                               NULL);
-        NdisStatus = Adapter->NdisStatus;
+        NdisStatus = Request.Status;
     }
 
     return NdisStatus;
@@ -288,14 +300,16 @@ VOID NTAPI ProtocolRequestComplete(
  *     Status         = Status of the operation
  */
 {
-    PLAN_ADAPTER Adapter = (PLAN_ADAPTER)BindingContext;
+    PLAN_REQUEST Request = CONTAINING_RECORD(NdisRequest, LAN_REQUEST, Request);
+
+    UNREFERENCED_PARAMETER(BindingContext);
 
     TI_DbgPrint(DEBUG_DATALINK, ("Called.\n"));
 
-    /* Save status of request and signal an event */
-    Adapter->NdisStatus = Status;
+    /* Save the status of this request and wake the one waiting for it */
+    Request->Status = Status;
 
-    KeSetEvent(&Adapter->Event, 0, FALSE);
+    KeSetEvent(&Request->Event, IO_NO_INCREMENT, FALSE);
 }
 
 
