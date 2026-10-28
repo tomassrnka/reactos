@@ -863,6 +863,31 @@ AccRewriteSetHandleRights(HANDLE handle,
             Ret = (DWORD)RegSetKeySecurity((HKEY)handle,
                                            SecurityInfo,
                                            pSecurityDescriptor);
+            if (Ret == ERROR_ACCESS_DENIED)
+            {
+                /* Like Windows, reopen the key with the rights the change needs
+                 * instead of requiring them on the caller's handle: Google Updater
+                 * sets the DACL through a KEY_WRITE handle (READ_CONTROL only).
+                 * The reopen is access checked against the key's own security. */
+                HKEY hReopened;
+                REGSAM Access = 0;
+
+                if (SecurityInfo & DACL_SECURITY_INFORMATION)
+                    Access |= WRITE_DAC;
+                if (SecurityInfo & (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION))
+                    Access |= WRITE_OWNER;
+                if (SecurityInfo & SACL_SECURITY_INFORMATION)
+                    Access |= ACCESS_SYSTEM_SECURITY;
+
+                if (Access != 0 &&
+                    RegOpenKeyExW((HKEY)handle, L"", 0, Access, &hReopened) == ERROR_SUCCESS)
+                {
+                    Ret = (DWORD)RegSetKeySecurity(hReopened,
+                                                   SecurityInfo,
+                                                   pSecurityDescriptor);
+                    RegCloseKey(hReopened);
+                }
+            }
             break;
         }
 

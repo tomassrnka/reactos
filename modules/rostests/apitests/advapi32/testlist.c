@@ -50,6 +50,7 @@ extern void func_ServiceFailureActions(void);
 extern void func_ServiceRecovery(void);
 extern void func_ServiceNetwork(void);
 extern void func_SetEntriesInAclOld(void);
+extern void func_SetSecurityInfoKey(void);
 extern void func_SetNamedSecurityInfoInherit(void);
 extern void func_SddlRights(void);
 
@@ -123,6 +124,7 @@ const struct test winetest_testlist[] =
     { "ServiceRecovery", func_ServiceRecovery },
     { "ServiceNetwork", func_ServiceNetwork },
     { "SetEntriesInAclOld", func_SetEntriesInAclOld },
+    { "SetSecurityInfoKey", func_SetSecurityInfoKey },
     { "SetNamedSecurityInfoInherit", func_SetNamedSecurityInfoInherit },
     { "SddlRights", func_SddlRights },
     { "ServiceProcess", func_ServiceProcess },
