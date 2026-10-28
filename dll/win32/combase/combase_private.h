@@ -121,8 +121,9 @@ HRESULT apartment_disconnectproxies(struct apartment *apt);
 /* RpcSs interface */
 HRESULT rpcss_get_next_seqid(DWORD *id);
 HRESULT rpc_get_local_class_object(REFCLSID rclsid, REFIID riid, void **obj);
-HRESULT rpc_register_local_server(REFCLSID clsid, IStream *stream, DWORD flags, unsigned int *cookie);
-HRESULT rpc_revoke_local_server(unsigned int cookie);
+HRESULT rpc_register_local_server(REFCLSID clsid, IStream *stream, DWORD flags, unsigned int *cookie,
+        void **ctxt_handle);
+HRESULT rpc_revoke_local_server(unsigned int cookie, void **ctxt_handle);
 HRESULT rpc_create_clientchannel(const OXID *oxid, const IPID *ipid, const OXID_INFO *oxid_info, const IID *iid,
         DWORD dest_context, void *dest_context_data, IRpcChannelBuffer **chan, struct apartment *apt);
 HRESULT rpc_create_serverchannel(DWORD dest_context, void *dest_context_data, IRpcChannelBuffer **chan);
@@ -248,6 +249,8 @@ ULONG stub_manager_int_release(struct stub_manager *stub_manager);
 struct stub_manager * get_stub_manager_from_object(struct apartment *apt, IUnknown *object, BOOL alloc);
 void stub_manager_disconnect(struct stub_manager *m);
 ULONG stub_manager_ext_addref(struct stub_manager *m, ULONG refs, BOOL tableweak);
+ULONG stub_manager_ext_addref_internal(struct stub_manager *m, ULONG refs);
+void stub_manager_set_surrogate(ISurrogate *surrogate);
 ULONG stub_manager_ext_release(struct stub_manager *m, ULONG refs, BOOL tableweak, BOOL last_unlock_releases);
 struct stub_manager * get_stub_manager(struct apartment *apt, OID oid);
 void stub_manager_release_marshal_data(struct stub_manager *m, ULONG refs, const IPID *ipid, BOOL tableweak);

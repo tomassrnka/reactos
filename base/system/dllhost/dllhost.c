@@ -10,7 +10,10 @@
  * combase starts "dllhost.exe /Processid:{CLSID}" for a class whose AppID has
  * a DllSurrogate value, then waits for the CLSID to show up in rpcss. The
  * surrogate loads the in-process server, registers its class factory as a
- * local server and stays up until it is asked to exit.
+ * local server and stays up until it is asked to exit: combase calls
+ * ISurrogate::FreeSurrogate when the last external reference to an object of the
+ * surrogate is released, as Windows does. A client that dies without releasing
+ * its objects keeps the surrogate alive.
  */
 
 /* INCLUDES *****************************************************************/

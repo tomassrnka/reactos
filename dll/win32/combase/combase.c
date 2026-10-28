@@ -128,6 +128,7 @@ struct registered_class
     DWORD flags;
     unsigned int cookie;
     unsigned int rpcss_cookie;
+    void *rpcss_ctxt_handle;
 };
 
 static struct list registered_classes = LIST_INIT(registered_classes);
@@ -3051,7 +3052,8 @@ HRESULT WINAPI CoRegisterClassObject(REFCLSID rclsid, IUnknown *object, DWORD cl
             return hr;
         }
 
-        hr = rpc_register_local_server(&newclass->clsid, marshal_stream, flags, &newclass->rpcss_cookie);
+        hr = rpc_register_local_server(&newclass->clsid, marshal_stream, flags, &newclass->rpcss_cookie,
+                &newclass->rpcss_ctxt_handle);
         IStream_Release(marshal_stream);
     }
 
@@ -3064,7 +3066,7 @@ static void com_revoke_class_object(struct registered_class *entry)
     list_remove(&entry->entry);
 
     if (entry->clscontext & CLSCTX_LOCAL_SERVER)
-        rpc_revoke_local_server(entry->rpcss_cookie);
+        rpc_revoke_local_server(entry->rpcss_cookie, &entry->rpcss_ctxt_handle);
 
     IUnknown_Release(entry->object);
     free(entry);
@@ -3361,9 +3363,13 @@ HRESULT WINAPI CoResumeClassObjects(void)
  */
 HRESULT WINAPI CoRegisterSurrogate(ISurrogate *surrogate)
 {
-    FIXME("%p stub\n", surrogate);
+    TRACE("%p\n", surrogate);
 
-    return E_NOTIMPL;
+    /* ISurrogate::FreeSurrogate is called when the last external reference to an
+     * object of this process is released. */
+    stub_manager_set_surrogate(surrogate);
+
+    return S_OK;
 }
 
 /***********************************************************************

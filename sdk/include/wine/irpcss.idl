@@ -28,16 +28,22 @@ cpp_quote("#define IRPCSS_ENDPOINT {'i','r','p','c','s','s',0}")
 ]
 interface Irpcss
 {
+    /* A registration lives as long as the process that made it: when the process dies, the
+     * runtime runs the context handle's rundown routine and rpcss drops the registration. */
+    typedef [context_handle] void *IrpcssContextHandle;
+
     HRESULT irpcss_server_register(
         [in] handle_t handle,
         [in] const GUID *clsid,
         [in] unsigned int flags,
         [in] PMInterfacePointer object,
-        [out] unsigned int *cookie);
+        [out] unsigned int *cookie,
+        [out] IrpcssContextHandle *ctxt_handle);
 
     HRESULT irpcss_server_revoke(
         [in] handle_t handle,
-        [in] unsigned int cookie);
+        [in] unsigned int cookie,
+        [in, out] IrpcssContextHandle *ctxt_handle);
 
     HRESULT irpcss_get_class_object(
         [in] handle_t handle,
