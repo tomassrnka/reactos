@@ -27,6 +27,7 @@
 #define FOLDER L"\\ReactOS Sec"
 /* the service limits; see MAX_TASKS_PER_USER in base/services/schedsvc/taskrun.c */
 #define TASKS_PER_USER 64
+#define FOLDERS_PER_USER 32
 #define PASSWORD L"Task-Sched-Test-2026!"
 
 void __RPC_FAR * __RPC_USER midl_user_allocate(SIZE_T len)
@@ -49,6 +50,38 @@ static void far_xml(WCHAR *xml)
 {
     _snwprintf(xml, 600, L"%s<Triggers><TimeTrigger><StartBoundary>2099-01-01T00:00:00</StartBoundary>"
              L"</TimeTrigger></Triggers>%s", xml_head, xml_actions);
+}
+
+/*
+ * A task that fires at "start" (UTC, YYYY-MM-DDTHH:MM:SSZ), as the principal (NULL for none), and whose
+ * action writes C:\ts_<tag>.txt: if the file appears, the task ran.
+ */
+static void prin_xml(WCHAR *xml, const WCHAR *principal, const WCHAR *tag, const WCHAR *start)
+{
+    WCHAR prin[200] = L"";
+
+    if (principal && wcscmp(principal, L"-"))
+        _snwprintf(prin, ARRAYSIZE(prin), L"<Principals><Principal id=\"Author\"><UserId>%s</UserId></Principal></Principals>",
+                   principal);
+    _snwprintf(xml, 1500, L"%s<Triggers><TimeTrigger><StartBoundary>%s</StartBoundary></TimeTrigger></Triggers>%s"
+               L"<Actions Context=\"Author\"><Exec><Command>%%SystemRoot%%\\system32\\cmd.exe</Command>"
+               L"<Arguments>/c echo x&gt; C:\\ts_%s.txt</Arguments></Exec></Actions></Task>", xml_head, start, prin, tag);
+}
+
+static BOOL marker_exists(const WCHAR *tag)
+{
+    WCHAR path[100];
+
+    _snwprintf(path, ARRAYSIZE(path), L"C:\\ts_%s.txt", tag);
+    return GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
+}
+
+static void marker_delete(const WCHAR *tag)
+{
+    WCHAR path[100];
+
+    _snwprintf(path, ARRAYSIZE(path), L"C:\\ts_%s.txt", tag);
+    DeleteFileW(path);
 }
 
 static BOOL bind_to(const WCHAR *protseq, const WCHAR *endpoint)
@@ -332,6 +365,37 @@ static void test_xml_size(void)
     ok(hr == S_OK, "DeleteTask(Big): 0x%lx\n", hr);
 }
 
+/* a task the service cannot read is refused, and a refused or update-only call leaves no folder behind */
+static void test_registration_failures(void)
+{
+    WCHAR xml[600];
+    HRESULT hr;
+    static const WCHAR *broken[] = { L"<Task xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\"><Actions>",
+                                     L"not xml at all", L"<Other><Actions/></Other>", L"" };
+    unsigned int i;
+
+    if (!bind_local()) return;
+    for (i = 0; i < ARRAYSIZE(broken); i++)
+    {
+        hr = register_task(FOLDER L"\\NewFolder\\Broken", broken[i], TASK_CREATE);
+        ok(hr == SCHED_E_MALFORMEDXML, "RegisterTask(broken XML %u): 0x%lx\n", i, hr);
+    }
+    ok(!file_exists(L"\\ReactOS Sec\\NewFolder"), "a refused XML created its folder\n");
+
+    far_xml(xml);
+    hr = register_task(FOLDER L"\\NewFolder\\Update", xml, TASK_UPDATE);
+    ok(FAILED(hr), "an update of a task that is not there succeeded: 0x%lx\n", hr);
+    ok(!file_exists(L"\\ReactOS Sec\\NewFolder"), "an update created a folder\n");
+
+    hr = register_task(FOLDER L"\\NewFolder\\Sub\\Task", xml, TASK_CREATE);
+    ok(hr == S_OK, "RegisterTask(two new folders): 0x%lx\n", hr);
+    ok(file_exists(L"\\ReactOS Sec\\NewFolder\\Sub\\Task"), "the task is not in its folders\n");
+    delete_task(FOLDER L"\\NewFolder\\Sub\\Task");
+    delete_task(FOLDER L"\\NewFolder\\Sub");
+    hr = delete_task(FOLDER L"\\NewFolder");
+    ok(hr == S_OK, "DeleteTask(NewFolder): 0x%lx\n", hr);
+}
+
 static void test_run_overlap(void)
 {
     static const WCHAR long_actions[] =
@@ -439,6 +503,22 @@ static void test_not_local(void)
     ok(hr == E_ACCESSDENIED, "DeleteTask over ncacn_np: 0x%lx\n", hr);
     hr = run_task(FOLDER L"\\Remote");
     ok(hr == E_ACCESSDENIED, "Run over ncacn_np: 0x%lx\n", hr);
+    {
+        WCHAR *got = NULL;
+        DWORD start = 0, count = 0;
+        TASK_NAMES names = NULL;
+
+        hr = retrieve_task(FOLDER L"\\Remote", &got);
+        ok(hr == E_ACCESSDENIED && !got, "RetrieveTask over ncacn_np: 0x%lx\n", hr);
+        RPC_CALL(SchRpcEnumTasks(L"\\", 0, &start, 0, &count, &names));
+        ok(hr == E_ACCESSDENIED && !count && !names, "EnumTasks over ncacn_np: 0x%lx, %lu names\n", hr, count);
+        start = 0;
+        RPC_CALL(SchRpcEnumFolders(L"\\", 0, &start, 0, &count, &names));
+        ok(hr == E_ACCESSDENIED && !count && !names, "EnumFolders over ncacn_np: 0x%lx, %lu names\n", hr, count);
+        RPC_CALL(SchRpcCreateFolder(FOLDER L"\\RemoteFolder", NULL, 0));
+        ok(hr == E_ACCESSDENIED, "CreateFolder over ncacn_np: 0x%lx\n", hr);
+        ok(!file_exists(L"\\ReactOS Sec\\RemoteFolder"), "a folder came in over ncacn_np\n");
+    }
 
     /* and it still works locally */
     if (!bind_local()) return;
@@ -447,6 +527,9 @@ static void test_not_local(void)
 }
 
 /* ---- two users ---------------------------------------------------------------------------- */
+
+static char **main_argv;
+static int main_argc;
 
 typedef struct _NET_CALL
 {
@@ -504,19 +587,25 @@ static BOOL create_user(NET_CALL *call, WCHAR *name, const WCHAR *prefix, DWORD 
     return call->Status == NERR_Success;
 }
 
+static HRESULT as_user_ex(char **argv, const char *op, const WCHAR *user, const char *name, int count, DWORD flags,
+                          const char *extra);
+
+/*
+ * The users are left in place unless TASKSCHD_TEST_DELETE_USERS is set: NetUserDel fails on this system for
+ * a user that logged on (SAM: no Members key) and heap errors follow in the processes around it.
+ */
 static void delete_user(const WCHAR *name)
 {
-    static NET_CALL call;
+    if (getenv("TASKSCHD_TEST_DELETE_USERS"))
+    {
+        HRESULT status = as_user_ex(main_argv, "deluser", name, "-", 0, 0, "");
 
-    call.Add = FALSE;
-    call.Name = (PWSTR)name;
-    /* clean up only: this system may not delete a user that logged on */
-    if (timed_net_call(&call) && call.Status != NERR_Success)
-        trace("NetUserDel(%ls) failed: %lu\n", name, call.Status);
+        if (status != NERR_Success) trace("NetUserDel(%ls) failed: %lu\n", name, (DWORD)status);
+    }
 }
 
 /* the child: log the user on, impersonate it, make one kind of call, exit with its HRESULT or count */
-static void child_main(char **argv)
+static void child_main(int argc, char **argv)
 {
     WCHAR user[64], name[256], path[300], xml[600];
     HANDLE token;
@@ -528,6 +617,8 @@ static void child_main(char **argv)
 
     MultiByteToWideChar(CP_ACP, 0, argv[4], -1, user, ARRAYSIZE(user));
     MultiByteToWideChar(CP_ACP, 0, argv[5], -1, name, ARRAYSIZE(name));
+    if (!strcmp(op, "deluser"))
+        ExitProcess(NetUserDel(NULL, user));
     if (!LogonUserW(user, L".", PASSWORD, LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &token))
         ExitProcess(0x10000000 | GetLastError());
     if (!ImpersonateLoggedOnUser(token))
@@ -537,7 +628,27 @@ static void child_main(char **argv)
 
     far_xml(xml);
     _snwprintf(path, ARRAYSIZE(path), FOLDER L"\\%s", name);
-    if (!strcmp(op, "register"))
+    if (!strcmp(op, "regprin") && argc >= 11)
+    {
+        WCHAR principal[100], tag[50], start[50];
+
+        MultiByteToWideChar(CP_ACP, 0, argv[8], -1, principal, ARRAYSIZE(principal));
+        MultiByteToWideChar(CP_ACP, 0, argv[9], -1, tag, ARRAYSIZE(tag));
+        MultiByteToWideChar(CP_ACP, 0, argv[10], -1, start, ARRAYSIZE(start));
+        prin_xml(xml, principal, tag, start);
+        hr = register_task(path, xml, TASK_CREATE);
+    }
+    else if (!strcmp(op, "folders"))
+    {
+        for (i = 0; i < count; i++)
+        {
+            _snwprintf(path, ARRAYSIZE(path), FOLDER L"\\%s%d", name, i);
+            RPC_CALL(SchRpcCreateFolder(path, NULL, 0));
+            if (hr == S_OK) n++;
+        }
+        hr = n;
+    }
+    else if (!strcmp(op, "register"))
         hr = register_task(path, xml, flags);
     else if (!strcmp(op, "delete"))
         hr = delete_task(path);
@@ -578,15 +689,17 @@ static const char *child_exe(const char *self)
     return native;
 }
 
-static HRESULT as_user(char **argv, const char *op, const WCHAR *user, const char *name, int count, DWORD flags)
+static HRESULT as_user_ex(char **argv, const char *op, const WCHAR *user, const char *name, int count, DWORD flags,
+                          const char *extra)
 {
-    char cmd[MAX_PATH + 200], userA[64];
+    char cmd[MAX_PATH + 300], userA[64];
     STARTUPINFOA si = { sizeof(si) };
     PROCESS_INFORMATION pi;
     DWORD code = 0xffffffff, wait;
 
     WideCharToMultiByte(CP_ACP, 0, user, -1, userA, sizeof(userA), NULL, NULL);
-    snprintf(cmd, sizeof(cmd), "\"%s\" TaskSchedulerSecurity child %s %s %s %d %lu", child_exe(argv[0]), op, userA, name, count, flags);
+    snprintf(cmd, sizeof(cmd), "\"%s\" TaskSchedulerSecurity child %s %s %s %d %lu %s", child_exe(argv[0]), op, userA, name,
+             count, flags, extra);
     if (!CreateProcessA(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
     {
         ok(0, "CreateProcess(%s) failed: %lu\n", cmd, GetLastError());
@@ -599,6 +712,11 @@ static HRESULT as_user(char **argv, const char *op, const WCHAR *user, const cha
     GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hProcess);
     return code;
+}
+
+static HRESULT as_user(char **argv, const char *op, const WCHAR *user, const char *name, int count, DWORD flags)
+{
+    return as_user_ex(argv, op, user, name, count, flags, "");
 }
 
 static void test_users(char **argv)
@@ -687,13 +805,189 @@ static void test_users(char **argv)
     hr = delete_task(FOLDER L"\\Bob");
     ok(hr == S_OK, "administrator: DeleteTask(Bob): 0x%lx\n", hr);
 
+    /* so is the number of folders */
+    made = as_user(argv, "folders", alice, "F", FOLDERS_PER_USER + 8, 0);
+    ok(made == FOLDERS_PER_USER, "alice created %d folders, the limit is %d\n", made, FOLDERS_PER_USER);
+    made = as_user(argv, "folders", bob, "G", 1, 0);
+    ok(made == 1, "bob created %d folders after alice reached her limit\n", made);
+    for (i = 0; i < FOLDERS_PER_USER + 8; i++)
+    {
+        WCHAR path[100];
+
+        _snwprintf(path, 100, FOLDER L"\\F%d", i);
+        delete_task(path);
+    }
+    delete_task(FOLDER L"\\G0");
+    ok(!file_exists(L"\\ReactOS Sec\\F0"), "an alice folder is still there\n");
+
 done:
     delete_user(alice);
     delete_user(bob);
 }
 
-static char **main_argv;
-static int main_argc;
+/* the SID of an account, or NULL */
+static PSID account_sid(const WCHAR *name)
+{
+    DWORD size = 0, domain_size = 0;
+    SID_NAME_USE use;
+    PSID sid;
+
+    LookupAccountNameW(NULL, name, NULL, &size, NULL, &domain_size, &use);
+    if (!size || !(sid = malloc(size))) return NULL;
+    domain_size = 256;
+    {
+        WCHAR *domain = malloc(domain_size * sizeof(WCHAR));
+        BOOL ret = LookupAccountNameW(NULL, name, sid, &size, domain, &domain_size, &use);
+
+        free(domain);
+        if (ret) return sid;
+    }
+    free(sid);
+    return NULL;
+}
+
+static NET_API_STATUS admins_member(PSID sid, BOOL add)
+{
+    BYTE admins[SECURITY_MAX_SID_SIZE];
+    DWORD size = sizeof(admins), glen = 256, dlen = 256;
+    WCHAR group[256], domain[256];
+    SID_NAME_USE use;
+    LOCALGROUP_MEMBERS_INFO_0 member;
+
+    CreateWellKnownSid(WinBuiltinAdministratorsSid, NULL, admins, &size);
+    if (!LookupAccountSidW(NULL, admins, group, &glen, domain, &dlen, &use)) return GetLastError();
+    member.lgrmi0_sid = sid;
+    return add ? NetLocalGroupAddMembers(NULL, group, 0, (BYTE *)&member, 1)
+               : NetLocalGroupDelMembers(NULL, group, 0, (BYTE *)&member, 1);
+}
+
+/*
+ * Nobody makes the service run a task as an account that is not theirs unless they are an administrator
+ * right now. Markers (C:\ts_<tag>.txt) show what ran at the start time of the tasks.
+ */
+static void test_principals(char **argv)
+{
+    static WCHAR pat[32], carol[32], self[100];
+    static NET_CALL pat_call, carol_call;
+    static const WCHAR *never[] = { L"patsys", L"patadm", L"carsys", L"caradm" };
+    static const WCHAR *always[] = { L"ctlsys", L"ctladm" };
+    char principal[120], extra[300], startA[50];
+    WCHAR xml[1500], start[50];
+    SYSTEMTIME st;
+    FILETIME ft;
+    ULARGE_INTEGER t;
+    DWORD len = ARRAYSIZE(self), wait;
+    PSID carol_sid;
+    HRESULT hr;
+    unsigned int i;
+
+    GetUserNameW(self, &len);
+    for (i = 0; i < ARRAYSIZE(never); i++) marker_delete(never[i]);
+    for (i = 0; i < ARRAYSIZE(always); i++) marker_delete(always[i]);
+    marker_delete(L"carrun");
+
+    if (!create_user(&pat_call, pat, L"tsP", 0)) return;
+    if (!create_user(&carol_call, carol, L"tsC", 7919))
+    {
+        delete_user(pat);
+        return;
+    }
+    carol_sid = account_sid(carol);
+    ok(carol_sid != NULL, "no SID for %ls\n", carol);
+    if (!carol_sid || !bind_local()) goto done;
+
+    hr = admins_member(carol_sid, TRUE);
+    ok(hr == NERR_Success, "adding %ls to the administrators: %lu\n", carol, hr);
+    if (hr != NERR_Success) goto done;
+
+    /* every task fires 100 s from now */
+    GetSystemTimeAsFileTime(&ft);
+    t.LowPart = ft.dwLowDateTime;
+    t.HighPart = ft.dwHighDateTime;
+    t.QuadPart += 100 * 10000000ULL;
+    ft.dwLowDateTime = t.LowPart;
+    ft.dwHighDateTime = t.HighPart;
+    FileTimeToSystemTime(&ft, &st);
+    _snwprintf(start, 50, L"%04u-%02u-%02uT%02u:%02u:%02uZ", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    WideCharToMultiByte(CP_ACP, 0, start, -1, startA, sizeof(startA), NULL, NULL);
+    WideCharToMultiByte(CP_ACP, 0, self, -1, principal, sizeof(principal), NULL, NULL);
+
+    /* controls: an administrator's tasks, as LocalSystem and as the user that is logged on, run */
+    prin_xml(xml, L"S-1-5-18", L"ctlsys", start);
+    hr = register_task(FOLDER L"\\CtlSys", xml, TASK_CREATE);
+    ok(hr == S_OK, "administrator: RegisterTask(CtlSys): 0x%lx\n", hr);
+    prin_xml(xml, self, L"ctladm", start);
+    hr = register_task(FOLDER L"\\CtlAdm", xml, TASK_CREATE);
+    ok(hr == S_OK, "administrator: RegisterTask(CtlAdm): 0x%lx\n", hr);
+
+    /* a user that is not an administrator: LocalSystem, and the user that is logged on */
+    snprintf(extra, sizeof(extra), "S-1-5-18 patsys %s", startA);
+    hr = as_user_ex(argv, "regprin", pat, "PatSys", 0, 0, extra);
+    ok(hr == S_OK, "user: RegisterTask(PatSys): 0x%lx\n", hr);
+    snprintf(extra, sizeof(extra), "%s patadm %s", principal, startA);
+    hr = as_user_ex(argv, "regprin", pat, "PatAdm", 0, 0, extra);
+    ok(hr == S_OK, "user: RegisterTask(PatAdm): 0x%lx\n", hr);
+    hr = as_user(argv, "run", pat, "PatSys", 0, 0);
+    ok(FAILED(hr), "user: Run of the LocalSystem task succeeded: 0x%lx\n", hr);
+    hr = as_user(argv, "run", pat, "PatAdm", 0, 0);
+    ok(FAILED(hr), "user: Run of the task of another account succeeded: 0x%lx\n", hr);
+
+    /* an administrator, who registers the same two kinds and is then demoted */
+    snprintf(extra, sizeof(extra), "S-1-5-18 carsys %s", startA);
+    hr = as_user_ex(argv, "regprin", carol, "CarSys", 0, 0, extra);
+    ok(hr == S_OK, "administrator: RegisterTask(CarSys): 0x%lx\n", hr);
+    snprintf(extra, sizeof(extra), "%s caradm %s", principal, startA);
+    hr = as_user_ex(argv, "regprin", carol, "CarAdm", 0, 0, extra);
+    ok(hr == S_OK, "administrator: RegisterTask(CarAdm): 0x%lx\n", hr);
+    hr = as_user(argv, "run", carol, "CarSys", 0, 0);
+    ok(hr == S_OK, "administrator: Run of her LocalSystem task: 0x%lx\n", hr);
+    for (wait = 0; wait < 20 && !marker_exists(L"carsys"); wait++) Sleep(1000);
+    ok(marker_exists(L"carsys"), "the LocalSystem task of an administrator did not run\n");
+    marker_delete(L"carsys");
+
+    hr = admins_member(carol_sid, FALSE);
+    ok(hr == NERR_Success, "removing %ls from the administrators: %lu\n", carol, hr);
+    hr = as_user(argv, "run", carol, "CarSys", 0, 0);
+    ok(FAILED(hr), "demoted: Run of the LocalSystem task succeeded: 0x%lx\n", hr);
+    hr = as_user(argv, "run", carol, "CarAdm", 0, 0);
+    ok(FAILED(hr), "demoted: Run of the task of another account succeeded: 0x%lx\n", hr);
+
+    /* the start time and a margin for the tasks to run */
+    GetSystemTimeAsFileTime(&ft);
+    t.LowPart = ft.dwLowDateTime;
+    t.HighPart = ft.dwHighDateTime;
+    {
+        ULARGE_INTEGER end;
+        SystemTimeToFileTime(&st, &ft);
+        end.LowPart = ft.dwLowDateTime;
+        end.HighPart = ft.dwHighDateTime;
+        end.QuadPart += 25 * 10000000ULL;
+        if (end.QuadPart > t.QuadPart) Sleep((DWORD)((end.QuadPart - t.QuadPart) / 10000));
+    }
+
+    for (i = 0; i < ARRAYSIZE(always); i++)
+        ok(marker_exists(always[i]), "the task %ls of an administrator did not run\n", always[i]);
+    for (i = 0; i < ARRAYSIZE(never); i++)
+        ok(!marker_exists(never[i]), "the task %ls ran as an account that is not its registrant's\n", never[i]);
+
+    delete_task(FOLDER L"\\CtlSys");
+    delete_task(FOLDER L"\\CtlAdm");
+    delete_task(FOLDER L"\\PatSys");
+    delete_task(FOLDER L"\\PatAdm");
+    delete_task(FOLDER L"\\CarSys");
+    delete_task(FOLDER L"\\CarAdm");
+    for (i = 0; i < ARRAYSIZE(never); i++) marker_delete(never[i]);
+    for (i = 0; i < ARRAYSIZE(always); i++) marker_delete(always[i]);
+
+done:
+    if (carol_sid)
+    {
+        admins_member(carol_sid, FALSE);
+        free(carol_sid);
+    }
+    delete_user(pat);
+    delete_user(carol);
+}
 
 static BOOL section(const char *name)
 {
@@ -711,14 +1005,14 @@ START_TEST(TaskSchedulerSecurity)
 
     if (argc >= 8)
     {
-        child_main(argv);
+        child_main(argc, argv);
         return;
     }
 
     if (!bind_local()) return;
     RPC_CALL(SchRpcCreateFolder(FOLDER, NULL, 0));
     ok(hr == S_OK || hr == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS), "CreateFolder: 0x%lx\n", hr);
-    if (FAILED(hr))
+    if (FAILED(hr) && hr != HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS))
     {
         skip("no Task Scheduler\n");
         return;
@@ -727,10 +1021,12 @@ START_TEST(TaskSchedulerSecurity)
     /* "TaskSchedulerSecurity <name>" runs one part only */
     if (section("paths")) test_paths();
     if (section("xml")) test_xml_size();
+    if (section("failures")) test_registration_failures();
     if (section("overlap")) test_run_overlap();
     if (section("local")) test_not_local();
     if (section("overflow")) test_survives_overflow();
     if (section("users")) test_users(argv);
+    if (section("principals")) test_principals(argv);
 
     if (bind_local())
     {
