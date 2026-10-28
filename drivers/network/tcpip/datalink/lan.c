@@ -979,6 +979,8 @@ VOID ReconfigureAdapterWorker(PVOID Context)
         {
             Adapter->CompletingReset = (ReconfigureContext.State == Adapter->State);
             Success = ReconfigureAdapter(&ReconfigureContext);
+            /* the link went up or down: the usable addresses changed */
+            AddrChangeNotify();
         }
 
         TcpipAcquireSpinLock(&Adapter->ReconfigureLock, &OldIrql);

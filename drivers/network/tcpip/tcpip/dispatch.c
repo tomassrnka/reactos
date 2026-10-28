@@ -1667,6 +1667,7 @@ NTSTATUS DispTdiSetIPAddress( PIRP Irp, PIO_STACK_LOCATION IrpSp ) {
             IpAddrChange->Address = IF->Index;
             Status = STATUS_SUCCESS;
             Irp->IoStatus.Information = IF->Index;
+            AddrChangeNotify();
             break;
         }
     } EndFor(IF);
@@ -1693,6 +1694,7 @@ NTSTATUS DispTdiDeleteIPAddress( PIRP Irp, PIO_STACK_LOCATION IrpSp ) {
             IF->Broadcast.Address.IPv4Address = 0;
 
             Status = STATUS_SUCCESS;
+            AddrChangeNotify();
         }
     } EndFor(IF);
 

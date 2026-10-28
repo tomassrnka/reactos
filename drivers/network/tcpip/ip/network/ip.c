@@ -332,6 +332,8 @@ BOOLEAN IPRegisterInterface(
 
     TcpipReleaseSpinLock(&IF->Lock, OldIrql);
 
+    AddrChangeNotify();
+
     return TRUE;
 }
 
@@ -370,6 +372,8 @@ VOID IPUnregisterInterface(
     TcpipAcquireSpinLock(&InterfaceListLock, &OldIrql3);
     RemoveEntryList(&IF->ListEntry);
     TcpipReleaseSpinLock(&InterfaceListLock, OldIrql3);
+
+    AddrChangeNotify();
 }
 
 

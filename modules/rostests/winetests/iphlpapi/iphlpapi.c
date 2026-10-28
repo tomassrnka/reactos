@@ -1830,12 +1830,6 @@ static void testNotifyAddrChange(void)
     HANDLE handle;
     BOOL success;
 
-#ifdef __REACTOS__
-    if (IsReactOS()) {
-        skip("FIXME: testNotifyAddrChange() hangs on ReactOS! (works on Windows)\n");
-        return;
-    }
-#endif
     handle = NULL;
     ZeroMemory(&overlapped, sizeof(overlapped));
     ret = NotifyAddrChange(&handle, &overlapped);

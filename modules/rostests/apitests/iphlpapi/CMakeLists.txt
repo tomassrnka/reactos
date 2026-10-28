@@ -13,6 +13,7 @@ list(APPEND SOURCE
     ArpNeighbor.c
     icmp.c
     IpTables2.c
+    NotifyAddrChange.c
     NotifyIpInterfaceChange.c
     NotifyRouteChange2.c
     SendARP.c
