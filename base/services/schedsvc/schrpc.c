@@ -181,6 +181,40 @@ static HRESULT write_xml_utf8(const WCHAR *name, DWORD disposition, const WCHAR 
     strcat(out, body);
     free(xml);
 
+    /* an update is written next to the task and moved over it, so a failed write keeps the old file */
+    if (disposition != CREATE_NEW)
+    {
+        DWORD attrs = GetFileAttributesW(name);
+
+        if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY))
+        {
+            WCHAR *temp = malloc((wcslen(name) + 5) * sizeof(WCHAR));
+
+            if (!temp)
+            {
+                free(out);
+                return E_OUTOFMEMORY;
+            }
+            wcscpy(temp, name);
+            wcscat(temp, L".tmp");
+            hfile = CreateFileW(temp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, 0);
+            if (hfile == INVALID_HANDLE_VALUE)
+                hr = HRESULT_FROM_WIN32(GetLastError());
+            else
+            {
+                if (!WriteFile(hfile, out, size, &written, NULL) || written != size)
+                    hr = HRESULT_FROM_WIN32(GetLastError() ? GetLastError() : ERROR_WRITE_FAULT);
+                CloseHandle(hfile);
+                if (hr == S_OK && !MoveFileExW(temp, name, MOVEFILE_REPLACE_EXISTING))
+                    hr = HRESULT_FROM_WIN32(GetLastError());
+                if (hr != S_OK) DeleteFileW(temp);
+            }
+            free(temp);
+            free(out);
+            return hr;
+        }
+    }
+
     hfile = CreateFileW(name, GENERIC_WRITE, 0, NULL, disposition, 0, 0);
     if (hfile == INVALID_HANDLE_VALUE)
     {
@@ -202,13 +236,85 @@ static HRESULT write_xml_utf8(const WCHAR *name, DWORD disposition, const WCHAR 
     return hr;
 }
 
+#ifdef __REACTOS__
+static WCHAR *trimmed_copy(const WCHAR *dir)
+{
+    WCHAR *copy = wcsdup(dir);
+    SIZE_T len;
+
+    if (!copy) return NULL;
+    for (len = wcslen(copy); len && copy[len - 1] == '\\'; len--) copy[len - 1] = 0;
+    return copy;
+}
+
+/* the folders that full_dir needs and does not have: how many (UINT_MAX on failure), and the length of the shortest missing prefix */
+static unsigned int missing_dirs(const WCHAR *full_dir, SIZE_T *top_len)
+{
+    WCHAR *copy = trimmed_copy(full_dir), *slash;
+    unsigned int n = 0;
+
+    *top_len = 0;
+    if (!copy) return ~0u;
+    while (GetFileAttributesW(copy) == INVALID_FILE_ATTRIBUTES)
+    {
+        n++;
+        *top_len = wcslen(copy);
+        if (!(slash = wcsrchr(copy, '\\'))) break;
+        *slash = 0;
+    }
+    free(copy);
+    return n;
+}
+
+/* remove the folders of full_dir from the deepest up to the one of length top_len: what this call created */
+static void remove_created_dirs(const WCHAR *full_dir, SIZE_T top_len)
+{
+    WCHAR *copy = trimmed_copy(full_dir), *slash;
+
+    if (!copy) return;
+    while (wcslen(copy) >= top_len)
+    {
+        RemoveDirectoryW(copy);
+        if (!(slash = wcsrchr(copy, '\\'))) break;
+        *slash = 0;
+    }
+    free(copy);
+}
+
+/* record (or forget) the folders this call created; rel_offset is where the path below the task store starts */
+static HRESULT record_dirs(const struct caller *caller, const WCHAR *full_dir, SIZE_T rel_offset, SIZE_T top_len,
+                           BOOL forget)
+{
+    WCHAR *copy = trimmed_copy(full_dir);
+    SIZE_T len, end;
+    WCHAR saved;
+    HRESULT hr = S_OK;
+
+    if (!copy) return E_OUTOFMEMORY;
+    end = wcslen(copy);
+    for (len = top_len; len <= end && hr == S_OK; len++)
+    {
+        if (len != end && copy[len] != '\\') continue;
+        saved = copy[len];
+        copy[len] = 0;
+        if (forget) schedsvc_folder_forgotten(copy + rel_offset);
+        else hr = schedsvc_folder_recorded(caller, copy + rel_offset);
+        copy[len] = saved;
+    }
+    free(copy);
+    return hr;
+}
+#endif
+
 HRESULT __cdecl SchRpcRegisterTask(const WCHAR *path, const WCHAR *xml, DWORD flags, const WCHAR *sddl,
                                    DWORD task_logon_type, DWORD n_creds, const TASK_USER_CRED *creds,
                                    WCHAR **actual_path, TASK_XML_ERROR_INFO **xml_error_info)
 {
-    WCHAR *full_name = NULL, *relative_path, *norm_path = NULL, *p;
+    WCHAR *full_name = NULL, *relative_path, *norm_path = NULL, *dir = NULL, *p;
     DWORD disposition;
     BOOL existed;
+    unsigned int n_created = 0;
+    SIZE_T top_len = 0;
     struct caller caller;
     HRESULT hr;
 
@@ -228,6 +334,9 @@ HRESULT __cdecl SchRpcRegisterTask(const WCHAR *path, const WCHAR *xml, DWORD fl
         hr = HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE);
         goto done;
     }
+
+    /* a task the service cannot read would only fail at every reload */
+    if (FAILED(hr = schedsvc_validate_xml(xml))) goto done;
 #endif
 
     /* FIXME: assume that validation is performed on the client side */
@@ -319,19 +428,38 @@ HRESULT __cdecl SchRpcRegisterTask(const WCHAR *path, const WCHAR *xml, DWORD fl
     existed = TRUE;
 #endif
 
-    if (path && wcschr(path, '\\'))
-    {
-        /* a task in a folder: create the folder */
-        p = wcsrchr(full_name, '\\');
-        *p = 0;
-        hr = create_directory(full_name);
-        *p = '\\';
-        if (hr != S_OK && hr != HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS))
-        {
 #ifdef __REACTOS__
-            schedsvc_unlock();
-#endif
-            goto done;
+    /* the folders of the task are created only by a call that may create the task, and removed again if it fails */
+    if (path && wcschr(path, '\\') && disposition != OPEN_EXISTING)
+    {
+        if (!(dir = wcsdup(full_name)))
+        {
+            hr = E_OUTOFMEMORY;
+            goto unlock;
+        }
+        *wcsrchr(dir, '\\') = 0;
+        n_created = missing_dirs(dir, &top_len);
+        if (n_created == ~0u)
+        {
+            n_created = 0;
+            hr = E_OUTOFMEMORY;
+            goto unlock;
+        }
+        if (n_created)
+        {
+            if (FAILED(hr = schedsvc_check_folder_quota(&caller, n_created))) goto unlock;
+            hr = create_directory(dir);
+            if (hr != S_OK && hr != HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS))
+            {
+                remove_created_dirs(dir, top_len);
+                goto unlock;
+            }
+            if (FAILED(hr = record_dirs(&caller, dir, relative_path - full_name, top_len, FALSE)))
+            {
+                record_dirs(&caller, dir, relative_path - full_name, top_len, TRUE);
+                remove_created_dirs(dir, top_len);
+                goto unlock;
+            }
         }
     }
 
@@ -339,17 +467,21 @@ HRESULT __cdecl SchRpcRegisterTask(const WCHAR *path, const WCHAR *xml, DWORD fl
     if (hr == S_OK)
     {
         schedsvc_auto_start();
-#ifdef __REACTOS__
         hr = schedsvc_task_registered(&caller, relative_path, xml);
         if (hr != S_OK && !existed) DeleteFileW(full_name); /* no record, no task */
-#endif
         if (hr == S_OK) *actual_path = wcsdup(relative_path);
     }
-#ifdef __REACTOS__
+    if (hr != S_OK && n_created)
+    {
+        record_dirs(&caller, dir, relative_path - full_name, top_len, TRUE);
+        remove_created_dirs(dir, top_len);
+    }
+unlock:
     schedsvc_unlock();
 #endif
 
 done:
+    free(dir);
     free(norm_path);
     free(full_name);
 #ifdef __REACTOS__
@@ -694,25 +826,37 @@ HRESULT __cdecl SchRpcRetrieveTask(const WCHAR *path, const WCHAR *languages, UL
     if (FAILED(hr = schedsvc_begin_call(&caller))) return hr;
     if (!schedsvc_valid_path(path))
         hr = HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
-    else /* the XML of a task is for its owner and the administrators */
-        hr = schedsvc_check_owner(&caller, path);
-    schedsvc_end_call(&caller);
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr))
+    {
+        schedsvc_end_call(&caller);
+        return hr;
+    }
 #endif
     full_name = get_full_name(path, NULL);
-    if (!full_name) return E_OUTOFMEMORY;
+    if (!full_name)
+    {
+        schedsvc_end_call(&caller);
+        return E_OUTOFMEMORY;
+    }
 
-    hr = read_xml(full_name, xml);
+    /* the XML of a task is for its owner and the administrators; the check and the read are one step */
+    schedsvc_lock();
+    hr = schedsvc_check_owner(&caller, path);
+    if (hr == S_OK) hr = read_xml(full_name, xml);
+    schedsvc_unlock();
     if (hr != S_OK) *xml = NULL;
 
+    schedsvc_end_call(&caller);
     free(full_name);
     return hr;
 }
 
 HRESULT __cdecl SchRpcCreateFolder(const WCHAR *path, const WCHAR *sddl, DWORD flags)
 {
-    WCHAR *full_name;
+    WCHAR *full_name, *relative_path;
     struct caller caller;
+    SIZE_T top_len;
+    unsigned int n;
     HRESULT hr;
 
     TRACE("%s,%s,%#lx\n", debugstr_w(path), debugstr_w(sddl), flags);
@@ -721,14 +865,35 @@ HRESULT __cdecl SchRpcCreateFolder(const WCHAR *path, const WCHAR *sddl, DWORD f
 
 #ifdef __REACTOS__
     if (FAILED(hr = schedsvc_begin_call(&caller))) return hr;
-    schedsvc_end_call(&caller);
-    if (!schedsvc_valid_path(path)) return HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
+    if (!schedsvc_valid_path(path))
+    {
+        schedsvc_end_call(&caller);
+        return HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
+    }
 #endif
-    full_name = get_full_name(path, NULL);
-    if (!full_name) return E_OUTOFMEMORY;
+    full_name = get_full_name(path, &relative_path);
+    if (!full_name)
+    {
+        schedsvc_end_call(&caller);
+        return E_OUTOFMEMORY;
+    }
 
-    hr = create_directory(full_name);
+    schedsvc_lock();
+    n = missing_dirs(full_name, &top_len);
+    if (n == ~0u)
+        hr = E_OUTOFMEMORY;
+    else if (!n)
+        hr = HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS);
+    else if (SUCCEEDED(hr = schedsvc_check_folder_quota(&caller, n)))
+    {
+        hr = create_directory(full_name);
+        if (hr == S_OK && FAILED(hr = record_dirs(&caller, full_name, relative_path - full_name, top_len, FALSE)))
+            record_dirs(&caller, full_name, relative_path - full_name, top_len, TRUE);
+        if (hr != S_OK) remove_created_dirs(full_name, top_len);
+    }
+    schedsvc_unlock();
 
+    schedsvc_end_call(&caller);
     free(full_name);
     return hr;
 }
@@ -1096,6 +1261,7 @@ HRESULT __cdecl SchRpcDelete(const WCHAR *path, DWORD flags)
     {
         /* a folder has no owner; only an empty one goes */
         if (!RemoveDirectoryW(full_name)) hr = HRESULT_FROM_WIN32(GetLastError());
+        else schedsvc_folder_forgotten(path);
     }
     else
     {
@@ -1156,15 +1322,24 @@ HRESULT __cdecl SchRpcGetTaskInfo(const WCHAR *path, DWORD flags, DWORD *enabled
     if (FAILED(hr = schedsvc_begin_call(&caller))) return hr;
     if (!schedsvc_valid_path(path))
         hr = HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
-    else
-        hr = schedsvc_check_owner(&caller, path);
-    schedsvc_end_call(&caller);
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr))
+    {
+        schedsvc_end_call(&caller);
+        return hr;
+    }
 #endif
     full_name = get_full_name(path, NULL);
-    if (!full_name) return E_OUTOFMEMORY;
+    if (!full_name)
+    {
+        schedsvc_end_call(&caller);
+        return E_OUTOFMEMORY;
+    }
 
-    hr = read_xml(full_name, &xml);
+    schedsvc_lock();
+    hr = schedsvc_check_owner(&caller, path);
+    if (hr == S_OK) hr = read_xml(full_name, &xml);
+    schedsvc_unlock();
+    schedsvc_end_call(&caller);
     free(full_name);
     if (hr != S_OK) return hr;
     hr = read_task_info_from_xml(xml, &info);

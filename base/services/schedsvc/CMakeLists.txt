@@ -23,5 +23,5 @@ add_library(schedsvc MODULE
 set_module_type(schedsvc win32dll UNICODE)
 target_link_libraries(schedsvc uuid wine pseh)
 add_dependencies(schedsvc wineheaders) # schrpc.h
-add_importlibs(schedsvc advapi32 rpcrt4 ole32 oleaut32 xmllite userenv msvcrt kernel32_vista kernel32 ntdll)
+add_importlibs(schedsvc advapi32 netapi32 rpcrt4 ole32 oleaut32 xmllite userenv msvcrt kernel32_vista kernel32 ntdll)
 add_cd_file(TARGET schedsvc DESTINATION reactos/system32 FOR all)

@@ -45,6 +45,7 @@
 #include <tlhelp32.h>
 #include <userenv.h>
 #include <rpc.h>
+#include <lm.h>
 #include <pseh/pseh2.h>
 #include <xmllite.h>
 #include <taskschd.h>
@@ -74,6 +75,9 @@ VOID TaskSchedulerStop(VOID);
 #define MAX_PATH_DEPTH 16
 #define MAX_TASKS_PER_USER 64
 #define MAX_TASKS_TOTAL 1024
+#define MAX_FOLDERS_PER_USER 32
+#define MAX_FOLDERS_TOTAL 256
+#define FOLDERS_KEY L"SYSTEM\\CurrentControlSet\\Services\\Schedule\\TaskFolders"
 #define MAX_INSTANCES 64
 /* the longest period, delay or repetition kept; longer ones are clamped */
 #define MAX_SECONDS (100ULL * 365 * 86400)
@@ -130,6 +134,8 @@ static struct list tasks = LIST_INIT(tasks);
 static struct logon logons[64];
 static unsigned int n_logons;
 static HANDLE stop_event, update_event, scheduler_thread;
+static CRITICAL_SECTION *store_cs, *changes_cs;
+static CRITICAL_SECTION *get_cs(CRITICAL_SECTION **slot);
 
 static ULONGLONG get_time(void)
 {
@@ -389,7 +395,8 @@ static void element_text(struct task *task, const WCHAR **names, unsigned int de
             }
             else if (!wcscmp(name, L"EndBoundary"))
             {
-                if (!parse_datetime(value, &trigger->end)) trigger->end = 0;
+                /* an end that cannot be read must not leave the trigger without one */
+                if (!parse_datetime(value, &trigger->end)) trigger->supported = FALSE;
             }
             else if (!wcscmp(name, L"Delay")) trigger->delay = parse_duration(value);
             else if (!wcscmp(name, L"UserId"))
@@ -459,6 +466,7 @@ struct parse_state
 {
     WCHAR *names[MAX_DEPTH];
     unsigned int depth, skip;
+    BOOL root;
 };
 
 /* reads every node; the elements go to begin_element and element_text */
@@ -466,9 +474,9 @@ static HRESULT parse_nodes(struct task *task, IXmlReader *reader, struct parse_s
 {
     XmlNodeType type;
     const WCHAR *name, *value;
-    HRESULT hr = S_OK;
+    HRESULT hr = S_OK, read = S_OK;
 
-    while (SUCCEEDED(hr) && IXmlReader_Read(reader, &type) == S_OK)
+    while (SUCCEEDED(hr) && (read = IXmlReader_Read(reader, &type)) == S_OK)
     {
         switch (type)
         {
@@ -488,6 +496,7 @@ static HRESULT parse_nodes(struct task *task, IXmlReader *reader, struct parse_s
                 break;
             }
             state->depth++;
+            state->root = TRUE;
             if (wcscmp(state->names[0], L"Task"))
             {
                 hr = SCHED_E_MALFORMEDXML;
@@ -513,6 +522,8 @@ static HRESULT parse_nodes(struct task *task, IXmlReader *reader, struct parse_s
             break;
         }
     }
+    /* the document has to end where a document ends, and have a root element */
+    if (SUCCEEDED(hr) && (read != S_FALSE || state->depth || !state->root)) hr = SCHED_E_MALFORMEDXML;
     return hr;
 }
 
@@ -598,6 +609,18 @@ static HRESULT parse_task_xml(struct task *task, const WCHAR *xml)
     }
     if (FAILED(hr)) WARN("%s: failed to parse the task, hr %#lx\n", debugstr_w(task->path), hr);
     return FAILED(hr) ? hr : S_OK;
+}
+
+/* SCHED_E_MALFORMEDXML unless the service can read the task XML */
+HRESULT schedsvc_validate_xml(const WCHAR *xml)
+{
+    struct task *task = calloc(1, sizeof(*task));
+    HRESULT hr;
+
+    if (!task) return E_OUTOFMEMORY;
+    hr = parse_task_xml(task, xml);
+    free_task(task);
+    return hr == E_OUTOFMEMORY ? hr : (hr == S_OK ? S_OK : SCHED_E_MALFORMEDXML);
 }
 
 /* the TaskCache key name of a task path: no leading separator, '\' and '/' become '|' */
@@ -901,7 +924,16 @@ static HANDLE start_action(const struct task *task, const struct action *action,
         wcscat(cmdline, arguments);
     }
 
-    CreateEnvironmentBlock(&env, token, FALSE);
+    /* a task of a user never gets the environment of this service */
+    if (!CreateEnvironmentBlock(&env, token, FALSE) && token)
+    {
+        ERR("task %s: no environment for its user (%lu), not starting it\n", debugstr_w(task->path), GetLastError());
+        free(command);
+        free(arguments);
+        free(directory);
+        free(cmdline);
+        return NULL;
+    }
     if (token)
     {
         si.lpDesktop = L"winsta0\\default";
@@ -932,6 +964,40 @@ static HANDLE start_action(const struct task *task, const struct action *action,
     return ret ? pi.hProcess : NULL;
 }
 
+/*
+ * TRUE if the account is LocalSystem or a member of BUILTIN\\Administrators right now, from the SAM
+ * (NetUserGetLocalGroups; NetLocalGroupGetMembers faults after a few calls on this system)
+ */
+static BOOL sid_is_admin_now(PSID sid)
+{
+    BYTE admins[SECURITY_MAX_SID_SIZE];
+    WCHAR group[256], user[256], domain[256];
+    DWORD size = sizeof(admins), glen = ARRAYSIZE(group), ulen = ARRAYSIZE(user), dlen = ARRAYSIZE(domain);
+    SID_NAME_USE use;
+    LOCALGROUP_USERS_INFO_0 *groups = NULL;
+    DWORD read = 0, total = 0, i;
+    NET_API_STATUS status;
+    BOOL found = FALSE;
+
+    if (IsWellKnownSid(sid, WinLocalSystemSid)) return TRUE;
+    if (!CreateWellKnownSid(WinBuiltinAdministratorsSid, NULL, admins, &size) ||
+        !LookupAccountSidW(NULL, admins, group, &glen, domain, &dlen, &use))
+        return FALSE;
+    dlen = ARRAYSIZE(domain);
+    if (!LookupAccountSidW(NULL, sid, user, &ulen, domain, &dlen, &use) || use != SidTypeUser) return FALSE;
+
+    status = NetUserGetLocalGroups(NULL, user, 0, 0, (BYTE **)&groups, MAX_PREFERRED_LENGTH, &read, &total);
+    if (status != NERR_Success)
+    {
+        WARN("cannot list the groups of %s (%lu)\n", debugstr_w(user), status);
+        return FALSE;
+    }
+    for (i = 0; i < read; i++)
+        if (!wcsicmp(groups[i].lgrui0_name, group)) found = TRUE;
+    NetApiBufferFree(groups);
+    return found;
+}
+
 /* the account a task runs as: its principal, else the registering user */
 static PSID task_identity(const struct task *task)
 {
@@ -952,6 +1018,20 @@ static HANDLE run_task(struct task *task)
     {
         WARN("task %s: no account to run as\n", debugstr_w(task->path));
         return NULL;
+    }
+
+    /*
+     * A task of any account but the registrant's own runs only if the registrant was an administrator
+     * when registering it and still is: the flag recorded then is not enough, an administrator that
+     * was demoted since must not keep running tasks as others.
+     */
+    if (!IsWellKnownSid(sid, WinLocalServiceSid) && !IsWellKnownSid(sid, WinNetworkServiceSid) &&
+        !(task->registrant && EqualSid(sid, task->registrant)) &&
+        (!task->privileged || !task->registrant || !sid_is_admin_now(task->registrant)))
+    {
+        WARN("task %s: its registrant is not an administrator (any more), not running it as another account\n",
+             debugstr_w(task->path));
+        goto done;
     }
 
     if (IsWellKnownSid(sid, WinLocalSystemSid))
@@ -1156,6 +1236,72 @@ static ULONGLONG run_due_tasks(ULONGLONG last, ULONGLONG now)
     return next;
 }
 
+/* the tasks registered or deleted since the scheduler last looked: it reloads those only */
+struct change
+{
+    struct list entry;
+    WCHAR *name;    /* TaskCache key name */
+};
+
+static struct list changes = LIST_INIT(changes);
+
+static void queue_change(const WCHAR *name)
+{
+    struct change *change = malloc(sizeof(*change));
+
+    if (change && (change->name = wcsdup(name)))
+    {
+        EnterCriticalSection(get_cs(&changes_cs));
+        list_add_tail(&changes, &change->entry);
+        LeaveCriticalSection(get_cs(&changes_cs));
+    }
+    else free(change);
+    if (update_event) SetEvent(update_event);
+}
+
+static void apply_changes(void)
+{
+    struct list local = LIST_INIT(local);
+    struct change *change, *next;
+    struct task *task, *old, *old_next;
+    WCHAR *path, *p;
+    HKEY cache;
+    BOOL have_cache;
+
+    EnterCriticalSection(get_cs(&changes_cs));
+    list_move_tail(&local, &changes);
+    LeaveCriticalSection(get_cs(&changes_cs));
+
+    have_cache = !RegOpenKeyExW(HKEY_LOCAL_MACHINE, TASKCACHE_KEY, 0, KEY_READ, &cache);
+    LIST_FOR_EACH_ENTRY_SAFE(change, next, &local, struct change, entry)
+    {
+        list_remove(&change->entry);
+        task = have_cache ? load_task(cache, change->name) : NULL;
+        if ((path = wcsdup(change->name)))
+        {
+            for (p = path; *p; p++) if (*p == '|') *p = '\\';
+            LIST_FOR_EACH_ENTRY_SAFE(old, old_next, &tasks, struct task, entry)
+            {
+                if (wcsicmp(old->path, path)) continue;
+                /* keep what the previous copy of the task was doing */
+                if (task)
+                {
+                    task->process = old->process;
+                    task->pending = old->pending;
+                    old->process = NULL;
+                }
+                list_remove(&old->entry);
+                free_task(old);
+            }
+            free(path);
+        }
+        if (task) list_add_tail(&tasks, &task->entry);
+        free(change->name);
+        free(change);
+    }
+    if (have_cache) RegCloseKey(cache);
+}
+
 static DWORD WINAPI scheduler_thread_proc(void *arg)
 {
     ULONGLONG last, now, next;
@@ -1190,7 +1336,7 @@ static DWORD WINAPI scheduler_thread_proc(void *arg)
             /* finish the old schedule up to now, then switch to the new one */
             run_due_tasks(last, now);
             last = now;
-            load_tasks();
+            apply_changes();
         }
         scan_logons(now, TRUE);
         next = run_due_tasks(last, now);
@@ -1207,32 +1353,31 @@ static DWORD WINAPI scheduler_thread_proc(void *arg)
     return 0;
 }
 
-static CRITICAL_SECTION *get_store_lock(void)
+static CRITICAL_SECTION *get_cs(CRITICAL_SECTION **slot)
 {
-    static CRITICAL_SECTION *lock;
     CRITICAL_SECTION *new;
 
-    if (!lock && (new = malloc(sizeof(*new))))
+    if (!*slot && (new = malloc(sizeof(*new))))
     {
         InitializeCriticalSection(new);
-        if (InterlockedCompareExchangePointer((void **)&lock, new, NULL))
+        if (InterlockedCompareExchangePointer((void **)slot, new, NULL))
         {
             DeleteCriticalSection(new);
             free(new);
         }
     }
-    return lock;
+    return *slot;
 }
 
 /* one writer at a time: the check that a task may be replaced or deleted and the change itself */
 void schedsvc_lock(void)
 {
-    EnterCriticalSection(get_store_lock());
+    EnterCriticalSection(get_cs(&store_cs));
 }
 
 void schedsvc_unlock(void)
 {
-    LeaveCriticalSection(get_store_lock());
+    LeaveCriticalSection(get_cs(&store_cs));
 }
 
 /* TRUE if the binding of a call came in over ncalrpc: no other transport, so no remote caller */
@@ -1373,6 +1518,74 @@ HRESULT schedsvc_check_quota(const struct caller *caller)
     return S_OK;
 }
 
+/* who created the folders of the task store: a key per folder, the SID of its creator */
+HRESULT schedsvc_check_folder_quota(const struct caller *caller, unsigned int n_new)
+{
+    WCHAR name[256], *registrant;
+    DWORD index, len, mine = 0, total = 0;
+    HKEY folders, key;
+
+    if (!RegOpenKeyExW(HKEY_LOCAL_MACHINE, FOLDERS_KEY, 0, KEY_READ, &folders))
+    {
+        for (index = 0; len = ARRAYSIZE(name), !RegEnumKeyExW(folders, index, name, &len, NULL, NULL, NULL, NULL); index++)
+        {
+            total++;
+            if (caller->privileged || RegOpenKeyExW(folders, name, 0, KEY_READ, &key)) continue;
+            if ((registrant = reg_get_string(key, L"Registrant")))
+            {
+                if (caller->sid && !wcsicmp(registrant, caller->sid)) mine++;
+                free(registrant);
+            }
+            RegCloseKey(key);
+        }
+        RegCloseKey(folders);
+    }
+    if (total + n_new > MAX_FOLDERS_TOTAL || (!caller->privileged && mine + n_new > MAX_FOLDERS_PER_USER))
+    {
+        WARN("too many folders (%lu, %lu of %s, %u new)\n", total, mine, debugstr_w(caller->sid), n_new);
+        return HRESULT_FROM_WIN32(ERROR_NOT_ENOUGH_QUOTA);
+    }
+    return S_OK;
+}
+
+HRESULT schedsvc_folder_recorded(const struct caller *caller, const WCHAR *path)
+{
+    WCHAR *name = cache_name(path);
+    HKEY folders, key;
+    LONG ret;
+
+    if (!name) return E_INVALIDARG;
+    ret = RegCreateKeyExW(HKEY_LOCAL_MACHINE, FOLDERS_KEY, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &folders, NULL);
+    if (!ret)
+    {
+        ret = RegCreateKeyExW(folders, name, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &key, NULL);
+        if (!ret)
+        {
+            ret = RegSetValueExW(key, L"Registrant", 0, REG_SZ, (const BYTE *)caller->sid,
+                                 (wcslen(caller->sid) + 1) * sizeof(WCHAR));
+            RegCloseKey(key);
+            if (ret) RegDeleteKeyW(folders, name);
+        }
+        RegCloseKey(folders);
+    }
+    free(name);
+    return ret ? HRESULT_FROM_WIN32(ret) : S_OK;
+}
+
+void schedsvc_folder_forgotten(const WCHAR *path)
+{
+    WCHAR *name = cache_name(path);
+    HKEY folders;
+
+    if (!name) return;
+    if (!RegOpenKeyExW(HKEY_LOCAL_MACHINE, FOLDERS_KEY, 0, KEY_ALL_ACCESS, &folders))
+    {
+        RegDeleteKeyW(folders, name);
+        RegCloseKey(folders);
+    }
+    free(name);
+}
+
 HRESULT schedsvc_task_registered(const struct caller *caller, const WCHAR *path, const WCHAR *xml)
 {
     WCHAR *name;
@@ -1403,13 +1616,14 @@ HRESULT schedsvc_task_registered(const struct caller *caller, const WCHAR *path,
         }
         RegCloseKey(cache);
     }
+    /* even a failed record changed or dropped what the scheduler has */
+    queue_change(name);
     free(name);
     if (ret)
     {
         ERR("failed to record task %s (%ld)\n", debugstr_w(path), ret);
         return HRESULT_FROM_WIN32(ret);
     }
-    if (update_event) SetEvent(update_event);
     return S_OK;
 }
 
@@ -1426,14 +1640,14 @@ HRESULT schedsvc_task_deleted(const WCHAR *path)
         ret = RegDeleteKeyW(cache, name);
         RegCloseKey(cache);
     }
-    free(name);
     if (ret == ERROR_FILE_NOT_FOUND || ret == ERROR_PATH_NOT_FOUND) ret = ERROR_SUCCESS;
+    if (!ret) queue_change(name);
+    free(name);
     if (ret)
     {
         ERR("failed to remove the record of %s (%ld)\n", debugstr_w(path), ret);
         return HRESULT_FROM_WIN32(ret);
     }
-    if (update_event) SetEvent(update_event);
     return S_OK;
 }
 
