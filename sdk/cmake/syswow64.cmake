@@ -154,7 +154,7 @@ function(setup_syswow64)
         -DENABLE_ROSTESTS:BOOL=OFF)
     # Settings that change what the user-mode files are or how they are built
     foreach(_var CMAKE_BUILD_TYPE DLL_EXPORT_VERSION ENABLE_CCACHE SEPARATE_DBG NO_ROSSYM
-                 OPTIMIZE LTCG DBG KDBG _WINKD_ GDB USE_DUMMY_PSEH STACK_PROTECTOR PCH I18N_LANG)
+                 OPTIMIZE LTCG DBG KDBG _WINKD_ GDB USE_DUMMY_PSEH STACK_PROTECTOR PCH I18N_LANG VERBUMP_TIER)
         if(DEFINED ${_var})
             list(APPEND _args "-D${_var}=${${_var}}")
         endif()

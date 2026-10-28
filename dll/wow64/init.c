@@ -285,11 +285,21 @@ static NTSTATUS MapNtdll(PVOID *Base)
     if (NT_SUCCESS(Status))
     {
         PIMAGE_NT_HEADERS32 Header = RtlImageNtHeader(*Base);
+        PVOID Preferred;
         if (Header->FileHeader.Machine != IMAGE_FILE_MACHINE_I386 ||
             Header->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC)
             return STATUS_INVALID_IMAGE_FORMAT;
-        if ((ULONG_PTR)*Base != Header->OptionalHeader.ImageBase)
-            return STATUS_CONFLICTING_ADDRESSES;
+        Preferred = ULongToPtr(Header->OptionalHeader.ImageBase);
+        if (*Base != Preferred)
+        {
+            /* The kernel maps the i386 ntdll at its base when it creates the
+             * process, and the creator may have patched that view (system-call
+             * hooks of a sandbox): run it, not this copy */
+            if (!NT_SUCCESS(NtAreMappedFilesTheSame(Preferred, *Base)))
+                return STATUS_CONFLICTING_ADDRESSES;
+            NtUnmapViewOfSection(NtCurrentProcess(), *Base);
+            *Base = Preferred;
+        }
     }
     return Status;
 }

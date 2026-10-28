@@ -178,6 +178,14 @@ PsLocateSystemDll(
     VOID
 );
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+VOID
+NTAPI
+PspMapSystemDll32(
+    IN PEPROCESS Process
+);
+#endif
+
 VOID
 NTAPI
 PsChangeQuantumTable(

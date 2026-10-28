@@ -1944,6 +1944,8 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         {
         case ProcessDefaultHardErrorMode: case ProcessExecuteFlags: case ProcessPriorityClass:
         case ProcessSessionInformation: case ProcessBreakOnTermination: case ProcessCookie:
+        case ProcessHandleCount: case 58 /* ProcessHandleTable, Windows 8.1 */:
+            /* A ULONG, and the handle values as a ULONG array */
             return NtQueryInformationProcess(H(0), a[1], P(2), a[3], P(4));
         case ProcessIoCounters: case ProcessTimes: case ProcessVmCounters: case ProcessDeviceMap:
         case ProcessImageFileName: case ProcessQuotaLimits:
@@ -1963,6 +1965,18 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         {
         case ProcessDefaultHardErrorMode: case ProcessExecuteFlags: case ProcessPriorityClass:
             return NtSetInformationProcess(H(0), a[1], P(2), a[3]);
+        case ProcessAccessToken:
+        {
+            /* PROCESS_ACCESS_TOKEN: the primary token and the initial thread of a
+             * suspended child (CreateProcessAsUser), two guest handles */
+            PROCESS_ACCESS_TOKEN Native;
+            const ULONG *In = P(2);
+            if (a[3] != 2 * sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+            if (!a[2] || !GuestSpan(a[2], a[3])) return STATUS_ACCESS_VIOLATION;
+            Native.Token = HANDLE32(In[0]);
+            Native.Thread = HANDLE32(In[1]);
+            return NtSetInformationProcess(H(0), a[1], &Native, sizeof(Native));
+        }
         case ProcessQuotaLimits:
         {
             WOW64_QUOTA_LIMITS_EX Guest;

@@ -258,6 +258,11 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
                     -DDXGKDDI_INTERFACE_VERSION=0x1052 # Vista
                     -DDLL_EXPORT_VERSION=${DLL_EXPORT_VERSION})
 
+    # Optional override of the system version tier that ntverp.h defaults to
+    if(DEFINED VERBUMP_TIER)
+        add_definitions(-DVERBUMP_TIER=${VERBUMP_TIER})
+    endif()
+
     # Arch Options
     if(ARCH STREQUAL "i386")
         # clang-cl defines this one for itself

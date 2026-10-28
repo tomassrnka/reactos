@@ -888,6 +888,44 @@ MmCreatePeb(IN PEPROCESS Process,
         _SEH2_END;
     }
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    /* Like Windows, fill the PEB32 of a WOW64 process from the PEB, so the
+     * creator of a suspended process finds its image base there (the Chromium
+     * sandbox reads it through the PEB address of ProcessBasicInformation).
+     * wow64.dll completes it when the process starts. */
+    if (Process->Wow64Process)
+    {
+        PEB32 *Peb32 = PS_GET_PEB32_FROM_PEB(Peb);
+
+        _SEH2_TRY
+        {
+            RtlZeroMemory(Peb32, sizeof(*Peb32));
+            Peb32->InheritedAddressSpace = Peb->InheritedAddressSpace;
+            Peb32->BeingDebugged = Peb->BeingDebugged;
+            Peb32->Mutant = (ULONG)(ULONG_PTR)Peb->Mutant;
+            Peb32->ImageBaseAddress = (ULONG)(ULONG_PTR)Peb->ImageBaseAddress;
+            Peb32->OSMajorVersion = Peb->OSMajorVersion;
+            Peb32->OSMinorVersion = Peb->OSMinorVersion;
+            Peb32->OSBuildNumber = Peb->OSBuildNumber;
+            Peb32->OSPlatformId = Peb->OSPlatformId;
+            Peb32->OSCSDVersion = Peb->OSCSDVersion;
+            Peb32->NumberOfProcessors = Peb->NumberOfProcessors;
+            Peb32->NtGlobalFlag = Peb->NtGlobalFlag;
+            Peb32->SessionId = Peb->SessionId;
+            Peb32->ImageSubsystem = Peb->ImageSubsystem;
+            Peb32->ImageSubsystemMajorVersion = Peb->ImageSubsystemMajorVersion;
+            Peb32->ImageSubsystemMinorVersion = Peb->ImageSubsystemMinorVersion;
+            Peb32->ImageProcessAffinityMask = (ULONG)Peb->ImageProcessAffinityMask;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            KeDetachProcess();
+            _SEH2_YIELD(return _SEH2_GetExceptionCode());
+        }
+        _SEH2_END;
+    }
+#endif
+
     //
     // Detach from the Process
     //
