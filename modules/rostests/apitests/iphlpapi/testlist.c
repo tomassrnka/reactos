@@ -17,6 +17,7 @@ extern void func_icmp(void);
 extern void func_IpInterface(void);
 extern void func_IpTables2(void);
 extern void func_NotifyAddrChange(void);
+extern void func_NotifyChanges(void);
 extern void func_NotifyIpInterfaceChange(void);
 extern void func_NotifyRouteChange2(void);
 extern void func_SendARP(void);
@@ -39,6 +40,7 @@ const struct test winetest_testlist[] =
     { "IpInterface",               func_IpInterface },
     { "IpTables2",                  func_IpTables2 },
     { "NotifyAddrChange",          func_NotifyAddrChange },
+    { "NotifyChanges",              func_NotifyChanges },
     { "NotifyIpInterfaceChange",    func_NotifyIpInterfaceChange },
     { "NotifyRouteChange2",         func_NotifyRouteChange2 },
     { "SendARP",                    func_SendARP },

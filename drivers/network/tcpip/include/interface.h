@@ -18,6 +18,8 @@ PIP_INTERFACE IPReferenceDefaultInterface(VOID);
 /* tcpip/addrchange.c: wake the IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST waiters */
 VOID AddrChangeInitialize(VOID);
 VOID AddrChangeNotify(VOID);
+VOID RouteChangeNotify(VOID);
+NTSTATUS DispRouteChangeNotifyRequest(PIRP Irp);
 NTSTATUS DispAddrChangeNotifyRequest(PIRP Irp);
 NTSTATUS DispAddrChangeCancelRequest(PIRP Irp);
 NTSTATUS NTAPI TiDispatchCleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp);

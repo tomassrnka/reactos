@@ -46,6 +46,8 @@ typedef struct _ADDR_NOTIFY {
 
 static ADDR_NOTIFY *NotifyList;
 static CRITICAL_SECTION NotifyLock;
+void NotifyRegistrationInit(void);
+void NotifyRegistrationFree(void);
 
 BOOL WINAPI DllMain (HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 {
@@ -53,11 +55,13 @@ BOOL WINAPI DllMain (HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
     case DLL_PROCESS_ATTACH:
       DisableThreadLibraryCalls( hinstDLL );
       InitializeCriticalSection(&NotifyLock);
+      NotifyRegistrationInit();
       interfaceMapInit();
       break;
 
     case DLL_PROCESS_DETACH:
       interfaceMapFree();
+      NotifyRegistrationFree();
       DeleteCriticalSection(&NotifyLock);
       break;
   }
@@ -2911,87 +2915,6 @@ DWORD WINAPI ConvertLengthToIpv4Mask(ULONG MaskLength, PULONG Mask)
   /* the mask is in network byte order */
   *Mask = MaskLength ? htonl(0xffffffffUL << (32 - MaskLength)) : 0;
   return NO_ERROR;
-}
-
-/******************************************************************
- *    NotifyIpInterfaceChange (IPHLPAPI.@)
- *
- * Register a callback for changes of the IP interfaces.
- *
- * NOTES
- *  The IP helper here cannot see interface changes (NotifyAddrChange does
- *  not either), so the registration fails with ERROR_NOT_SUPPORTED instead
- *  of returning a handle whose callback never runs.
- */
-DWORD WINAPI NotifyIpInterfaceChange(ADDRESS_FAMILY Family, PVOID Callback, PVOID CallerContext,
-                                     BOOLEAN InitialNotification, HANDLE *NotificationHandle)
-{
-  if ((Family != AF_UNSPEC && Family != AF_INET && Family != AF_INET6) || !Callback || !NotificationHandle)
-    return ERROR_INVALID_PARAMETER;
-
-  FIXME("(Family %u, Callback %p, Context %p, Initial %d): interface changes are not reported\n",
-        Family, Callback, CallerContext, InitialNotification);
-  return ERROR_NOT_SUPPORTED;
-}
-
-
-/******************************************************************
- *    NotifyRouteChange2 (IPHLPAPI.@)
- *
- * Register a callback for changes of the IP routing table.
- *
- * NOTES
- *  See NotifyIpInterfaceChange: route changes cannot be seen here, so the
- *  registration fails with ERROR_NOT_SUPPORTED.
- */
-DWORD WINAPI NotifyRouteChange2(ADDRESS_FAMILY Family, PVOID Callback, PVOID CallerContext,
-                                BOOLEAN InitialNotification, HANDLE *NotificationHandle)
-{
-  if ((Family != AF_UNSPEC && Family != AF_INET && Family != AF_INET6) || !Callback || !NotificationHandle)
-    return ERROR_INVALID_PARAMETER;
-
-  FIXME("(Family %u, Callback %p, Context %p, Initial %d): route changes are not reported\n",
-        Family, Callback, CallerContext, InitialNotification);
-  return ERROR_NOT_SUPPORTED;
-}
-
-
-/******************************************************************
- *    NotifyUnicastIpAddressChange (IPHLPAPI.@)
- *
- * Register a callback for changes of the unicast IP addresses.
- *
- * NOTES
- *  See NotifyIpInterfaceChange: address changes cannot be seen here, so the
- *  registration fails with ERROR_NOT_SUPPORTED.
- */
-DWORD WINAPI NotifyUnicastIpAddressChange(ADDRESS_FAMILY Family, PVOID Callback, PVOID CallerContext,
-                                          BOOLEAN InitialNotification, HANDLE *NotificationHandle)
-{
-  if ((Family != AF_UNSPEC && Family != AF_INET && Family != AF_INET6) || !Callback || !NotificationHandle)
-    return ERROR_INVALID_PARAMETER;
-
-  FIXME("(Family %u, Callback %p, Context %p, Initial %d): address changes are not reported\n",
-        Family, Callback, CallerContext, InitialNotification);
-  return ERROR_NOT_SUPPORTED;
-}
-
-
-/******************************************************************
- *    CancelMibChangeNotify2 (IPHLPAPI.@)
- *
- * Deregister a change notification.
- *
- * NOTES
- *  No notification can be registered (see NotifyIpInterfaceChange), so no
- *  handle is valid.
- */
-DWORD WINAPI CancelMibChangeNotify2(HANDLE NotificationHandle)
-{
-  if (!NotificationHandle)
-    return ERROR_INVALID_PARAMETER;
-
-  return ERROR_INVALID_HANDLE;
 }
 
 /******************************************************************

@@ -18,6 +18,7 @@ list(APPEND SOURCE
     luid.c
     media.c
     netio.c
+    notify.c
     registry.c
     resinfo_reactos.c
     route_reactos.c

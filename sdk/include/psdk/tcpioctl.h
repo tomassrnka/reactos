@@ -53,6 +53,9 @@
 /* Completes the waiting IOCTL_IP_ADDCHANGE_NOTIFY_REQUESTs of the file object with STATUS_CANCELLED */
 #define IOCTL_IP_ADDCHANGE_CANCEL_REQUEST \
     _TCP_CTL_CODE(0x18, METHOD_BUFFERED, FILE_ANY_ACCESS)
+/* Pends until the IPv4 route table changes (no input, no output); the cancel request above cancels it too */
+#define IOCTL_IP_ROUTECHANGE_NOTIFY_REQUEST \
+    _TCP_CTL_CODE(0x19, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #endif
 
 #define IOCTL_ICMP_ECHO_REQUEST \
