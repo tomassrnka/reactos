@@ -611,10 +611,21 @@ static HRESULT create_surrogate_server(REFCLSID rclsid, HANDLE *process)
     {
         TRACE("No value for DllSurrogate key\n");
 
-        if ((sizeof(void *) == 8 || is_wow64) && opposite == KEY_WOW64_32KEY)
+        /* The surrogate matches the bitness of the registry view the class was found in. */
+        if (is_opposite && arch == 64)
+        {
             GetSystemWow64DirectoryW(command, MAX_PATH - ARRAY_SIZE(L"\\dllhost.exe"));
+        }
+        else if (is_opposite)
+        {
+            /* 32-bit client, 64-bit class: the native System32 (not redirected, see below) */
+            GetWindowsDirectoryW(command, MAX_PATH - ARRAY_SIZE(L"\\system32\\dllhost.exe"));
+            wcscat(command, L"\\system32");
+        }
         else
+        {
             GetSystemDirectoryW(command, MAX_PATH - ARRAY_SIZE(L"\\dllhost.exe"));
+        }
 
         wcscat(command, L"\\dllhost.exe");
     }
