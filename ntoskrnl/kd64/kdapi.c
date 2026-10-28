@@ -1978,6 +1978,16 @@ KdExitDebugger(IN BOOLEAN Enable)
         KdTimerStart = KeQueryPerformanceCounter(NULL);
     }
 
+    /*
+     * The time slip DPC is only set up once the debugger structures have been
+     * initialized by KdInitSystem(). We can get here without that (e.g. from
+     * KdRefreshDebuggerNotPresent() on a kernel booted without /DEBUG, where
+     * KdPitchDebugger is still FALSE): queueing the zeroed DPC would call a
+     * NULL deferred routine.
+     */
+    if (!KdpDebuggerStructuresInitialized)
+        return;
+
     /* Check if a Time Slip was on queue */
     TimeSlip = InterlockedIncrement(&KdpTimeSlipPending);
     if (TimeSlip == 1)
@@ -2293,6 +2303,16 @@ KdSystemDebugControl(
 #endif
         default:
             break;
+    }
+
+    /*
+     * Windows Vista and later refuse every command, supported or not,
+     * when no kernel debugger is active.
+     */
+    if ((NtMajorVersion >= 6) &&
+        (KdPitchDebugger || KdDebuggerNotPresent))
+    {
+        return STATUS_DEBUGGER_INACTIVE;
     }
 
     switch (Command)

@@ -371,9 +371,11 @@ QlSwapToOwnBlockEx(
     ok_eq_hex(Status, STATUS_SUCCESS);
 
     /*
-     * A new block must start with no usage and nothing waiting to be returned.
-     * Report any garbage, then zero it so the rest of the test can still run
-     * on a kernel that leaves the block uninitialized (no-op on a fixed one).
+     * A new block starts at the usage of the process and with nothing waiting
+     * to be returned. Report any garbage and clear Return. The usage must not
+     * be touched: other threads charge objects to this block (Process == NULL)
+     * while the test runs, and wiping the seeded usage loses those charges, so
+     * their return underflows the block later (bugcheck 0x21 after the test).
      */
     {
         PEPROCESS_QUOTA_BLOCK N = Process->QuotaBlock;
@@ -386,7 +388,6 @@ QlSwapToOwnBlockEx(
             /* A new private block is seeded with the process' own usage, not zero. */
             ok_eq_size(N->QuotaEntry[t].Usage, Process->QuotaUsage[t]);
             ok_eq_size(N->QuotaEntry[t].Return, 0);
-            N->QuotaEntry[t].Usage = 0;
             N->QuotaEntry[t].Return = 0;
         }
     }
