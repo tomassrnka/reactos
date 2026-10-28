@@ -120,11 +120,10 @@ KdbpKdbTrapFrameFromKernelStack(
     PVOID KernelStack,
     PKDB_KTRAP_FRAME KdbTrapFrame)
 {
-    ULONG_PTR *StackPtr;
-
     RtlZeroMemory(KdbTrapFrame, sizeof(KDB_KTRAP_FRAME));
-    StackPtr = (ULONG_PTR *) KernelStack;
 #ifdef _M_IX86
+    ULONG_PTR *StackPtr = (ULONG_PTR *)KernelStack;
+
     KdbTrapFrame->Ebp = StackPtr[3];
     KdbTrapFrame->Edi = StackPtr[4];
     KdbTrapFrame->Esi = StackPtr[5];
@@ -136,6 +135,44 @@ KdbpKdbTrapFrameFromKernelStack(
     KdbTrapFrame->SegDs = KGDT_R0_DATA;
     KdbTrapFrame->SegEs = KGDT_R0_DATA;
     KdbTrapFrame->SegGs = KGDT_R0_DATA;
+#elif defined(_M_AMD64)
+    /*
+     * KernelStack points at the KSWITCH_FRAME that KiSwapContextInternal left
+     * behind. Its return address is inside KiSwapContext, whose frame is a
+     * KEXCEPTION_FRAME holding the non-volatile registers (the unwind info of
+     * KiSwapContext describes exactly that), so describe the thread as being
+     * in KiSwapContext right after the call and let RtlVirtualUnwind do the rest.
+     */
+    KSWITCH_FRAME SwitchFrame;
+    KEXCEPTION_FRAME ExFrame;
+
+    if (!NT_SUCCESS(KdbpSafeReadMemory(&SwitchFrame, KernelStack, sizeof(SwitchFrame))))
+        return;
+
+    KdbTrapFrame->Rip = SwitchFrame.Return;
+    KdbTrapFrame->Rsp = (ULONG64)KernelStack + sizeof(KSWITCH_FRAME);
+    KdbTrapFrame->Rbp = SwitchFrame.Rbp;
+    KdbTrapFrame->SegCs = KGDT64_R0_CODE;
+    KdbTrapFrame->SegSs = KGDT64_R0_DATA;
+    KdbTrapFrame->SegDs = KGDT64_R3_DATA | RPL_MASK;
+    KdbTrapFrame->SegEs = KGDT64_R3_DATA | RPL_MASK;
+    KdbTrapFrame->SegGs = KGDT64_R3_DATA | RPL_MASK;
+    KdbTrapFrame->EFlags = 0x2;
+
+    /* The registers of the suspended thread live in KiSwapContext's frame */
+    if (NT_SUCCESS(KdbpSafeReadMemory(&ExFrame,
+                                      (PVOID)KdbTrapFrame->Rsp,
+                                      sizeof(ExFrame) - sizeof(ExFrame.Return))))
+    {
+        KdbTrapFrame->Rbp = ExFrame.Rbp;
+        KdbTrapFrame->Rbx = ExFrame.Rbx;
+        KdbTrapFrame->Rdi = ExFrame.Rdi;
+        KdbTrapFrame->Rsi = ExFrame.Rsi;
+        KdbTrapFrame->R12 = ExFrame.R12;
+        KdbTrapFrame->R13 = ExFrame.R13;
+        KdbTrapFrame->R14 = ExFrame.R14;
+        KdbTrapFrame->R15 = ExFrame.R15;
+    }
 #endif
 
     /* FIXME: what about the other registers??? */
@@ -1025,6 +1062,64 @@ KdbpSetEnterCondition(
     return TRUE;
 }
 
+/*
+ * The debugger runs at DISPATCH_LEVEL with every other processor frozen, which
+ * makes PsLookupProcessByProcessId and PsLookupThreadByThreadId trip their
+ * PAGED_CODE check. That prints through DbgPrint, which enters the debugger
+ * again from inside the debugger and ends in a bugcheck loop. So walk the
+ * process and thread lists here instead. No reference is taken: nothing runs
+ * while the debugger owns the system.
+ */
+PEPROCESS
+KdbpFindProcessById(
+    IN HANDLE ProcessId)
+{
+    extern LIST_ENTRY PsActiveProcessHead;
+    PLIST_ENTRY Entry;
+    ULONG Limit = 0x10000;
+
+    for (Entry = PsActiveProcessHead.Flink;
+         Entry && (Entry != &PsActiveProcessHead) && Limit--;
+         Entry = Entry->Flink)
+    {
+        PEPROCESS Process = CONTAINING_RECORD(Entry, EPROCESS, ActiveProcessLinks);
+
+        if (Process->UniqueProcessId == ProcessId)
+            return Process;
+    }
+
+    return NULL;
+}
+
+PETHREAD
+KdbpFindThreadById(
+    IN HANDLE ThreadId)
+{
+    extern LIST_ENTRY PsActiveProcessHead;
+    PLIST_ENTRY ProcessEntry, ThreadEntry;
+    ULONG ProcessLimit = 0x10000;
+
+    for (ProcessEntry = PsActiveProcessHead.Flink;
+         ProcessEntry && (ProcessEntry != &PsActiveProcessHead) && ProcessLimit--;
+         ProcessEntry = ProcessEntry->Flink)
+    {
+        PEPROCESS Process = CONTAINING_RECORD(ProcessEntry, EPROCESS, ActiveProcessLinks);
+        ULONG ThreadLimit = 0x10000;
+
+        for (ThreadEntry = Process->ThreadListHead.Flink;
+             ThreadEntry && (ThreadEntry != &Process->ThreadListHead) && ThreadLimit--;
+             ThreadEntry = ThreadEntry->Flink)
+        {
+            PETHREAD Thread = CONTAINING_RECORD(ThreadEntry, ETHREAD, ThreadListEntry);
+
+            if (Thread->Cid.UniqueThread == ThreadId)
+                return Thread;
+        }
+    }
+
+    return NULL;
+}
+
 /*!\brief Switches to another thread context
  *
  * \param ThreadId  Id of the thread to switch to.
@@ -1040,7 +1135,8 @@ KdbpAttachToThread(
     PEPROCESS Process;
 
     /* Get a pointer to the thread */
-    if (!NT_SUCCESS(PsLookupThreadByThreadId(ThreadId, &Thread)))
+    Thread = KdbpFindThreadById(ThreadId);
+    if (!Thread)
     {
         KdbpPrint("Invalid thread id: 0x%08x\n", (ULONG_PTR)ThreadId);
         return FALSE;
@@ -1050,7 +1146,6 @@ KdbpAttachToThread(
     if (KeIsExecutingDpc() && Process != KdbCurrentProcess)
     {
         KdbpPrint("Cannot attach to thread within another process while executing a DPC.\n");
-        ObDereferenceObject(Thread);
         return FALSE;
     }
 
@@ -1100,7 +1195,6 @@ KdbpAttachToThread(
         KdbCurrentProcess = Process;
     }
 
-    ObDereferenceObject(Thread);
     return TRUE;
 }
 
@@ -1122,14 +1216,14 @@ KdbpAttachToProcess(
     PLIST_ENTRY Entry;
 
     /* Get a pointer to the process */
-    if (!NT_SUCCESS(PsLookupProcessByProcessId(ProcessId, &Process)))
+    Process = KdbpFindProcessById(ProcessId);
+    if (!Process)
     {
         KdbpPrint("Invalid process id: 0x%08x\n", (ULONG_PTR)ProcessId);
         return FALSE;
     }
 
     Entry = Process->ThreadListHead.Flink;
-    ObDereferenceObject(Process);
     if (Entry == &KdbCurrentProcess->ThreadListHead)
     {
         KdbpPrint("No threads in process 0x%p, cannot attach to process!\n", ProcessId);

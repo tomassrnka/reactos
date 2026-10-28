@@ -282,6 +282,14 @@ KdpSafeWriteMemory(
     IN ULONGLONG Value
 );
 
+PEPROCESS
+KdbpFindProcessById(
+    IN HANDLE ProcessId);
+
+PETHREAD
+KdbpFindThreadById(
+    IN HANDLE ThreadId);
+
 NTSTATUS
 KdbpSafeReadMemory(OUT PVOID Dest,
                    IN PVOID Src,
