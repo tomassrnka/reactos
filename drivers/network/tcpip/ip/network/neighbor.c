@@ -29,6 +29,7 @@ VOID NBSendPackets( PNEIGHBOR_CACHE_ENTRY NCE ) {
     PLIST_ENTRY PacketEntry;
     PNEIGHBOR_PACKET Packet;
     UINT HashValue;
+    KIRQL OldIrql;
 
     ASSERT(!(NCE->State & NUD_INCOMPLETE));
 
@@ -38,10 +39,19 @@ VOID NBSendPackets( PNEIGHBOR_CACHE_ENTRY NCE ) {
     HashValue ^= HashValue >> 4;
     HashValue &= NB_HASHMASK;
 
-    /* Send any waiting packets */
-    while ((PacketEntry = ExInterlockedRemoveHeadList(&NCE->PacketQueue,
-                                              &NeighborCache[HashValue].Lock)) != NULL)
+    /* Send any waiting packets. The bucket lock is taken as a spin lock, not through
+       ExInterlockedRemoveHeadList: that one spins with interrupts disabled, and the holder of
+       the lock may wait for an IPI (a TLB flush when it frees pool, such as an NCE with its
+       last reference): the spinning processor would never take it, a deadlock */
+    for (;;)
     {
+        TcpipAcquireSpinLock(&NeighborCache[HashValue].Lock, &OldIrql);
+        PacketEntry = IsListEmpty(&NCE->PacketQueue) ? NULL : RemoveHeadList(&NCE->PacketQueue);
+        TcpipReleaseSpinLock(&NeighborCache[HashValue].Lock, OldIrql);
+
+        if (!PacketEntry)
+            break;
+
 	Packet = CONTAINING_RECORD( PacketEntry, NEIGHBOR_PACKET, Next );
 
 	TI_DbgPrint
