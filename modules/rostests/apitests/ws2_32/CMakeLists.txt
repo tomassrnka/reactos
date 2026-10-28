@@ -30,6 +30,7 @@ list(APPEND SOURCE
     open_osfhandle.c
     rcvbuf.c
     recv.c
+    WSARecvMsg.c
     WSASendMsg.c
     send.c
     sotimeout.c

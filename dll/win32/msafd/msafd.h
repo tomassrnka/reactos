@@ -396,6 +396,15 @@ WSPStringToAddress(
     IN OUT  LPINT lpAddressLength,
     OUT     LPINT lpErrno);
 
+INT
+WSPAPI
+WSPRecvMsg(
+    IN SOCKET s,
+    IN OUT LPWSAMSG lpMsg,
+    OUT LPDWORD lpNumberOfBytesRecvd,
+    IN OUT LPWSAOVERLAPPED lpOverlapped,
+    IN LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine);
+
 BOOL
 WSPAPI
 WSPAcceptEx(

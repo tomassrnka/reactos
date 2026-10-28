@@ -9,7 +9,7 @@
  * reported as "unchangeable". Chrome's QUIC code relies on exactly this: it
  * sets SO_RCVBUF on a UDP socket, reads it back, and if the read-back is
  * smaller than requested it fails the socket with
- * ERR_SOCKET_RECEIVE_BUFFER_SIZE_UNCHANGEABLE (net error -348), aborting the
+ * ERR_SOCKET_RECEIVE_BUFFER_SIZE_UNCHANGEABLE (net error -162), aborting the
  * QUIC handshake. These tests pin the contract that makes that path work.
  */
 
@@ -29,7 +29,8 @@ TestBufOption(
     /* A representative spread: below/at the old 0x2000 clamp, inside the
      * 0x2001..0xFFFE range AFD used to cap, and the large sizes Chrome's QUIC
      * asks for. */
-    static const INT Sizes[] = { 4096, 8192, 32768, 65536, 131072, 262144, 1048576 };
+    static const INT Sizes[] = { 0, 4096, 8192, 32768, 65536, 131072, 262144, 1048576,
+                                 2097152, 4194304, 8388608, 16777216 };
     SIZE_T i;
 
     /* The default must read back as a sane, non-zero size without error. */
@@ -62,10 +63,13 @@ TestBufOption(
         ok(Length == sizeof(ReadBack), "%s: length %d after set %d\n", Name, Length, Requested);
 
         /* The contract Chrome depends on: the read-back is at least what was
-         * requested (never smaller, never reported as unchangeable: the -348
-         * trigger). The provider records the hint as given, so it must be exactly
+         * requested (never smaller, never reported as unchangeable: the -162 and
+         * -163 trigger). The provider records the hint as given, so it must be exactly
          * the request: a rounded value would show up here. Compare against the
          * saved request, not the (possibly mutated) option buffer. */
+        ok(ReadBack >= Requested,
+           "%s: set %d but read back only %d (Chrome: unchangeable)\n",
+           Name, Requested, ReadBack);
         ok(ReadBack == Requested,
            "%s: set %d but read back %d\n",
            Name, Requested, ReadBack);

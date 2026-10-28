@@ -3004,6 +3004,7 @@ WSPIoctl(IN  SOCKET Handle,
                 GUID ConnectExGUID = WSAID_CONNECTEX;
                 GUID DisconnectExGUID = WSAID_DISCONNECTEX;
                 GUID GetAcceptExSockaddrsGUID = WSAID_GETACCEPTEXSOCKADDRS;
+                GUID RecvMsgGUID = WSAID_WSARECVMSG;
 
                 if (IsEqualGUID(&AcceptExGUID, lpvInBuffer))
                 {
@@ -3029,6 +3030,13 @@ WSPIoctl(IN  SOCKET Handle,
                 else if (IsEqualGUID(&GetAcceptExSockaddrsGUID, lpvInBuffer))
                 {
                     *((PVOID *)lpvOutBuffer) = WSPGetAcceptExSockaddrs;
+                    cbRet = sizeof(PVOID);
+                    Errno = NO_ERROR;
+                    Ret = NO_ERROR;
+                }
+                else if (IsEqualGUID(&RecvMsgGUID, lpvInBuffer))
+                {
+                    *((PVOID *)lpvOutBuffer) = WSPRecvMsg;
                     cbRet = sizeof(PVOID);
                     Errno = NO_ERROR;
                     Ret = NO_ERROR;
@@ -3554,7 +3562,7 @@ WSPSetSockOpt(
                * AFD_INFO_SEND_WINDOW_SIZE, so storing the read-back made
                * getsockopt(SO_SNDBUF) report the unchanged default (Chrome's
                * QUIC path treats that as ERR_SOCKET_SEND_BUFFER_SIZE_UNCHANGEABLE,
-               * net error -349). Record the requested value as Windows does. */
+               * net error -163). Record the requested value as Windows does. */
               SetSocketInformation(Socket,
                                    AFD_INFO_SEND_WINDOW_SIZE,
                                    NULL,
@@ -3589,7 +3597,7 @@ WSPSetSockOpt(
                * not be changed. Chrome's QUIC path sets SO_RCVBUF, reads it
                * back, and on a smaller-than-requested read-back fails the UDP
                * socket with ERR_SOCKET_RECEIVE_BUFFER_SIZE_UNCHANGEABLE
-               * (net error -348), which aborts the QUIC handshake.
+               * (net error -162), which aborts the QUIC handshake.
                *
                * Record the requested value in SharedData, exactly as Windows'
                * provider records the hint, so getsockopt reads it back. The
