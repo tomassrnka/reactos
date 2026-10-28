@@ -2664,7 +2664,8 @@ AllocateEnumContext(
     if (ApiStatus != NERR_Success)
         return ApiStatus;
 
-    /* Initialize the fields */
+    /* Initialize the fields (the handles are released even if never opened) */
+    ZeroMemory(EnumContext, sizeof(ENUM_CONTEXT));
     EnumContext->EnumerationContext = 0;
     EnumContext->Buffer = NULL;
     EnumContext->Count = 0;
