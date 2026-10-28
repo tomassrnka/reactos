@@ -16,12 +16,11 @@ VOID
 NTAPI
 ReadIrpCancel(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
-    /* The read holds a reference on the adapter (NduDispatchRead) */
+    /* The read holds a reference on the adapter (NduDispatchRead) while its cancel routine is set. The
+       read takes the cancel spin lock to remove the routine before it drops that reference, so the
+       adapter stays as long as this holds the lock: it is released only once the adapter is not used */
     PNDISUIO_ADAPTER_CONTEXT AdapterContext = Irp->Tail.Overlay.DriverContext[0];
     PNDISUIO_PACKET_ENTRY PacketEntry;
-
-    /* Release the cancel spin lock */
-    IoReleaseCancelSpinLock(Irp->CancelIrql);
 
     /* Indicate a 0-byte packet on the queue to cancel the read */
     PacketEntry = ExAllocatePool(NonPagedPool, sizeof(NDISUIO_PACKET_ENTRY));
@@ -35,6 +34,9 @@ ReadIrpCancel(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
         KeSetEvent(&AdapterContext->PacketReadEvent, IO_NO_INCREMENT, FALSE);
     }
+
+    /* Release the cancel spin lock */
+    IoReleaseCancelSpinLock(Irp->CancelIrql);
 }
 
 NTSTATUS
@@ -76,6 +78,8 @@ NduDispatchRead(PDEVICE_OBJECT DeviceObject,
     IoSetCancelRoutine(Irp, ReadIrpCancel);
     if (Irp->Cancel)
     {
+        /* Cancelled before the routine was set: nothing called it, and it must not stay set */
+        IoSetCancelRoutine(Irp, NULL);
         IoReleaseCancelSpinLock(OldCancelIrql);
 
         DereferenceAdapterContext(AdapterContext);
@@ -121,17 +125,17 @@ NduDispatchRead(PDEVICE_OBJECT DeviceObject,
         }
         else
         {
-            /* Remove the cancel routine */
-            IoAcquireCancelSpinLock(&OldCancelIrql);
-            IoSetCancelRoutine(Irp, NULL);
-            IoReleaseCancelSpinLock(OldCancelIrql);
-
             /* Remove the first packet in the list */
             ListEntry = RemoveHeadList(&AdapterContext->PacketList);
             PacketEntry = CONTAINING_RECORD(ListEntry, NDISUIO_PACKET_ENTRY, ListEntry);
 
-            /* Release the adapter lock */
+            /* Release the adapter lock: the cancel routine takes it under the cancel spin lock */
             KeReleaseSpinLock(&AdapterContext->Spinlock, OldIrql);
+
+            /* Remove the cancel routine */
+            IoAcquireCancelSpinLock(&OldCancelIrql);
+            IoSetCancelRoutine(Irp, NULL);
+            IoReleaseCancelSpinLock(OldCancelIrql);
 
             /* And we're done with this loop */
             Status = STATUS_SUCCESS;
