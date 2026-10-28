@@ -64,6 +64,7 @@ BOOLEAN FASTCALL co_WinPosSetWindowPos(PWND Wnd, HWND WndInsertAfter, INT x, INT
 BOOLEAN FASTCALL co_WinPosSetWindowPosEx(PWND Wnd, HWND WndInsertAfter, INT x, INT y, INT cx, INT cy, UINT flags, BOOL NoMessages);
 VOID FASTCALL co_WinPosNoMessagesNotify(PWND Window, BOOL PointerCrossed);
 BOOLEAN FASTCALL co_WinPosShowWindow(PWND Window, INT Cmd);
+BOOLEAN FASTCALL co_WinPosSysCommandShow(PWND Window, INT Cmd);
 void FASTCALL co_WinPosSendSizeMove(PWND Window);
 void FASTCALL co_WinPosSendSizeMoveEx(PWND Window, BOOL bCreate);
 void FASTCALL co_WinPosSendNcCalcSizeStateChanged(PWND Window);
