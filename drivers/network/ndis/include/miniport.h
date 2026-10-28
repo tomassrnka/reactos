@@ -116,6 +116,7 @@ typedef struct _LOGICAL_ADAPTER
     KEVENT                     SendTurnEvent;
     BOOLEAN                    Removing;               /* The adapter is stopped or removed: the protocols are being unbound, sends and requests fail (MiniStartRemoving) */
     BOOLEAN                    Torndown;               /* The remove/surprise-remove teardown ran once (MiniShutdownAdapter is idempotent) */
+    LIST_ENTRY                 ResetWaiters;           /* Bindings whose NdisReset pends (ADAPTER_BINDING.ResetEntry), under the miniport lock: each holds a reference until a reset ends (MiniEndResetWaits) */
 } LOGICAL_ADAPTER, *PLOGICAL_ADAPTER;
 
 #define GET_LOGICAL_ADAPTER(Handle)((PLOGICAL_ADAPTER)Handle)

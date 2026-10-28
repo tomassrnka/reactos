@@ -28,8 +28,11 @@ typedef struct _ADAPTER_BINDING {
     PPROTOCOL_BINDING ProtocolBinding;          /* Protocol that opened adapter */
     PLOGICAL_ADAPTER  Adapter;                  /* Adapter opened by protocol */
     volatile LONG     Closing;                  /* NdisCloseAdapter runs: the binding takes no new send or request */
-    volatile LONG     Outstanding;              /* References: one held while open, one per send/request in flight; the
-                                                   last one dropped (by NdisCloseAdapter or a late completion) frees it */
+    volatile LONG     Outstanding;              /* References: one held while open, one per send, request, data transfer or
+                                                   reset in flight; the last one dropped (by NdisCloseAdapter or a late
+                                                   completion) frees it */
+    LIST_ENTRY        ResetEntry;               /* On the adapter's ResetWaiters while ResetPending, under the miniport lock */
+    BOOLEAN           ResetPending;             /* An NdisReset of this binding pends: it holds a reference */
 } ADAPTER_BINDING, *PADAPTER_BINDING;
 
 /* The UnbindContext NDIS gives a protocol's UnbindAdapterHandler, for NdisCompleteUnbindAdapter.
@@ -44,6 +47,11 @@ typedef struct _NDIS_UNBIND_CONTEXT {
 VOID
 ProLeaveBinding(
     PADAPTER_BINDING AdapterBinding);
+
+/* A reset of the adapter ended: the bindings whose NdisReset pended drop their reference */
+VOID
+MiniEndResetWaits(
+    PLOGICAL_ADAPTER Adapter);
 
 typedef struct _NDIS_REQUEST_MAC_BLOCK {
     PVOID Unknown1;
