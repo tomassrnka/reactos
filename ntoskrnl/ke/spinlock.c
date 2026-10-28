@@ -242,7 +242,12 @@ VOID
 NTAPI
 KeAcquireSpinLockAtDpcLevel(IN PKSPIN_LOCK SpinLock)
 {
-    /* Make sure we are at DPC or above! */
+#if DBG
+    /*
+     * Make sure we are at DPC or above!
+     * Like Windows, only checked builds validate the IRQL here; a free build
+     * performs the plain lock operation (kmtest KeSpinLock relies on this).
+     */
     if (KeGetCurrentIrql() < DISPATCH_LEVEL)
     {
         /* We aren't -- bugcheck */
@@ -252,6 +257,7 @@ KeAcquireSpinLockAtDpcLevel(IN PKSPIN_LOCK SpinLock)
                      0,
                      0);
     }
+#endif
 
     /* Do the inlined function */
     KxAcquireSpinLock(SpinLock);
@@ -265,7 +271,12 @@ VOID
 NTAPI
 KeReleaseSpinLockFromDpcLevel(IN PKSPIN_LOCK SpinLock)
 {
-    /* Make sure we are at DPC or above! */
+#if DBG
+    /*
+     * Make sure we are at DPC or above!
+     * Like Windows, only checked builds validate the IRQL here; a free build
+     * performs the plain lock operation (kmtest KeSpinLock relies on this).
+     */
     if (KeGetCurrentIrql() < DISPATCH_LEVEL)
     {
         /* We aren't -- bugcheck */
@@ -275,6 +286,7 @@ KeReleaseSpinLockFromDpcLevel(IN PKSPIN_LOCK SpinLock)
                      0,
                      0);
     }
+#endif
 
     /* Do the inlined function */
     KxReleaseSpinLock(SpinLock);
@@ -287,7 +299,12 @@ VOID
 FASTCALL
 KefAcquireSpinLockAtDpcLevel(IN PKSPIN_LOCK SpinLock)
 {
-    /* Make sure we are at DPC or above! */
+#if DBG
+    /*
+     * Make sure we are at DPC or above!
+     * Like Windows, only checked builds validate the IRQL here; a free build
+     * performs the plain lock operation (kmtest KeSpinLock relies on this).
+     */
     if (KeGetCurrentIrql() < DISPATCH_LEVEL)
     {
         /* We aren't -- bugcheck */
@@ -297,6 +314,7 @@ KefAcquireSpinLockAtDpcLevel(IN PKSPIN_LOCK SpinLock)
                      0,
                      0);
     }
+#endif
 
     /* Do the inlined function */
     KxAcquireSpinLock(SpinLock);
@@ -309,7 +327,12 @@ VOID
 FASTCALL
 KefReleaseSpinLockFromDpcLevel(IN PKSPIN_LOCK SpinLock)
 {
-    /* Make sure we are at DPC or above! */
+#if DBG
+    /*
+     * Make sure we are at DPC or above!
+     * Like Windows, only checked builds validate the IRQL here; a free build
+     * performs the plain lock operation (kmtest KeSpinLock relies on this).
+     */
     if (KeGetCurrentIrql() < DISPATCH_LEVEL)
     {
         /* We aren't -- bugcheck */
@@ -319,6 +342,7 @@ KefReleaseSpinLockFromDpcLevel(IN PKSPIN_LOCK SpinLock)
                      0,
                      0);
     }
+#endif
 
     /* Do the inlined function */
     KxReleaseSpinLock(SpinLock);
@@ -411,11 +435,13 @@ KeAcquireInStackQueuedSpinLockAtDpcLevel(IN PKSPIN_LOCK SpinLock,
     /* Set it up properly */
     LockHandle->LockQueue.Next = NULL;
     LockHandle->LockQueue.Lock = SpinLock;
-#ifdef CONFIG_SMP
 #if 0
     KeAcquireQueuedSpinLockAtDpcLevel(LockHandle->LockQueue.Next);
-#else
-    /* Make sure we are at DPC or above! */
+#elif DBG
+    /*
+     * Make sure we are at DPC or above!
+     * Like Windows, only checked builds validate the IRQL here.
+     */
     if (KeGetCurrentIrql() < DISPATCH_LEVEL)
     {
         /* We aren't -- bugcheck */
@@ -425,7 +451,6 @@ KeAcquireInStackQueuedSpinLockAtDpcLevel(IN PKSPIN_LOCK SpinLock,
                      0,
                      0);
     }
-#endif
 #endif
 
     /* Acquire the lock */
@@ -439,12 +464,14 @@ VOID
 FASTCALL
 KeReleaseInStackQueuedSpinLockFromDpcLevel(IN PKLOCK_QUEUE_HANDLE LockHandle)
 {
-#ifdef CONFIG_SMP
 #if 0
     /* Call the internal function */
     KeReleaseQueuedSpinLockFromDpcLevel(LockHandle->LockQueue.Next);
-#else
-    /* Make sure we are at DPC or above! */
+#elif DBG
+    /*
+     * Make sure we are at DPC or above!
+     * Like Windows, only checked builds validate the IRQL here.
+     */
     if (KeGetCurrentIrql() < DISPATCH_LEVEL)
     {
         /* We aren't -- bugcheck */
@@ -454,7 +481,6 @@ KeReleaseInStackQueuedSpinLockFromDpcLevel(IN PKLOCK_QUEUE_HANDLE LockHandle)
                      0,
                      0);
     }
-#endif
 #endif
 
     /* Release the lock */
