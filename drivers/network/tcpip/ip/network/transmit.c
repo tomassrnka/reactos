@@ -242,14 +242,25 @@ NTSTATUS IPSendDatagram(PIP_PACKET IPPacket, PNEIGHBOR_CACHE_ENTRY NCE)
  *     send routine (IPSendFragment)
  */
 {
+    UINT PathMTU;
+
     TI_DbgPrint(MAX_TRACE, ("Called. IPPacket (0x%X)  NCE (0x%X)\n", IPPacket, NCE));
 
     DISPLAY_IP_PACKET(IPPacket);
 
     /* Fetch path MTU now, because it may change */
-    TI_DbgPrint(MID_TRACE,("PathMTU: %d\n", NCE->Interface->MTU));
+    PathMTU = NCE->Interface->MTU;
+    TI_DbgPrint(MID_TRACE,("PathMTU: %d\n", PathMTU));
 
-    return SendFragments(IPPacket, NCE, NCE->Interface->MTU);
+    /* An interface being configured has its routes before its MTU (ReconfigureAdapter
+       reads the addresses, then the link information) */
+    if (PathMTU == 0)
+    {
+        IPPacket->Free(IPPacket);
+        return STATUS_NETWORK_UNREACHABLE;
+    }
+
+    return SendFragments(IPPacket, NCE, PathMTU);
 }
 
 /* EOF */

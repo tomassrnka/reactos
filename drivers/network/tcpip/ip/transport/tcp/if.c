@@ -64,6 +64,7 @@ TCPSendDataCallback(struct netif *netif, struct pbuf *p, const ip4_addr_t *dest)
     NdisStatus = AllocatePacketWithBuffer(&Packet.NdisPacket, NULL, p->tot_len);
     if (NdisStatus != NDIS_STATUS_SUCCESS)
     {
+        NBDereferenceNeighbor(NCE);
         return ERR_MEM;
     }
 
@@ -103,9 +104,12 @@ TCPSendDataCallback(struct netif *netif, struct pbuf *p, const ip4_addr_t *dest)
         {
             InterlockedDecrement(&TCPUnresolvedSegments);
             FreeNdisPacket(Packet.NdisPacket);
+            NBDereferenceNeighbor(NCE);
             return ERR_MEM;
         }
 
+        /* The packet waits on the NCE without a reference of its own: the NCE completes
+           whatever is queued on it when it leaves the cache, or with its last reference */
         if (!NBQueuePacketLimited(NCE, Packet.NdisPacket, TCPSendDataComplete,
                                   Unresolved ? &TCPUnresolvedSegments : NULL,
                                   TCP_UNRESOLVED_PER_NEIGHBOR))
@@ -113,9 +117,11 @@ TCPSendDataCallback(struct netif *netif, struct pbuf *p, const ip4_addr_t *dest)
             if (Unresolved)
                 InterlockedDecrement(&TCPUnresolvedSegments);
             FreeNdisPacket(Packet.NdisPacket);
+            NBDereferenceNeighbor(NCE);
             return ERR_MEM;
         }
 
+        NBDereferenceNeighbor(NCE);
         return ERR_OK;
     }
 
@@ -124,10 +130,12 @@ TCPSendDataCallback(struct netif *netif, struct pbuf *p, const ip4_addr_t *dest)
     if (NCE->State & NUD_INCOMPLETE)
     {
         FreeNdisPacket(Packet.NdisPacket);
+        NBDereferenceNeighbor(NCE);
         return ERR_MEM;
     }
 
     NdisStatus = IPSendDatagram(&Packet, NCE);
+    NBDereferenceNeighbor(NCE);
     if (!NT_SUCCESS(NdisStatus))
         return ERR_RTE;
 

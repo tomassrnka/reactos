@@ -29,6 +29,7 @@ VOID NBSendPackets( PNEIGHBOR_CACHE_ENTRY NCE ) {
     PLIST_ENTRY PacketEntry;
     PNEIGHBOR_PACKET Packet;
     UINT HashValue;
+    KIRQL OldIrql;
 
     ASSERT(!(NCE->State & NUD_INCOMPLETE));
 
@@ -38,10 +39,19 @@ VOID NBSendPackets( PNEIGHBOR_CACHE_ENTRY NCE ) {
     HashValue ^= HashValue >> 4;
     HashValue &= NB_HASHMASK;
 
-    /* Send any waiting packets */
-    while ((PacketEntry = ExInterlockedRemoveHeadList(&NCE->PacketQueue,
-                                              &NeighborCache[HashValue].Lock)) != NULL)
+    /* Send any waiting packets. The bucket lock is taken as a spin lock, not through
+       ExInterlockedRemoveHeadList: that one spins with interrupts disabled, and the holder of
+       the lock may wait for an IPI (a TLB flush when it frees pool, such as an NCE with its
+       last reference): the spinning processor would never take it, a deadlock */
+    for (;;)
     {
+        TcpipAcquireSpinLock(&NeighborCache[HashValue].Lock, &OldIrql);
+        PacketEntry = IsListEmpty(&NCE->PacketQueue) ? NULL : RemoveHeadList(&NCE->PacketQueue);
+        TcpipReleaseSpinLock(&NeighborCache[HashValue].Lock, OldIrql);
+
+        if (!PacketEntry)
+            break;
+
 	Packet = CONTAINING_RECORD( PacketEntry, NEIGHBOR_PACKET, Next );
 
 	TI_DbgPrint
@@ -86,6 +96,51 @@ VOID NBFlushPacketQueue( PNEIGHBOR_CACHE_ENTRY NCE,
 
 	ExFreePoolWithTag( Packet, NEIGHBOR_PACKET_TAG );
     }
+}
+
+VOID NBReferenceNeighbor(
+    PNEIGHBOR_CACHE_ENTRY NCE)
+{
+    LONG RefCount = InterlockedIncrement(&NCE->RefCount);
+
+    ASSERT(RefCount > 1);
+    UNREFERENCED_PARAMETER(RefCount);
+}
+
+VOID NBDereferenceNeighbor(
+    PNEIGHBOR_CACHE_ENTRY NCE)
+/*
+ * FUNCTION: Drops a reference to an NCE, and frees it with the last one
+ * NOTES:
+ *     At <= DISPATCH_LEVEL, also under the NCE's bucket lock (the cache's reference
+ *     goes there): nothing else can reach an NCE without references, so the packets
+ *     queued on it since it left the cache are completed without the lock
+ */
+{
+    LONG RefCount = InterlockedDecrement(&NCE->RefCount);
+
+    ASSERT(RefCount >= 0);
+    if (RefCount != 0)
+        return;
+
+    ASSERT(NCE->Unlinked);
+
+    NBFlushPacketQueue(NCE, NDIS_STATUS_REQUEST_ABORTED);
+
+    IPDereferenceInterface(NCE->Interface);
+
+    ExFreePoolWithTag(NCE, NCE_TAG);
+}
+
+/* Takes an NCE out of the cache: the caller holds its bucket lock and has unlinked it. Drops the
+   cache's reference, which may be the last one */
+static VOID NBUnlinkedNeighbor(
+    PNEIGHBOR_CACHE_ENTRY NCE,
+    NDIS_STATUS Status)
+{
+    NCE->Unlinked = TRUE;
+    NBFlushPacketQueue(NCE, Status);
+    NBDereferenceNeighbor(NCE);
 }
 
 VOID NBTimeout(VOID)
@@ -152,9 +207,7 @@ VOID NBTimeout(VOID)
                         Status = NDIS_STATUS_REQUEST_ABORTED;
                     }
 
-                    NBFlushPacketQueue(NCE, Status);
-
-                    ExFreePoolWithTag(NCE, NCE_TAG);
+                    NBUnlinkedNeighbor(NCE, Status);
 
                     continue;
                 }
@@ -202,10 +255,8 @@ VOID NBShutdown(VOID)
       while (CurNCE) {
           NextNCE = CurNCE->Next;
 
-          /* Flush wait queue */
-	  NBFlushPacketQueue( CurNCE, NDIS_STATUS_NOT_ACCEPTED );
-
-          ExFreePoolWithTag(CurNCE, NCE_TAG);
+          /* Flush wait queue; whoever still uses it frees it */
+          NBUnlinkedNeighbor(CurNCE, NDIS_STATUS_NOT_ACCEPTED);
 
 	  CurNCE = NextNCE;
       }
@@ -251,11 +302,10 @@ VOID NBDestroyNeighborsForInterface(PIP_INTERFACE Interface)
         {
             if (NCE->Interface == Interface)
             {
-                /* Unlink and destroy the NCE */
+                /* Unlink the NCE: it goes when its last user lets go */
                 *PrevNCE = NCE->Next;
 
-                NBFlushPacketQueue(NCE, NDIS_STATUS_REQUEST_ABORTED);
-                ExFreePoolWithTag(NCE, NCE_TAG);
+                NBUnlinkedNeighbor(NCE, NDIS_STATUS_REQUEST_ABORTED);
 
                 continue;
             }
@@ -288,9 +338,9 @@ PNEIGHBOR_CACHE_ENTRY NBAddNeighbor(
  * RETURNS:
  *   Pointer to NCE, NULL there is not enough free resources
  * NOTES:
- *   The NCE if referenced for the caller if created. The NCE retains
- *   a reference to the IP address if it is created, the caller is
- *   responsible for providing this reference
+ *   The NCE is referenced for the caller (NBDereferenceNeighbor), and
+ *   references the interface. No NCE is added to an unregistered
+ *   interface (NULL is returned)
  */
 {
   PNEIGHBOR_CACHE_ENTRY NCE;
@@ -319,6 +369,8 @@ PNEIGHBOR_CACHE_ENTRY NBAddNeighbor(
   if ((InternalAddress.Address.IPv4Address & LOOPBACK_ADDRMASK_IPv4) == (LOOPBACK_ADDRESS_IPv4 & LOOPBACK_ADDRMASK_IPv4))
     InternalAddress.Address.IPv4Address = LOOPBACK_ADDRESS_IPv4;
 
+  NCE->RefCount = 2; /* The cache's and the caller's */
+  NCE->Unlinked = FALSE;
   NCE->Interface = Interface;
   NCE->Address = InternalAddress;
   NCE->LinkAddressLength = LinkAddressLength;
@@ -342,6 +394,16 @@ PNEIGHBOR_CACHE_ENTRY NBAddNeighbor(
 
   TcpipAcquireSpinLock(&NeighborCache[HashValue].Lock, &OldIrql);
 
+  /* NBDestroyNeighborsForInterface takes this lock after the interface was unregistered:
+     it finds the NCE if the flag was clear here */
+  if (Interface->Unbound)
+  {
+      TcpipReleaseSpinLock(&NeighborCache[HashValue].Lock, OldIrql);
+      ExFreePoolWithTag(NCE, NCE_TAG);
+      return NULL;
+  }
+
+  IPReferenceInterface(Interface);
   NCE->Next = NeighborCache[HashValue].Cache;
   NeighborCache[HashValue].Cache = NCE;
 
@@ -505,6 +567,9 @@ PNEIGHBOR_CACHE_ENTRY NBLocateNeighbor(
       }
   }
 
+  if (NCE != NULL)
+      NBReferenceNeighbor(NCE);
+
   TcpipReleaseSpinLock(&NeighborCache[HashValue].Lock, OldIrql);
 
   TI_DbgPrint(MAX_TRACE, ("Leaving.\n"));
@@ -590,6 +655,15 @@ BOOLEAN NBQueuePacketLimited(
 
   TcpipAcquireSpinLock(&NeighborCache[HashValue].Lock, &OldIrql);
 
+  /* Out of the cache, no reply resolves it any more and no timeout flushes it: the packet
+     would wait until the NCE goes, and its sender may hold the NCE until the packet is done */
+  if (NCE->Unlinked && (NCE->State & NUD_INCOMPLETE))
+  {
+      TcpipReleaseSpinLock(&NeighborCache[HashValue].Lock, OldIrql);
+      ExFreePoolWithTag( Packet, NEIGHBOR_PACKET_TAG );
+      return FALSE;
+  }
+
   if (UnresolvedLimit && (NCE->State & NUD_INCOMPLETE))
   {
       Waiting = 0;
@@ -636,13 +710,14 @@ VOID NBRemoveNeighbor(
  * ARGUMENTS:
  *   NCE = Pointer to NCE to remove from cache
  * NOTES:
- *   The NCE must be in a safe state
+ *   The caller holds a reference to the NCE, which it still has to drop
  */
 {
   PNEIGHBOR_CACHE_ENTRY *PrevNCE;
   PNEIGHBOR_CACHE_ENTRY CurNCE;
   ULONG HashValue;
   KIRQL OldIrql;
+  BOOLEAN Found = FALSE;
 
   TI_DbgPrint(DEBUG_NCACHE, ("Called. NCE (0x%X).\n", NCE));
 
@@ -664,14 +739,19 @@ VOID NBRemoveNeighbor(
           /* Found it, now unlink it from the list */
           *PrevNCE = CurNCE->Next;
 
+          CurNCE->Unlinked = TRUE;
 	  NBFlushPacketQueue( CurNCE, NDIS_STATUS_REQUEST_ABORTED );
-          ExFreePoolWithTag(CurNCE, NCE_TAG);
+          Found = TRUE;
 
 	  break;
         }
     }
 
   TcpipReleaseSpinLock(&NeighborCache[HashValue].Lock, OldIrql);
+
+  /* The cache's reference (not the last one: the caller has one) */
+  if (Found)
+      NBDereferenceNeighbor(NCE);
 }
 
 ULONG NBCopyNeighbors

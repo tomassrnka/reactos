@@ -30,6 +30,10 @@ PNEIGHBOR_CACHE_ENTRY RouterGetRoute(PIP_ADDRESS Destination);
 
 NTSTATUS RouterRemoveRoute(PIP_ADDRESS Target, PIP_ADDRESS Router);
 
+VOID RouterReplaceRouter(
+    PNEIGHBOR_CACHE_ENTRY OldRouter,
+    PNEIGHBOR_CACHE_ENTRY NewRouter);
+
 PFIB_ENTRY RouterCreateRoute(
     PIP_ADDRESS NetworkAddress,
     PIP_ADDRESS Netmask,
@@ -46,7 +50,7 @@ VOID RouterRemoveRoutesForInterface(PIP_INTERFACE Interface);
 
 UINT CountFIBs(PIP_INTERFACE IF);
 
-UINT CopyFIBs( PIP_INTERFACE IF, PFIB_ENTRY Target );
+UINT CopyFIBs( PIP_INTERFACE IF, PFIB_ENTRY Target, UINT Capacity );
 
 UINT ProcessAutoMetric(PIP_INTERFACE Interface);
 

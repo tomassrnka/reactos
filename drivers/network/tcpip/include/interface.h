@@ -13,6 +13,7 @@ NTSTATUS GetInterfaceName( PIP_INTERFACE Interface, PCHAR NameBuffer,
 VOID GetInterfaceConnectionStatus( PIP_INTERFACE Interface, PULONG OperStatus );
 PIP_INTERFACE FindOnLinkInterface(PIP_ADDRESS Address);
 PIP_INTERFACE GetDefaultInterface(VOID);
+PIP_INTERFACE IPReferenceDefaultInterface(VOID);
 
 /* tcpip/addrchange.c: wake the IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST waiters */
 VOID AddrChangeInitialize(VOID);
