@@ -1230,6 +1230,18 @@ GetNextFrame(
     PRUNTIME_FUNCTION FunctionEntry;
     ULONG64 ImageBase, EstablisherFrame;
     PVOID HandlerData;
+    UCHAR Code[16];
+    DWORD64 ReturnAddress;
+
+    /*
+     * RtlVirtualUnwind scans the code at RIP for an epilogue. A garbage return
+     * address (the bottom of an idle thread stack points into the discarded
+     * boot code) is not mapped, and a page fault here, at HIGH_LEVEL on the
+     * NMI stack, ends in a triple fault instead of reaching the handler below.
+     * So only unwind through memory that can be read without faulting.
+     */
+    if (!NT_SUCCESS(KdbpSafeReadMemory(Code, (PVOID)Context->Rip, sizeof(Code))))
+        return FALSE;
 
     _SEH2_TRY
     {
@@ -1239,7 +1251,9 @@ GetNextFrame(
         {
             /* No function entry, so this must be a leaf function. Pop the return address from the stack.
             Note: this can happen after the first frame as the result of an exception */
-            Context->Rip = *(DWORD64*)Context->Rsp;
+            if (!NT_SUCCESS(KdbpSafeReadMemory(&ReturnAddress, (PVOID)Context->Rsp, sizeof(ReturnAddress))))
+                return FALSE;
+            Context->Rip = ReturnAddress;
             Context->Rsp += sizeof(DWORD64);
             return TRUE;
         }
@@ -1270,12 +1284,19 @@ KdbpCmdBackTrace(
     PCHAR Argv[])
 {
     CONTEXT Context = *KdbCurrentTrapFrame;
+    ULONG64 PreviousRsp;
 
     /* Walk through the frames */
     KdbpPrint("Frames:\n");
     do
     {
         BOOLEAN GotNextFrame;
+
+        PreviousRsp = Context.Rsp;
+
+        /* The bottom of a thread's stack leaves a small value as return address */
+        if (Context.Rip < 0x10000)
+            break;
 
         KdbpPrint("[%p] ", (PVOID)Context.Rsp);
 
@@ -1291,6 +1312,21 @@ KdbpCmdBackTrace(
         if (!GotNextFrame)
         {
             KdbpPrint("Couldn't get next frame\n");
+            break;
+        }
+
+        /* Unwinding always moves up the stack; anything else is a corrupt frame */
+        if (Context.Rsp <= PreviousRsp)
+        {
+            if (Context.Rip < (ULONG64)(ULONG_PTR)MmSystemRangeStart)
+            {
+                /* Unwinding the system call entry leaves kernel mode */
+                KdbpPrint("[user mode] rip=%p rsp=%p\n", (PVOID)Context.Rip, (PVOID)Context.Rsp);
+            }
+            else
+            {
+                KdbpPrint("Stack walk stopped, the stack pointer did not advance\n");
+            }
             break;
         }
     } while ((Context.Rip != 0) && (Context.Rsp != 0));
@@ -1786,7 +1822,6 @@ KdbpCmdThread(
     PLIST_ENTRY Entry;
     PETHREAD Thread = NULL;
     PEPROCESS Process = NULL;
-    BOOLEAN ReferencedThread = FALSE, ReferencedProcess = FALSE;
     PULONG_PTR Stack;
     PULONG_PTR Frame;
     ULONG_PTR Pc;
@@ -1814,14 +1849,11 @@ KdbpCmdThread(
                 return TRUE;
             }
 
-            if (!NT_SUCCESS(PsLookupProcessByProcessId((PVOID)ul, &Process)))
+            if ((Process = KdbpFindProcessById((PVOID)ul)) == NULL)
             {
                 KdbpPrint("thread: Invalid process id!\n");
                 return TRUE;
             }
-
-            /* Remember our reference */
-            ReferencedProcess = TRUE;
         }
 
         Entry = Process->ThreadListHead.Flink;
@@ -1832,13 +1864,14 @@ KdbpCmdThread(
             else
                 KdbpPrint("No threads in current process!\n");
 
-            if (ReferencedProcess)
-                ObDereferenceObject(Process);
-
             return TRUE;
         }
 
+#ifdef _M_AMD64
+        KdbpPrint("  TID         State        Prior.  Affinity    RBP               RIP\n");
+#else
         KdbpPrint("  TID         State        Prior.  Affinity    EBP         EIP\n");
+#endif
         do
         {
             Thread = CONTAINING_RECORD(Entry, ETHREAD, ThreadListEntry);
@@ -1869,11 +1902,24 @@ KdbpCmdThread(
             else
             {
                 Stack = (PULONG_PTR)Thread->Tcb.KernelStack;
+#ifdef _M_AMD64
+                /* KernelStack points at the KSWITCH_FRAME of KiSwapContextInternal */
+                KSWITCH_FRAME SwitchFrame;
+
+                Frame = NULL;
+                Pc = 0;
+                if (NT_SUCCESS(KdbpSafeReadMemory(&SwitchFrame, Stack, sizeof(SwitchFrame))))
+                {
+                    Frame = (PULONG_PTR)SwitchFrame.Rbp;
+                    Pc = SwitchFrame.Return;
+                }
+#else
                 Frame = (PULONG_PTR)Stack[4];
                 Pc = 0;
 
                 if (Frame) /* FIXME: Should we attach to the process to read Ebp[1]? */
                     KdbpSafeReadMemory(&Pc, Frame + 1, sizeof(Pc));
+#endif
             }
 
             if (Thread->Tcb.State < (DeferredReady + 1))
@@ -1881,23 +1927,23 @@ KdbpCmdThread(
             else
                 State = "Unknown";
 
+#ifdef _M_AMD64
+            KdbpPrint(" %s0x%08x  %-11s  %3d     0x%08x  0x%p  0x%p%s\n",
+#else
             KdbpPrint(" %s0x%08x  %-11s  %3d     0x%08x  0x%08x  0x%08x%s\n",
+#endif
                       str1,
                       Thread->Cid.UniqueThread,
                       State,
                       Thread->Tcb.Priority,
                       Thread->Tcb.Affinity,
                       Frame,
-                      Pc,
+                      (PVOID)Pc,
                       str2);
 
             Entry = Entry->Flink;
         }
         while (Entry != &Process->ThreadListHead);
-
-        /* Release our reference, if any */
-        if (ReferencedProcess)
-            ObDereferenceObject(Process);
     }
     else if (Argc >= 2 && _stricmp(Argv[1], "attach") == 0)
     {
@@ -1934,14 +1980,11 @@ KdbpCmdThread(
                 return TRUE;
             }
 
-            if (!NT_SUCCESS(PsLookupThreadByThreadId((PVOID)ul, &Thread)))
+            if ((Thread = KdbpFindThreadById((PVOID)ul)) == NULL)
             {
                 KdbpPrint("thread: Invalid thread id!\n");
                 return TRUE;
             }
-
-            /* Remember our reference */
-            ReferencedThread = TRUE;
         }
 
         if (Thread->Tcb.State < (DeferredReady + 1))
@@ -1976,10 +2019,6 @@ KdbpCmdThread(
                   , NPX_STATE_TO_STRING(Thread->Tcb.NpxState), Thread->Tcb.NpxState
 #endif
             );
-
-        /* Release our reference if we had one */
-        if (ReferencedThread)
-            ObDereferenceObject(Thread);
     }
 
     return TRUE;
@@ -1994,7 +2033,6 @@ KdbpCmdProc(
 {
     PLIST_ENTRY Entry;
     PEPROCESS Process;
-    BOOLEAN ReferencedProcess = FALSE;
     PCHAR State, pend, str1, str2;
     ULONG_PTR ul;
     extern LIST_ENTRY PsActiveProcessHead;
@@ -2074,14 +2112,11 @@ KdbpCmdProc(
                 return TRUE;
             }
 
-            if (!NT_SUCCESS(PsLookupProcessByProcessId((PVOID)ul, &Process)))
+            if ((Process = KdbpFindProcessById((PVOID)ul)) == NULL)
             {
                 KdbpPrint("proc: Invalid process id!\n");
                 return TRUE;
             }
-
-            /* Remember our reference */
-            ReferencedProcess = TRUE;
         }
 
         State = ((Process->Pcb.State == ProcessInMemory) ? "In Memory" :
@@ -2094,10 +2129,6 @@ KdbpCmdProc(
                   Process->UniqueProcessId,
                   State, Process->Pcb.State,
                   Process->ImageFileName);
-
-        /* Release our reference, if any */
-        if (ReferencedProcess)
-            ObDereferenceObject(Process);
     }
 
     return TRUE;
