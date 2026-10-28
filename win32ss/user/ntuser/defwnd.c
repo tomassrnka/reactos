@@ -149,7 +149,7 @@ DefWndHandleSysCommand(PWND pWnd, WPARAM wParam, LPARAM lParam)
       case SC_MAXIMIZE:
         if (((pWnd->style & WS_MINIMIZE) != 0) && UserHMGetHandle(pWnd) == UserGetActiveWindow())
             IntShowOwnedPopups(pWnd,TRUE);
-        co_WinPosShowWindow( pWnd, SW_MAXIMIZE );
+        co_WinPosSysCommandShow( pWnd, SW_MAXIMIZE );
         break;
 
       case SC_RESTORE:

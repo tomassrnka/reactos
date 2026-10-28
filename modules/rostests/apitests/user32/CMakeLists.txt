@@ -93,6 +93,7 @@ list(APPEND SOURCE
     SwitchDesktop.c
     SuspendResumeNotification.c
     SwitchToThisWindow.c
+    SysCommandHidden.c
     SystemMenu.c
     SystemParametersInfo.c
     TrackMouseEvent.c

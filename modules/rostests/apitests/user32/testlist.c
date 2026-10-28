@@ -93,6 +93,7 @@ extern void func_ShowWindowFrame(void);
 extern void func_SwitchDesktop(void);
 extern void func_SuspendResumeNotification(void);
 extern void func_SwitchToThisWindow(void);
+extern void func_SysCommandHidden(void);
 extern void func_SystemParametersInfo(void);
 extern void func_SystemMenu(void);
 extern void func_TrackMouseEvent(void);
@@ -200,6 +201,7 @@ const struct test winetest_testlist[] =
     { "SwitchDesktop", func_SwitchDesktop },
     { "SuspendResumeNotification", func_SuspendResumeNotification },
     { "SwitchToThisWindow", func_SwitchToThisWindow },
+    { "SysCommandHidden", func_SysCommandHidden },
     { "SystemMenu", func_SystemMenu },
     { "SystemParametersInfo", func_SystemParametersInfo },
     { "TrackMouseEvent", func_TrackMouseEvent },
