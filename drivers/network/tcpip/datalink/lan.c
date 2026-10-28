@@ -205,6 +205,67 @@ VOID FreeAdapter(
 }
 
 
+VOID UnbindAdapter(
+    PLAN_ADAPTER Adapter);
+
+/*
+ * FUNCTION: Gives up an adapter whose NdisOpenAdapter succeeded but which is not registered after all
+ * NOTES:
+ *     Torn down as LANUnregisterAdapter does it, minus the adapter list (it is not on it yet):
+ *     - the binding is closed first: NDIS keeps calling the binding's context (status and receive
+ *       indications) until then, and the freed LAN_ADAPTER's memory is soon some other driver's (it
+ *       was ndisuio's context, which a status indication then overwrote)
+ *     - a reconfiguration BindAdapter's media indication queued (ReconfigureAdapterWorker holds the
+ *       adapter) ends first, and the received frames still queued are delivered, before the adapter
+ *       is freed; the IP interface BindAdapter registered goes after them (UnbindAdapter)
+ */
+static
+VOID DenyOpenAdapter(
+    PLAN_ADAPTER Adapter)
+{
+    NDIS_STATUS NdisStatus;
+    NDIS_HANDLE NdisHandle;
+    LARGE_INTEGER Delay;
+    BOOLEAN Queued;
+    KIRQL OldIrql;
+
+    Delay.QuadPart = -100000;
+    TcpipAcquireSpinLock(&Adapter->ReconfigureLock, &OldIrql);
+    Adapter->Unbinding = TRUE;
+    TcpipReleaseSpinLock(&Adapter->ReconfigureLock, OldIrql);
+    for (;;) {
+        TcpipAcquireSpinLock(&Adapter->ReconfigureLock, &OldIrql);
+        Queued = Adapter->ReconfigureQueued;
+        TcpipReleaseSpinLock(&Adapter->ReconfigureLock, OldIrql);
+        if (!Queued)
+            break;
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+    }
+
+    TcpipAcquireSpinLock(&Adapter->Lock, &OldIrql);
+    NdisHandle = Adapter->NdisHandle;
+    Adapter->NdisHandle = NULL;
+    TcpipReleaseSpinLock(&Adapter->Lock, OldIrql);
+    if (NdisHandle) {
+        NdisCloseAdapter(&NdisStatus, NdisHandle);
+        if (NdisStatus == NDIS_STATUS_PENDING)
+            TcpipWaitForSingleObject(&Adapter->Event,
+                                     UserRequest,
+                                     KernelMode,
+                                     FALSE,
+                                     NULL);
+    }
+
+    ChewSerialRundown(&Adapter->ReceiveQueue);
+    while (Adapter->ReceiveWorkItems != 0)
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+
+    UnbindAdapter(Adapter);
+
+    FreeAdapter(Adapter);
+}
+
+
 NTSTATUS TcpipLanGetDwordOid
 ( PIP_INTERFACE Interface,
   NDIS_OID Oid,
@@ -1619,8 +1680,8 @@ BOOLEAN BindAdapter(
                           sizeof(MediaState));
     if (NdisStatus != NDIS_STATUS_SUCCESS) {
         TI_DbgPrint(DEBUG_DATALINK, ("Could not query media status (0x%X).\n", NdisStatus));
-        IPUnregisterInterface(IF);
-        IPDestroyInterface(IF);
+        /* The interface stays registered: DenyOpenAdapter removes it (UnbindAdapter) once the
+           reconfiguration the media indication queued is done with it */
         return FALSE;
     }
 
@@ -1638,8 +1699,8 @@ BOOLEAN BindAdapter(
 
     if (NdisStatus != NDIS_STATUS_SUCCESS) {
         TI_DbgPrint(DEBUG_DATALINK, ("Could not set packet filter (0x%X).\n", NdisStatus));
-        IPUnregisterInterface(IF);
-        IPDestroyInterface(IF);
+        /* The interface stays registered: DenyOpenAdapter removes it (UnbindAdapter) once the
+           reconfiguration the media indication queued is done with it */
         return FALSE;
     }
 
@@ -1764,7 +1825,7 @@ NDIS_STATUS LANRegisterAdapter(
     default:
         /* Unsupported media */
         TI_DbgPrint(MIN_TRACE, ("Unsupported media.\n"));
-        FreeAdapter(IF);
+        DenyOpenAdapter(IF);
         return NDIS_STATUS_NOT_SUPPORTED;
     }
 
@@ -1787,14 +1848,14 @@ NDIS_STATUS LANRegisterAdapter(
                           IF->HWAddressLength);
     if (NdisStatus != NDIS_STATUS_SUCCESS) {
         TI_DbgPrint(MIN_TRACE, ("Query for current hardware address failed.\n"));
-        FreeAdapter(IF);
+        DenyOpenAdapter(IF);
         return NdisStatus;
     }
 
     /* Bind adapter to IP layer */
     if( !BindAdapter(IF, RegistryPath) ) {
 	TI_DbgPrint(DEBUG_DATALINK,("denying adapter %wZ (BindAdapter)\n", AdapterName));
-	FreeAdapter(IF);
+	DenyOpenAdapter(IF);
 	return NDIS_STATUS_NOT_ACCEPTED;
     }
 
