@@ -1065,6 +1065,12 @@ IopCompleteRequest(
     IN PVOID* SystemArgument2
 );
 
+VOID
+NTAPI
+IopWriteDeferredPortIosb(
+    IN PIRP Irp
+);
+
 //
 // Error Logging Routines
 //
@@ -1274,6 +1280,16 @@ IopCloseFile(
     IN ACCESS_MASK GrantedAccess,
     IN ULONG_PTR ProcessHandleCount,
     IN ULONG_PTR SystemHandleCount
+);
+
+NTSTATUS
+NTAPI
+IopCancelProcessFileIrps(
+    IN PEPROCESS Process,
+    IN PFILE_OBJECT FileObject,
+    IN PIO_STATUS_BLOCK IoRequestToCancel OPTIONAL,
+    IN BOOLEAN PortOnly,
+    OUT PBOOLEAN Found
 );
 
 NTSTATUS

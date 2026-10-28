@@ -14,6 +14,7 @@ list(APPEND SOURCE
     Wow64Environment.c
     BindIoCompletionCallback.c
     CancelIoEx.c
+    IocpCancelStatus.c
     ApplicationRestart.c
     AppModel.c
     ConsoleCP.c

@@ -2312,7 +2312,25 @@ IopCloseFile(IN PEPROCESS Process OPTIONAL,
     }
 
     /* Make sure this is the last handle */
-    if (SystemHandleCount != 1) return;
+    if (SystemHandleCount != 1)
+    {
+        /*
+         * This process closed its last handle but other processes still hold
+         * the file object, so no cleanup IRP goes down. Like Windows, cancel
+         * the requests of this process whose completion only the completion
+         * port would report (no event, no APC routine): nothing in this
+         * process could pick them up any more. Requests with an event or an
+         * APC, and those of other processes, stay in progress. Completion
+         * ports exist only on non-synchronous file objects, so the file
+         * object lock is not involved.
+         */
+        if ((Process != NULL) && (FileObject->CompletionContext != NULL))
+        {
+            BOOLEAN Found;
+            (VOID)IopCancelProcessFileIrps(Process, FileObject, NULL, TRUE, &Found);
+        }
+        return;
+    }
 
     /* Check if this is a direct open or not */
     if (FileObject->Flags & FO_DIRECT_DEVICE_OPEN)
@@ -4279,16 +4297,37 @@ typedef struct _IOP_CANCEL_APC
     KAPC Apc;
     PFILE_OBJECT FileObject;
     PIO_STATUS_BLOCK IoRequestToCancel;
+    BOOLEAN PortOnly;
 } IOP_CANCEL_APC, *PIOP_CANCEL_APC;
+
+/*
+ * A request whose completion is reported only through the file's completion
+ * port: asynchronous, pending, no event, no APC routine, and an APC context
+ * for the port packet. Nothing else in the issuing process can learn about it.
+ */
+static
+BOOLEAN
+IopIsPortOnlyRequest(IN PIRP Irp,
+                     IN PFILE_OBJECT FileObject)
+{
+    return (FileObject->CompletionContext != NULL) &&
+           !(Irp->Flags & (IRP_SYNCHRONOUS_API | IRP_PAGING_IO |
+                           IRP_CREATE_OPERATION | IRP_CLOSE_OPERATION)) &&
+           (Irp->UserEvent == NULL) &&
+           (Irp->Overlay.AsynchronousParameters.UserApcRoutine == NULL) &&
+           (Irp->Overlay.AsynchronousParameters.UserApcContext != NULL);
+}
 
 static
 BOOLEAN
 IopIsRequestToCancel(IN PIRP Irp,
                      IN PFILE_OBJECT FileObject,
-                     IN PIO_STATUS_BLOCK IoRequestToCancel OPTIONAL)
+                     IN PIO_STATUS_BLOCK IoRequestToCancel OPTIONAL,
+                     IN BOOLEAN PortOnly)
 {
     return (Irp->Tail.Overlay.OriginalFileObject == FileObject) &&
-           (!(IoRequestToCancel) || (Irp->UserIosb == IoRequestToCancel));
+           (!(IoRequestToCancel) || (Irp->UserIosb == IoRequestToCancel)) &&
+           (!(PortOnly) || IopIsPortOnlyRequest(Irp, FileObject));
 }
 
 /* Only the owning thread walks its IRP list to cancel, at APC_LEVEL */
@@ -4296,7 +4335,8 @@ static
 BOOLEAN
 IopCancelThreadFileIrps(IN PETHREAD Thread,
                         IN PFILE_OBJECT FileObject,
-                        IN PIO_STATUS_BLOCK IoRequestToCancel OPTIONAL)
+                        IN PIO_STATUS_BLOCK IoRequestToCancel OPTIONAL,
+                        IN BOOLEAN PortOnly)
 {
     PLIST_ENTRY ListHead, NextEntry;
     BOOLEAN Found = FALSE;
@@ -4310,7 +4350,7 @@ IopCancelThreadFileIrps(IN PETHREAD Thread,
     {
         /* Get the IRP and check if it is one of the requests to cancel */
         Irp = CONTAINING_RECORD(NextEntry, IRP, ThreadListEntry);
-        if (IopIsRequestToCancel(Irp, FileObject, IoRequestToCancel))
+        if (IopIsRequestToCancel(Irp, FileObject, IoRequestToCancel, PortOnly))
         {
             IoCancelIrp(Irp);
             Found = TRUE;
@@ -4325,7 +4365,8 @@ static
 BOOLEAN
 IopThreadHasFileIrps(IN PETHREAD Thread,
                      IN PFILE_OBJECT FileObject,
-                     IN PIO_STATUS_BLOCK IoRequestToCancel OPTIONAL)
+                     IN PIO_STATUS_BLOCK IoRequestToCancel OPTIONAL,
+                     IN BOOLEAN PortOnly)
 {
     PLIST_ENTRY ListHead, NextEntry;
     BOOLEAN Found = FALSE;
@@ -4337,7 +4378,8 @@ IopThreadHasFileIrps(IN PETHREAD Thread,
     {
         if (IopIsRequestToCancel(CONTAINING_RECORD(NextEntry, IRP, ThreadListEntry),
                                  FileObject,
-                                 IoRequestToCancel))
+                                 IoRequestToCancel,
+                                 PortOnly))
         {
             Found = TRUE;
             break;
@@ -4379,12 +4421,89 @@ IopCancelApcNormalRoutine(IN PVOID NormalContext,
     KeRaiseIrql(APC_LEVEL, &OldIrql);
     IopCancelThreadFileIrps(PsGetCurrentThread(),
                             CancelApc->FileObject,
-                            CancelApc->IoRequestToCancel);
+                            CancelApc->IoRequestToCancel,
+                            CancelApc->PortOnly);
     KeLowerIrql(OldIrql);
 
     /* Defer: the last deref must not run IopDeleteFile inside this cancel APC */
     ObDereferenceObjectDeferDelete(CancelApc->FileObject);
     ExFreePoolWithTag(CancelApc, TAG_IO);
+}
+
+/*
+ * Cancels the matching requests of every thread of Process on FileObject:
+ * the current thread's right away, the others' from a kernel APC queued to
+ * each of them (only the owning thread walks its IRP list to cancel).
+ */
+NTSTATUS
+NTAPI
+IopCancelProcessFileIrps(IN PEPROCESS Process,
+                         IN PFILE_OBJECT FileObject,
+                         IN PIO_STATUS_BLOCK IoRequestToCancel OPTIONAL,
+                         IN BOOLEAN PortOnly,
+                         OUT PBOOLEAN Found)
+{
+    PIOP_CANCEL_APC CancelApc;
+    PETHREAD CurrentThread = PsGetCurrentThread();
+    PETHREAD Thread;
+    KIRQL OldIrql;
+    NTSTATUS Status = STATUS_SUCCESS;
+    PAGED_CODE();
+
+    *Found = FALSE;
+
+    /* The current thread cancels its own requests right away (it may be attached elsewhere) */
+    if (PsGetThreadProcess(CurrentThread) == Process)
+    {
+        KeRaiseIrql(APC_LEVEL, &OldIrql);
+        if (IopCancelThreadFileIrps(CurrentThread, FileObject, IoRequestToCancel, PortOnly))
+            *Found = TRUE;
+        KeLowerIrql(OldIrql);
+    }
+
+    /* Other threads with matching requests cancel them from a kernel APC */
+    for (Thread = PsGetNextProcessThread(Process, NULL);
+         Thread != NULL;
+         Thread = PsGetNextProcessThread(Process, Thread))
+    {
+        if ((Thread == CurrentThread) ||
+            !IopThreadHasFileIrps(Thread, FileObject, IoRequestToCancel, PortOnly))
+        {
+            continue;
+        }
+
+        *Found = TRUE;
+        CancelApc = ExAllocatePoolWithTag(NonPagedPool, sizeof(*CancelApc), TAG_IO);
+        if (!CancelApc)
+        {
+            /* The requests of this and the remaining threads stay in progress */
+            ObDereferenceObject(Thread);
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            break;
+        }
+
+        ObReferenceObject(FileObject);
+        CancelApc->FileObject = FileObject;
+        CancelApc->IoRequestToCancel = IoRequestToCancel;
+        CancelApc->PortOnly = PortOnly;
+        KeInitializeApc(&CancelApc->Apc,
+                        &Thread->Tcb,
+                        OriginalApcEnvironment,
+                        IopCancelApcKernelRoutine,
+                        NULL,
+                        IopCancelApcNormalRoutine,
+                        KernelMode,
+                        CancelApc);
+
+        if (!KeInsertQueueApc(&CancelApc->Apc, NULL, NULL, IO_NO_INCREMENT))
+        {
+            /* The thread is exiting, and its I/O is cancelled by IoCancelThreadIo */
+            ObDereferenceObject(FileObject);
+            ExFreePoolWithTag(CancelApc, TAG_IO);
+        }
+    }
+
+    return Status;
 }
 
 /*
@@ -4396,13 +4515,9 @@ NtCancelIoFileEx(IN HANDLE FileHandle,
                  IN PIO_STATUS_BLOCK IoRequestToCancel OPTIONAL,
                  OUT PIO_STATUS_BLOCK IoStatusBlock)
 {
-    PIOP_CANCEL_APC CancelApc;
     BOOLEAN Found = FALSE;
     PFILE_OBJECT FileObject;
-    PETHREAD CurrentThread = PsGetCurrentThread();
-    PETHREAD Thread;
     PEPROCESS Process = PsGetCurrentProcess();
-    KIRQL OldIrql;
     KPROCESSOR_MODE PreviousMode = KeGetPreviousMode();
     NTSTATUS Status;
     PAGED_CODE();
@@ -4437,54 +4552,8 @@ NtCancelIoFileEx(IN HANDLE FileHandle,
     /* Update the operation counts */
     IopUpdateOperationCount(IopOtherTransfer);
 
-    /* The current thread cancels its own requests right away */
-    KeRaiseIrql(APC_LEVEL, &OldIrql);
-    if (IopCancelThreadFileIrps(CurrentThread, FileObject, IoRequestToCancel))
-        Found = TRUE;
-    KeLowerIrql(OldIrql);
-
-    /* Other threads with matching requests cancel them from a kernel APC */
-    for (Thread = PsGetNextProcessThread(Process, NULL);
-         Thread != NULL;
-         Thread = PsGetNextProcessThread(Process, Thread))
-    {
-        if ((Thread == CurrentThread) ||
-            !IopThreadHasFileIrps(Thread, FileObject, IoRequestToCancel))
-        {
-            continue;
-        }
-
-        Found = TRUE;
-        CancelApc = ExAllocatePoolWithTag(NonPagedPool, sizeof(*CancelApc), TAG_IO);
-        if (!CancelApc)
-        {
-            /* The requests of this and the remaining threads stay in progress */
-            ObDereferenceObject(Thread);
-            Status = STATUS_INSUFFICIENT_RESOURCES;
-            break;
-        }
-
-        ObReferenceObject(FileObject);
-        CancelApc->FileObject = FileObject;
-        CancelApc->IoRequestToCancel = IoRequestToCancel;
-        KeInitializeApc(&CancelApc->Apc,
-                        &Thread->Tcb,
-                        OriginalApcEnvironment,
-                        IopCancelApcKernelRoutine,
-                        NULL,
-                        IopCancelApcNormalRoutine,
-                        KernelMode,
-                        CancelApc);
-
-        if (!KeInsertQueueApc(&CancelApc->Apc, NULL, NULL, IO_NO_INCREMENT))
-        {
-            /* The thread is exiting, and its I/O is cancelled by IoCancelThreadIo */
-            ObDereferenceObject(FileObject);
-            ExFreePoolWithTag(CancelApc, TAG_IO);
-        }
-    }
-
     /* Cancellation does not wait for the requests to complete */
+    Status = IopCancelProcessFileIrps(Process, FileObject, IoRequestToCancel, FALSE, &Found);
     if (NT_SUCCESS(Status))
         Status = Found ? STATUS_SUCCESS : STATUS_NOT_FOUND;
 
