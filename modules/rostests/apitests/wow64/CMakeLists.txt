@@ -30,7 +30,7 @@ add_wow64_apitest(kernel32
     Wow64ThreadApc Wow64ThreadLifetime Wow64ThreadExitProcess Wow64Threads QueueUserAPC
     GetCurrentDirectory GetEnvironmentVariable GetDriveType GetCPInfo
     IsDBCSLeadByteEx lstrlen Wow64Environment Wow64ProgramFiles Wow64EnvironmentBlock Wow64SystemDlls DynamicTls HandleList JobObject
-    Wow64Console ProcThreadMitigation)
+    Wow64Console ProcThreadMitigation RegisterWait)
 add_wow64_apitest(ntdll StackOverflowDispatch
     Wow64Continue Wow64SystemRangeStart Wow64QueryVirtualMemory Wow64PowerInformation Wow64QueryInformationProcess NtOpenKey NtOpenKeyEx NtQueryKey NtQueryValueKey
     RtlDetermineDosPathNameType RtlUnicodeStringToAnsiString StackOverflow StackOverflowThread StackDeepRecursion SystemCallStubs
