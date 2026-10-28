@@ -18,6 +18,7 @@ list(APPEND SOURCE
     chew/workqueue.c
     datalink/lan.c
     tcpip/ainfo.c
+    tcpip/addrchange.c
     tcpip/buffer.c
     tcpip/cinfo.c
     tcpip/dispatch.c

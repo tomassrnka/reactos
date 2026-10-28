@@ -36,16 +36,29 @@ typedef struct _NAME_SERVER_LIST_CONTEXT {
     IP_ADDR_STRING *pLastAddr;
 } NAME_SERVER_LIST_CONTEXT, *PNAME_SERVER_LIST_CONTEXT;
 
+/* Pending NotifyAddrChange requests: the OVERLAPPED the caller passed and the
+ * file handle that carries the request. Closing the handle cancels the request. */
+typedef struct _ADDR_NOTIFY {
+    struct _ADDR_NOTIFY *Next;
+    LPOVERLAPPED Overlapped;
+    HANDLE File;
+} ADDR_NOTIFY;
+
+static ADDR_NOTIFY *NotifyList;
+static CRITICAL_SECTION NotifyLock;
+
 BOOL WINAPI DllMain (HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 {
   switch (fdwReason) {
     case DLL_PROCESS_ATTACH:
       DisableThreadLibraryCalls( hinstDLL );
+      InitializeCriticalSection(&NotifyLock);
       interfaceMapInit();
       break;
 
     case DLL_PROCESS_DETACH:
       interfaceMapFree();
+      DeleteCriticalSection(&NotifyLock);
       break;
   }
   return TRUE;
@@ -2723,17 +2736,100 @@ DWORD WINAPI IpRenewAddress(PIP_ADAPTER_INDEX_MAP AdapterInfo)
  *  overlapped [In]  overlapped structure that notifies the caller
  *
  * RETURNS
- *  Success: NO_ERROR
+ *  Success: NO_ERROR (blocking form) or ERROR_IO_PENDING (overlapped form)
  *  Failure: error code from winerror.h
  *
- * FIXME
- *  Stub, returns ERROR_NOT_SUPPORTED.
+ * NOTES
+ *  With both parameters NULL the call blocks until the address table
+ *  changes. With both set, the request is queued in tcpip.sys
+ *  (IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST), the call returns ERROR_IO_PENDING and
+ *  the event of the OVERLAPPED is signalled on a change. *Handle receives the
+ *  file handle of the request; it is owned by this DLL and stays valid (for
+ *  GetOverlappedResult) until the same OVERLAPPED is registered or cancelled
+ *  again after its request completed.
  */
 DWORD WINAPI NotifyAddrChange(PHANDLE Handle, LPOVERLAPPED overlapped)
 {
-  FIXME("(Handle %p, overlapped %p): stub\n", Handle, overlapped);
-  if (Handle) *Handle = INVALID_HANDLE_VALUE;
-  if (overlapped) ((IO_STATUS_BLOCK *) overlapped)->Status = STATUS_PENDING;
+  UNICODE_STRING name;
+  OBJECT_ATTRIBUTES attrs;
+  IO_STATUS_BLOCK iosb;
+  NTSTATUS status;
+  HANDLE file;
+  ADDR_NOTIFY *entry, **link;
+
+  TRACE("(Handle %p, overlapped %p)\n", Handle, overlapped);
+
+  if ((Handle == NULL) != (overlapped == NULL))
+    return ERROR_INVALID_PARAMETER;
+
+  if (!overlapped)
+  {
+    /* blocking form: a synchronous handle makes the IOCTL wait */
+    status = openTcpFile(&file, FILE_READ_DATA);
+    if (!NT_SUCCESS(status))
+      return RtlNtStatusToDosError(status);
+    status = NtDeviceIoControlFile(file, NULL, NULL, NULL, &iosb,
+                                   IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST,
+                                   NULL, 0, NULL, 0);
+    closeTcpFile(file);
+    return NT_SUCCESS(status) ? NO_ERROR : RtlNtStatusToDosError(status);
+  }
+
+  /* asynchronous handle: the request stays pending in the driver */
+  RtlInitUnicodeString(&name, L"\\Device\\Tcp");
+  InitializeObjectAttributes(&attrs, &name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+  status = NtOpenFile(&file, FILE_READ_DATA | SYNCHRONIZE, &attrs, &iosb,
+                      FILE_SHARE_READ | FILE_SHARE_WRITE, 0);
+  if (!NT_SUCCESS(status))
+    return RtlNtStatusToDosError(status);
+
+  entry = HeapAlloc(GetProcessHeap(), 0, sizeof(*entry));
+  if (!entry)
+  {
+    NtClose(file);
+    return ERROR_NOT_ENOUGH_MEMORY;
+  }
+  entry->Overlapped = overlapped;
+  entry->File = file;
+
+  EnterCriticalSection(&NotifyLock);
+
+  /* a request of this OVERLAPPED that has completed has nothing left to release but its handle */
+  for (link = &NotifyList; *link; )
+  {
+    ADDR_NOTIFY *old = *link;
+    if (old->Overlapped == overlapped && (NTSTATUS)overlapped->Internal != STATUS_PENDING)
+    {
+      *link = old->Next;
+      NtClose(old->File);
+      HeapFree(GetProcessHeap(), 0, old);
+    }
+    else
+      link = &old->Next;
+  }
+
+  overlapped->Internal = STATUS_PENDING;
+  overlapped->InternalHigh = 0;
+  status = NtDeviceIoControlFile(file, overlapped->hEvent, NULL, NULL,
+                                 (PIO_STATUS_BLOCK)overlapped,
+                                 IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST,
+                                 NULL, 0, NULL, 0);
+  if (status == STATUS_PENDING)
+  {
+    entry->Next = NotifyList;
+    NotifyList = entry;
+  }
+  LeaveCriticalSection(&NotifyLock);
+
+  if (status != STATUS_PENDING)
+  {
+    NtClose(file);
+    HeapFree(GetProcessHeap(), 0, entry);
+    return NT_SUCCESS(status) ? NO_ERROR : RtlNtStatusToDosError(status);
+  }
+
+  *Handle = file;
+  SetLastError(ERROR_IO_PENDING);
   return ERROR_IO_PENDING;
 }
 
@@ -3409,13 +3505,57 @@ DWORD WINAPI DECLSPEC_HOTPATCH GetAdaptersAddresses(ULONG Family,ULONG Flags,PVO
 }
 #endif
 
-/*
- * @unimplemented
+/******************************************************************
+ *    CancelIPChangeNotify (IPHLPAPI.@)
+ *
+ * Cancel the notification requests registered with NotifyAddrChange for an OVERLAPPED.
+ *
+ * RETURNS
+ *  TRUE if a pending request was cancelled; its event is signalled and the
+ *  OVERLAPPED completes with ERROR_OPERATION_ABORTED. FALSE otherwise.
  */
 BOOL WINAPI CancelIPChangeNotify(LPOVERLAPPED notifyOverlapped)
 {
-    FIXME(":stub\n");
-    return 0L;
+    ADDR_NOTIFY *entry, **link;
+    IO_STATUS_BLOCK iosb;
+    BOOL found = FALSE;
+
+    if (!notifyOverlapped)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    EnterCriticalSection(&NotifyLock);
+    for (link = &NotifyList; *link; )
+    {
+        entry = *link;
+        if (entry->Overlapped != notifyOverlapped)
+        {
+            link = &entry->Next;
+        }
+        else if ((NTSTATUS)notifyOverlapped->Internal == STATUS_PENDING)
+        {
+            /* the request completes with STATUS_CANCELLED; its handle stays valid for GetOverlappedResult */
+            if (NT_SUCCESS(NtDeviceIoControlFile(entry->File, NULL, NULL, NULL, &iosb,
+                                                 IOCTL_IP_ADDCHANGE_CANCEL_REQUEST,
+                                                 NULL, 0, NULL, 0)))
+                found = TRUE;
+            link = &entry->Next;
+        }
+        else
+        {
+            /* an earlier request that finished or was cancelled */
+            *link = entry->Next;
+            NtClose(entry->File);
+            HeapFree(GetProcessHeap(), 0, entry);
+        }
+    }
+    LeaveCriticalSection(&NotifyLock);
+
+    if (!found)
+        SetLastError(ERROR_INVALID_PARAMETER);
+    return found;
 }
 
 #ifdef GetAdaptersAddressesV1

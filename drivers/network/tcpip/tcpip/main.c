@@ -604,6 +604,15 @@ TiDispatch(
                     Status = DispTdiDeleteIPAddress(Irp, IrpSp);
                 break;
 
+            case IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST:
+                TI_DbgPrint(MIN_TRACE, ("IP_ADDCHANGE_NOTIFY_REQUEST\n"));
+                Status = DispAddrChangeNotifyRequest(Irp);
+                break;
+
+            case IOCTL_IP_ADDCHANGE_CANCEL_REQUEST:
+                Status = DispAddrChangeCancelRequest(Irp);
+                break;
+
             case IOCTL_QUERY_IP_HW_ADDRESS:
                 TI_DbgPrint(MIN_TRACE, ("QUERY_IP_HW_ADDRESS\n"));
                 Status = DispTdiQueryIpHwAddress(DeviceObject, Irp, IrpSp);
@@ -1099,10 +1108,13 @@ DriverEntry(
     /* Initialize the driver object with this driver's entry points */
     DriverObject->MajorFunction[IRP_MJ_CREATE]  = TiDispatchOpenClose;
     DriverObject->MajorFunction[IRP_MJ_CLOSE]   = TiDispatchOpenClose;
+    DriverObject->MajorFunction[IRP_MJ_CLEANUP] = TiDispatchCleanup;
     DriverObject->MajorFunction[IRP_MJ_INTERNAL_DEVICE_CONTROL] = TiDispatchInternal;
     DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = TiDispatch;
 
     DriverObject->DriverUnload = TiUnload;
+
+    AddrChangeInitialize();
 
     /* Open loopback adapter */
     Status = LoopRegisterAdapter(NULL, NULL);
