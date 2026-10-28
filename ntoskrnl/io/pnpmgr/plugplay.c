@@ -992,7 +992,7 @@ IopDeviceStatus(PPLUGPLAY_CONTROL_STATUS_DATA StatusData)
     _SEH2_TRY
     {
         Operation = StatusData->Operation;
-        if (Operation == PNP_SET_DEVICE_STATUS)
+        if (Operation == PNP_SET_DEVICE_STATUS || Operation == PNP_CLEAR_DEVICE_STATUS)
         {
             DeviceStatus = StatusData->DeviceStatus;
             DeviceProblem = StatusData->DeviceProblem;
@@ -1030,11 +1030,28 @@ IopDeviceStatus(PPLUGPLAY_CONTROL_STATUS_DATA StatusData)
             break;
 
         case PNP_SET_DEVICE_STATUS:
-            DPRINT1("Set status data is NOT SUPPORTED\n");
+            /* Only the problem can be set. The rest of the status is the PnP manager's own, and
+             * so are the user flags: DNUF_DISABLED, which keeps a device node, is never set
+             * from here, so a user-mode CM_Set_DevNode_Problem(CM_PROB_DISABLED) marks nothing
+             * that the PnP manager would act on */
+            if ((DeviceStatus & DN_HAS_PROBLEM) && DeviceProblem != 0)
+            {
+                PiSetDevNodeProblem(DeviceNode, DeviceProblem);
+            }
             break;
 
         case PNP_CLEAR_DEVICE_STATUS:
-            DPRINT1("FIXME: Clear status data!\n");
+            /* The problem that the caller names is the one that goes. A device that the PnP
+             * manager has parked (a disabled device, or one whose enable failed) keeps its
+             * problem until it is enabled: the enable clears it as it starts the device */
+            if ((DeviceStatus & DN_HAS_PROBLEM) &&
+                (DeviceNode->Flags & DNF_HAS_PROBLEM) &&
+                (DeviceProblem == 0 || DeviceProblem == DeviceNode->Problem) &&
+                !(DeviceNode->State == DeviceNodeInitialized &&
+                  (DeviceNode->UserFlags & DNUF_DISABLED)))
+            {
+                PiClearDevNodeProblem(DeviceNode);
+            }
             break;
     }
 

@@ -3515,6 +3515,10 @@ SetupDeviceInstance(
 
     if (ulStatus & DN_HAS_PROBLEM)
     {
+        /* An installation or a driver update does not enable a disabled device */
+        if (ulProblem == CM_PROB_DISABLED)
+            goto done;
+
         ret = ClearDeviceStatus(pszDeviceInstance,
                                 DN_HAS_PROBLEM,
                                 ulProblem);

@@ -530,6 +530,24 @@ START_TEST(RootDeviceDisable)
         CheckConfigFlags(0, "after DICS_ENABLE");
     }
 
+    /* The status of a node can be set and cleared from user mode, but a problem that user mode
+     * sets is only that: it neither disables the device nor makes the PnP manager keep its node */
+    if (is_reactos())
+    {
+        ULONG Status = 0, Problem = 0;
+
+        Cr = CM_Set_DevNode_Problem(DevInst, CM_PROB_FAILED_INSTALL, CM_SET_DEVNODE_PROBLEM_NORMAL);
+        ok(Cr == CR_SUCCESS, "CM_Set_DevNode_Problem failed: 0x%lx\n", Cr);
+        Cr = CM_Get_DevNode_Status(&Status, &Problem, DevInst, 0);
+        ok(Cr == CR_SUCCESS && (Status & DN_HAS_PROBLEM) && Problem == CM_PROB_FAILED_INSTALL,
+           "after CM_Set_DevNode_Problem: status 0x%lx, problem %lu, cr 0x%lx\n", Status, Problem, Cr);
+        Cr = CM_Set_DevNode_Problem(DevInst, 0, CM_SET_DEVNODE_PROBLEM_OVERRIDE);
+        ok(Cr == CR_SUCCESS, "Clearing the problem failed: 0x%lx\n", Cr);
+        Cr = CM_Get_DevNode_Status(&Status, &Problem, DevInst, 0);
+        ok(Cr == CR_SUCCESS && !(Status & DN_HAS_PROBLEM) && Problem == 0,
+           "after clearing the problem: status 0x%lx, problem %lu, cr 0x%lx\n", Status, Problem, Cr);
+    }
+
     /* Removing a disabled device removes its node */
     Cr = CM_Disable_DevNode(DevInst, 0);
     ok(Cr == CR_SUCCESS, "CM_Disable_DevNode failed: 0x%lx\n", Cr);
