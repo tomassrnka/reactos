@@ -426,6 +426,81 @@ RelaunchPacketReceiveWorker(
     ObDereferenceObject(FileObject);
 }
 
+/* Writes through a locked slot of the request (the slot has no MDL when the caller gave no pointer) */
+static VOID
+StoreToLockedBuffer(
+    _In_ PAFD_MAPBUF Map,
+    _In_ PVOID Data,
+    _In_ ULONG Length)
+{
+    if( !Map->Mdl )
+        return;
+
+    Map->BufferAddress = MmMapLockedPages( Map->Mdl, KernelMode );
+    if( Map->BufferAddress ) {
+        RtlCopyMemory( Map->BufferAddress, Data, MIN(Length, MmGetMdlByteCount(Map->Mdl)) );
+        MmUnmapLockedPages( Map->BufferAddress, Map->Mdl );
+    }
+}
+
+/*
+ * The control data of a received datagram for WSARecvMsg, as Windows hands it out: with
+ * IP_PKTINFO enabled one message (level IPPROTO_IP, type IP_PKTINFO, an in_pktinfo with the
+ * destination address and the interface index), laid out like the WSACMSGHDR of the caller
+ * (the header is 12 bytes for a 32-bit process, 16 for a 64-bit one, and the data follows it).
+ * The control length reports the full size of the message, the buffer receives as much of it
+ * as it can take (a byte-wise cut for a 64-bit caller, as Windows does) and MSG_CTRUNC flags
+ * the difference.
+ * Without IP_PKTINFO there is no control data and nothing to truncate.
+ *
+ * Returns TRUE when the message is truncated (the receive then fails with WSAEMSGSIZE).
+ */
+static BOOLEAN
+StoreMessageControl(
+    _In_ PAFD_RECV_INFO_UDP RecvReq,
+    _In_ PAFD_MAPBUF Map,
+    _In_ PAFD_STORED_DATAGRAM DatagramRecv,
+    _In_ BOOLEAN DatagramTruncated)
+{
+    PAFD_RECV_INFO_MSG Msg = (PAFD_RECV_INFO_MSG)RecvReq;
+    PAFD_WSABUF Slots = RecvReq->BufferArray + RecvReq->BufferCount;
+    UCHAR Cmsg[16 + sizeof(ULONG) * 2];
+    ULONG HeaderSize = Msg->CmsgHdrSize;
+    ULONG Total = 0, Capacity = Slots[EXTRA_LOCK_CONTROL].buf ? Slots[EXTRA_LOCK_CONTROL].len : 0;
+    ULONG Flags = DatagramTruncated ? MSG_TRUNC : 0;
+
+    if( (Msg->Options & AFD_RECV_MSG_PKTINFO) && DatagramRecv->PktInfo.Valid ) {
+        ULONG Pos = 0;
+        INT Level = IPPROTO_IP, Type = 19 /* IP_PKTINFO */;
+        ULONG Addr = DatagramRecv->PktInfo.DstAddress, Index = DatagramRecv->PktInfo.IfIndex;
+
+        Total = HeaderSize + sizeof(Addr) + sizeof(Index);
+        ASSERT(Total <= sizeof(Cmsg));
+        RtlZeroMemory(Cmsg, sizeof(Cmsg));
+        /* cmsg_len is a SIZE_T, followed by two INT: cmsg_level and cmsg_type */
+        RtlCopyMemory(Cmsg, &Total, sizeof(Total));
+        Pos = HeaderSize - 2 * sizeof(INT);
+        RtlCopyMemory(Cmsg + Pos, &Level, sizeof(Level));
+        RtlCopyMemory(Cmsg + Pos + sizeof(INT), &Type, sizeof(Type));
+        RtlCopyMemory(Cmsg + HeaderSize, &Addr, sizeof(Addr));
+        RtlCopyMemory(Cmsg + HeaderSize + sizeof(Addr), &Index, sizeof(Index));
+
+        if( Capacity < Total )
+            Flags |= MSG_CTRUNC;
+
+        /* A 64-bit process gets as many bytes as fit. A 32-bit one (whose messages the
+         * 64-bit system converts) gets the header when that fits, and the data only whole. */
+        if( HeaderSize == 12 && Capacity < Total )
+            Capacity = (Capacity >= HeaderSize) ? HeaderSize : 0;
+        StoreToLockedBuffer(&Map[RecvReq->BufferCount + EXTRA_LOCK_CONTROL], Cmsg, MIN(Capacity, Total));
+    }
+
+    StoreToLockedBuffer(&Map[RecvReq->BufferCount + EXTRA_LOCK_CONTROL_LENGTH], &Total, sizeof(Total));
+    StoreToLockedBuffer(&Map[RecvReq->BufferCount + EXTRA_LOCK_MSG_FLAGS], &Flags, sizeof(Flags));
+
+    return (Flags & MSG_CTRUNC) != 0;
+}
+
 static NTSTATUS NTAPI
 SatisfyPacketRecvRequest( PAFD_FCB FCB, PIRP Irp,
                          PAFD_STORED_DATAGRAM DatagramRecv,
@@ -513,6 +588,12 @@ SatisfyPacketRecvRequest( PAFD_FCB FCB, PIRP Irp,
         Status = Irp->IoStatus.Status = STATUS_BUFFER_OVERFLOW;
     }
 
+    /* WSARecvMsg: the control data and the message flags */
+    if( ExtraBuffers && (RecvReq->AfdFlags & AFD_RECV_MSG) ) {
+        if( StoreMessageControl((PAFD_RECV_INFO_UDP)RecvReq, Map, DatagramRecv, Status == STATUS_BUFFER_OVERFLOW) )
+            Status = Irp->IoStatus.Status = STATUS_BUFFER_OVERFLOW;
+    }
+
     Irp->IoStatus.Information = *TotalBytesCopied;
 
     if (!(RecvReq->TdiFlags & TDI_RECEIVE_PEEK))
@@ -574,7 +655,7 @@ AfdConnectedSocketReadData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     RecvReq->BufferArray = LockBuffers( RecvReq->BufferArray,
                                        RecvReq->BufferCount,
                                        NULL, NULL,
-                                       TRUE, FALSE, LockMode );
+                                       TRUE, FALSE, LockMode, NULL );
 
     if( !RecvReq->BufferArray ) {
         return UnlockAndMaybeComplete( FCB, STATUS_ACCESS_VIOLATION,
@@ -754,6 +835,11 @@ PacketSocketRecvComplete(
         DatagramRecv->Address =
             TaCopyTransportAddress( FCB->AddressFrom->RemoteAddress );
 
+        /* What the transport reported besides the source (AddressFrom->Options),
+         * for a WSARecvMsg that asks for IP_PKTINFO. The next datagram starts clean. */
+        DatagramRecv->PktInfo = FCB->RecvPktInfo;
+        RtlZeroMemory( &FCB->RecvPktInfo, sizeof(FCB->RecvPktInfo) );
+
         if( !DatagramRecv->Address ) Status = STATUS_NO_MEMORY;
 
     } else Status = STATUS_NO_MEMORY;
@@ -836,6 +922,7 @@ AfdPacketSocketReadData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
     PAFD_RECV_INFO_UDP RecvReq;
+    PAFD_RECV_INFO_MSG Msg = NULL;
     PLIST_ENTRY ListEntry;
     PAFD_STORED_DATAGRAM DatagramRecv;
     KPROCESSOR_MODE LockMode;
@@ -869,11 +956,23 @@ AfdPacketSocketReadData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     AFD_DbgPrint(MID_TRACE,("Recv flags %x\n", RecvReq->AfdFlags));
 
+    /* WSARecvMsg: the control data pointers follow the AFD_RECV_INFO_UDP. They
+     * were copied with the request; the structure must hold them. */
+    if( RecvReq->AfdFlags & AFD_RECV_MSG ) {
+        PAFD_RECV_INFO_MSG MsgReq = (PAFD_RECV_INFO_MSG)RecvReq;
+
+        if( IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(AFD_RECV_INFO_MSG) ||
+            (MsgReq->CmsgHdrSize != 12 && MsgReq->CmsgHdrSize != 16) ) {
+            return UnlockAndMaybeComplete(FCB, STATUS_INVALID_PARAMETER, Irp, 0);
+        }
+        Msg = MsgReq;
+    }
+
     RecvReq->BufferArray = LockBuffers( RecvReq->BufferArray,
                                         RecvReq->BufferCount,
                                         RecvReq->Address,
                                         RecvReq->AddressLength,
-                                        TRUE, TRUE, LockMode );
+                                        TRUE, TRUE, LockMode, Msg );
 
     if( !RecvReq->BufferArray ) { /* access violation in userspace */
         return UnlockAndMaybeComplete(FCB, STATUS_ACCESS_VIOLATION, Irp, 0);

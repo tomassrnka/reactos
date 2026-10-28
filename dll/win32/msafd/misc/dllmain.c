@@ -3178,6 +3178,25 @@ WSPGetSockOpt(IN SOCKET Handle,
         return SOCKET_ERROR;
     }
 
+    /* IP_PKTINFO: AFD has no such option, WSARecvMsg asks AFD for the packet information
+     * when the socket has it enabled (a datagram or raw socket; a stream socket: WSAEINVAL) */
+    if (Level == IPPROTO_IP && OptionName == IP_PKTINFO)
+    {
+        if (!(Socket->SharedData->ServiceFlags1 & XP1_CONNECTIONLESS))
+        {
+            if (lpErrno) *lpErrno = WSAEINVAL;
+            return SOCKET_ERROR;
+        }
+        if (*OptionLength < (INT)sizeof(DWORD))
+        {
+            if (lpErrno) *lpErrno = WSAEFAULT;
+            return SOCKET_ERROR;
+        }
+        *(DWORD *)OptionValue = Socket->SharedData->IpPktInfo ? 1 : 0;
+        *OptionLength = sizeof(DWORD);
+        return NO_ERROR;
+    }
+
     switch (Level)
     {
         case SOL_SOCKET:
@@ -3487,6 +3506,23 @@ WSPSetSockOpt(
     {
         if (lpErrno) *lpErrno = WSAEFAULT;
         return SOCKET_ERROR;
+    }
+
+    /* IP_PKTINFO: a switch for WSARecvMsg, kept with the socket (see WSPGetSockOpt) */
+    if (level == IPPROTO_IP && optname == IP_PKTINFO)
+    {
+        if (!(Socket->SharedData->ServiceFlags1 & XP1_CONNECTIONLESS))
+        {
+            if (lpErrno) *lpErrno = WSAEINVAL;
+            return SOCKET_ERROR;
+        }
+        if (optlen < (INT)sizeof(DWORD))
+        {
+            if (lpErrno) *lpErrno = WSAEFAULT;
+            return SOCKET_ERROR;
+        }
+        Socket->SharedData->IpPktInfo = (*(DWORD *)optval != 0) ? 1 : 0;
+        return NO_ERROR;
     }
 
     /* FIXME: We should handle some more cases here */

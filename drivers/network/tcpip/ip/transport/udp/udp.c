@@ -399,7 +399,8 @@ VOID UDPReceive(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
                              &SearchContext);
   if (AddrFile) {
     do {
-      DGDeliverData(AddrFile,
+      DGDeliverData(Interface,
+		    AddrFile,
 		    SrcAddress,
                     DstAddress,
 		    UDPHeader->SourcePort,

@@ -595,7 +595,7 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         SendReq->BufferArray = LockBuffers( SendReq->BufferArray,
                                             SendReq->BufferCount,
                                             NULL, NULL,
-                                            FALSE, FALSE, LockMode );
+                                            FALSE, FALSE, LockMode, NULL );
 
         if( !SendReq->BufferArray ) {
             return UnlockAndMaybeComplete( FCB, STATUS_ACCESS_VIOLATION,
@@ -663,7 +663,7 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     SendReq->BufferArray = LockBuffers( SendReq->BufferArray,
                                         SendReq->BufferCount,
                                         NULL, NULL,
-                                        FALSE, FALSE, LockMode );
+                                        FALSE, FALSE, LockMode, NULL );
 
     if( !SendReq->BufferArray ) {
         return UnlockAndMaybeComplete( FCB, STATUS_ACCESS_VIOLATION,
@@ -869,7 +869,7 @@ AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     SendReq->BufferArray = LockBuffers( SendReq->BufferArray,
                                         SendReq->BufferCount,
                                         NULL, NULL,
-                                        FALSE, FALSE, LockMode );
+                                        FALSE, FALSE, LockMode, NULL );
 
     if( !SendReq->BufferArray )
         return UnlockAndMaybeComplete( FCB, STATUS_ACCESS_VIOLATION,

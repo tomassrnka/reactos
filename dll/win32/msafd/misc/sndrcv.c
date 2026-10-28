@@ -115,7 +115,8 @@ WSPGetOverlappedResult(
             *lpErrno = WSAENOTSOCK;
         return FALSE;
     }
-    if (!lpOverlapped || !lpdwBytes || !lpdwFlags)
+    /* The flags are optional */
+    if (!lpOverlapped || !lpdwBytes)
     {
         if (lpErrno)
             *lpErrno = WSAEFAULT;
@@ -147,16 +148,21 @@ WSPGetOverlappedResult(
     switch (IoStatusBlock->Status)
     {
         case STATUS_RECEIVE_EXPEDITED:
-            *lpdwFlags = MSG_OOB;
+            if (lpdwFlags)
+                *lpdwFlags = MSG_OOB;
             break;
         case STATUS_RECEIVE_PARTIAL_EXPEDITED:
-            *lpdwFlags = MSG_PARTIAL | MSG_OOB;
+            if (lpdwFlags)
+                *lpdwFlags = MSG_PARTIAL | MSG_OOB;
             break;
         case STATUS_RECEIVE_PARTIAL:
-            *lpdwFlags = MSG_PARTIAL;
+            if (lpdwFlags)
+                *lpdwFlags = MSG_PARTIAL;
             break;
         default:
-            *lpdwFlags = 0;
+            /* A failed request leaves the flags as they were, as on Windows */
+            if (lpdwFlags && NT_SUCCESS(IoStatusBlock->Status))
+                *lpdwFlags = 0;
             if (lpErrno)
                 *lpErrno = TranslateNtStatusError(IoStatusBlock->Status);
             break;
@@ -238,6 +244,7 @@ WSPRecv(SOCKET Handle,
     HANDLE                  SockEvent;
     PSOCKET_INFORMATION     Socket;
     DWORD                   NumberOfBytesRead;
+    int                     Ret;
 
     TRACE("WSPRecv(%x)\n", Handle);
 
@@ -423,27 +430,40 @@ WSPRecv(SOCKET Handle,
     TRACE("Leaving (%lx %ld)\n", Status, NumberOfBytesRead);
 
     /* A timed out receive leaves the caller's byte count unchanged */
-    return MsafdReturnWithErrno(Status, lpErrno, NumberOfBytesRead,
-                                (Status == STATUS_IO_TIMEOUT) ? NULL : lpNumberOfBytesRead);
+    Ret = MsafdReturnWithErrno(Status, lpErrno, NumberOfBytesRead,
+                               (Status == STATUS_IO_TIMEOUT) ? NULL : lpNumberOfBytesRead);
+
+    /* A datagram larger than the buffers (a connected datagram socket): the failure
+     * reports the bytes that were received, as Windows does */
+    if (Status == STATUS_BUFFER_OVERFLOW && lpNumberOfBytesRead)
+        *lpNumberOfBytesRead = NumberOfBytesRead;
+
+    return Ret;
 }
 
+/*
+ * The datagram receive of WSPRecvFrom and WSPRecvMsg. With a message, AFD also gets the
+ * message's control buffer, control length and flags to fill in (see AFD_RECV_INFO_MSG), and
+ * the socket's IP_PKTINFO setting; the address buffer may then be absent.
+ */
+static
 int
-WSPAPI
-WSPRecvFrom(SOCKET Handle,
-            LPWSABUF lpBuffers,
-            DWORD dwBufferCount,
-            LPDWORD lpNumberOfBytesRead,
-            LPDWORD ReceiveFlags,
-            struct sockaddr *SocketAddress,
-            int *SocketAddressLength,
-            LPWSAOVERLAPPED lpOverlapped,
-            LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine,
-            LPWSATHREADID lpThreadId,
-            LPINT lpErrno )
+MsafdRecvFrom(SOCKET Handle,
+              LPWSABUF lpBuffers,
+              DWORD dwBufferCount,
+              LPDWORD lpNumberOfBytesRead,
+              LPDWORD ReceiveFlags,
+              struct sockaddr *SocketAddress,
+              int *SocketAddressLength,
+              LPWSAOVERLAPPED lpOverlapped,
+              LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine,
+              LPWSATHREADID lpThreadId,
+              LPINT lpErrno,
+              LPWSAMSG Msg)
 {
     PIO_STATUS_BLOCK            IOSB;
     IO_STATUS_BLOCK             DummyIOSB;
-    AFD_RECV_INFO_UDP           RecvInfo;
+    AFD_RECV_INFO_MSG           RecvInfo;
     NTSTATUS                    Status;
     PMSAFD_RECV_APC_CONTEXT     APCContext;
     PIO_APC_ROUTINE             APCFunction = NULL;
@@ -451,6 +471,7 @@ WSPRecvFrom(SOCKET Handle,
     HANDLE                      SockEvent;
     PSOCKET_INFORMATION         Socket;
     DWORD                       NumberOfBytesRead;
+    int                         Ret;
 
     TRACE("WSPRecvFrom(%x)\n", Handle);
 
@@ -475,7 +496,7 @@ WSPRecvFrom(SOCKET Handle,
         return SOCKET_ERROR;
     }
 
-    if (!(Socket->SharedData->ServiceFlags1 & XP1_CONNECTIONLESS))
+    if (!Msg && !(Socket->SharedData->ServiceFlags1 & XP1_CONNECTIONLESS))
     {
         /* Call WSPRecv for a non-datagram socket */
         return WSPRecv(Handle,
@@ -492,12 +513,28 @@ WSPRecvFrom(SOCKET Handle,
     /* Bind us First */
     if (Socket->SharedData->State == SocketOpen)
     {
+        SOCKADDR_STORAGE Wildcard;
+        INT WildcardLength = sizeof(Wildcard);
+
+        /* A message without an address buffer still needs the socket bound */
+        if (!SocketAddress || !SocketAddressLength)
+        {
+            SocketAddress = (struct sockaddr *)&Wildcard;
+            SocketAddressLength = &WildcardLength;
+        }
+
         Socket->HelperData->WSHGetWildcardSockaddr(Socket->HelperContext,
             SocketAddress,
             SocketAddressLength);
         /* Bind it */
         if (WSPBind(Handle, SocketAddress, *SocketAddressLength, lpErrno) == SOCKET_ERROR)
             return SOCKET_ERROR;
+
+        if (SocketAddress == (struct sockaddr *)&Wildcard)
+        {
+            SocketAddress = NULL;
+            SocketAddressLength = NULL;
+        }
     }
     memset(&RecvInfo, 0, sizeof(RecvInfo));
 
@@ -510,33 +547,43 @@ WSPRecvFrom(SOCKET Handle,
     }
 
     /* Set up the Receive Structure */
-    RecvInfo.BufferArray = (PAFD_WSABUF)lpBuffers;
-    RecvInfo.BufferCount = dwBufferCount;
-    RecvInfo.TdiFlags = 0;
-    RecvInfo.AfdFlags = Socket->SharedData->NonBlocking ? AFD_IMMEDIATE : 0;
-    RecvInfo.AddressLength = SocketAddressLength;
-    RecvInfo.Address = SocketAddress;
+    RecvInfo.Udp.BufferArray = (PAFD_WSABUF)lpBuffers;
+    RecvInfo.Udp.BufferCount = dwBufferCount;
+    RecvInfo.Udp.TdiFlags = 0;
+    RecvInfo.Udp.AfdFlags = Socket->SharedData->NonBlocking ? AFD_IMMEDIATE : 0;
+    RecvInfo.Udp.AddressLength = SocketAddressLength;
+    RecvInfo.Udp.Address = SocketAddress;
+
+    if (Msg)
+    {
+        RecvInfo.Udp.AfdFlags |= AFD_RECV_MSG;
+        RecvInfo.ControlBuffer = Msg->Control.buf;
+        RecvInfo.ControlLength = &Msg->Control.len;
+        RecvInfo.MsgFlags = &Msg->dwFlags;
+        RecvInfo.Options = Socket->SharedData->IpPktInfo ? AFD_RECV_MSG_PKTINFO : 0;
+        RecvInfo.CmsgHdrSize = sizeof(WSACMSGHDR);
+    }
 
     /* Set the TDI Flags */
     if (!ReceiveFlags || *ReceiveFlags == 0)
     {
-        RecvInfo.TdiFlags |= TDI_RECEIVE_NORMAL;
+        RecvInfo.Udp.TdiFlags |= TDI_RECEIVE_NORMAL;
     }
     else
     {
         if (*ReceiveFlags & MSG_OOB)
         {
-            RecvInfo.TdiFlags |= TDI_RECEIVE_EXPEDITED;
+            RecvInfo.Udp.TdiFlags |= TDI_RECEIVE_EXPEDITED;
         }
 
         if (*ReceiveFlags & MSG_PEEK)
         {
-            RecvInfo.TdiFlags |= TDI_RECEIVE_PEEK;
+            RecvInfo.Udp.TdiFlags |= TDI_RECEIVE_PEEK;
         }
 
         if (*ReceiveFlags & MSG_PARTIAL)
         {
-            RecvInfo.TdiFlags |= TDI_RECEIVE_PARTIAL;
+            RecvInfo.Udp.TdiFlags |= TDI_RECEIVE_PARTIAL;
         }
     }
 
@@ -562,7 +609,7 @@ WSPRecvFrom(SOCKET Handle,
         IOSB = (PIO_STATUS_BLOCK)lpOverlapped;
         if (lpCompletionRoutine)
         {
-            RecvInfo.AfdFlags |= AFD_SKIP_FIO;
+            RecvInfo.Udp.AfdFlags |= AFD_SKIP_FIO;
             APCFunction = &MsafdRecvAPC;
             APCContext = HeapAlloc(GlobalHeap, 0, sizeof(*APCContext));
             if (!APCContext)
@@ -593,7 +640,7 @@ WSPRecvFrom(SOCKET Handle,
             }
         }
 
-        RecvInfo.AfdFlags |= AFD_OVERLAPPED;
+        RecvInfo.Udp.AfdFlags |= AFD_OVERLAPPED;
     }
 
     IOSB->Information = 0;
@@ -607,7 +654,7 @@ WSPRecvFrom(SOCKET Handle,
                                     IOSB,
                                     IOCTL_AFD_RECV_DATAGRAM,
                                     &RecvInfo,
-                                    sizeof(RecvInfo),
+                                    Msg ? sizeof(RecvInfo) : sizeof(RecvInfo.Udp),
                                     NULL,
                                     0);
 
@@ -663,8 +710,34 @@ WSPRecvFrom(SOCKET Handle,
     TRACE("Leaving (%lx %ld)\n", Status, NumberOfBytesRead);
 
     /* A timed out receive leaves the caller's byte count unchanged */
-    return MsafdReturnWithErrno(Status, lpErrno, NumberOfBytesRead,
-                                (Status == STATUS_IO_TIMEOUT) ? NULL : lpNumberOfBytesRead);
+    Ret = MsafdReturnWithErrno(Status, lpErrno, NumberOfBytesRead,
+                               (Status == STATUS_IO_TIMEOUT) ? NULL : lpNumberOfBytesRead);
+
+    /* A datagram larger than the buffers: the failure reports the bytes that were
+     * received, as Windows does */
+    if (Status == STATUS_BUFFER_OVERFLOW && lpNumberOfBytesRead)
+        *lpNumberOfBytesRead = NumberOfBytesRead;
+
+    return Ret;
+}
+
+int
+WSPAPI
+WSPRecvFrom(SOCKET Handle,
+            LPWSABUF lpBuffers,
+            DWORD dwBufferCount,
+            LPDWORD lpNumberOfBytesRead,
+            LPDWORD ReceiveFlags,
+            struct sockaddr *SocketAddress,
+            int *SocketAddressLength,
+            LPWSAOVERLAPPED lpOverlapped,
+            LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine,
+            LPWSATHREADID lpThreadId,
+            LPINT lpErrno )
+{
+    return MsafdRecvFrom(Handle, lpBuffers, dwBufferCount, lpNumberOfBytesRead, ReceiveFlags,
+                         SocketAddress, SocketAddressLength, lpOverlapped, lpCompletionRoutine,
+                         lpThreadId, lpErrno, NULL);
 }
 
 
@@ -674,10 +747,13 @@ WSPRecvFrom(SOCKET Handle,
  * (the read path of a socket that asked for IP_RECVTOS), and a refused lookup fails every UDP
  * read of the QUIC session with ERR_FAILED.
  *
- * The message is received as a datagram receive with the message's own address buffer, flags and
- * buffers. AFD has no ancillary data, so the control buffer is returned empty (as Windows does
- * for a socket that enabled no packet information). The message must stay valid until an
- * overlapped receive completes, as on Windows: the address length is written there.
+ * The message is received as a datagram receive with the message's own address buffer, flags
+ * and buffers, and AFD fills in its control data (see AFD_RECV_INFO_MSG), also when an
+ * overlapped receive completes after this returns: the message must stay valid until then, as
+ * on Windows (the address length is written there too). The control data is an IP_PKTINFO
+ * message when the socket enabled it, none otherwise. The control length is its full size,
+ * the buffer takes as much as fits, and MSG_CTRUNC / MSG_TRUNC flag what was cut off, with
+ * WSAEMSGSIZE (the received bytes are still counted).
  */
 INT
 WSPAPI
@@ -713,45 +789,34 @@ WSPRecvMsg(
         return SOCKET_ERROR;
     }
 
-    lpMsg->Control.len = 0;
+    /* A control buffer needs a size and a size needs a buffer, else nothing is received
+     * (the datagram stays queued and the message is not touched), as on Windows */
+    if ((lpMsg->Control.buf == NULL) != (lpMsg->Control.len == 0))
+    {
+        SetLastError(WSAEFAULT);
+        return SOCKET_ERROR;
+    }
+
     Flags = lpMsg->dwFlags;
     lpMsg->dwFlags = 0;
 
-    if (lpMsg->name)
-    {
-        Ret = WSPRecvFrom(Handle,
-                          lpMsg->lpBuffers,
-                          lpMsg->dwBufferCount,
-                          lpNumberOfBytesRecvd,
-                          &Flags,
-                          lpMsg->name,
-                          &lpMsg->namelen,
-                          lpOverlapped,
-                          lpCompletionRoutine,
-                          NULL,
-                          &Errno);
-    }
-    else
-    {
-        Ret = WSPRecv(Handle,
-                      lpMsg->lpBuffers,
-                      lpMsg->dwBufferCount,
-                      lpNumberOfBytesRecvd,
-                      &Flags,
-                      lpOverlapped,
-                      lpCompletionRoutine,
-                      NULL,
-                      &Errno);
-    }
+    Ret = MsafdRecvFrom(Handle,
+                        lpMsg->lpBuffers,
+                        lpMsg->dwBufferCount,
+                        lpNumberOfBytesRecvd,
+                        &Flags,
+                        lpMsg->name,
+                        lpMsg->name ? &lpMsg->namelen : NULL,
+                        lpOverlapped,
+                        lpCompletionRoutine,
+                        NULL,
+                        &Errno,
+                        lpMsg);
 
     if (Ret == NO_ERROR)
-    {
-        lpMsg->dwFlags = Flags;
         return NO_ERROR;
-    }
 
-    if (Errno == WSAEMSGSIZE)
-        lpMsg->dwFlags = MSG_TRUNC;
+    /* An error before the request reached AFD leaves the control length as it was */
     SetLastError(Errno ? Errno : WSASYSCALLFAILURE);
     return SOCKET_ERROR;
 }

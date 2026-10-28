@@ -95,9 +95,17 @@ typedef struct IPADDR_ENTRY {
 
 #define IN_FLIGHT_REQUESTS              5
 
-#define EXTRA_LOCK_BUFFERS              2 /* Number of extra buffers needed
+#define EXTRA_LOCK_BUFFERS              5 /* Number of extra buffers needed
 					   * for ancillary data on packet
-					   * requests. */
+					   * requests: the address and its
+					   * length, then (WSARecvMsg only)
+					   * the control buffer, its length
+					   * and the message flags. */
+#define EXTRA_LOCK_ADDRESS              0 /* offsets of those buffers after */
+#define EXTRA_LOCK_ADDRESS_LENGTH       1 /* the data buffers */
+#define EXTRA_LOCK_CONTROL              2
+#define EXTRA_LOCK_CONTROL_LENGTH       3
+#define EXTRA_LOCK_MSG_FLAGS            4
 
 /* The referenced handle table of a select request; the caller's buffer is copied back to it */
 #define AFD_HANDLES(Irp) ((PAFD_HANDLE)(Irp)->Tail.Overlay.DriverContext[2])
@@ -165,10 +173,24 @@ typedef struct _AFD_DATA_WINDOW {
     UINT BytesUsed, Size, Content;
 } AFD_DATA_WINDOW, *PAFD_DATA_WINDOW;
 
+/*
+ * What the transport tells AFD about a received datagram besides its source, through the Options
+ * of the connection information of the receive (tcpip: DGDeliverData). Valid is 0 until the
+ * transport fills the structure in. DstAddress is the datagram's destination, as in the IP
+ * header (network order); IfIndex is the index of the interface that owns it, or that the
+ * datagram arrived on (the index tcpip reports for the interface).
+ */
+typedef struct _AFD_RECV_PKTINFO {
+    ULONG Valid;
+    ULONG DstAddress;
+    ULONG IfIndex;
+} AFD_RECV_PKTINFO, *PAFD_RECV_PKTINFO;
+
 typedef struct _AFD_STORED_DATAGRAM {
     LIST_ENTRY ListEntry;
     UINT Len;
     PTRANSPORT_ADDRESS Address;
+    AFD_RECV_PKTINFO PktInfo;
     CHAR Buffer[1];
 } AFD_STORED_DATAGRAM, *PAFD_STORED_DATAGRAM;
 
@@ -191,6 +213,7 @@ typedef struct _AFD_FCB {
     LARGE_INTEGER DisconnectTimeout;
     PTRANSPORT_ADDRESS LocalAddress, RemoteAddress;
     PTDI_CONNECTION_INFORMATION AddressFrom, ConnectCallInfo, ConnectReturnInfo;
+    AFD_RECV_PKTINFO RecvPktInfo; /* AddressFrom->Options: filled in by the transport per datagram */
     AFD_TDI_OBJECT AddressFile, Connection;
     AFD_IN_FLIGHT_REQUEST ConnectIrp, ListenIrp, ReceiveIrp, SendIrp, DisconnectIrp;
     PIRP AcceptIrp;
@@ -333,7 +356,8 @@ ObDereferenceObjectDeferDelete(
 PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
 			 PVOID AddressBuf, PINT AddressLen,
 			 BOOLEAN Write, BOOLEAN LockAddress,
-             KPROCESSOR_MODE LockMode );
+             KPROCESSOR_MODE LockMode,
+             PAFD_RECV_INFO_MSG Msg );
 VOID UnlockBuffers( PAFD_WSABUF Buf, UINT Count, BOOL Address );
 BOOLEAN SocketAcquireStateLock( PAFD_FCB FCB );
 NTSTATUS NTAPI UnlockAndMaybeComplete

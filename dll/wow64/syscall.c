@@ -1447,7 +1447,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         ULONG InputLength = a[7];
         AFD_RECV_INFO Transfer;
         AFD_SEND_INFO_UDP Datagram;
-        AFD_RECV_INFO_UDP RecvDatagram;
+        AFD_RECV_INFO_MSG RecvDatagram;
         AFD_ACCEPT_DATA Accept;
         /* These requests contain counted strings/addresses or opaque bytes.
          * AFD requests carrying handles or WSABUF arrays need translation. */
@@ -1527,31 +1527,45 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
              * array like IOCTL_AFD_RECV and widen the source-address buffer and
              * address-length pointers; AFD locks the guest buffers and writes
              * the sender sockaddr and its length back through them (the sockaddr
-             * layout itself is identical in 32 and 64 bits). */
+             * layout itself is identical in 32 and 64 bits).
+             * WSARecvMsg (AFD_RECV_MSG) adds ControlBuffer, ControlLength and
+             * MsgFlags pointers (widened the same way), Options and CmsgHdrSize
+             * (the guest's WSACMSGHDR size, 12, which AFD lays the control
+             * messages out by). */
             const ULONG *From = Input;
             const ULONG *Buffers;
             ULONG i;
             if (InputLength < 6 * sizeof(ULONG)) return STATUS_BUFFER_TOO_SMALL;
             RtlZeroMemory(&RecvDatagram, sizeof(RecvDatagram));
-            RecvDatagram.BufferCount = From[1];
-            RecvDatagram.AfdFlags = From[2];
-            RecvDatagram.TdiFlags = From[3];
-            RecvDatagram.Address = PTR32(From[4]);
-            RecvDatagram.AddressLength = PTR32(From[5]);
-            Buffers = PTR32(From[0]);
-            if (!RecvDatagram.BufferCount ||
-                RecvDatagram.BufferCount > WOW64_MAX_ARRAY_COUNT)
-                return STATUS_INVALID_PARAMETER;
-            RecvDatagram.BufferArray = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0,
-                                        RecvDatagram.BufferCount * sizeof(AFD_WSABUF));
-            if (!RecvDatagram.BufferArray) return STATUS_NO_MEMORY;
-            for (i = 0; i < RecvDatagram.BufferCount; ++i)
+            RecvDatagram.Udp.BufferCount = From[1];
+            RecvDatagram.Udp.AfdFlags = From[2];
+            RecvDatagram.Udp.TdiFlags = From[3];
+            RecvDatagram.Udp.Address = PTR32(From[4]);
+            RecvDatagram.Udp.AddressLength = PTR32(From[5]);
+            if (RecvDatagram.Udp.AfdFlags & AFD_RECV_MSG)
             {
-                RecvDatagram.BufferArray[i].len = Buffers[2 * i];
-                RecvDatagram.BufferArray[i].buf = PTR32(Buffers[2 * i + 1]);
+                if (InputLength < 11 * sizeof(ULONG)) return STATUS_BUFFER_TOO_SMALL;
+                RecvDatagram.ControlBuffer = PTR32(From[6]);
+                RecvDatagram.ControlLength = PTR32(From[7]);
+                RecvDatagram.MsgFlags = PTR32(From[8]);
+                RecvDatagram.Options = From[9];
+                RecvDatagram.CmsgHdrSize = From[10];
+            }
+            Buffers = PTR32(From[0]);
+            if (!RecvDatagram.Udp.BufferCount ||
+                RecvDatagram.Udp.BufferCount > WOW64_MAX_ARRAY_COUNT)
+                return STATUS_INVALID_PARAMETER;
+            RecvDatagram.Udp.BufferArray = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0,
+                                        RecvDatagram.Udp.BufferCount * sizeof(AFD_WSABUF));
+            if (!RecvDatagram.Udp.BufferArray) return STATUS_NO_MEMORY;
+            for (i = 0; i < RecvDatagram.Udp.BufferCount; ++i)
+            {
+                RecvDatagram.Udp.BufferArray[i].len = Buffers[2 * i];
+                RecvDatagram.Udp.BufferArray[i].buf = PTR32(Buffers[2 * i + 1]);
             }
             Input = &RecvDatagram;
-            InputLength = sizeof(RecvDatagram);
+            InputLength = (RecvDatagram.Udp.AfdFlags & AFD_RECV_MSG) ? sizeof(RecvDatagram) :
+                                                                       sizeof(RecvDatagram.Udp);
             break;
         }
         case IOCTL_AFD_SEND:

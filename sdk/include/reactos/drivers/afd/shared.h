@@ -122,6 +122,34 @@ typedef struct _AFD_RECV_INFO_UDP {
     PINT				AddressLength;
 } AFD_RECV_INFO_UDP, *PAFD_RECV_INFO_UDP;
 
+/*
+ * WSARecvMsg: AFD_RECV_INFO_UDP extended by the message's control data, requested with
+ * AFD_RECV_MSG in AfdFlags (the input buffer must then hold the whole structure).
+ *
+ * The three pointers refer to fields of the caller's WSAMSG and stay valid until the request
+ * completes (an overlapped receive completes long after the call returns), so AFD locks them
+ * with the data buffers and writes the result itself:
+ *  - ControlLength holds the size of ControlBuffer on input and the size of the control data
+ *    on completion (the full size, also when ControlBuffer was too small), 0 without any;
+ *  - ControlBuffer receives the control messages, cut off at the size it was given;
+ *  - MsgFlags receives MSG_TRUNC (datagram cut off) and MSG_CTRUNC (control data cut off).
+ * Options asks for the control messages: AFD_RECV_MSG_PKTINFO for an IP_PKTINFO message
+ * (struct in_pktinfo: the datagram's destination address and the interface it arrived on).
+ * CmsgHdrSize is sizeof(WSACMSGHDR) of the caller, 12 for a 32-bit process and 16 for a
+ * 64-bit one, which sets the layout of the messages.
+ */
+#define AFD_RECV_MSG                    0x8000L
+#define AFD_RECV_MSG_PKTINFO            0x1L
+
+typedef struct _AFD_RECV_INFO_MSG {
+    AFD_RECV_INFO_UDP			Udp;
+    PVOID				ControlBuffer;
+    PULONG				ControlLength;
+    PULONG				MsgFlags;
+    ULONG				Options;
+    ULONG				CmsgHdrSize;
+} AFD_RECV_INFO_MSG, *PAFD_RECV_INFO_MSG;
+
 typedef struct  _AFD_SEND_INFO {
     PAFD_WSABUF				BufferArray;
     ULONG				BufferCount;
@@ -423,6 +451,7 @@ typedef struct _SOCK_SHARED_INFO {
         BOOLEAN					SendShutdown:1;
         BOOLEAN					UseDelayedAcceptance:1;
 		BOOLEAN					UseSAN:1;
+		BOOLEAN					IpPktInfo:1;
     }; // Flags
     DWORD						CreateFlags;
     DWORD						ServiceFlags1;
