@@ -5719,7 +5719,7 @@ NdisMCancelTimer(
                                   BytesTransferred)      \
 {                                                        \
     (*((PNDIS_MINIPORT_BLOCK)(MiniportAdapterHandle))->TDCompleteHandler)( \
-        MiniportAdapterHandle, Packet, Status, BytesTransferred)           \
+        MiniportAdapterHandle, Packet, Status, BytesTransferred);          \
 }
 
 #endif /* !_NDIS_ */

@@ -59,6 +59,9 @@ DriverEntry(PDRIVER_OBJECT DriverObject,
         return Status;
     }
 
+    /* Reads and writes copy the frame through Irp->AssociatedIrp.SystemBuffer */
+    GlobalDeviceObject->Flags |= DO_BUFFERED_IO;
+
     /* Create a symbolic link into the DOS devices namespace */
     Status = IoCreateSymbolicLink(&DosDeviceName, &NtDeviceName);
     if (!NT_SUCCESS(Status))

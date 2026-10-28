@@ -165,6 +165,25 @@ ReferenceFileAdapter(PFILE_OBJECT FileObject,
     return AdapterContext;
 }
 
+/* Another reference on an adapter the caller knows is still there (NDIS calls its binding, at up to
+   DISPATCH_LEVEL), or FALSE once it is being unbound: the unbind waits for the last one to go */
+BOOLEAN
+ReferenceAdapterContext(PNDISUIO_ADAPTER_CONTEXT AdapterContext)
+{
+    BOOLEAN Referenced = FALSE;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&GlobalAdapterListLock, &OldIrql);
+    if (!AdapterContext->Unbinding)
+    {
+        InterlockedIncrement(&AdapterContext->RefCount);
+        Referenced = TRUE;
+    }
+    KeReleaseSpinLock(&GlobalAdapterListLock, OldIrql);
+
+    return Referenced;
+}
+
 VOID
 DereferenceAdapterContext(PNDISUIO_ADAPTER_CONTEXT AdapterContext)
 {

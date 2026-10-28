@@ -107,15 +107,50 @@ NduSendComplete(NDIS_HANDLE ProtocolBindingContext,
                 PNDIS_PACKET Packet,
                 NDIS_STATUS Status)
 {
-    PNDISUIO_ADAPTER_CONTEXT AdapterContext = ProtocolBindingContext;
+    PNDISUIO_SEND Send = NDISUIO_PACKET_SEND(Packet);
+
+    UNREFERENCED_PARAMETER(ProtocolBindingContext);
 
     DPRINT("Asynchronous adapter send completed\n");
 
-    /* Store the final status and signal the event */
-    AdapterContext->AsyncStatus = Status;
-    KeSetEvent(&AdapterContext->AsyncEvent, IO_NO_INCREMENT, FALSE);
+    /* Store the status of this send and wake the write waiting for it (NduDispatchWrite) */
+    Send->Status = Status;
+    KeSetEvent(&Send->Event, IO_NO_INCREMENT, FALSE);
 }
 
+/* Puts a received packet (header and data, Length bytes) on the adapter's list for a read */
+static
+NDIS_STATUS
+QueueReceivedPacket(PNDISUIO_ADAPTER_CONTEXT AdapterContext,
+                    PVOID PacketBuffer,
+                    ULONG Length)
+{
+    PNDISUIO_PACKET_ENTRY PacketEntry;
+
+    /* Allocate a packet entry from pool */
+    PacketEntry = ExAllocatePool(NonPagedPool, FIELD_OFFSET(NDISUIO_PACKET_ENTRY, PacketData[Length]));
+    if (!PacketEntry)
+        return NDIS_STATUS_RESOURCES;
+
+    /* Initialize the packet entry and copy in packet data */
+    PacketEntry->PacketLength = Length;
+    RtlCopyMemory(PacketEntry->PacketData, PacketBuffer, Length);
+
+    /* Insert the packet on the adapter's packet list */
+    ExInterlockedInsertTailList(&AdapterContext->PacketList,
+                                &PacketEntry->ListEntry,
+                                &AdapterContext->Spinlock);
+
+    /* Signal the read event */
+    KeSetEvent(&AdapterContext->PacketReadEvent,
+               IO_NETWORK_INCREMENT,
+               FALSE);
+
+    return NDIS_STATUS_SUCCESS;
+}
+
+/* The end of a transfer NduReceive started, done at once or later: the data is in the buffer
+   (after the header NduReceive copied), or the packet is dropped */
 VOID
 NTAPI
 NduTransferDataComplete(NDIS_HANDLE ProtocolBindingContext,
@@ -124,12 +159,24 @@ NduTransferDataComplete(NDIS_HANDLE ProtocolBindingContext,
                         UINT BytesTransferred)
 {
     PNDISUIO_ADAPTER_CONTEXT AdapterContext = ProtocolBindingContext;
+    PNDISUIO_TRANSFER Transfer = NDISUIO_PACKET_TRANSFER(Packet);
+    PVOID PacketBuffer = Transfer->PacketBuffer;
+    ULONG HeaderSize = Transfer->HeaderSize;
 
-    DPRINT("Asynchronous adapter transfer completed\n");
+    DPRINT("Adapter transfer completed\n");
 
-    /* Store the final status and signal the event */
-    AdapterContext->AsyncStatus = Status;
-    KeSetEvent(&AdapterContext->AsyncEvent, IO_NO_INCREMENT, FALSE);
+    /* Free the packet descriptor and buffers but not the pool, which has the data */
+    CleanupAndFreePacket(Packet, FALSE);
+
+    if (Status == NDIS_STATUS_SUCCESS)
+        QueueReceivedPacket(AdapterContext, PacketBuffer, HeaderSize + BytesTransferred);
+    else
+        DPRINT1("Failed to transfer data with status 0x%x\n", Status);
+
+    ExFreePool(PacketBuffer);
+
+    /* The transfer's reference (NduReceive): the unbind may free the adapter from here on */
+    DereferenceAdapterContext(AdapterContext);
 }
 
 VOID
@@ -137,13 +184,9 @@ NTAPI
 NduResetComplete(NDIS_HANDLE ProtocolBindingContext,
                  NDIS_STATUS Status)
 {
-    PNDISUIO_ADAPTER_CONTEXT AdapterContext = ProtocolBindingContext;
-
-    DPRINT("Asynchronous adapter reset completed\n");
-
-    /* Store the final status and signal the event */
-    AdapterContext->AsyncStatus = Status;
-    KeSetEvent(&AdapterContext->AsyncEvent, IO_NO_INCREMENT, FALSE);
+    /* ndisuio resets nothing: this is a reset of the adapter that NDIS or another protocol
+       asked for, which NDIS tells every binding about. Nothing waits for it. */
+    DPRINT("Adapter reset completed\n");
 }
 
 VOID
@@ -204,7 +247,7 @@ NduReceive(NDIS_HANDLE ProtocolBindingContext,
            UINT PacketSize)
 {
     PNDISUIO_ADAPTER_CONTEXT AdapterContext = ProtocolBindingContext;
-    PNDISUIO_PACKET_ENTRY PacketEntry;
+    PNDISUIO_TRANSFER Transfer;
     PVOID PacketBuffer;
     PNDIS_PACKET Packet;
     NDIS_STATUS Status;
@@ -221,7 +264,23 @@ NduReceive(NDIS_HANDLE ProtocolBindingContext,
     if (!PacketBuffer)
         return NDIS_STATUS_NOT_ACCEPTED;
 
-    /* Allocate the packet descriptor and buffer */
+    /* The header is valid only during this indication */
+    RtlCopyMemory(PacketBuffer, HeaderBuffer, HeaderBufferSize);
+
+    /* All the data is in the lookahead buffer */
+    if (LookaheadBufferSize >= PacketSize)
+    {
+        NdisCopyLookaheadData((PVOID)((PUCHAR)PacketBuffer + HeaderBufferSize),
+                              LookAheadBuffer,
+                              PacketSize,
+                              AdapterContext->MacOptions);
+
+        Status = QueueReceivedPacket(AdapterContext, PacketBuffer, HeaderBufferSize + PacketSize);
+        ExFreePool(PacketBuffer);
+        return Status;
+    }
+
+    /* Otherwise the miniport copies it into a packet that maps the buffer after the header */
     Packet = CreatePacketFromPoolBuffer(AdapterContext,
                                         (PUCHAR)PacketBuffer + HeaderBufferSize,
                                         PacketSize);
@@ -231,73 +290,27 @@ NduReceive(NDIS_HANDLE ProtocolBindingContext,
         return NDIS_STATUS_NOT_ACCEPTED;
     }
 
-    /* Transfer the packet data into our data buffer */
-    if (LookaheadBufferSize == PacketSize)
+    /* This runs at DISPATCH_LEVEL, in the indication: nothing waits for a transfer the miniport
+       pends. NduTransferDataComplete ends it, and the adapter stays until then */
+    if (!ReferenceAdapterContext(AdapterContext))
     {
-        NdisCopyLookaheadData((PVOID)((PUCHAR)PacketBuffer + HeaderBufferSize),
-                              LookAheadBuffer,
-                              PacketSize,
-                              AdapterContext->MacOptions);
-        BytesTransferred = PacketSize;
-    }
-    else
-    {
-        NdisTransferData(&Status,
-                         AdapterContext->BindingHandle,
-                         MacReceiveContext,
-                         0,
-                         PacketSize,
-                         Packet,
-                         &BytesTransferred);
-        if (Status == NDIS_STATUS_PENDING)
-        {
-            KeWaitForSingleObject(&AdapterContext->AsyncEvent,
-                                  Executive,
-                                  KernelMode,
-                                  FALSE,
-                                  NULL);
-            Status = AdapterContext->AsyncStatus;
-        }
-        if (Status != NDIS_STATUS_SUCCESS)
-        {
-            DPRINT1("Failed to transfer data with status 0x%x\n", Status);
-            CleanupAndFreePacket(Packet, FALSE);
-            ExFreePool(PacketBuffer);
-            return NDIS_STATUS_NOT_ACCEPTED;
-        }
-    }
-
-    /* Copy the header data */
-    RtlCopyMemory(PacketBuffer, HeaderBuffer, HeaderBufferSize);
-
-    /* Free the packet descriptor and buffers
-       but not the pool because we still need it */
-    CleanupAndFreePacket(Packet, FALSE);
-
-    /* Allocate a packet entry from pool */
-    PacketEntry = ExAllocatePool(NonPagedPool, sizeof(NDISUIO_PACKET_ENTRY) + BytesTransferred + HeaderBufferSize - 1);
-    if (!PacketEntry)
-    {
+        CleanupAndFreePacket(Packet, FALSE);
         ExFreePool(PacketBuffer);
-        return NDIS_STATUS_RESOURCES;
+        return NDIS_STATUS_NOT_ACCEPTED;
     }
+    Transfer = NDISUIO_PACKET_TRANSFER(Packet);
+    Transfer->PacketBuffer = PacketBuffer;
+    Transfer->HeaderSize = HeaderBufferSize;
 
-    /* Initialize the packet entry and copy in packet data */
-    PacketEntry->PacketLength = BytesTransferred + HeaderBufferSize;
-    RtlCopyMemory(PacketEntry->PacketData, PacketBuffer, PacketEntry->PacketLength);
-
-    /* Free the old buffer */
-    ExFreePool(PacketBuffer);
-
-    /* Insert the packet on the adapter's packet list */
-    ExInterlockedInsertTailList(&AdapterContext->PacketList,
-                                &PacketEntry->ListEntry,
-                                &AdapterContext->Spinlock);
-
-    /* Signal the read event */
-    KeSetEvent(&AdapterContext->PacketReadEvent,
-               IO_NETWORK_INCREMENT,
-               FALSE);
+    NdisTransferData(&Status,
+                     AdapterContext->BindingHandle,
+                     MacReceiveContext,
+                     0,
+                     PacketSize,
+                     Packet,
+                     &BytesTransferred);
+    if (Status != NDIS_STATUS_PENDING)
+        NduTransferDataComplete(AdapterContext, Packet, Status, BytesTransferred);
 
     return NDIS_STATUS_SUCCESS;
 }

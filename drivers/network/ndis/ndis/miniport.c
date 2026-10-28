@@ -497,6 +497,9 @@ MiniResetComplete(
 
     KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
 
+    /* The protocols that asked for a reset have been told */
+    MiniEndResetWaits(Adapter);
+
     /* The reset is over: a request that is still pending is lost with it */
     MiniAbortPendingRequest(Adapter, NDIS_STATUS_REQUEST_ABORTED, FALSE);
 }
@@ -639,6 +642,9 @@ MiniTransferDataComplete(
         Packet,
         Status,
         BytesTransferred);
+
+    /* The transfer is done (see ProTransferData); NdisCloseAdapter may free the binding from here on */
+    ProLeaveBinding(AdapterBinding);
     KeLowerIrql(OldIrql);
 }
 
@@ -1417,6 +1423,65 @@ MiniFailReset(
                 NDIS_STATUS_FAILURE);
     }
     KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
+
+    MiniEndResetWaits(Adapter);
+}
+
+/*
+ * A reset ended (MiniResetComplete, MiniFailReset): the protocols whose NdisReset pended have been told
+ * through their ResetCompleteHandler (the bindings still open), and each binding drops the reference its
+ * reset held (see ProReset). A binding that was closed meanwhile is freed here.
+ */
+VOID
+MiniEndResetWaits(
+    PLOGICAL_ADAPTER Adapter)
+{
+    LIST_ENTRY Waiters;
+    PLIST_ENTRY CurrentEntry;
+    PADAPTER_BINDING AdapterBinding;
+    KIRQL OldIrql;
+
+    InitializeListHead(&Waiters);
+    KeAcquireSpinLock(&Adapter->NdisMiniportBlock.Lock, &OldIrql);
+    while (!IsListEmpty(&Adapter->ResetWaiters))
+    {
+        CurrentEntry = RemoveHeadList(&Adapter->ResetWaiters);
+        AdapterBinding = CONTAINING_RECORD(CurrentEntry, ADAPTER_BINDING, ResetEntry);
+        AdapterBinding->ResetPending = FALSE;
+        InsertTailList(&Waiters, CurrentEntry);
+    }
+    KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
+
+    while (!IsListEmpty(&Waiters))
+    {
+        CurrentEntry = RemoveHeadList(&Waiters);
+        ProLeaveBinding(CONTAINING_RECORD(CurrentEntry, ADAPTER_BINDING, ResetEntry));
+    }
+}
+
+/*
+ * After MiniportHalt: a reset the miniport pended and never completed is over. The protocols are told it
+ * failed and their bindings drop the reference of their reset (NdisCloseAdapter in their unbind does not
+ * wait for it), and the adapter is not left resetting for good across a restart (MiniIsBusy).
+ */
+static
+VOID
+MiniEndPendingResetAtHalt(
+    PLOGICAL_ADAPTER Adapter)
+{
+    KIRQL OldIrql;
+    BOOLEAN Pending;
+
+    KeAcquireSpinLock(&Adapter->NdisMiniportBlock.Lock, &OldIrql);
+    Pending = (Adapter->NdisMiniportBlock.ResetStatus == NDIS_STATUS_PENDING);
+    if (Pending)
+        Adapter->NdisMiniportBlock.ResetStatus = NDIS_STATUS_FAILURE;
+    KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
+
+    if (Pending)
+        MiniFailReset(Adapter);
+    else
+        MiniEndResetWaits(Adapter);
 }
 
 /*
@@ -1691,8 +1756,9 @@ MiniShutdownAdapter(
     }
     MiniFailQueuedWork(Adapter, TRUE, NULL);
     MiniAbortPendingRequest(Adapter, NDIS_STATUS_FAILURE, TRUE);
+    MiniEndPendingResetAtHalt(Adapter);
 
-    /* The sends and requests have been completed or failed: the protocols' unbind drains at once */
+    /* The sends, requests and resets have been completed or failed: the protocols' unbind drains at once */
     ProUnbindAdapter(Adapter);
 
     if (Adapter->NdisMiniportBlock.EthDB)
@@ -3148,6 +3214,7 @@ NdisIPnPStopDevice(
   /* The halted miniport completes nothing any more: the adapter must not stay stalled
      behind a request it never completed, across a restart */
   MiniAbortPendingRequest(Adapter, NDIS_STATUS_FAILURE, TRUE);
+  MiniEndPendingResetAtHalt(Adapter);
 
   IoSetDeviceInterfaceState(&Adapter->NdisMiniportBlock.SymbolicLinkName, FALSE);
   ProUnbindAdapter(Adapter);
@@ -3539,6 +3606,7 @@ NdisIAddDevice(
   Adapter = (PLOGICAL_ADAPTER)DeviceObject->DeviceExtension;
   KeInitializeSpinLock(&Adapter->NdisMiniportBlock.Lock);
   InitializeListHead(&Adapter->ProtocolListHead);
+  InitializeListHead(&Adapter->ResetWaiters);
   /* Empty until NdisIPnPStartDevice links them, so MiniUnlinkAdapter's IsListEmpty check is valid
      for an adapter that is removed before it ever started */
   InitializeListHead(&Adapter->ListEntry);

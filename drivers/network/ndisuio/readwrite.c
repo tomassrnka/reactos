@@ -16,12 +16,11 @@ VOID
 NTAPI
 ReadIrpCancel(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
-    /* The read holds a reference on the adapter (NduDispatchRead) */
+    /* The read holds a reference on the adapter (NduDispatchRead) while its cancel routine is set. The
+       read takes the cancel spin lock to remove the routine before it drops that reference, so the
+       adapter stays as long as this holds the lock: it is released only once the adapter is not used */
     PNDISUIO_ADAPTER_CONTEXT AdapterContext = Irp->Tail.Overlay.DriverContext[0];
     PNDISUIO_PACKET_ENTRY PacketEntry;
-
-    /* Release the cancel spin lock */
-    IoReleaseCancelSpinLock(Irp->CancelIrql);
 
     /* Indicate a 0-byte packet on the queue to cancel the read */
     PacketEntry = ExAllocatePool(NonPagedPool, sizeof(NDISUIO_PACKET_ENTRY));
@@ -35,6 +34,9 @@ ReadIrpCancel(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
         KeSetEvent(&AdapterContext->PacketReadEvent, IO_NO_INCREMENT, FALSE);
     }
+
+    /* Release the cancel spin lock */
+    IoReleaseCancelSpinLock(Irp->CancelIrql);
 }
 
 NTSTATUS
@@ -76,6 +78,8 @@ NduDispatchRead(PDEVICE_OBJECT DeviceObject,
     IoSetCancelRoutine(Irp, ReadIrpCancel);
     if (Irp->Cancel)
     {
+        /* Cancelled before the routine was set: nothing called it, and it must not stay set */
+        IoSetCancelRoutine(Irp, NULL);
         IoReleaseCancelSpinLock(OldCancelIrql);
 
         DereferenceAdapterContext(AdapterContext);
@@ -121,17 +125,17 @@ NduDispatchRead(PDEVICE_OBJECT DeviceObject,
         }
         else
         {
-            /* Remove the cancel routine */
-            IoAcquireCancelSpinLock(&OldCancelIrql);
-            IoSetCancelRoutine(Irp, NULL);
-            IoReleaseCancelSpinLock(OldCancelIrql);
-
             /* Remove the first packet in the list */
             ListEntry = RemoveHeadList(&AdapterContext->PacketList);
             PacketEntry = CONTAINING_RECORD(ListEntry, NDISUIO_PACKET_ENTRY, ListEntry);
 
-            /* Release the adapter lock */
+            /* Release the adapter lock: the cancel routine takes it under the cancel spin lock */
             KeReleaseSpinLock(&AdapterContext->Spinlock, OldIrql);
+
+            /* Remove the cancel routine */
+            IoAcquireCancelSpinLock(&OldCancelIrql);
+            IoSetCancelRoutine(Irp, NULL);
+            IoReleaseCancelSpinLock(OldCancelIrql);
 
             /* And we're done with this loop */
             Status = STATUS_SUCCESS;
@@ -179,6 +183,7 @@ NduDispatchWrite(PDEVICE_OBJECT DeviceObject,
     PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation(Irp);
     PNDISUIO_ADAPTER_CONTEXT AdapterContext;
     PNDIS_PACKET Packet;
+    NDISUIO_SEND Send;
     NDIS_STATUS Status;
     ULONG BytesCopied = 0;
 
@@ -201,6 +206,12 @@ NduDispatchWrite(PDEVICE_OBJECT DeviceObject,
                                         IrpSp->Parameters.Write.Length);
     if (Packet)
     {
+        /* The completion of this send comes to this write alone (NduSendComplete): the packet and
+           the buffer it maps are the miniport's until then, and are freed only afterwards */
+        KeInitializeEvent(&Send.Event, NotificationEvent, FALSE);
+        Send.Status = NDIS_STATUS_PENDING;
+        NDISUIO_PACKET_SEND(Packet) = &Send;
+
         /* Send it via NDIS */
         NdisSend(&Status,
                  AdapterContext->BindingHandle,
@@ -209,12 +220,12 @@ NduDispatchWrite(PDEVICE_OBJECT DeviceObject,
         /* Wait for the send */
         if (Status == NDIS_STATUS_PENDING)
         {
-            KeWaitForSingleObject(&AdapterContext->AsyncEvent,
+            KeWaitForSingleObject(&Send.Event,
                                   Executive,
                                   KernelMode,
                                   FALSE,
                                   NULL);
-            Status = AdapterContext->AsyncStatus;
+            Status = Send.Status;
         }
 
         /* Check if it succeeded */

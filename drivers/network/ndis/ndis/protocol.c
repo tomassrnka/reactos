@@ -258,7 +258,7 @@ ProLeaveBinding(
 }
 
 /*
- * A send or request of the binding starts: it takes a reference until it is done (ProLeaveBinding),
+ * A send, request, data transfer or reset of the binding starts: it takes a reference until it is done (ProLeaveBinding),
  * so that the binding is not freed under it. FALSE when it must fail at once (NdisCloseAdapter runs,
  * or the adapter is going away); the reference is taken then too, and its caller drops it as usual.
  */
@@ -402,12 +402,58 @@ ProRequest(
 NDIS_STATUS NTAPI
 ProReset(
     IN  NDIS_HANDLE MacBindingHandle)
+/*
+ * FUNCTION: Resets the adapter for a protocol
+ * RETURNS:
+ *     The status of a reset done at once, or NDIS_STATUS_PENDING: the protocol's ResetCompleteHandler
+ *     is called when a reset of the adapter ends (MiniResetComplete, MiniFailReset), and the binding
+ *     holds a reference until then (MiniEndResetWaits), so that NdisCloseAdapter does not free it under
+ *     that completion
+ */
 {
-    PADAPTER_BINDING AdapterBinding = MacBindingHandle;
+    PADAPTER_BINDING AdapterBinding = GET_ADAPTER_BINDING(MacBindingHandle);
+    PLOGICAL_ADAPTER Adapter = AdapterBinding->Adapter;
+    NDIS_STATUS Status;
+    KIRQL OldIrql;
+    BOOLEAN Mine;
 
     /* FIXME: Wait for all packets to be sent */
 
-    return MiniReset(AdapterBinding->Adapter);
+    if (!ProEnterBinding(AdapterBinding))
+    {
+        ProLeaveBinding(AdapterBinding);
+        return ProBindingStatus(AdapterBinding);
+    }
+
+    /* One reset of a binding at a time: the one that pends holds the reference */
+    KeAcquireSpinLock(&Adapter->NdisMiniportBlock.Lock, &OldIrql);
+    if (AdapterBinding->ResetPending)
+    {
+        KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
+        ProLeaveBinding(AdapterBinding);
+        return NDIS_STATUS_RESET_IN_PROGRESS;
+    }
+    AdapterBinding->ResetPending = TRUE;
+    InsertTailList(&Adapter->ResetWaiters, &AdapterBinding->ResetEntry);
+    KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
+
+    Status = MiniReset(Adapter);
+    if (Status == NDIS_STATUS_PENDING)
+        return Status;
+
+    /* Done at once. The end of another reset may have dropped the reference already */
+    KeAcquireSpinLock(&Adapter->NdisMiniportBlock.Lock, &OldIrql);
+    Mine = AdapterBinding->ResetPending;
+    if (Mine)
+    {
+        AdapterBinding->ResetPending = FALSE;
+        RemoveEntryList(&AdapterBinding->ResetEntry);
+    }
+    KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
+    if (Mine)
+        ProLeaveBinding(AdapterBinding);
+
+    return Status;
 }
 
 VOID NTAPI
@@ -804,6 +850,15 @@ ProTransferData(
 
     ASSERT(Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.TransferDataHandler);
 
+    /* Done when it is completed to the protocol (MiniTransferDataComplete, which finds the binding in
+       the packet as for a send), or returned here */
+    Packet->Reserved[1] = (ULONG_PTR)AdapterBinding;
+    if (!ProEnterBinding(AdapterBinding))
+    {
+        ProLeaveBinding(AdapterBinding);
+        return ProBindingStatus(AdapterBinding);
+    }
+
     KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
 
     Status = (*Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.TransferDataHandler)(
@@ -815,6 +870,9 @@ ProTransferData(
         BytesToTransfer);
 
     KeLowerIrql(OldIrql);
+
+    if (Status != NDIS_STATUS_PENDING)
+        ProLeaveBinding(AdapterBinding);
 
     return Status;
 }
@@ -851,7 +909,7 @@ NdisCloseAdapter(
     InterlockedExchange(&AdapterBinding->Closing, TRUE);
     MiniFailBindingWork(Adapter, AdapterBinding);
 
-    /* Wait, but not forever, for the sends and requests in the miniport to complete, so that the
+    /* Wait, but not forever, for the sends, requests, transfers and resets in the miniport to complete, so that the
        protocol can free the context they complete to once this returns. The adapter is halted before
        this runs on a remove or stop, so the miniport has completed them (its halt does); the wait is
        the margin for one still on another processor. A miniport that never completes a send (surprise
@@ -863,7 +921,7 @@ NdisCloseAdapter(
         KeDelayExecutionThread(KernelMode, FALSE, &Delay);
 
     if (AdapterBinding->Outstanding != 1)
-        NDIS_DbgPrint(MIN_TRACE, ("%wZ: %ld sends/requests of the binding to %wZ did not complete; freeing the binding when they do\n",
+        NDIS_DbgPrint(MIN_TRACE, ("%wZ: %ld sends/requests/transfers/resets of the binding to %wZ did not complete; freeing the binding when they do\n",
                                   &AdapterBinding->ProtocolBinding->Chars.Name, AdapterBinding->Outstanding - 1,
                                   &Adapter->NdisMiniportBlock.MiniportName));
 
