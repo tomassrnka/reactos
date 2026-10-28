@@ -131,13 +131,18 @@ static
 BOOL
 WINAPI
 ParseV4Address(IN PCWSTR AddressString,
-               OUT PDWORD pAddress)
+               OUT PDWORD pAddress,
+               OUT PBOOL pbTrailingSpace)
 {
     CHAR AnsiAddressString[MAX_HOSTNAME_LEN];
     CHAR * cp = AnsiAddressString;
     DWORD val, base;
     unsigned char c;
     DWORD parts[4], *pp = parts;
+
+    if (pbTrailingSpace)
+        *pbTrailingSpace = FALSE;
+
     if (!AddressString)
         return FALSE;
     WideCharToMultiByte(CP_ACP,
@@ -187,9 +192,16 @@ again:
         goto again;
     }
     /*
-    * Check for trailing characters.
+    * Check for trailing characters. Like inet_aton, accept trailing
+    * whitespace, and nothing else.
     */
-    if (*cp) return FALSE;
+    if (*cp)
+    {
+        if (!isspace((unsigned char)*cp)) return FALSE;
+        while (isspace((unsigned char)*cp)) cp++;
+        if (*cp) return FALSE;
+        if (pbTrailingSpace) *pbTrailingSpace = TRUE;
+    }
 
     if (pp >= parts + 4) return FALSE;
     *pp++ = val;
@@ -564,6 +576,7 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
     PSERVENT ptService = NULL;
     PCHAR pc = NULL;
     BOOL bClone = FALSE;
+    BOOL bNumeric, bTrailingSpace = FALSE;
     WORD wTcpPort = 0;
     WORD wUdpPort = 0;
     WCHAR CanonicalName[0x42];
@@ -705,8 +718,15 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
         }
     }
 
+    /* Check if this is a valid IPv4 address */
+    bNumeric = pszNodeName && ParseV4Address(pszNodeName, &dwAddress, &bTrailingSpace);
+
+    /* An address with trailing whitespace is not strictly numeric */
+    if (bNumeric && bTrailingSpace && (iFlags & AI_NUMERICHOST))
+        bNumeric = FALSE;
+
     /* Check if no node was given or if this is is a valid IPv4 address */
-    if ((!pszNodeName) || (ParseV4Address(pszNodeName, &dwAddress)))
+    if ((!pszNodeName) || bNumeric)
     {
         /* Check if we don't have a node name */
         if (!pszNodeName)
@@ -726,7 +746,8 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
         if (!iError && pszNodeName)
         {
             /* Set AI_NUMERICHOST since this is a numeric string */
-            (*pptResult)->ai_flags |= AI_NUMERICHOST;
+            if (!bTrailingSpace)
+                (*pptResult)->ai_flags |= AI_NUMERICHOST;
 
             /* Check if the canonical name was requested */
             if (iFlags & AI_CANONNAME)
