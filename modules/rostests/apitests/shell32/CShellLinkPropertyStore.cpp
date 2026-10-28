@@ -199,8 +199,8 @@ static void TestNoProperties(PCWSTR path)
     }
 }
 
-/* A block as another writer lays it out: cbStorage does not count the zero terminator, values and storages are
- * not DWORD aligned, a storage of a named property comes in between, unknown types are skipped */
+/* A block as another writer lays it out: values and storages are not DWORD aligned, a storage of a named
+ * property comes in between, unknown types are skipped */
 static void TestForeignBlock(PCWSTR path)
 {
     static const GUID fmtA = { 0x11111111, 0x2222, 0x3333, { 1, 2, 3, 4, 5, 6, 7, 8 } };
@@ -222,21 +222,21 @@ static void TestForeignBlock(PCWSTR path)
     v = 13 + 4 + 8; memcpy(p, &v, 4); v = 5; memcpy(p + 4, &v, 4); p[8] = 0;
     *(WORD *)(p + 9) = VT_LPWSTR; v = 3; memcpy(p + 13, &v, 4); memcpy(p + 17, L"AB", 6); p += 13 + 4 + 8;
     v = 13 + 4; memcpy(p, &v, 4); v = 6; memcpy(p + 4, &v, 4); *(WORD *)(p + 9) = VT_BSTR; p += 13 + 4;
-    v = (DWORD)(p - storage); memcpy(storage, &v, 4); /* without the terminator */
-    p += 4;
+    p += 4; /* the zero terminator */
+    v = (DWORD)(p - storage); memcpy(storage, &v, 4);
     /* a storage of named properties, left alone */
     storage = p;
     p += 4; v = 0x53505331; memcpy(p, &v, 4); p += 4; memcpy(p, &fmtNamed, 16); p += 16;
     v = 9 + 4 + 13; memcpy(p, &v, 4); v = 4; memcpy(p + 4, &v, 4); p[8] = 0; memcpy(p + 9, L"N", 2); p += 9 + 4 + 13;
-    v = (DWORD)(p - storage); memcpy(storage, &v, 4);
     p += 4;
+    v = (DWORD)(p - storage); memcpy(storage, &v, 4);
     /* storage B: id 9 = VT_UI4 */
     storage = p;
     p += 4; v = 0x53505331; memcpy(p, &v, 4); p += 4; memcpy(p, &fmtB, 16); p += 16;
     v = 13 + 4; memcpy(p, &v, 4); v = 9; memcpy(p + 4, &v, 4); p[8] = 0;
     *(WORD *)(p + 9) = VT_UI4; v = 77; memcpy(p + 13, &v, 4); p += 13 + 4;
-    v = (DWORD)(p - storage); memcpy(storage, &v, 4);
     p += 4;
+    v = (DWORD)(p - storage); memcpy(storage, &v, 4);
     p += 4; /* the list terminator */
     while ((p - blk) & 3)
         p++;
@@ -278,6 +278,231 @@ static void TestForeignBlock(PCWSTR path)
     ok_dec(count, 2);
 }
 
+/* ---- malformed property blocks: the parser must not crash and must not take values it was not given ---- */
+
+struct RAWBLK
+{
+    BYTE b[512];
+    DWORD n;
+};
+
+static void RawPut(RAWBLK *r, const void *data, DWORD cb)
+{
+    memcpy(r->b + r->n, data, cb);
+    r->n += cb;
+}
+
+static void RawDword(RAWBLK *r, DWORD v)
+{
+    RawPut(r, &v, 4);
+}
+
+static void RawBegin(RAWBLK *r)
+{
+    r->n = 0;
+    memset(r->b, 0, sizeof(r->b));
+    RawDword(r, 0); /* the size, in RawEnd */
+    RawDword(r, 0xA0000009);
+}
+
+/* Opens a storage; returns its offset for RawStorageEnd. cbStorage is filled in later. */
+static DWORD RawStorage(RAWBLK *r, const GUID *fmtid)
+{
+    DWORD ib = r->n;
+    RawDword(r, 0);
+    RawDword(r, 0x53505331);
+    RawPut(r, fmtid, sizeof(GUID));
+    return ib;
+}
+
+/* cbValue, pid, a zero byte, the type and a zero word: the 13 bytes in front of the data */
+static void RawValueHead(RAWBLK *r, DWORD cbValue, DWORD pid, WORD vt)
+{
+    const BYTE zero[1] = { 0 };
+    WORD w = 0;
+    RawDword(r, cbValue);
+    RawDword(r, pid);
+    RawPut(r, zero, 1);
+    RawPut(r, &vt, 2);
+    RawPut(r, &w, 2);
+}
+
+static void RawUI4(RAWBLK *r, DWORD pid, DWORD val)
+{
+    RawValueHead(r, 13 + 4, pid, VT_UI4);
+    RawDword(r, val);
+}
+
+static void RawStorageEnd(RAWBLK *r, DWORD ib, BOOL bTerminator, int cbOverride)
+{
+    DWORD cb;
+    if (bTerminator)
+        RawDword(r, 0);
+    cb = cbOverride >= 0 ? (DWORD)cbOverride : r->n - ib;
+    memcpy(r->b + ib, &cb, 4);
+}
+
+static void RawEnd(RAWBLK *r, int cbBlockOverride)
+{
+    DWORD cb;
+    RawDword(r, 0);
+    while (r->n & 3)
+        r->b[r->n++] = 0;
+    cb = cbBlockOverride >= 0 ? (DWORD)cbBlockOverride : r->n;
+    memcpy(r->b, &cb, 4);
+}
+
+/* Feeds the block to a link and counts the properties it ends up with, directly and after a save/load. */
+static void CheckRaw(PCWSTR path, const char *what, RAWBLK *r, DWORD expectCount, const PROPERTYKEY *pkMissing)
+{
+    CComPtr<IShellLinkW> psl, psl2;
+    CComPtr<IShellLinkDataList> pdl;
+    CComPtr<IPropertyStore> pps, pps2;
+    DWORD count = 0xdead;
+    PROPVARIANT pv;
+
+    if (FAILED(CreateLink(&psl)))
+        return;
+    psl->SetPath(L"C:\\Windows\\System32\\cmd.exe");
+    ok_hex(psl->QueryInterface(IID_PPV_ARG(IShellLinkDataList, &pdl)), S_OK);
+    ok_hex(psl->QueryInterface(IID_PPV_ARG(IPropertyStore, &pps)), S_OK);
+    if (!pdl || !pps)
+        return;
+    pdl->AddDataBlock(r->b);
+    ok_hex(pps->GetCount(&count), S_OK);
+    ok(count == expectCount, "%s: count is %lu, expected %lu\n", what, count, expectCount);
+    if (pkMissing)
+    {
+        PropVariantInit(&pv);
+        ok_hex(pps->GetValue(*pkMissing, &pv), S_OK);
+        ok(pv.vt == VT_EMPTY, "%s: value that must not be read has type %u\n", what, pv.vt);
+        PropVariantClear(&pv);
+    }
+
+    DeleteFileW(path);
+    SaveLink(psl, path);
+    if (FAILED(CreateLink(&psl2)))
+        return;
+    LoadLink(psl2, path);
+    ok_hex(psl2->QueryInterface(IID_PPV_ARG(IPropertyStore, &pps2)), S_OK);
+    count = 0xdead;
+    if (pps2)
+        ok_hex(pps2->GetCount(&count), S_OK);
+    ok(count == expectCount, "%s: after save/load count is %lu, expected %lu\n", what, count, expectCount);
+}
+
+static void TestMalformedBlocks(PCWSTR path)
+{
+    static const GUID fmtA = { 0x11111111, 0x2222, 0x3333, { 1, 2, 3, 4, 5, 6, 7, 8 } };
+    static const PROPERTYKEY kA6 = { fmtA, 6 };
+    RAWBLK r;
+    DWORD ib, v;
+
+    /* sanity: the builder yields a block the parser accepts (two values) */
+    RawBegin(&r);
+    ib = RawStorage(&r, &fmtA);
+    RawUI4(&r, 5, 1);
+    RawUI4(&r, 6, 2);
+    RawStorageEnd(&r, ib, TRUE, -1);
+    RawEnd(&r, -1);
+    CheckRaw(path, "well-formed", &r, 2, NULL);
+
+    /* truncated block: the size of the block ends inside the first storage */
+    RawBegin(&r);
+    ib = RawStorage(&r, &fmtA);
+    RawUI4(&r, 5, 1);
+    RawStorageEnd(&r, ib, TRUE, -1);
+    RawEnd(&r, 8 + 24 + 8);
+    CheckRaw(path, "truncated block", &r, 0, NULL);
+
+    /* truncated second storage: the first one is kept */
+    RawBegin(&r);
+    ib = RawStorage(&r, &fmtA);
+    RawUI4(&r, 5, 1);
+    RawStorageEnd(&r, ib, TRUE, -1);
+    ib = RawStorage(&r, &fmtA);
+    RawUI4(&r, 7, 3);
+    RawStorageEnd(&r, ib, TRUE, -1);
+    RawEnd(&r, r.n - 12); /* cut into the second storage's value */
+    CheckRaw(path, "truncated second storage", &r, 1, NULL);
+
+    /* a storage that claims more bytes than the block has */
+    RawBegin(&r);
+    ib = RawStorage(&r, &fmtA);
+    RawUI4(&r, 5, 1);
+    RawStorageEnd(&r, ib, TRUE, 0x1000);
+    RawEnd(&r, -1);
+    CheckRaw(path, "oversized cbStorage", &r, 0, NULL);
+
+    /* oversized cch: a VT_LPWSTR whose character count is far beyond its value; the value after it survives */
+    RawBegin(&r);
+    ib = RawStorage(&r, &fmtA);
+    RawValueHead(&r, 13 + 4 + 4, 5, VT_LPWSTR);
+    RawDword(&r, 0x7FFFFFFF); /* cch */
+    RawDword(&r, 0);          /* one WCHAR and padding of data */
+    RawUI4(&r, 6, 2);
+    RawStorageEnd(&r, ib, TRUE, -1);
+    RawEnd(&r, -1);
+    CheckRaw(path, "oversized cch", &r, 1, NULL);
+
+    /* cch one more than the data holds */
+    RawBegin(&r);
+    ib = RawStorage(&r, &fmtA);
+    RawValueHead(&r, 13 + 4 + 4, 5, VT_LPWSTR); /* 4 bytes of cch + 4 bytes of data = 2 WCHAR */
+    RawDword(&r, 3); /* cch 3 needs 6 bytes */
+    RawDword(&r, 0x00410041);
+    RawStorageEnd(&r, ib, TRUE, -1);
+    RawEnd(&r, -1);
+    CheckRaw(path, "cch off by one", &r, 0, NULL);
+
+    /* cbValue below the 13 byte value header: the rest of that storage is not read */
+    for (v = 0; v < 13; v += 12)
+    {
+        RawBegin(&r);
+        ib = RawStorage(&r, &fmtA);
+        RawDword(&r, v ? v : 1); /* cbValue 1, then 12 */
+        RawDword(&r, 5);
+        RawDword(&r, 0);
+        RawDword(&r, 0);
+        RawUI4(&r, 6, 2);
+        RawStorageEnd(&r, ib, TRUE, -1);
+        RawEnd(&r, -1);
+        CheckRaw(path, v ? "cbValue 12" : "cbValue 1", &r, 0, &kA6);
+    }
+
+    /* zero cbStorage: the list ends there, a storage behind it is not read */
+    RawBegin(&r);
+    RawDword(&r, 0);
+    ib = RawStorage(&r, &fmtA);
+    RawUI4(&r, 5, 1);
+    RawStorageEnd(&r, ib, TRUE, -1);
+    RawEnd(&r, -1);
+    CheckRaw(path, "zero cbStorage", &r, 0, NULL);
+
+    /* cbStorage covers only the first value: the second value is outside the storage and is not read */
+    RawBegin(&r);
+    ib = RawStorage(&r, &fmtA);
+    RawUI4(&r, 5, 1);
+    RawStorageEnd(&r, ib, FALSE, -1); /* ends before the second value */
+    RawUI4(&r, 6, 2);
+    RawDword(&r, 0);
+    RawEnd(&r, -1);
+    CheckRaw(path, "cbStorage shorter than the values", &r, 1, &kA6);
+
+    /* the same, followed by a zero (the end of the list for a reader that honours cbStorage) and a storage that
+     * only a reader that walks to the value terminator would find */
+    RawBegin(&r);
+    ib = RawStorage(&r, &fmtA);
+    RawUI4(&r, 5, 1);
+    RawStorageEnd(&r, ib, FALSE, -1);
+    RawDword(&r, 0);
+    ib = RawStorage(&r, &fmtA);
+    RawUI4(&r, 6, 2);
+    RawStorageEnd(&r, ib, TRUE, -1);
+    RawEnd(&r, -1);
+    CheckRaw(path, "hidden storage behind a short cbStorage", &r, 1, &kA6);
+}
+
 START_TEST(CShellLinkPropertyStore)
 {
     WCHAR dir[MAX_PATH], path[MAX_PATH];
@@ -292,6 +517,8 @@ START_TEST(CShellLinkPropertyStore)
     TestNoProperties(path);
     DeleteFileW(path);
     TestForeignBlock(path);
+    DeleteFileW(path);
+    TestMalformedBlocks(path);
     DeleteFileW(path);
 
     CoUninitialize();
