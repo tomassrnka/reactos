@@ -2,8 +2,8 @@
  * COPYRIGHT:   See COPYING in the top level directory
  * PROJECT:     ReactOS TCP/IP protocol driver
  * FILE:        tcpip/addrchange.c
- * PURPOSE:     IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST: pending requests that
- *              complete when the IPv4 address table changes
+ * PURPOSE:     IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST and IOCTL_IP_ROUTECHANGE_NOTIFY_REQUEST: pending
+ *              requests that complete when the IPv4 address table or the route table changes
  */
 
 #include "precomp.h"
@@ -16,23 +16,31 @@
  * closes the last handle of its file object (see AddrChangeCleanup).
  */
 
-static IO_CSQ AddrChangeCsq;
-static LIST_ENTRY AddrChangeQueue;
-static KSPIN_LOCK AddrChangeLock;
+/* One queue for the address changes, one for the route changes */
+typedef struct _CHANGE_QUEUE
+{
+    IO_CSQ Csq;
+    LIST_ENTRY List;
+    KSPIN_LOCK Lock;
+} CHANGE_QUEUE;
+
+static CHANGE_QUEUE AddrChangeQueue;
+static CHANGE_QUEUE RouteChangeQueue;
+
+#define QUEUE_OF(Csq) CONTAINING_RECORD((Csq), CHANGE_QUEUE, Csq)
 
 static
 VOID
 NTAPI
-AddrChangeCsqInsertIrp(PIO_CSQ Csq, PIRP Irp)
+ChangeCsqInsertIrp(PIO_CSQ Csq, PIRP Irp)
 {
-    UNREFERENCED_PARAMETER(Csq);
-    InsertTailList(&AddrChangeQueue, &Irp->Tail.Overlay.ListEntry);
+    InsertTailList(&QUEUE_OF(Csq)->List, &Irp->Tail.Overlay.ListEntry);
 }
 
 static
 VOID
 NTAPI
-AddrChangeCsqRemoveIrp(PIO_CSQ Csq, PIRP Irp)
+ChangeCsqRemoveIrp(PIO_CSQ Csq, PIRP Irp)
 {
     UNREFERENCED_PARAMETER(Csq);
     RemoveEntryList(&Irp->Tail.Overlay.ListEntry);
@@ -41,15 +49,14 @@ AddrChangeCsqRemoveIrp(PIO_CSQ Csq, PIRP Irp)
 static
 PIRP
 NTAPI
-AddrChangeCsqPeekNextIrp(PIO_CSQ Csq, PIRP Irp, PVOID PeekContext)
+ChangeCsqPeekNextIrp(PIO_CSQ Csq, PIRP Irp, PVOID PeekContext)
 {
+    PLIST_ENTRY Head = &QUEUE_OF(Csq)->List;
     PLIST_ENTRY Entry;
     PIRP Next;
 
-    UNREFERENCED_PARAMETER(Csq);
-
-    Entry = Irp ? Irp->Tail.Overlay.ListEntry.Flink : AddrChangeQueue.Flink;
-    for (; Entry != &AddrChangeQueue; Entry = Entry->Flink)
+    Entry = Irp ? Irp->Tail.Overlay.ListEntry.Flink : Head->Flink;
+    for (; Entry != Head; Entry = Entry->Flink)
     {
         Next = CONTAINING_RECORD(Entry, IRP, Tail.Overlay.ListEntry);
         if (!PeekContext ||
@@ -63,25 +70,23 @@ AddrChangeCsqPeekNextIrp(PIO_CSQ Csq, PIRP Irp, PVOID PeekContext)
 static
 VOID
 NTAPI
-AddrChangeCsqAcquireLock(PIO_CSQ Csq, PKIRQL Irql)
+ChangeCsqAcquireLock(PIO_CSQ Csq, PKIRQL Irql)
 {
-    UNREFERENCED_PARAMETER(Csq);
-    KeAcquireSpinLock(&AddrChangeLock, Irql);
+    KeAcquireSpinLock(&QUEUE_OF(Csq)->Lock, Irql);
 }
 
 static
 VOID
 NTAPI
-AddrChangeCsqReleaseLock(PIO_CSQ Csq, KIRQL Irql)
+ChangeCsqReleaseLock(PIO_CSQ Csq, KIRQL Irql)
 {
-    UNREFERENCED_PARAMETER(Csq);
-    KeReleaseSpinLock(&AddrChangeLock, Irql);
+    KeReleaseSpinLock(&QUEUE_OF(Csq)->Lock, Irql);
 }
 
 static
 VOID
 NTAPI
-AddrChangeCsqCompleteCanceledIrp(PIO_CSQ Csq, PIRP Irp)
+ChangeCsqCompleteCanceledIrp(PIO_CSQ Csq, PIRP Irp)
 {
     UNREFERENCED_PARAMETER(Csq);
     Irp->IoStatus.Status = STATUS_CANCELLED;
@@ -89,32 +94,54 @@ AddrChangeCsqCompleteCanceledIrp(PIO_CSQ Csq, PIRP Irp)
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
 }
 
+static
+VOID
+ChangeQueueInitialize(CHANGE_QUEUE *Queue)
+{
+    InitializeListHead(&Queue->List);
+    KeInitializeSpinLock(&Queue->Lock);
+    IoCsqInitialize(&Queue->Csq,
+                    ChangeCsqInsertIrp,
+                    ChangeCsqRemoveIrp,
+                    ChangeCsqPeekNextIrp,
+                    ChangeCsqAcquireLock,
+                    ChangeCsqReleaseLock,
+                    ChangeCsqCompleteCanceledIrp);
+}
+
 VOID
 AddrChangeInitialize(VOID)
 {
-    InitializeListHead(&AddrChangeQueue);
-    KeInitializeSpinLock(&AddrChangeLock);
-    IoCsqInitialize(&AddrChangeCsq,
-                    AddrChangeCsqInsertIrp,
-                    AddrChangeCsqRemoveIrp,
-                    AddrChangeCsqPeekNextIrp,
-                    AddrChangeCsqAcquireLock,
-                    AddrChangeCsqReleaseLock,
-                    AddrChangeCsqCompleteCanceledIrp);
+    ChangeQueueInitialize(&AddrChangeQueue);
+    ChangeQueueInitialize(&RouteChangeQueue);
+}
+
+static
+VOID
+ChangeQueueNotify(CHANGE_QUEUE *Queue)
+{
+    PIRP Irp;
+
+    while ((Irp = IoCsqRemoveNextIrp(&Queue->Csq, NULL)) != NULL)
+    {
+        Irp->IoStatus.Status = STATUS_SUCCESS;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
+    }
 }
 
 /* Complete every waiting request; callable at IRQL <= DISPATCH_LEVEL */
 VOID
 AddrChangeNotify(VOID)
 {
-    PIRP Irp;
+    ChangeQueueNotify(&AddrChangeQueue);
+}
 
-    while ((Irp = IoCsqRemoveNextIrp(&AddrChangeCsq, NULL)) != NULL)
-    {
-        Irp->IoStatus.Status = STATUS_SUCCESS;
-        Irp->IoStatus.Information = 0;
-        IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
-    }
+/* The route table changed (a route added or removed); callable at IRQL <= DISPATCH_LEVEL */
+VOID
+RouteChangeNotify(VOID)
+{
+    ChangeQueueNotify(&RouteChangeQueue);
 }
 
 /* IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST: queue the request until the next change */
@@ -123,24 +150,38 @@ DispAddrChangeNotifyRequest(PIRP Irp)
 {
     /* The request carries no data; this is a plain pend, so any buffers are ignored */
     Irp->IoStatus.Information = 0;
-    IoCsqInsertIrp(&AddrChangeCsq, Irp, NULL);
+    IoCsqInsertIrp(&AddrChangeQueue.Csq, Irp, NULL);
     return STATUS_PENDING;
 }
 
-/* Cancel the waiting requests of one file object; returns how many */
+/* IOCTL_IP_ROUTECHANGE_NOTIFY_REQUEST: queue the request until the next route change */
+NTSTATUS
+DispRouteChangeNotifyRequest(PIRP Irp)
+{
+    Irp->IoStatus.Information = 0;
+    IoCsqInsertIrp(&RouteChangeQueue.Csq, Irp, NULL);
+    return STATUS_PENDING;
+}
+
+/* Cancel the waiting requests of one file object, in both queues; returns how many */
 static
 ULONG
 AddrChangeCancelFile(PFILE_OBJECT FileObject)
 {
     PIRP Pending;
     ULONG Count = 0;
+    CHANGE_QUEUE *Queues[2] = { &AddrChangeQueue, &RouteChangeQueue };
+    ULONG i;
 
-    while ((Pending = IoCsqRemoveNextIrp(&AddrChangeCsq, FileObject)) != NULL)
+    for (i = 0; i < 2; i++)
     {
-        Pending->IoStatus.Status = STATUS_CANCELLED;
-        Pending->IoStatus.Information = 0;
-        IoCompleteRequest(Pending, IO_NO_INCREMENT);
-        Count++;
+        while ((Pending = IoCsqRemoveNextIrp(&Queues[i]->Csq, FileObject)) != NULL)
+        {
+            Pending->IoStatus.Status = STATUS_CANCELLED;
+            Pending->IoStatus.Information = 0;
+            IoCompleteRequest(Pending, IO_NO_INCREMENT);
+            Count++;
+        }
     }
 
     return Count;

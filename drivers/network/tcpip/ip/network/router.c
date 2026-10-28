@@ -289,6 +289,8 @@ PFIB_ENTRY RouterAddRoute(
     InsertTailList(&FIBListHead, &FIBE->ListEntry);
     TcpipReleaseSpinLock(&FIBLock, OldIrql);
 
+    RouteChangeNotify();
+
     return FIBE;
 }
 
@@ -443,6 +445,8 @@ VOID RouterRemoveRoutesForInterface(PIP_INTERFACE Interface)
     PLIST_ENTRY NextEntry;
     PFIB_ENTRY Current;
 
+    BOOLEAN Removed = FALSE;
+
     TcpipAcquireSpinLock(&FIBLock, &OldIrql);
 
     CurrentEntry = FIBListHead.Flink;
@@ -451,12 +455,18 @@ VOID RouterRemoveRoutesForInterface(PIP_INTERFACE Interface)
         Current = CONTAINING_RECORD(CurrentEntry, FIB_ENTRY, ListEntry);
 
         if (Interface == Current->Router->Interface)
+        {
             DestroyFIBE(Current);
+            Removed = TRUE;
+        }
 
         CurrentEntry = NextEntry;
     }
 
     TcpipReleaseSpinLock(&FIBLock, OldIrql);
+
+    if (Removed)
+        RouteChangeNotify();
 }
 
 NTSTATUS RouterRemoveRoute(PIP_ADDRESS Target, PIP_ADDRESS Router)
@@ -509,6 +519,9 @@ NTSTATUS RouterRemoveRoute(PIP_ADDRESS Target, PIP_ADDRESS Router)
     RouterDumpRoutes();
 
     TcpipReleaseSpinLock(&FIBLock, OldIrql);
+
+    if (Found)
+        RouteChangeNotify();
 
     TI_DbgPrint(DEBUG_ROUTER, ("Leaving\n"));
 

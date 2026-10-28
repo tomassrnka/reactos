@@ -609,6 +609,10 @@ TiDispatch(
                 Status = DispAddrChangeNotifyRequest(Irp);
                 break;
 
+            case IOCTL_IP_ROUTECHANGE_NOTIFY_REQUEST:
+                Status = DispRouteChangeNotifyRequest(Irp);
+                break;
+
             case IOCTL_IP_ADDCHANGE_CANCEL_REQUEST:
                 Status = DispAddrChangeCancelRequest(Irp);
                 break;

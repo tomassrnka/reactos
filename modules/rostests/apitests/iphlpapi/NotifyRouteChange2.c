@@ -21,29 +21,29 @@ static void TestNotify(const char *Name, FN_Notify pNotify, FN_CancelMibChangeNo
     HANDLE Handle;
     DWORD Error;
 
+    Handle = NULL;
     Error = pNotify(99, Callback, NULL, FALSE, &Handle);
     ok(Error == ERROR_INVALID_PARAMETER, "%s: bad family: %lu\n", Name, Error);
+    /* Windows accepts no callback, and faults on a missing handle pointer */
+    Handle = NULL;
     Error = pNotify(AF_UNSPEC, NULL, NULL, FALSE, &Handle);
-    ok(Error == ERROR_INVALID_PARAMETER, "%s: no callback: %lu\n", Name, Error);
-    Error = pNotify(AF_UNSPEC, Callback, NULL, FALSE, NULL);
-    ok(Error == ERROR_INVALID_PARAMETER, "%s: no handle pointer: %lu\n", Name, Error);
+    ok(Error == NO_ERROR, "%s: no callback: %lu\n", Name, Error);
+    if (Error == NO_ERROR)
+        pCancel(Handle);
+    if (is_reactos())
+    {
+        Error = pNotify(AF_UNSPEC, Callback, NULL, FALSE, NULL);
+        ok(Error == ERROR_INVALID_PARAMETER, "%s: no handle pointer: %lu\n", Name, Error);
+    }
 
     Handle = NULL;
     Error = pNotify(AF_UNSPEC, Callback, NULL, FALSE, &Handle);
-    if (is_reactos())
+    ok(Error == NO_ERROR, "%s returned %lu\n", Name, Error);
+    ok(Handle != NULL, "%s: no handle\n", Name);
+    if (Error == NO_ERROR)
     {
-        /* Changes cannot be seen, so the registration fails honestly */
-        ok(Error == ERROR_NOT_SUPPORTED, "%s returned %lu\n", Name, Error);
-    }
-    else
-    {
-        ok(Error == NO_ERROR, "%s returned %lu\n", Name, Error);
-        ok(Handle != NULL, "%s: no handle\n", Name);
-        if (Error == NO_ERROR)
-        {
-            Error = pCancel(Handle);
-            ok(Error == NO_ERROR, "CancelMibChangeNotify2 returned %lu\n", Error);
-        }
+        Error = pCancel(Handle);
+        ok(Error == NO_ERROR, "CancelMibChangeNotify2 returned %lu\n", Error);
     }
 }
 

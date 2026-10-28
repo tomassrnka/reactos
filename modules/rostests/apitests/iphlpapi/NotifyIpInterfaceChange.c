@@ -35,29 +35,26 @@ START_TEST(NotifyIpInterfaceChange)
     if (!pNotifyIpInterfaceChange || !pCancelMibChangeNotify2)
         return;
 
+    Handle = NULL;
     Error = pNotifyIpInterfaceChange(99, Callback, NULL, FALSE, &Handle);
     ok(Error == ERROR_INVALID_PARAMETER, "Bad family: %lu\n", Error);
-    Error = pNotifyIpInterfaceChange(AF_UNSPEC, Callback, NULL, FALSE, NULL);
-    ok(Error == ERROR_INVALID_PARAMETER, "No handle pointer: %lu\n", Error);
+    /* Windows faults on a missing handle pointer */
+    if (is_reactos())
+    {
+        Error = pNotifyIpInterfaceChange(AF_UNSPEC, Callback, NULL, FALSE, NULL);
+        ok(Error == ERROR_INVALID_PARAMETER, "No handle pointer: %lu\n", Error);
+    }
 
     Handle = NULL;
     Error = pNotifyIpInterfaceChange(AF_UNSPEC, Callback, NULL, FALSE, &Handle);
-    if (is_reactos())
+    ok(Error == NO_ERROR, "NotifyIpInterfaceChange returned %lu\n", Error);
+    ok(Handle != NULL, "No handle\n");
+    if (Error == NO_ERROR)
     {
-        /* Interface changes cannot be seen, so the registration fails honestly */
-        ok(Error == ERROR_NOT_SUPPORTED, "NotifyIpInterfaceChange returned %lu\n", Error);
-    }
-    else
-    {
-        ok(Error == NO_ERROR, "NotifyIpInterfaceChange returned %lu\n", Error);
-        ok(Handle != NULL, "No handle\n");
-        if (Error == NO_ERROR)
-        {
-            Error = pCancelMibChangeNotify2(Handle);
-            ok(Error == NO_ERROR, "CancelMibChangeNotify2 returned %lu\n", Error);
-        }
+        Error = pCancelMibChangeNotify2(Handle);
+        ok(Error == NO_ERROR, "CancelMibChangeNotify2 returned %lu\n", Error);
     }
 
     Error = pCancelMibChangeNotify2(NULL);
-    ok(Error == ERROR_INVALID_PARAMETER, "CancelMibChangeNotify2(NULL) returned %lu\n", Error);
+    ok(Error == ERROR_INVALID_HANDLE || Error == ERROR_INVALID_PARAMETER, "CancelMibChangeNotify2(NULL) returned %lu\n", Error);
 }

@@ -15,6 +15,7 @@ list(APPEND SOURCE
     IpInterface.c
     IpTables2.c
     NotifyAddrChange.c
+    NotifyChanges.c
     NotifyIpInterfaceChange.c
     NotifyRouteChange2.c
     SendARP.c
