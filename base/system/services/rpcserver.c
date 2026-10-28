@@ -1733,7 +1733,7 @@ RSetServiceStatus(
     UINT uID;
 
     DPRINT("RSetServiceStatus() called\n");
-    DPRINT("hServiceStatus = %lu\n", hServiceStatus);
+    DPRINT("hServiceStatus = %I64u\n", hServiceStatus);
     DPRINT("dwServiceType = 0x%lx\n", lpServiceStatus->dwServiceType);
     DPRINT("dwCurrentState = %lu\n", lpServiceStatus->dwCurrentState);
     DPRINT("dwControlsAccepted = %lu\n", lpServiceStatus->dwControlsAccepted);
@@ -1748,7 +1748,7 @@ RSetServiceStatus(
         return ERROR_INVALID_HANDLE;
     }
 
-    lpService = (PSERVICE)hServiceStatus;
+    lpService = (PSERVICE)(ULONG_PTR)hServiceStatus;
 
     /* Check current state */
     if (!ScmIsValidServiceState(lpServiceStatus->dwCurrentState))
@@ -1953,7 +1953,7 @@ RI_ScSetServiceBitsW(
     }
 
     // FIXME: Validate the status handle
-    pService = (PSERVICE)hServiceStatus;
+    pService = (PSERVICE)(ULONG_PTR)hServiceStatus;
 
     if (bSetBitsOn)
     {
@@ -6814,7 +6814,7 @@ RI_ScSendPnPMessage(
            hServiceStatus, dwControl, dwEventType, dwEventSize, pEventData);
 
     /* FIXME: Verify the status handle */
-    pService = (PSERVICE)hServiceStatus;
+    pService = (PSERVICE)(ULONG_PTR)hServiceStatus;
 
     /* Fail, if the service is a driver */
     if (pService->Status.dwServiceType & SERVICE_DRIVER)
@@ -6930,7 +6930,7 @@ RI_ScValidatePnPService(
     if (pService == NULL)
         return ERROR_SERVICE_DOES_NOT_EXIST;
 
-    *phServiceStatus = (RPC_SERVICE_STATUS_HANDLE)pService;
+    *phServiceStatus = (RPC_SERVICE_STATUS_HANDLE)(ULONG_PTR)pService;
 
     return ERROR_SUCCESS;
 }

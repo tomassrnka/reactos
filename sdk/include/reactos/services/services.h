@@ -31,10 +31,15 @@ typedef struct _SCM_CONTROL_PACKET
     DWORD dwControl;
     DWORD dwArgumentsCount;
     DWORD dwServiceTag;
-    SERVICE_STATUS_HANDLE hServiceStatus;
+    /* Fixed width: the packet goes from the 64-bit services.exe to WoW64 (32-bit)
+     * service processes as well, so its layout must not depend on the pointer size */
+    ULONG64 hServiceStatus;
     DWORD dwServiceNameOffset;
+    /* Offset of the argument offsets vector: dwArgumentsCount DWORD offsets, relative
+     * to the start of the vector, followed by the NUL-terminated UNICODE strings */
     DWORD dwArgumentsOffset;
 } SCM_CONTROL_PACKET, *PSCM_CONTROL_PACKET;
+C_ASSERT(sizeof(SCM_CONTROL_PACKET) == 32);
 
 typedef struct _SCM_REPLY_PACKET
 {

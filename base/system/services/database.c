@@ -2158,7 +2158,9 @@ ScmControlServiceEx(
 
     /*
      * Calculate the required packet size for the start argument vector 'argv',
-     * composed of the pointer offsets list, followed by UNICODE strings.
+     * composed of the DWORD offsets list, followed by UNICODE strings.
+     * DWORD (not pointer-sized) offsets keep the layout identical for
+     * 32-bit (WoW64) service processes.
      * The strings are stored successively after the offsets vector, with
      * the offsets being relative to the beginning of the vector, as in the
      * following layout (with N == argc):
@@ -2166,8 +2168,8 @@ ScmControlServiceEx(
      */
     if (argc > 0 && argv != NULL)
     {
-        PacketSize = ALIGN_UP(PacketSize, PWSTR);
-        PacketSize += (argc * sizeof(PWSTR));
+        PacketSize = ALIGN_UP(PacketSize, DWORD);
+        PacketSize += (argc * sizeof(DWORD));
 
         DPRINT("Argc: %lu\n", argc);
         for (i = 0; i < argc; i++)
@@ -2184,7 +2186,7 @@ ScmControlServiceEx(
 
     ControlPacket->dwSize = PacketSize;
     ControlPacket->dwControl = dwControl;
-    ControlPacket->hServiceStatus = hServiceStatus;
+    ControlPacket->hServiceStatus = (ULONG_PTR)hServiceStatus;
     ControlPacket->dwServiceTag = dwServiceTag;
 
     /* Copy the start command line */
@@ -2198,11 +2200,12 @@ ScmControlServiceEx(
     /* Copy the argument vector */
     if (argc > 0 && argv != NULL)
     {
-        PWSTR *pOffPtr, pArgPtr;
+        PDWORD pOffPtr;
+        PWSTR pArgPtr;
 
         Ptr += wcslen(pServiceName) + 1;
-        pOffPtr = (PWSTR*)ALIGN_UP_POINTER(Ptr, PWSTR);
-        pArgPtr = (PWSTR)((ULONG_PTR)pOffPtr + argc * sizeof(PWSTR));
+        pOffPtr = (PDWORD)ALIGN_UP_POINTER(Ptr, DWORD);
+        pArgPtr = (PWSTR)((ULONG_PTR)pOffPtr + argc * sizeof(DWORD));
 
         ControlPacket->dwArgumentsCount  = argc;
         ControlPacket->dwArgumentsOffset = (DWORD)((ULONG_PTR)pOffPtr - (ULONG_PTR)ControlPacket);
@@ -2213,8 +2216,8 @@ ScmControlServiceEx(
         for (i = 0; i < argc; i++)
         {
             wcscpy(pArgPtr, argv[i]);
-            pOffPtr[i] = (PWSTR)((ULONG_PTR)pArgPtr - (ULONG_PTR)pOffPtr);
-            DPRINT("offset[%lu]: %p\n", i, pOffPtr[i]);
+            pOffPtr[i] = (DWORD)((ULONG_PTR)pArgPtr - (ULONG_PTR)pOffPtr);
+            DPRINT("offset[%lu]: %lu\n", i, pOffPtr[i]);
             pArgPtr += wcslen(argv[i]) + 1;
         }
     }
@@ -2259,7 +2262,7 @@ ScmControlService(
 
     ControlPacket->dwSize = PacketSize;
     ControlPacket->dwControl = dwControl;
-    ControlPacket->hServiceStatus = hServiceStatus;
+    ControlPacket->hServiceStatus = (ULONG_PTR)hServiceStatus;
 
     /* Copy the service name */
     ControlPacket->dwServiceNameOffset = sizeof(SCM_CONTROL_PACKET);

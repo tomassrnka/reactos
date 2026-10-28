@@ -17,7 +17,11 @@ const unsigned short SC_MAX_ARGUMENTS = 1024;
 
 typedef [handle] LPSTR SVCCTL_HANDLEA;
 typedef [handle] LPWSTR SVCCTL_HANDLEW;
-typedef [handle] ULONG_PTR RPC_SERVICE_STATUS_HANDLE;
+/* Fixed width on the wire: WoW64 (32-bit) service processes call the 64-bit
+ * services.exe. As ULONG_PTR, the 32-bit stubs marshalled FC_LONG and the
+ * 64-bit ones FC_HYPER, so SetServiceStatus from a 32-bit service never
+ * reached the SCM and the service stayed START_PENDING. */
+typedef [handle] unsigned hyper RPC_SERVICE_STATUS_HANDLE;
 typedef [context_handle] PVOID SC_RPC_HANDLE;
 typedef SC_RPC_HANDLE* LPSC_RPC_HANDLE;
 typedef [context_handle] PVOID SC_RPC_LOCK;
