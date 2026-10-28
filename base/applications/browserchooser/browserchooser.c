@@ -10,10 +10,14 @@
 
 #include <windows.h>
 #include <commctrl.h>
+#include <objbase.h>
+#include <shobjidl.h>
 #include <shlwapi.h>
 #include <shlobj.h>
 #include <iphlpapi.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <wctype.h>
 #include <strsafe.h>
 
 #include "resource.h"
@@ -37,6 +41,7 @@ static BROWSER_ENTRY g_Browsers[MAX_BROWSERS];
 static int g_BrowserCount = 0;
 static int g_InstallItemIndex = -1; /* listbox index of the synthetic "install Firefox" item, or -1 */
 static HWND g_hDlg = NULL;
+static WCHAR g_szPreselect[256]; /* browser to select first (ms-settings:defaultapps?registeredAppUser=...) */
 
 static const WCHAR szStartMenuInternet[] = L"SOFTWARE\\Clients\\StartMenuInternet";
 static const WCHAR szRegisteredApps[]    = L"SOFTWARE\\RegisteredApplications";
@@ -398,18 +403,126 @@ WriteProgId(LPCWSTR pszProgId, LPCWSTR pszFriendly, LPCWSTR pszExe)
     SetStringValue(HKEY_LOCAL_MACHINE, szSub, NULL, szCmd);
 }
 
+/* Machine wide handler of a protocol: the open command of the browser's own class when it has one. */
 static void
-WriteProtocolHandler(LPCWSTR pszProto, LPCWSTR pszExe)
+WriteProtocolHandler(LPCWSTR pszProto, LPCWSTR pszExe, LPCWSTR pszProgId)
 {
     WCHAR szSub[256];
-    WCHAR szCmd[MAX_PATH + 16];
+    WCHAR szCmd[MAX_PATH * 2];
+    BOOL bHaveCmd = FALSE;
 
     StringCchPrintfW(szSub, ARRAYSIZE(szSub), L"%s\\%s", szClasses, pszProto);
     SetStringValue(HKEY_LOCAL_MACHINE, szSub, L"URL Protocol", L"");
 
+    if (pszProgId)
+    {
+        HKEY hKey;
+        StringCchPrintfW(szSub, ARRAYSIZE(szSub), L"%s\\%s\\shell\\open\\command", szClasses, pszProgId);
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, szSub, 0, KEY_READ, &hKey) == ERROR_SUCCESS)
+        {
+            bHaveCmd = ReadRegString(hKey, NULL, szCmd, ARRAYSIZE(szCmd)) && szCmd[0];
+            RegCloseKey(hKey);
+        }
+    }
+    if (!bHaveCmd)
+        StringCchPrintfW(szCmd, ARRAYSIZE(szCmd), L"\"%s\" \"%%1\"", pszExe);
+
     StringCchPrintfW(szSub, ARRAYSIZE(szSub), L"%s\\%s\\shell\\open\\command", szClasses, pszProto);
-    StringCchPrintfW(szCmd, ARRAYSIZE(szCmd), L"\"%s\" \"%%1\"", pszExe);
     SetStringValue(HKEY_LOCAL_MACHINE, szSub, NULL, szCmd);
+}
+
+/* The name a browser is listed under in RegisteredApplications: the value that points at its Capabilities key. */
+static BOOL
+FindRegisteredAppName(LPCWSTR pszKey, LPWSTR pszOut, size_t cchOut)
+{
+    WCHAR szWant[320];
+    HKEY hKey;
+    DWORD i;
+    BOOL bFound = FALSE;
+
+    StringCchPrintfW(szWant, ARRAYSIZE(szWant), L"%s\\%s\\Capabilities", szStartMenuInternet, pszKey);
+    /* the values are relative to HKLM and may or may not carry the "SOFTWARE\\" casing of ours */
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, szRegisteredApps, 0, KEY_READ, &hKey) != ERROR_SUCCESS)
+        return FALSE;
+
+    for (i = 0; !bFound; i++)
+    {
+        WCHAR szName[256], szData[320];
+        DWORD cchName = ARRAYSIZE(szName), cbData = sizeof(szData) - sizeof(WCHAR), dwType;
+        LPCWSTR pszData = szData;
+        LPCWSTR pszWant = szWant;
+
+        if (RegEnumValueW(hKey, i, szName, &cchName, NULL, &dwType, (LPBYTE)szData, &cbData) != ERROR_SUCCESS)
+            break;
+        if (dwType != REG_SZ)
+            continue;
+        szData[cbData / sizeof(WCHAR)] = L'\0';
+        if (*pszData == L'\\')
+            pszData++;
+        if (!StrCmpNIW(pszData, L"SOFTWARE\\", 9))
+            pszData += 9;
+        pszWant += 9; /* szWant starts with "SOFTWARE\\" */
+        if (!StrCmpIW(pszData, pszWant))
+        {
+            StringCchCopyW(pszOut, cchOut, szName);
+            bFound = TRUE;
+        }
+    }
+    RegCloseKey(hKey);
+    return bFound;
+}
+
+/* The ProgId a browser declares for <pszName> in the <pszGroup> of its own Capabilities, if that class can launch it. */
+static BOOL
+ReadOwnProgId(LPCWSTR pszKey, LPCWSTR pszGroup, LPCWSTR pszName, LPWSTR pszProgId, size_t cchProgId)
+{
+    WCHAR szSub[384];
+    WCHAR szCmd[MAX_PATH * 2];
+    HKEY hKey;
+    BOOL bOk;
+
+    StringCchPrintfW(szSub, ARRAYSIZE(szSub), L"%s\\%s\\Capabilities\\%s", szStartMenuInternet, pszKey, pszGroup);
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, szSub, 0, KEY_READ, &hKey) != ERROR_SUCCESS)
+        return FALSE;
+    bOk = ReadRegString(hKey, pszName, pszProgId, (DWORD)cchProgId) && pszProgId[0];
+    RegCloseKey(hKey);
+    if (!bOk || wcschr(pszProgId, L'\\'))
+        return FALSE;
+
+    StringCchPrintfW(szSub, ARRAYSIZE(szSub), L"%s\\%s\\shell\\open\\command", szClasses, pszProgId);
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, szSub, 0, KEY_READ, &hKey) != ERROR_SUCCESS)
+        return FALSE;
+    bOk = ReadRegString(hKey, NULL, szCmd, ARRAYSIZE(szCmd)) && szCmd[0];
+    RegCloseKey(hKey);
+    return bOk;
+}
+
+/*
+ * Record the choice for the current user the way Windows' Default Programs does:
+ * IApplicationAssociationRegistration::SetAppAsDefaultAll writes the UserChoice of every
+ * association the application's Capabilities declare. The shell (ShellExecute, AssocQueryString)
+ * and the browsers' own "am I the default" checks read it back.
+ */
+static BOOL
+SetUserChoice(LPCWSTR pszRegisteredApp)
+{
+    IApplicationAssociationRegistration *pAAR = NULL;
+    HRESULT hr;
+    BOOL bInit;
+
+    bInit = SUCCEEDED(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED));
+    hr = CoCreateInstance(&CLSID_ApplicationAssociationRegistration, NULL, CLSCTX_INPROC_SERVER,
+                          &IID_IApplicationAssociationRegistration, (void **)&pAAR);
+    if (SUCCEEDED(hr))
+    {
+        hr = pAAR->lpVtbl->SetAppAsDefaultAll(pAAR, pszRegisteredApp);
+        pAAR->lpVtbl->Release(pAAR);
+    }
+    if (bInit)
+        CoUninitialize();
+
+    LogLine(L"SetUserChoice: SetAppAsDefaultAll(%s) = 0x%08lx", pszRegisteredApp, hr);
+    return SUCCEEDED(hr);
 }
 
 /*
@@ -425,9 +538,11 @@ SetDefaultBrowser(LPCWSTR pszKey, LPCWSTR pszName, LPCWSTR pszExe)
     WCHAR szToken[160];
     WCHAR szUrlProgId[224];
     WCHAR szHtmlProgId[224];
+    WCHAR szRegApp[256];
     WCHAR szCapBase[320];
     WCHAR szSub[384];
     WCHAR szData[320];
+    BOOL bOwnUrl, bOwnHtml;
 
     LogLine(L"SetDefaultBrowser key=%s name=%s exe=%s", pszKey, pszName, pszExe);
 
@@ -439,22 +554,37 @@ SetDefaultBrowser(LPCWSTR pszKey, LPCWSTR pszName, LPCWSTR pszExe)
     g_WriteError = ERROR_SUCCESS;
 
     SanitizeToken(pszKey, szToken, ARRAYSIZE(szToken));
-    StringCchPrintfW(szUrlProgId, ARRAYSIZE(szUrlProgId), L"Nitro.%s.URL", szToken);
-    StringCchPrintfW(szHtmlProgId, ARRAYSIZE(szHtmlProgId), L"Nitro.%s.HTML", szToken);
+
+    /* Browsers such as Chrome and Firefox register their own Default Programs capabilities and
+     * ProgIDs (ChromeHTML, FirefoxURL-...). Use those: the browser recognises its own ProgID as
+     * "I am the default", and its command line is the one it expects. Clients that do not (the
+     * built-in browser) get the nitro ProgIDs and capabilities written below. */
+    bOwnUrl = ReadOwnProgId(pszKey, L"URLAssociations", L"http", szUrlProgId, ARRAYSIZE(szUrlProgId));
+    bOwnHtml = ReadOwnProgId(pszKey, L"FileAssociations", L".html", szHtmlProgId, ARRAYSIZE(szHtmlProgId));
+    if (!bOwnUrl)
+        StringCchPrintfW(szUrlProgId, ARRAYSIZE(szUrlProgId), L"Nitro.%s.URL", szToken);
+    if (!bOwnHtml)
+        StringCchPrintfW(szHtmlProgId, ARRAYSIZE(szHtmlProgId), L"Nitro.%s.HTML", szToken);
 
     /* 1. StartMenuInternet default = this client */
     SetStringValue(HKEY_LOCAL_MACHINE, szStartMenuInternet, NULL, pszKey);
 
     /* 2. ProgIDs that actually launch the browser */
-    StringCchPrintfW(szData, ARRAYSIZE(szData), L"%s URL", pszName);
-    WriteProgId(szUrlProgId, szData, pszExe);
-    StringCchPrintfW(szData, ARRAYSIZE(szData), L"%s HTML Document", pszName);
-    WriteProgId(szHtmlProgId, szData, pszExe);
+    if (!bOwnUrl)
+    {
+        StringCchPrintfW(szData, ARRAYSIZE(szData), L"%s URL", pszName);
+        WriteProgId(szUrlProgId, szData, pszExe);
+    }
+    if (!bOwnHtml)
+    {
+        StringCchPrintfW(szData, ARRAYSIZE(szData), L"%s HTML Document", pszName);
+        WriteProgId(szHtmlProgId, szData, pszExe);
+    }
 
-    /* 3. Protocol handlers (effective switch on NT 5.2 - no UserChoice hash) */
-    WriteProtocolHandler(L"http", pszExe);
-    WriteProtocolHandler(L"https", pszExe);
-    WriteProtocolHandler(L"ftp", pszExe);
+    /* 3. Machine wide protocol handlers (HKLM\Software\Classes), for software that reads them directly */
+    WriteProtocolHandler(L"http", pszExe, szUrlProgId);
+    WriteProtocolHandler(L"https", pszExe, szUrlProgId);
+    WriteProtocolHandler(L"ftp", pszExe, szUrlProgId);
 
     /* 4. File associations */
     StringCchPrintfW(szSub, ARRAYSIZE(szSub), L"%s\\.htm", szClasses);
@@ -466,25 +596,36 @@ SetDefaultBrowser(LPCWSTR pszKey, LPCWSTR pszName, LPCWSTR pszExe)
     StringCchPrintfW(szCapBase, ARRAYSIZE(szCapBase), L"%s\\%s\\Capabilities",
                      szStartMenuInternet, pszKey);
 
-    SetStringValue(HKEY_LOCAL_MACHINE, szCapBase, L"ApplicationName", pszName);
-    StringCchPrintfW(szData, ARRAYSIZE(szData), L"%s,0", pszExe);
-    SetStringValue(HKEY_LOCAL_MACHINE, szCapBase, L"ApplicationIcon", szData);
-    StringCchPrintfW(szData, ARRAYSIZE(szData), L"%s web browser", pszName);
-    SetStringValue(HKEY_LOCAL_MACHINE, szCapBase, L"ApplicationDescription", szData);
+    if (!bOwnUrl)
+    {
+        SetStringValue(HKEY_LOCAL_MACHINE, szCapBase, L"ApplicationName", pszName);
+        StringCchPrintfW(szData, ARRAYSIZE(szData), L"%s,0", pszExe);
+        SetStringValue(HKEY_LOCAL_MACHINE, szCapBase, L"ApplicationIcon", szData);
+        StringCchPrintfW(szData, ARRAYSIZE(szData), L"%s web browser", pszName);
+        SetStringValue(HKEY_LOCAL_MACHINE, szCapBase, L"ApplicationDescription", szData);
 
-    StringCchPrintfW(szSub, ARRAYSIZE(szSub), L"%s\\URLAssociations", szCapBase);
-    SetStringValue(HKEY_LOCAL_MACHINE, szSub, L"http", szUrlProgId);
-    SetStringValue(HKEY_LOCAL_MACHINE, szSub, L"https", szUrlProgId);
-    SetStringValue(HKEY_LOCAL_MACHINE, szSub, L"ftp", szUrlProgId);
+        StringCchPrintfW(szSub, ARRAYSIZE(szSub), L"%s\\URLAssociations", szCapBase);
+        SetStringValue(HKEY_LOCAL_MACHINE, szSub, L"http", szUrlProgId);
+        SetStringValue(HKEY_LOCAL_MACHINE, szSub, L"https", szUrlProgId);
+        SetStringValue(HKEY_LOCAL_MACHINE, szSub, L"ftp", szUrlProgId);
 
-    StringCchPrintfW(szSub, ARRAYSIZE(szSub), L"%s\\FileAssociations", szCapBase);
-    SetStringValue(HKEY_LOCAL_MACHINE, szSub, L".htm", szHtmlProgId);
-    SetStringValue(HKEY_LOCAL_MACHINE, szSub, L".html", szHtmlProgId);
+        StringCchPrintfW(szSub, ARRAYSIZE(szSub), L"%s\\FileAssociations", szCapBase);
+        SetStringValue(HKEY_LOCAL_MACHINE, szSub, L".htm", szHtmlProgId);
+        SetStringValue(HKEY_LOCAL_MACHINE, szSub, L".html", szHtmlProgId);
+    }
 
-    /* 6. RegisteredApplications entry */
-    StringCchPrintfW(szData, ARRAYSIZE(szData), L"%s\\%s\\Capabilities",
-                     szStartMenuInternet, pszKey);
-    SetStringValue(HKEY_LOCAL_MACHINE, szRegisteredApps, pszName, szData);
+    /* 6. RegisteredApplications entry (the browser's own, else ours) */
+    if (!FindRegisteredAppName(pszKey, szRegApp, ARRAYSIZE(szRegApp)))
+    {
+        StringCchCopyW(szRegApp, ARRAYSIZE(szRegApp), pszName);
+        StringCchPrintfW(szData, ARRAYSIZE(szData), L"%s\\%s\\Capabilities",
+                         szStartMenuInternet, pszKey);
+        SetStringValue(HKEY_LOCAL_MACHINE, szRegisteredApps, szRegApp, szData);
+    }
+
+    /* 7. The current user's choice (UserChoice of http, https, ...), read by the shell and the browsers */
+    if (g_WriteError == ERROR_SUCCESS && !SetUserChoice(szRegApp))
+        g_WriteError = ERROR_GEN_FAILURE;
 
     /* Notify the shell that associations changed. */
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_FLUSH, NULL, NULL);
@@ -745,7 +886,19 @@ PopulateList(HWND hDlg)
         g_InstallItemIndex = idx;
     }
 
-    SendMessageW(hList, LB_SETCURSEL, 0, 0);
+    idx = 0;
+    if (g_szPreselect[0])
+    {
+        for (i = 0; i < g_BrowserCount; i++)
+        {
+            if (!StrCmpIW(g_Browsers[i].szName, g_szPreselect) || !StrCmpIW(g_Browsers[i].szKey, g_szPreselect))
+            {
+                idx = i;
+                break;
+            }
+        }
+    }
+    SendMessageW(hList, LB_SETCURSEL, idx, 0);
 }
 
 static void
@@ -868,8 +1021,10 @@ DlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
 /*
  * Non-interactive automation entry points (also useful for unattended
  * provisioning scripts):
- *   bchooser.exe /set <StartMenuInternetKey>   set that client as default
+ *   bchooser.exe /set <key or name>            set that StartMenuInternet client as default
  *   bchooser.exe /installfirefox               install Firefox via RAPPS + set default
+ *   bchooser.exe /settings <ms-settings:defaultapps[?registeredAppUser=name]>   the "Default apps" page
+ *                                              (what ms-settings: opens): the chooser, that browser selected
  *   bchooser.exe /firstlogon                   the RunOnce launch: show the chooser, except
  *                                              under unattended setup (no dialog, rc 0)
  * Returns 0 on success, 1 on failure (-1: run the GUI).  Without arguments the GUI chooser runs.
@@ -922,7 +1077,7 @@ RunAutomation(int argc, LPWSTR *argv)
         EnumBrowsers();
         for (i = 0; i < g_BrowserCount; i++)
         {
-            if (!StrCmpIW(g_Browsers[i].szKey, argv[1]))
+            if (!StrCmpIW(g_Browsers[i].szKey, argv[1]) || !StrCmpIW(g_Browsers[i].szName, argv[1]))
             {
                 return SetDefaultBrowser(g_Browsers[i].szKey,
                                          g_Browsers[i].szName,
@@ -931,6 +1086,43 @@ RunAutomation(int argc, LPWSTR *argv)
         }
         LogLine(L"Automation: /set - browser '%s' not found", argv[1]);
         return 1;
+    }
+
+    if (!StrCmpIW(argv[0], L"/settings"))
+    {
+        /* The "Default apps" page of the Windows settings app: ms-settings:defaultapps[?registeredAppUser=<name>]
+         * (what browsers open for "Make default"). Show the chooser with that browser selected. Other pages
+         * have nothing to show. */
+        LPCWSTR pszUri = argc > 1 ? argv[1] : L"";
+        LPCWSTR pszName;
+
+        if (StrCmpNIW(pszUri, L"ms-settings:defaultapps", 23))
+        {
+            LogLine(L"Automation: /settings - no page for %s", pszUri);
+            return 0;
+        }
+        pszName = StrStrIW(pszUri, L"registeredAppUser=");
+        if (pszName)
+        {
+            LPWSTR pszOut = g_szPreselect;
+            pszName += 18;
+            while (*pszName && *pszName != L'&' && pszOut < g_szPreselect + ARRAYSIZE(g_szPreselect) - 1)
+            {
+                if (*pszName == L'%' && iswxdigit(pszName[1]) && iswxdigit(pszName[2]))
+                {
+                    WCHAR sz[3] = { pszName[1], pszName[2], 0 };
+                    *pszOut++ = (WCHAR)wcstoul(sz, NULL, 16);
+                    pszName += 3;
+                }
+                else
+                {
+                    *pszOut++ = (*pszName == L'+') ? L' ' : *pszName;
+                    pszName++;
+                }
+            }
+            *pszOut = L'\0';
+        }
+        return -1; /* show the chooser */
     }
 
     LogLine(L"Automation: unknown option '%s'", argv[0]);
