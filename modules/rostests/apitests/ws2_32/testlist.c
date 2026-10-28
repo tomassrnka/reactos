@@ -13,6 +13,7 @@ extern void func_broadcast(void);
 extern void func_close(void);
 extern void func_closerace(void);
 extern void func_connectex(void);
+extern void func_connecterror(void);
 extern void func_GetAddrInfoEx(void);
 extern void func_getaddrinfo(void);
 extern void func_GetHostNameW(void);
@@ -62,6 +63,7 @@ const struct test winetest_testlist[] =
     { "close", func_close },
     { "closerace", func_closerace },
     { "connectex", func_connectex },
+    { "connecterror", func_connecterror },
     { "GetAddrInfoEx", func_GetAddrInfoEx },
     { "getaddrinfo", func_getaddrinfo },
     { "GetHostNameW", func_GetHostNameW },
