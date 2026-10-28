@@ -816,6 +816,8 @@ NetGroupEnum(
         if (ApiStatus != NERR_Success)
             goto done;
 
+        ZeroMemory(EnumContext, sizeof(GROUP_ENUM_CONTEXT));
+
         EnumContext->EnumerationContext = 0;
         EnumContext->Buffer = NULL;
         EnumContext->Returned = 0;
@@ -1170,6 +1172,8 @@ NetGroupGetUsers(
         ApiStatus = NetApiBufferAllocate(sizeof(USER_ENUM_CONTEXT), (PVOID*)&EnumContext);
         if (ApiStatus != NERR_Success)
             goto done;
+
+        ZeroMemory(EnumContext, sizeof(USER_ENUM_CONTEXT));
 
         EnumContext->MemberCount = 0;
         EnumContext->MemberIds = NULL;

@@ -10,6 +10,7 @@
 
 extern void func_DsRoleGetPrimaryDomainInformation(void);
 extern void func_NetGetAadJoinInformation(void);
+extern void func_NetLocalGroup(void);
 extern void func_NetServerGetInfo(void);
 extern void func_NetShare(void);
 
@@ -17,6 +18,7 @@ const struct test winetest_testlist[] =
 {
     { "DsRoleGetPrimaryDomainInformation", func_DsRoleGetPrimaryDomainInformation },
     { "NetGetAadJoinInformation", func_NetGetAadJoinInformation },
+    { "NetLocalGroup", func_NetLocalGroup },
     { "NetServerGetInfo", func_NetServerGetInfo },
     { "NetShare", func_NetShare },
 

@@ -261,8 +261,11 @@ SampRemoveMemberFromAllAliases(IN PSAM_DB_OBJECT DomainObject,
                                         &MembersKey);
                 if (NT_SUCCESS(Status))
                 {
-                    Status = SampRegDeleteValue(AliasKey,
+                    /* The member SID is a value of the alias Members key */
+                    Status = SampRegDeleteValue(MembersKey,
                                                 MemberSidString);
+                    if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+                        Status = STATUS_SUCCESS;
 
                     SampRegCloseKey(&MembersKey);
                 }
@@ -287,6 +290,10 @@ SampRemoveMemberFromAllAliases(IN PSAM_DB_OBJECT DomainObject,
                 Status = STATUS_SUCCESS;
 
             SampRegCloseKey(&MembersKey);
+        }
+        else if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+        {
+            Status = STATUS_SUCCESS;
         }
 
         SampRegCloseKey(&AliasesKey);

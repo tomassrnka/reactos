@@ -473,8 +473,14 @@ SampRemoveUserFromDomainAliases(
                                                 UserSidString);
                     SampRegCloseKey(&UserIdMembersKeyHandle);
 
+                    if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+                        Status = STATUS_SUCCESS;
+
                     if (!NT_SUCCESS(Status))
+                    {
+                        SampRegCloseKey(&UserIdKeyHandle);
                         break;
+                    }
                 }
 
                 SampRegCloseKey(&UserIdKeyHandle);
@@ -492,8 +498,13 @@ SampRemoveUserFromDomainAliases(
         goto done;
     }
 
-    Status = SampRegDeleteKey(AliasesMembersKeyHandle,
-                              UserSidString);
+    if (NT_SUCCESS(Status))
+    {
+        Status = SampRegDeleteKey(AliasesMembersKeyHandle,
+                                  UserSidString);
+        if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+            Status = STATUS_SUCCESS;
+    }
 
 done:
     SampRegCloseKey(&AliasesMembersKeyHandle);
@@ -551,7 +562,7 @@ SampRemoveUserFromAllAliases(
     {
         Status = SampRegEnumerateSubKey(DomainsKeyHandle,
                                         DomainEnumIndex,
-                                        64 * sizeof(WCHAR),
+                                        ARRAYSIZE(DomainKeyName),
                                         DomainKeyName);
         if (!NT_SUCCESS(Status))
         {

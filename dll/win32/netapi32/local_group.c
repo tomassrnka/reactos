@@ -1075,6 +1075,7 @@ NetLocalGroupEnum(
         if (ApiStatus != NERR_Success)
             goto done;
 
+        ZeroMemory(EnumContext, sizeof(ENUM_CONTEXT));
         EnumContext->EnumerationContext = 0;
         EnumContext->Buffer = NULL;
         EnumContext->Returned = 0;
@@ -1458,6 +1459,10 @@ NetLocalGroupGetMembers(
         if (ApiStatus != NERR_Success)
             goto done;
 
+        /* The handles and result pointers are released in the cleanup path
+         * even when they were never set, so they must start out as NULL */
+        ZeroMemory(EnumContext, sizeof(MEMBER_ENUM_CONTEXT));
+
         /* Connect to the SAM Server */
         Status = SamConnect((servername != NULL) ? &ServerName : NULL,
                             &EnumContext->ServerHandle,
@@ -1495,7 +1500,10 @@ NetLocalGroupGetMembers(
         if (EnumContext->AliasHandle == NULL)
         {
             if (EnumContext->DomainHandle != NULL)
+            {
                 SamCloseHandle(EnumContext->DomainHandle);
+                EnumContext->DomainHandle = NULL;
+            }
 
             /* Open the Acount Domain */
             Status = OpenAccountDomain(EnumContext->ServerHandle,

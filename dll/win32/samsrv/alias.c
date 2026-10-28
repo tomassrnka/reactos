@@ -233,18 +233,27 @@ SampGetMembersInAlias(IN PSAM_DB_OBJECT AliasObject,
                             &MembersKeyHandle);
     if (!NT_SUCCESS(Status))
     {
-        ERR("SampRegOpenKey failed with status 0x%08lx\n", Status);
-        goto done;
-    }
+        /* The Members key exists only while the alias has members */
+        if (Status != STATUS_OBJECT_NAME_NOT_FOUND)
+        {
+            ERR("SampRegOpenKey failed with status 0x%08lx\n", Status);
+            goto done;
+        }
 
-    /* Get the number of members */
-    Status = SampRegQueryKeyInfo(MembersKeyHandle,
-                                 NULL,
-                                 &Count);
-    if (!NT_SUCCESS(Status))
+        Count = 0;
+        Status = STATUS_SUCCESS;
+    }
+    else
     {
-        ERR("SampRegQueryKeyInfo failed with status 0x%08lx\n", Status);
-        goto done;
+        /* Get the number of members */
+        Status = SampRegQueryKeyInfo(MembersKeyHandle,
+                                     NULL,
+                                     &Count);
+        if (!NT_SUCCESS(Status))
+        {
+            ERR("SampRegQueryKeyInfo failed with status 0x%08lx\n", Status);
+            goto done;
+        }
     }
 
     /* Allocate the member array */
@@ -255,9 +264,12 @@ SampGetMembersInAlias(IN PSAM_DB_OBJECT AliasObject,
         goto done;
     }
 
+    /* The cleanup path frees every SID pointer, so they must start out NULL */
+    RtlZeroMemory(Members, Count * sizeof(SAMPR_SID_INFORMATION));
+
     /* Enumerate the members */
     Index = 0;
-    while (TRUE)
+    while (MembersKeyHandle != NULL && Index < Count)
     {
         /* Get the size of the next SID */
         DataLength = 0;
@@ -303,9 +315,24 @@ SampGetMembersInAlias(IN PSAM_DB_OBJECT AliasObject,
     {
         *MemberCount = Count;
         *MemberArray = Members;
+        Members = NULL;
     }
 
 done:
+    /* Free a partial result */
+    if (Members != NULL)
+    {
+        for (Index = 0; Index < Count; Index++)
+        {
+            if (Members[Index].SidPointer != NULL)
+                midl_user_free(Members[Index].SidPointer);
+        }
+
+        midl_user_free(Members);
+    }
+
+    SampRegCloseKey(&MembersKeyHandle);
+
     return Status;
 }
 
@@ -328,7 +355,11 @@ SampRemoveAllMembersFromAlias(IN PSAM_DB_OBJECT AliasObject)
                             &MembersKeyHandle);
     if (!NT_SUCCESS(Status))
     {
-        ERR("SampRegOpenKey failed (Status 0x%08lx)\n", Status);
+        /* No Members key means no members */
+        if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+            Status = STATUS_SUCCESS;
+        else
+            ERR("SampRegOpenKey failed (Status 0x%08lx)\n", Status);
         goto done;
     }
 
