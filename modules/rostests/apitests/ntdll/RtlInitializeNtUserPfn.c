@@ -47,11 +47,20 @@ START_TEST(RtlInitializeNtUserPfn)
 
     printf("NTDDI version: %lx\n", GetNTDDIVersion());
 
-    /* OS version specific count of A/W functions */
-    Count1 = (GetNTDDIVersion() >= NTDDI_WIN10) ? 24 : 23;
+    if (is_reactos())
+    {
+        /* The table sizes are fixed at build time, they don't follow the version we report */
+        Count1 = RTLP_NUMBER_OF_NTUSER_WNDPROCS;
+        Count2 = RTLP_NUMBER_OF_NTUSER_WORKERPROCS;
+    }
+    else
+    {
+        /* OS version specific count of A/W functions */
+        Count1 = (GetNTDDIVersion() >= NTDDI_WIN10) ? 24 : 23;
 
-    /* OS version specific count of other functions */
-    Count2 = (GetNTDDIVersion() >= NTDDI_WIN11) ? 18 : 11;
+        /* OS version specific count of other functions */
+        Count2 = (GetNTDDIVersion() >= NTDDI_WIN11) ? 18 : 11;
+    }
 
     /* Try different variants of too large sizes */
     Status = pRtlInitializeNtUserPfn(ProcsA, (Count1 + 1) * sizeof(PVOID), ProcsW, Count1 * sizeof(PVOID), OtherProcs, Count2 * sizeof(PVOID));

@@ -114,7 +114,11 @@ START_TEST(RtlRetrieveNtUserPfn)
     SIZE_T Count2 = ((PUCHAR)p3 - (PUCHAR)p2) / FieldSize;
 
     ok_eq_size(Count1, Count2);
-    ok_eq_size(Count1, GetNTVersion() >= _WIN32_WINNT_WIN10 ? 24 : 23);
+    /* ReactOS has fixed size tables, independent of the version it reports */
+    if (is_reactos())
+        ok_eq_size(Count1, RTLP_NUMBER_OF_NTUSER_WNDPROCS);
+    else
+        ok_eq_size(Count1, GetNTVersion() >= _WIN32_WINNT_WIN10 ? 24 : 23);
 
     /* Iterate over all function pointers from arrays 1 and 2 in one run */
     for (SIZE_T i = 0; i < (Count1 + Count2); i++)
@@ -124,7 +128,13 @@ START_TEST(RtlRetrieveNtUserPfn)
            "p1[%d] (%p) is not within .text section (%p-%p)\n", i, pfn, NtDllTextStart, NtDllTextEnd);
 
         /* Check the dispatch code */
-        if (is_reactos() || GetNTVersion() >= _WIN32_WINNT_WIN10)
+        if (is_reactos())
+        {
+            /* The thunks are 16-byte aligned, but not padded with the bytes Windows 10 uses */
+            ok_eq_size((ULONG_PTR)pfn & 15, 0);
+            ok_eq_int(memcmp(&pfn[0], "\xFF\x25", 2), 0); // jmp [x]
+        }
+        else if (GetNTVersion() >= _WIN32_WINNT_WIN10)
         {
 #if defined(_M_IX86)
             ok_eq_size((ULONG_PTR)pfn & 15, 0); // The functions should be 16-byte aligned
