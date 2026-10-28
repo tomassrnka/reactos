@@ -2395,7 +2395,9 @@ WSPConnect(SOCKET Handle,
             Status = IOSB->Status;
         }
 
-        Socket->SharedData->SocketLastError = TranslateNtStatusError(Status);
+        /* A blocking connect reports its failure itself: SO_ERROR stays clear, as on Windows.
+         * Only a non-blocking connect leaves the error there (see MsafdConnectAPC). */
+        Socket->SharedData->SocketLastError = 0;
         if (Status != STATUS_SUCCESS)
             goto Leave;
 
@@ -3252,6 +3254,18 @@ WSPGetSockOpt(IN SOCKET Handle,
                     break;
 
                 case SO_ERROR:
+                    /* The failure of a non-blocking connect is kept by AFD: its completion APC
+                     * may not have run on this thread, or on any thread that asks */
+                    if (Socket->SharedData->SocketLastError == 0)
+                    {
+                        ULONG ConnectStatus = 0;
+
+                        if (GetSocketInformation(Socket, AFD_INFO_CONNECT_ERROR, NULL, &ConnectStatus, NULL, NULL, NULL) == NO_ERROR &&
+                            ConnectStatus != 0)
+                        {
+                            Socket->SharedData->SocketLastError = TranslateNtStatusError((NTSTATUS)ConnectStatus);
+                        }
+                    }
                     Buffer = &Socket->SharedData->SocketLastError;
                     BufferSize = sizeof(INT);
                     break;

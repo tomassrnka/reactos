@@ -217,6 +217,8 @@ typedef struct _AFD_TDI_HANDLE_DATA
 #define AFD_INFO_SEND_WINDOW_SIZE	0x07L
 #define AFD_INFO_GROUP_ID_TYPE	        0x10L
 #define AFD_INFO_RECEIVE_CONTENT_SIZE   0x11L
+/* ReactOS: the NTSTATUS of a failed non-blocking connect, for SO_ERROR; 0 if none is recorded */
+#define AFD_INFO_CONNECT_ERROR          0x12L
 
 /* AFD Share Flags */
 #define AFD_SHARE_UNIQUE		0x0L

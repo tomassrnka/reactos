@@ -204,6 +204,7 @@ typedef struct _AFD_FCB {
     PVOID Context;
     DWORD PollState;
     NTSTATUS PollStatus[FD_MAX_EVENTS];
+    NTSTATUS AsyncConnectStatus; /* failure of the last non-blocking connect, reported by SO_ERROR */
     NTSTATUS LastReceiveStatus;
     UINT ContextSize;
     PVOID ConnectData;

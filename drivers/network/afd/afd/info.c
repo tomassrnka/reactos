@@ -64,6 +64,10 @@ AfdGetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
         InfoReq->Information.Ulong = FCB->Recv.Content - FCB->Recv.BytesUsed;
         break;
 
+    case AFD_INFO_CONNECT_ERROR:
+        InfoReq->Information.Ulong = (ULONG)FCB->AsyncConnectStatus;
+        break;
+
         case AFD_INFO_SENDS_IN_PROGRESS:
             InfoReq->Information.Ulong = 0;
 

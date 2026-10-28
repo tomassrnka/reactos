@@ -468,6 +468,9 @@ StreamSocketConnectComplete(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     if( !NT_SUCCESS(Irp->IoStatus.Status) ) {
         FCB->PollState |= AFD_EVENT_CONNECT_FAIL;
         FCB->PollStatus[FD_CONNECT_BIT] = Irp->IoStatus.Status;
+        /* A blocking connect returns its error itself; only a non-blocking one leaves it for SO_ERROR */
+        if (FCB->NonBlocking && !IsListEmpty(&FCB->PendingIrpList[FUNCTION_CONNECT]))
+            FCB->AsyncConnectStatus = Irp->IoStatus.Status;
         AFD_DbgPrint(MID_TRACE,("Going to bound state\n"));
         FCB->SharedData.State = SOCKET_STATE_BOUND;
         PollReeval( FCB->DeviceExt, FCB->FileObject );
@@ -608,6 +611,8 @@ SubmitConnect(PAFD_FCB FCB, PIRP Irp, UINT Function)
     FCB->SharedData.State = SOCKET_STATE_BOUND;
     FCB->PollState |= AFD_EVENT_CONNECT_FAIL;
     FCB->PollStatus[FD_CONNECT_BIT] = Status;
+    if (FCB->NonBlocking && Function == FUNCTION_CONNECT)
+        FCB->AsyncConnectStatus = Status;
     PollReeval(FCB->DeviceExt, FCB->FileObject);
     FreeConnectSendBuffer(FCB);
 
@@ -761,6 +766,7 @@ AfdStreamSocketConnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
             FCB->SharedData.State = SOCKET_STATE_CONNECTING;
             /* An earlier connect's failure does not belong to this one */
             FCB->PollState &= ~AFD_EVENT_CONNECT_FAIL;
+            FCB->AsyncConnectStatus = STATUS_SUCCESS;
 
             AFD_DbgPrint(MID_TRACE,("Queueing IRP %p\n", Irp));
             Status = QueueUserModeIrp(FCB, Irp, FUNCTION_CONNECT);
@@ -936,6 +942,7 @@ AfdStreamSocketSuperConnect(
         FCB->SharedData.State = SOCKET_STATE_CONNECTING;
         /* An earlier connect's failure does not belong to this one */
         FCB->PollState &= ~AFD_EVENT_CONNECT_FAIL;
+        FCB->AsyncConnectStatus = STATUS_SUCCESS;
 
         AFD_DbgPrint(MID_TRACE,("Queueing IRP %p\n", Irp));
         Status = QueueUserModeIrp( FCB, Irp, FUNCTION_CONNECTEX );
