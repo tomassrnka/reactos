@@ -24,3 +24,13 @@ add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/winfsp.ini
             DESTINATION reactos/Featmgr/Catalog FOR all)
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/payload/gl-sw-pack/glsw-pack.txt
             DESTINATION reactos/Featmgr/Payload/gl-sw-pack FOR all)
+
+# --- Claude Desktop: software-tier entry (amd64 only, Anthropic ships an x64 build) ---
+# Only the manifest and a RAPPS-format entry (not a manifest: the catalog scan reads *.ini) ship in the image. The app itself is downloaded
+# from Anthropic's release feed at install time (SHA1-checked) and is never bundled.
+if(ARCH STREQUAL "amd64")
+    add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/claude-desktop.ini
+                DESTINATION reactos/Featmgr/Catalog FOR all)
+    add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/claude-desktop.txt
+                DESTINATION reactos/Featmgr/Catalog FOR all)
+endif()

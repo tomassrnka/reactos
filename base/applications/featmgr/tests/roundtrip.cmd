@@ -224,6 +224,8 @@ call :st fmt-sw Enabled "79 sw Enabled after install"
 call :ex %R%\fmt-sw.installed 1 "80 installer ran (side-effect file)"
 reg query HKLM\SOFTWARE\ReactOS\Nitro\FmTest /v Sw >nul 2>&1
 call :rc0 "81 installer side-effect registry value"
+reg query HKLM\SOFTWARE\ReactOS\Nitro\FmTest /v SwReg >nul 2>&1
+call :rc0 "81b software-tier [Registry] applied after install"
 %FM% /list /state:enabled /tier:software > %O%\l.txt 2>&1
 find "fmt-sw" %O%\l.txt >nul
 call :rc0 "82 list shows installed software"
@@ -234,6 +236,8 @@ call :st fmt-sw Disabled "84 sw Disabled"
 call :ex %R%\fmt-sw.installed 0 "85 uninstaller removed side-effect file"
 reg query HKLM\SOFTWARE\ReactOS\Nitro\FmTest /v Sw >nul 2>&1
 call :rc1 "86 uninstaller removed registry value"
+reg query HKLM\SOFTWARE\ReactOS\Nitro\FmTest /v SwReg >nul 2>&1
+call :rc1 "86b software-tier [Registry] reverted on disable"
 %FM% /enable fmt-sw >> %LOG% 2>&1
 call :rc0 "87 re-install from Disabled"
 call :st fmt-sw Enabled "88 sw Enabled again"

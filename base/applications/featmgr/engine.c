@@ -271,6 +271,21 @@ static BOOL RappsExePath(LPWSTR out, DWORD cch)
     return SUCCEEDED(StringCchPrintfW(out, cch, L"%s\\rapps.exe", sys));
 }
 
+/* [Rapps] Entry= : a RAPPS-format entry that ships in the image (absolute, %SystemRoot% etc.
+ * expanded; or relative to the feature's payload dir) for packages that are not in the online
+ * RAPPS database. */
+static BOOL RappsEntryPath(const FM_FEATURE *f, LPWSTR out, DWORD cch)
+{
+    WCHAR raw[MAX_PATH], exp[MAX_PATH];
+    GetPrivateProfileStringW(L"Rapps", L"Entry", L"", raw, MAX_PATH, f->ManifestPath);
+    if (!raw[0]) return FALSE;
+    ExpandCmd(f->Id, raw, exp, MAX_PATH);
+    if (IsAbsPath(exp))
+        return SUCCEEDED(StringCchCopyW(out, cch, exp));
+    FmGetPayloadDir(f->Id, out, cch);
+    return SUCCEEDED(StringCchCatW(out, cch, L"\\")) && SUCCEEDED(StringCchCatW(out, cch, exp));
+}
+
 /* Can the install be attempted? rapps provider: rapps.exe present (the download
  * happens at install time, so there is no staged payload to check). command
  * provider: the installer file is staged. */
@@ -281,7 +296,11 @@ static BOOL SoftwareAvailable(const FM_FEATURE *f)
         return InstallerPath(f, p, MAX_PATH) && GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES;
     if (_wcsicmp(f->Provider, L"rapps"))
         return FALSE;                                   /* unknown provider */
-    return RappsExePath(p, MAX_PATH) && GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES;
+    if (!RappsExePath(p, MAX_PATH) || GetFileAttributesW(p) == INVALID_FILE_ATTRIBUTES)
+        return FALSE;
+    if (RappsEntryPath(f, p, MAX_PATH))                 /* shipped RAPPS entry must be present */
+        return GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES;
+    return TRUE;
 }
 
 /* Does every declared [Payload] source file exist on disk? */
@@ -826,7 +845,7 @@ static HRESULT RunAndWait(LPCWSTR cmdline, DWORD timeoutMs, DWORD *code, FILE *l
  * install time so disable stays data-driven (same as the OS tier's undo lists). */
 static HRESULT BuildSoftwareCommands(const FM_FEATURE *f, LPWSTR inst, LPWSTR uninst, DWORD cch, FILE *log)
 {
-    WCHAR pkg[128], rapps[MAX_PATH];
+    WCHAR pkg[128], name[128], rapps[MAX_PATH];
 
     inst[0] = uninst[0] = L'\0';
     if (!_wcsicmp(f->Provider, L"command"))
@@ -866,7 +885,13 @@ static HRESULT BuildSoftwareCommands(const FM_FEATURE *f, LPWSTR inst, LPWSTR un
     }
     if (!RappsExePath(rapps, MAX_PATH)) return E_FAIL;
     StringCchPrintfW(inst, cch, L"\"%s\" /install /S \"%s\"", rapps, pkg);
-    StringCchPrintfW(uninst, cch, L"\"%s\" /uninstall /S \"%s\"", rapps, pkg);
+    /* [Rapps] UninstallName= : the installed app's display name. Uninstall then resolves it
+     * from the registry, so it keeps working when the entry is no longer in the RAPPS DB. */
+    GetPrivateProfileStringW(L"Rapps", L"UninstallName", L"", name, ARRAYSIZE(name), f->ManifestPath);
+    if (name[0] && !wcspbrk(name, L"\"\r\n"))
+        StringCchPrintfW(uninst, cch, L"\"%s\" /uninstall /S \"%s\"", rapps, name);
+    else
+        StringCchPrintfW(uninst, cch, L"\"%s\" /uninstall /S \"%s\"", rapps, pkg);
     return S_OK;
 }
 
@@ -880,6 +905,16 @@ static HRESULT SoftwareInstall(const FM_FEATURE *f, HKEY state, FILE *log)
 
     hr = BuildSoftwareCommands(f, inst, uninst, ARRAYSIZE(inst), log);
     if (FAILED(hr)) return hr;
+    if (!_wcsicmp(f->Provider, L"rapps"))
+    {
+        WCHAR entry[MAX_PATH], pkg[128];
+        if (RappsEntryPath(f, entry, MAX_PATH))
+        {
+            GetPrivateProfileStringW(L"Rapps", L"Pkg", L"", pkg, ARRAYSIZE(pkg), f->ManifestPath);
+            if (!FmStageRappsEntry(entry, pkg, log))
+                return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+        }
+    }
     LOGF(log, L"  software install via '%s' provider\n", f->Provider);
     hr = RunAndWait(inst, SW_RUN_TIMEOUT_MS, &code, log);
     if (FAILED(hr)) return hr;
@@ -939,6 +974,25 @@ static HRESULT EnableDeps(const FM_FEATURE *f, FILE *log)
 }
 
 static void RevertState(HKEY state, FILE *log);
+
+/* Apply the manifest's [Registry] actions, recording undo info in the state key. */
+static HRESULT ApplyRegistrySection(const FM_FEATURE *f, HKEY state, FILE *log)
+{
+    WCHAR *sect, *p;
+    HRESULT hr = S_OK;
+
+    sect = ReadSection(f->ManifestPath, L"Registry");
+    if (!sect) return S_OK;
+    for (p = sect; *p; p += wcslen(p) + 1)
+    {
+        WCHAR *eq = wcschr(p, L'=');
+        if (!eq) continue;
+        hr = ApplyRegAction(eq + 1, state, log);
+        if (FAILED(hr)) break;
+    }
+    HeapFree(GetProcessHeap(), 0, sect);
+    return hr;
+}
 
 HRESULT FmEnable(LPCWSTR id, FILE *log)
 {
@@ -1005,6 +1059,24 @@ HRESULT FmEnable(LPCWSTR id, FILE *log)
             }
             return hr;
         }
+        /* per-app configuration the installer cannot do (install-time registry: protocol
+         * handlers, compatibility settings), reverted with the app on disable */
+        RegDeleteValueW(state, L"RegUndo");
+        hr = ApplyRegistrySection(&f, state, log);
+        if (FAILED(hr))
+        {
+            WCHAR sub[512];
+            LOGF(log, L"post-install registry FAILED (0x%08lx); uninstalling\n", hr);
+            SoftwareUninstall(state, log);
+            RevertState(state, log);
+            RegCloseKey(state);
+            if (f.State == FM_STATE_NOT_INSTALLED)
+            {
+                StringCchPrintfW(sub, 512, L"%s\\%s", STATE_KEY, id);
+                RegDeleteKeyW(HKEY_LOCAL_MACHINE, sub);
+            }
+            return hr;
+        }
         UtcNow(now, 32);
         SetStateSz(state, L"State", L"Enabled");
         SetStateSz(state, L"Name", f.Name);
@@ -1043,19 +1115,8 @@ HRESULT FmEnable(LPCWSTR id, FILE *log)
     }
 
     /* registry actions */
-    sect = ReadSection(f.ManifestPath, L"Registry");
-    if (sect)
-    {
-        for (p = sect; *p; p += wcslen(p) + 1)
-        {
-            WCHAR *eq = wcschr(p, L'=');
-            if (!eq) continue;
-            hr = ApplyRegAction(eq + 1, state, log);
-            if (FAILED(hr)) goto done;
-        }
-        HeapFree(GetProcessHeap(), 0, sect);
-        sect = NULL;
-    }
+    hr = ApplyRegistrySection(&f, state, log);
+    if (FAILED(hr)) goto done;
 
     /* driver/service registration (after files + registry, so the image exists) */
     sect = ReadSection(f.ManifestPath, L"Service");
