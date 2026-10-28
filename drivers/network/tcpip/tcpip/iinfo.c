@@ -244,7 +244,7 @@ TDI_STATUS InfoTdiSetArptableMIB(PIP_INTERFACE IF, PVOID Buffer, UINT BufferSize
 {
     PIPARP_ENTRY ArpEntry = Buffer;
     IP_ADDRESS Address;
-    PNEIGHBOR_CACHE_ENTRY NCE;
+    PNEIGHBOR_CACHE_ENTRY NCE, OldNCE;
 
     if (!Buffer || BufferSize < sizeof(IPARP_ENTRY))
         return TDI_INVALID_PARAMETER;
@@ -254,11 +254,8 @@ TDI_STATUS InfoTdiSetArptableMIB(PIP_INTERFACE IF, PVOID Buffer, UINT BufferSize
 
     AddrInitIPv4(&Address, ArpEntry->LogAddr);
 
-    if ((NCE = NBLocateNeighbor(&Address, IF)))
-    {
-        NBRemoveNeighbor(NCE);
-        NBDereferenceNeighbor(NCE);
-    }
+    if ((OldNCE = NBLocateNeighbor(&Address, IF)))
+        NBRemoveNeighbor(OldNCE);
 
     NCE = NBAddNeighbor(IF,
                         &Address,
@@ -266,6 +263,15 @@ TDI_STATUS InfoTdiSetArptableMIB(PIP_INTERFACE IF, PVOID Buffer, UINT BufferSize
                         ArpEntry->AddrSize,
                         NUD_PERMANENT,
                         0);
+
+    if (OldNCE)
+    {
+        /* The routes through the old entry (a gateway) use the new one */
+        if (NCE)
+            RouterReplaceRouter(OldNCE, NCE);
+        NBDereferenceNeighbor(OldNCE);
+    }
+
     if (!NCE)
         return TDI_INVALID_PARAMETER;
 

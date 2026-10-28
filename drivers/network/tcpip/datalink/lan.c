@@ -52,6 +52,8 @@ typedef struct _RECONFIGURE_CONTEXT {
 
 NDIS_HANDLE NdisProtocolHandle = (NDIS_HANDLE)NULL;
 BOOLEAN ProtocolRegistered     = FALSE;
+/* Adapters an IP interface owns (BindAdapter) that its last reference has not freed yet */
+static volatile LONG LanAdaptersOwned = 0;
 LIST_ENTRY AdapterListHead;
 KSPIN_LOCK AdapterListLock;
 
@@ -214,6 +216,9 @@ static VOID LanReleaseAdapter(
     ASSERT(!Adapter->NdisHandle && !Adapter->ReceiveQueue.WorkItem);
 
     ExFreePoolWithTag(Adapter, LAN_ADAPTER_TAG);
+
+    /* LANUnregisterProtocol waits for this */
+    InterlockedDecrement(&LanAdaptersOwned);
 }
 
 
@@ -1669,6 +1674,7 @@ BOOLEAN BindAdapter(
     /* The interface owns the adapter from now on: on a failure below, DenyOpenAdapter
        removes the interface (UnbindAdapter), and the adapter goes with its last reference */
     Adapter->Context = IF;
+    InterlockedIncrement(&LanAdaptersOwned);
 
     /*
      * Query per-adapter configuration from the registry
@@ -1940,6 +1946,8 @@ NDIS_STATUS LANUnregisterAdapter(
     /* Close the binding first: NDIS completes our sends and requests on it and
        indicates nothing more, so no received frame is queued after this */
     TcpipAcquireSpinLock(&Adapter->Lock, &OldIrql);
+    /* LANTransmit refuses packets from now on, instead of reporting them sent */
+    Adapter->State = LAN_STATE_STOPPED;
     NdisHandle = Adapter->NdisHandle;
     if (NdisHandle) {
         Adapter->NdisHandle = NULL;
@@ -1999,6 +2007,22 @@ LANUnregisterProtocol(VOID)
             TcpipReleaseSpinLock(&AdapterListLock, OldIrql);
 
             LANUnregisterAdapter(Current);
+        }
+
+        /* An interface outlives its unbinding while something still references it (an NCE
+           held by a sender, a WaitForHwAddress work item for up to 10 seconds): its last
+           reference frees the adapter (LanReleaseAdapter), which must happen before the
+           driver goes */
+        {
+            LARGE_INTEGER Delay;
+            ULONG Waited = 0;
+
+            Delay.QuadPart = -100000; /* 10 ms */
+            while (LanAdaptersOwned != 0) {
+                if ((++Waited % 1000) == 0)
+                    DbgPrint("TCPIP: unload waits for %ld adapters still referenced\n", LanAdaptersOwned);
+                KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+            }
         }
 
         NdisDeregisterProtocol(&NdisStatus, NdisProtocolHandle);

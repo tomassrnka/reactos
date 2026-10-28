@@ -30,6 +30,10 @@ PNEIGHBOR_CACHE_ENTRY RouterGetRoute(PIP_ADDRESS Destination);
 
 NTSTATUS RouterRemoveRoute(PIP_ADDRESS Target, PIP_ADDRESS Router);
 
+VOID RouterReplaceRouter(
+    PNEIGHBOR_CACHE_ENTRY OldRouter,
+    PNEIGHBOR_CACHE_ENTRY NewRouter);
+
 PFIB_ENTRY RouterCreateRoute(
     PIP_ADDRESS NetworkAddress,
     PIP_ADDRESS Netmask,

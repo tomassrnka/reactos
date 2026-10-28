@@ -293,6 +293,43 @@ PFIB_ENTRY RouterAddRoute(
 }
 
 
+VOID RouterReplaceRouter(
+    PNEIGHBOR_CACHE_ENTRY OldRouter,
+    PNEIGHBOR_CACHE_ENTRY NewRouter)
+/*
+ * FUNCTION: Makes the routes through an NCE use another one
+ * ARGUMENTS:
+ *     OldRouter = NCE that left the neighbor cache (NBRemoveNeighbor)
+ *     NewRouter = NCE that replaces it in the cache, for the same address
+ * NOTES:
+ *     A route keeps its router's NCE: one out of the cache is never resolved or
+ *     updated again, so the routes through it would go nowhere (an unresolved
+ *     one takes no packets). The caller holds a reference to both
+ */
+{
+    KIRQL OldIrql;
+    PLIST_ENTRY CurrentEntry;
+    PFIB_ENTRY Current;
+
+    TcpipAcquireSpinLock(&FIBLock, &OldIrql);
+
+    for (CurrentEntry = FIBListHead.Flink;
+         CurrentEntry != &FIBListHead;
+         CurrentEntry = CurrentEntry->Flink)
+    {
+        Current = CONTAINING_RECORD(CurrentEntry, FIB_ENTRY, ListEntry);
+        if (Current->Router == OldRouter)
+        {
+            NBReferenceNeighbor(NewRouter);
+            Current->Router = NewRouter;
+            NBDereferenceNeighbor(OldRouter);
+        }
+    }
+
+    TcpipReleaseSpinLock(&FIBLock, OldIrql);
+}
+
+
 PNEIGHBOR_CACHE_ENTRY RouterGetRoute(PIP_ADDRESS Destination)
 /*
  * FUNCTION: Finds a router to use to get to Destination
