@@ -107,6 +107,10 @@ int     FmGetDependents(LPCWSTR id, LPWSTR buf, DWORD cch);
 #define FM_IMPORT_CLEAN   0x2  /* first delete previously generated rapps-*.ini */
 int    FmImportRapps(LPCWSTR srcDir, DWORD flags, int *skipped, FILE *log);
 
+/* Stage a RAPPS-format entry that ships in the image into the RAPPS database as <pkg>
+ * (see FmEnable: [Rapps] Entry=). */
+BOOL   FmStageRappsEntry(LPCWSTR entryFile, LPCWSTR pkg, FILE *log);
+
 /* Utility: tier/state to display string. */
 LPCWSTR FmTierStr(FM_TIER t);
 LPCWSTR FmStateStr(FM_STATE s);

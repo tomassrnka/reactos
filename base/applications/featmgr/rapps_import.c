@@ -259,6 +259,37 @@ static BOOL FetchRappsDatabase(FILE *log)
     return wr == WAIT_OBJECT_0 && code == 0;
 }
 
+/* Make a RAPPS-format entry that ships in the image (a catalog manifest's [Rapps] Entry=)
+ * resolvable by rapps.exe as package <pkg>: ensure the per-user RAPPS database exists
+ * (fetched headless when missing, so staging never leaves a lone entry that would stop
+ * rapps from downloading its catalog), then copy the file in as <pkg>.txt. */
+BOOL FmStageRappsEntry(LPCWSTR entryFile, LPCWSTR pkg, FILE *log)
+{
+    WCHAR dir[MAX_PATH], dest[MAX_PATH];
+
+    if (!ValidPkgName(pkg))
+    {
+        LOGF(log, L"error: invalid RAPPS package name '%s'\n", pkg);
+        return FALSE;
+    }
+    if (!DefaultRappsDir(dir, MAX_PATH))
+    {
+        LOGF(log, L"error: cannot locate the RAPPS database directory\n");
+        return FALSE;
+    }
+    if (!HasRappsEntries(dir))
+        FetchRappsDatabase(log);   /* best effort: offline, the entry is staged alone */
+    SHCreateDirectoryExW(NULL, dir, NULL);
+    if (FAILED(StringCchPrintfW(dest, MAX_PATH, L"%s\\%s.txt", dir, pkg))
+        || !CopyFileW(entryFile, dest, FALSE))
+    {
+        LOGF(log, L"error: cannot stage RAPPS entry %s (%lu)\n", entryFile, GetLastError());
+        return FALSE;
+    }
+    LOGF(log, L"  staged RAPPS entry: %s\n", dest);
+    return TRUE;
+}
+
 int FmImportRapps(LPCWSTR srcDir, DWORD flags, int *skipped, FILE *log)
 {
     WCHAR src[MAX_PATH], outDir[MAX_PATH], glob[MAX_PATH], file[MAX_PATH], outFile[MAX_PATH];
