@@ -182,6 +182,10 @@ SysWOW64/dinput.dll
 SysWOW64/dinput8.dll
 @0x600 SysWOW64/d3d8.dll
 
+# Human interface device helpers (hid.dll): imported by the 32-bit user32 winetest (raw input
+# tests) and by hid_winetest. It only needs kernel32 and msvcrt, so there is no import chain to add.
+SysWOW64/hid.dll
+
 # Code-page data used by the guest kernel32 NLS loader.
 SysWOW64/c_037.nls
 SysWOW64/c_10000.nls
