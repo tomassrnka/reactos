@@ -7,6 +7,7 @@
 
 #include "precomp.h"
 #include <lm.h>
+#include <ntsecapi.h>
 
 #define CHILD_COUNT 20
 #define CALL_TIMEOUT_MS 120000
@@ -157,12 +158,82 @@ static VOID LogonAndCheck(PWSTR User)
     CloseHandle(Token);
 }
 
+/* A wrong password is refused with ERROR_LOGON_FAILURE and gives no token */
+static VOID WrongPassword(PWSTR User)
+{
+    WCHAR Wrong[] = L"Not-The-Password-2026!";
+    HANDLE Token = (HANDLE)(ULONG_PTR)0xdeadbeef;
+    BOOL Ok;
+
+    SetLastError(0xdeadbeef);
+    Ok = LogonUserW(User, L".", Wrong, LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &Token);
+    ok(!Ok, "LogonUserW(%ls) with a wrong password succeeded\n", User);
+    ok(GetLastError() == ERROR_LOGON_FAILURE, "LogonUserW with a wrong password: error %lu\n", GetLastError());
+    ok(Token == NULL, "LogonUserW with a wrong password returned the token %p\n", Token);
+    if (Ok && Token)
+        CloseHandle(Token);
+}
+
+typedef NTSTATUS (NTAPI *LSA_CONNECT)(PHANDLE);
+typedef NTSTATUS (NTAPI *LSA_LOOKUP)(HANDLE, PLSA_STRING, PULONG);
+typedef NTSTATUS (NTAPI *LSA_CALL)(HANDLE, ULONG, PVOID, ULONG, PVOID *, PULONG, PNTSTATUS);
+typedef NTSTATUS (NTAPI *LSA_CLOSE)(PVOID);
+
+/* LsaCallAuthenticationPackage carries package specific buffers that may hold pointers. The WoW64
+ * layer translates none of them yet: a 32-bit process gets STATUS_NOT_SUPPORTED, a known gap. */
+static VOID CallAuthenticationPackage(VOID)
+{
+    HMODULE Secur32 = LoadLibraryW(L"secur32.dll");
+    LSA_CONNECT Connect = Secur32 ? (LSA_CONNECT)GetProcAddress(Secur32, "LsaConnectUntrusted") : NULL;
+    LSA_LOOKUP Lookup = Secur32 ? (LSA_LOOKUP)GetProcAddress(Secur32, "LsaLookupAuthenticationPackage") : NULL;
+    LSA_CALL Call = Secur32 ? (LSA_CALL)GetProcAddress(Secur32, "LsaCallAuthenticationPackage") : NULL;
+    LSA_CLOSE Deregister = Secur32 ? (LSA_CLOSE)GetProcAddress(Secur32, "LsaDeregisterLogonProcess") : NULL;
+    LSA_CLOSE FreeBuffer = Secur32 ? (LSA_CLOSE)GetProcAddress(Secur32, "LsaFreeReturnBuffer") : NULL;
+    MSV1_0_PROTOCOL_MESSAGE_TYPE Submit;
+    LSA_STRING Name;
+    HANDLE Lsa;
+    ULONG Package, Length = 0;
+    PVOID Buffer = NULL;
+    NTSTATUS Status, ProtocolStatus = 0;
+    BOOL Wow = FALSE;
+
+    if (!Connect || !Lookup || !Call || !Deregister || !FreeBuffer)
+    {
+        skip("secur32 has no LSA client functions\n");
+        return;
+    }
+    Status = Connect(&Lsa);
+    if (!NT_SUCCESS(Status))
+    {
+        skip("LsaConnectUntrusted failed: %08lx\n", Status);
+        return;
+    }
+    RtlInitString((PSTRING)&Name, MSV1_0_PACKAGE_NAME);
+    Status = Lookup(Lsa, &Name, &Package);
+    ok(Status == STATUS_SUCCESS, "LsaLookupAuthenticationPackage returned %08lx\n", Status);
+    if (NT_SUCCESS(Status))
+    {
+        Submit = MsV1_0Lm20ChallengeRequest;
+        Status = Call(Lsa, Package, &Submit, sizeof(Submit), &Buffer, &Length, &ProtocolStatus);
+        IsWow64Process(GetCurrentProcess(), &Wow);
+        if (Wow)
+            ok(Status == STATUS_NOT_SUPPORTED, "LsaCallAuthenticationPackage in WoW64 returned %08lx\n", Status);
+        else
+            trace("LsaCallAuthenticationPackage returned %08lx\n", Status);
+        if (NT_SUCCESS(Status) && Buffer)
+            FreeBuffer(Buffer);
+    }
+    Deregister(Lsa);
+}
+
 static VOID ChildLogon(PCSTR UserA)
 {
     WCHAR User[32];
 
     MultiByteToWideChar(CP_ACP, 0, UserA, -1, User, RTL_NUMBER_OF(User));
     LogonAndCheck(User);
+    WrongPassword(User);
+    CallAuthenticationPackage();
 }
 
 START_TEST(LogonUser)
