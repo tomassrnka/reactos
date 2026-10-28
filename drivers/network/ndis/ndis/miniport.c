@@ -491,6 +491,12 @@ MiniResetComplete(
     KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
 }
 
+static
+VOID
+MiniCompleteRequest(
+    PNDIS_REQUEST Request,
+    NDIS_STATUS   Status);
+
 VOID NTAPI
 MiniRequestComplete(
     IN NDIS_HANDLE MiniportAdapterHandle,
@@ -498,7 +504,6 @@ MiniRequestComplete(
 {
     PLOGICAL_ADAPTER Adapter = (PLOGICAL_ADAPTER)MiniportAdapterHandle;
     PNDIS_REQUEST Request;
-    PNDIS_REQUEST_MAC_BLOCK MacBlock;
     KIRQL OldIrql;
 
     NDIS_DbgPrint(DEBUG_MINIPORT, ("Called.\n"));
@@ -509,28 +514,15 @@ MiniRequestComplete(
     Request = Adapter->NdisMiniportBlock.PendingRequest;
     KeReleaseSpinLockFromDpcLevel(&Adapter->NdisMiniportBlock.Lock);
 
-    MacBlock = (PNDIS_REQUEST_MAC_BLOCK)Request->MacReserved;
+    /* The miniport completes the one request it returned NDIS_STATUS_PENDING for */
+    if (!Request)
+    {
+        NDIS_DbgPrint(MIN_TRACE, ("Request completion without a pending request (status 0x%x)\n", Status));
+        KeLowerIrql(OldIrql);
+        return;
+    }
 
-    /* We may or may not be doing this request on behalf of an adapter binding */
-    if (MacBlock->Binding != NULL)
-    {
-        /* We are, so invoke its request complete handler */
-        if (MacBlock->Binding->RequestCompleteHandler != NULL)
-        {
-            (*MacBlock->Binding->RequestCompleteHandler)(
-                MacBlock->Binding->ProtocolBindingContext,
-                Request,
-                Status);
-        }
-    }
-    else
-    {
-        /* We are doing this internally, so we'll signal this event we've stashed in the MacBlock */
-        ASSERT(MacBlock->Unknown1 != NULL);
-        ASSERT(MacBlock->Unknown3 == NULL);
-        MacBlock->Unknown3 = UlongToPtr(Status);
-        KeSetEvent(MacBlock->Unknown1, IO_NO_INCREMENT, FALSE);
-    }
+    MiniCompleteRequest(Request, Status);
 
     KeAcquireSpinLockAtDpcLevel(&Adapter->NdisMiniportBlock.Lock);
     Adapter->NdisMiniportBlock.PendingRequest = NULL;
@@ -800,7 +792,7 @@ MiniSetInformation(
   MacBlock = (PNDIS_REQUEST_MAC_BLOCK)NdisRequest->MacReserved;
   MacBlock->Unknown1 = &Event;
 
-  NdisStatus = MiniDoRequest(Adapter, NdisRequest);
+  NdisStatus = MiniStartRequest(Adapter, NdisRequest);
 
   if (NdisStatus == NDIS_STATUS_PENDING)
   {
@@ -860,7 +852,7 @@ MiniQueryInformation(
   MacBlock = (PNDIS_REQUEST_MAC_BLOCK)NdisRequest->MacReserved;
   MacBlock->Unknown1 = &Event;
 
-  NdisStatus = MiniDoRequest(Adapter, NdisRequest);
+  NdisStatus = MiniStartRequest(Adapter, NdisRequest);
 
   if (NdisStatus == NDIS_STATUS_PENDING)
   {
@@ -1311,11 +1303,14 @@ MiniStopSends(
  * captured item, never through PendingRequest or ResetStatus, which a request
  * or reset running outside the miniport lock may still use.
  */
-/* Completes a request that never reached the miniport, as MiniRequestComplete does */
+/* Hands a request back to whoever made it: the protocol of its binding, or the
+   NDIS caller waiting on the event stashed in the MacBlock. The request belongs
+   to its owner again afterwards and is not touched. */
 static
 VOID
-MiniFailRequest(
-    PNDIS_REQUEST Request)
+MiniCompleteRequest(
+    PNDIS_REQUEST Request,
+    NDIS_STATUS   Status)
 {
     PNDIS_REQUEST_MAC_BLOCK MacBlock = (PNDIS_REQUEST_MAC_BLOCK)Request->MacReserved;
     KIRQL OldIrql;
@@ -1328,15 +1323,26 @@ MiniFailRequest(
             (*MacBlock->Binding->RequestCompleteHandler)(
                 MacBlock->Binding->ProtocolBindingContext,
                 Request,
-                NDIS_STATUS_FAILURE);
+                Status);
         }
     }
     else
     {
-        MacBlock->Unknown3 = UlongToPtr(NDIS_STATUS_FAILURE);
+        ASSERT(MacBlock->Unknown1 != NULL);
+        ASSERT(MacBlock->Unknown3 == NULL);
+        MacBlock->Unknown3 = UlongToPtr(Status);
         KeSetEvent(MacBlock->Unknown1, IO_NO_INCREMENT, FALSE);
     }
     KeLowerIrql(OldIrql);
+}
+
+/* Completes a request that never reached the miniport */
+static
+VOID
+MiniFailRequest(
+    PNDIS_REQUEST Request)
+{
+    MiniCompleteRequest(Request, NDIS_STATUS_FAILURE);
 }
 
 /* Tells the protocols that a reset which never reached the miniport failed, as MiniResetComplete does */
@@ -1471,6 +1477,52 @@ MiniQueueWorkItem(
     KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
 }
 
+/*
+ * FUNCTION: Gives a request to the miniport, or queues it
+ * NOTES:
+ *     A miniport has one request at a time, as on Windows. PendingRequest is
+ *     claimed under the miniport lock together with the check, so two callers
+ *     can never both find the miniport idle. A request that has to wait is run
+ *     and completed by the worker once the one before it is done.
+ * RETURNS:
+ *     The miniport's status, or NDIS_STATUS_PENDING when queued
+ */
+NDIS_STATUS
+MiniStartRequest(
+    PLOGICAL_ADAPTER Adapter,
+    PNDIS_REQUEST NdisRequest)
+{
+    KIRQL OldIrql;
+    BOOLEAN Queued = FALSE;
+
+    KeAcquireSpinLock(&Adapter->NdisMiniportBlock.Lock, &OldIrql);
+    if (Adapter->NdisMiniportBlock.PendingRequest ||
+        MiniGetFirstWorkItem(Adapter, NdisWorkItemRequest))
+    {
+        if (!MiniInsertWorkItem(Adapter, NdisWorkItemRequest, NdisRequest, FALSE))
+        {
+            KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
+            return NDIS_STATUS_RESOURCES;
+        }
+        Queued = TRUE;
+    }
+    else
+    {
+        Adapter->NdisMiniportBlock.PendingRequest = NdisRequest;
+    }
+    KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
+
+    if (Queued)
+    {
+        /* The completion of the request in flight starts the worker too; this
+           covers a request that completed before this one was queued */
+        MiniWorkItemComplete(Adapter, NdisWorkItemRequest);
+        return NDIS_STATUS_PENDING;
+    }
+
+    return MiniDoRequest(Adapter, NdisRequest);
+}
+
 /* Called with the miniport lock held */
 static
 BOOLEAN
@@ -1601,7 +1653,9 @@ MiniDoRequest(
 
     KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
 
+    /* MiniStartRequest or the worker claimed the miniport for this request */
     KeAcquireSpinLockAtDpcLevel(&Adapter->NdisMiniportBlock.Lock);
+    ASSERT(Adapter->NdisMiniportBlock.PendingRequest == NdisRequest);
     Adapter->NdisMiniportBlock.PendingRequest = NdisRequest;
     KeReleaseSpinLockFromDpcLevel(&Adapter->NdisMiniportBlock.Lock);
 
@@ -1754,6 +1808,13 @@ MiniportWorker(IN PDEVICE_OBJECT DeviceObject, IN PVOID Context)
   if (Serialized && (NdisStatus == NDIS_STATUS_SUCCESS))
       Adapter->MiniportBusy = TRUE;
 
+  /* A request is dequeued only while none is in flight (see above): claim the miniport for it */
+  if ((NdisStatus == NDIS_STATUS_SUCCESS) && (WorkItemType == NdisWorkItemRequest))
+  {
+      ASSERT(Adapter->NdisMiniportBlock.PendingRequest == NULL);
+      Adapter->NdisMiniportBlock.PendingRequest = (PNDIS_REQUEST)WorkItemContext;
+  }
+
   KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
 
   if (NdisStatus == NDIS_STATUS_SUCCESS)
@@ -1870,22 +1931,10 @@ MiniportWorker(IN PDEVICE_OBJECT DeviceObject, IN PVOID Context)
             if (NdisStatus == NDIS_STATUS_PENDING)
               break;
 
-            Adapter->NdisMiniportBlock.PendingRequest = (PNDIS_REQUEST)WorkItemContext;
-            switch (((PNDIS_REQUEST)WorkItemContext)->RequestType)
-              {
-                case NdisRequestQueryInformation:
-                  NdisMQueryInformationComplete((NDIS_HANDLE)Adapter, NdisStatus);
-                  break;
-
-                case NdisRequestSetInformation:
-                  NdisMSetInformationComplete((NDIS_HANDLE)Adapter, NdisStatus);
-                  break;
-
-                default:
-                  NDIS_DbgPrint(MIN_TRACE, ("Unknown NDIS request type.\n"));
-                  break;
-              }
-            Adapter->NdisMiniportBlock.PendingRequest = NULL;
+            /* Done synchronously. MiniDoRequest has given the miniport up and the next
+               request may run by now, so this one is completed from the captured item,
+               not through PendingRequest */
+            MiniCompleteRequest((PNDIS_REQUEST)WorkItemContext, NdisStatus);
             break;
 
           default:

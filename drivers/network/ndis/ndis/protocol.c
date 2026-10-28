@@ -339,12 +339,7 @@ ProRequest(
   MiniQueueWorkItem(Adapter, NdisWorkItemRequest, NdisRequest, FALSE);
   return NDIS_STATUS_PENDING;
 #else
-  if (MiniIsBusy(Adapter, NdisWorkItemRequest)) {
-      MiniQueueWorkItem(Adapter, NdisWorkItemRequest, NdisRequest, FALSE);
-      return NDIS_STATUS_PENDING;
-  }
-
-  return MiniDoRequest(Adapter, NdisRequest);
+  return MiniStartRequest(Adapter, NdisRequest);
 #endif
 }
 
