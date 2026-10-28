@@ -8,6 +8,7 @@ extern void func_GetBestInterfaceEx(void);
 extern void func_GetBestRoute2(void);
 extern void func_GetExtendedTcpTable(void);
 extern void func_GetExtendedUdpTable(void);
+extern void func_GetIfTableConcurrent(void);
 extern void func_GetInterfaceName(void);
 extern void func_GetNetworkParams(void);
 extern void func_GetOwnerModuleFromTcpEntry(void);
@@ -27,6 +28,7 @@ const struct test winetest_testlist[] =
     { "GetBestRoute2",             func_GetBestRoute2 },
     { "GetExtendedTcpTable",        func_GetExtendedTcpTable },
     { "GetExtendedUdpTable",        func_GetExtendedUdpTable },
+    { "GetIfTableConcurrent",       func_GetIfTableConcurrent },
     { "GetInterfaceName",           func_GetInterfaceName },
     { "GetNetworkParams",           func_GetNetworkParams },
     { "GetOwnerModuleFromTcpEntry", func_GetOwnerModuleFromTcpEntry },

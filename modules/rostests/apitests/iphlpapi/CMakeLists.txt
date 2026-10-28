@@ -5,6 +5,7 @@ list(APPEND SOURCE
     GetBestRoute2.c
     GetExtendedTcpTable.c
     GetExtendedUdpTable.c
+    GetIfTableConcurrent.c
     GetInterfaceName.c
     GetNetworkParams.c
     GetOwnerModuleFromTcpEntry.c
