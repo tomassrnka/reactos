@@ -12,7 +12,7 @@
  * Run it once per boot: a removed root device stays a leaked device node until then.
  *
  * Optional argument after the test name: a scenario name
- * (serial, abort, abort1, late, deferred, deferred1, halt, remove).
+ * (serial, abort, abort1, late, deferred, deferred1, remove, readd).
  */
 
 #include <apitest.h>
@@ -746,10 +746,9 @@ TestDeferredAbort(PFAKE Fake, ULONG Addressing)
 
 /* (c) (d) requests pended and queued when the device is removed (ReactOS stops a disabled device the same way):
    the pended request fails, the queued ones fail and never reach the miniport, and nothing calls the halted miniport.
-   NDIS does not unbind the protocols from a removed adapter (ndisuio keeps its binding to the freed adapter), so
-   this goes last, and nothing may use the adapter's binding afterwards. */
+   NDIS unbinds the protocols first: ndisuio lets go of the adapter, and its handle bound to it is dead. */
 static
-void
+BOOL
 TestRemove(PFAKE Fake)
 {
     REQ Reqs[3];
@@ -785,7 +784,7 @@ TestRemove(PFAKE Fake)
             ok(!NT_SUCCESS(Reqs[i].Status) && Reqs[i].Status != STATUS_PENDING,
                "%ls: %s ended with 0x%lx\n", Fake->Name, Names[i], Reqs[i].Status);
         else if (Abandoned)
-            return;
+            return FALSE;
         trace("%ls: %s: 0x%lx\n", Fake->Name, Names[i], Reqs[i].Status);
     }
 
@@ -794,6 +793,82 @@ TestRemove(PFAKE Fake)
     ok(St.Halted == 1, "%ls: not halted\n", Fake->Name);
     ok(St.CallsAfterHalt == 0, "%ls: %lu calls into the halted miniport\n", Fake->Name, St.CallsAfterHalt);
     ok(St.Requests == 1, "%ls: %lu requests reached the miniport, the queued ones must not\n", Fake->Name, St.Requests);
+
+    if (Removed && Fake->Binding)
+    {
+        REQ Req;
+        HANDLE Binding;
+
+        /* ndisuio was unbound: the handle it had bound to the adapter takes no request (in a thread of its
+           own: before, the request went to the freed adapter), and the adapter is not there to bind to */
+        if (StartRequest(Fake, &Req, FALSE, 1))
+        {
+            if (Join(Fake, &Req, "the request on the binding of the removed adapter"))
+                ok(!NT_SUCCESS(Req.Status) && Req.Status != STATUS_PENDING,
+                   "%ls: a request on the binding of the removed adapter: 0x%lx\n", Fake->Name, Req.Status);
+            else if (Abandoned)
+                return FALSE;
+        }
+        DropBinding(Fake);
+        Binding = OpenBinding(Fake);
+        ok(Binding == INVALID_HANDLE_VALUE, "%ls: ndisuio still binds the removed adapter\n", Fake->Name);
+        if (Binding != INVALID_HANDLE_VALUE)
+            CloseHandle(Binding);
+    }
+    return Removed;
+}
+
+/* The removed device comes back by a reenumeration of the root, without a reboot: the same registry is still
+   there, so a new adapter of the driver starts. Returns whether it came up. */
+static
+BOOL
+BringBack(PFAKE Fake)
+{
+    DEVINST Root;
+    CONFIGRET Cr;
+    ULONG Initializes;
+
+    DropBinding(Fake);
+    Initializes = Stats(Fake).Initializes;
+
+    Cr = CM_Locate_DevNodeW(&Root, NULL, CM_LOCATE_DEVNODE_NORMAL);
+    ok(Cr == CR_SUCCESS, "CM_Locate_DevNodeW(root): 0x%lx\n", Cr);
+    if (Cr != CR_SUCCESS)
+        return FALSE;
+    Cr = CM_Reenumerate_DevNode(Root, CM_REENUMERATE_SYNCHRONOUS);
+    ok(Cr == CR_SUCCESS, "CM_Reenumerate_DevNode: 0x%lx\n", Cr);
+    if (!WAIT_STAT(Fake, Initializes, Initializes + 1, 30000))
+    {
+        ok(0, "%ls: the device did not come back\n", Fake->Name);
+        return FALSE;
+    }
+    WaitAdapter(Fake, "the add");
+    return TRUE;
+}
+
+/* (f) the removed device comes back, without a reboot: a new adapter starts, and NDIS binds the protocols to
+   it. They must have let go of the removed adapter (before, ndisuio kept its binding to the freed adapter,
+   and the bind walked it). The new adapter works, and goes away the same way. */
+static
+void
+TestReAdd(PFAKE Fake)
+{
+    FAKEMP_STATS St;
+
+    trace("%ls: add after remove\n", Fake->Name);
+
+    if (!BringBack(Fake))
+        return;
+
+    St = Stats(Fake);
+    ok(St.Halted == 0, "%ls: halted\n", Fake->Name);
+    CheckAlive(Fake, "on the adapter added after a remove");
+    DropBinding(Fake);
+    if (Abandoned)
+        return;
+
+    /* Requests pended and queued on it at its remove end as on the first one */
+    TestRemove(Fake);
 }
 
 START_TEST(FakeMiniport)
@@ -813,8 +888,8 @@ START_TEST(FakeMiniport)
         return;
     }
 
-    /* The adapters come and go with the test: both are installed first, so that nothing starts
-       an adapter after another one was removed */
+    /* The adapters come and go with the test: both are installed first, then each is removed and
+       comes back (readd: an adapter starts after another one was removed) */
     for (i = 0; i < 2; i++)
     {
         Fake = &Fakes[i];
@@ -853,8 +928,9 @@ START_TEST(FakeMiniport)
         Fake = &Fakes[i];
         if (!Fake->Installed)
             continue;
-        if (Want("remove"))
-            TestRemove(Fake);
+
+        if ((Want("remove") || Want("readd")) && TestRemove(Fake) && !Abandoned && Want("readd"))
+            TestReAdd(Fake);
         DropBinding(Fake);
     }
 

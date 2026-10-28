@@ -39,6 +39,17 @@ typedef struct _NDISUIO_ADAPTER_CONTEXT
     ULONG OpenCount;
     LIST_ENTRY OpenEntryList;
 
+    /* The binding's own reference, and one per read, write or IOCTL using the
+       adapter (ReferenceFileAdapter): the unbind frees the context once the
+       last one is gone */
+    volatile LONG RefCount;
+    KEVENT RefsGoneEvent;
+
+    /* The adapter is being unbound: no new open or call, and the reads that
+       wait for a packet end (UnbindingEvent is set) */
+    BOOLEAN Unbinding;
+    KEVENT UnbindingEvent;
+
     /* NDIS pools */
     NDIS_HANDLE PacketPoolHandle;
     NDIS_HANDLE BufferPoolHandle;
@@ -125,12 +136,12 @@ CleanupAndFreePacket(PNDIS_PACKET Packet,
 PNDISUIO_ADAPTER_CONTEXT
 FindAdapterContextByName(PNDIS_STRING DeviceName);
 
-VOID
-ReferenceAdapterContext(PNDISUIO_ADAPTER_CONTEXT AdapterContext);
+PNDISUIO_ADAPTER_CONTEXT
+ReferenceFileAdapter(PFILE_OBJECT FileObject,
+                     PBOOLEAN WriteOnly);
 
 VOID
-DereferenceAdapterContextWithOpenEntry(PNDISUIO_ADAPTER_CONTEXT AdapterContext,
-                                       PNDISUIO_OPEN_ENTRY OpenEntry);
+DereferenceAdapterContext(PNDISUIO_ADAPTER_CONTEXT AdapterContext);
 
 /* protocol.c */
 VOID

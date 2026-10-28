@@ -27,7 +27,23 @@ typedef struct _ADAPTER_BINDING {
     KSPIN_LOCK        Lock;                     /* Protecting spin lock */
     PPROTOCOL_BINDING ProtocolBinding;          /* Protocol that opened adapter */
     PLOGICAL_ADAPTER  Adapter;                  /* Adapter opened by protocol */
+    volatile LONG     Closing;                  /* NdisCloseAdapter runs: the binding takes no new send or request */
+    volatile LONG     Outstanding;              /* References: one held while open, one per send/request in flight; the
+                                                   last one dropped (by NdisCloseAdapter or a late completion) frees it */
 } ADAPTER_BINDING, *PADAPTER_BINDING;
+
+/* The UnbindContext NDIS gives a protocol's UnbindAdapterHandler, for NdisCompleteUnbindAdapter.
+   It is not the binding: the protocol closes that (NdisCloseAdapter) before it completes the unbind. */
+typedef struct _NDIS_UNBIND_CONTEXT {
+    KEVENT      Event;
+    NDIS_STATUS Status;
+} NDIS_UNBIND_CONTEXT, *PNDIS_UNBIND_CONTEXT;
+
+/* A send or request of the binding is done (completed to the protocol or returned synchronously), or the
+   binding is closed: drops a reference, and the last one frees the binding */
+VOID
+ProLeaveBinding(
+    PADAPTER_BINDING AdapterBinding);
 
 typedef struct _NDIS_REQUEST_MAC_BLOCK {
     PVOID Unknown1;
@@ -72,5 +88,9 @@ proSendPacketToMiniport(PLOGICAL_ADAPTER Adapter, PNDIS_PACKET Packet);
 VOID
 NTAPI
 ndisBindMiniportsToProtocol(OUT PNDIS_STATUS Status, IN PPROTOCOL_BINDING Protocol);
+
+VOID
+ProUnbindAdapter(
+    PLOGICAL_ADAPTER Adapter);
 
 /* EOF */

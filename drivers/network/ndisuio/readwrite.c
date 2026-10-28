@@ -16,8 +16,8 @@ VOID
 NTAPI
 ReadIrpCancel(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
-    PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation(Irp);
-    PNDISUIO_ADAPTER_CONTEXT AdapterContext = IrpSp->FileObject->FsContext;
+    /* The read holds a reference on the adapter (NduDispatchRead) */
+    PNDISUIO_ADAPTER_CONTEXT AdapterContext = Irp->Tail.Overlay.DriverContext[0];
     PNDISUIO_PACKET_ENTRY PacketEntry;
 
     /* Release the cancel spin lock */
@@ -43,24 +43,33 @@ NduDispatchRead(PDEVICE_OBJECT DeviceObject,
                 PIRP Irp)
 {
     PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation(Irp);
-    PNDISUIO_ADAPTER_CONTEXT AdapterContext = IrpSp->FileObject->FsContext;
-    PNDISUIO_OPEN_ENTRY OpenEntry = IrpSp->FileObject->FsContext2;
+    PNDISUIO_ADAPTER_CONTEXT AdapterContext;
+    BOOLEAN WriteOnly = FALSE;
     KIRQL OldIrql, OldCancelIrql;
     NTSTATUS Status;
     PLIST_ENTRY ListEntry;
     PNDISUIO_PACKET_ENTRY PacketEntry = NULL;
     ULONG BytesCopied = 0;
+    PVOID WaitObjects[2];
 
     ASSERT(DeviceObject == GlobalDeviceObject);
 
-    if (OpenEntry->WriteOnly)
+    /* The adapter stays until this read is done; WriteOnly is read under the list lock inside */
+    AdapterContext = ReferenceFileAdapter(IrpSp->FileObject, &WriteOnly);
+    if (AdapterContext == NULL || WriteOnly)
     {
+        if (AdapterContext != NULL)
+            DereferenceAdapterContext(AdapterContext);
+
         Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
         Irp->IoStatus.Information = 0;
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
 
         return STATUS_INVALID_PARAMETER;
     }
+    Irp->Tail.Overlay.DriverContext[0] = AdapterContext;
+    WaitObjects[0] = &AdapterContext->PacketReadEvent;
+    WaitObjects[1] = &AdapterContext->UnbindingEvent;
 
     /* Make the read cancellable */
     IoAcquireCancelSpinLock(&OldCancelIrql);
@@ -68,6 +77,8 @@ NduDispatchRead(PDEVICE_OBJECT DeviceObject,
     if (Irp->Cancel)
     {
         IoReleaseCancelSpinLock(OldCancelIrql);
+
+        DereferenceAdapterContext(AdapterContext);
 
         /* Indicate a 0 byte read */
         Irp->IoStatus.Status = STATUS_SUCCESS;
@@ -87,13 +98,18 @@ NduDispatchRead(PDEVICE_OBJECT DeviceObject,
         {
             KeReleaseSpinLock(&AdapterContext->Spinlock, OldIrql);
 
-            /* Wait for a packet (in the context of the calling user thread) */
-            Status = KeWaitForSingleObject(&AdapterContext->PacketReadEvent,
-                                           UserRequest,
-                                           UserMode,
-                                           TRUE,
-                                           NULL);
-            if (Status != STATUS_SUCCESS)
+            /* Wait for a packet (in the context of the calling user thread), or the unbind */
+            Status = KeWaitForMultipleObjects(2,
+                                              WaitObjects,
+                                              WaitAny,
+                                              UserRequest,
+                                              UserMode,
+                                              TRUE,
+                                              NULL,
+                                              NULL);
+            if (Status == STATUS_WAIT_1)
+                Status = STATUS_DEVICE_REMOVED;
+            if (Status != STATUS_WAIT_0)
             {
                 /* Remove the cancel routine */
                 IoAcquireCancelSpinLock(&OldCancelIrql);
@@ -145,6 +161,8 @@ NduDispatchRead(PDEVICE_OBJECT DeviceObject,
         BytesCopied = 0;
     }
 
+    DereferenceAdapterContext(AdapterContext);
+
     /* Complete the IRP */
     Irp->IoStatus.Status = Status;
     Irp->IoStatus.Information = BytesCopied;
@@ -159,12 +177,23 @@ NduDispatchWrite(PDEVICE_OBJECT DeviceObject,
                  PIRP Irp)
 {
     PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation(Irp);
-    PNDISUIO_ADAPTER_CONTEXT AdapterContext = IrpSp->FileObject->FsContext;
+    PNDISUIO_ADAPTER_CONTEXT AdapterContext;
     PNDIS_PACKET Packet;
     NDIS_STATUS Status;
     ULONG BytesCopied = 0;
 
     ASSERT(DeviceObject == GlobalDeviceObject);
+
+    /* The adapter stays until this write is done */
+    AdapterContext = ReferenceFileAdapter(IrpSp->FileObject, NULL);
+    if (AdapterContext == NULL)
+    {
+        Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+
+        return STATUS_INVALID_PARAMETER;
+    }
 
     /* Create a packet and buffer descriptor for this user buffer */
     Packet = CreatePacketFromPoolBuffer(AdapterContext,
@@ -199,6 +228,8 @@ NduDispatchWrite(PDEVICE_OBJECT DeviceObject,
         /* No memory */
         Status = STATUS_NO_MEMORY;
     }
+
+    DereferenceAdapterContext(AdapterContext);
 
     /* Complete the IRP */
     Irp->IoStatus.Status = Status;

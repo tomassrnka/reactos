@@ -111,14 +111,13 @@ CleanupAndFreePacket(PNDIS_PACKET Packet, BOOLEAN FreePool)
     NdisFreePacket(Packet);
 }
 
+/* Called with GlobalAdapterListLock held: the context stays valid only while it is held */
 PNDISUIO_ADAPTER_CONTEXT
 FindAdapterContextByName(PNDIS_STRING DeviceName)
 {
-    KIRQL OldIrql;
     PLIST_ENTRY CurrentEntry;
     PNDISUIO_ADAPTER_CONTEXT AdapterContext;
 
-    KeAcquireSpinLock(&GlobalAdapterListLock, &OldIrql);
     CurrentEntry = GlobalAdapterList.Flink;
     while (CurrentEntry != &GlobalAdapterList)
     {
@@ -126,51 +125,50 @@ FindAdapterContextByName(PNDIS_STRING DeviceName)
 
         /* Check if the device name matches */
         if (RtlEqualUnicodeString(&AdapterContext->DeviceName, DeviceName, TRUE))
-        {
-            KeReleaseSpinLock(&GlobalAdapterListLock, OldIrql);
             return AdapterContext;
-        }
 
         CurrentEntry = CurrentEntry->Flink;
     }
-    KeReleaseSpinLock(&GlobalAdapterListLock, OldIrql);
 
     return NULL;
 }
 
-VOID
-ReferenceAdapterContext(PNDISUIO_ADAPTER_CONTEXT AdapterContext)
+/* The adapter a handle is bound to, referenced for one call (DereferenceAdapterContext), or NULL when
+   it has none or the adapter is being unbound. GlobalAdapterListLock orders this with the unbind, which
+   detaches and frees the handles'\''' open entries under it: the open entry must not be touched after the
+   lock is dropped, so its WriteOnly flag is captured here instead of returning the entry. */
+PNDISUIO_ADAPTER_CONTEXT
+ReferenceFileAdapter(PFILE_OBJECT FileObject,
+                     PBOOLEAN WriteOnly)
 {
-    /* Increment the open count */
-    AdapterContext->OpenCount++;
+    PNDISUIO_ADAPTER_CONTEXT AdapterContext;
+    PNDISUIO_OPEN_ENTRY OpenEntry;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&GlobalAdapterListLock, &OldIrql);
+    AdapterContext = FileObject->FsContext;
+    if (AdapterContext != NULL && !AdapterContext->Unbinding)
+    {
+        InterlockedIncrement(&AdapterContext->RefCount);
+        if (WriteOnly != NULL)
+        {
+            OpenEntry = FileObject->FsContext2;
+            *WriteOnly = OpenEntry->WriteOnly;
+        }
+    }
+    else
+    {
+        AdapterContext = NULL;
+    }
+    KeReleaseSpinLock(&GlobalAdapterListLock, OldIrql);
+
+    return AdapterContext;
 }
 
 VOID
-DereferenceAdapterContextWithOpenEntry(PNDISUIO_ADAPTER_CONTEXT AdapterContext,
-                                       PNDISUIO_OPEN_ENTRY OpenEntry)
+DereferenceAdapterContext(PNDISUIO_ADAPTER_CONTEXT AdapterContext)
 {
-    KIRQL OldIrql;
-
-    /* Lock the adapter context */
-    KeAcquireSpinLock(&AdapterContext->Spinlock, &OldIrql);
-
-    /* Decrement the open count */
-    AdapterContext->OpenCount--;
-
-    /* Cleanup the open entry if we were given one */
-    if (OpenEntry != NULL)
-    {
-        /* Remove the open entry */
-        RemoveEntryList(&OpenEntry->ListEntry);
-
-        /* Invalidate the FO */
-        OpenEntry->FileObject->FsContext = NULL;
-        OpenEntry->FileObject->FsContext2 = NULL;
-
-        /* Free the open entry */
-        ExFreePool(OpenEntry);
-    }
-
-    /* Release the adapter context lock */
-    KeReleaseSpinLock(&AdapterContext->Spinlock, OldIrql);
+    /* The last one lets the unbind free the context */
+    if (InterlockedDecrement(&AdapterContext->RefCount) == 0)
+        KeSetEvent(&AdapterContext->RefsGoneEvent, IO_NO_INCREMENT, FALSE);
 }
