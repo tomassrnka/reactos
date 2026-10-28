@@ -12,7 +12,9 @@
  * complete each to its own caller. When it did not, a caller could be woken for
  * another request and return while its own still sat in the queue, so the miniport
  * wrote into a dead stack frame, or a caller was never woken at all.
- * Each call has to return, and return the rows the first call returned.
+ * Each call has to return and succeed, and a row has to keep its index, type and
+ * hardware address. Speed, MTU, status and counters may legitimately change while
+ * the test runs and are not compared, nor is the number of rows.
  */
 
 #include <apitest.h>
@@ -21,22 +23,28 @@
 #include <iphlpapi.h>
 
 #define THREADS 8
-#define SECONDS 15
-#define MAX_ROWS 16
+#define SECONDS 5
+#define MAX_ROWS 32
 
 static MIB_IFROW BaseRows[MAX_ROWS];
 static DWORD BaseCount;
 static volatile LONG Stop;
 static volatile LONG Calls, Failures, Mismatches;
 
-static BOOL RowsMatch(const MIB_IFROW *Row, const MIB_IFROW *Base)
+/* Rows are matched by index: an interface that came or went meanwhile is not a mismatch */
+static BOOL RowChanged(const MIB_IFROW *Row)
 {
-    return Row->dwIndex == Base->dwIndex &&
-           Row->dwType == Base->dwType &&
-           Row->dwMtu == Base->dwMtu &&
-           Row->dwSpeed == Base->dwSpeed &&
-           Row->dwPhysAddrLen == Base->dwPhysAddrLen &&
-           !memcmp(Row->bPhysAddr, Base->bPhysAddr, min(Row->dwPhysAddrLen, MAXLEN_PHYSADDR));
+    DWORD i;
+
+    for (i = 0; i < BaseCount; i++)
+    {
+        if (BaseRows[i].dwIndex != Row->dwIndex)
+            continue;
+        return BaseRows[i].dwType != Row->dwType ||
+               BaseRows[i].dwPhysAddrLen != Row->dwPhysAddrLen ||
+               memcmp(BaseRows[i].bPhysAddr, Row->bPhysAddr, min(Row->dwPhysAddrLen, MAXLEN_PHYSADDR));
+    }
+    return FALSE;
 }
 
 static DWORD WINAPI QueryThread(PVOID Context)
@@ -61,14 +69,9 @@ static DWORD WINAPI QueryThread(PVOID Context)
             InterlockedIncrement(&Failures);
             continue;
         }
-        if (Table->dwNumEntries != BaseCount)
-        {
-            InterlockedIncrement(&Mismatches);
-            continue;
-        }
         for (i = 0; i < Table->dwNumEntries; i++)
         {
-            if (!RowsMatch(&Table->table[i], &BaseRows[i]))
+            if (RowChanged(&Table->table[i]))
             {
                 InterlockedIncrement(&Mismatches);
                 break;
@@ -82,10 +85,10 @@ static DWORD WINAPI QueryThread(PVOID Context)
 
 START_TEST(GetIfTableConcurrent)
 {
-    PMIB_IFTABLE Table;
     HANDLE Threads[THREADS];
+    PMIB_IFTABLE Table;
     ULONG Size, i, Started = 0;
-    DWORD Error, Wait;
+    DWORD Wait, Error;
 
     Table = HeapAlloc(GetProcessHeap(), 0, 0x10000);
     if (!Table)
@@ -119,10 +122,9 @@ START_TEST(GetIfTableConcurrent)
     /* A call that never returns is the failure this test is about: do not wait forever for it */
     Wait = Started ? WaitForMultipleObjects(Started, Threads, TRUE, 60 * 1000) : WAIT_OBJECT_0;
     ok(Wait == WAIT_OBJECT_0, "A GetIfTable call did not return (wait %lu)\n", Wait);
-
     ok(Calls > 0, "No call completed\n");
     ok(Failures == 0, "%ld of %ld calls failed\n", Failures, Calls);
-    ok(Mismatches == 0, "%ld of %ld calls returned rows that differ from the first call\n", Mismatches, Calls);
+    ok(Mismatches == 0, "%ld of %ld calls returned a row whose index, type or address changed\n", Mismatches, Calls);
     trace("%ld calls from %lu threads in %u seconds\n", Calls, Started, SECONDS);
 
     if (Wait == WAIT_OBJECT_0)

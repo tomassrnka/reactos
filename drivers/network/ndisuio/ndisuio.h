@@ -16,6 +16,16 @@ extern NDIS_HANDLE GlobalProtocolHandle;
 extern LIST_ENTRY GlobalAdapterList;
 extern KSPIN_LOCK GlobalAdapterListLock;
 
+/* One NDIS request and its own completion. NDIS completes a pending request
+   through NduRequestComplete with that request, so the waiter is found from
+   it: several requests can be pending on one adapter at a time. */
+typedef struct _NDISUIO_REQUEST
+{
+    NDIS_REQUEST Request;
+    KEVENT Event;
+    NDIS_STATUS Status;
+} NDISUIO_REQUEST, *PNDISUIO_REQUEST;
+
 typedef struct _NDISUIO_ADAPTER_CONTEXT
 {
     /* Asynchronous completion */
@@ -156,6 +166,13 @@ VOID
 NTAPI
 NduResetComplete(NDIS_HANDLE ProtocolBindingContext,
                  NDIS_STATUS Status);
+
+VOID
+NduInitRequest(PNDISUIO_REQUEST Request);
+
+NDIS_STATUS
+NduIssueRequest(NDIS_HANDLE BindingHandle,
+                PNDISUIO_REQUEST Request);
 
 VOID
 NTAPI
