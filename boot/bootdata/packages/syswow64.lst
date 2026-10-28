@@ -155,6 +155,7 @@ SysWOW64/samlib.dll
 SysWOW64/schannel.dll
 SysWOW64/secur32.dll
 SysWOW64/security.dll
+SysWOW64/cfgmgr32.dll
 SysWOW64/setupapi.dll
 SysWOW64/shdocvw.dll
 SysWOW64/windowscodecs.dll
