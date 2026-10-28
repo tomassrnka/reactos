@@ -285,9 +285,6 @@ InitProcessCallback(PEPROCESS Process)
 
 #if DBG
     DbgInitDebugChannels();
-#if defined(KDBG)
-    KdRosRegisterCliCallback(DbgGdiKdbgCliCallback);
-#endif
 #endif
 
     /* Map the global user heap into the process */
@@ -1112,6 +1109,11 @@ DriverEntry(
 #if DBG && defined(KDBG)
     KdSystemDebugControl('CsoR', DbgPreServiceHook, ID_Win32PreServiceHook, 0, 0, 0, 0);
     KdSystemDebugControl('CsoR', DbgPostServiceHook, ID_Win32PostServiceHook, 0, 0, 0, 0);
+
+    /* Register the !gdi.* KDBG commands once, here. This used to sit in
+       InitProcessCallback, i.e. once per GUI process, and never unregistered
+       (win32k does not unload), so the 10-entry table filled with copies. */
+    KdRosRegisterCliCallback(DbgGdiKdbgCliCallback);
 #endif
 
     /* Create the global USER heap */
