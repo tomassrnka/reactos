@@ -3,15 +3,21 @@
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
  * PURPOSE:     Fake NDIS 5.1 miniport that pends, never completes, completes late and resets on command,
  *              to exercise NDIS's request serialization, abort on reset and on halt/remove.
- *              It has no hardware: a root-enumerated device. It is built twice, serialized and
- *              deserialized (FAKEMP_DESERIALIZED).
+ *              It has no hardware: a root-enumerated device. It is built serialized and
+ *              deserialized (FAKEMP_DESERIALIZED), and a third time serialized with its link up
+ *              (FAKEMP_LINK_UP), for tests that need tcpip to configure the adapter.
  */
 
 #include <ndis.h>
 
 #include "fakemp.h"
 
-#ifdef FAKEMP_DESERIALIZED
+#if defined(FAKEMP_LINK_UP)
+#define FAKEMP_NAME         L"FakeMpT"
+#define FAKEMP_LAST_BYTE    0x54
+#define FAKEMP_ATTRIBUTES   0
+#define FAKEMP_DESCRIPTION  "FakeMp link up"
+#elif defined(FAKEMP_DESERIALIZED)
 #define FAKEMP_NAME         L"FakeMpD"
 #define FAKEMP_LAST_BYTE    0x44
 #define FAKEMP_ATTRIBUTES   NDIS_ATTRIBUTE_DESERIALIZE
@@ -355,8 +361,13 @@ StandardQuery(
             Value = NDIS_MAC_OPTION_COPY_LOOKAHEAD_DATA | NDIS_MAC_OPTION_NO_LOOPBACK;
             break;
         case OID_GEN_MEDIA_CONNECT_STATUS:
+#ifdef FAKEMP_LINK_UP
+            /* tcpip configures the adapter, and sends through it */
+            Value = NdisMediaStateConnected;
+#else
             /* No link: nothing is sent, and tcpip does not configure the adapter */
             Value = NdisMediaStateDisconnected;
+#endif
             break;
         case OID_GEN_MAXIMUM_SEND_PACKETS:
             Value = 1;
