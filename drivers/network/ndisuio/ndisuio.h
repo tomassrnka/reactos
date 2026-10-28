@@ -87,6 +87,9 @@ typedef struct _NDISUIO_ADAPTER_CONTEXT
     /* Mac options */
     ULONG MacOptions;
 
+    /* The largest frame a write may send, its Ethernet header included (OID_GEN_MAXIMUM_TOTAL_SIZE) */
+    ULONG MaxTotalSize;
+
     /* Device name */
     UNICODE_STRING DeviceName;
 
@@ -120,6 +123,10 @@ typedef struct _NDISUIO_PACKET_ENTRY
     /* Packet data */
     UCHAR PacketData[1];
 } NDISUIO_PACKET_ENTRY, *PNDISUIO_PACKET_ENTRY;
+
+/* A write is a whole Ethernet frame: at least the header (destination, source, type) */
+#define NDISUIO_ETH_HEADER_SIZE 14
+#define NDISUIO_DEFAULT_MAX_TOTAL_SIZE 1514
 
 /* NDIS version info */
 #define NDIS_MAJOR_VERSION 5

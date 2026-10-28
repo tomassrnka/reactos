@@ -15,7 +15,7 @@
  * out of order, or only in its halt; and received (reads), with data the miniport transfers at once or later.
  *
  * Optional argument after the test name: a scenario name
- * (serial, abort, abort1, late, deferred, deferred1, sends, receive, sendhalt, remove, readd).
+ * (serial, abort, abort1, late, deferred, deferred1, sends, receive, writelen, sendhalt, xfernever, bindfail, remove, readd).
  */
 
 #include <apitest.h>
@@ -328,6 +328,7 @@ Unstick(PFAKE Fake)
     Control(Fake, FAKEMP_IOCTL_RELEASE_SPIN, NULL, 0, NULL, 0);
     Control(Fake, FAKEMP_IOCTL_FINISH_RESET, NULL, 0, NULL, 0);
     Control(Fake, FAKEMP_IOCTL_COMPLETE_HELD, NULL, 0, NULL, 0);
+    Control(Fake, FAKEMP_IOCTL_COMPLETE_TRANSFERS, NULL, 0, NULL, 0);
     CompleteSends(Fake, FAKEMP_COMPLETE_ALL);
 }
 
@@ -372,14 +373,16 @@ typedef struct _SEND
 
 #define FRAME_SIZE  96
 
+#define MAX_TEST_FRAME  4096
+
 static
 NTSTATUS
-DoWrite(HANDLE Binding, UCHAR Seed, ULONG_PTR *Written)
+DoWriteLen(HANDLE Binding, UCHAR Seed, ULONG Length, ULONG_PTR *Written)
 {
     /* To a unicast address that is not the adapter's (NDIS loops that back), from the adapter's */
     static const UCHAR Destination[6] = { 0x02, 0x00, 0x5E, 0x10, 0x00, 0x01 };
     static const UCHAR Source[6] = { 0x02, 0xFA, 0xCE, 0x4D, 0x50, 0x00 };
-    UCHAR Frame[FRAME_SIZE];
+    UCHAR Frame[MAX_TEST_FRAME];
     IO_STATUS_BLOCK IoStatus;
     LARGE_INTEGER Offset;
     NTSTATUS Status;
@@ -390,13 +393,13 @@ DoWrite(HANDLE Binding, UCHAR Seed, ULONG_PTR *Written)
     memcpy(Frame + 6, Source, 6);
     Frame[12] = FAKEMP_TEST_ETHERTYPE >> 8;
     Frame[13] = FAKEMP_TEST_ETHERTYPE & 0xFF;
-    for (i = 14; i < FRAME_SIZE; i++)
+    for (i = 14; i < sizeof(Frame); i++)
         Frame[i] = (UCHAR)(Seed + i);
 
     /* The handle is not synchronous: an offset is required, the driver ignores it */
     IoStatus.Information = 0;
     Offset.QuadPart = 0;
-    Status = NtWriteFile(Binding, Event, NULL, NULL, &IoStatus, Frame, sizeof(Frame), &Offset, NULL);
+    Status = NtWriteFile(Binding, Event, NULL, NULL, &IoStatus, Frame, Length, &Offset, NULL);
     if (Status == STATUS_PENDING)
     {
         NtWaitForSingleObject(Event, FALSE, NULL);
@@ -405,6 +408,13 @@ DoWrite(HANDLE Binding, UCHAR Seed, ULONG_PTR *Written)
     CloseHandle(Event);
     *Written = NT_SUCCESS(Status) ? IoStatus.Information : 0;
     return Status;
+}
+
+static
+NTSTATUS
+DoWrite(HANDLE Binding, UCHAR Seed, ULONG_PTR *Written)
+{
+    return DoWriteLen(Binding, Seed, FRAME_SIZE, Written);
 }
 
 static
@@ -1133,9 +1143,150 @@ TestReceive(PFAKE Fake)
     ok(St.TransfersHeld == 0, "%ls: %lu transfers still held\n", Fake->Name, St.TransfersHeld);
 }
 
+
+/* (k) writes of the wrong length: a write shorter than an Ethernet header (0 bytes gave NDIS a NULL buffer,
+   a few bytes reached miniports that read the header) or longer than the adapter's largest frame (1514
+   with its header) is refused with STATUS_INVALID_PARAMETER and never reaches the miniport. The shortest
+   and the longest frame go through. */
+static
+void
+TestWriteLength(PFAKE Fake)
+{
+    static const struct { ULONG Length; BOOL Good; } Cases[] =
+    {
+        { 4000, FALSE }, { 1515, FALSE }, { 1514, TRUE }, { 14, TRUE }, { 13, FALSE }, { 1, FALSE }, { 0, FALSE },
+    };
+    FAKEMP_STATS St;
+    ULONG i, Good = 0;
+    ULONG_PTR Written;
+    NTSTATUS Status;
+
+    trace("%ls: write lengths\n", Fake->Name);
+
+    ConfigureSends(Fake, FAKEMP_SEND_IMMEDIATE, 0);
+    Control(Fake, FAKEMP_IOCTL_RESET_STATS, NULL, 0, NULL, 0);
+    if (!Fake->Binding)
+    {
+        Fake->Binding = OpenBinding(Fake);
+        ok(Fake->Binding != INVALID_HANDLE_VALUE, "%ls: no ndisuio binding: %lu\n", Fake->Name, GetLastError());
+    }
+    if (Fake->Binding == INVALID_HANDLE_VALUE)
+    {
+        Fake->Binding = NULL;
+        return;
+    }
+
+    for (i = 0; i < ARRAYSIZE(Cases); i++)
+    {
+        Status = DoWriteLen(Fake->Binding, 0x11, Cases[i].Length, &Written);
+        if (Cases[i].Good)
+        {
+            Good++;
+            ok(Status == STATUS_SUCCESS && Written == Cases[i].Length,
+               "%ls: write of %lu bytes: 0x%lx, %Iu bytes\n", Fake->Name, Cases[i].Length, Status, Written);
+        }
+        else
+        {
+            ok(Status == STATUS_INVALID_PARAMETER && Written == 0,
+               "%ls: write of %lu bytes: 0x%lx, %Iu bytes, not STATUS_INVALID_PARAMETER\n", Fake->Name, Cases[i].Length, Status, Written);
+        }
+    }
+
+    St = Stats(Fake);
+    ok(St.Sends == Good, "%ls: %lu frames reached the miniport, %lu were fine\n", Fake->Name, St.Sends, Good);
+    CheckAlive(Fake, "after the writes of the wrong length");
+}
+
 static
 BOOL
 BringBack(PFAKE Fake);
+
+typedef struct _REMOVAL
+{
+    PFAKE Fake;
+    BOOL Removed;
+} REMOVAL, *PREMOVAL;
+
+static
+DWORD
+WINAPI
+RemoveThread(PVOID Context)
+{
+    PREMOVAL Removal = Context;
+
+    Removal->Removed = RemoveDevice(Removal->Fake, FALSE);
+    return 0;
+}
+
+/* (l) a received frame whose transfer the miniport pends and never completes, not even in its halt. The
+   protocol (ndisuio) holds the adapter until its TransferDataComplete: NDIS must fail the transfer when the
+   miniport is halted, once, or the remove (unbind) waits for it for good in the PnP worker. */
+static
+void
+TestTransferNever(PFAKE Fake)
+{
+    RECV Recv;
+    REMOVAL Removal;
+    HANDLE Thread;
+    FAKEMP_STATS St;
+    ULONG Halts;
+    DWORD Start;
+    BOOL Hung = FALSE;
+
+    trace("%ls: a transfer that never completes\n", Fake->Name);
+
+    Configure(Fake, FAKEMP_REQ_IMMEDIATE, FAKEMP_REQ_IMMEDIATE, 0, FAKEMP_RESET_SYNC, 0);
+    ConfigureSends(Fake, FAKEMP_SEND_IMMEDIATE, 0);
+    Control(Fake, FAKEMP_IOCTL_RESET_STATS, NULL, 0, NULL, 0);
+    Halts = Stats(Fake).Halts;
+
+    /* A read waiting makes ndisuio accept the frame (and ends with the remove) */
+    if (!StartRecv(Fake, &Recv))
+        return;
+    Sleep(100);
+    ok(IndicateFrame(Fake, 0x55, 16, FAKEMP_XFER_NEVER), "%ls: INDICATE failed: %lu\n", Fake->Name, GetLastError());
+    ok(WAIT_STAT(Fake, TransfersNever, 1, 5000), "%ls: no transfer pended\n", Fake->Name);
+    Sleep(300);
+    ok(WriteRunning(Recv.Thread), "%ls: the read ended before the transfer completed (0x%lx)\n", Fake->Name, Recv.Status);
+
+    Removal.Fake = Fake;
+    Removal.Removed = FALSE;
+    Start = GetTickCount();
+    Thread = CreateThread(NULL, 0, RemoveThread, &Removal, 0, NULL);
+    ok(Thread != NULL, "CreateThread failed: %lu\n", GetLastError());
+    if (!Thread)
+        return;
+    if (WaitForSingleObject(Thread, SETTLE_MS) != WAIT_OBJECT_0)
+    {
+        ok(0, "%ls: the remove did not end: the unbind waits for the transfer the halted miniport never completes\n", Fake->Name);
+        Hung = TRUE;
+        Unstick(Fake);
+        if (WaitForSingleObject(Thread, SETTLE_MS) != WAIT_OBJECT_0)
+        {
+            Abandoned = TRUE;
+            return;
+        }
+    }
+    CloseHandle(Thread);
+    trace("%ls: removed in %lu ms\n", Fake->Name, GetTickCount() - Start);
+
+    if (JoinRecv(Fake, &Recv, "the read of the removed adapter"))
+        ok(!NT_SUCCESS(Recv.Status) && Recv.Status != STATUS_PENDING, "%ls: the read ended with 0x%lx\n", Fake->Name, Recv.Status);
+    else if (Abandoned)
+        return;
+
+    St = Stats(Fake);
+    ok(St.Halts == Halts + 1, "%ls: %lu halts, %lu before\n", Fake->Name, St.Halts, Halts);
+    ok(St.TransfersCompletedAtHalt == 0, "%ls: the miniport completed %lu transfers in its halt\n", Fake->Name, St.TransfersCompletedAtHalt);
+    ok(St.CallsAfterHalt == 0, "%ls: %lu calls into the halted miniport\n", Fake->Name, St.CallsAfterHalt);
+
+    DropBinding(Fake);
+    if (Removal.Removed && !Hung)
+    {
+        if (BringBack(Fake))
+            CheckAlive(Fake, "on the adapter added after the transfer never completed");
+    }
+}
 
 /* (h) sends the miniport completes only in its halt, when the device is removed: the remove does not wait
    for them forever (NDIS halts the miniport before it unbinds the protocols), each write ends with its own
@@ -1327,6 +1478,79 @@ TestReAdd(PFAKE Fake)
     TestRemove(Fake);
 }
 
+/* (m) tcpip's bind fails after its media indication queued the reconfiguration worker (the miniport fails the
+   set of the packet filter): tcpip gives the adapter up. It must end that worker, close its binding and free
+   the adapter only then; before, the queued worker ran on the freed adapter. The adapter stays usable
+   through ndisuio, and binds as usual the next time. */
+static
+BOOL
+SetRootDevice(PFAKE Fake, BOOL Set)
+{
+    WCHAR Path[MAX_PATH];
+    HKEY Key;
+    LONG Error;
+
+    /* tcpip finds the description of the adapter it binds through Linkage\RootDevice of the class key (the
+       fake adapter has none: its bind is refused before it gets as far as the media indication) */
+    FormatW(Path, CLASS_KEY L"\\%s\\Linkage", Fake->ClassIndex);
+    Error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, Path, 0, KEY_ALL_ACCESS, &Key);
+    ok(Error == ERROR_SUCCESS, "%ls: Linkage key: %ld\n", Fake->Name, Error);
+    if (Error != ERROR_SUCCESS)
+        return FALSE;
+    if (Set)
+        Error = RegSetValueExW(Key, L"RootDevice", 0, REG_SZ, (const BYTE *)Fake->Guid, (lstrlenW(Fake->Guid) + 1) * sizeof(WCHAR));
+    else
+        Error = RegDeleteValueW(Key, L"RootDevice");
+    RegCloseKey(Key);
+    return Error == ERROR_SUCCESS;
+}
+
+static
+void
+TestBindFail(PFAKE Fake)
+{
+    ULONG Failures = 1, Initializes;
+    FAKEMP_STATS St;
+
+    trace("%ls: a protocol bind that fails after the media indication\n", Fake->Name);
+
+    Control(Fake, FAKEMP_IOCTL_RESET_STATS, NULL, 0, NULL, 0);
+    if (!SetRootDevice(Fake, TRUE))
+        return;
+    ok(Control(Fake, FAKEMP_IOCTL_FAIL_FILTER, &Failures, sizeof(Failures), NULL, 0), "%ls: FAIL_FILTER: %lu\n", Fake->Name, GetLastError());
+    if (!RemoveDevice(Fake, FALSE))
+        return;
+    DropBinding(Fake);
+    Initializes = Stats(Fake).Initializes;
+    if (!BringBack(Fake))
+        return;
+    St = Stats(Fake);
+    ok(St.Initializes == Initializes + 1, "%ls: %lu initializes\n", Fake->Name, St.Initializes);
+    /* tcpip binds a moment after the miniport starts */
+    if (!WAIT_STAT(Fake, FilterFailures, 1, 8000))
+    {
+        /* With a NIC in the VM tcpip is not bound to the fake adapters at all (its bind list); without one it is */
+        skip("%ls: tcpip does not bind the fake adapter (a NIC is present)\n", Fake->Name);
+    }
+
+    SetRootDevice(Fake, FALSE);
+
+    /* Time for the worker the failed bind queued, which ran on the freed adapter */
+    Sleep(2000);
+    CheckAlive(Fake, "on the adapter tcpip gave up");
+    DropBinding(Fake);
+    if (Abandoned)
+        return;
+
+    /* The next add binds again (the failure was once) */
+    if (RemoveDevice(Fake, FALSE) && BringBack(Fake))
+    {
+        Sleep(500);
+        CheckAlive(Fake, "on the adapter tcpip binds again");
+        DropBinding(Fake);
+    }
+}
+
 START_TEST(FakeMiniport)
 {
     char **Argv;
@@ -1378,6 +1602,8 @@ START_TEST(FakeMiniport)
             TestSends(Fake);
         if (!Abandoned && Want("receive"))
             TestReceive(Fake);
+        if (!Abandoned && Want("writelen"))
+            TestWriteLength(Fake);
         DropBinding(Fake);
         DropBinding(Fake);
         if (Abandoned)
@@ -1392,6 +1618,10 @@ START_TEST(FakeMiniport)
 
         if (Want("sendhalt"))
             TestSendHalt(Fake);
+        if (!Abandoned && Want("xfernever"))
+            TestTransferNever(Fake);
+        if (!Abandoned && Want("bindfail"))
+            TestBindFail(Fake);
         if (!Abandoned && (Want("remove") || Want("readd")) && TestRemove(Fake) && !Abandoned && Want("readd"))
             TestReAdd(Fake);
         DropBinding(Fake);
