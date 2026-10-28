@@ -404,6 +404,48 @@ static void Test_WheelScroll(void)
     ok(ret, "restoring SPI_SETWHEELSCROLLCHARS failed, error %lu\n", GetLastError());
 }
 
+/* SPI_GETFOREGROUNDLOCKTIMEOUT is the REG_DWORD Control Panel\Desktop\ForegroundLockTimeout, default 200000 */
+static void Test_ForegroundLockTimeout(void)
+{
+    DWORD value = 0xAAAAAAAA, saved, expected = 200000, dwType, cbValue;
+    DWORD regValue;
+    BOOL ret;
+    HKEY hKey;
+
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Control Panel\\Desktop", 0, KEY_READ, &hKey) == ERROR_SUCCESS)
+    {
+        cbValue = sizeof(regValue);
+        if (RegQueryValueExW(hKey, L"ForegroundLockTimeout", NULL, &dwType, (LPBYTE)&regValue, &cbValue) == ERROR_SUCCESS &&
+            dwType == REG_DWORD)
+            expected = regValue;
+        RegCloseKey(hKey);
+    }
+
+    SetLastError(0xdeadbeef);
+    ret = SystemParametersInfoW(SPI_GETFOREGROUNDLOCKTIMEOUT, 0, &value, 0);
+    ok(ret, "SPI_GETFOREGROUNDLOCKTIMEOUT failed, error %lu\n", GetLastError());
+    ok(value == expected, "SPI_GETFOREGROUNDLOCKTIMEOUT: got %lu, expected %lu\n", value, expected);
+    if (!ret)
+        return;
+
+    /* The new value is passed in pvParam, not uiParam. Windows refuses this from a
+     * non-interactive window station (ERROR_REQUIRES_INTERACTIVE_WINDOWSTATION). */
+    saved = value;
+    SetLastError(0xdeadbeef);
+    ret = SystemParametersInfoW(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, UlongToPtr(150000), 0);
+    if (!ret)
+    {
+        skip("SPI_SETFOREGROUNDLOCKTIMEOUT failed, error %lu\n", GetLastError());
+        return;
+    }
+    value = 0;
+    ret = SystemParametersInfoW(SPI_GETFOREGROUNDLOCKTIMEOUT, 0, &value, 0);
+    ok(ret && value == 150000, "SPI_GETFOREGROUNDLOCKTIMEOUT after the set: %d, %lu\n", ret, value);
+
+    ret = SystemParametersInfoW(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, UlongToPtr(saved), 0);
+    ok(ret, "restoring SPI_SETFOREGROUNDLOCKTIMEOUT failed, error %lu\n", GetLastError());
+}
+
 static void Test_MouseSonarVanish(void)
 {
     Test_UserPrefBool(SPI_GETMOUSESONAR, SPI_SETMOUSESONAR, "MOUSESONAR", 1, 0x40);
@@ -424,6 +466,7 @@ START_TEST(SystemParametersInfo)
     Test_GradientCaptions();
     Test_MouseSonarVanish();
     Test_WheelScroll();
+    Test_ForegroundLockTimeout();
 
     DestroyWindow(hWnd1);
     DestroyWindow(hWnd2);
