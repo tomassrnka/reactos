@@ -33,7 +33,8 @@ add_wow64_apitest(kernel32
     Wow64Console ProcThreadMitigation)
 add_wow64_apitest(ntdll StackOverflowDispatch
     Wow64Continue Wow64SystemRangeStart Wow64QueryVirtualMemory Wow64PowerInformation Wow64QueryInformationProcess NtOpenKey NtOpenKeyEx NtQueryKey NtQueryValueKey
-    RtlDetermineDosPathNameType RtlUnicodeStringToAnsiString StackOverflow StackOverflowThread StackDeepRecursion SystemCallStubs)
+    RtlDetermineDosPathNameType RtlUnicodeStringToAnsiString StackOverflow StackOverflowThread StackDeepRecursion SystemCallStubs
+    Wow64SystemProcessInformation)
 add_wow64_apitest(advapi32
     ServiceArgs RegCreateKeyEx RegOpenKeyExW RegQueryValueExW RegEnumValueW RegWow64 RegWow64Unicode RegWow64Views RegWow64SharedCreate RegWow64Matrix RegWow64LongName RegWow64SharedLongName RegWow64Volatile RegWow64Aliases TokenLogonSid RestrictedSidsCopy TokenDefaultDacl)
 
