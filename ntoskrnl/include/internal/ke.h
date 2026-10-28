@@ -463,6 +463,12 @@ KiProcessorFreezeHandler(
     _In_ PKTRAP_FRAME TrapFrame,
     _In_ PKEXCEPTION_FRAME ExceptionFrame);
 
+BOOLEAN
+KiHandleNmiDuringFreeze(
+    _In_ PKTRAP_FRAME TrapFrame,
+    _In_ PKEXCEPTION_FRAME ExceptionFrame,
+    _Out_ PBOOLEAN Frozen);
+
 VOID
 NTAPI
 KiIpiSendRequest(
@@ -1105,14 +1111,22 @@ VOID
 NTAPI
 KiInitMachineDependent(VOID);
 
-VOID
+BOOLEAN
 NTAPI
 KxFreezeExecution(
     VOID);
 
-VOID
+BOOLEAN
 NTAPI
 KxThawExecution(
+    VOID);
+
+ULONG
+KiCheckDroppedNmi(
+    VOID);
+
+VOID
+KiHandleLostNmi(
     VOID);
 
 BOOLEAN

@@ -30,6 +30,7 @@ HARDWARE_PTE HalpSavedPte;
 //
 PVOID HalpGpfHandler;
 PVOID HalpBopHandler;
+BOOLEAN HalpNmiBeforeBiosCall;
 
 //
 // TSS Data
@@ -512,11 +513,24 @@ VOID
 NTAPI
 HalpSwitchToRealModeTrapHandlers(VOID)
 {
+    PVOID OldGpfHandler = KeQueryInterruptHandler(13);
+
     //
-    // Save the current Invalid Opcode and General Protection Fault Handlers
+    // Save the current Invalid Opcode and General Protection Fault Handlers.
+    // The dummy handler of an earlier call (or of an outer one) is no handler
+    // to go back to.
     //
-    HalpGpfHandler = KeQueryInterruptHandler(13);
-    HalpBopHandler = KeQueryInterruptHandler(6);
+    if (OldGpfHandler != (PVOID)HalpTrap0D)
+    {
+        HalpGpfHandler = OldGpfHandler;
+        HalpBopHandler = KeQueryInterruptHandler(6);
+
+        //
+        // Remember whether this call runs for an NMI that is being reported
+        // already, and no NMI interrupted V8086 code
+        //
+        HalpNmiBeforeBiosCall = HalpNMIInProgress;
+    }
 
     //
     // Now set our own GPF handler to handle exceptions while in real mode
@@ -563,7 +577,7 @@ HalpRestoreTrapHandlers(VOID)
     //
     // Keep dummy GPF handler in case we get an NMI during V8086
     //
-    if (!HalpNMIInProgress)
+    if (!HalpNMIInProgress || HalpNmiBeforeBiosCall)
     {
         //
         // Not an NMI -- put back the original handler

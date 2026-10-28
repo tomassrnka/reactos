@@ -18,6 +18,10 @@
 /* Freeze data */
 KIRQL KiOldIrql;
 ULONG KiFreezeFlag;
+#ifndef CONFIG_SMP
+/* Nesting of the freezes of the one processor; the SMP code counts its own */
+static ULONG KiFreezeNesting;
+#endif
 
 /* FUNCTIONS ******************************************************************/
 
@@ -26,7 +30,7 @@ NTAPI
 KeFreezeExecution(IN PKTRAP_FRAME TrapFrame,
                   IN PKEXCEPTION_FRAME ExceptionFrame)
 {
-    BOOLEAN Enable;
+    BOOLEAN Enable, Outermost;
     KIRQL OldIrql;
 
 #ifndef CONFIG_SMP
@@ -49,12 +53,19 @@ KeFreezeExecution(IN PKTRAP_FRAME TrapFrame,
 #endif
 
 #ifdef CONFIG_SMP
-    /* Architecture specific freeze code */
-    KxFreezeExecution();
+    /* Architecture specific freeze code. It reports whether this call froze
+       the processors, and not a nested one from the debugger's owner */
+    Outermost = KxFreezeExecution();
+#else
+    /* A nested call (the debugger entered again from the session) neither
+       replaces the IRQL to go back to nor ends the freeze early */
+    Outermost = (KiFreezeNesting++ == 0);
 #endif
 
-    /* Save the old IRQL to be restored on unfreeze */
-    KiOldIrql = OldIrql;
+    /* Save the old IRQL to be restored on unfreeze. A nested call runs at
+       HIGH_LEVEL already, and must not replace the one of the outer call */
+    if (Outermost)
+        KiOldIrql = OldIrql;
 
     /* Return whether interrupts were enabled */
     return Enable;
@@ -64,9 +75,15 @@ VOID
 NTAPI
 KeThawExecution(IN BOOLEAN Enable)
 {
+    ULONG Dropped = 0;
+
+    /* A nested freeze of the owner ends with the others still frozen */
 #ifdef CONFIG_SMP
-    /* Architecture specific thaw code */
-    KxThawExecution();
+    if (!KxThawExecution())
+        return;
+#else
+    if (--KiFreezeNesting != 0)
+        return;
 #endif
 
     /* Clear the freeze flag */
@@ -74,6 +91,11 @@ KeThawExecution(IN BOOLEAN Enable)
 
     /* Cleanup CPU caches */
     KxFlushEntireCurrentTb();
+
+#if defined(_M_IX86) || defined(_M_AMD64)
+    /* Give an NMI that was dropped during the freeze its normal handling */
+    Dropped = KiCheckDroppedNmi();
+#endif
 
     /* Restore the old IRQL */
 #ifndef CONFIG_SMP
@@ -83,6 +105,12 @@ KeThawExecution(IN BOOLEAN Enable)
 
     /* Re-enable interrupts */
     KeRestoreInterrupts(Enable);
+
+    /* Say so, now that the others run and the debugger can be entered again.
+       Not from the NMI handlers, which run at HIGH_LEVEL on a small stack
+       that a print through the debugger can overflow */
+    if ((Dropped != 0) && (KeGetCurrentIrql() < HIGH_LEVEL))
+        DbgPrint("KE: %lu NMI(s) arrived during the debugger freeze and were dropped\n", Dropped);
 }
 
 /* EOF */
