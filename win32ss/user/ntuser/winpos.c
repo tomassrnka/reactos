@@ -3189,53 +3189,6 @@ co_WinPosShowWindow(PWND Wnd, INT Cmd)
    return WasVisible;
 }
 
-/*
- * SC_MAXIMIZE of a window that is not visible changes the window state (style, position, WM_SIZE)
- * but keeps the window hidden and inactive; ShowWindow(SW_MAXIMIZE) shows and activates it.
- * Chrome sends WM_SYSCOMMAND/SC_MAXIMIZE to a window that was never shown (initial show state
- * "maximized") and expects no activation before it has finished constructing the window.
- * SC_MINIMIZE and SC_RESTORE are not handled here: their behaviour on a hidden window is unverified.
- */
-BOOLEAN FASTCALL
-co_WinPosSysCommandShow(PWND Wnd, INT Cmd)
-{
-   RECTL NewPos = {0, 0, 0, 0};
-   UINT Swp;
-
-   ASSERT_REFS_CO(Wnd);
-
-   if (Cmd == SW_MAXIMIZE && (Wnd->style & (WS_VISIBLE | WS_CHILD)) == 0)
-   {
-      if (Wnd->style & WS_MAXIMIZE)
-         return FALSE; /* already maximized: nothing to do, stay hidden */
-
-      Swp = co_WinPosMinMaximize(Wnd, SW_MAXIMIZE, &NewPos);
-      if (!VerifyWnd(Wnd))
-         return FALSE;
-
-      if (Swp & SWP_STATECHANGED)
-         Swp |= SWP_FRAMECHANGED;
-
-      co_WinPosSetWindowPos(Wnd,
-                            0 != (Wnd->ExStyle & WS_EX_TOPMOST) ? HWND_TOPMOST : HWND_TOP,
-                            NewPos.left,
-                            NewPos.top,
-                            NewPos.right,
-                            NewPos.bottom,
-                            LOWORD(Swp | SWP_NOACTIVATE | SWP_NOZORDER) & ~SWP_SHOWWINDOW);
-
-      if (VerifyWnd(Wnd) &&
-          (Wnd->state & WNDS_SENDSIZEMOVEMSGS) &&
-          !(Wnd->state2 & WNDS2_INDESTROY))
-      {
-         co_WinPosSendSizeMove(Wnd);
-      }
-      return FALSE;
-   }
-
-   return co_WinPosShowWindow(Wnd, Cmd);
-}
-
 static PWND
 co_WinPosSearchChildren(
    IN PWND ScopeWin,

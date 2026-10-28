@@ -140,16 +140,26 @@ DefWndHandleSysCommand(PWND pWnd, WPARAM wParam, LPARAM lParam)
         DefWndDoSizeMove(pWnd, wParam);
         break;
 
+      /* Windows ignores SC_MINIMIZE for a window that is already minimized and SC_MAXIMIZE for one
+         that is already maximized, even if it is hidden: the window is neither shown nor activated.
+         Chrome creates its frame with WS_MAXIMIZE and then sends it SC_MAXIMIZE while it is still
+         hidden; showing and activating it there runs BrowserView::OnWidgetActivationChanged before
+         the browser window is fully constructed. Otherwise both commands show and activate the
+         window (ShowWindow), hidden or not. */
       case SC_MINIMIZE:
+        if (pWnd->style & WS_MINIMIZE)
+            break;
         if (UserHMGetHandle(pWnd) == UserGetActiveWindow())
             IntShowOwnedPopups(pWnd,FALSE); // This is done in ShowWindow! Need to retest!
         co_WinPosShowWindow( pWnd, SW_MINIMIZE );
         break;
 
       case SC_MAXIMIZE:
+        if (pWnd->style & WS_MAXIMIZE)
+            break;
         if (((pWnd->style & WS_MINIMIZE) != 0) && UserHMGetHandle(pWnd) == UserGetActiveWindow())
             IntShowOwnedPopups(pWnd,TRUE);
-        co_WinPosSysCommandShow( pWnd, SW_MAXIMIZE );
+        co_WinPosShowWindow( pWnd, SW_MAXIMIZE );
         break;
 
       case SC_RESTORE:
