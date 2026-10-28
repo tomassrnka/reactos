@@ -146,6 +146,7 @@ extern void func_RtlHandle(void);
 extern void func_RtlHeapTailCheck(void);
 extern void func_RtlImageDirectoryEntryToData(void);
 extern void func_RtlImageRvaToVa(void);
+extern void func_RtlInitializeNtUserPfn(void);
 extern void func_RtlInitializeSidEx(void);
 extern void func_RtlIntSafe(void);
 extern void func_RtlIsNameInExpression(void);
@@ -344,6 +345,7 @@ const struct test winetest_testlist[] =
     { "RtlHeapTailCheck",               func_RtlHeapTailCheck },
     { "RtlImageDirectoryEntryToData",   func_RtlImageDirectoryEntryToData },
     { "RtlImageRvaToVa",                func_RtlImageRvaToVa },
+    { "RtlInitializeNtUserPfn",         func_RtlInitializeNtUserPfn },
     { "RtlInitializeSidEx",         func_RtlInitializeSidEx },
     { "RtlIntSafe",                     func_RtlIntSafe },
     { "RtlIsNameInExpression",          func_RtlIsNameInExpression},
@@ -365,6 +367,8 @@ const struct test winetest_testlist[] =
     { "RtlSetTimeZoneInformation",      func_RtlSetTimeZoneInformation },
     { "RtlReAllocateHeap",              func_RtlReAllocateHeap },
     { "RtlRemovePrivileges",            func_RtlRemovePrivileges },
+    /* RtlRetrieveNtUserPfn is not registered: it fails for 32-bit programs in a WoW64 guest, where the ntdll PFN
+       registration is skipped (W32K_WIDE_ACTIVE in regcontrol.c). It passes on native i386 and amd64. */
     { "RtlSRWLock",                     func_RtlSRWLock },
     { "RtlSRWLockStress",               func_RtlSRWLockStress },
     { "RtlSRWLockThroughput",          func_RtlSRWLockThroughput },
