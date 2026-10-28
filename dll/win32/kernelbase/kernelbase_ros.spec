@@ -1238,7 +1238,7 @@
 #@ stdcall QueryIdleProcessorCycleTime(ptr ptr)
 #@ stdcall QueryIdleProcessorCycleTimeEx(long ptr ptr)
 @ stdcall QueryInterruptTime(ptr)
-@ stdcall QueryInterruptTimePrecise(ptr) kernel32.QueryUnbiasedInterruptTimePrecise
+@ stdcall -version=0x601+ QueryInterruptTimePrecise(ptr) kernel32.QueryUnbiasedInterruptTimePrecise
 #@ stdcall QueryMemoryResourceNotification(ptr ptr)
 # #@ stub QueryOptionalDelayLoadedAPI
 #@ stdcall QueryPerformanceCounter(ptr) ntdll.RtlQueryPerformanceCounter

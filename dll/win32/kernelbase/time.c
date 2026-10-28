@@ -22,8 +22,6 @@ typedef struct _BASEP_KSYSTEM_TIME
 } BASEP_KSYSTEM_TIME;
 
 #define BASEP_INTERRUPT_TIME ((volatile BASEP_KSYSTEM_TIME *)0x7ffe0008)
-#define BASEP_TICK           156250LL    /* 15.6 ms in 100 ns units */
-#define BASEP_UNSET          MINLONGLONG
 
 static
 LONGLONG
@@ -52,6 +50,7 @@ QueryInterruptTime(
 /*
  * The precise interrupt time lives in kernel32 (QueryUnbiasedInterruptTimePrecise): programs reach it through
  * api-ms-win-core-realtime-l1-1-1, which resolves to kernel32 here, and a sandboxed process must not have to load
- * another DLL to resolve it. The unbiased time is the interrupt time on this system, so both precise functions are
- * forwarded there (kernelbase_ros.spec).
+ * another DLL to resolve it. Both precise functions are forwarded there (kernelbase_ros.spec); it returns the unbiased
+ * time (the interrupt time minus the sleep bias). QueryInterruptTimePrecise is forwarded there too, so it differs from
+ * Windows by the bias, which the kernel keeps at zero; QueryInterruptTime above reads the biased time as Windows does.
  */
