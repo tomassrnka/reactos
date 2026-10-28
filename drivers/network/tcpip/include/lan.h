@@ -43,7 +43,8 @@ typedef struct LAN_ADAPTER {
     KSPIN_LOCK Lock;                        /* Lock for this structure */
     UCHAR State, OldState;                  /* State of the adapter */
     BOOLEAN CompletingReset;                /* Reset is finishing */
-    KSPIN_LOCK ReconfigureLock;             /* Protects the next four; never held across NDIS calls */
+    KSPIN_LOCK ReconfigureLock;             /* Protects the next five; never held across NDIS calls */
+    BOOLEAN Unbinding;                      /* LANUnregisterAdapter runs: no reconfiguration starts */
     BOOLEAN ReconfigureQueued;              /* Reconfiguration worker queued or running */
     BOOLEAN QueuedResetEnd;                 /* The queued request completes a reset */
     UCHAR QueuedState;                      /* Last state requested from that worker */
@@ -68,6 +69,7 @@ typedef struct LAN_ADAPTER {
     UINT PacketFilter;                      /* Packet filter for this adapter */
     CHEW_SERIAL_QUEUE ReceiveQueue;         /* Received packets, in arrival order */
     LONG HeldPackets;                       /* Miniport packets waiting in ReceiveQueue */
+    volatile LONG ReceiveWorkItems;         /* Received frames queued as work items of their own */
 } LAN_ADAPTER, *PLAN_ADAPTER;
 
 /* LAN adapter state constants */

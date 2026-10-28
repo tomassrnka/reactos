@@ -89,7 +89,10 @@ NDIS_STATUS NDISCall(
         Request.Request.DATA.QUERY_INFORMATION.InformationBufferLength = Length;
     }
 
-    if (Adapter->State != LAN_STATE_RESETTING) {
+    if (!Adapter->NdisHandle) {
+        /* Closed: LANUnregisterAdapter runs */
+        NdisStatus = NDIS_STATUS_CLOSING;
+    } else if (Adapter->State != LAN_STATE_RESETTING) {
         NdisRequest(&NdisStatus, Adapter->NdisHandle, &Request.Request);
     } else {
         NdisStatus = NDIS_STATUS_NOT_ACCEPTED;
@@ -362,7 +365,12 @@ static VOID LanReceiveWorker( PLIST_ENTRY Entry ) {
 }
 
 static VOID LanReceiveWorkItem( PVOID Context ) {
+    PLAN_ADAPTER Adapter = ((PLAN_WQ_ITEM)Context)->Adapter;
+
     LanReceiveItem(Context);
+
+    /* LANUnregisterAdapter waits for this */
+    InterlockedDecrement(&Adapter->ReceiveWorkItems);
 }
 
 static VOID LanReceivePacket(
@@ -487,10 +495,14 @@ BOOLEAN LanSubmitReceiveWork(
     /* TCP segments go through one worker per adapter, so they reach TCP in the order
        they were indicated. Other frames keep a work item each: nothing they wait for
        (an ARP reply, a socket's lock) can hold up TCP or each other */
-    if (Tcp)
+    if (Tcp) {
         Queued = ChewSerialInsert(&Adapter->ReceiveQueue, &WQItem->ListEntry);
-    else
+    } else {
+        InterlockedIncrement(&Adapter->ReceiveWorkItems);
         Queued = ChewCreate(LanReceiveWorkItem, WQItem);
+        if (!Queued)
+            InterlockedDecrement(&Adapter->ReceiveWorkItems);
+    }
 
     if (!Queued) {
         ExFreePoolWithTag(WQItem, WQ_CONTEXT_TAG);
@@ -1066,6 +1078,12 @@ VOID NTAPI ProtocolStatus(
      * stopped.
      */
     TcpipAcquireSpinLock(&Adapter->ReconfigureLock, &OldIrql);
+    if (Adapter->Unbinding)
+    {
+        /* The adapter goes away: LANUnregisterAdapter waits for the worker that runs, none starts */
+        TcpipReleaseSpinLock(&Adapter->ReconfigureLock, OldIrql);
+        return;
+    }
     if (ResetEnd)
     {
         /* Never filtered: the worker reads the link information again */
@@ -1272,7 +1290,11 @@ VOID LANTransmit(
 
 	TcpipAcquireSpinLock( &Adapter->Lock, &OldIrql );
 	TI_DbgPrint(MID_TRACE, ("NdisSend\n"));
-	NdisSend(&NdisStatus, Adapter->NdisHandle, XmitPacket);
+	/* LANUnregisterAdapter closes the binding under the lock */
+	if (Adapter->NdisHandle)
+	    NdisSend(&NdisStatus, Adapter->NdisHandle, XmitPacket);
+	else
+	    NdisStatus = NDIS_STATUS_CLOSING;
 	TI_DbgPrint(MID_TRACE, ("NdisSend %s\n",
 				NdisStatus == NDIS_STATUS_PENDING ?
 				"Pending" : "Complete"));
@@ -1633,12 +1655,19 @@ VOID UnbindAdapter(
  *     Adapter = Pointer to LAN_ADAPTER structure
  */
 {
+    PIP_INTERFACE IF = Adapter->Context;
+
     TI_DbgPrint(DEBUG_DATALINK, ("Called.\n"));
 
-    if (Adapter->State == LAN_STATE_STARTED) {
-        PIP_INTERFACE IF = Adapter->Context;
+    /* BindAdapter registered the interface whatever the media state: a disconnected
+       adapter's interface must go as well, with every route and neighbor on it */
+    if (IF) {
+        Adapter->Context = NULL;
 
         IPUnregisterInterface(IF);
+
+        RouterRemoveRoutesForInterface(IF);
+        NBDestroyNeighborsForInterface(IF);
 
         IPDestroyInterface(IF);
     }
@@ -1793,6 +1822,8 @@ NDIS_STATUS LANUnregisterAdapter(
     KIRQL OldIrql;
     NDIS_HANDLE NdisHandle;
     NDIS_STATUS NdisStatus = NDIS_STATUS_SUCCESS;
+    LARGE_INTEGER Delay;
+    BOOLEAN Queued;
 
     TI_DbgPrint(DEBUG_DATALINK, ("Called.\n"));
 
@@ -1801,13 +1832,24 @@ NDIS_STATUS LANUnregisterAdapter(
     RemoveEntryList(&Adapter->ListEntry);
     TcpipReleaseSpinLock(&AdapterListLock, OldIrql);
 
-    /* Queued TCP segments use the IP interface: deliver or refuse them before it goes
-       away (the work items of other frames are not tracked, as before) */
-    ChewSerialRundown(&Adapter->ReceiveQueue);
+    /* No reconfiguration starts any more; the one that runs uses the binding and the
+       interface, so it ends first (its NDIS requests fail at once on an adapter that
+       NDIS is removing) */
+    Delay.QuadPart = -100000;
+    TcpipAcquireSpinLock(&Adapter->ReconfigureLock, &OldIrql);
+    Adapter->Unbinding = TRUE;
+    TcpipReleaseSpinLock(&Adapter->ReconfigureLock, OldIrql);
+    for (;;) {
+        TcpipAcquireSpinLock(&Adapter->ReconfigureLock, &OldIrql);
+        Queued = Adapter->ReconfigureQueued;
+        TcpipReleaseSpinLock(&Adapter->ReconfigureLock, OldIrql);
+        if (!Queued)
+            break;
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+    }
 
-    /* Unbind adapter from IP layer */
-    UnbindAdapter(Adapter);
-
+    /* Close the binding first: NDIS completes our sends and requests on it and
+       indicates nothing more, so no received frame is queued after this */
     TcpipAcquireSpinLock(&Adapter->Lock, &OldIrql);
     NdisHandle = Adapter->NdisHandle;
     if (NdisHandle) {
@@ -1825,6 +1867,15 @@ NDIS_STATUS LANUnregisterAdapter(
         }
     } else
         TcpipReleaseSpinLock(&Adapter->Lock, OldIrql);
+
+    /* The received frames still queued use the adapter and the IP interface: deliver
+       them (what they send fails on the closed binding) before both go away */
+    ChewSerialRundown(&Adapter->ReceiveQueue);
+    while (Adapter->ReceiveWorkItems != 0)
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+
+    /* Unbind adapter from IP layer */
+    UnbindAdapter(Adapter);
 
     FreeAdapter(Adapter);
 
