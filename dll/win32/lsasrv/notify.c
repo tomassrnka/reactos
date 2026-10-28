@@ -64,6 +64,7 @@ LsapAddNotification(
     PLSA_API_MSG pRequestMsg)
 {
     PLSA_NOTIFICATION_ENTRY pEntry;
+    OBJECT_ATTRIBUTES ObjectAttributes;
     HANDLE hProcess = NULL;
     NTSTATUS Status = STATUS_SUCCESS;
 
@@ -84,11 +85,12 @@ LsapAddNotification(
     pEntry->EventHandle = pRequestMsg->PolicyChangeNotify.Request.NotificationEventHandle;
     pEntry->ClientId = pRequestMsg->h.ClientId;
 
-    /* Open the client process */
+    /* Open the client process: NtOpenProcess takes the address of a CLIENT_ID, not the process ID */
+    InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
     Status = NtOpenProcess(&hProcess,
                            PROCESS_DUP_HANDLE,
-                           NULL,
-                           pEntry->ClientId.UniqueProcess);
+                           &ObjectAttributes,
+                           &pEntry->ClientId);
     if (!NT_SUCCESS(Status))
     {
         ERR("NtOpenProcess() failed (Status 0x%08lx)\n", Status);
