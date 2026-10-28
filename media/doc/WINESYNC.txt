@@ -267,6 +267,7 @@ dll/win32/sti                 # Synced to Wine-10.0
 dll/win32/sxs                 # Synced to Wine-10.0
 dll/win32/t2embed             # Synced to Wine-10.0
 dll/win32/tapi32              # Synced to Wine-10.0
+dll/win32/taskschd            # Synced to Wine-11.20
 dll/win32/tbs                 # Forked at Wine-11.19 (the functions fail the way Windows does without a TPM)
 dll/win32/tdh                 # Synced to Wine-11.19 (the stubs are implemented)
 dll/win32/traffic             # Synced to Wine-10.0
@@ -339,6 +340,7 @@ base/applications/winhlp32          # Synced to WineStaging-4.0
 base/applications/wordpad           # Synced to WineStaging-1.9.16
 base/applications/write             # Synced to WineStaging-3.3
 base/services/rpcss                 # Synced to Wine-10.0
+base/services/schedsvc/schrpc.c     # Synced to Wine-11.20 (dlls/schedsvc/schedsvc.c, the ITaskSchedulerService server)
 base/system/expand                  # Synced to WineStaging-3.3
 base/system/msiexec                 # Synced to Wine-10.0
 

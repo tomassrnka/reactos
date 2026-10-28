@@ -2407,7 +2407,9 @@ RegisterWow64Dlls(VOID)
         L"rpcrt4.dll", L"urlmon.dll",
         /* IServiceProvider proxy/stub: CoRegisterClassObject(CLSCTX_LOCAL_SERVER)
          * marshals it, so 32-bit COM servers (Google Updater) need it */
-        L"actxprxy.dll"
+        L"actxprxy.dll",
+        /* CLSID_TaskScheduler: 32-bit updaters register their wake tasks */
+        L"taskschd.dll"
     };
     WCHAR Directory[MAX_PATH], Application[MAX_PATH], Command[2 * MAX_PATH + 64];
     STARTUPINFOW Startup = {sizeof(Startup)};

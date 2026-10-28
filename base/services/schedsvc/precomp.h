@@ -99,6 +99,15 @@ DumpStartList(
     _In_ PLIST_ENTRY StartListHead);
 
 
+/* taskrun.c */
+
+DWORD
+TaskSchedulerStart(VOID);
+
+VOID
+TaskSchedulerStop(VOID);
+
+
 /* rpcserver.c */
 
 DWORD

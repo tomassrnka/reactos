@@ -30,6 +30,10 @@
 
 #include "lmerr.h"
 
+/* schrpc_s.c; schrpc.h needs the COM headers */
+extern RPC_IF_HANDLE ITaskSchedulerService_v1_0_s_ifspec;
+extern RPC_STATUS CALLBACK schedsvc_if_callback(RPC_IF_HANDLE iface, void *context);
+
 WINE_DEFAULT_DEBUG_CHANNEL(schedsvc);
 
 
@@ -40,6 +44,7 @@ WINAPI
 RpcThreadRoutine(
     LPVOID lpParameter)
 {
+    RPC_BINDING_VECTOR *BindingVector;
     RPC_STATUS Status;
 
     Status = RpcServerUseProtseqEpW(L"ncacn_np", 20, L"\\pipe\\atsvc", NULL);
@@ -56,6 +61,33 @@ RpcThreadRoutine(
         return 0;
     }
 
+    /* Task Scheduler 2.0 (taskschd.dll binds to it over ncalrpc through the endpoint mapper) */
+    Status = RpcServerUseProtseqEpW(L"ncalrpc", RPC_C_PROTSEQ_MAX_REQS_DEFAULT, L"atsvc", NULL);
+    if (Status != RPC_S_OK)
+        ERR("RpcServerUseProtseqEpW(ncalrpc) failed (Status %lx)\n", Status);
+
+    /* local only; this rpcrt4 does not call the callback or check the flag, so every entry point
+       of the interface checks its transport as well (schedsvc_begin_call) */
+    Status = RpcServerRegisterIfEx(ITaskSchedulerService_v1_0_s_ifspec, NULL, NULL,
+                                   RPC_IF_ALLOW_LOCAL_ONLY, RPC_C_LISTEN_MAX_CALLS_DEFAULT,
+                                   schedsvc_if_callback);
+    if (Status != RPC_S_OK)
+        ERR("RpcServerRegisterIf(ITaskSchedulerService) failed (Status %lx)\n", Status);
+
+    Status = RpcServerInqBindings(&BindingVector);
+    if (Status == RPC_S_OK)
+    {
+        Status = RpcEpRegisterW(ITaskSchedulerService_v1_0_s_ifspec, BindingVector, NULL, NULL);
+        if (Status != RPC_S_OK)
+            ERR("RpcEpRegisterW(ITaskSchedulerService) failed (Status %lx)\n", Status);
+        Status = RpcEpRegisterW(atsvc_v1_0_s_ifspec, BindingVector, NULL, NULL);
+        if (Status != RPC_S_OK)
+            ERR("RpcEpRegisterW(atsvc) failed (Status %lx)\n", Status);
+        RpcBindingVectorFree(&BindingVector);
+    }
+    else
+        ERR("RpcServerInqBindings() failed (Status %lx)\n", Status);
+
     Status = RpcServerListen(1, RPC_C_LISTEN_MAX_CALLS_DEFAULT, FALSE);
     if (Status != RPC_S_OK)
     {
@@ -66,15 +98,16 @@ RpcThreadRoutine(
 }
 
 
+/* The Task Scheduler 2.0 server (schrpc.c) returns malloc()ed memory */
 void __RPC_FAR * __RPC_USER midl_user_allocate(SIZE_T len)
 {
-    return HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, len);
+    return calloc(1, len);
 }
 
 
 void __RPC_USER midl_user_free(void __RPC_FAR * ptr)
 {
-    HeapFree(GetProcessHeap(), 0, ptr);
+    free(ptr);
 }
 
 
