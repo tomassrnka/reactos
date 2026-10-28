@@ -408,7 +408,11 @@ SampRemoveUserFromDomainAliases(
                             &AliasesKeyHandle);
     if (!NT_SUCCESS(Status))
     {
-        ERR("Failed to open the Aliases key (Status %08lX)\n", Status);
+        /* A domain without aliases has no such key: the user is in none of them */
+        if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+            Status = STATUS_SUCCESS;
+        else
+            ERR("Failed to open the Aliases key (Status %08lX)\n", Status);
         goto done;
     }
 
@@ -418,7 +422,11 @@ SampRemoveUserFromDomainAliases(
                             &AliasesMembersKeyHandle);
     if (!NT_SUCCESS(Status))
     {
-        ERR("Failed to open the Members key (Status %08lX)\n", Status);
+        /* No alias has a member in this domain */
+        if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+            Status = STATUS_SUCCESS;
+        else
+            ERR("Failed to open the Members key (Status %08lX)\n", Status);
         goto done;
     }
 
