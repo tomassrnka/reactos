@@ -20,13 +20,31 @@ test_Precise(
 {
     FN_QueryUnbiasedInterruptTimePrecise pPrecise;
     ULONGLONG Coarse1, Coarse2, Time1, Time2, Prev;
+    HMODULE hBefore;
     int i;
+
+    hBefore = GetModuleHandleW(L"kernelbase.dll");
 
     /*
      * Windows exports it from kernelbase.dll only (programs reach it through api-ms-win-core-realtime-l1-1-1, which is
-     * kernelbase there); the apisets of this system name kernel32, which forwards to kernelbase
+     * kernelbase there); the apisets of this system name kernel32, which implements it
      */
     pPrecise = (FN_QueryUnbiasedInterruptTimePrecise)GetProcAddress(hKernel32, "QueryUnbiasedInterruptTimePrecise");
+    if (is_reactos() && pPrecise)
+    {
+        /*
+         * Chrome delay-loads it through api-ms-win-core-realtime-l1-1-1 inside its sandbox, after lockdown, where loading
+         * another DLL fails: resolving it must not pull kernelbase.dll in (it forwarded there once, and the renderer
+         * crashed in the delay-load failure handler)
+         */
+        HMODULE hApi = LoadLibraryW(L"api-ms-win-core-realtime-l1-1-1.dll");
+        ok(hApi != NULL, "api-ms-win-core-realtime-l1-1-1.dll does not load, error %lu\n", GetLastError());
+        if (hApi)
+            ok(GetProcAddress(hApi, "QueryUnbiasedInterruptTimePrecise") == (FARPROC)pPrecise,
+               "The api set does not resolve to the kernel32 export\n");
+        if (!hBefore)
+            ok(GetModuleHandleW(L"kernelbase.dll") == NULL, "Resolving the export loaded kernelbase.dll\n");
+    }
     if (!pPrecise && !is_reactos())
         pPrecise = (FN_QueryUnbiasedInterruptTimePrecise)GetProcAddress(LoadLibraryW(L"kernelbase.dll"),
                                                                          "QueryUnbiasedInterruptTimePrecise");
