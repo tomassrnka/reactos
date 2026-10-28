@@ -326,6 +326,12 @@ NduStatusComplete(NDIS_HANDLE ProtocolBindingContext)
     /* FIXME: Implement status tracking */
 }
 
+/*
+ * Called by NDIS when the adapter goes away (it has failed the adapter's requests and sends by
+ * then, so nothing here waits for the miniport). The handles bound to the adapter are detached:
+ * they take no call any more, and a read waiting for a packet ends. The binding is closed once
+ * no read, write or IOCTL uses it, and everything the binding had is freed.
+ */
 static
 NDIS_STATUS
 UnbindAdapterByContext(PNDISUIO_ADAPTER_CONTEXT AdapterContext)
@@ -338,58 +344,45 @@ UnbindAdapterByContext(PNDISUIO_ADAPTER_CONTEXT AdapterContext)
 
     DPRINT("Unbinding adapter %wZ\n", &AdapterContext->DeviceName);
 
-    /* FIXME: We don't do anything with outstanding reads */
-
-    /* Remove the adapter context from the global list */
+    /* Nothing finds the adapter or uses it through a handle from here on */
     KeAcquireSpinLock(&GlobalAdapterListLock, &OldIrql);
     RemoveEntryList(&AdapterContext->ListEntry);
-    KeReleaseSpinLock(&GlobalAdapterListLock, OldIrql);
+    AdapterContext->Unbinding = TRUE;
 
-    /* Free the device name string */
-    RtlFreeUnicodeString(&AdapterContext->DeviceName);
-
-    /* Invalidate all handles to this adapter */
-    CurrentEntry = AdapterContext->OpenEntryList.Flink;
-    while (CurrentEntry != &AdapterContext->OpenEntryList)
+    KeAcquireSpinLockAtDpcLevel(&AdapterContext->Spinlock);
+    while (!IsListEmpty(&AdapterContext->OpenEntryList))
     {
+        CurrentEntry = RemoveHeadList(&AdapterContext->OpenEntryList);
         OpenEntry = CONTAINING_RECORD(CurrentEntry, NDISUIO_OPEN_ENTRY, ListEntry);
 
         /* Make sure the entry is sane */
         ASSERT(OpenEntry->FileObject);
-
-        /* Remove the adapter context pointer */
         ASSERT(AdapterContext == OpenEntry->FileObject->FsContext);
+        ASSERT(OpenEntry == OpenEntry->FileObject->FsContext2);
+
+        /* The handle is not bound to an adapter any more (see NduDispatchClose) */
         OpenEntry->FileObject->FsContext = NULL;
+        OpenEntry->FileObject->FsContext2 = NULL;
         AdapterContext->OpenCount--;
 
-        /* Remove the open entry pointer */
-        ASSERT(OpenEntry == OpenEntry->FileObject->FsContext2);
-        OpenEntry->FileObject->FsContext2 = NULL;
-
-        /* Move to the next entry */
-        CurrentEntry = CurrentEntry->Flink;
-
-        /* Free the open entry */
         ExFreePool(OpenEntry);
     }
 
     /* If this fails, we have a refcount mismatch somewhere */
     ASSERT(AdapterContext->OpenCount == 0);
+    KeReleaseSpinLockFromDpcLevel(&AdapterContext->Spinlock);
+    KeReleaseSpinLock(&GlobalAdapterListLock, OldIrql);
 
-    /* Free all pending packet entries */
-    CurrentEntry = AdapterContext->PacketList.Flink;
-    while (CurrentEntry != &AdapterContext->PacketList)
-    {
-        PacketEntry = CONTAINING_RECORD(CurrentEntry, NDISUIO_PACKET_ENTRY, ListEntry);
+    /* End the reads waiting for a packet, then wait for the calls that use the adapter */
+    KeSetEvent(&AdapterContext->UnbindingEvent, IO_NO_INCREMENT, FALSE);
+    DereferenceAdapterContext(AdapterContext);
+    KeWaitForSingleObject(&AdapterContext->RefsGoneEvent,
+                          Executive,
+                          KernelMode,
+                          FALSE,
+                          NULL);
 
-        /* Move to the next entry */
-        CurrentEntry = CurrentEntry->Flink;
-
-        /* Free the packet entry */
-        ExFreePool(PacketEntry);
-    }
-
-    /* Send the close request */
+    /* Send the close request: no send or request of ours is in NDIS any more */
     NdisCloseAdapter(&Status,
                      AdapterContext->BindingHandle);
 
@@ -403,6 +396,18 @@ UnbindAdapterByContext(PNDISUIO_ADAPTER_CONTEXT AdapterContext)
                               NULL);
         Status = AdapterContext->AsyncStatus;
     }
+
+    /* NDIS indicates nothing to the closed binding: free the packets nobody read */
+    while (!IsListEmpty(&AdapterContext->PacketList))
+    {
+        CurrentEntry = RemoveHeadList(&AdapterContext->PacketList);
+        PacketEntry = CONTAINING_RECORD(CurrentEntry, NDISUIO_PACKET_ENTRY, ListEntry);
+        ExFreePool(PacketEntry);
+    }
+
+    NdisFreePacketPool(AdapterContext->PacketPoolHandle);
+    NdisFreeBufferPool(AdapterContext->BufferPoolHandle);
+    RtlFreeUnicodeString(&AdapterContext->DeviceName);
 
     /* Free the context */
     ExFreePool(AdapterContext);
@@ -433,10 +438,13 @@ BindAdapterByName(PNDIS_STRING DeviceName)
     RtlZeroMemory(AdapterContext, sizeof(*AdapterContext));
     KeInitializeEvent(&AdapterContext->AsyncEvent, SynchronizationEvent, FALSE);
     KeInitializeEvent(&AdapterContext->PacketReadEvent, SynchronizationEvent, FALSE);
+    KeInitializeEvent(&AdapterContext->RefsGoneEvent, NotificationEvent, FALSE);
+    KeInitializeEvent(&AdapterContext->UnbindingEvent, NotificationEvent, FALSE);
     KeInitializeSpinLock(&AdapterContext->Spinlock);
     InitializeListHead(&AdapterContext->PacketList);
     InitializeListHead(&AdapterContext->OpenEntryList);
     AdapterContext->OpenCount = 0;
+    AdapterContext->RefCount = 1;
 
     /* Store the name without a terminator, so an open matches
      * whether or not the caller passes one */

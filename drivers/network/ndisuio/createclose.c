@@ -41,23 +41,35 @@ NduDispatchClose(PDEVICE_OBJECT DeviceObject,
                  PIRP Irp)
 {
     PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation(Irp);
-    PNDISUIO_ADAPTER_CONTEXT AdapterContext = IrpSp->FileObject->FsContext;
-    PNDISUIO_OPEN_ENTRY OpenEntry = IrpSp->FileObject->FsContext2;
+    PFILE_OBJECT FileObject = IrpSp->FileObject;
+    PNDISUIO_ADAPTER_CONTEXT AdapterContext;
+    PNDISUIO_OPEN_ENTRY OpenEntry = NULL;
+    KIRQL OldIrql;
 
     ASSERT(DeviceObject == GlobalDeviceObject);
 
-    DPRINT("Closing file object 0x%x\n", IrpSp->FileObject);
+    DPRINT("Closing file object 0x%x\n", FileObject);
 
-    /* Check if this handle was ever associated with an adapter */
+    /* Detach the handle from its adapter, unless the unbind of the adapter did already */
+    KeAcquireSpinLock(&GlobalAdapterListLock, &OldIrql);
+    AdapterContext = FileObject->FsContext;
     if (AdapterContext != NULL)
     {
+        OpenEntry = FileObject->FsContext2;
         ASSERT(OpenEntry != NULL);
 
-        DPRINT("Removing binding to adapter %wZ\n", &AdapterContext->DeviceName);
+        KeAcquireSpinLockAtDpcLevel(&AdapterContext->Spinlock);
+        RemoveEntryList(&OpenEntry->ListEntry);
+        AdapterContext->OpenCount--;
+        KeReleaseSpinLockFromDpcLevel(&AdapterContext->Spinlock);
 
-        /* Call the our helper */
-        DereferenceAdapterContextWithOpenEntry(AdapterContext, OpenEntry);
+        FileObject->FsContext = NULL;
+        FileObject->FsContext2 = NULL;
     }
+    KeReleaseSpinLock(&GlobalAdapterListLock, OldIrql);
+
+    if (OpenEntry != NULL)
+        ExFreePool(OpenEntry);
 
     /* Completed */
     Irp->IoStatus.Status = STATUS_SUCCESS;

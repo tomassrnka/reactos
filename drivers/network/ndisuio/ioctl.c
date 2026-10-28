@@ -44,6 +44,7 @@ QueryBinding(PIRP Irp, PIO_STACK_LOCATION IrpSp)
 
     if (QueryBinding && BindingLength >= sizeof(NDISUIO_QUERY_BINDING))
     {
+        /* The adapter is used under the lock: an unbind frees it once it is off the list */
         KeAcquireSpinLock(&GlobalAdapterListLock, &OldIrql);
         i = 0;
         CurrentEntry = GlobalAdapterList.Flink;
@@ -57,10 +58,9 @@ QueryBinding(PIRP Irp, PIO_STACK_LOCATION IrpSp)
             i++;
             CurrentEntry = CurrentEntry->Flink;
         }
-        KeReleaseSpinLock(&GlobalAdapterListLock, OldIrql);
         if (AdapterContext)
         {
-            DPRINT("Query binding for index %d is adapter %wZ\n", i, &AdapterContext->DeviceName);
+            DPRINT("Query binding for index %d\n", i);
             BytesCopied = sizeof(NDISUIO_QUERY_BINDING);
             if (AdapterContext->DeviceName.Length <= BindingLength - BytesCopied)
             {
@@ -89,6 +89,7 @@ QueryBinding(PIRP Irp, PIO_STACK_LOCATION IrpSp)
             /* Invalid index */
             Status = STATUS_NO_MORE_ENTRIES;
         }
+        KeReleaseSpinLock(&GlobalAdapterListLock, OldIrql);
     }
     else
     {
@@ -143,9 +144,8 @@ CancelPacketRead(PIRP Irp, PIO_STACK_LOCATION IrpSp)
 
 static
 NTSTATUS
-SetAdapterOid(PIRP Irp, PIO_STACK_LOCATION IrpSp)
+SetAdapterOid(PIRP Irp, PIO_STACK_LOCATION IrpSp, PNDISUIO_ADAPTER_CONTEXT AdapterContext)
 {
-    PNDISUIO_ADAPTER_CONTEXT AdapterContext = IrpSp->FileObject->FsContext;
     PNDISUIO_SET_OID SetOidRequest;
     NDISUIO_REQUEST Request;
     ULONG RequestLength;
@@ -205,9 +205,8 @@ SetAdapterOid(PIRP Irp, PIO_STACK_LOCATION IrpSp)
 
 static
 NTSTATUS
-QueryAdapterOid(PIRP Irp, PIO_STACK_LOCATION IrpSp)
+QueryAdapterOid(PIRP Irp, PIO_STACK_LOCATION IrpSp, PNDISUIO_ADAPTER_CONTEXT AdapterContext)
 {
-    PNDISUIO_ADAPTER_CONTEXT AdapterContext = IrpSp->FileObject->FsContext;
     PNDISUIO_QUERY_OID QueryOidRequest;
     NDISUIO_REQUEST Request;
     ULONG RequestLength;
@@ -278,6 +277,7 @@ OpenDeviceReadWrite(PIRP Irp, PIO_STACK_LOCATION IrpSp)
     KIRQL OldIrql;
 
     NameLength = IrpSp->Parameters.DeviceIoControl.InputBufferLength;
+    OpenEntry = NULL;
     if (NameLength != 0)
     {
         DeviceName.MaximumLength = DeviceName.Length = NameLength;
@@ -291,65 +291,57 @@ OpenDeviceReadWrite(PIRP Irp, PIO_STACK_LOCATION IrpSp)
             DeviceName.Length -= sizeof(WCHAR);
         }
 
-        /* Check if this already has a context */
-        AdapterContext = FindAdapterContextByName(&DeviceName);
-        if (AdapterContext != NULL)
+        OpenEntry = ExAllocatePool(NonPagedPool, sizeof(*OpenEntry));
+        if (OpenEntry == NULL)
         {
-            DPRINT("Binding file object 0x%x to device %wZ\n", FileObject, &AdapterContext->DeviceName);
-
-            /* Reference the adapter context */
-            KeAcquireSpinLock(&AdapterContext->Spinlock, &OldIrql);
-            if (AdapterContext->OpenCount != 0)
+            Status = STATUS_NO_MEMORY;
+        }
+        else
+        {
+            /* Found and attached under the list lock: an unbind detaches the handles under it */
+            KeAcquireSpinLock(&GlobalAdapterListLock, &OldIrql);
+            AdapterContext = FindAdapterContextByName(&DeviceName);
+            if (AdapterContext == NULL || AdapterContext->Unbinding || FileObject->FsContext != NULL)
             {
-                /* An open for read-write is exclusive,
-                 * so we can't have any other open handles */
-                KeReleaseSpinLock(&AdapterContext->Spinlock, OldIrql);
+                /* Invalid device name, or the handle is bound already */
                 Status = STATUS_INVALID_PARAMETER;
             }
             else
             {
-                /* Add a reference */
-                ReferenceAdapterContext(AdapterContext);
-                Status = STATUS_SUCCESS;
+                KeAcquireSpinLockAtDpcLevel(&AdapterContext->Spinlock);
+                if (AdapterContext->OpenCount != 0)
+                {
+                    /* An open for read-write is exclusive,
+                     * so we can't have any other open handles */
+                    Status = STATUS_INVALID_PARAMETER;
+                }
+                else
+                {
+                    AdapterContext->OpenCount++;
+
+                    /* Set the file object pointer */
+                    OpenEntry->FileObject = FileObject;
+
+                    /* Set the permissions */
+                    OpenEntry->WriteOnly = FALSE;
+
+                    /* Associate this FO with the adapter */
+                    FileObject->FsContext = AdapterContext;
+                    FileObject->FsContext2 = OpenEntry;
+
+                    /* Add it to the adapter's list */
+                    InsertTailList(&AdapterContext->OpenEntryList,
+                                   &OpenEntry->ListEntry);
+
+                    /* The adapter has it now */
+                    OpenEntry = NULL;
+                    Status = STATUS_SUCCESS;
+                }
+                KeReleaseSpinLockFromDpcLevel(&AdapterContext->Spinlock);
             }
-        }
-        else
-        {
-            /* Invalid device name */
-            Status = STATUS_INVALID_PARAMETER;
-        }
+            KeReleaseSpinLock(&GlobalAdapterListLock, OldIrql);
 
-        /* Check that the bind succeeded */
-        if (NT_SUCCESS(Status))
-        {
-            OpenEntry = ExAllocatePool(NonPagedPool, sizeof(*OpenEntry));
-            if (OpenEntry)
-            {
-                /* Set the file object pointer */
-                OpenEntry->FileObject = FileObject;
-
-                /* Set the permissions */
-                OpenEntry->WriteOnly = FALSE;
-
-                /* Associate this FO with the adapter */
-                FileObject->FsContext = AdapterContext;
-                FileObject->FsContext2 = OpenEntry;
-
-                /* Add it to the adapter's list */
-                InsertTailList(&AdapterContext->OpenEntryList,
-                               &OpenEntry->ListEntry);
-
-                /* Success */
-                KeReleaseSpinLock(&AdapterContext->Spinlock, OldIrql);
-                Status = STATUS_SUCCESS;
-            }
-            else
-            {
-                /* Remove the reference we added */
-                KeReleaseSpinLock(&AdapterContext->Spinlock, OldIrql);
-                DereferenceAdapterContextWithOpenEntry(AdapterContext, NULL);
-                Status = STATUS_NO_MEMORY;
-            }
+            DPRINT("Binding file object 0x%x to device %wZ: 0x%lx\n", FileObject, &DeviceName, Status);
         }
     }
     else
@@ -357,6 +349,9 @@ OpenDeviceReadWrite(PIRP Irp, PIO_STACK_LOCATION IrpSp)
         /* Invalid device name */
         Status = STATUS_INVALID_PARAMETER;
     }
+
+    if (OpenEntry != NULL)
+        ExFreePool(OpenEntry);
 
     Irp->IoStatus.Status = Status;
     Irp->IoStatus.Information = 0;
@@ -454,7 +449,9 @@ NduDispatchDeviceControl(PDEVICE_OBJECT DeviceObject,
                          PIRP Irp)
 {
     PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation(Irp);
-    PNDISUIO_OPEN_ENTRY OpenEntry;
+    PNDISUIO_ADAPTER_CONTEXT AdapterContext;
+    BOOLEAN WriteOnly = FALSE;
+    NTSTATUS Status;
 
     ASSERT(DeviceObject == GlobalDeviceObject);
 
@@ -474,8 +471,10 @@ NduDispatchDeviceControl(PDEVICE_OBJECT DeviceObject,
             return QueryBinding(Irp, IrpSp);
 
         default:
-            /* Fail if this file object has no adapter associated */
-            if (IrpSp->FileObject->FsContext == NULL)
+            /* Fail if this file object has no adapter associated (or its adapter is going away);
+               the adapter stays until the IOCTL is done */
+            AdapterContext = ReferenceFileAdapter(IrpSp->FileObject, &WriteOnly);
+            if (AdapterContext == NULL)
             {
                 Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
                 Irp->IoStatus.Information = 0;
@@ -488,38 +487,46 @@ NduDispatchDeviceControl(PDEVICE_OBJECT DeviceObject,
             switch (IrpSp->Parameters.DeviceIoControl.IoControlCode)
             {
                 case IOCTL_NDISUIO_SET_OID_VALUE:
-                    return SetAdapterOid(Irp, IrpSp);
+                    Status = SetAdapterOid(Irp, IrpSp, AdapterContext);
+                    break;
 
                 default:
                     /* Check that we have read permissions */
-                    OpenEntry = IrpSp->FileObject->FsContext2;
-                    if (OpenEntry->WriteOnly)
+                    if (WriteOnly)
                     {
                         Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
                         Irp->IoStatus.Information = 0;
                         IoCompleteRequest(Irp, IO_NO_INCREMENT);
 
-                        return STATUS_INVALID_PARAMETER;
+                        Status = STATUS_INVALID_PARAMETER;
+                        break;
                     }
 
                     switch (IrpSp->Parameters.DeviceIoControl.IoControlCode)
                     {
 #if 0
                         case IOCTL_CANCEL_READ:
-                            return CancelPacketRead(Irp, IrpSp);
+                            Status = CancelPacketRead(Irp, IrpSp);
+                            break;
 #endif
 
                         case IOCTL_NDISUIO_QUERY_OID_VALUE:
-                            return QueryAdapterOid(Irp, IrpSp);
+                            Status = QueryAdapterOid(Irp, IrpSp, AdapterContext);
+                            break;
 
                         default:
                             DPRINT1("Unimplemented\n");
                             Irp->IoStatus.Status = STATUS_NOT_IMPLEMENTED;
                             Irp->IoStatus.Information = 0;
                             IoCompleteRequest(Irp, IO_NO_INCREMENT);
-                            return STATUS_NOT_IMPLEMENTED;
+                            Status = STATUS_NOT_IMPLEMENTED;
+                            break;
                     }
+                    break;
             }
-            break;
+
+            /* Not the IRP: it is completed, and may be gone */
+            DereferenceAdapterContext(AdapterContext);
+            return Status;
     }
 }
