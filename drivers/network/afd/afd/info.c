@@ -310,7 +310,15 @@ AfdGetSockName( PDEVICE_OBJECT DeviceObject, PIRP Irp,
              * unlocks and frees it when it completes, whether the query
              * succeeds or fails. Freeing it here as well would put it on the
              * MDL lookaside list twice. */
-            Status = TdiQueryInformation( FCB->Connection.Object
+            /* A refused or cancelled connect leaves its connection endpoint
+             * behind with no address attached, but the socket keeps the
+             * (possibly implicit) local binding of its address file, which
+             * Windows reports. Ask the connection only while it is the live
+             * one: connecting, connected, or with no address file to ask. */
+            Status = TdiQueryInformation( (FCB->Connection.Object &&
+                                           (FCB->SharedData.State == SOCKET_STATE_CONNECTED ||
+                                            FCB->SharedData.State == SOCKET_STATE_CONNECTING ||
+                                            FCB->AddressFile.Object == NULL))
                                             ? FCB->Connection.Object
                                             : FCB->AddressFile.Object,
                                           TDI_QUERY_ADDRESS_INFO,
