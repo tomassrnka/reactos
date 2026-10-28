@@ -84,11 +84,11 @@ DWORD WINAPI AddIPAddress(IPAddr Address, IPMask Netmask, DWORD IfIndex, PULONG 
 
 DWORD getInterfaceGatewayByIndex(DWORD index)
 {
-    DWORD ndx, retVal = 0, numRoutes = getNumRoutes();
+    DWORD ndx, retVal = 0;
     RouteTable *table = getRouteTable();
     if (!table) return 0;
 
-    for (ndx = 0; ndx < numRoutes; ndx++)
+    for (ndx = 0; ndx < table->numRoutes; ndx++)
     {
         if ((table->routes[ndx].ifIndex == (index)) && (table->routes[ndx].dest == 0))
             retVal = table->routes[ndx].gateway;
@@ -1825,7 +1825,7 @@ DWORD WINAPI GetIpForwardTable(PMIB_IPFORWARDTABLE pIpForwardTable, PULONG pdwSi
           DWORD ndx;
 
           pIpForwardTable->dwNumEntries = table->numRoutes;
-          for (ndx = 0; ndx < numRoutes; ndx++) {
+          for (ndx = 0; ndx < table->numRoutes; ndx++) {
             pIpForwardTable->table[ndx].dwForwardIfIndex =
              table->routes[ndx].ifIndex;
             pIpForwardTable->table[ndx].dwForwardDest =

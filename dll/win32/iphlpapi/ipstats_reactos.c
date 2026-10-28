@@ -531,10 +531,12 @@ VOID HexDump( PCHAR Data, DWORD Len ) {
     fprintf(stderr,"\n");
 }
 
+/* The routes can change between getNumRoutes and the copy (interfaces come and go, routes are
+   added): the table holds at most the routes counted, and its numRoutes is the number copied */
 RouteTable *getRouteTable(void)
 {
     RouteTable *out_route_table;
-    DWORD numRoutes = getNumRoutes(), routesAdded = 0;
+    DWORD numRoutes = getNumRoutes(), routesAdded = 0, capacity;
     TDIEntityID ent;
     HANDLE tcpFile;
     NTSTATUS status = openTcpFile(&tcpFile, FILE_READ_DATA);
@@ -553,13 +555,15 @@ RouteTable *getRouteTable(void)
         return NULL;
     }
 
-    out_route_table->numRoutes = numRoutes;
+    capacity = numRoutes;
 
-    for (i = 0; routesAdded < out_route_table->numRoutes; i++) {
+    for (i = 0; routesAdded < capacity; i++) {
         int j;
         IPRouteEntry *route_set;
 
-        getNthIpEntity(tcpFile, i, &ent);
+        /* Fewer IP entities or routes than counted */
+        if (!NT_SUCCESS(getNthIpEntity(tcpFile, i, &ent)))
+            break;
 
         tdiGetRoutesForIpEntity(tcpFile, &ent, &route_set, &numRoutes);
         if (!route_set) {
@@ -575,8 +579,8 @@ RouteTable *getRouteTable(void)
                 snmpInfo.ipsi_numroutes);
 #endif
 
-        for (j = 0; j < numRoutes; j++) {
-            int routeNum = j + routesAdded;
+        for (j = 0; j < numRoutes && routesAdded < capacity; j++, routesAdded++) {
+            int routeNum = routesAdded;
             out_route_table->routes[routeNum].dest =
                 route_set[j].ire_dest;
             out_route_table->routes[routeNum].mask =
@@ -590,9 +594,9 @@ RouteTable *getRouteTable(void)
         }
 
         if (route_set) tdiFreeThingSet(route_set);
-
-        routesAdded += numRoutes;
     }
+
+    out_route_table->numRoutes = routesAdded;
 
     closeTcpFile(tcpFile);
     TRACE("status = 0x%08lx, out_route_table = 0x%p\n", status, out_route_table);
