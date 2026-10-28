@@ -235,6 +235,79 @@ SimpleErrorChecks(HANDLE FileHandleReadOnly, HANDLE FileHandleWriteOnly, HANDLE 
     TestMapView(ReadOnlySection, NtCurrentProcess(), &BaseAddress, 0, 0, NULL, &ViewSize, ViewUnmap, 0, (PAGE_READWRITE | PAGE_READONLY), STATUS_INVALID_PAGE_PROTECTION, IGNORE);
     TestMapView(ReadOnlySection, NtCurrentProcess(), &BaseAddress, 0, 0, NULL, &ViewSize, ViewUnmap, MEM_RESERVE, PAGE_READONLY, STATUS_SECTION_PROTECTION, IGNORE);
 
+    //positive and boundary cases (Windows 10 oracle, x64 and x86)
+    {
+        HANDLE NullSizeSection = NULL, WriteCopySection = NULL;
+
+        //file section created with a NULL MaximumSize maps whole, offset 0 / size 0
+        Status = ZwCreateSection(&NullSizeSection, SECTION_ALL_ACCESS, NULL, NULL, PAGE_READWRITE, SEC_COMMIT, FileHandleWriteOnly);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (!skip(NT_SUCCESS(Status), "No NULL-size section\n"))
+        {
+            BaseAddress = NULL;
+            ViewSize = 0;
+            SectionOffset.QuadPart = 0;
+            Status = ZwMapViewOfSection(NullSizeSection, NtCurrentProcess(), &BaseAddress, 0, 0, &SectionOffset, &ViewSize, ViewUnmap, 0, PAGE_READWRITE);
+            ok_eq_hex(Status, STATUS_SUCCESS);
+            if (NT_SUCCESS(Status))
+            {
+                ok_eq_ulongptr(ViewSize, (SIZE_T)PAGE_SIZE);
+                ZwUnmapViewOfSection(NtCurrentProcess(), BaseAddress);
+            }
+            ZwClose(NullSizeSection);
+        }
+
+        //pagefile section: view 0 / 0 maps the whole section
+        BaseAddress = NULL;
+        ViewSize = 0;
+        SectionOffset.QuadPart = 0;
+        Status = ZwMapViewOfSection(PageFileSectionHandle, NtCurrentProcess(), &BaseAddress, 0, 0, &SectionOffset, &ViewSize, ViewUnmap, 0, PAGE_READWRITE);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+        {
+            ok_eq_ulongptr(ViewSize, (SIZE_T)(5 * MM_ALLOCATION_GRANULARITY));
+            ZwUnmapViewOfSection(NtCurrentProcess(), BaseAddress);
+        }
+
+        //pagefile section: a view that starts at the end of the section has nothing to map
+        BaseAddress = NULL;
+        ViewSize = 0;
+        SectionOffset.QuadPart = 5 * MM_ALLOCATION_GRANULARITY;
+        TestMapView(PageFileSectionHandle, NtCurrentProcess(), &BaseAddress, 0, 0, &SectionOffset, &ViewSize, ViewUnmap, 0, PAGE_READWRITE, STATUS_INVALID_VIEW_SIZE, IGNORE);
+        ViewSize = 1;
+        TestMapView(PageFileSectionHandle, NtCurrentProcess(), &BaseAddress, 0, 0, &SectionOffset, &ViewSize, ViewUnmap, 0, PAGE_READWRITE, STATUS_INVALID_VIEW_SIZE, IGNORE);
+        ViewSize = 1;
+        SectionOffset.QuadPart = 4 * MM_ALLOCATION_GRANULARITY;
+        TestMapView(PageFileSectionHandle, NtCurrentProcess(), &BaseAddress, 0, 0, &SectionOffset, &ViewSize, ViewUnmap, 0, PAGE_READWRITE, STATUS_SUCCESS, STATUS_SUCCESS);
+
+        //MEM_RESERVE view of one byte more than the file: the whole last page, at once
+        BaseAddress = NULL;
+        ViewSize = TestStringSize + 1;
+        Status = ZwMapViewOfSection(WriteSectionHandle, NtCurrentProcess(), &BaseAddress, 0, 0, NULL, &ViewSize, ViewUnmap, MEM_RESERVE, PAGE_READWRITE);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+        {
+            ok_eq_ulongptr(ViewSize, (SIZE_T)PAGE_SIZE);
+            ZwUnmapViewOfSection(NtCurrentProcess(), BaseAddress);
+        }
+
+        //MEM_RESERVE needs a section that can be written: read-only and copy-on-write are refused
+        BaseAddress = NULL;
+        ViewSize = 0;
+        TestMapView(ReadOnlySection, NtCurrentProcess(), &BaseAddress, 0, 0, NULL, &ViewSize, ViewUnmap, MEM_RESERVE, PAGE_READWRITE, STATUS_SECTION_PROTECTION, IGNORE);
+        TestMapView(ReadOnlySection, NtCurrentProcess(), &BaseAddress, 0, 0, NULL, &ViewSize, ViewUnmap, MEM_RESERVE, PAGE_WRITECOPY, STATUS_SECTION_PROTECTION, IGNORE);
+        MaximumSize.QuadPart = TestStringSize;
+        Status = ZwCreateSection(&WriteCopySection, SECTION_ALL_ACCESS, NULL, &MaximumSize, PAGE_WRITECOPY, SEC_COMMIT, FileHandleReadOnly);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (!skip(NT_SUCCESS(Status), "No write-copy section\n"))
+        {
+            TestMapView(WriteCopySection, NtCurrentProcess(), &BaseAddress, 0, 0, NULL, &ViewSize, ViewUnmap, 0, PAGE_WRITECOPY, STATUS_SUCCESS, STATUS_SUCCESS);
+            TestMapView(WriteCopySection, NtCurrentProcess(), &BaseAddress, 0, 0, NULL, &ViewSize, ViewUnmap, MEM_RESERVE, PAGE_READONLY, STATUS_SECTION_PROTECTION, IGNORE);
+            TestMapView(WriteCopySection, NtCurrentProcess(), &BaseAddress, 0, 0, NULL, &ViewSize, ViewUnmap, MEM_RESERVE, PAGE_WRITECOPY, STATUS_SECTION_PROTECTION, IGNORE);
+            ZwClose(WriteCopySection);
+        }
+    }
+
     ZwClose(WriteSectionHandle);
     ZwClose(PageFileSectionHandle);
     ZwClose(ReadOnlySection);
