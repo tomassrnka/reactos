@@ -4761,9 +4761,18 @@ MmMapViewOfSection(
     else
     {
         PMM_SECTION_SEGMENT Segment = (PMM_SECTION_SEGMENT)Section->Segment;
-        LONGLONG ViewOffset;
+        LONGLONG ViewOffset, RequestedOffset;
+        LONGLONG SectionLimit;
 
         ASSERT(Segment->RefCount > 0);
+
+        /* A MEM_RESERVE view is the writable kind: it needs a section that can be written */
+        if ((AllocationType & MEM_RESERVE) &&
+            !(Section->InitialPageProtection & (PAGE_READWRITE|PAGE_EXECUTE_READWRITE)))
+        {
+            Status = STATUS_SECTION_PROTECTION;
+            goto Exit;
+        }
 
         /* check for write access */
         if ((Protect & (PAGE_READWRITE|PAGE_EXECUTE_READWRITE)) &&
@@ -4789,24 +4798,33 @@ MmMapViewOfSection(
 
         if (SectionOffset == NULL)
         {
-            ViewOffset = 0;
+            ViewOffset = RequestedOffset = 0;
         }
         else
         {
+            /* The view starts on a page, but the caller's offset is what has to lie inside the section */
+            RequestedOffset = SectionOffset->QuadPart;
             SectionOffset->QuadPart &= ~(PAGE_SIZE - 1);
             ViewOffset = SectionOffset->QuadPart;
         }
 
         /* Check if the offset and size would cause an overflow */
-        if (((ULONG64)ViewOffset + *ViewSize) < (ULONG64)ViewOffset)
+        if ((((ULONG64)ViewOffset + *ViewSize) < (ULONG64)ViewOffset) ||
+            (((ULONG64)RequestedOffset + *ViewSize) < (ULONG64)RequestedOffset))
         {
             DPRINT1("Section offset overflows\n");
             Status = STATUS_INVALID_VIEW_SIZE;
             goto Exit;
         }
 
+        /* A MEM_RESERVE view of a file may span the whole last page of the section.
+         * (Windows lets it run past the end of the section; here it stays within the pages the section has.) */
+        SectionLimit = Section->SizeOfSection.QuadPart;
+        if ((AllocationType & MEM_RESERVE) && !Section->u.Flags.PhysicalMemory)
+            SectionLimit = PAGE_ROUND_UP_64(SectionLimit);
+
         /* Check if the offset and size are bigger than the section itself */
-        if (((ULONG64)ViewOffset + *ViewSize) > (ULONG64)Section->SizeOfSection.QuadPart)
+        if (((ULONG64)RequestedOffset + *ViewSize) > (ULONG64)SectionLimit)
         {
             /* This is allowed for physical memory sections and kernel mode callers */
             if (!Section->u.Flags.PhysicalMemory || (ExGetPreviousMode() == UserMode))
@@ -5324,6 +5342,14 @@ MmCreateSection (OUT PVOID  * Section,
     if (AllocationAttributes & SEC_LARGE_PAGES)
     {
         DPRINT1("SEC_LARGE_PAGES is not supported\n");
+        return STATUS_INVALID_PARAMETER_6;
+    }
+
+    /* Windows 8 and later only build an image section from a file handle:
+     * a file object (with or without a handle) is rejected for SEC_IMAGE */
+    if ((AllocationAttributes & SEC_IMAGE) && (FileObject != NULL) && MI_IS_WIN8_OR_LATER())
+    {
+        DPRINT1("A file object cannot back an image section\n");
         return STATUS_INVALID_PARAMETER_6;
     }
 

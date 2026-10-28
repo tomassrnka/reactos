@@ -2294,6 +2294,11 @@ MmCreateArm3Section(OUT PVOID *SectionObject,
              (SectionPageProtection & PAGE_GUARD) ||
              (SectionPageProtection & PAGE_NOACCESS)));
 
+    /* Windows 10 reads the maximum size of a paging file section before it
+     * looks at the protection: a NULL pointer faults even with a bad protection */
+    if ((NtMajorVersion >= 10) && !FileHandle && !FileObject)
+        (VOID)*(volatile LONGLONG *)InputMaximumSize;
+
     /* Convert section flag to page flag */
     if (AllocationAttributes & SEC_NOCACHE)
         SectionPageProtection |= PAGE_NOCACHE;
@@ -2728,11 +2733,12 @@ MmMapViewOfArm3Section(
     ASSERT(Section->u.Flags.WriteCombined == 0);
     ASSERT(ControlArea->u.Flags.PhysicalMemory == 0);
 
-    /* FIXME */
+    /* MEM_RESERVE only applies to file views: a paging file section refuses it
+     * (Windows 10 oracle: STATUS_INVALID_PARAMETER, x64 and x86) */
     if ((AllocationType & MEM_RESERVE) != 0)
     {
-        DPRINT1("MmMapViewOfArm3Section called with MEM_RESERVE, this is not implemented yet!!!\n");
-        return STATUS_NOT_IMPLEMENTED;
+        DPRINT1("MEM_RESERVE cannot be used with a pagefile-backed section\n");
+        return MI_PARAM_STATUS(9);
     }
 
     /* Check if the mapping protection is compatible with the create */
@@ -2764,6 +2770,13 @@ MmMapViewOfArm3Section(
         /* Compute it for the caller */
         CalculatedViewSize = Section->SizeOfSection.QuadPart -
                              SectionOffset->QuadPart;
+
+        /* A view that starts at the end of the section has nothing to map */
+        if (CalculatedViewSize == 0)
+        {
+            DPRINT1("Section offset is at the end of the section\n");
+            return STATUS_INVALID_VIEW_SIZE;
+        }
 
         /* Check if it's larger than 4GB or overflows into kernel-mode */
         if (!NT_SUCCESS(RtlULongLongToSIZET(CalculatedViewSize, ViewSize)) ||
@@ -3349,6 +3362,16 @@ NtCreateSection(OUT PHANDLE SectionHandle,
         _SEH2_END;
     }
     else if (!MaximumSize) MaximumSize = &SafeMaximumSize;
+
+    if (NtMajorVersion >= 10)
+    {
+        /* Windows 10 validates the page protection before the maximum size,
+         * and an image section without a file is a file error, not a size error */
+        if (MiMakeProtectionMask(SectionPageProtection | ((AllocationAttributes & SEC_NOCACHE) ? PAGE_NOCACHE : 0)) == MM_INVALID_PROTECTION)
+            return STATUS_INVALID_PAGE_PROTECTION;
+        if ((AllocationAttributes & SEC_IMAGE) && !FileHandle)
+            return STATUS_INVALID_FILE_FOR_SECTION;
+    }
 
     /* Check that MaximumSize is valid if backed by paging file */
     if ((!FileHandle) && (!MaximumSize->QuadPart))
