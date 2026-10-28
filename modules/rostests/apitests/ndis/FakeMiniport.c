@@ -11,8 +11,11 @@
  *
  * Run it once per boot: a removed root device stays a leaked device node until then.
  *
+ * Frames are sent through ndisuio too (writes on the binding), which the miniport holds and completes
+ * out of order, or only in its halt; and received (reads), with data the miniport transfers at once or later.
+ *
  * Optional argument after the test name: a scenario name
- * (serial, abort, abort1, late, deferred, deferred1, remove, readd).
+ * (serial, abort, abort1, late, deferred, deferred1, sends, receive, sendhalt, remove, readd).
  */
 
 #include <apitest.h>
@@ -58,6 +61,7 @@ typedef struct _FAKE
     HANDLE Control;
     HANDLE Binding;     /* The one ndisuio binding: a read-write open is exclusive, so the requests share it */
     BOOL Installed;
+    FAKEMP_CONFIG Cfg;  /* As last configured */
 } FAKE, *PFAKE;
 
 static FAKE Fakes[2] =
@@ -171,14 +175,23 @@ static
 void
 Configure(PFAKE Fake, ULONG QueryMode, ULONG SetMode, ULONG DelayMs, ULONG ResetMode, ULONG AddressingReset)
 {
-    FAKEMP_CONFIG Cfg;
+    Fake->Cfg.QueryMode = QueryMode;
+    Fake->Cfg.SetMode = SetMode;
+    Fake->Cfg.DelayMs = DelayMs;
+    Fake->Cfg.ResetMode = ResetMode;
+    Fake->Cfg.AddressingReset = AddressingReset;
+    ok(Control(Fake, FAKEMP_IOCTL_SET_CONFIG, &Fake->Cfg, sizeof(Fake->Cfg), NULL, 0),
+       "%ls: SET_CONFIG failed: %lu\n", Fake->Name, GetLastError());
+}
 
-    Cfg.QueryMode = QueryMode;
-    Cfg.SetMode = SetMode;
-    Cfg.DelayMs = DelayMs;
-    Cfg.ResetMode = ResetMode;
-    Cfg.AddressingReset = AddressingReset;
-    ok(Control(Fake, FAKEMP_IOCTL_SET_CONFIG, &Cfg, sizeof(Cfg), NULL, 0),
+/* How the miniport handles the test frames; the request configuration stays */
+static
+void
+ConfigureSends(PFAKE Fake, ULONG SendMode, ULONG SendDelayMs)
+{
+    Fake->Cfg.SendMode = SendMode;
+    Fake->Cfg.SendDelayMs = SendDelayMs;
+    ok(Control(Fake, FAKEMP_IOCTL_SET_CONFIG, &Fake->Cfg, sizeof(Fake->Cfg), NULL, 0),
        "%ls: SET_CONFIG failed: %lu\n", Fake->Name, GetLastError());
 }
 
@@ -302,12 +315,20 @@ StartRequest(PFAKE Fake, PREQ Req, BOOL Set, ULONG Count)
 }
 
 static
+BOOL
+CompleteSends(PFAKE Fake, ULONG Which)
+{
+    return Control(Fake, FAKEMP_IOCTL_COMPLETE_SEND, &Which, sizeof(Which), NULL, 0);
+}
+
+static
 void
 Unstick(PFAKE Fake)
 {
     Control(Fake, FAKEMP_IOCTL_RELEASE_SPIN, NULL, 0, NULL, 0);
     Control(Fake, FAKEMP_IOCTL_FINISH_RESET, NULL, 0, NULL, 0);
     Control(Fake, FAKEMP_IOCTL_COMPLETE_HELD, NULL, 0, NULL, 0);
+    CompleteSends(Fake, FAKEMP_COMPLETE_ALL);
 }
 
 /* Waits for the request to end. A hung one is a failure; it is pushed to the end, and if that fails
@@ -334,6 +355,249 @@ Join(PFAKE Fake, PREQ Req, PCSTR What)
     CloseHandle(Req->Thread);
     Req->Thread = NULL;
     return Ended;
+}
+
+/* Writes from the protocol side: one thread, Count frames written one after the other, each written once
+   its send is done */
+typedef struct _SEND
+{
+    HANDLE Binding;
+    HANDLE Thread;
+    UCHAR Seed;
+    ULONG Count;
+    ULONG Sent;             /* Writes that succeeded */
+    NTSTATUS Status;        /* Of the last write */
+    ULONG_PTR Written;      /* ... and its byte count */
+} SEND, *PSEND;
+
+#define FRAME_SIZE  96
+
+static
+NTSTATUS
+DoWrite(HANDLE Binding, UCHAR Seed, ULONG_PTR *Written)
+{
+    /* To a unicast address that is not the adapter's (NDIS loops that back), from the adapter's */
+    static const UCHAR Destination[6] = { 0x02, 0x00, 0x5E, 0x10, 0x00, 0x01 };
+    static const UCHAR Source[6] = { 0x02, 0xFA, 0xCE, 0x4D, 0x50, 0x00 };
+    UCHAR Frame[FRAME_SIZE];
+    IO_STATUS_BLOCK IoStatus;
+    LARGE_INTEGER Offset;
+    NTSTATUS Status;
+    HANDLE Event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ULONG i;
+
+    memcpy(Frame, Destination, 6);
+    memcpy(Frame + 6, Source, 6);
+    Frame[12] = FAKEMP_TEST_ETHERTYPE >> 8;
+    Frame[13] = FAKEMP_TEST_ETHERTYPE & 0xFF;
+    for (i = 14; i < FRAME_SIZE; i++)
+        Frame[i] = (UCHAR)(Seed + i);
+
+    /* The handle is not synchronous: an offset is required, the driver ignores it */
+    IoStatus.Information = 0;
+    Offset.QuadPart = 0;
+    Status = NtWriteFile(Binding, Event, NULL, NULL, &IoStatus, Frame, sizeof(Frame), &Offset, NULL);
+    if (Status == STATUS_PENDING)
+    {
+        NtWaitForSingleObject(Event, FALSE, NULL);
+        Status = IoStatus.Status;
+    }
+    CloseHandle(Event);
+    *Written = NT_SUCCESS(Status) ? IoStatus.Information : 0;
+    return Status;
+}
+
+static
+DWORD
+WINAPI
+SendThread(PVOID Context)
+{
+    PSEND Send = Context;
+    ULONG i;
+
+    for (i = 0; i < Send->Count; i++)
+    {
+        Send->Status = DoWrite(Send->Binding, (UCHAR)(Send->Seed + i), &Send->Written);
+        if (!NT_SUCCESS(Send->Status))
+            break;
+        if (Send->Written == FRAME_SIZE)
+            Send->Sent++;
+    }
+    return 0;
+}
+
+static
+BOOL
+StartSend(PFAKE Fake, PSEND Send, UCHAR Seed, ULONG Count)
+{
+    ZeroMemory(Send, sizeof(*Send));
+    Send->Seed = Seed;
+    Send->Count = Count;
+    Send->Status = STATUS_PENDING;
+    if (!Fake->Binding)
+    {
+        Fake->Binding = OpenBinding(Fake);
+        ok(Fake->Binding != INVALID_HANDLE_VALUE, "%ls: no ndisuio binding: %lu\n", Fake->Name, GetLastError());
+    }
+    Send->Binding = Fake->Binding;
+    if (Send->Binding == INVALID_HANDLE_VALUE)
+    {
+        Fake->Binding = NULL;
+        return FALSE;
+    }
+    Send->Thread = CreateThread(NULL, 0, SendThread, Send, 0, NULL);
+    ok(Send->Thread != NULL, "CreateThread failed: %lu\n", GetLastError());
+    return Send->Thread != NULL;
+}
+
+/* As Join, for writes */
+static
+BOOL
+JoinSend(PFAKE Fake, PSEND Send, PCSTR What)
+{
+    BOOL Ended = TRUE;
+
+    if (!Send->Thread)
+        return FALSE;
+    if (WaitForSingleObject(Send->Thread, SETTLE_MS) != WAIT_OBJECT_0)
+    {
+        ok(0, "%ls: %s did not end\n", Fake->Name, What);
+        Ended = FALSE;
+        Unstick(Fake);
+        if (WaitForSingleObject(Send->Thread, SETTLE_MS) != WAIT_OBJECT_0)
+        {
+            Abandoned = TRUE;
+            return FALSE;
+        }
+    }
+    CloseHandle(Send->Thread);
+    Send->Thread = NULL;
+    return Ended;
+}
+
+/* A read on the binding, in a thread of its own (it waits for a frame) */
+typedef struct _RECV
+{
+    HANDLE Binding;
+    HANDLE Thread;
+    NTSTATUS Status;
+    ULONG_PTR Read;
+    UCHAR Frame[256];
+} RECV, *PRECV;
+
+static
+DWORD
+WINAPI
+RecvThread(PVOID Context)
+{
+    PRECV Recv = Context;
+    IO_STATUS_BLOCK IoStatus;
+    LARGE_INTEGER Offset;
+    HANDLE Event = CreateEventW(NULL, TRUE, FALSE, NULL);
+
+    IoStatus.Information = 0;
+    Offset.QuadPart = 0;
+    Recv->Status = NtReadFile(Recv->Binding, Event, NULL, NULL, &IoStatus, Recv->Frame, sizeof(Recv->Frame), &Offset, NULL);
+    if (Recv->Status == STATUS_PENDING)
+    {
+        NtWaitForSingleObject(Event, FALSE, NULL);
+        Recv->Status = IoStatus.Status;
+    }
+    Recv->Read = NT_SUCCESS(Recv->Status) ? IoStatus.Information : 0;
+    CloseHandle(Event);
+    return 0;
+}
+
+static
+BOOL
+StartRecv(PFAKE Fake, PRECV Recv)
+{
+    ZeroMemory(Recv, sizeof(*Recv));
+    Recv->Status = STATUS_PENDING;
+    if (!Fake->Binding)
+    {
+        Fake->Binding = OpenBinding(Fake);
+        ok(Fake->Binding != INVALID_HANDLE_VALUE, "%ls: no ndisuio binding: %lu\n", Fake->Name, GetLastError());
+    }
+    Recv->Binding = Fake->Binding;
+    if (Recv->Binding == INVALID_HANDLE_VALUE)
+    {
+        Fake->Binding = NULL;
+        return FALSE;
+    }
+    Recv->Thread = CreateThread(NULL, 0, RecvThread, Recv, 0, NULL);
+    ok(Recv->Thread != NULL, "CreateThread failed: %lu\n", GetLastError());
+    return Recv->Thread != NULL;
+}
+
+static
+VOID
+CALLBACK
+WakeApc(ULONG_PTR Parameter)
+{
+}
+
+/* A read waits for a frame until one comes (alertably): one that does not end is woken by an APC */
+static
+BOOL
+JoinRecv(PFAKE Fake, PRECV Recv, PCSTR What)
+{
+    BOOL Ended = TRUE;
+
+    if (!Recv->Thread)
+        return FALSE;
+    if (WaitForSingleObject(Recv->Thread, SETTLE_MS) != WAIT_OBJECT_0)
+    {
+        ok(0, "%ls: %s did not end\n", Fake->Name, What);
+        Ended = FALSE;
+        Control(Fake, FAKEMP_IOCTL_COMPLETE_TRANSFERS, NULL, 0, NULL, 0);
+        QueueUserAPC(WakeApc, Recv->Thread, 0);
+        if (WaitForSingleObject(Recv->Thread, SETTLE_MS) != WAIT_OBJECT_0)
+        {
+            Abandoned = TRUE;
+            return FALSE;
+        }
+    }
+    CloseHandle(Recv->Thread);
+    Recv->Thread = NULL;
+    return Ended;
+}
+
+/* The frame the miniport indicated with this seed, header included */
+static
+BOOL
+RecvIsFrame(PRECV Recv, ULONG Seed)
+{
+    ULONG i;
+
+    if (Recv->Read != FAKEMP_RX_FRAME_SIZE ||
+        Recv->Frame[12] != (FAKEMP_TEST_ETHERTYPE >> 8) || Recv->Frame[13] != (FAKEMP_TEST_ETHERTYPE & 0xFF))
+        return FALSE;
+    for (i = 14; i < FAKEMP_RX_FRAME_SIZE; i++)
+    {
+        if (Recv->Frame[i] != (UCHAR)(Seed + i))
+            return FALSE;
+    }
+    return TRUE;
+}
+
+static
+BOOL
+IndicateFrame(PFAKE Fake, ULONG Seed, ULONG Lookahead, ULONG TransferMode)
+{
+    FAKEMP_INDICATE Ind;
+
+    Ind.Seed = Seed;
+    Ind.Lookahead = Lookahead;
+    Ind.TransferMode = TransferMode;
+    return Control(Fake, FAKEMP_IOCTL_INDICATE, &Ind, sizeof(Ind), NULL, 0);
+}
+
+static
+BOOL
+WriteRunning(HANDLE Thread)
+{
+    return Thread && WaitForSingleObject(Thread, 0) == WAIT_TIMEOUT;
 }
 
 static
@@ -744,6 +1008,198 @@ TestDeferredAbort(PFAKE Fake, ULONG Addressing)
     CheckAlive(Fake, "after the deferred abort");
 }
 
+#define SEND_THREADS    4
+#define SEND_PERTHREAD  16
+
+/* (g) writes pending in the miniport at once: each write ends when its own send completes, not another
+   one's (before, a write woke on any completion and freed the frame the miniport still held). Then many
+   writes at once, which the miniport completes newest first. */
+static
+void
+TestSends(PFAKE Fake)
+{
+    SEND First, Second, Many[SEND_THREADS];
+    BOOL Started[SEND_THREADS];
+    FAKEMP_STATS St;
+    ULONG i;
+
+    trace("%ls: sends\n", Fake->Name);
+
+    ConfigureSends(Fake, FAKEMP_SEND_HOLD, 0);
+    Control(Fake, FAKEMP_IOCTL_RESET_STATS, NULL, 0, NULL, 0);
+
+    if (!StartSend(Fake, &First, 0x10, 1))
+        return;
+    ok(WAIT_STAT(Fake, SendsHeld, 1, 5000), "%ls: the first send did not reach the miniport\n", Fake->Name);
+    if (StartSend(Fake, &Second, 0x20, 1))
+    {
+        ok(WAIT_STAT(Fake, SendsHeld, 2, 5000), "%ls: the second send did not reach the miniport\n", Fake->Name);
+        Sleep(300);
+        ok(WriteRunning(First.Thread), "%ls: the first write ended with its send held (0x%lx)\n", Fake->Name, First.Status);
+        ok(WriteRunning(Second.Thread), "%ls: the second write ended with its send held (0x%lx)\n", Fake->Name, Second.Status);
+
+        /* The second send completes: only its write ends */
+        ok(CompleteSends(Fake, FAKEMP_COMPLETE_NEWEST), "%ls: no send to complete\n", Fake->Name);
+        if (JoinSend(Fake, &Second, "the write whose send completed"))
+            ok(Second.Status == STATUS_SUCCESS && Second.Written == FRAME_SIZE,
+               "%ls: the second write: 0x%lx, %Iu bytes\n", Fake->Name, Second.Status, Second.Written);
+        if (Abandoned)
+            return;
+        Sleep(300);
+        ok(WriteRunning(First.Thread), "%ls: the first write ended with the second send's completion (0x%lx)\n",
+           Fake->Name, First.Status);
+    }
+
+    ok(CompleteSends(Fake, FAKEMP_COMPLETE_OLDEST), "%ls: the miniport does not hold the first send\n", Fake->Name);
+    if (JoinSend(Fake, &First, "the write whose send completed last"))
+        ok(First.Status == STATUS_SUCCESS && First.Written == FRAME_SIZE,
+           "%ls: the first write: 0x%lx, %Iu bytes\n", Fake->Name, First.Status, First.Written);
+    if (Abandoned)
+        return;
+
+    St = Stats(Fake);
+    ok(St.SendsHeld == 0, "%ls: %lu sends still held\n", Fake->Name, St.SendsHeld);
+    ok(St.SendDataBad == 0, "%ls: %lu sends were freed before the miniport completed them\n", Fake->Name, St.SendDataBad);
+
+    /* Many at once, completed out of order */
+    ConfigureSends(Fake, FAKEMP_SEND_DELAY, 5);
+    Control(Fake, FAKEMP_IOCTL_RESET_STATS, NULL, 0, NULL, 0);
+    for (i = 0; i < SEND_THREADS; i++)
+        Started[i] = StartSend(Fake, &Many[i], (UCHAR)(0x40 * i), SEND_PERTHREAD);
+    for (i = 0; i < SEND_THREADS; i++)
+    {
+        if (!Started[i])
+            continue;
+        if (JoinSend(Fake, &Many[i], "a writer"))
+            ok(Many[i].Sent == SEND_PERTHREAD && Many[i].Status == STATUS_SUCCESS,
+               "%ls: writer %lu: %lu of %u writes, last 0x%lx\n", Fake->Name, i, Many[i].Sent, SEND_PERTHREAD, Many[i].Status);
+        if (Abandoned)
+            return;
+    }
+    St = Stats(Fake);
+    trace("%ls: %lu sends, %lu completed late, %lu held at once\n", Fake->Name, St.Sends, St.SendsCompleted, St.MaxSendsHeld);
+    ok(St.Sends == SEND_THREADS * SEND_PERTHREAD, "%ls: %lu sends reached the miniport\n", Fake->Name, St.Sends);
+    ok(St.SendsCompleted == St.Sends, "%ls: %lu of %lu sends completed late\n", Fake->Name, St.SendsCompleted, St.Sends);
+    ok(St.SendsHeld == 0, "%ls: %lu sends still held\n", Fake->Name, St.SendsHeld);
+    ok(St.SendDataBad == 0, "%ls: %lu sends were freed before the miniport completed them\n", Fake->Name, St.SendDataBad);
+
+    ConfigureSends(Fake, FAKEMP_SEND_IMMEDIATE, 0);
+}
+
+/* (i) frames received through ndisuio: all in the lookahead, the rest transferred at once, or transferred
+   later (ndisuio does not wait for that in the indication: the frame is read once the transfer completes) */
+static
+void
+TestReceive(PFAKE Fake)
+{
+    static const struct { ULONG Lookahead; ULONG Mode; PCSTR What; } Cases[] =
+    {
+        { FAKEMP_RX_FRAME_SIZE, FAKEMP_XFER_SYNC, "a frame all in the lookahead" },
+        { 16,                   FAKEMP_XFER_SYNC, "a frame transferred at once" },
+        { 16,                   FAKEMP_XFER_HOLD, "a frame transferred later" },
+    };
+    RECV Recv;
+    FAKEMP_STATS St;
+    ULONG i, Seed;
+
+    trace("%ls: receive\n", Fake->Name);
+
+    Control(Fake, FAKEMP_IOCTL_RESET_STATS, NULL, 0, NULL, 0);
+    for (i = 0; i < ARRAYSIZE(Cases); i++)
+    {
+        Seed = 0x31 * (i + 1);
+        if (!StartRecv(Fake, &Recv))
+            return;
+        Sleep(100);
+        ok(IndicateFrame(Fake, Seed, Cases[i].Lookahead, Cases[i].Mode), "%ls: INDICATE failed: %lu\n", Fake->Name, GetLastError());
+        if (Cases[i].Mode == FAKEMP_XFER_HOLD)
+        {
+            ok(WAIT_STAT(Fake, TransfersHeld, 1, 5000), "%ls: no transfer held\n", Fake->Name);
+            Sleep(300);
+            ok(WriteRunning(Recv.Thread), "%ls: the read ended before the transfer completed (0x%lx, %Iu bytes)\n",
+               Fake->Name, Recv.Status, Recv.Read);
+            ok(Control(Fake, FAKEMP_IOCTL_COMPLETE_TRANSFERS, NULL, 0, NULL, 0), "%ls: no transfer to complete\n", Fake->Name);
+        }
+        if (JoinRecv(Fake, &Recv, Cases[i].What))
+            ok(Recv.Status == STATUS_SUCCESS && RecvIsFrame(&Recv, Seed),
+               "%ls: %s: 0x%lx, %Iu bytes, not the frame\n", Fake->Name, Cases[i].What, Recv.Status, Recv.Read);
+        if (Abandoned)
+            return;
+    }
+
+    St = Stats(Fake);
+    ok(St.Indications == ARRAYSIZE(Cases), "%ls: %lu indications\n", Fake->Name, St.Indications);
+    ok(St.Transfers >= 2, "%ls: %lu transfers\n", Fake->Name, St.Transfers);
+    ok(St.TransfersHeld == 0, "%ls: %lu transfers still held\n", Fake->Name, St.TransfersHeld);
+}
+
+static
+BOOL
+BringBack(PFAKE Fake);
+
+/* (h) sends the miniport completes only in its halt, when the device is removed: the remove does not wait
+   for them forever (NDIS halts the miniport before it unbinds the protocols), each write ends with its own
+   send's failure, and the frames are still there when the halt completes them. The device comes back. */
+static
+void
+TestSendHalt(PFAKE Fake)
+{
+    SEND Sends[2];
+    BOOL Started[2];
+    FAKEMP_STATS St;
+    ULONG i, Halts;
+    BOOL Removed;
+    DWORD Start;
+
+    trace("%ls: sends completed by the halt\n", Fake->Name);
+
+    Configure(Fake, FAKEMP_REQ_IMMEDIATE, FAKEMP_REQ_IMMEDIATE, 0, FAKEMP_RESET_SYNC, 0);
+    ConfigureSends(Fake, FAKEMP_SEND_HOLD, 0);
+    Control(Fake, FAKEMP_IOCTL_RESET_STATS, NULL, 0, NULL, 0);
+    Halts = Stats(Fake).Halts;
+
+    for (i = 0; i < 2; i++)
+    {
+        Started[i] = StartSend(Fake, &Sends[i], (UCHAR)(0x80 + 0x20 * i), 1);
+        ok(WAIT_STAT(Fake, SendsHeld, i + 1, 5000), "%ls: send %lu did not reach the miniport\n", Fake->Name, i);
+    }
+    /* A received frame whose transfer the halt fails too: ndisuio drops it, and lets go of the adapter */
+    ok(IndicateFrame(Fake, 0x77, 16, FAKEMP_XFER_HOLD), "%ls: INDICATE failed: %lu\n", Fake->Name, GetLastError());
+    ok(WAIT_STAT(Fake, TransfersHeld, 1, 5000), "%ls: no transfer held\n", Fake->Name);
+    Sleep(300);
+    ok(WriteRunning(Sends[0].Thread) && WriteRunning(Sends[1].Thread), "%ls: a write ended with its send held\n", Fake->Name);
+
+    Start = GetTickCount();
+    Removed = RemoveDevice(Fake, FALSE);
+    trace("%ls: removed in %lu ms\n", Fake->Name, GetTickCount() - Start);
+    if (!Removed)
+        Unstick(Fake);
+
+    for (i = 0; i < 2; i++)
+    {
+        if (!Started[i])
+            continue;
+        if (JoinSend(Fake, &Sends[i], "a write whose send the halt completed"))
+            ok(!NT_SUCCESS(Sends[i].Status) && Sends[i].Status != STATUS_PENDING && Sends[i].Written == 0,
+               "%ls: write %lu ended with 0x%lx, %Iu bytes\n", Fake->Name, i, Sends[i].Status, Sends[i].Written);
+        else if (Abandoned)
+            return;
+    }
+
+    St = Stats(Fake);
+    ok(St.Halts == Halts + 1, "%ls: %lu halts, %lu before\n", Fake->Name, St.Halts, Halts);
+    ok(St.SendsCompletedAtHalt == 2, "%ls: the halt completed %lu sends\n", Fake->Name, St.SendsCompletedAtHalt);
+    ok(St.SendsHeld == 0, "%ls: %lu sends still held\n", Fake->Name, St.SendsHeld);
+    ok(St.SendDataBad == 0, "%ls: %lu sends were freed before the halt completed them\n", Fake->Name, St.SendDataBad);
+    ok(St.TransfersCompletedAtHalt == 1, "%ls: the halt completed %lu transfers\n", Fake->Name, St.TransfersCompletedAtHalt);
+    ok(St.CallsAfterHalt == 0, "%ls: %lu calls into the halted miniport\n", Fake->Name, St.CallsAfterHalt);
+
+    ConfigureSends(Fake, FAKEMP_SEND_IMMEDIATE, 0);
+    DropBinding(Fake);
+    if (Removed)
+        BringBack(Fake);
+}
+
 /* (c) (d) requests pended and queued when the device is removed (ReactOS stops a disabled device the same way):
    the pended request fails, the queued ones fail and never reach the miniport, and nothing calls the halted miniport.
    NDIS unbinds the protocols first: ndisuio lets go of the adapter, and its handle bound to it is dead. */
@@ -918,6 +1374,11 @@ START_TEST(FakeMiniport)
             TestResetAbort(Fake, 1);
         if (!Abandoned && Want("deferred1"))
             TestDeferredAbort(Fake, 1);
+        if (!Abandoned && Want("sends"))
+            TestSends(Fake);
+        if (!Abandoned && Want("receive"))
+            TestReceive(Fake);
+        DropBinding(Fake);
         DropBinding(Fake);
         if (Abandoned)
             break;
@@ -929,7 +1390,9 @@ START_TEST(FakeMiniport)
         if (!Fake->Installed)
             continue;
 
-        if ((Want("remove") || Want("readd")) && TestRemove(Fake) && !Abandoned && Want("readd"))
+        if (Want("sendhalt"))
+            TestSendHalt(Fake);
+        if (!Abandoned && (Want("remove") || Want("readd")) && TestRemove(Fake) && !Abandoned && Want("readd"))
             TestReAdd(Fake);
         DropBinding(Fake);
     }

@@ -24,6 +24,35 @@
 #define FAKEMP_RESET_SYNC       0   /* Completes in the handler */
 #define FAKEMP_RESET_PEND       1   /* NDIS_STATUS_PENDING until FAKEMP_IOCTL_FINISH_RESET */
 
+/* How the miniport handles a send of a FAKEMP_TEST_ETHERTYPE frame (the others complete in the handler) */
+#define FAKEMP_SEND_IMMEDIATE   0   /* Completes in the handler */
+#define FAKEMP_SEND_HOLD        1   /* NDIS_STATUS_PENDING, completes on FAKEMP_IOCTL_COMPLETE_SEND or in the halt */
+#define FAKEMP_SEND_DELAY       2   /* NDIS_STATUS_PENDING, a timer completes the held sends, newest first, SendDelayMs
+                                       after the last one came */
+
+#define FAKEMP_TEST_ETHERTYPE   0x88B5  /* IEEE local experimental */
+#define FAKEMP_MAX_HELD_SENDS   32
+
+/* FAKEMP_IOCTL_COMPLETE_SEND input: which held send completes */
+#define FAKEMP_COMPLETE_OLDEST  0
+#define FAKEMP_COMPLETE_NEWEST  1
+#define FAKEMP_COMPLETE_ALL     2
+
+/* FAKEMP_IOCTL_INDICATE: a FAKEMP_TEST_ETHERTYPE frame of FAKEMP_RX_FRAME_SIZE bytes to the adapter's address,
+   data byte i (from the start of the frame) = Seed + i. With Lookahead less than the data, the protocols copy
+   the rest with NdisTransferData, which the miniport does as TransferMode says. */
+#define FAKEMP_RX_FRAME_SIZE    128
+#define FAKEMP_XFER_SYNC        0   /* Copies in the handler */
+#define FAKEMP_XFER_HOLD        1   /* NDIS_STATUS_PENDING, copies and completes on FAKEMP_IOCTL_COMPLETE_TRANSFERS or in the halt (fails) */
+#define FAKEMP_MAX_HELD_XFERS   8
+
+typedef struct _FAKEMP_INDICATE
+{
+    ULONG Seed;
+    ULONG Lookahead;            /* Data bytes after the header in the lookahead buffer */
+    ULONG TransferMode;         /* FAKEMP_XFER_* */
+} FAKEMP_INDICATE, *PFAKEMP_INDICATE;
+
 typedef struct _FAKEMP_CONFIG
 {
     ULONG QueryMode;            /* FAKEMP_REQ_* for FAKEMP_OID_TEST_QUERY */
@@ -31,6 +60,8 @@ typedef struct _FAKEMP_CONFIG
     ULONG DelayMs;              /* FAKEMP_REQ_PEND_DELAY */
     ULONG ResetMode;            /* FAKEMP_RESET_* */
     ULONG AddressingReset;      /* *AddressingReset the reset handler returns */
+    ULONG SendMode;             /* FAKEMP_SEND_* */
+    ULONG SendDelayMs;          /* FAKEMP_SEND_DELAY */
 } FAKEMP_CONFIG, *PFAKEMP_CONFIG;
 
 typedef struct _FAKEMP_STATS
@@ -52,6 +83,17 @@ typedef struct _FAKEMP_STATS
     ULONG ResetsCompleted;
     ULONG HangChecks;
     ULONG HangCpu;              /* The processor the last CheckForHang ran on: NDIS's timer DPC (and the reset) run there */
+    ULONG Sends;                /* Test frames given to the send handler */
+    ULONG SendsHeld;            /* ... pended and not completed yet */
+    ULONG MaxSendsHeld;
+    ULONG SendsCompleted;       /* ... completed after pending them */
+    ULONG SendsCompletedAtHalt; /* ... of those, by the halt */
+    ULONG SendDataBad;          /* A held send's data changed before the miniport completed it: its sender let go of it */
+    ULONG Indications;          /* FAKEMP_IOCTL_INDICATE */
+    ULONG Transfers;            /* Transfer handler entries */
+    ULONG TransfersHeld;        /* ... pended and not completed yet */
+    ULONG TransfersCompleted;   /* ... completed after pending them */
+    ULONG TransfersCompletedAtHalt;
 } FAKEMP_STATS, *PFAKEMP_STATS;
 
 #define FAKEMP_IOCTL_SET_CONFIG     CTL_CODE(FILE_DEVICE_NETWORK, 0x900, METHOD_BUFFERED, FILE_ANY_ACCESS) /* in: FAKEMP_CONFIG */
@@ -61,6 +103,9 @@ typedef struct _FAKEMP_STATS
 #define FAKEMP_IOCTL_COMPLETE_HELD  CTL_CODE(FILE_DEVICE_NETWORK, 0x904, METHOD_BUFFERED, FILE_ANY_ACCESS) /* completes the pended request now (NDIS_STATUS_SUCCESS) */
 #define FAKEMP_IOCTL_FINISH_RESET   CTL_CODE(FILE_DEVICE_NETWORK, 0x905, METHOD_BUFFERED, FILE_ANY_ACCESS) /* NdisMResetComplete for a pended reset */
 #define FAKEMP_IOCTL_RELEASE_SPIN   CTL_CODE(FILE_DEVICE_NETWORK, 0x906, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define FAKEMP_IOCTL_INDICATE       CTL_CODE(FILE_DEVICE_NETWORK, 0x908, METHOD_BUFFERED, FILE_ANY_ACCESS) /* in: FAKEMP_INDICATE */
+#define FAKEMP_IOCTL_COMPLETE_TRANSFERS CTL_CODE(FILE_DEVICE_NETWORK, 0x909, METHOD_BUFFERED, FILE_ANY_ACCESS) /* completes the held transfers */
+#define FAKEMP_IOCTL_COMPLETE_SEND  CTL_CODE(FILE_DEVICE_NETWORK, 0x907, METHOD_BUFFERED, FILE_ANY_ACCESS) /* in: ULONG FAKEMP_COMPLETE_*; out (optional): ULONG sends completed */
 
 
 #endif
