@@ -156,6 +156,9 @@ SysWOW64/schannel.dll
 SysWOW64/secur32.dll
 SysWOW64/security.dll
 SysWOW64/cfgmgr32.dll
+# Delay-loaded by 32-bit Firefox (xul.dll): MMCSS thread characteristics, credential prompt.
+SysWOW64/avrt.dll
+SysWOW64/credui.dll
 SysWOW64/setupapi.dll
 SysWOW64/shdocvw.dll
 SysWOW64/windowscodecs.dll
