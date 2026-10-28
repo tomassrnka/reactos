@@ -19,9 +19,9 @@ LARGE_INTEGER HalpCpuClockFrequency = {{INITIAL_STALL_COUNT * 1000000}};
 UCHAR TscCalibrationPhase;
 ULONG64 TscCalibrationArray[NUM_SAMPLES];
 
-/* TRUE when the frequency was measured against the ACPI power management timer
-   (five windows agreeing to 1/10000 and to the RTC calibration); the clock
-   interrupt then counts lost periods with it */
+/* TRUE when the frequency came from the hypervisor, or was measured against the
+   ACPI power management timer (five windows agreeing to 1/10000, not above the
+   RTC calibration); the clock interrupt then counts lost periods with it */
 BOOLEAN HalpTscCalibrated;
 
 #define PM_TIMER_FREQUENCY 3579545
@@ -31,8 +31,48 @@ BOOLEAN HalpTscCalibrated;
 #define PM_TIMER_LONGEST 4 /* seconds, below the 4.687 s wrap of a 24-bit timer */
 #define PM_TIMER_STEPS 16  /* fewer steps than this can each take over 1/16 of a window */
 
+#define PM_TIMER_TRIES 3
+
 #define RTC_MODE 6 /* Mode 6 is 1024 Hz */
 #define SAMPLE_FREQUENCY ((32768 << 1) >> RTC_MODE)
+
+/* A TSC frequency reported by a hypervisor is used within these bounds */
+#define HV_TSC_MINIMUM_FREQUENCY 10000000ULL      /* 10 MHz */
+#define HV_TSC_MAXIMUM_FREQUENCY 100000000000ULL  /* 100 GHz */
+
+/* KVM paravirtual clock (kvmclock): the hypervisor fills this structure with
+   the factors that convert the TSC to nanoseconds, which give the TSC
+   frequency it set for the guest */
+#define KVM_CPUID_FEATURES_OFFSET 1
+#define KVM_FEATURE_CLOCKSOURCE 0x1
+#define KVM_FEATURE_CLOCKSOURCE2 0x8
+#define MSR_KVM_SYSTEM_TIME 0x12
+#define MSR_KVM_SYSTEM_TIME_NEW 0x4b564d01
+
+typedef struct _PVCLOCK_VCPU_TIME_INFO
+{
+    ULONG Version;
+    ULONG Pad0;
+    ULONG64 TscTimestamp;
+    ULONG64 SystemTime;
+    ULONG TscToSystemMul;
+    CHAR TscShift;
+    UCHAR Flags;
+    UCHAR Pad[2];
+} PVCLOCK_VCPU_TIME_INFO;
+
+/* Aligned to its size, so it does not cross a page */
+static volatile PVCLOCK_VCPU_TIME_INFO DECLSPEC_ALIGN(32) HalpKvmClock;
+
+/* Hyper-V: the TSC frequency in Hz is in a synthetic MSR when the partition
+   may access the frequency MSRs */
+#define HV_CPUID_FEATURES 0x40000003
+#define HV_ACCESS_FREQUENCY_MSRS 0x800
+#define HV_FEATURE_FREQUENCY_MSRS_AVAILABLE 0x100 /* CPUID 0x40000003 EDX bit 8 */
+#define HV_X64_MSR_TSC_FREQUENCY 0x40000022
+
+/* Hypervisor timing leaf (VMware, and KVM when configured): TSC kHz in EAX */
+#define HV_CPUID_TIMING_OFFSET 0x10
 
 /* PRIVATE FUNCTIONS *********************************************************/
 
@@ -153,15 +193,17 @@ HalpKeepLongStep(
     timer (4.7 s for 24 bits, nearly 100 windows long), and the TSC sees the
     pause whatever its rate. The result is the median of the remaining
     frequencies, and at least five of them must agree with it to 1/10000.
-    As a second guard, a window longer than 4 s by the RTC calibration is
-    dropped and the result must agree with that calibration to 1/8. Otherwise
-    the measurement fails and the RTC calibration is used, without counting
-    lost clock periods.
+    As a second guard, a window longer than 4 s by the reference frequency
+    (the RTC calibration, or the hypervisor's) is dropped and the result must
+    not exceed it by more than 1/8 (lost RTC interrupts only make the RTC
+    calibration higher, as a hidden wrap makes this one). Otherwise
+    the measurement fails; without a frequency from the hypervisor the RTC
+    calibration is then used, without counting lost clock periods.
 */
 static
 BOOLEAN
 HalpCalibrateTscWithPmTimer(
-    _In_ ULONG64 RtcFrequency)
+    _In_ ULONG64 ReferenceFrequency)
 {
     ULONG64 Ticks[PM_TIMER_WINDOWS], Counts[PM_TIMER_WINDOWS], Frequency[PM_TIMER_WINDOWS];
     ULONG64 Sorted[PM_TIMER_WINDOWS], Last, End, Bracket, Count, Median, Difference;
@@ -248,7 +290,7 @@ HalpCalibrateTscWithPmTimer(
     for (Valid = 0, Window = 0; Window < PM_TIMER_WINDOWS; Window++)
     {
         if (Suspect[Window] || !Ticks[Window] || (Ticks[Window] > 2 * Median) ||
-            (2 * Ticks[Window] < Median) || (Ticks[Window] / PM_TIMER_LONGEST > RtcFrequency))
+            (2 * Ticks[Window] < Median) || (Ticks[Window] / PM_TIMER_LONGEST > ReferenceFrequency))
             continue;
         Frequency[Valid++] = (Ticks[Window] / Counts[Window]) * PM_TIMER_FREQUENCY +
             ((Ticks[Window] % Counts[Window]) * PM_TIMER_FREQUENCY + Counts[Window] / 2) / Counts[Window];
@@ -267,13 +309,182 @@ HalpCalibrateTscWithPmTimer(
     if (Agreeing < PM_TIMER_AGREEING)
         return FALSE;
 
-    Difference = (Median > RtcFrequency) ? Median - RtcFrequency : RtcFrequency - Median;
-    if (Difference > RtcFrequency / 8)
+    /* Lost RTC interrupts make the RTC calibration too high, a hidden wrap of
+       the timer makes this one too high: only a result above the RTC
+       calibration can be a hidden wrap */
+    if ((Median > ReferenceFrequency) && (Median - ReferenceFrequency > ReferenceFrequency / 8))
         return FALSE;
 
     HalpCpuClockFrequency.QuadPart = Median;
     HalpTscCalibrated = TRUE;
     return TRUE;
+}
+
+/* The hypervisor interfaces looked for, and where their CPUID leaves start */
+#define HV_SIGNATURE_MICROSOFT 0
+#define HV_SIGNATURE_KVM       1
+#define HV_SIGNATURE_VMWARE    2
+#define HV_SIGNATURE_COUNT     3
+
+/*
+    Finds the CPUID base of a hypervisor by its signature; returns the highest
+    leaf it reports in EAX, as it is (KVM may leave it 0). A hypervisor that
+    also presents another one's interface (KVM with the Hyper-V enlightenments)
+    moves its own leaves to 0x40000100 and up, so all 256 possible bases are
+    probed: that is about a thousand CPUID exits when it is done per question
+    and slow when nested or starved, so it is done once and kept.
+*/
+static
+ULONG
+HalpFindHypervisorBase(
+    _In_ ULONG Interface,
+    _Out_ PULONG Base)
+{
+    static const char Signatures[HV_SIGNATURE_COUNT][12] =
+        { "Microsoft Hv", "KVMKVMKVM\0\0\0", "VMwareVMware" };
+    static BOOLEAN Scanned;
+    static ULONG Bases[HV_SIGNATURE_COUNT], Highests[HV_SIGNATURE_COUNT];
+    INT CpuInfo[4];
+    ULONG Leaf, Index;
+
+    if (!Scanned)
+    {
+        __cpuid(CpuInfo, 1);
+        if (CpuInfo[2] & 0x80000000)
+        {
+            for (Leaf = 0x40000000; Leaf < 0x40010000; Leaf += 0x100)
+            {
+                __cpuid(CpuInfo, Leaf);
+                for (Index = 0; Index < HV_SIGNATURE_COUNT; Index++)
+                {
+                    if (!Bases[Index] && RtlEqualMemory(&CpuInfo[1], Signatures[Index], 12))
+                    {
+                        Bases[Index] = Leaf;
+                        Highests[Index] = (ULONG)CpuInfo[0];
+                    }
+                }
+            }
+        }
+        Scanned = TRUE;
+    }
+
+    *Base = Bases[Interface];
+    return Bases[Interface] ? Highests[Interface] : 0;
+}
+
+/* Reads the TSC frequency from KVM's paravirtual clock */
+static
+ULONG64
+HalpGetKvmClockFrequency(VOID)
+{
+    PHYSICAL_ADDRESS Address;
+    INT CpuInfo[4];
+    ULONG Base, Highest, Msr, Version, Mul, Tries;
+    CHAR Shift;
+    ULONG64 Frequency;
+
+    /* An old KVM leaves the highest leaf 0 and has the features leaf (Linux
+       reads it without looking at the highest leaf); otherwise a highest leaf
+       below the features leaf, as the signature leaf alone, means it is not
+       there and reading it would return whatever the CPU gives for it */
+    Highest = HalpFindHypervisorBase(HV_SIGNATURE_KVM, &Base);
+    if (!Base || (Highest && (Highest < Base + KVM_CPUID_FEATURES_OFFSET)))
+        return 0;
+    __cpuid(CpuInfo, Base + KVM_CPUID_FEATURES_OFFSET);
+    if (CpuInfo[0] & KVM_FEATURE_CLOCKSOURCE2)
+        Msr = MSR_KVM_SYSTEM_TIME_NEW;
+    else if (CpuInfo[0] & KVM_FEATURE_CLOCKSOURCE)
+        Msr = MSR_KVM_SYSTEM_TIME;
+    else
+        return 0;
+
+    Address = MmGetPhysicalAddress((PVOID)&HalpKvmClock);
+    if (!Address.QuadPart)
+        return 0;
+
+    /* Enable the clock structure of this processor (bit 0), which KVM fills
+       before the guest runs again, read it, and disable it again: only the
+       conversion factors are needed */
+    RtlZeroMemory((PVOID)&HalpKvmClock, sizeof(HalpKvmClock));
+    __writemsr(Msr, (ULONG64)Address.QuadPart | 1);
+    for (Tries = 0; Tries < 1000; Tries++)
+    {
+        /* An odd version is an update in progress */
+        Version = HalpKvmClock.Version;
+        _ReadWriteBarrier();
+        Mul = HalpKvmClock.TscToSystemMul;
+        Shift = HalpKvmClock.TscShift;
+        _ReadWriteBarrier();
+        if (!(Version & 1) && (Version == HalpKvmClock.Version) && Mul)
+            break;
+        Mul = 0;
+    }
+    __writemsr(Msr, 0);
+    if (!Mul || (Shift < -31) || (Shift > 31))
+        return 0;
+
+    /* nanoseconds = ((TSC ticks << Shift) * Mul) >> 32, with a negative Shift
+       shifting right: so the frequency is 10^9 * 2^32 / Mul / 2^Shift */
+    Frequency = ((1000000000ULL << 32) + Mul / 2) / Mul;
+    if (Shift >= 0)
+        Frequency = (Frequency + ((1ULL << Shift) >> 1)) >> Shift;
+    else if (Frequency > (HV_TSC_MAXIMUM_FREQUENCY >> -Shift))
+        return 0;
+    else
+        Frequency <<= -Shift;
+    return Frequency;
+}
+
+/*!
+    \brief Returns the TSC frequency the hypervisor reports, or 0.
+
+    A hypervisor sets the rate of the guest TSC and can say what it is: the
+    Hyper-V frequency MSR, KVM's paravirtual clock, or the timing leaf of
+    VMware (and KVM when configured). This does not depend on how the guest
+    processors are scheduled, while a calibration against a timer is wrong
+    when the host does not run the processor in time.
+*/
+static
+ULONG64
+HalpGetHypervisorTscFrequency(VOID)
+{
+    INT CpuInfo[4];
+    ULONG Base, Highest;
+    ULONG64 Frequency = 0;
+
+    /* Hyper-V, and hypervisors presenting its interface */
+    Highest = HalpFindHypervisorBase(HV_SIGNATURE_MICROSOFT, &Base);
+    if ((Base == 0x40000000) && (Highest >= HV_CPUID_FEATURES))
+    {
+        /* Both bits, as Linux does: reading the MSR without the second is a #GP
+           on a host that grants the access but has no frequency to give */
+        __cpuid(CpuInfo, HV_CPUID_FEATURES);
+        if ((CpuInfo[0] & HV_ACCESS_FREQUENCY_MSRS) &&
+            (CpuInfo[3] & HV_FEATURE_FREQUENCY_MSRS_AVAILABLE))
+            Frequency = __readmsr(HV_X64_MSR_TSC_FREQUENCY);
+    }
+
+    /* KVM */
+    if ((Frequency < HV_TSC_MINIMUM_FREQUENCY) || (Frequency > HV_TSC_MAXIMUM_FREQUENCY))
+        Frequency = HalpGetKvmClockFrequency();
+
+    /* The timing leaf, in kHz */
+    if ((Frequency < HV_TSC_MINIMUM_FREQUENCY) || (Frequency > HV_TSC_MAXIMUM_FREQUENCY))
+    {
+        Frequency = 0;
+        Highest = HalpFindHypervisorBase(HV_SIGNATURE_VMWARE, &Base);
+        if (!Base)
+            Highest = HalpFindHypervisorBase(HV_SIGNATURE_KVM, &Base);
+        if (Base && (Highest >= Base + HV_CPUID_TIMING_OFFSET))
+        {
+            __cpuid(CpuInfo, Base + HV_CPUID_TIMING_OFFSET);
+            Frequency = (ULONG64)(ULONG)CpuInfo[0] * 1000;
+        }
+    }
+
+    if ((Frequency < HV_TSC_MINIMUM_FREQUENCY) || (Frequency > HV_TSC_MAXIMUM_FREQUENCY))
+        return 0;
+    return Frequency;
 }
 
 /* Measures the TSC frequency over four RTC interrupts */
@@ -337,17 +548,59 @@ VOID
 NTAPI
 HalpInitializeTsc(VOID)
 {
+    ULONG64 Frequency, RtcFrequency;
+    ULONG Try;
+
     /* Check if the CPU supports RDTSC */
     if (!(KeGetCurrentPrcb()->FeatureBits & KF_RDTSC))
     {
         KeBugCheck(HAL_INITIALIZATION_FAILED);
     }
 
-    /* Count RTC interrupts, then refine with the power management timer;
-       the TSC is not reset (on this processor alone it would leave the TSCs
-       of the processors out of step) */
+    /* A frequency the hypervisor reports does not depend on the host running
+       this processor in time; a calibration is wrong by a lot when it does
+       not (over ten times, measured under host load). The power management
+       timer follows the host's disciplined clock and can be closer by some
+       parts per million (the hypervisor's figure is the host's own TSC
+       calibration, in kHz for KVM, and that can itself be off by more than
+       0.1%), so its measurement is kept when it passes its own checks and
+       agrees with the hypervisor's to 1/100, which still rejects the tenfold
+       errors. Otherwise the hypervisor's figure is used.
+
+       Note that the lost-tick catch-up of the clock interrupt then trusts this
+       figure: a guest migrated to a host with another TSC frequency and no TSC
+       scaling would run with a skewed one */
+    Frequency = HalpGetHypervisorTscFrequency();
+    if (Frequency)
+    {
+        PCSTR Source = "power management timer";
+
+        if (!HalpCalibrateTscWithPmTimer(Frequency) ||
+            ((ULONG64)HalpCpuClockFrequency.QuadPart > Frequency + Frequency / 100) ||
+            ((ULONG64)HalpCpuClockFrequency.QuadPart < Frequency - Frequency / 100))
+        {
+            HalpCpuClockFrequency.QuadPart = Frequency;
+            Source = "hypervisor";
+        }
+        HalpTscCalibrated = TRUE;
+        DPRINT1("TSC frequency %I64u Hz (hypervisor %I64u Hz, using %s)\n",
+                HalpCpuClockFrequency.QuadPart, Frequency, Source);
+        return;
+    }
+
+    /* Count RTC interrupts, then refine with the power management timer,
+       which can be tried again when it was disturbed; the TSC is not reset
+       (on this processor alone it would leave the TSCs of the processors
+       out of step) */
     HalpCalibrateTscWithRtc();
-    HalpCalibrateTscWithPmTimer((ULONG64)HalpCpuClockFrequency.QuadPart);
+    RtcFrequency = (ULONG64)HalpCpuClockFrequency.QuadPart;
+    for (Try = 0; Try < PM_TIMER_TRIES; Try++)
+    {
+        if (HalpCalibrateTscWithPmTimer(RtcFrequency))
+            break;
+    }
+    DPRINT1("TSC frequency %I64u Hz (RTC %I64u Hz, power management timer %s)\n",
+            HalpCpuClockFrequency.QuadPart, RtcFrequency, HalpTscCalibrated ? "agrees" : "failed");
 }
 
 CODE_SEG("INIT")
