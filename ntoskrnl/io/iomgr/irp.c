@@ -269,6 +269,45 @@ IopWriteAsyncUserIosb(PIRP Irp)
     }
 }
 
+/*
+ * Windows writes the I/O status block of a cancelled request that pended and
+ * reports only through a completion port (no event, no APC routine) when the
+ * packet is removed from the port, not when the request completes. Other
+ * requests get theirs at completion, which HasOverlappedIoCompleted and
+ * GetOverlappedResult rely on. IopCompleteRequest leaves the IRP's thread in
+ * Tail.Overlay.Thread (referenced) for a deferred IOSB and NULL otherwise.
+ * Called by the remover; writes in the issuing process.
+ */
+VOID
+NTAPI
+IopWriteDeferredPortIosb(IN PIRP Irp)
+{
+    PETHREAD Thread = Irp->Tail.Overlay.Thread;
+    PEPROCESS Process;
+    KAPC_STATE ApcState;
+
+    if (!Thread) return;
+    Irp->Tail.Overlay.Thread = NULL;
+
+    /* Removal from the port of the issuing process is the usual case */
+    Process = PsGetThreadProcess(Thread);
+    if (Process == PsGetCurrentProcess())
+    {
+        IopWriteAsyncUserIosb(Irp);
+    }
+    else if ((KeGetCurrentIrql() == PASSIVE_LEVEL) &&
+             ExAcquireRundownProtection(&Process->RundownProtect))
+    {
+        /* Another process removed it: write in the issuer, unless it is exiting */
+        KeStackAttachProcess(&Process->Pcb, &ApcState);
+        IopWriteAsyncUserIosb(Irp);
+        KeUnstackDetachProcess(&ApcState);
+        ExReleaseRundownProtection(&Process->RundownProtect);
+    }
+
+    ObDereferenceObject(Thread);
+}
+
 VOID
 NTAPI
 IopCompleteRequest(IN PKAPC Apc,
@@ -282,6 +321,7 @@ IopCompleteRequest(IN PKAPC Apc,
     PMDL Mdl, NextMdl;
     PVOID Port = NULL, Key = NULL;
     BOOLEAN SignaledCreateRequest = FALSE;
+    BOOLEAN DeferIosb = FALSE;
 
     /* Get data from the APC */
     FileObject = (PFILE_OBJECT)*SystemArgument1;
@@ -377,7 +417,15 @@ IopCompleteRequest(IN PKAPC Apc,
             Key = FileObject->CompletionContext->Key;
         }
 
-        IopWriteAsyncUserIosb(Irp);
+        /* A cancelled pended request reported only through the port gets its IOSB at removal */
+        DeferIosb = (Port) &&
+                    (Irp->PendingReturned) &&
+                    (Irp->Cancel) &&
+                    (Irp->IoStatus.Status == STATUS_CANCELLED) &&
+                    !(Irp->UserEvent) &&
+                    !(Irp->Overlay.AsynchronousParameters.UserApcRoutine) &&
+                    (Irp->Overlay.AsynchronousParameters.UserApcContext);
+        if (!DeferIosb) IopWriteAsyncUserIosb(Irp);
 
         /* Check if we have an event or a file object */
         if (Irp->UserEvent)
@@ -489,6 +537,21 @@ IopCompleteRequest(IN PKAPC Apc,
             /* We have an I/O Completion setup... create the special Overlay */
             Irp->Tail.CompletionKey = Key;
             Irp->Tail.Overlay.PacketType = IopCompletionPacketIrp;
+
+            /*
+             * The completion APC (Tail.Apc, which overlays Tail.Overlay) has
+             * been delivered, so Tail.Overlay.Thread is free again: it tells
+             * the remover whose IOSB to write, if any.
+             */
+            if (DeferIosb)
+            {
+                Irp->Tail.Overlay.Thread = PsGetCurrentThread();
+                ObReferenceObject(Irp->Tail.Overlay.Thread);
+            }
+            else
+            {
+                Irp->Tail.Overlay.Thread = NULL;
+            }
             KeInsertQueue(Port, &Irp->Tail.Overlay.ListEntry);
         }
         else

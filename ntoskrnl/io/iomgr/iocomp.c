@@ -122,6 +122,9 @@ IopUnpackCompletionEntry(IN PLIST_ENTRY ListEntry,
         Entry->ApcContext = Irp->Overlay.AsynchronousParameters.UserApcContext;
         Entry->IoStatusBlock = Irp->IoStatus;
 
+        /* Write the IOSB the completion left to the removal */
+        IopWriteDeferredPortIosb(Irp);
+
         /* Free the IRP */
         IoFreeIrp(Irp);
     }
@@ -181,8 +184,10 @@ IopDeleteIoCompletion(PVOID ObjectBody)
             /* Check if it's part of an IRP, or a separate packet */
             if (Packet->PacketType == IopCompletionPacketIrp)
             {
-                /* Get the IRP and free it */
+                /* Get the IRP and free it; nobody removes it, so no IOSB is written */
                 Irp = CONTAINING_RECORD(Packet, IRP, Tail.Overlay.ListEntry);
+                if (Irp->Tail.Overlay.Thread)
+                    ObDereferenceObject(Irp->Tail.Overlay.Thread);
                 IoFreeIrp(Irp);
             }
             else
