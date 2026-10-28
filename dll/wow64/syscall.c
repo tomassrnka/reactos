@@ -765,6 +765,8 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         if (a[3]) PROBE(3);
         Cleanup->HandleProcess = H(2);
         Status = NtDuplicateObject(H(0), H(1), H(2), a[3] ? &Cleanup->Handle : NULL, a[4], a[5], a[6]);
+        /* Moving a handle out of this process closes it as NtClose does */
+        if (NT_SUCCESS(Status) && (a[6] & DUPLICATE_CLOSE_SOURCE) && IsCurrentProcess(H(0))) Wow64LpcForget(a[1]);
         if (a[3]) { RETURN_HANDLE_AT(3); }
         return Status;
     case W64_NtSuspendThread: return NtSuspendThread(H(0), P(1));
@@ -802,7 +804,15 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         PROBE(0); ATTR(2); Status = NtOpenSemaphore(&Cleanup->Handle, a[1], OA(2)); RETURN_HANDLE();
     case W64_NtOpenMutant:
         PROBE(0); ATTR(2); Status = NtOpenMutant(&Cleanup->Handle, a[1], OA(2)); RETURN_HANDLE();
-    case W64_NtClose: return NtClose(H(0));
+    case W64_NtClose:
+        Wow64LpcForget(a[0]);
+        return NtClose(H(0));
+    case W64_NtConnectPort:
+        PROBE(0);
+        Status = Wow64LpcConnect(Number, a, &Cleanup->Handle, &Cleanup->Reported);
+        RETURN_HANDLE();
+    case W64_NtRequestWaitReplyPort:
+        return Wow64LpcRequest(Number, a[0], a[1], a[2], &Cleanup->Reported);
     case W64_NtContinue: return Wow64Continue(P(0), a[1]);
     case W64_NtQueryObject:
         if (a[1] == ObjectBasicInformation || a[1] == ObjectHandleFlagInformation)
