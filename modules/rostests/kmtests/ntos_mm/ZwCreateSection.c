@@ -323,6 +323,13 @@ SimpleErrorChecks(HANDLE FileHandleReadOnly, HANDLE FileHandleWriteOnly, HANDLE 
     MaximumSize.QuadPart = 0;
     CREATE_SECTION(Section, SECTION_ALL_ACCESS, NULL, MaximumSize, PAGE_READWRITE, SEC_COMMIT, NULL, STATUS_INVALID_PARAMETER_4, IGNORE);
 
+    if (GetNTVersion() >= _WIN32_WINNT_WIN10)
+    {
+        /* Windows 10 oracle: the protection is validated before the maximum size, and an image section without a file is a file error */
+        CREATE_SECTION(Section, SECTION_ALL_ACCESS, NULL, MaximumSize, 0, SEC_RESERVE, NULL, STATUS_INVALID_PAGE_PROTECTION, IGNORE);
+        CREATE_SECTION(Section, SECTION_ALL_ACCESS, NULL, MaximumSize, PAGE_READONLY, SEC_IMAGE, NULL, STATUS_INVALID_FILE_FOR_SECTION, IGNORE);
+    }
+
     //division by zero in ROS
     if (!skip(SharedUserData->LargePageMinimum > 0, "LargePageMinimum is 0\n"))
     {

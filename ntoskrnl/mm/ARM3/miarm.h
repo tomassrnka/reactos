@@ -31,6 +31,10 @@ extern "C" {
 #define MI_PARAM_STATUS(n) \
     ((NtMajorVersion >= 10) ? STATUS_INVALID_PARAMETER : STATUS_INVALID_PARAMETER_##n)
 
+/* Behaviour that Windows 8 (6.2) introduced and every later version keeps */
+#define MI_IS_WIN8_OR_LATER() \
+    ((NtMajorVersion > 6) || ((NtMajorVersion == 6) && (NtMinorVersion >= 2)))
+
 /*
  * ZeroBits is a count in the 32-bit address space for values 1..21.
  * On a 64-bit kernel, values >= 32 describe the leading zeroes of a mask;

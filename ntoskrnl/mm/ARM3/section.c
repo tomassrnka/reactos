@@ -2294,6 +2294,11 @@ MmCreateArm3Section(OUT PVOID *SectionObject,
              (SectionPageProtection & PAGE_GUARD) ||
              (SectionPageProtection & PAGE_NOACCESS)));
 
+    /* Windows 10 reads the maximum size of a paging file section before it
+     * looks at the protection: a NULL pointer faults even with a bad protection */
+    if ((NtMajorVersion >= 10) && !FileHandle && !FileObject)
+        (VOID)*(volatile LONGLONG *)InputMaximumSize;
+
     /* Convert section flag to page flag */
     if (AllocationAttributes & SEC_NOCACHE)
         SectionPageProtection |= PAGE_NOCACHE;
@@ -3349,6 +3354,16 @@ NtCreateSection(OUT PHANDLE SectionHandle,
         _SEH2_END;
     }
     else if (!MaximumSize) MaximumSize = &SafeMaximumSize;
+
+    if (NtMajorVersion >= 10)
+    {
+        /* Windows 10 validates the page protection before the maximum size,
+         * and an image section without a file is a file error, not a size error */
+        if (MiMakeProtectionMask(SectionPageProtection | ((AllocationAttributes & SEC_NOCACHE) ? PAGE_NOCACHE : 0)) == MM_INVALID_PROTECTION)
+            return STATUS_INVALID_PAGE_PROTECTION;
+        if ((AllocationAttributes & SEC_IMAGE) && !FileHandle)
+            return STATUS_INVALID_FILE_FOR_SECTION;
+    }
 
     /* Check that MaximumSize is valid if backed by paging file */
     if ((!FileHandle) && (!MaximumSize->QuadPart))

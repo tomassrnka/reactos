@@ -5327,6 +5327,14 @@ MmCreateSection (OUT PVOID  * Section,
         return STATUS_INVALID_PARAMETER_6;
     }
 
+    /* Windows 8 and later only build an image section from a file handle:
+     * a file object (with or without a handle) is rejected for SEC_IMAGE */
+    if ((AllocationAttributes & SEC_IMAGE) && (FileObject != NULL) && MI_IS_WIN8_OR_LATER())
+    {
+        DPRINT1("A file object cannot back an image section\n");
+        return STATUS_INVALID_PARAMETER_6;
+    }
+
     /* Check if an ARM3 section is being created instead */
     if (!(AllocationAttributes & SEC_IMAGE))
     {
