@@ -164,6 +164,11 @@ ServiceInit(VOID)
 
     CloseHandle(hThread);
 
+    /* Start the Task Scheduler 2.0 trigger thread */
+    dwError = TaskSchedulerStart();
+    if (dwError != ERROR_SUCCESS)
+        ERR("TaskSchedulerStart() failed (Error %lu)\n", dwError);
+
     /* Create the stop event */
     Events[0] = CreateEvent(NULL, FALSE, FALSE, NULL);
     if (Events[0] == NULL)
@@ -258,6 +263,8 @@ SchedServiceMain(DWORD argc, LPTSTR *argv)
             RtlReleaseResource(&JobListLock);
         }
     }
+
+    TaskSchedulerStop();
 
     /* Close the start and update event handles */
     CloseHandle(Events[0]);
