@@ -45,6 +45,14 @@ PVOID PspSystemDllEntryPoint;
 UNICODE_STRING PsNtDllPathName =
     RTL_CONSTANT_STRING(L"\\SystemRoot\\System32\\ntdll.dll");
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+/* The i386 ntdll and its preferred base, when SysWOW64 is installed */
+static PVOID PspSystemDllSection32;
+static PVOID PspSystemDllBase32;
+static UNICODE_STRING PsNtDll32PathName =
+    RTL_CONSTANT_STRING(L"\\SystemRoot\\SysWOW64\\ntdll.dll");
+#endif
+
 PHANDLE_TABLE PspCidTable;
 
 PEPROCESS PsInitialSystemProcess = NULL;
@@ -181,6 +189,124 @@ PspMapSystemDll(IN PEPROCESS Process,
     return Status;
 }
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+/*
+ * Windows maps the i386 ntdll into a WOW64 process when it creates the process,
+ * so the creator can read and patch it while the process is still suspended
+ * (the Chromium sandbox installs its system-call interceptions this way, at the
+ * address of the ntdll in its own process). wow64.dll uses this view when the
+ * process starts. A process whose preferred base is taken gets none; wow64.dll
+ * then reports the conflict as before.
+ */
+CODE_SEG("INIT")
+static
+VOID
+PspLocateSystemDll32(VOID)
+{
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatusBlock;
+    HANDLE FileHandle, SectionHandle;
+    LARGE_INTEGER Offset = {{0, 0}};
+    SIZE_T ViewSize = 0;
+    PVOID Section, Base = NULL;
+    PIMAGE_NT_HEADERS32 NtHeaders;
+    NTSTATUS Status;
+
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &PsNtDll32PathName,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                               NULL,
+                               NULL);
+    Status = ZwOpenFile(&FileHandle,
+                        FILE_READ_ACCESS | FILE_EXECUTE,
+                        &ObjectAttributes,
+                        &IoStatusBlock,
+                        FILE_SHARE_READ,
+                        0);
+    if (!NT_SUCCESS(Status))
+        return;
+    Status = ZwCreateSection(&SectionHandle,
+                             SECTION_ALL_ACCESS,
+                             NULL,
+                             NULL,
+                             PAGE_EXECUTE,
+                             SEC_IMAGE,
+                             FileHandle);
+    ZwClose(FileHandle);
+    if (!NT_SUCCESS(Status))
+        return;
+    Status = ObReferenceObjectByHandle(SectionHandle,
+                                       SECTION_ALL_ACCESS,
+                                       MmSectionObjectType,
+                                       KernelMode,
+                                       &Section,
+                                       NULL);
+    ZwClose(SectionHandle);
+    if (!NT_SUCCESS(Status))
+        return;
+
+    /* Find the preferred base: map it once into this process, which is not a
+     * WOW64 process (so the i386 image maps with a machine mismatch status) */
+    Status = MmMapViewOfSection(Section,
+                                PsGetCurrentProcess(),
+                                &Base,
+                                0,
+                                0,
+                                &Offset,
+                                &ViewSize,
+                                ViewShare,
+                                0,
+                                PAGE_READWRITE);
+    if (Status != STATUS_SUCCESS && Status != STATUS_IMAGE_MACHINE_TYPE_MISMATCH)
+    {
+        if (NT_SUCCESS(Status)) MmUnmapViewOfSection(PsGetCurrentProcess(), Base);
+        DPRINT1("Cannot map %wZ: %lx\n", &PsNtDll32PathName, Status);
+        ObDereferenceObject(Section);
+        return;
+    }
+    NtHeaders = (PIMAGE_NT_HEADERS32)RtlImageNtHeader(Base);
+    if (NtHeaders &&
+        NtHeaders->FileHeader.Machine == IMAGE_FILE_MACHINE_I386 &&
+        NtHeaders->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC &&
+        NtHeaders->OptionalHeader.ImageBase == (ULONG_PTR)Base)
+    {
+        PspSystemDllBase32 = Base;
+        PspSystemDllSection32 = Section;
+    }
+    MmUnmapViewOfSection(PsGetCurrentProcess(), Base);
+    if (!PspSystemDllSection32)
+        ObDereferenceObject(Section);
+}
+
+VOID
+NTAPI
+PspMapSystemDll32(IN PEPROCESS Process)
+{
+    LARGE_INTEGER Offset = {{0, 0}};
+    SIZE_T ViewSize = 0;
+    PVOID Base = PspSystemDllBase32;
+    NTSTATUS Status;
+
+    if (!PspSystemDllSection32 || !Process->Wow64Process)
+        return;
+    Status = MmMapViewOfSection(PspSystemDllSection32,
+                                Process,
+                                &Base,
+                                0,
+                                0,
+                                &Offset,
+                                &ViewSize,
+                                ViewShare,
+                                0,
+                                PAGE_READWRITE);
+    if (NT_SUCCESS(Status) && (Status != STATUS_SUCCESS || Base != PspSystemDllBase32))
+    {
+        /* Only the preferred base: the guest loader runs it unrelocated */
+        MmUnmapViewOfSection(Process, Base);
+    }
+}
+#endif
+
 CODE_SEG("INIT")
 NTSTATUS
 NTAPI
@@ -262,6 +388,10 @@ PsLocateSystemDll(VOID)
         /* Failed, bugcheck */
         KeBugCheckEx(PROCESS1_INITIALIZATION_FAILED, Status, 5, 0, 0);
     }
+
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    PspLocateSystemDll32();
+#endif
 
     /* Return status */
     return Status;

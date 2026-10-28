@@ -797,6 +797,10 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
             //
             Status = MmCreatePeb(Process, &InitialPeb, &Process->Peb);
             if (!NT_SUCCESS(Status)) goto CleanupWithRef;
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+            /* MmCreatePeb identified a WOW64 process: map its i386 ntdll as well */
+            PspMapSystemDll32(Process);
+#endif
         }
         else
         {
