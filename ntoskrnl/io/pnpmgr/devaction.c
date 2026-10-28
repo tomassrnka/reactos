@@ -1200,6 +1200,117 @@ PiSetDevNodeText(
 }
 
 static
+VOID
+IopMarkDeviceNodeDisabled(
+    _In_ PDEVICE_NODE DeviceNode);
+
+/* Tells whether a service is a boot-start driver (Start == SERVICE_BOOT_START) */
+static
+BOOLEAN
+IopIsBootStartService(
+    _In_ PUNICODE_STRING ServiceName)
+{
+    static const UNICODE_STRING ServicesPath =
+        RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\");
+    UNICODE_STRING KeyName;
+    PKEY_VALUE_FULL_INFORMATION kvInfo;
+    HANDLE Key;
+    BOOLEAN BootStart = FALSE;
+
+    if (ServiceName == NULL || ServiceName->Length == 0)
+        return FALSE;
+
+    KeyName.MaximumLength = ServicesPath.Length + ServiceName->Length + sizeof(UNICODE_NULL);
+    KeyName.Length = 0;
+    KeyName.Buffer = ExAllocatePoolWithTag(PagedPool, KeyName.MaximumLength, TAG_IO);
+    if (KeyName.Buffer == NULL)
+        return FALSE;
+    RtlCopyUnicodeString(&KeyName, (PUNICODE_STRING)&ServicesPath);
+    RtlAppendUnicodeStringToString(&KeyName, ServiceName);
+    KeyName.Buffer[KeyName.Length / sizeof(WCHAR)] = UNICODE_NULL;
+
+    if (NT_SUCCESS(IopOpenRegistryKeyEx(&Key, NULL, &KeyName, KEY_READ)))
+    {
+        if (NT_SUCCESS(IopGetRegistryValue(Key, L"Start", &kvInfo)))
+        {
+            BootStart = kvInfo->Type == REG_DWORD &&
+                        kvInfo->DataLength == sizeof(ULONG) &&
+                        *(PULONG)((ULONG_PTR)kvInfo + kvInfo->DataOffset) == SERVICE_BOOT_START;
+            ExFreePool(kvInfo);
+        }
+        ZwClose(Key);
+    }
+    ExFreePoolWithTag(KeyName.Buffer, TAG_IO);
+    return BootStart;
+}
+
+/* Tells whether a node is part of what the system boots from: its driver is a boot-start
+ * driver (the disk, the volume, the storage controller, PCI, ACPI, the display...). Such a
+ * device is not disabled, and a disable that is recorded for it is not honored at boot. */
+BOOLEAN
+IopIsBootCriticalNode(
+    _In_ PDEVICE_NODE DeviceNode)
+{
+    UNICODE_STRING EnumRoot = RTL_CONSTANT_STRING(ENUM_ROOT);
+    PKEY_VALUE_FULL_INFORMATION kvInfo;
+    HANDLE EnumKey, InstanceKey;
+    BOOLEAN BootCritical = FALSE;
+
+    if (IopIsBootStartService(&DeviceNode->ServiceName))
+        return TRUE;
+
+    /* The node may not know its service (it is only set once the service's Enum key is
+     * updated): the Service value of the instance key says it too */
+    if (DeviceNode->InstancePath.Length == 0 ||
+        !NT_SUCCESS(IopOpenRegistryKeyEx(&EnumKey, NULL, &EnumRoot, KEY_READ)))
+        return FALSE;
+
+    if (NT_SUCCESS(IopOpenRegistryKeyEx(&InstanceKey, EnumKey, &DeviceNode->InstancePath, KEY_READ)))
+    {
+        if (NT_SUCCESS(IopGetRegistryValue(InstanceKey, L"Service", &kvInfo)))
+        {
+            if (kvInfo->Type == REG_SZ && kvInfo->DataLength > sizeof(UNICODE_NULL))
+            {
+                UNICODE_STRING ServiceName;
+
+                ServiceName.Buffer = (PWSTR)((ULONG_PTR)kvInfo + kvInfo->DataOffset);
+                ServiceName.Length = (USHORT)(kvInfo->DataLength - sizeof(UNICODE_NULL));
+                ServiceName.MaximumLength = ServiceName.Length;
+                BootCritical = IopIsBootStartService(&ServiceName);
+            }
+            ExFreePool(kvInfo);
+        }
+        ZwClose(InstanceKey);
+    }
+    ZwClose(EnumKey);
+    return BootCritical;
+}
+
+/* Tells whether the instance key says that the device is disabled: CONFIGFLAG_DISABLED in
+ * its ConfigFlags, which SetupDiChangeState(DICS_DISABLE, DICS_FLAG_GLOBAL) sets and the
+ * enable clears. The device is not started until then, even after a reboot. */
+static
+BOOLEAN
+IopIsDeviceConfigDisabled(
+    _In_ HANDLE InstanceKey)
+{
+    PKEY_VALUE_FULL_INFORMATION kvInfo;
+    BOOLEAN Disabled = FALSE;
+    NTSTATUS Status;
+
+    Status = IopGetRegistryValue(InstanceKey, REGSTR_VAL_CONFIGFLAGS, &kvInfo);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+
+    if (kvInfo->Type == REG_DWORD && kvInfo->DataLength == sizeof(ULONG))
+    {
+        Disabled = !!(*(PULONG)((ULONG_PTR)kvInfo + kvInfo->DataOffset) & CONFIGFLAG_DISABLED);
+    }
+    ExFreePool(kvInfo);
+    return Disabled;
+}
+
+static
 NTSTATUS
 PiInitializeDevNode(
     _In_ PDEVICE_NODE DeviceNode)
@@ -1337,6 +1448,40 @@ PiInitializeDevNode(
     // That allows us to start devices during an early boot
     IopInstallCriticalDevice(DeviceNode);
     IopSetServiceEnumData(DeviceNode, InstanceKey);
+
+    /* A disabled device keeps its node, but no driver is added and it is not started
+     * (CM_PROB_DISABLED, like a device that is disabled while the system runs) */
+    if (IopIsDeviceConfigDisabled(InstanceKey))
+    {
+        PKEY_VALUE_FULL_INFORMATION ServiceInfo;
+        BOOLEAN BootCritical = FALSE;
+
+        if (NT_SUCCESS(IopGetRegistryValue(InstanceKey, L"Service", &ServiceInfo)))
+        {
+            if (ServiceInfo->Type == REG_SZ && ServiceInfo->DataLength > sizeof(UNICODE_NULL))
+            {
+                UNICODE_STRING ServiceName;
+
+                ServiceName.Buffer = (PWSTR)((ULONG_PTR)ServiceInfo + ServiceInfo->DataOffset);
+                ServiceName.Length = (USHORT)(ServiceInfo->DataLength - sizeof(UNICODE_NULL));
+                ServiceName.MaximumLength = ServiceName.Length;
+                BootCritical = IopIsBootStartService(&ServiceName);
+            }
+            ExFreePool(ServiceInfo);
+        }
+
+        if (BootCritical)
+        {
+            /* A disable that was recorded for a device the system boots from would make the
+             * system unbootable: leave the device enabled */
+            DPRINT1("%wZ is marked disabled but is a boot device: not disabled\n", &DeviceNode->InstancePath);
+        }
+        else
+        {
+            DPRINT("%wZ is disabled (CONFIGFLAG_DISABLED)\n", &DeviceNode->InstancePath);
+            IopMarkDeviceNodeDisabled(DeviceNode);
+        }
+    }
 
     ZwClose(InstanceKey);
 
@@ -1737,8 +1882,12 @@ NTAPI
 IopSendRemoveDevice(IN PDEVICE_OBJECT DeviceObject);
 
 /**
- * @brief   Tells whether a device node is in the "disabled" state: its stack is gone,
- *          the node stays in the tree and waits to be started again.
+ * @brief   Tells whether a device node is parked: its stack is gone, the node stays in the
+ *          tree and waits to be started again (an enable) or removed for good.
+ *
+ * What says so is DNUF_DISABLED, which only the PnP manager sets, and never the problem code,
+ * which user mode can set (CM_Set_DevNode_Problem). The problem is CM_PROB_DISABLED for a
+ * device that was disabled, or what a failed enable left (CM_PROB_FAILED_START, ...).
  */
 static
 BOOLEAN
@@ -1746,9 +1895,7 @@ IopIsDeviceNodeDisabled(
     _In_ PDEVICE_NODE DeviceNode)
 {
     return DeviceNode->State == DeviceNodeInitialized &&
-           (DeviceNode->UserFlags & DNUF_DISABLED) &&
-           (DeviceNode->Flags & DNF_HAS_PROBLEM) &&
-           DeviceNode->Problem == CM_PROB_DISABLED;
+           (DeviceNode->UserFlags & DNUF_DISABLED);
 }
 
 /* Marks the node disabled. Only the PnP manager does this (the flag is what the root
@@ -1771,9 +1918,10 @@ IopClearDeviceNodeDisabled(
     PiClearDevNodeProblem(DeviceNode);
 }
 
-/* Brings a node that was removed, but whose PDO is still there, back as a disabled device:
+/* Brings a node that was removed, but whose PDO is still there, back as a parked device:
  * the state a device waits in for an enable. Gives the node back the PDO reference that its
- * removal dropped and frees the resource lists that the removal only emptied.
+ * removal dropped and frees the resource lists that the removal only emptied. The problem the
+ * node has stays (the caller says what the device is: disabled, or failed to start).
  * Returns FALSE if the PDO is being deleted. */
 static
 BOOLEAN
@@ -1802,7 +1950,9 @@ IopReviveNodeAsDisabled(
                            DNF_NON_STOPPED_REBALANCE |
                            DNF_NO_RESOURCE_REQUIRED);
 
-    IopMarkDeviceNodeDisabled(DeviceNode);
+    DeviceNode->UserFlags |= DNUF_DISABLED;
+    if (!(DeviceNode->Flags & DNF_HAS_PROBLEM))
+        PiSetDevNodeProblem(DeviceNode, CM_PROB_FAILED_START);
     PiSetDevNodeState(DeviceNode, DeviceNodeInitialized);
     return TRUE;
 }
@@ -2380,6 +2530,13 @@ IopQueryAndRemoveDevice(
 
     if (VetoContext->Disable && !IopIsDeviceNodeDisabled(DeviceNode))
     {
+        /* The boot device's stack cannot be disabled (a drive that is gone at the next boot) */
+        if (!VetoContext->Force && IopIsBootCriticalNode(DeviceNode))
+        {
+            IopCaptureVeto(VetoContext, DeviceNode, PNP_VetoNonDisableable);
+            return STATUS_PLUGPLAY_QUERY_VETOED;
+        }
+
         /* A device that never started has no stack to tear down: disabling it only marks it */
         if (DeviceNode->State == DeviceNodeInitialized)
         {
@@ -2394,6 +2551,7 @@ IopQueryAndRemoveDevice(
             !(DeviceNode->Flags & DNF_DEVICE_GONE) &&
             IopReviveNodeAsDisabled(DeviceNode))
         {
+            IopMarkDeviceNodeDisabled(DeviceNode);
             return STATUS_SUCCESS;
         }
     }
@@ -2411,7 +2569,11 @@ IopQueryAndRemoveDevice(
     if (IopIsDeviceNodeDisabled(DeviceNode))
     {
         if (VetoContext->Disable)
+        {
+            /* A device that a failed enable left with its problem is disabled again */
+            IopMarkDeviceNodeDisabled(DeviceNode);
             return STATUS_SUCCESS;
+        }
 
         IopClearDeviceNodeDisabled(DeviceNode);
         PiSetDevNodeState(DeviceNode, DeviceNodeAwaitingQueuedRemoval);
@@ -2968,9 +3130,10 @@ PipDeviceActionWorker(
 
                 if (enabling)
                 {
-                    // enabling: clear the problem and start the stack again. DNUF_DISABLED stays
-                    // until the device has started: if the start fails and the device is
-                    // removed for it, the root enumerator must still keep the PDO.
+                    // enabling: clear the problem (CM_PROB_DISABLED, or what an earlier failed
+                    // enable left) and start the stack again. DNUF_DISABLED stays until the
+                    // device has started: if the start fails and the device is removed for it,
+                    // the root enumerator must still keep the PDO.
                     PiClearDevNodeProblem(deviceNode);
                 }
 
@@ -2993,13 +3156,32 @@ PipDeviceActionWorker(
                                     &deviceNode->InstancePath, deviceNode->State, deviceNode->Problem);
                             status = STATUS_UNSUCCESSFUL;
 
-                            // The device stays in the tree, disabled, and can be enabled again
+                            // The stack that failed to start vetoed its removal (or the removal is
+                            // otherwise pending): the device does not start, so take it down
+                            // without asking, or it stays in this state and a removal later on
+                            // would find the node without its keep flag
+                            if (deviceNode->State == DeviceNodeAwaitingQueuedRemoval)
+                            {
+                                IopPrepareDeviceForRemoval(deviceNode->PhysicalDeviceObject, TRUE, NULL);
+                                IopSendRemoveDevice(deviceNode->PhysicalDeviceObject);
+                            }
+
+                            // The device stays in the tree with the problem of the failure (the
+                            // one Windows reports), and can be enabled again
                             if (deviceNode->State == DeviceNodeRemoved)
+                            {
                                 IopReviveNodeAsDisabled(deviceNode);
+                            }
                             else if (deviceNode->State == DeviceNodeInitialized)
-                                IopMarkDeviceNodeDisabled(deviceNode);
+                            {
+                                if (!(deviceNode->Flags & DNF_HAS_PROBLEM))
+                                    PiSetDevNodeProblem(deviceNode, CM_PROB_FAILED_START);
+                            }
                             else
-                                deviceNode->UserFlags &= ~DNUF_DISABLED;
+                            {
+                                // Not reachable: the state machine ends in one of the states above
+                                DPRINT1("Unexpected state 0x%x after a failed enable\n", deviceNode->State);
+                            }
                         }
                     }
                 }

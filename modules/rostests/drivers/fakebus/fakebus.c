@@ -116,21 +116,25 @@ FdoBusRelations(PFAKEBUS_FDO Fdo, PIRP Irp)
     return IoCallDriver(Fdo->Lower, Irp);
 }
 
-/* The test makes the bus fail to start with Services\\fakebus\\Parameters\\FailStart = 1 */
+/* The test makes the bus fail to start with Services\\fakebus\\Parameters\\FailStart = 1, and
+ * refuse to be removed (IRP_MN_QUERY_REMOVE_DEVICE) with FailQueryRemove = 1 */
 static
 BOOLEAN
-StartShouldFail(VOID)
+ParameterIsSet(PCWSTR Name)
 {
-    ULONG FailStart = 0;
+    ULONG Value = 0;
     RTL_QUERY_REGISTRY_TABLE Table[2];
 
     RtlZeroMemory(Table, sizeof(Table));
     Table[0].Flags = RTL_QUERY_REGISTRY_DIRECT;
-    Table[0].Name = L"FailStart";
-    Table[0].EntryContext = &FailStart;
+    Table[0].Name = (PWSTR)Name;
+    Table[0].EntryContext = &Value;
     RtlQueryRegistryValues(RTL_REGISTRY_SERVICES, L"fakebus\\Parameters", Table, NULL, NULL);
-    return FailStart != 0;
+    return Value != 0;
 }
+
+#define StartShouldFail()       ParameterIsSet(L"FailStart")
+#define QueryRemoveShouldFail() ParameterIsSet(L"FailQueryRemove")
 
 static
 NTSTATUS
@@ -154,6 +158,11 @@ FdoPnp(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             break;
 
         case IRP_MN_QUERY_REMOVE_DEVICE:
+            if (QueryRemoveShouldFail())
+                return Complete(Irp, STATUS_UNSUCCESSFUL, 0);
+            Irp->IoStatus.Status = STATUS_SUCCESS;
+            break;
+
         case IRP_MN_CANCEL_REMOVE_DEVICE:
         case IRP_MN_QUERY_STOP_DEVICE:
         case IRP_MN_CANCEL_STOP_DEVICE:

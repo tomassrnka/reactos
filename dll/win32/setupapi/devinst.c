@@ -5806,8 +5806,23 @@ SetupDiChangeState(
                     goto cleanup;
             }
 
-            /* Enable/disable device in registry */
-            hKey = SETUPDI_OpenDrvKey(hRootKey, deviceInfo, KEY_QUERY_VALUE | KEY_SET_VALUE);
+            /* A device that cannot be disabled (the boot disk's stack, the buses it is on) is not
+             * marked disabled: the next boot would not have it. As on Windows, refuse. */
+            if (PropChange->StateChange == DICS_DISABLE)
+            {
+                ULONG ulStatus, ulProblem;
+
+                if (CM_Get_DevNode_Status_Ex(&ulStatus, &ulProblem, deviceInfo->dnDevInst, 0, set->hMachine) == CR_SUCCESS &&
+                    !(ulStatus & DN_DISABLEABLE))
+                {
+                    SetLastError(ERROR_NOT_DISABLEABLE);
+                    goto cleanup;
+                }
+            }
+
+            /* Enable/disable device in registry: ConfigFlags (global) or CSConfigFlags (profile)
+             * of the device's instance key, where the PnP manager reads them at boot */
+            hKey = SETUPDI_OpenDevKey(hRootKey, deviceInfo, KEY_QUERY_VALUE | KEY_SET_VALUE);
             if (hKey == INVALID_HANDLE_VALUE && GetLastError() == ERROR_FILE_NOT_FOUND)
                 hKey = SETUPDI_CreateDevKey(hRootKey, deviceInfo, KEY_QUERY_VALUE | KEY_SET_VALUE);
             if (hKey == INVALID_HANDLE_VALUE)
@@ -5859,9 +5874,9 @@ SetupDiChangeState(
                 else
                     ret = StopDevice(DeviceInfoSet, DeviceInfoData);
 
-                /* The flag is not applied at boot and the device could not be stopped, so it keeps
-                 * running: do not leave it marked disabled. (Windows keeps the flag and asks for a
-                 * restart, which works there because the flag takes effect at the next boot.) */
+                /* The device could not be stopped, so it keeps running: do not leave it marked
+                 * disabled, or it would be gone at the next boot without the user's knowing.
+                 * (Windows keeps the flag and asks for a restart.) */
                 if (!ret && PropChange->StateChange == DICS_DISABLE)
                 {
                     dwError = GetLastError();

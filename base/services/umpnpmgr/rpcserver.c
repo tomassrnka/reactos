@@ -681,6 +681,56 @@ done:
 }
 
 
+/* Tells whether the caller of an RPC is an administrator (or the system). The kernel checks
+ * a privilege on NtPlugPlayControl, but umpnpmgr makes that call as the system, and its
+ * endpoint is open to everyone, so the check has to be made here, on the client's token. */
+static
+BOOL
+IsCallerAdmin(
+    _In_ handle_t hBinding)
+{
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    PSID pAdminSid = NULL, pSystemSid = NULL;
+    HANDLE hToken;
+    BOOL bAdmin = FALSE, bMember;
+    RPC_STATUS RpcStatus;
+
+    if (!AllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID,
+                                  DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &pAdminSid))
+        return FALSE;
+
+    if (!AllocateAndInitializeSid(&NtAuthority, 1, SECURITY_LOCAL_SYSTEM_RID,
+                                  0, 0, 0, 0, 0, 0, 0, &pSystemSid))
+    {
+        FreeSid(pAdminSid);
+        return FALSE;
+    }
+
+    RpcStatus = RpcImpersonateClient(hBinding);
+    if (RpcStatus != RPC_S_OK)
+    {
+        DPRINT1("RpcImpersonateClient failed (Status 0x%08lx)\n", RpcStatus);
+        goto done;
+    }
+
+    if (OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, FALSE, &hToken))
+    {
+        if (CheckTokenMembership(hToken, pAdminSid, &bMember) && bMember)
+            bAdmin = TRUE;
+        else if (CheckTokenMembership(hToken, pSystemSid, &bMember) && bMember)
+            bAdmin = TRUE;
+        CloseHandle(hToken);
+    }
+
+    RpcRevertToSelf();
+
+done:
+    FreeSid(pSystemSid);
+    FreeSid(pAdminSid);
+    return bAdmin;
+}
+
+
 VOID
 __RPC_USER
 PNP_NOTIFY_HANDLE_rundown(
@@ -3394,6 +3444,63 @@ done:
 }
 
 
+/* Tells whether CONFIGFLAG_DISABLED is set in the ConfigFlags of the device's instance key */
+static BOOL
+IsDeviceConfigDisabled(
+    _In_ HKEY hDeviceKey)
+{
+    DWORD dwConfigFlags, dwSize = sizeof(dwConfigFlags), dwType;
+
+    return RegQueryValueExW(hDeviceKey,
+                            L"ConfigFlags",
+                            NULL,
+                            &dwType,
+                            (LPBYTE)&dwConfigFlags,
+                            &dwSize) == ERROR_SUCCESS &&
+           dwType == REG_DWORD &&
+           (dwConfigFlags & CONFIGFLAG_DISABLED);
+}
+
+
+/* Enabling a device also takes back the global disable that SetupDiChangeState(DICS_DISABLE)
+ * recorded in its instance key, so that the device starts at the next boot too (Windows does
+ * the same for CM_Enable_DevNode) */
+static VOID
+ClearDeviceConfigDisabled(
+    _In_ LPWSTR pszDeviceInstance)
+{
+    HKEY hDeviceKey;
+    DWORD dwConfigFlags, dwSize = sizeof(dwConfigFlags), dwType;
+
+    if (RegOpenKeyExW(hEnumKey,
+                      pszDeviceInstance,
+                      0,
+                      KEY_QUERY_VALUE | KEY_SET_VALUE,
+                      &hDeviceKey) != ERROR_SUCCESS)
+        return;
+
+    if (RegQueryValueExW(hDeviceKey,
+                         L"ConfigFlags",
+                         NULL,
+                         &dwType,
+                         (LPBYTE)&dwConfigFlags,
+                         &dwSize) == ERROR_SUCCESS &&
+        dwType == REG_DWORD &&
+        (dwConfigFlags & CONFIGFLAG_DISABLED))
+    {
+        dwConfigFlags &= ~CONFIGFLAG_DISABLED;
+        RegSetValueExW(hDeviceKey,
+                       L"ConfigFlags",
+                       0,
+                       REG_DWORD,
+                       (LPBYTE)&dwConfigFlags,
+                       sizeof(dwConfigFlags));
+    }
+
+    RegCloseKey(hDeviceKey);
+}
+
+
 static CONFIGRET
 SetupDeviceInstance(
     _In_ LPWSTR pszDeviceInstance,
@@ -3441,6 +3548,12 @@ SetupDeviceInstance(
         goto done;
     }
 
+    /* A disabled device is not started by an installation or a driver update */
+    if (IsDeviceConfigDisabled(hDeviceKey))
+    {
+        goto done;
+    }
+
     GetDeviceStatus(pszDeviceInstance,
                     &ulStatus,
                     &ulProblem);
@@ -3452,6 +3565,10 @@ SetupDeviceInstance(
 
     if (ulStatus & DN_HAS_PROBLEM)
     {
+        /* An installation or a driver update does not enable a disabled device */
+        if (ulProblem == CM_PROB_DISABLED)
+            goto done;
+
         ret = ClearDeviceStatus(pszDeviceInstance,
                                 DN_HAS_PROBLEM,
                                 ulProblem);
@@ -3487,6 +3604,10 @@ EnableDeviceInstance(
     NTSTATUS Status;
 
     DPRINT("Enable device instance %S\n", pszDeviceInstance);
+
+    /* The flag goes before the enable is tried, as on Windows: an enable that fails to start
+     * does not bring the disable back at the next boot, which would try the start again */
+    ClearDeviceConfigDisabled(pszDeviceInstance);
 
     /* Nothing to do for a device that is running */
     if (GetDeviceStatus(pszDeviceInstance, &ulStatus, &ulProblem) == CR_SUCCESS &&
@@ -3563,6 +3684,12 @@ PNP_DeviceInstanceAction(
             break;
 
         case PNP_DEVINST_ENABLE:
+            /* Changing the state of a device takes an administrator */
+            if (!IsCallerAdmin(hBinding))
+            {
+                ret = CR_ACCESS_DENIED;
+                break;
+            }
             ret = EnableDeviceInstance(pszDeviceInstance1);
             break;
 
@@ -3672,8 +3799,6 @@ PNP_SetDeviceProblem(
     ULONG ulOldStatus, ulOldProblem;
     CONFIGRET ret = CR_SUCCESS;
 
-    UNREFERENCED_PARAMETER(hBinding);
-
     DPRINT1("PNP_SetDeviceProblem(%p %S %lu 0x%08lx)\n",
            hBinding, pDeviceID, ulProblem, ulFlags);
 
@@ -3683,11 +3808,20 @@ PNP_SetDeviceProblem(
     if (!IsValidDeviceInstanceID(pDeviceID))
         return CR_INVALID_DEVINST;
 
+    if (!IsCallerAdmin(hBinding))
+        return CR_ACCESS_DENIED;
+
     ret = GetDeviceStatus(pDeviceID,
                           &ulOldStatus,
                           &ulOldProblem);
     if (ret != CR_SUCCESS)
         return ret;
+
+    /* Windows refuses to put a problem on a device that runs (CR_INVALID_DATA, measured), and
+     * CM_PROB_DISABLED is not for a caller to set: the device would be stranded with it */
+    if (ulProblem != 0 &&
+        ((ulOldStatus & DN_STARTED) || ulProblem == CM_PROB_DISABLED))
+        return CR_INVALID_DATA;
 
     if (((ulFlags & CM_SET_DEVNODE_PROBLEM_OVERRIDE) == 0) &&
         (ulOldProblem != 0) &&
@@ -3735,6 +3869,10 @@ PNP_DisableDevInst(
     if (!IsValidDeviceInstanceID(pDeviceID) ||
         IsRootDeviceInstanceID(pDeviceID))
         return CR_INVALID_DEVINST;
+
+    /* Changing the state of a device takes an administrator */
+    if (!IsCallerAdmin(hBinding))
+        return CR_ACCESS_DENIED;
 
     return DisableDeviceInstance(pDeviceID,
                                  pVetoType,
