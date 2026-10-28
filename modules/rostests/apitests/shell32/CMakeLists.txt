@@ -27,6 +27,7 @@ list(APPEND SOURCE
     LockServer.cpp
     Int64ToString.cpp
     IApplicationAssociationRegistration.cpp
+    IDestinationList.cpp
     IQueryAssociations.cpp
     IShellFolderViewCB.cpp
     ItemIDList.cpp

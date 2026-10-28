@@ -163,6 +163,7 @@ list(APPEND IDL_SOURCES
     msdadc.idl
     mstask.idl
     netfw.idl
+    objectarray.idl
     oledb.idl
     propsys.idl
     pstore.idl
