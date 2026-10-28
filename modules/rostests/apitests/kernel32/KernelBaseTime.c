@@ -21,6 +21,19 @@ static FN_QueryTime pQueryInterruptTimePrecise;
 static FN_QueryTime pQueryUnbiasedInterruptTimePrecise;
 static BOOL (WINAPI *pQueryUnbiasedInterruptTime)(PULONGLONG);
 
+/* shlwapi imports kernelbase.dll: the module is in the process once shlwapi is loaded, with no LoadLibrary of its own */
+static void
+test_StaticImport(void)
+{
+    HMODULE Shlwapi = LoadLibraryW(L"shlwapi.dll");
+
+    ok(Shlwapi != NULL, "shlwapi.dll does not load, error %lu\n", GetLastError());
+    if (Shlwapi == NULL)
+        return;
+    ok(GetModuleHandleW(L"kernelbase.dll") != NULL, "kernelbase.dll is not loaded after shlwapi.dll\n");
+    FreeLibrary(Shlwapi);
+}
+
 static void
 test_Load(void)
 {
@@ -278,6 +291,7 @@ test_ClockAdjust(FN_QueryTime Precise, const char *Name)
 
 START_TEST(KernelBaseTime)
 {
+    test_StaticImport();
     test_Load();
     if (g_Module == NULL)
         return;

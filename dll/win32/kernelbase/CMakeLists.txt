@@ -26,10 +26,6 @@ add_importlibs(kernelbase_ros msvcrt advapi32 advapi32_vista kernel32 kernel32_v
 add_dependencies(kernelbase_ros psdk errcodes)
 add_cd_file(TARGET kernelbase_ros DESTINATION reactos/system32 FOR all)
 
-# Fake import library, so consumers can link against it without needing to know about the actual implementation in kernelbase_ros.dll
-add_library(libkernelbase INTERFACE)
-target_link_libraries(libkernelbase INTERFACE libkernelbase_ros)
-
 # Programs ask for kernelbase.dll by that name (the MSYS2 and Cygwin runtimes load it for the interrupt time functions).
 # The module only forwards every export of kernelbase_ros.dll, so that one copy of the code is loaded.
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/kernelbase_ros.spec
@@ -37,6 +33,7 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${CMAKE_CURRENT_S
 file(STRINGS kernelbase_ros.spec _kernelbase_spec REGEX "^@ stdcall ")
 math(EXPR _kernelbase_version "${DLL_EXPORT_VERSION}")
 set(_kernelbase_def "; File generated automatically, do not edit!\n\nNAME kernelbase.dll\n\nEXPORTS\n")
+set(_kernelbase_implib_spec "# File generated automatically, do not edit!\n")
 foreach(_line IN LISTS _kernelbase_spec)
     set(_min 0)
     if(_line MATCHES "^@ stdcall -version=(0x[0-9a-fA-F]+)\\+")
@@ -48,6 +45,7 @@ foreach(_line IN LISTS _kernelbase_spec)
     endif()
     if(_line MATCHES "^@ stdcall (-[^ ]+ )?([A-Za-z0-9_]+)\\(")
         string(APPEND _kernelbase_def " ${CMAKE_MATCH_2}=kernelbase_ros.${CMAKE_MATCH_2}\n")
+        string(APPEND _kernelbase_implib_spec "${_line}\n")
     endif()
 endforeach()
 
@@ -63,6 +61,7 @@ set(_kernel32_names)
 foreach(_line IN LISTS _kernel32_spec)
     if(_line MATCHES "^@ [a-z]+ (-[^ ]+ )*([A-Za-z0-9_@]+)[ (]")
         list(APPEND _kernel32_names ${CMAKE_MATCH_2})
+        string(APPEND _kernel32_line_${CMAKE_MATCH_2} "${_line}\n")
     endif()
 endforeach()
 file(STRINGS kernelbase_fwd.lst _kernelbase_fwd REGEX "^@ ")
@@ -101,8 +100,20 @@ foreach(_line IN LISTS _kernelbase_fwd)
         message(FATAL_ERROR "kernelbase_fwd.lst: ${_name} is already exported through kernelbase_ros")
     endif()
     string(APPEND _kernelbase_def " ${_name}=kernel32.${_name}\n")
+    # the import library needs the argument sizes (stdcall decoration on i386), which only the kernel32 spec line has
+    # (all of them: the version/arch variants of one name are separate spec lines)
+    # (-private would keep them out of the library: kernel32 only hides them from its own import library)
+    string(REPLACE " -private" "" _k32lines "${_kernel32_line_${_name}}")
+    string(APPEND _kernelbase_implib_spec "${_k32lines}")
 endforeach()
 file(GENERATE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/kernelbase.def CONTENT "${_kernelbase_def}")
+
+# Import library of kernelbase.dll for the modules that import it statically (shlwapi, vbscript). It has exactly the exports of
+# kernelbase.def above: both come from the same spec lines, the implib spec just keeps the argument lists. The imports then resolve
+# through the forwarders, which load kernelbase_ros.dll (kernelbase.dll itself is not an import of kernel32: that would be a cycle).
+file(GENERATE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/kernelbase_implib.spec CONTENT "${_kernelbase_implib_spec}")
+file(RELATIVE_PATH _kernelbase_implib_spec_rel ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/kernelbase_implib.spec)
+generate_import_lib(libkernelbase kernelbase.dll ${_kernelbase_implib_spec_rel} "--version=${DLL_EXPORT_VERSION}" "")
 
 add_library(kernelbase MODULE
     kernelbase.rc

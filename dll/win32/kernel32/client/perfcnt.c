@@ -105,11 +105,15 @@ QueryUnbiasedInterruptTime(
 #define BASEP_PRECISE_TICK  156250LL    /* 15.6 ms in 100 ns units */
 #define BASEP_PRECISE_UNSET MINLONGLONG
 
+/* The unbiased interrupt time, read the same way as in QueryUnbiasedInterruptTime */
 static
 LONGLONG
 BasepReadInterruptTimeK(VOID)
 {
-    return KiReadSystemTime(&SharedUserData->InterruptTime).QuadPart;
+    ULONGLONG UnbiasedTime;
+
+    QueryUnbiasedInterruptTime(&UnbiasedTime);
+    return (LONGLONG)UnbiasedTime;
 }
 
 /*
@@ -196,8 +200,8 @@ BasepQueryPrecise(VOID)
 /*
  * @implemented
  *
- * The shared user data of this system has no bias for time spent in sleep and hibernation, so the unbiased time is
- * the interrupt time.
+ * The unbiased time is the interrupt time minus the bias for time spent in sleep and hibernation (the bias is zero
+ * while the kernel does not set it, and absent from the shared user data before NT 6).
  */
 VOID
 WINAPI
