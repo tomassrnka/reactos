@@ -4556,7 +4556,7 @@ MmMapViewOfSection(
     SIZE_T Unassigned, ViewCommit;
 
     if (!MiZeroBitsToHighestAddress(ZeroBits, &HighestAddress))
-        return STATUS_INVALID_PARAMETER_4;
+        return MI_PARAM_STATUS(4);
 
     if (MiIsRosSectionObject(SectionObject) == FALSE)
     {

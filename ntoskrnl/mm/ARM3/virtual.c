@@ -4887,7 +4887,7 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
         (ZeroBits > 32 && ZeroBits < MM_VIRTMEM_GRANULARITY - 1))
     {
         DPRINT1("Too many zero bits\n");
-        return STATUS_INVALID_PARAMETER_3;
+        return MI_PARAM_STATUS(3);
     }
 
     /* Check for valid Allocation Types */

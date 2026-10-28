@@ -191,7 +191,7 @@ Test_PageFileSection(void)
     }
     else
     {
-        ok_ntstatus(Status, STATUS_INVALID_PARAMETER_4);
+        ok_ntstatus(Status, (GetNTVersion() >= _WIN32_WINNT_WIN10) ? STATUS_INVALID_PARAMETER : STATUS_INVALID_PARAMETER_4);
         if (!NT_SUCCESS(Status))
         {
             NtClose(SectionHandle);
