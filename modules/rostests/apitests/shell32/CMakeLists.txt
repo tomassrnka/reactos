@@ -14,6 +14,7 @@ list(APPEND SOURCE
     CShellDispatch.cpp
     CShellItem.cpp
     CShellLink.cpp
+    CShellLinkPropertyStore.cpp
     #CUserNotification.cpp # Test is broken on Win 2003
     Control_RunDLLW.cpp
     DragDrop.cpp
