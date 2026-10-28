@@ -98,8 +98,8 @@ private:
 
     LPWSTR        m_sLinkPath;
 
-    /* Properties set through IPropertyStore (System.AppUserModel.ID and friends). They are kept for the life
-       of the object; they are not written to the .lnk file. */
+    /* Properties set through IPropertyStore (System.AppUserModel.ID and friends). They are loaded from and saved
+       to the PropertyStoreDataBlock (EXP_PROPERTYSTORAGE_SIG) of the .lnk file. */
     struct LINKPROP
     {
         PROPERTYKEY key;
@@ -110,6 +110,8 @@ private:
     ULONG         m_cPropsAlloc;
 
     VOID FreeProperties();
+    VOID LoadPropertyBlock();
+    HRESULT SavePropertyBlock();
     LINKPROP *FindProperty(REFPROPERTYKEY key);
 
     CComPtr<IUnknown>    m_site;

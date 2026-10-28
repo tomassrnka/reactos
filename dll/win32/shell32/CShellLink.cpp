@@ -344,6 +344,336 @@ CShellLink::LINKPROP *CShellLink::FindProperty(REFPROPERTYKEY key)
     return NULL;
 }
 
+/* PropertyStoreDataBlock (EXP_PROPERTYSTORAGE_SIG): a list of serialized property storages ([MS-PROPSTORE] 2.2).
+ *   block:   DWORD cbSize, DWORD 0xA0000009, storage..., DWORD 0
+ *   storage: DWORD cbStorage, DWORD 0x53505331 ("1SPS"), GUID fmtid, value..., DWORD 0
+ *   value:   DWORD cbValue, DWORD pid, BYTE 0, WORD vt, WORD 0, data   (cbValue counts the whole value)
+ * Storages that are keyed by name (FMTID_NamedProperties) and value types other than the common scalar, string and
+ * CLSID ones are not interpreted; they are dropped when the link is saved again. */
+#define PSB_VERSION 0x53505331
+
+static const GUID FMTID_PSBNamed = { 0xD5CDD505, 0x2E9C, 0x101B, { 0x93, 0x97, 0x08, 0x00, 0x2B, 0x2C, 0xF9, 0xAE } };
+
+static inline DWORD PSB_ReadDword(const BYTE *p)
+{
+    DWORD d;
+    CopyMemory(&d, p, sizeof(d));
+    return d;
+}
+
+static inline WORD PSB_ReadWord(const BYTE *p)
+{
+    WORD w;
+    CopyMemory(&w, p, sizeof(w));
+    return w;
+}
+
+/* Decode one typed value of cbData bytes; returns FALSE for a type that is not handled or malformed data. */
+static BOOL PSB_DecodeValue(WORD vt, const BYTE *p, DWORD cbData, PROPVARIANT *pv)
+{
+    PropVariantInit(pv);
+    switch (vt)
+    {
+        case VT_EMPTY:
+        case VT_NULL:
+            pv->vt = vt;
+            return TRUE;
+        case VT_I2:
+        case VT_UI2:
+        case VT_BOOL:
+            if (cbData < 2)
+                return FALSE;
+            pv->vt = vt;
+            pv->uiVal = PSB_ReadWord(p);
+            return TRUE;
+        case VT_I4:
+        case VT_UI4:
+        case VT_INT:
+        case VT_UINT:
+            if (cbData < 4)
+                return FALSE;
+            pv->vt = vt;
+            pv->ulVal = PSB_ReadDword(p);
+            return TRUE;
+        case VT_I8:
+        case VT_UI8:
+        case VT_FILETIME:
+            if (cbData < 8)
+                return FALSE;
+            pv->vt = vt;
+            CopyMemory(&pv->uhVal, p, 8);
+            return TRUE;
+        case VT_CLSID:
+            if (cbData < sizeof(GUID))
+                return FALSE;
+            pv->puuid = (CLSID *)CoTaskMemAlloc(sizeof(GUID));
+            if (!pv->puuid)
+                return FALSE;
+            CopyMemory(pv->puuid, p, sizeof(GUID));
+            pv->vt = vt;
+            return TRUE;
+        case VT_LPWSTR:
+        {
+            DWORD cch;
+            if (cbData < 4)
+                return FALSE;
+            cch = PSB_ReadDword(p);
+            if (cch > (cbData - 4) / sizeof(WCHAR))
+                return FALSE;
+            pv->pwszVal = (LPWSTR)CoTaskMemAlloc((cch + 1) * sizeof(WCHAR));
+            if (!pv->pwszVal)
+                return FALSE;
+            CopyMemory(pv->pwszVal, p + 4, cch * sizeof(WCHAR));
+            pv->pwszVal[cch] = UNICODE_NULL; /* the stored length normally includes the terminator */
+            pv->vt = vt;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+VOID CShellLink::LoadPropertyBlock()
+{
+    DATABLOCK_HEADER *pBlock = SHFindDataBlock(m_pDBList, EXP_PROPERTYSTORAGE_SIG);
+    if (!pBlock || pBlock->cbSize < sizeof(DATABLOCK_HEADER) + sizeof(DWORD))
+        return;
+
+    const BYTE *p = (const BYTE *)pBlock + sizeof(DATABLOCK_HEADER);
+    const BYTE *end = (const BYTE *)pBlock + pBlock->cbSize;
+    BOOL bDirty = m_bDirty;
+
+    while ((SIZE_T)(end - p) >= sizeof(DWORD))
+    {
+        DWORD cbStorage = PSB_ReadDword(p);
+        if (cbStorage == 0)
+            break; /* end of the list */
+        if (cbStorage < 24 + sizeof(DWORD) || cbStorage > (SIZE_T)(end - p))
+            break;
+
+        GUID fmtid;
+        CopyMemory(&fmtid, p + 8, sizeof(fmtid));
+        BOOL bUsable = PSB_ReadDword(p + 4) == PSB_VERSION && !IsEqualGUID(fmtid, FMTID_PSBNamed);
+
+        /* Walk the values up to their zero terminator: writers differ on whether cbStorage counts it, and the
+         * value layout (a size first) is the same for numeric and named properties */
+        const BYTE *v = p + 24;
+        while ((SIZE_T)(end - v) >= sizeof(DWORD))
+        {
+            DWORD cbValue = PSB_ReadDword(v);
+            if (cbValue == 0)
+            {
+                v += sizeof(DWORD);
+                break;
+            }
+            if (cbValue < 13 || cbValue > (SIZE_T)(end - v))
+            {
+                v = end; /* damaged block: stop */
+                break;
+            }
+
+            if (bUsable)
+            {
+                PROPERTYKEY key;
+                PROPVARIANT var;
+                key.fmtid = fmtid;
+                key.pid = PSB_ReadDword(v + 4);
+                if (PSB_DecodeValue(PSB_ReadWord(v + 9), v + 13, cbValue - 13, &var))
+                {
+                    SetValue(key, var);
+                    PropVariantClear(&var);
+                }
+            }
+            v += cbValue;
+        }
+        p = v;
+    }
+
+    m_bDirty = bDirty;
+}
+
+struct PSB_BUFFER
+{
+    BYTE *pb;
+    DWORD cb;
+    DWORD cbAlloc;
+};
+
+static BOOL PSB_Append(PSB_BUFFER *buf, const void *data, DWORD cb)
+{
+    if (buf->cb + cb > buf->cbAlloc)
+    {
+        DWORD cbNew = max(buf->cbAlloc * 2, buf->cb + cb + 64);
+        BYTE *pNew = (BYTE *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, cbNew);
+        if (!pNew)
+            return FALSE;
+        if (buf->pb)
+            CopyMemory(pNew, buf->pb, buf->cb);
+        HeapFree(GetProcessHeap(), 0, buf->pb);
+        buf->pb = pNew;
+        buf->cbAlloc = cbNew;
+    }
+    if (cb)
+    {
+        if (data)
+            CopyMemory(buf->pb + buf->cb, data, cb);
+        else
+            ZeroMemory(buf->pb + buf->cb, cb);
+    }
+    buf->cb += cb;
+    return TRUE;
+}
+
+/* Append a serialized value for pv, or nothing for a type that cannot be stored. *pbWritten tells which. */
+static BOOL PSB_AppendValue(PSB_BUFFER *buf, DWORD pid, const PROPVARIANT *pv, BOOL *pbWritten)
+{
+    const void *data = NULL;
+    DWORD cbData = 0, cbStr = 0, cch = 0;
+    const DWORD zero = 0;
+
+    *pbWritten = FALSE;
+    switch (pv->vt)
+    {
+        case VT_EMPTY:
+        case VT_NULL:
+            break;
+        case VT_I2:
+        case VT_UI2:
+        case VT_BOOL:
+            data = &pv->uiVal;
+            cbData = 4; /* two bytes of value, two of padding */
+            break;
+        case VT_I4:
+        case VT_UI4:
+        case VT_INT:
+        case VT_UINT:
+            data = &pv->ulVal;
+            cbData = 4;
+            break;
+        case VT_I8:
+        case VT_UI8:
+        case VT_FILETIME:
+            data = &pv->uhVal;
+            cbData = 8;
+            break;
+        case VT_CLSID:
+            if (!pv->puuid)
+                return TRUE;
+            data = pv->puuid;
+            cbData = sizeof(GUID);
+            break;
+        case VT_LPWSTR:
+            if (!pv->pwszVal)
+                return TRUE;
+            cch = lstrlenW(pv->pwszVal) + 1;
+            cbStr = (cch * sizeof(WCHAR) + 3) & ~3; /* a string is padded to a DWORD boundary */
+            cbData = sizeof(DWORD) + cbStr;
+            break;
+        default:
+            return TRUE;
+    }
+
+    DWORD cbValue = 13 + cbData;
+    const BYTE head[4 + 4 + 1] = { 0 };
+    WORD vt = pv->vt, pad = 0;
+    if (!PSB_Append(buf, &cbValue, 4) || !PSB_Append(buf, &pid, 4) || !PSB_Append(buf, head, 1) ||
+        !PSB_Append(buf, &vt, 2) || !PSB_Append(buf, &pad, 2))
+        return FALSE;
+    if (pv->vt == VT_LPWSTR)
+    {
+        if (!PSB_Append(buf, &cch, 4) || !PSB_Append(buf, pv->pwszVal, cch * sizeof(WCHAR)) ||
+            !PSB_Append(buf, NULL, cbStr - cch * sizeof(WCHAR)))
+            return FALSE;
+    }
+    else if (cbData)
+    {
+        if (pv->vt == VT_I2 || pv->vt == VT_UI2 || pv->vt == VT_BOOL)
+        {
+            if (!PSB_Append(buf, data, 2) || !PSB_Append(buf, &zero, 2))
+                return FALSE;
+        }
+        else if (!PSB_Append(buf, data, cbData))
+            return FALSE;
+    }
+    *pbWritten = TRUE;
+    return TRUE;
+}
+
+/* Rebuild the property data block from the in-memory properties. */
+HRESULT CShellLink::SavePropertyBlock()
+{
+    HRESULT hr = S_OK;
+    PSB_BUFFER buf = { NULL, 0, 0 };
+    BOOL *pDone = NULL;
+    const DWORD zero = 0;
+
+    SHRemoveDataBlock(&m_pDBList, EXP_PROPERTYSTORAGE_SIG);
+    if (!m_cProps)
+        return S_OK;
+
+    pDone = (BOOL *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, m_cProps * sizeof(BOOL));
+    if (!pDone)
+        return E_OUTOFMEMORY;
+
+    const DWORD sig = EXP_PROPERTYSTORAGE_SIG, version = PSB_VERSION;
+    if (!PSB_Append(&buf, NULL, 4) || !PSB_Append(&buf, &sig, 4)) /* the size is filled in below */
+    {
+        hr = E_OUTOFMEMORY;
+        goto done;
+    }
+
+    for (ULONG i = 0; i < m_cProps; ++i)
+    {
+        if (pDone[i])
+            continue;
+
+        DWORD ibStorage = buf.cb, nValues = 0;
+        BOOL ok = PSB_Append(&buf, NULL, 4) && PSB_Append(&buf, &version, 4) &&
+                  PSB_Append(&buf, &m_pProps[i].key.fmtid, sizeof(GUID));
+        for (ULONG j = i; ok && j < m_cProps; ++j)
+        {
+            BOOL bWritten;
+            if (pDone[j] || !IsEqualGUID(m_pProps[j].key.fmtid, m_pProps[i].key.fmtid))
+                continue;
+            pDone[j] = TRUE;
+            ok = PSB_AppendValue(&buf, m_pProps[j].key.pid, &m_pProps[j].var, &bWritten);
+            nValues += bWritten;
+        }
+        ok = ok && PSB_Append(&buf, &zero, 4);
+        if (!ok)
+        {
+            hr = E_OUTOFMEMORY;
+            goto done;
+        }
+        if (nValues)
+        {
+            DWORD cbStorage = buf.cb - ibStorage;
+            CopyMemory(buf.pb + ibStorage, &cbStorage, 4);
+        }
+        else
+        {
+            buf.cb = ibStorage; /* nothing storable in this format id */
+        }
+    }
+
+    if (buf.cb == 8)
+        goto done; /* no storable property at all */
+
+    /* The list terminator, then pad the block to a DWORD multiple as SHAddDataBlock wants */
+    if (!PSB_Append(&buf, &zero, 4) || !PSB_Append(&buf, NULL, (4 - (buf.cb & 3)) & 3))
+    {
+        hr = E_OUTOFMEMORY;
+        goto done;
+    }
+    CopyMemory(buf.pb, &buf.cb, 4);
+    if (!SHAddDataBlock(&m_pDBList, (DATABLOCK_HEADER *)buf.pb))
+        hr = E_FAIL;
+
+done:
+    HeapFree(GetProcessHeap(), 0, pDone);
+    HeapFree(GetProcessHeap(), 0, buf.pb);
+    return hr;
+}
+
 /* IPropertyStore: Chrome's installer sets System.AppUserModel.ID and ToastActivatorCLSID on every
  * shortcut it creates and treats a missing interface as a failed shortcut. */
 HRESULT STDMETHODCALLTYPE CShellLink::GetCount(DWORD *cProps)
@@ -862,6 +1192,9 @@ HRESULT STDMETHODCALLTYPE CShellLink::Load(IStream *stm)
     if (FAILED(hr)) // FIXME: Should we fail?
         return hr;
 
+    /* Properties stored in the PropertyStoreDataBlock become the IPropertyStore values of the link */
+    LoadPropertyBlock();
+
     LPEXP_SPECIAL_FOLDER pSpecial = (LPEXP_SPECIAL_FOLDER)SHFindDataBlock(m_pDBList, EXP_SPECIAL_FOLDER_SIG);
     if (pSpecial && pSpecial->cbSize == sizeof(*pSpecial) && ILGetSize(m_pPidl) > pSpecial->cbOffset)
     {
@@ -1134,6 +1467,11 @@ HRESULT STDMETHODCALLTYPE CShellLink::Save(IStream *stm, BOOL fClearDirty)
      * inside Logo3 and Darwin data blocks in the m_pDBList list, and the
      * m_Header.dwFlags is suitably initialized.
      */
+    /* Refresh the PropertyStoreDataBlock from the IPropertyStore values */
+    hr = SavePropertyBlock();
+    if (FAILED(hr))
+        return hr;
+
     hr = SHWriteDataBlockList(stm, m_pDBList);
     if (FAILED(hr))
         return hr;
@@ -2551,6 +2889,9 @@ HRESULT STDMETHODCALLTYPE CShellLink::AddDataBlock(void* pDataBlock)
 {
     if (SHAddDataBlock(&m_pDBList, (DATABLOCK_HEADER*)pDataBlock))
     {
+        /* The properties of a property storage block are the values of the link's IPropertyStore */
+        if (((DATABLOCK_HEADER*)pDataBlock)->dwSignature == EXP_PROPERTYSTORAGE_SIG)
+            LoadPropertyBlock();
         m_bDirty = TRUE;
         return S_OK;
     }

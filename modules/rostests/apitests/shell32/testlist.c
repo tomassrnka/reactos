@@ -15,6 +15,7 @@ extern void func_CShellDesktop(void);
 extern void func_CShellDispatch(void);
 extern void func_CShellItem(void);
 extern void func_CShellLink(void);
+extern void func_CShellLinkPropertyStore(void);
 extern void func_CUserNotification(void);
 extern void func_DragDrop(void);
 extern void func_DriveTools(void);
@@ -95,6 +96,7 @@ const struct test winetest_testlist[] =
     { "CShellDispatch", func_CShellDispatch },
     { "CShellItem", func_CShellItem },
     { "CShellLink", func_CShellLink },
+    { "CShellLinkPropertyStore", func_CShellLinkPropertyStore },
     //{ "CUserNotification", func_CUserNotification }, // Test is broken on Win 2003
     { "DragDrop", func_DragDrop },
     { "DriveTools", func_DriveTools },
