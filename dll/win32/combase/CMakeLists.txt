@@ -6,6 +6,11 @@ include_directories(${REACTOS_SOURCE_DIR}/sdk/include/wine)
 spec2def(combase.dll combase.spec ADD_IMPORTLIB)
 add_idl_headers(combase_idlheader dcom.idl)
 add_rpc_files(client irpcss.idl)
+# irpcss.idl includes these: the generated client stub is stale unless it depends on them too
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/irpcss_c.c ${CMAKE_CURRENT_BINARY_DIR}/irpcss_c.h
+    APPEND
+    DEPENDS ${REACTOS_SOURCE_DIR}/sdk/include/wine/irot.idl ${REACTOS_SOURCE_DIR}/sdk/include/wine/irpcss.idl)
 
 list(APPEND SOURCE
     apartment.c

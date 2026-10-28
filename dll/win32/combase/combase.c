@@ -3260,10 +3260,12 @@ HRESULT WINAPI CoLockObjectExternal(IUnknown *object, BOOL lock, BOOL last_unloc
         return S_OK;
     }
 
+    /* The lock is the process's own reference, not a client's: it must not be counted
+     * for the surrogate's idle exit (an unbalanced unlock would unbalance the count). */
     if (lock)
-        stub_manager_ext_addref(stubmgr, 1, FALSE);
+        stub_manager_ext_addref_internal(stubmgr, 1);
     else
-        stub_manager_ext_release(stubmgr, 1, FALSE, last_unlock_releases);
+        stub_manager_ext_release_internal(stubmgr, 1, last_unlock_releases);
 
     stub_manager_int_release(stubmgr);
     apartment_release(apt);

@@ -223,6 +223,7 @@ static struct stub_manager *new_stub_manager(struct apartment *apt, IUnknown *ob
      * the marshalled ifptr.
      */
     sm->extrefs = 0;
+    sm->counted_refs = 0;
     sm->disconnected = FALSE;
 
     hres = IUnknown_QueryInterface(object, &IID_IExternalConnection, (void**)&sm->extern_conn);
@@ -239,6 +240,8 @@ static struct stub_manager *new_stub_manager(struct apartment *apt, IUnknown *ob
     return sm;
 }
 
+static void stub_manager_uncount_refs(struct stub_manager *m);
+
 void stub_manager_disconnect(struct stub_manager *m)
 {
     struct ifstub *ifstub;
@@ -252,6 +255,8 @@ void stub_manager_disconnect(struct stub_manager *m)
         m->disconnected = TRUE;
     }
     LeaveCriticalSection(&m->lock);
+
+    stub_manager_uncount_refs(m);
 }
 
 /* caller must remove stub manager from apartment prior to calling this function */
@@ -260,6 +265,8 @@ static void stub_manager_delete(struct stub_manager *m)
     struct list *cursor;
 
     TRACE("destroying %p (oid=%s)\n", m, wine_dbgstr_longlong(m->oid));
+
+    stub_manager_uncount_refs(m);
 
     /* release every ifstub */
     while ((cursor = list_head(&m->ifstubs)))
@@ -421,6 +428,10 @@ void stub_manager_set_surrogate(ISurrogate *surrogate)
     if (old) ISurrogate_Release(old);
 }
 
+/* Each stub manager tracks how many of its external references are counted in
+ * surrogate_extrefs (m->counted_refs), so that what it drops without a client
+ * releasing it (disconnect, destruction) is taken back exactly, and so that
+ * releases never take back more than was counted. */
 static void surrogate_extrefs_changed(LONG delta)
 {
     ISurrogate *surrogate = NULL;
@@ -438,6 +449,20 @@ static void surrogate_extrefs_changed(LONG delta)
     ISurrogate_Release(surrogate);
 }
 
+/* the clients of a disconnected or destroyed stub are gone: stop counting their references */
+static void stub_manager_uncount_refs(struct stub_manager *m)
+{
+    ULONG counted;
+
+    EnterCriticalSection(&m->lock);
+    counted = m->counted_refs;
+    m->counted_refs = 0;
+    LeaveCriticalSection(&m->lock);
+
+    if (counted)
+        surrogate_extrefs_changed(-(LONG)counted);
+}
+
 static ULONG ext_addref(struct stub_manager *m, ULONG refs, BOOL tableweak, BOOL table)
 {
     BOOL first_extern_ref;
@@ -450,6 +475,8 @@ static ULONG ext_addref(struct stub_manager *m, ULONG refs, BOOL tableweak, BOOL
     /* make sure we don't overflow extrefs */
     refs = min(refs, (ULONG_MAX-1 - m->extrefs));
     rc = (m->extrefs += refs);
+    if (!table)
+        m->counted_refs += refs;
 
     if (tableweak)
         rc += ++m->weakrefs;
@@ -487,7 +514,7 @@ ULONG stub_manager_ext_addref_internal(struct stub_manager *m, ULONG refs)
 static ULONG ext_release(struct stub_manager *m, ULONG refs, BOOL tableweak, BOOL last_unlock_releases, BOOL table)
 {
     BOOL last_extern_ref;
-    ULONG rc;
+    ULONG rc, counted = 0;
 
     EnterCriticalSection(&m->lock);
 
@@ -502,10 +529,16 @@ static ULONG ext_release(struct stub_manager *m, ULONG refs, BOOL tableweak, BOO
 
     last_extern_ref = refs && !m->extrefs;
 
+    if (!table)
+    {
+        counted = min(refs, m->counted_refs);
+        m->counted_refs -= counted;
+    }
+
     LeaveCriticalSection(&m->lock);
 
-    if (!table && refs)
-        surrogate_extrefs_changed(-(LONG)refs);
+    if (counted)
+        surrogate_extrefs_changed(-(LONG)counted);
 
     TRACE("removed %lu refs from %p (oid %s), rc is now %lu\n", refs, m, wine_dbgstr_longlong(m->oid), rc);
 
@@ -523,6 +556,12 @@ static ULONG ext_release(struct stub_manager *m, ULONG refs, BOOL tableweak, BOO
 ULONG stub_manager_ext_release(struct stub_manager *m, ULONG refs, BOOL tableweak, BOOL last_unlock_releases)
 {
     return ext_release(m, refs, tableweak, last_unlock_releases, FALSE);
+}
+
+/* remove references of the process itself (see stub_manager_ext_addref_internal) */
+ULONG stub_manager_ext_release_internal(struct stub_manager *m, ULONG refs, BOOL last_unlock_releases)
+{
+    return ext_release(m, refs, FALSE, last_unlock_releases, TRUE);
 }
 
 /* gets the stub manager associated with an ipid - caller must have

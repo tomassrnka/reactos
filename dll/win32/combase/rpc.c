@@ -750,11 +750,19 @@ HRESULT rpc_get_local_class_object(REFCLSID rclsid, REFIID riid, void **obj)
     HRESULT hr;
 
     /* rpcss drops the registrations of a process when it dies, which can take a moment
-     * after the process is gone; the next try then finds nothing and starts a new server. */
+     * after the process is gone; the next try then finds nothing and starts a new server.
+     * The retries are bounded: a server that keeps dying in QueryService (a crash, rather than
+     * a stale registration) is relaunched at most 51 times before the error is returned.
+     * The pause pumps messages, so an STA caller stays responsive. */
     while (is_dead_server_error(hr = rpc_get_local_class_object_once(rclsid, riid, obj)) && retries++ < 50)
     {
+        DWORD start_ticks = GetTickCount(), index;
+
         TRACE("server of %s is gone (%#lx), trying again\n", debugstr_guid(rclsid), hr);
-        Sleep(100);
+        do
+        {
+            CoWaitForMultipleHandles(0, 100, 0, NULL, &index);
+        } while (GetTickCount() - start_ticks < 100);
     }
     return hr;
 }

@@ -18,8 +18,7 @@
 
 #pragma makedep client
 
-/* The included IDL files are not dependencies of the generated client stubs: touch this file
- * when wine/irpcss.idl changes (last: context handle for class registrations). */
+/* The included IDL files are dependencies of the generated client stub (see CMakeLists.txt). */
 
 #include "wine/irot.idl"
 #include "wine/irpcss.idl"

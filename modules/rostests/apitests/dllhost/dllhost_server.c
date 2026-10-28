@@ -16,6 +16,7 @@ typedef struct
 {
     IPersist iface;
     LONG ref;
+    LONG calls;
 } Obj;
 
 static HRESULT WINAPI Obj_QueryInterface(IPersist *iface, REFIID riid, void **ppv)
@@ -49,6 +50,11 @@ static HRESULT WINAPI Obj_GetClassID(IPersist *iface, CLSID *pClassID)
 
     *pClassID = guid;
     pClassID->Data1 = GetCurrentProcessId();
+
+    /* The third call disconnects the object from its clients (the test activates, which calls
+     * once, then calls twice more to get a disconnect while it still holds the object). */
+    if (InterlockedIncrement(&((Obj *)iface)->calls) == 3)
+        CoDisconnectObject((IUnknown *)iface, 0);
     return S_OK;
 }
 
@@ -88,6 +94,7 @@ static HRESULT WINAPI Factory_CreateInstance(IClassFactory *iface, IUnknown *out
         return E_OUTOFMEMORY;
     obj->iface.lpVtbl = (IPersistVtbl *)&ObjVtbl;
     obj->ref = 1;
+    obj->calls = 0;
     hr = IPersist_QueryInterface(&obj->iface, riid, ppv);
     IPersist_Release(&obj->iface);
     return hr;

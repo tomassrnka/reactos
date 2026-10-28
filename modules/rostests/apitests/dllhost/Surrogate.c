@@ -137,6 +137,7 @@ static DWORD WINAPI Watchdog(void *param)
 {
     Sleep(240000);
     trace("Surrogate test timed out\n");
+    Unregister();
     ExitProcess(1);
     return 0;
 }
@@ -144,10 +145,11 @@ static DWORD WINAPI Watchdog(void *param)
 START_TEST(Surrogate)
 {
     BOOL clientWow64 = IsWow64(GetCurrentProcess());
-    IPersist *first, *second, *third;
+    IPersist *first, *second, *third, *fourth;
     WCHAR name[MAX_PATH];
     HANDLE process, process2, process3 = NULL;
-    DWORD pid, pid2, pid3, wait;
+    DWORD pid, pid2, pid3, pid4, wait;
+    GUID id;
     HRESULT hr;
 
     CloseHandle(CreateThread(NULL, 0, Watchdog, NULL, 0, NULL));
@@ -244,6 +246,30 @@ START_TEST(Surrogate)
     }
     if (process3)
         CloseHandle(process3);
+
+    /* CoDisconnectObject drops the references of the object's clients: the surrogate
+     * exits although the client still holds a (now dead) proxy. */
+    fourth = Activate(&pid4, &hr);
+    ok(hr == S_OK, "CoCreateInstance for the disconnect case returned %08lx\n", hr);
+    if (fourth)
+    {
+        process = OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE, FALSE, pid4);
+        ok(process != NULL, "OpenProcess failed, error %lu\n", GetLastError());
+        IPersist_GetClassID(fourth, &id);
+        hr = IPersist_GetClassID(fourth, &id); /* the server disconnects the object in this call */
+        trace("call that disconnects the object returned %08lx\n", hr);
+        if (process)
+        {
+            wait = WaitForSingleObject(process, EXIT_TIMEOUT);
+            ok(wait == WAIT_OBJECT_0, "surrogate did not exit after its object was disconnected (%lu)\n", wait);
+            if (wait != WAIT_OBJECT_0)
+                TerminateProcess(process, 0);
+            CloseHandle(process);
+        }
+        hr = IPersist_GetClassID(fourth, &id);
+        ok(FAILED(hr), "call on the disconnected object returned %08lx\n", hr);
+        IPersist_Release(fourth);
+    }
 
 done:
     CoUninitialize();
