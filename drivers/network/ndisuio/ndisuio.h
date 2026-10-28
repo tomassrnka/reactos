@@ -26,9 +26,35 @@ typedef struct _NDISUIO_REQUEST
     NDIS_STATUS Status;
 } NDISUIO_REQUEST, *PNDISUIO_REQUEST;
 
+/* One send and its own completion, as for a request: NDIS completes a pending
+   send through NduSendComplete with its packet, which points to this (in the
+   packet's ProtocolReserved). Several writes can be pending on one adapter, and
+   each waits for its own packet, which the miniport holds until then. */
+typedef struct _NDISUIO_SEND
+{
+    KEVENT Event;
+    NDIS_STATUS Status;
+} NDISUIO_SEND, *PNDISUIO_SEND;
+
+/* A received packet whose data NdisTransferData copies, maybe later
+   (NduTransferDataComplete): the buffer that gets the header and data, in the
+   packet's ProtocolReserved. The transfer holds a reference on the adapter. */
+typedef struct _NDISUIO_TRANSFER
+{
+    PVOID PacketBuffer;
+    ULONG HeaderSize;
+} NDISUIO_TRANSFER, *PNDISUIO_TRANSFER;
+
+C_ASSERT(sizeof(PNDISUIO_SEND) <= PROTOCOL_RESERVED_SIZE_IN_PACKET);
+C_ASSERT(sizeof(NDISUIO_TRANSFER) <= PROTOCOL_RESERVED_SIZE_IN_PACKET);
+
+#define NDISUIO_PACKET_SEND(Packet)     (*(PNDISUIO_SEND *)&(Packet)->ProtocolReserved[0])
+#define NDISUIO_PACKET_TRANSFER(Packet) ((PNDISUIO_TRANSFER)&(Packet)->ProtocolReserved[0])
+
 typedef struct _NDISUIO_ADAPTER_CONTEXT
 {
-    /* Asynchronous completion */
+    /* Asynchronous completion of the open and the close (one at a time: the bind and
+       the unbind). Sends, requests and transfers have their own. */
     NDIS_STATUS AsyncStatus;
     KEVENT AsyncEvent;
 
@@ -139,6 +165,9 @@ FindAdapterContextByName(PNDIS_STRING DeviceName);
 PNDISUIO_ADAPTER_CONTEXT
 ReferenceFileAdapter(PFILE_OBJECT FileObject,
                      PBOOLEAN WriteOnly);
+
+BOOLEAN
+ReferenceAdapterContext(PNDISUIO_ADAPTER_CONTEXT AdapterContext);
 
 VOID
 DereferenceAdapterContext(PNDISUIO_ADAPTER_CONTEXT AdapterContext);

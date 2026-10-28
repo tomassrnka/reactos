@@ -183,6 +183,7 @@ NduDispatchWrite(PDEVICE_OBJECT DeviceObject,
     PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation(Irp);
     PNDISUIO_ADAPTER_CONTEXT AdapterContext;
     PNDIS_PACKET Packet;
+    NDISUIO_SEND Send;
     NDIS_STATUS Status;
     ULONG BytesCopied = 0;
 
@@ -205,6 +206,12 @@ NduDispatchWrite(PDEVICE_OBJECT DeviceObject,
                                         IrpSp->Parameters.Write.Length);
     if (Packet)
     {
+        /* The completion of this send comes to this write alone (NduSendComplete): the packet and
+           the buffer it maps are the miniport's until then, and are freed only afterwards */
+        KeInitializeEvent(&Send.Event, NotificationEvent, FALSE);
+        Send.Status = NDIS_STATUS_PENDING;
+        NDISUIO_PACKET_SEND(Packet) = &Send;
+
         /* Send it via NDIS */
         NdisSend(&Status,
                  AdapterContext->BindingHandle,
@@ -213,12 +220,12 @@ NduDispatchWrite(PDEVICE_OBJECT DeviceObject,
         /* Wait for the send */
         if (Status == NDIS_STATUS_PENDING)
         {
-            KeWaitForSingleObject(&AdapterContext->AsyncEvent,
+            KeWaitForSingleObject(&Send.Event,
                                   Executive,
                                   KernelMode,
                                   FALSE,
                                   NULL);
-            Status = AdapterContext->AsyncStatus;
+            Status = Send.Status;
         }
 
         /* Check if it succeeded */
