@@ -348,6 +348,7 @@ CShellLink::LINKPROP *CShellLink::FindProperty(REFPROPERTYKEY key)
  *   block:   DWORD cbSize, DWORD 0xA0000009, storage..., DWORD 0
  *   storage: DWORD cbStorage, DWORD 0x53505331 ("1SPS"), GUID fmtid, value..., DWORD 0
  *   value:   DWORD cbValue, DWORD pid, BYTE 0, WORD vt, WORD 0, data   (cbValue counts the whole value)
+ * cbStorage counts the whole storage including its zero terminator; the values are only read within it.
  * Storages that are keyed by name (FMTID_NamedProperties) and value types other than the common scalar, string and
  * CLSID ones are not interpreted; they are dropped when the link is saved again. */
 #define PSB_VERSION 0x53505331
@@ -449,27 +450,23 @@ VOID CShellLink::LoadPropertyBlock()
             break; /* end of the list */
         if (cbStorage < 24 + sizeof(DWORD) || cbStorage > (SIZE_T)(end - p))
             break;
+        const BYTE *vend = p + cbStorage; /* the values of this storage end here, whatever they claim */
 
         GUID fmtid;
         CopyMemory(&fmtid, p + 8, sizeof(fmtid));
         BOOL bUsable = PSB_ReadDword(p + 4) == PSB_VERSION && !IsEqualGUID(fmtid, FMTID_PSBNamed);
 
-        /* Walk the values up to their zero terminator: writers differ on whether cbStorage counts it, and the
-         * value layout (a size first) is the same for numeric and named properties */
+        /* Walk the values up to their zero terminator, but never past cbStorage: a value that lies beyond it is
+         * not part of the storage (a reader that honours cbStorage does not see it) and the next storage starts
+         * at p + cbStorage. The value layout (a size first) is the same for numeric and named properties. */
         const BYTE *v = p + 24;
-        while ((SIZE_T)(end - v) >= sizeof(DWORD))
+        while ((SIZE_T)(vend - v) >= sizeof(DWORD))
         {
             DWORD cbValue = PSB_ReadDword(v);
             if (cbValue == 0)
-            {
-                v += sizeof(DWORD);
                 break;
-            }
-            if (cbValue < 13 || cbValue > (SIZE_T)(end - v))
-            {
-                v = end; /* damaged block: stop */
-                break;
-            }
+            if (cbValue < 13 || cbValue > (SIZE_T)(vend - v))
+                break; /* damaged storage: skip the rest of it */
 
             if (bUsable)
             {
@@ -485,7 +482,7 @@ VOID CShellLink::LoadPropertyBlock()
             }
             v += cbValue;
         }
-        p = v;
+        p = vend;
     }
 
     m_bDirty = bDirty;
@@ -598,74 +595,82 @@ static BOOL PSB_AppendValue(PSB_BUFFER *buf, DWORD pid, const PROPVARIANT *pv, B
     return TRUE;
 }
 
-/* Rebuild the property data block from the in-memory properties. */
+/* Rebuild the property data block from the in-memory properties. The new block is built completely before the
+ * old one is dropped, so a failure while building leaves the link as it was. */
 HRESULT CShellLink::SavePropertyBlock()
 {
     HRESULT hr = S_OK;
     PSB_BUFFER buf = { NULL, 0, 0 };
     BOOL *pDone = NULL;
+    BOOL bHaveBlock = FALSE;
     const DWORD zero = 0;
 
-    SHRemoveDataBlock(&m_pDBList, EXP_PROPERTYSTORAGE_SIG);
-    if (!m_cProps)
-        return S_OK;
-
-    pDone = (BOOL *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, m_cProps * sizeof(BOOL));
-    if (!pDone)
-        return E_OUTOFMEMORY;
-
-    const DWORD sig = EXP_PROPERTYSTORAGE_SIG, version = PSB_VERSION;
-    if (!PSB_Append(&buf, NULL, 4) || !PSB_Append(&buf, &sig, 4)) /* the size is filled in below */
+    if (m_cProps)
     {
-        hr = E_OUTOFMEMORY;
-        goto done;
-    }
+        pDone = (BOOL *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, m_cProps * sizeof(BOOL));
+        if (!pDone)
+            return E_OUTOFMEMORY;
 
-    for (ULONG i = 0; i < m_cProps; ++i)
-    {
-        if (pDone[i])
-            continue;
-
-        DWORD ibStorage = buf.cb, nValues = 0;
-        BOOL ok = PSB_Append(&buf, NULL, 4) && PSB_Append(&buf, &version, 4) &&
-                  PSB_Append(&buf, &m_pProps[i].key.fmtid, sizeof(GUID));
-        for (ULONG j = i; ok && j < m_cProps; ++j)
-        {
-            BOOL bWritten;
-            if (pDone[j] || !IsEqualGUID(m_pProps[j].key.fmtid, m_pProps[i].key.fmtid))
-                continue;
-            pDone[j] = TRUE;
-            ok = PSB_AppendValue(&buf, m_pProps[j].key.pid, &m_pProps[j].var, &bWritten);
-            nValues += bWritten;
-        }
-        ok = ok && PSB_Append(&buf, &zero, 4);
-        if (!ok)
+        const DWORD sig = EXP_PROPERTYSTORAGE_SIG, version = PSB_VERSION;
+        if (!PSB_Append(&buf, NULL, 4) || !PSB_Append(&buf, &sig, 4)) /* the size is filled in below */
         {
             hr = E_OUTOFMEMORY;
             goto done;
         }
-        if (nValues)
+
+        for (ULONG i = 0; i < m_cProps; ++i)
         {
-            DWORD cbStorage = buf.cb - ibStorage;
-            CopyMemory(buf.pb + ibStorage, &cbStorage, 4);
+            if (pDone[i])
+                continue;
+
+            DWORD ibStorage = buf.cb, nValues = 0;
+            BOOL ok = PSB_Append(&buf, NULL, 4) && PSB_Append(&buf, &version, 4) &&
+                      PSB_Append(&buf, &m_pProps[i].key.fmtid, sizeof(GUID));
+            for (ULONG j = i; ok && j < m_cProps; ++j)
+            {
+                BOOL bWritten;
+                if (pDone[j] || !IsEqualGUID(m_pProps[j].key.fmtid, m_pProps[i].key.fmtid))
+                    continue;
+                pDone[j] = TRUE;
+                ok = PSB_AppendValue(&buf, m_pProps[j].key.pid, &m_pProps[j].var, &bWritten);
+                nValues += bWritten;
+            }
+            ok = ok && PSB_Append(&buf, &zero, 4);
+            if (!ok)
+            {
+                hr = E_OUTOFMEMORY;
+                goto done;
+            }
+            if (nValues)
+            {
+                DWORD cbStorage = buf.cb - ibStorage;
+                CopyMemory(buf.pb + ibStorage, &cbStorage, 4);
+            }
+            else
+            {
+                buf.cb = ibStorage; /* nothing storable in this format id */
+            }
         }
-        else
+
+        if (buf.cb > 8)
         {
-            buf.cb = ibStorage; /* nothing storable in this format id */
+            /* The list terminator, then pad the block to a DWORD multiple as SHAddDataBlock wants */
+            if (!PSB_Append(&buf, &zero, 4) || !PSB_Append(&buf, NULL, (4 - (buf.cb & 3)) & 3))
+            {
+                hr = E_OUTOFMEMORY;
+                goto done;
+            }
+            CopyMemory(buf.pb, &buf.cb, 4);
+            /* SHReadDataBlockList drops a block larger than 0xFFFF and everything behind it, so a link with
+             * that many properties keeps them in memory only and is saved without the block */
+            bHaveBlock = buf.cb <= 0xFFFF;
         }
     }
 
-    if (buf.cb == 8)
-        goto done; /* no storable property at all */
-
-    /* The list terminator, then pad the block to a DWORD multiple as SHAddDataBlock wants */
-    if (!PSB_Append(&buf, &zero, 4) || !PSB_Append(&buf, NULL, (4 - (buf.cb & 3)) & 3))
-    {
-        hr = E_OUTOFMEMORY;
-        goto done;
-    }
-    CopyMemory(buf.pb, &buf.cb, 4);
-    if (!SHAddDataBlock(&m_pDBList, (DATABLOCK_HEADER *)buf.pb))
+    /* Swap: drop every old block (a loaded file may carry several), then add the new one */
+    while (SHRemoveDataBlock(&m_pDBList, EXP_PROPERTYSTORAGE_SIG))
+        ;
+    if (bHaveBlock && !SHAddDataBlock(&m_pDBList, (DATABLOCK_HEADER *)buf.pb))
         hr = E_FAIL;
 
 done:
@@ -2887,10 +2892,20 @@ end:
 
 HRESULT STDMETHODCALLTYPE CShellLink::AddDataBlock(void* pDataBlock)
 {
-    if (SHAddDataBlock(&m_pDBList, (DATABLOCK_HEADER*)pDataBlock))
+    DATABLOCK_HEADER *pNew = (DATABLOCK_HEADER*)pDataBlock;
+    BOOL bProps = pNew && pNew->cbSize >= sizeof(DATABLOCK_HEADER) && pNew->dwSignature == EXP_PROPERTYSTORAGE_SIG;
+
+    /* A link has one property storage block: the supplied one replaces the old one, which must not be
+     * the one LoadPropertyBlock finds below */
+    if (bProps)
+    {
+        while (SHRemoveDataBlock(&m_pDBList, EXP_PROPERTYSTORAGE_SIG))
+            ;
+    }
+    if (SHAddDataBlock(&m_pDBList, pNew))
     {
         /* The properties of a property storage block are the values of the link's IPropertyStore */
-        if (((DATABLOCK_HEADER*)pDataBlock)->dwSignature == EXP_PROPERTYSTORAGE_SIG)
+        if (bProps)
             LoadPropertyBlock();
         m_bDirty = TRUE;
         return S_OK;
