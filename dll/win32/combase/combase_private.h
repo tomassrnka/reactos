@@ -226,6 +226,7 @@ struct stub_manager
     struct apartment *apt;        /* owning apt (RO) */
 
     ULONG             extrefs;    /* number of 'external' references (CS lock) */
+    ULONG             counted_refs; /* of those, the client references counted for a surrogate (CS lock) */
     ULONG             refs;       /* internal reference count (CS apt->cs) */
     ULONG             weakrefs;   /* number of weak references (CS lock) */
     OID               oid;        /* apartment-scoped unique identifier (RO) */
@@ -250,6 +251,7 @@ struct stub_manager * get_stub_manager_from_object(struct apartment *apt, IUnkno
 void stub_manager_disconnect(struct stub_manager *m);
 ULONG stub_manager_ext_addref(struct stub_manager *m, ULONG refs, BOOL tableweak);
 ULONG stub_manager_ext_addref_internal(struct stub_manager *m, ULONG refs);
+ULONG stub_manager_ext_release_internal(struct stub_manager *m, ULONG refs, BOOL last_unlock_releases);
 void stub_manager_set_surrogate(ISurrogate *surrogate);
 ULONG stub_manager_ext_release(struct stub_manager *m, ULONG refs, BOOL tableweak, BOOL last_unlock_releases);
 struct stub_manager * get_stub_manager(struct apartment *apt, OID oid);
