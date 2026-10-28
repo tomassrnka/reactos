@@ -2861,15 +2861,13 @@ DWORD WINAPI NotifyRouteChange(PHANDLE Handle, LPOVERLAPPED overlapped)
  *    The Vista IP Helper table functions (IPHLPAPI.@)
  *
  * NOTES
- *  This IP helper cannot build the NETIO tables yet. Failing with
- *  ERROR_NOT_SUPPORTED, and an empty table pointer, lets callers (Java's
- *  NetworkInterface, for one) take their error path. The earlier generated
- *  stubs returned NO_ERROR and left the output pointer alone, so callers read
- *  an uninitialised table.
- *  The checks of the arguments follow Windows: a missing output pointer of the
- *  family tables, an unknown address family or table level, and an empty
- *  interface row give ERROR_INVALID_PARAMETER. Windows faults on a missing
- *  output pointer of GetIfTable2 and GetIfTable2Ex, these fail instead.
+ *  The interface and unicast address tables are in netio.c. This IP helper
+ *  cannot build the neighbour and forward NETIO tables yet. Failing with
+ *  ERROR_NOT_SUPPORTED, and an empty table pointer, lets callers take their
+ *  error path. The earlier generated stubs returned NO_ERROR and left the
+ *  output pointer alone, so callers read an uninitialised table.
+ *  The checks of the arguments follow Windows: a missing output pointer and
+ *  an unknown address family give ERROR_INVALID_PARAMETER.
  */
 static BOOL is_valid_family(USHORT Family)
 {
@@ -2885,66 +2883,6 @@ static DWORD no_table(USHORT Family, PVOID *Table)
   return ERROR_NOT_SUPPORTED;
 }
 
-DWORD WINAPI GetIfTable2(PVOID *Table)
-{
-  FIXME("(%p): not supported\n", Table);
-  if (!Table)
-    return ERROR_INVALID_PARAMETER;
-
-  *Table = NULL;
-  return ERROR_NOT_SUPPORTED;
-}
-
-DWORD WINAPI GetIfTable2Ex(ULONG Level, PVOID *Table)
-{
-  FIXME("(%lu, %p): not supported\n", Level, Table);
-  if (!Table || Level > 2)
-    return ERROR_INVALID_PARAMETER;
-
-  *Table = NULL;
-  return ERROR_NOT_SUPPORTED;
-}
-
-/* A MIB_IF_ROW2 starts with the interface luid (8 bytes), the interface index follows */
-static BOOL if_row2_is_empty(const ULONG *Row)
-{
-  return !Row[0] && !Row[1] && !Row[2];
-}
-
-DWORD WINAPI GetIfEntry2(PVOID Row)
-{
-  FIXME("(%p): not supported\n", Row);
-  if (!Row || if_row2_is_empty(Row))
-    return ERROR_INVALID_PARAMETER;
-
-  return ERROR_NOT_SUPPORTED;
-}
-
-DWORD WINAPI GetIfEntry2Ex(ULONG Level, PVOID Row)
-{
-  FIXME("(%lu, %p): not supported\n", Level, Row);
-  if (!Row || Level > 2 || if_row2_is_empty(Row))
-    return ERROR_INVALID_PARAMETER;
-
-  return ERROR_NOT_SUPPORTED;
-}
-
-DWORD WINAPI GetUnicastIpAddressTable(USHORT Family, PVOID *Table)
-{
-  FIXME("(%u, %p): not supported\n", Family, Table);
-  return no_table(Family, Table);
-}
-
-/* A MIB_UNICASTIPADDRESS_ROW starts with a SOCKADDR_INET, its first member is the address family */
-DWORD WINAPI GetUnicastIpAddressEntry(PVOID Row)
-{
-  FIXME("(%p): not supported\n", Row);
-  if (!Row || !is_valid_family(*(const USHORT *)Row) || *(const USHORT *)Row == AF_UNSPEC)
-    return ERROR_INVALID_PARAMETER;
-
-  return ERROR_NOT_SUPPORTED;
-}
-
 DWORD WINAPI GetIpNetTable2(USHORT Family, PVOID *Table)
 {
   FIXME("(%u, %p): not supported\n", Family, Table);
@@ -2955,12 +2893,6 @@ DWORD WINAPI GetIpForwardTable2(USHORT Family, PVOID *Table)
 {
   FIXME("(%u, %p): not supported\n", Family, Table);
   return no_table(Family, Table);
-}
-
-/* No table is ever handed out, so there is nothing to free. */
-VOID WINAPI FreeMibTable(PVOID Memory)
-{
-  TRACE("(%p)\n", Memory);
 }
 
 DWORD WINAPI ConvertLengthToIpv4Mask(ULONG MaskLength, PULONG Mask)

@@ -17,6 +17,7 @@ list(APPEND SOURCE
     iphlpapi_main.c
     luid.c
     media.c
+    netio.c
     registry.c
     resinfo_reactos.c
     route_reactos.c
