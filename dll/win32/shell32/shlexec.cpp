@@ -2139,8 +2139,6 @@ static UINT_PTR SHELL_quote_and_execute(LPCWSTR wcmd, LPCWSTR wszParameters, LPC
 
 static UINT_PTR SHELL_execute_url(LPCWSTR lpFile, LPCWSTR wcmd, LPSHELLEXECUTEINFOW psei, LPSHELLEXECUTEINFOW psei_out, SHELL_ExecuteW32 execfunc)
 {
-    UINT_PTR retval;
-    CHeapPtr<WCHAR, CLocalAllocator> lpstrProtocol;
     LPCWSTR lpstrRes;
     INT iSize;
     DWORD len;
@@ -2152,23 +2150,55 @@ static UINT_PTR SHELL_execute_url(LPCWSTR lpFile, LPCWSTR wcmd, LPSHELLEXECUTEIN
         iSize = strlenW(lpFile);
 
     TRACE("Got URL: %s\n", debugstr_w(lpFile));
-    /* Looking for ...<protocol>\shell\<lpVerb>\command */
-    len = iSize + lstrlenW(L"\\shell\\") + lstrlenW(L"\\command") + 1;
-    if (psei->lpVerb && *psei->lpVerb)
-        len += lstrlenW(psei->lpVerb);
-    else
-        len += lstrlenW(L"open"); // FIXME: Use HCR_GetExecuteCommandW or AssocAPI
-    lpstrProtocol.Allocate(len);
-    memcpy(lpstrProtocol, lpFile, iSize * sizeof(WCHAR));
-    lpstrProtocol[iSize] = '\0';
-    strcatW(lpstrProtocol, L"\\shell\\");
-    strcatW(lpstrProtocol, psei->lpVerb && *psei->lpVerb ? psei->lpVerb : L"open");
-    strcatW(lpstrProtocol, L"\\command");
 
-    retval = execute_from_key(lpstrProtocol, lpFile, NULL, psei->lpParameters,
-                              wcmd, execfunc, psei, psei_out);
+    /* The handler is the ProgId the user chose for the protocol (UserChoice), else the protocol's own class */
+    WCHAR szProtocol[64 + 1], szProgId[MAX_PATH];
+    PCWSTR pszClass = NULL;
+    if (iSize > 0 && iSize < (INT)_countof(szProtocol))
+    {
+        memcpy(szProtocol, lpFile, iSize * sizeof(WCHAR));
+        szProtocol[iSize] = UNICODE_NULL;
+        if (HCR_GetUserChoiceOfUrlProtocol(szProtocol, szProgId, _countof(szProgId)))
+            pszClass = szProgId;
+    }
 
-    return retval;
+    /* Looking for ...<class>\shell\<lpVerb>\command */
+    PCWSTR pszVerb = (psei->lpVerb && *psei->lpVerb) ? psei->lpVerb : L"open"; // FIXME: Use HCR_GetExecuteCommandW or AssocAPI
+    for (int pass = 0; pass < 2; ++pass)
+    {
+        CHeapPtr<WCHAR, CLocalAllocator> lpstrKey;
+        SIZE_T cchClass = pszClass ? wcslen(pszClass) : (SIZE_T)iSize;
+        len = cchClass + lstrlenW(L"\\shell\\") + lstrlenW(pszVerb) + lstrlenW(L"\\command") + 1;
+        if (!lpstrKey.Allocate(len))
+            return 0;
+        if (pszClass)
+        {
+            wcscpy(lpstrKey, pszClass);
+        }
+        else
+        {
+            memcpy(lpstrKey, lpFile, iSize * sizeof(WCHAR));
+            lpstrKey[iSize] = UNICODE_NULL;
+        }
+        wcscat(lpstrKey, L"\\shell\\");
+        wcscat(lpstrKey, pszVerb);
+        wcscat(lpstrKey, L"\\command");
+
+        /* a chosen ProgId that lacks the verb falls back to the protocol class */
+        if (pszClass)
+        {
+            HKEY hKeyCmd;
+            if (RegOpenKeyExW(HKEY_CLASSES_ROOT, lpstrKey, 0, KEY_READ, &hKeyCmd) != ERROR_SUCCESS)
+            {
+                pszClass = NULL;
+                continue;
+            }
+            RegCloseKey(hKeyCmd);
+        }
+        return execute_from_key(lpstrKey, lpFile, NULL, psei->lpParameters,
+                                wcmd, execfunc, psei, psei_out);
+    }
+    return 0;
 }
 
 static void do_error_dialog(UINT_PTR retval, HWND hwnd, PCWSTR filename)
