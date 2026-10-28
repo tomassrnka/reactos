@@ -65,6 +65,99 @@ static void CheckQuery(SOCKET Socket, BOOL *Failed, const char *What)
     }
 }
 
+/* After a refused connect the implicit local binding persists: Windows reports
+ * the wildcard address with the automatically assigned port, and the same one
+ * on every later call. A socket bound by the caller keeps its address. */
+static void CheckKeptBinding(SOCKET Socket, ULONG Addr, USHORT *Port, BOOL *Failed, const char *What)
+{
+    SOCKADDR_IN Address;
+    int Length = sizeof(Address);
+    int Result;
+
+    memset(&Address, 0x55, sizeof(Address));
+    WSASetLastError(0);
+    Result = getsockname(Socket, (struct sockaddr *)&Address, &Length);
+    if (Result != 0)
+    {
+        ok(0, "%s: getsockname failed: result %d error %d\n", What, Result, WSAGetLastError());
+        *Failed = TRUE;
+        return;
+    }
+    if (Address.sin_family != AF_INET || Length != sizeof(Address) ||
+        Address.sin_addr.s_addr != Addr || Address.sin_port == 0 ||
+        (*Port != 0 && Address.sin_port != *Port))
+    {
+        ok(0, "%s: family %u length %d address %08lx port %u (expected address %08lx, port %u)\n",
+           What, Address.sin_family, Length, Address.sin_addr.s_addr, ntohs(Address.sin_port),
+           Addr, ntohs(*Port));
+        *Failed = TRUE;
+        return;
+    }
+    *Port = Address.sin_port;
+}
+
+static void TestRefusedConnect(USHORT ClosedPort)
+{
+    SOCKADDR_IN Address, Bound;
+    SOCKET Socket;
+    USHORT Port;
+    BOOL Failed = FALSE;
+    int Result;
+    u_long NonBlocking = 1;
+    fd_set Write, Except;
+    struct timeval Timeout = { 5, 0 };
+
+    ZeroMemory(&Address, sizeof(Address));
+    Address.sin_family = AF_INET;
+    Address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    Address.sin_port = htons(ClosedPort);
+
+    /* Blocking connect: refused, implicit binding kept */
+    Socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    ok(Socket != INVALID_SOCKET, "socket failed: %d\n", WSAGetLastError());
+    if (Socket == INVALID_SOCKET) return;
+    Result = connect(Socket, (struct sockaddr *)&Address, sizeof(Address));
+    ok(Result == SOCKET_ERROR && WSAGetLastError() == WSAECONNREFUSED,
+       "blocking connect: result %d error %d\n", Result, WSAGetLastError());
+    Port = 0;
+    CheckKeptBinding(Socket, INADDR_ANY, &Port, &Failed, "blocking refused");
+    CheckKeptBinding(Socket, INADDR_ANY, &Port, &Failed, "blocking refused, again");
+    closesocket(Socket);
+
+    /* Non-blocking connect: refused, implicit binding kept */
+    Socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    ok(Socket != INVALID_SOCKET, "socket failed: %d\n", WSAGetLastError());
+    if (Socket == INVALID_SOCKET) return;
+    ioctlsocket(Socket, FIONBIO, &NonBlocking);
+    connect(Socket, (struct sockaddr *)&Address, sizeof(Address));
+    FD_ZERO(&Write);
+    FD_ZERO(&Except);
+    FD_SET(Socket, &Write);
+    FD_SET(Socket, &Except);
+    Result = select(0, NULL, &Write, &Except, &Timeout);
+    ok(Result == 1 && FD_ISSET(Socket, &Except), "select: %d\n", Result);
+    Port = 0;
+    CheckKeptBinding(Socket, INADDR_ANY, &Port, &Failed, "non-blocking refused");
+    CheckKeptBinding(Socket, INADDR_ANY, &Port, &Failed, "non-blocking refused, again");
+    closesocket(Socket);
+
+    /* An explicit binding survives a refused connect unchanged */
+    Socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    ok(Socket != INVALID_SOCKET, "socket failed: %d\n", WSAGetLastError());
+    if (Socket == INVALID_SOCKET) return;
+    ZeroMemory(&Bound, sizeof(Bound));
+    Bound.sin_family = AF_INET;
+    Bound.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    ok(bind(Socket, (struct sockaddr *)&Bound, sizeof(Bound)) == 0, "bind failed: %d\n", WSAGetLastError());
+    Port = 0;
+    CheckKeptBinding(Socket, htonl(INADDR_LOOPBACK), &Port, &Failed, "bound before connect");
+    Result = connect(Socket, (struct sockaddr *)&Address, sizeof(Address));
+    ok(Result == SOCKET_ERROR && WSAGetLastError() == WSAECONNREFUSED,
+       "bound connect: result %d error %d\n", Result, WSAGetLastError());
+    CheckKeptBinding(Socket, htonl(INADDR_LOOPBACK), &Port, &Failed, "bound after refused");
+    closesocket(Socket);
+}
+
 /* Push a patterned buffer through a loopback connection and compare it */
 static BOOL CheckLoopbackData(SOCKET Listener, USHORT Port, PUCHAR Send, PUCHAR Receive, ULONG Seed)
 {
@@ -156,6 +249,8 @@ START_TEST(getsockname)
     ClosedPort = GetClosedPort();
     ok(ClosedPort != 0, "no closed port\n");
 
+    TestRefusedConnect(ClosedPort);
+
     for (i = 0; i < LOOPS && !Failed && DataOk; i++)
     {
         fd_set Write, Except;
@@ -181,8 +276,12 @@ START_TEST(getsockname)
         FD_SET(Socket, &Except);
         select(0, NULL, &Write, &Except, &Timeout);
 
-        CheckQuery(Socket, &Failed, "connect refused");
-        CheckQuery(Socket, &Failed, "connect refused, again");
+        {
+            USHORT KeptPort = 0;
+
+            CheckKeptBinding(Socket, INADDR_ANY, &KeptPort, &Failed, "connect refused");
+            CheckKeptBinding(Socket, INADDR_ANY, &KeptPort, &Failed, "connect refused, again");
+        }
         closesocket(Socket);
 
         if (i % 50 == 49)
