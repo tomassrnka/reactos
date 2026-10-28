@@ -20,6 +20,7 @@ list(APPEND SOURCE
     helpers.c
     iocpskip.c
     ioctlsocket.c
+    killpendingio.c
     listen.c
     udpconnreset.c
     manysockets.c

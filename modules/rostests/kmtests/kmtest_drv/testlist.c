@@ -31,6 +31,7 @@ KMT_TESTFUNC Test_ExSingleList;
 KMT_TESTFUNC Test_ExTimer;
 KMT_TESTFUNC Test_ExTimerResolution;
 KMT_TESTFUNC Test_ExUuid;
+KMT_TESTFUNC Test_ExWorkQueue;
 KMT_TESTFUNC Test_FsRtlDissect;
 KMT_TESTFUNC Test_FsRtlEcp;
 KMT_TESTFUNC Test_FsRtlExpression;
@@ -157,6 +158,7 @@ const KMT_TEST TestList[] =
     { "-ExTimer",                           Test_ExTimer },
     { "ExTimerResolution",                  Test_ExTimerResolution },
     { "ExUuid",                             Test_ExUuid },
+    { "ExWorkQueue",                        Test_ExWorkQueue },
     { "KsCapture",                          Test_KsCapture },
     { "Example",                            Test_Example },
     { "FsRtlDissect",                       Test_FsRtlDissect },
