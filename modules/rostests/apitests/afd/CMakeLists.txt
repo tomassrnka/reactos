@@ -13,7 +13,9 @@ list(APPEND SOURCE
     dgramstub.c
     tcpnonadmin.c
     tcpsetinfoex.c
-    tcpaccept.c)
+    tcpaccept.c
+    outputprobe.c
+    acceptstate.c)
 
 list(APPEND PCH_SKIP_SOURCE
     testlist.c)
