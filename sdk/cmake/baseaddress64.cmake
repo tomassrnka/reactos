@@ -435,3 +435,5 @@ set(baseaddress_mfreadwrite                   0x7fe0c000000) # manually added
 set(baseaddress_explorerframe                  0x7fe0b000000) # manually added
 set(baseaddress_kernelbase                     0x7fe0a000000) # manually added
 set(baseaddress_wevtapi                        0x7fe09000000) # manually added
+set(baseaddress_prntvpt                        0x7fe08000000) # manually added
+set(baseaddress_windows.data.pdf               0x7fe07000000) # manually added

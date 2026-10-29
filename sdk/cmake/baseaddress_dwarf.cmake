@@ -394,3 +394,5 @@ set(baseaddress_mf                            0x6c0a0000) # manually added
 set(baseaddress_mfplat                        0x6bfc0000) # manually added
 set(baseaddress_explorerframe                  0x6bec0000) # manually added
 set(baseaddress_kernelbase                     0x6beb0000) # manually added
+set(baseaddress_prntvpt                        0x6be30000) # manually added
+set(baseaddress_windows.data.pdf               0x6be70000) # manually added

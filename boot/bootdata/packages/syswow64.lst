@@ -34,6 +34,11 @@ SysWOW64/bcrypt.dll
 SysWOW64/bcryptprimitives.dll
 SysWOW64/cryptbase.dll
 SysWOW64/ncrypt.dll
+
+# WordCraft (Rust word processor) links windows.data.pdf.dll!PdfCreateRenderer and prntvpt.dll!PT* statically;
+# prntvpt ticket conversion loads msxml3 (listed below) and imports winspool.drv.
+@0x600 SysWOW64/prntvpt.dll
+@0x600 SysWOW64/windows.data.pdf.dll
 # DirectWrite and its user32 forwarder (Firefox renders text with it)
 SysWOW64/dwrite.dll
 SysWOW64/user32_vista.dll
