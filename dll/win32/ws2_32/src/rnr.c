@@ -263,6 +263,13 @@ WSALookupServiceBeginA(IN LPWSAQUERYSETA lpqsRestrictions,
         return SOCKET_ERROR;
     }
 
+    /* Same dwSize rule as WSALookupServiceBeginW */
+    if (lpqsRestrictions->dwSize < sizeof(*lpqsRestrictions))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return SOCKET_ERROR;
+    }
+
     /* Clear the reserved fields */
     lpqsRestrictions->dwOutputFlags = 0;
     lpqsRestrictions->lpszComment = NULL;
@@ -344,6 +351,16 @@ WSALookupServiceBeginW(IN LPWSAQUERYSETW lpqsRestrictions,
     {
         /* They are invalid; fail */
         SetLastError(WSAEFAULT);
+        return SOCKET_ERROR;
+    }
+
+    /* Windows rejects a query set whose dwSize is smaller than WSAQUERYSET
+     * (e.g. a zeroed one) with ERROR_INVALID_PARAMETER. Now that a NULL class
+     * id is accepted this must be checked here, or such a query reaches the NLA
+     * provider and wrongly succeeds. */
+    if (lpqsRestrictions->dwSize < sizeof(*lpqsRestrictions))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
         return SOCKET_ERROR;
     }
 
@@ -772,88 +789,91 @@ WSAInstallServiceClassW(IN LPWSASERVICECLASSINFOW lpServiceClassInfo)
     return SOCKET_ERROR;
 }
 
-VOID
-WSAAPI
-NSProviderInfoFromContext(IN PNSCATALOG_ENTRY Entry,
-    IN PNSPROVIDER_ENUM_CONTEXT Context)
+/*
+ * WSAEnumNameSpaceProviders{A,W} return an ARRAY of WSANAMESPACE_INFO structures
+ * (callers index it as info[i]) followed by the identifier strings the
+ * lpszIdentifier members point to. The structures must therefore be contiguous:
+ * packing each string right behind its own structure (as this code once did)
+ * only works while there is a single provider, and corrupts info[1..] as soon as
+ * the catalog has two (e.g. after the NLA provider was registered).
+ * Windows also reports the required size (WSAEFAULT) before writing anything.
+ */
+static
+DWORD
+NSProviderNameSize(IN PNSCATALOG_ENTRY Entry,
+                   IN BOOLEAN Unicode)
 {
-    INT size = Context->Unicode ? sizeof(WSANAMESPACE_INFOW) : sizeof(WSANAMESPACE_INFOA);
-    /* Calculate ProviderName string size */
-    INT size1 = Entry->ProviderName ? wcslen(Entry->ProviderName) + 1 : 0;
-    INT size2 = Context->Unicode ? size1 * sizeof(WCHAR) : size1 * sizeof(CHAR);
-    WSANAMESPACE_INFOW infoW;
-    /* Fill NS Provider data */
-    infoW.dwNameSpace = Entry->NamespaceId;
-    infoW.dwVersion = Entry->Version;
-    infoW.fActive = Entry->Enabled;
-    RtlMoveMemory(&infoW.NSProviderId,
-        &Entry->ProviderId,
-        sizeof(infoW.NSProviderId));
-    if (size2)
-    {
-        /* Calculate ProviderName string pointer */
-        infoW.lpszIdentifier = (LPWSTR)((ULONG_PTR)Context->ProtocolBuffer +
-            Context->BufferUsed + size);
-    }
-    else
-    {
-        infoW.lpszIdentifier = NULL;
-    }
+    if (!Entry->ProviderName)
+        return 0;
 
-    /* Check if we'll have space */
-    if ((Context->BufferUsed + size + size2) <=
-        (Context->BufferLength))
-    {
-        /* Copy the data */
-        RtlMoveMemory((PVOID)((ULONG_PTR)Context->ProtocolBuffer +
-            Context->BufferUsed),
-            &infoW,
-            size);
-        if (size2)
-        {
-            /* Entry->ProviderName is LPWSTR */
-            if (Context->Unicode)
-            {
-                RtlMoveMemory((PVOID)((ULONG_PTR)Context->ProtocolBuffer +
-                    Context->BufferUsed + size),
-                    Entry->ProviderName,
-                    size2);
-            }
-            else
-            {
-                /* Call the conversion function */
-                WideCharToMultiByte(CP_ACP,
-                    0,
-                    Entry->ProviderName,
-                    -1,
-                    (LPSTR)((ULONG_PTR)Context->ProtocolBuffer +
-                        Context->BufferUsed + size),
-                    size2,
-                    NULL,
-                    NULL);
+    if (Unicode)
+        return (wcslen(Entry->ProviderName) + 1) * sizeof(WCHAR);
 
-            }
-        }
+    /* Size of the ANSI string including the terminator */
+    return WideCharToMultiByte(CP_ACP, 0, Entry->ProviderName, -1, NULL, 0, NULL, NULL);
+}
 
-        /* Increase the count */
-        Context->Count++;
-    }
+BOOL
+WSAAPI
+NSProvidersCountProc(PVOID EnumContext,
+                     PNSCATALOG_ENTRY Entry)
+{
+    PNSPROVIDER_ENUM_CONTEXT Context = (PNSPROVIDER_ENUM_CONTEXT)EnumContext;
+
+    /* First pass: only count the entries and the string bytes they need */
+    Context->Count++;
+    Context->StringBytes += NSProviderNameSize(Entry, Context->Unicode);
+
+    return TRUE;
 }
 
 BOOL
 WSAAPI
 NSProvidersEnumerationProc(PVOID EnumContext,
-    PNSCATALOG_ENTRY Entry)
+                           PNSCATALOG_ENTRY Entry)
 {
     PNSPROVIDER_ENUM_CONTEXT Context = (PNSPROVIDER_ENUM_CONTEXT)EnumContext;
+    DWORD InfoSize = Context->Unicode ? sizeof(WSANAMESPACE_INFOW) : sizeof(WSANAMESPACE_INFOA);
+    DWORD NameSize = NSProviderNameSize(Entry, Context->Unicode);
+    WSANAMESPACE_INFOW InfoW;
+    PBYTE Buffer = Context->ProtocolBuffer;
+    PBYTE Name = Buffer + Context->Count * InfoSize + Context->BufferUsed;
 
-    /* Calculate ProviderName string size */
-    INT size1 = Entry->ProviderName ? wcslen(Entry->ProviderName) + 1 : 0;
-    INT size2 = Context->Unicode ? size1 * sizeof(WCHAR) : size1 * sizeof(CHAR);
+    /* The catalog changed between the two passes; do not overrun the buffer */
+    if (Context->Index >= Context->Count ||
+        Context->BufferUsed + NameSize > Context->StringBytes)
+    {
+        Context->ErrorCode = WSAEFAULT;
+        return FALSE;
+    }
 
-    /* Copy the information */
-    NSProviderInfoFromContext(Entry, Context);
-    Context->BufferUsed += Context->Unicode ? (sizeof(WSANAMESPACE_INFOW)+size2) : (sizeof(WSANAMESPACE_INFOA)+size2);
+    /* Fill NS Provider data */
+    RtlZeroMemory(&InfoW, sizeof(InfoW));
+    InfoW.dwNameSpace = Entry->NamespaceId;
+    InfoW.dwVersion = Entry->Version;
+    InfoW.fActive = Entry->Enabled;
+    RtlCopyMemory(&InfoW.NSProviderId, &Entry->ProviderId, sizeof(InfoW.NSProviderId));
+    InfoW.lpszIdentifier = NameSize ? (LPWSTR)Name : NULL;
+
+    /* WSANAMESPACE_INFOA and W have the same layout and size */
+    RtlCopyMemory(Buffer + Context->Index * InfoSize, &InfoW, InfoSize);
+
+    if (NameSize)
+    {
+        if (Context->Unicode)
+        {
+            RtlCopyMemory(Name, Entry->ProviderName, NameSize);
+        }
+        else if (!WideCharToMultiByte(CP_ACP, 0, Entry->ProviderName, -1,
+                                      (LPSTR)Name, NameSize, NULL, NULL))
+        {
+            /* Never leave an unterminated identifier behind */
+            Name[0] = '\0';
+        }
+    }
+
+    Context->Index++;
+    Context->BufferUsed += NameSize;
 
     /* Continue enumeration */
     return TRUE;
@@ -864,10 +884,10 @@ WSAAPI
 WSAEnumNameSpaceProvidersInternal(IN OUT LPDWORD lpdwBufferLength,
     OUT LPWSANAMESPACE_INFOA lpnspBuffer, BOOLEAN Unicode)
 {
-    INT Status;
     PWSPROCESS WsProcess;
     PNSCATALOG Catalog;
     NSPROVIDER_ENUM_CONTEXT Context;
+    DWORD Needed;
 
     DPRINT("WSAEnumNameSpaceProvidersInternal: %lx\n", lpnspBuffer);
 
@@ -886,39 +906,38 @@ WSAEnumNameSpaceProvidersInternal(IN OUT LPDWORD lpdwBufferLength,
         return SOCKET_ERROR;
     }
 
-    Context.ProtocolBuffer = lpnspBuffer;
-    Context.BufferLength = lpnspBuffer ? *lpdwBufferLength : 0;
-    Context.BufferUsed = 0;
-    Context.Count = 0;
+    RtlZeroMemory(&Context, sizeof(Context));
     Context.Unicode = Unicode;
     Context.ErrorCode = ERROR_SUCCESS;
 
+    /* First pass: how many entries and how many string bytes do we need? */
+    WsNcEnumerateCatalogItems(Catalog, NSProvidersCountProc, &Context);
+    Needed = Context.Count * (Unicode ? sizeof(WSANAMESPACE_INFOW) : sizeof(WSANAMESPACE_INFOA)) +
+             Context.StringBytes;
+
+    /* Check if enough space was available */
+    if (Needed && (!lpnspBuffer || *lpdwBufferLength < Needed))
+    {
+        /* Fail and tell them how much we need */
+        *lpdwBufferLength = Needed;
+        WSASetLastError(WSAEFAULT);
+        return SOCKET_ERROR;
+    }
+
+    /* Second pass: fill the array, then the strings behind it */
+    Context.ProtocolBuffer = lpnspBuffer;
+    Context.BufferLength = *lpdwBufferLength;
+    Context.BufferUsed = 0;
     WsNcEnumerateCatalogItems(Catalog, NSProvidersEnumerationProc, &Context);
 
-    /* Get status */
-    Status = Context.Count;
-
-    /* Check the error code */
-    if (Context.ErrorCode == ERROR_SUCCESS)
-    {
-        /* Check if enough space was available */
-        if (Context.BufferLength < Context.BufferUsed)
-        {
-            /* Fail and tell them how much we need */
-            *lpdwBufferLength = Context.BufferUsed;
-            WSASetLastError(WSAEFAULT);
-            Status = SOCKET_ERROR;
-        }
-    }
-    else
+    if (Context.ErrorCode != ERROR_SUCCESS)
     {
         /* Failure, normalize error */
-        Status = SOCKET_ERROR;
         WSASetLastError(Context.ErrorCode);
+        return SOCKET_ERROR;
     }
 
-    /* Return */
-    return Status;
+    return Context.Index;
 }
 
 /*
