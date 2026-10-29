@@ -35,6 +35,7 @@ list(APPEND SOURCE
     CreateRemoteThreadEx.c
     CreateProcess.c
     CreateProcessRace.c
+    CreateProcessStdHandles.c
     CreateWaitableTimerEx.c
     DefaultDllDirectories.c
     ThreadImpersonationToken.c

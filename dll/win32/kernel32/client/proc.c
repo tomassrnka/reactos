@@ -4544,6 +4544,23 @@ StartScan:
             goto Quickie;
         }
         if (EmptyList) KernelHandleCount = ConsoleHandleCount = 0;
+
+        /* A console handle is only checked by the console server when the child
+         * connects to a console. A GUI child never does, so a value that is no
+         * console handle of ours (or not inheritable) would slip through; check
+         * it here, as the kernel checks the other handles of the list. */
+        for (HandleIndex = 0; HandleIndex < ConsoleHandleCount; ++HandleIndex)
+        {
+            DWORD HandleFlags;
+
+            if (!GetHandleInformation(ConsoleHandleList[HandleIndex], &HandleFlags) ||
+                !(HandleFlags & HANDLE_FLAG_INHERIT))
+            {
+                BaseSetLastNTError(STATUS_INVALID_PARAMETER);
+                Result = FALSE;
+                goto Quickie;
+            }
+        }
         NativeAttributes.TotalLength = sizeof(NativeAttributes);
         NativeAttributes.Attributes[0].Attribute = ROS_PS_ATTRIBUTE_HANDLE_LIST;
         NativeAttributes.Attributes[0].Size = KernelHandleCount * sizeof(HANDLE);
