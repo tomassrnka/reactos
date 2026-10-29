@@ -2299,6 +2299,17 @@ KdSystemDebugControl(
         {
             return KdbRegisterCliCallback(InputBuffer, InputBufferLength);
         }
+
+        /*
+         * Print from a KDBG CLI callback through the debugger own output
+         * (pager included). DbgPrint would enter the debugger again from
+         * inside the debugger and never return.
+         */
+        case 'PdbK':
+        {
+            KdbpPrint("%.*s", InputBufferLength, (PCHAR)InputBuffer);
+            return STATUS_SUCCESS;
+        }
 #endif // KDBG
 #endif
         default:
