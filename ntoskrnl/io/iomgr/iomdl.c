@@ -43,14 +43,26 @@ IoAllocateMdl(IN PVOID VirtualAddress,
         Size *= sizeof(PFN_NUMBER);
         Size += sizeof(MDL);
 
+#ifndef _WIN64
         /*
-         * The MDL header has a 16-bit Size field, which used to cap a single MDL (and so a single
-         * locked buffer) at about 32 MB on x64. File systems lock the whole user buffer of an
-         * unbuffered request in one MDL, and Chrome's installer writes its 156 MB archive that way
-         * (FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED), which failed with
-         * STATUS_INSUFFICIENT_RESOURCES. Nothing in the kernel reads Size back: allocate the
-         * larger MDL and let the field wrap. The 2 GB length check above bounds the pool use.
+         * On 32-bit builds a single MDL (and so a single locked buffer) is limited to 64 MB: a
+         * larger request fails with STATUS_INSUFFICIENT_RESOURCES before any I/O, while anything
+         * up to the limit is allowed even where the MDL no longer fits the 16-bit Size field.
+         * 64 MB is a cap between the two limits the ntdll NtWriteFile apitest requires (a write
+         * just over the 16-bit Size limit succeeds, 128 MB fails); the exact 32-bit Windows value
+         * has not been measured.
          */
+        if (Length > 0x4000000) return NULL;
+#else
+        /*
+         * On 64-bit systems the 16-bit MDL Size field would cap a single locked buffer at about
+         * 32 MB. File systems lock the whole user buffer of an unbuffered request in one MDL, and
+         * Chrome's installer writes its 156 MB archive that way (FILE_FLAG_NO_BUFFERING |
+         * FILE_FLAG_OVERLAPPED), which failed with STATUS_INSUFFICIENT_RESOURCES. Nothing in the
+         * kernel reads Size back: allocate the larger MDL and let the field wrap. The 2 GB length
+         * check above bounds the pool use.
+         */
+#endif
     }
     else
     {
