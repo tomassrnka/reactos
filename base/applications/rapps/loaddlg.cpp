@@ -205,6 +205,8 @@ struct DownloadInfo
             cfg->GetString(DB_SAVEAS, szFileName);
             cfg->GetString(DB_DEPENDENCIES, szDependencies);
             bHasInstallerArgs = cfg->GetString(DB_SILENTARGS, szArgs) && !szArgs.IsEmpty();
+            cfg->GetString(DB_SHA256, szSHA256);
+            cfg->GetString(DB_MSIPROPS, szMsiProps);
         }
     }
 
@@ -221,6 +223,8 @@ struct DownloadInfo
     CStringW szUrl;
     CStringW szName;
     CStringW szSHA1;
+    CStringW szSHA256;
+    CStringW szMsiProps;
     CStringW szPackageName;
     CStringW szFileName;
     CStringW szSilentInstallArgs;
@@ -1131,11 +1135,12 @@ CDownloadManager::PerformDownloadAndInstall(const DownloadInfo &Info)
         }
     }
 
-    if ((Info.DLType == DLTYPE_APPLICATION) && Info.szSHA1[0] &&
+    if ((Info.DLType == DLTYPE_APPLICATION) && (Info.szSHA1[0] || Info.szSHA256[0]) &&
         GetFileAttributesW(Path) != INVALID_FILE_ATTRIBUTES)
     {
         // only open it in case of total correctness
-        if (VerifyInteg(Info.szSHA1.GetString(), Path))
+        if ((!Info.szSHA1[0] || VerifyInteg(Info.szSHA1.GetString(), Path)) &&
+            (!Info.szSHA256[0] || VerifyInteg256(Info.szSHA256.GetString(), Path)))
             goto run;
     }
 
@@ -1398,7 +1403,7 @@ CDownloadManager::PerformDownloadAndInstall(const DownloadInfo &Info)
 
     /* if this thing isn't a RAPPS update and it has a SHA-1 checksum
     verify its integrity by using the native advapi32.A_SHA1 functions */
-    if ((Info.DLType == DLTYPE_APPLICATION) && Info.szSHA1[0] != 0)
+    if ((Info.DLType == DLTYPE_APPLICATION) && (Info.szSHA1[0] != 0 || Info.szSHA256[0] != 0))
     {
         CStringW szMsgText;
 
@@ -1413,7 +1418,8 @@ CDownloadManager::PerformDownloadAndInstall(const DownloadInfo &Info)
         SetWindowTextW(hStatus, Path);
 
         // this may take a while, depending on the file size
-        if (!VerifyInteg(Info.szSHA1, Path))
+        if ((Info.szSHA1[0] && !VerifyInteg(Info.szSHA1, Path)) ||
+            (Info.szSHA256[0] && !VerifyInteg256(Info.szSHA256, Path)))
         {
             if (!szMsgText.LoadStringW(IDS_INTEG_CHECK_FAIL))
             {
@@ -1505,7 +1511,15 @@ run:
                 {
                     shExInfo.lpParameters = params;
                     if (it == INSTALLER_MSI)
+                    {
                         shExInfo.lpFile = L"msiexec.exe"; // params contains the .msi path
+                        if (!Info.szMsiProps.IsEmpty())
+                        {
+                            // entry's MsiProperties: public MSI properties appended to "/i <msi> /qn"
+                            params += L" " + Info.szMsiProps;
+                            shExInfo.lpParameters = params;
+                        }
+                    }
                 }
             }
         }

@@ -1,0 +1,16 @@
+[Section]
+Name = PS7 wrong hash
+Version = 7.4.22
+License = MIT
+LicenseType = 2
+Description = Microsoft's PowerShell 7.4 LTS (pwsh). The official x64 MSI is downloaded from the PowerShell GitHub release at install time.
+Category = 7
+URLSite = https://github.com/PowerShell/PowerShell
+Publisher = Microsoft Corporation
+Scope = Machine
+MsiProperties = PWRSHPLUGIN_VERSION=1 ADD_PATH=1 ENABLE_PSREMOTING=0 REGISTER_MANIFEST=0 USE_MU=0 ENABLE_MU=0 ADD_EXPLORER_CONTEXT_MENU_OPENPOWERSHELL=0 ADD_FILE_CONTEXT_MENU_RUNPOWERSHELL=0
+
+[Section.amd64]
+URLDownload = https://github.com/PowerShell/PowerShell/releases/download/v7.4.22/PowerShell-7.4.22-win-x64.msi
+SHA256 = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+SizeBytes = 110120960

@@ -6,7 +6,7 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 # --- CLI frontend (automation): featmgr /list /query /enable /disable ---
 add_executable(featmgr cli.c engine.c rapps_import.c featmgr.rc)
 set_module_type(featmgr win32cui UNICODE)
-add_importlibs(featmgr advapi32 shlwapi shell32 msvcrt kernel32 ntdll)
+add_importlibs(featmgr advapi32 shlwapi shell32 user32 msvcrt kernel32 ntdll)
 add_cd_file(TARGET featmgr DESTINATION reactos/system32 FOR all)
 
 # --- GUI applet: "Optional Features" (Turn features on/off) ---
@@ -32,5 +32,15 @@ if(ARCH STREQUAL "amd64")
     add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/claude-desktop.ini
                 DESTINATION reactos/Featmgr/Catalog FOR all)
     add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/claude-desktop.txt
+                DESTINATION reactos/Featmgr/Catalog FOR all)
+endif()
+
+# --- PowerShell 7 (LTS): software-tier entry (amd64 only; the x86 pwsh does not start yet, PS7-x86-pwsh-mscoree) ---
+# Manifest + RAPPS-format entry only. The official MSI is downloaded from the PowerShell GitHub release at
+# install time (SHA-256 checked) and is never bundled.
+if(ARCH STREQUAL "amd64")
+    add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/powershell-7.ini
+                DESTINATION reactos/Featmgr/Catalog FOR all)
+    add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/powershell-7.txt
                 DESTINATION reactos/Featmgr/Catalog FOR all)
 endif()

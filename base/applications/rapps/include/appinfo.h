@@ -98,6 +98,8 @@ enum InstallerType
 #define DB_SCOPE L"Scope" // User or Machine
 #define DB_SAVEAS L"SaveAs"
 #define DB_SILENTARGS L"SilentParameters"
+#define DB_SHA256 L"SHA256"             /* optional SHA-256 of the download, checked in addition to SHA1 */
+#define DB_MSIPROPS L"MsiProperties"    /* extra PROPERTY=value pairs for a silent .msi install */
 #define DB_NTVER L"NTVersion" // "Max-" || "Min-Max" || "Min" || "Min+"
 #define DB_DEPENDENCIES L"Dependencies"
 
