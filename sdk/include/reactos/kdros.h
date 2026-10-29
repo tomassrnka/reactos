@@ -62,6 +62,16 @@ KdRosRegisterCliCallback(
     return KdSystemDebugControl('RbdK', Callback, FALSE, 0, 0, 0, 0);
 }
 
+/* For use by a CLI callback only: prints through KDBG, not through DbgPrint */
+FORCEINLINE
+VOID
+KdRosKdbgPrint(
+    PCSTR String,
+    ULONG Length)
+{
+    KdSystemDebugControl('PdbK', (PVOID)String, Length, 0, 0, 0, 0);
+}
+
 FORCEINLINE
 VOID
 KdRosDeregisterCliCallback(
