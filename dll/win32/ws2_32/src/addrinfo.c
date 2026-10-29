@@ -1243,34 +1243,173 @@ NoMemory:
     return WSA_NOT_ENOUGH_MEMORY;
 }
 
-/* APC trampoline: run a GetAddrInfoEx completion routine in the caller's thread */
+/*
+ * GetAddrInfoExW asynchronous machinery.
+ *
+ * Windows resolves an OVERLAPPED GetAddrInfoEx lookup on a system worker
+ * thread and delivers the completion (completion routine or event) from
+ * there, never as an APC to the calling thread (measured on Windows 10: the
+ * routine runs on a thread-pool thread even when the caller never waits
+ * alertably, and also when it does). .NET issues the call from thread-pool
+ * threads that never wait alertably, so an APC delivery never ran.
+ *
+ * Every pending lookup is a GAIX_REQUEST on a global list, named by a small
+ * integer handle (as on Windows). A request is completed exactly once, by
+ * whichever of the lookup worker and GetAddrInfoExCancel moves it out of the
+ * PENDING state while holding the list lock. The caller's OVERLAPPED and
+ * result pointer are only touched by that winner, and never after the
+ * completion has been signalled.
+ */
+#define GAIX_PENDING    0
+#define GAIX_DONE       1
+#define GAIX_CANCELLED  2
+
+typedef struct _GAIX_REQUEST
+{
+    LIST_ENTRY Entry;
+    ULONG_PTR Id;
+    LONG State;
+    LPOVERLAPPED Overlapped;
+    LPLOOKUPSERVICE_COMPLETION_ROUTINE Routine;
+    PADDRINFOEXW *ppResult;
+    DWORD NameSpace;
+    BOOL HasHints;
+    ADDRINFOW Hints;
+    PWSTR Name;
+    PWSTR Service;
+} GAIX_REQUEST, *PGAIX_REQUEST;
+
+static volatile LONG GaixLock;
+static volatile LONG GaixNextId;
+static LIST_ENTRY GaixPending = {&GaixPending, &GaixPending};
+
 static
 VOID
-NTAPI
-GetAddrInfoExCompletionApc(IN ULONG_PTR Parameter)
+GaixLockAcquire(VOID)
 {
-    LPWSAOVERLAPPED Overlapped = (LPWSAOVERLAPPED)Parameter;
-    LPLOOKUPSERVICE_COMPLETION_ROUTINE Routine;
+    /* Critical sections here are a handful of instructions: a spin lock is enough */
+    while (InterlockedCompareExchange(&GaixLock, 1, 0) != 0)
+        Sleep(0);
+}
 
-    /* The routine pointer was parked in the (otherwise unused) InternalHigh */
-    Routine = (LPLOOKUPSERVICE_COMPLETION_ROUTINE)Overlapped->InternalHigh;
+static
+VOID
+GaixLockRelease(VOID)
+{
+    InterlockedExchange(&GaixLock, 0);
+}
+
+/* The DNS lookup proper; also what a synchronous call and the async worker share */
+static
+INT
+GaixResolve(IN PCWSTR pName,
+            IN PCWSTR pServiceName,
+            IN DWORD dwNameSpace,
+            IN const ADDRINFOW *pHints,
+            OUT PADDRINFOEXW *ppResult)
+{
+    ADDRINFOW *pResult = NULL;
+    INT Error;
+
+    *ppResult = NULL;
+
+    /* Only the DNS-capable namespaces are served (Windows: WSASERVICE_NOT_FOUND) */
+    if (dwNameSpace != NS_ALL && dwNameSpace != NS_DNS)
+        return WSASERVICE_NOT_FOUND;
+
+    Error = GetAddrInfoW(pName, pServiceName, pHints, &pResult);
+    if (Error == ERROR_SUCCESS)
+    {
+        Error = AddrInfoToAddrInfoEx(pResult, ppResult);
+        if (pResult)
+            FreeAddrInfoW(pResult);
+    }
+    return Error;
+}
+
+/* Signal a completed request. The OVERLAPPED may be freed by the callee afterwards */
+static
+VOID
+GaixSignal(IN LPOVERLAPPED Overlapped,
+           IN LPLOOKUPSERVICE_COMPLETION_ROUTINE Routine,
+           IN INT Error)
+{
+    Overlapped->Internal = (ULONG_PTR)(LONG)Error;
     Overlapped->InternalHigh = 0;
-    Routine((DWORD)Overlapped->Internal, 0, Overlapped);
+    if (Routine)
+        Routine((DWORD)Error, 0, (LPWSAOVERLAPPED)Overlapped);
+    else if (Overlapped->hEvent)
+        SetEvent((HANDLE)((ULONG_PTR)Overlapped->hEvent & ~(ULONG_PTR)1));
+}
+
+static
+VOID
+GaixFreeRequest(IN PGAIX_REQUEST Request)
+{
+    HeapFree(WsSockHeap, 0, Request);
+}
+
+/* Worker: resolve, then complete unless the lookup was cancelled meanwhile */
+static
+DWORD
+WINAPI
+GaixLookupWorker(IN PVOID Parameter)
+{
+    PGAIX_REQUEST Request = Parameter;
+    PADDRINFOEXW Result;
+    LPOVERLAPPED Overlapped;
+    LPLOOKUPSERVICE_COMPLETION_ROUTINE Routine;
+    PADDRINFOEXW *ppResult;
+    INT Error;
+    BOOL Won = FALSE;
+
+    Error = GaixResolve(Request->Name,
+                        Request->Service,
+                        Request->NameSpace,
+                        Request->HasHints ? &Request->Hints : NULL,
+                        &Result);
+
+    GaixLockAcquire();
+    if (Request->State == GAIX_PENDING)
+    {
+        Request->State = GAIX_DONE;
+        RemoveEntryList(&Request->Entry);
+        Won = TRUE;
+    }
+    GaixLockRelease();
+
+    /* Copy what we need: the request is ours alone from here on */
+    Overlapped = Request->Overlapped;
+    Routine = Request->Routine;
+    ppResult = Request->ppResult;
+    GaixFreeRequest(Request);
+
+    if (!Won)
+    {
+        /* Cancelled: the caller was told so; nobody owns this result */
+        FreeAddrInfoExChain(Result);
+        return 0;
+    }
+
+    /* The result must be visible before the completion is */
+    *ppResult = Result;
+    GaixSignal(Overlapped, Routine, Error);
+    return 0;
 }
 
 /*
  * @implemented
  *
- * The lookup itself always runs synchronously on the calling thread (it is
- * backed by GetAddrInfoW, which is IPv4 only here). The asynchronous calling
- * convention is honoured on top of that: with an OVERLAPPED the call returns
- * WSA_IO_PENDING, *ppResult is already filled, and completion is signalled
- * through the OVERLAPPED's event or by queuing the completion routine as an
- * APC on the calling thread (it runs at the next alertable wait, as on
- * Windows). The result code is stored in Overlapped->Internal.
- * TODO: a truly asynchronous lookup (worker thread + cancellation through
- * lpHandle). *lpHandle is set to NULL, which GetAddrInfoExCancel rejects with
- * WSA_INVALID_HANDLE since nothing is ever left pending.
+ * Without an OVERLAPPED the lookup runs on the calling thread (a timeout is
+ * rejected with WSAEINVAL, as on Windows). With one, Windows completes
+ * inline - returning the real result with nothing signalled and *lpHandle
+ * NULL - when the name is NULL or a numeric address, or the call fails
+ * validation; otherwise it returns WSA_IO_PENDING with *ppResult NULL,
+ * resolves on a worker thread, stores the result, then runs the completion
+ * routine on that thread or signals the event. Exactly one of the routine or
+ * hEvent must be given. The result code ends up in Overlapped->Internal.
+ * The timeout of an overlapped call is accepted and ignored.
+ * lpNspId is not validated.
  */
 INT
 WSAAPI
@@ -1285,11 +1424,12 @@ GetAddrInfoExW(IN PCWSTR pName,
                IN LPLOOKUPSERVICE_COMPLETION_ROUTINE lpCompletionRoutine,
                OUT LPHANDLE lpHandle)
 {
-    ADDRINFOW Hints, *pHints = NULL, *pResult = NULL;
+    ADDRINFOW Hints, *pHints = NULL;
+    PGAIX_REQUEST Request;
+    SIZE_T NameSize = 0, ServiceSize = 0;
     INT Error;
 
     UNREFERENCED_PARAMETER(lpNspId);
-    UNREFERENCED_PARAMETER(timeout);
 
     if (lpHandle)
         *lpHandle = NULL;
@@ -1301,15 +1441,19 @@ GetAddrInfoExW(IN PCWSTR pName,
     }
     *ppResult = NULL;
 
-    /* Only the DNS-capable namespaces are served */
-    if (dwNameSpace != NS_ALL && dwNameSpace != NS_DNS)
+    if (lpOverlapped)
     {
-        SetLastError(WSAEINVAL);
-        return WSAEINVAL;
-    }
+        /* Windows marks the operation in progress before it validates anything */
+        lpOverlapped->Internal = WSAEINPROGRESS;
 
-    /* A completion routine is only meaningful with an OVERLAPPED */
-    if (lpCompletionRoutine && !lpOverlapped)
+        /* Exactly one of the routine and the event */
+        if (!lpCompletionRoutine == !lpOverlapped->hEvent)
+        {
+            SetLastError(WSAEINVAL);
+            return WSAEINVAL;
+        }
+    }
+    else if (lpCompletionRoutine || timeout)
     {
         SetLastError(WSAEINVAL);
         return WSAEINVAL;
@@ -1325,38 +1469,96 @@ GetAddrInfoExW(IN PCWSTR pName,
         pHints = &Hints;
     }
 
-    Error = GetAddrInfoW(pName, pServiceName, pHints, &pResult);
-    if (Error == ERROR_SUCCESS)
-    {
-        Error = AddrInfoToAddrInfoEx(pResult, ppResult);
-        if (pResult)
-            FreeAddrInfoW(pResult);
-    }
-
     if (!lpOverlapped)
     {
+        Error = GaixResolve(pName, pServiceName, dwNameSpace, pHints, ppResult);
         SetLastError(Error);
         return Error;
     }
 
-    /* Asynchronous convention, completed inline */
-    lpOverlapped->Internal = Error;
-    lpOverlapped->InternalHigh = 0;
-    if (lpCompletionRoutine)
+    /* Overlapped. Names that need no network are answered inline, like Windows */
+    if (dwNameSpace == NS_ALL || dwNameSpace == NS_DNS)
     {
-        lpOverlapped->InternalHigh = (ULONG_PTR)lpCompletionRoutine;
-        if (!QueueUserAPC(GetAddrInfoExCompletionApc,
-                          GetCurrentThread(),
-                          (ULONG_PTR)lpOverlapped))
+        ADDRINFOW Numeric;
+
+        if (pHints)
+            Numeric = Hints;
+        else
+            RtlZeroMemory(&Numeric, sizeof(Numeric));
+        if (pName)
+            Numeric.ai_flags |= AI_NUMERICHOST;
+
+        Error = GaixResolve(pName, pServiceName, dwNameSpace, &Numeric, ppResult);
+
+        /*
+         * Success; or a failure that waiting would not change: any error but
+         * "host not found" (family, service, flags), or a name the caller
+         * said is numeric.
+         */
+        if (Error == ERROR_SUCCESS ||
+            Error != WSAHOST_NOT_FOUND ||
+            !pName ||
+            (pHints && (pHints->ai_flags & AI_NUMERICHOST)))
         {
-            lpOverlapped->InternalHigh = 0;
-            SetLastError(WSA_NOT_ENOUGH_MEMORY);
-            return WSA_NOT_ENOUGH_MEMORY;
+            SetLastError(Error);
+            return Error;
         }
     }
-    else if (lpOverlapped->hEvent)
+
+    /* Hand the lookup to a worker; it needs its own copy of everything */
+    if (pName)
+        NameSize = (wcslen(pName) + 1) * sizeof(WCHAR);
+    if (pServiceName)
+        ServiceSize = (wcslen(pServiceName) + 1) * sizeof(WCHAR);
+
+    Request = HeapAlloc(WsSockHeap, HEAP_ZERO_MEMORY, sizeof(*Request) + NameSize + ServiceSize);
+    if (!Request)
     {
-        SetEvent((HANDLE)((ULONG_PTR)lpOverlapped->hEvent & ~(ULONG_PTR)1));
+        SetLastError(WSA_NOT_ENOUGH_MEMORY);
+        return WSA_NOT_ENOUGH_MEMORY;
+    }
+    if (pName)
+    {
+        Request->Name = (PWSTR)(Request + 1);
+        RtlCopyMemory(Request->Name, pName, NameSize);
+    }
+    if (pServiceName)
+    {
+        Request->Service = (PWSTR)((PUCHAR)(Request + 1) + NameSize);
+        RtlCopyMemory(Request->Service, pServiceName, ServiceSize);
+    }
+    Request->NameSpace = dwNameSpace;
+    Request->HasHints = (pHints != NULL);
+    if (pHints)
+        Request->Hints = Hints;
+    Request->Overlapped = lpOverlapped;
+    Request->Routine = lpCompletionRoutine;
+    Request->ppResult = ppResult;
+    Request->State = GAIX_PENDING;
+    do
+    {
+        Request->Id = (ULONG_PTR)InterlockedIncrement(&GaixNextId);
+    } while (!Request->Id);
+
+    /* The OVERLAPPED is the caller's from the moment the worker may run */
+    lpOverlapped->Pointer = ppResult;
+    if (lpHandle)
+        *lpHandle = (HANDLE)Request->Id;
+
+    GaixLockAcquire();
+    InsertTailList(&GaixPending, &Request->Entry);
+    GaixLockRelease();
+
+    if (!QueueUserWorkItem(GaixLookupWorker, Request, WT_EXECUTELONGFUNCTION))
+    {
+        GaixLockAcquire();
+        RemoveEntryList(&Request->Entry);
+        GaixLockRelease();
+        GaixFreeRequest(Request);
+        if (lpHandle)
+            *lpHandle = NULL;
+        SetLastError(WSA_NOT_ENOUGH_MEMORY);
+        return WSA_NOT_ENOUGH_MEMORY;
     }
 
     SetLastError(WSA_IO_PENDING);
@@ -1366,13 +1568,69 @@ GetAddrInfoExW(IN PCWSTR pName,
 /*
  * @implemented
  *
- * GetAddrInfoExW completes every lookup inline, so no handle names a pending
- * one. Windows 10 (measured) returns WSA_INVALID_HANDLE for it without touching the last error.
+ * Cancel a pending overlapped lookup: it completes with WSA_E_CANCELLED
+ * (result NULL; routine run or event signalled before this returns) and
+ * returns 0. A handle that is not pending
+ * (never issued, completed, or already cancelled) gives WSA_INVALID_HANDLE
+ * without touching the last error (measured on Windows 10).
  */
 INT
 WSAAPI
 GetAddrInfoExCancel(IN LPHANDLE lpHandle)
 {
-    UNREFERENCED_PARAMETER(lpHandle);
-    return WSA_INVALID_HANDLE;
+    PGAIX_REQUEST Request = NULL;
+    PLIST_ENTRY Entry;
+    struct
+    {
+        LPOVERLAPPED Overlapped;
+        LPLOOKUPSERVICE_COMPLETION_ROUTINE Routine;
+    } Local = {NULL, NULL};
+    ULONG_PTR Id;
+
+    if (!lpHandle || !*lpHandle)
+        return WSA_INVALID_HANDLE;
+    Id = (ULONG_PTR)*lpHandle;
+
+    GaixLockAcquire();
+    for (Entry = GaixPending.Flink; Entry != &GaixPending; Entry = Entry->Flink)
+    {
+        PGAIX_REQUEST Candidate = CONTAINING_RECORD(Entry, GAIX_REQUEST, Entry);
+
+        if (Candidate->Id == Id && Candidate->State == GAIX_PENDING)
+        {
+            /* Ours now: the lookup worker will see CANCELLED and drop its result */
+            Request = Candidate;
+            Request->State = GAIX_CANCELLED;
+            RemoveEntryList(&Request->Entry);
+            /* Safe to read: the worker frees the request only after it sees the state change under this lock */
+            Local.Overlapped = Request->Overlapped;
+            Local.Routine = Request->Routine;
+            break;
+        }
+    }
+    GaixLockRelease();
+
+    if (!Request)
+        return WSA_INVALID_HANDLE;
+
+    /*
+     * Windows runs the completion routine of a cancelled lookup right here,
+     * on the cancelling thread, before GetAddrInfoExCancel returns (measured:
+     * also when cancelled from a thread other than the issuing one).
+     */
+    GaixSignal(Local.Overlapped, Local.Routine, WSA_E_CANCELLED);
+    return ERROR_SUCCESS;
+}
+
+/*
+ * @implemented
+ *
+ * Windows returns the lookup's status: WSAEINPROGRESS while pending, 0 or
+ * the failure after completion, WSA_E_CANCELLED if cancelled.
+ */
+INT
+WSAAPI
+GetAddrInfoExOverlappedResult(IN LPOVERLAPPED lpOverlapped)
+{
+    return (INT)lpOverlapped->Internal;
 }
