@@ -127,6 +127,9 @@ static HRESULT WINAPI enum_class_object_Next(
     if (lTimeout != WBEM_INFINITE && !once++) FIXME("timeout not supported\n");
 
     *puReturned = 0;
+#ifdef __REACTOS__
+    if (view->type == VIEW_TYPE_SELECT && !view->table_count) return WBEM_E_INVALID_CLASS;
+#endif
     if (ec->index >= view->result_count) return WBEM_S_FALSE;
 
     table = get_view_table( view, ec->index );

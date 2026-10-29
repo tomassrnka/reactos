@@ -470,6 +470,22 @@ HRESULT get_object( const WCHAR *object_path, IWbemClassObject **obj )
         free_path( path );
         return hr;
     }
+#ifdef __REACTOS__
+    {
+        IWbemClassObject *first = NULL;
+        ULONG count = 0;
+
+        /* WMI: an unknown class is WBEM_E_NOT_FOUND, and so is a key path that matches no instance */
+        hr = IEnumWbemClassObject_Next( iter, WBEM_INFINITE, 1, &first, &count );
+        if (first) IWbemClassObject_Release( first );
+        if (hr == WBEM_E_INVALID_CLASS || (hr == WBEM_S_FALSE && path->filter))
+        {
+            IEnumWbemClassObject_Release( iter );
+            free_path( path );
+            return WBEM_E_NOT_FOUND;
+        }
+    }
+#endif
     hr = create_class_object( path->class, iter, 0, NULL, obj );
     IEnumWbemClassObject_Release( iter );
     free_path( path );

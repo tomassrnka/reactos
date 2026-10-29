@@ -525,7 +525,27 @@ static const struct column col_bios[] =
     { prop_smbiosbiosversionW,  CIM_STRING|COL_FLAG_DYNAMIC },
     { prop_smbiosmajorversionW, CIM_UINT16 },
     { prop_smbiosminorversionW, CIM_UINT16 },
-    { prop_versionW,            CIM_STRING|COL_FLAG_KEY }
+    { prop_versionW,            CIM_STRING|COL_FLAG_KEY },
+    { L"BiosCharacteristics", CIM_UINT16|CIM_FLAG_ARRAY|COL_FLAG_DYNAMIC },
+    { L"BIOSVersion", CIM_STRING|CIM_FLAG_ARRAY|COL_FLAG_DYNAMIC },
+    { L"BuildNumber", CIM_STRING },
+    { L"Caption", CIM_STRING },
+    { L"CodeSet", CIM_STRING },
+    { L"EmbeddedControllerMajorVersion", CIM_UINT8 },
+    { L"EmbeddedControllerMinorVersion", CIM_UINT8 },
+    { L"InstallDate", CIM_DATETIME },
+    { L"InstallableLanguages", CIM_UINT16 },
+    { L"LanguageEdition", CIM_STRING },
+    { L"ListOfLanguages", CIM_STRING|CIM_FLAG_ARRAY|COL_FLAG_DYNAMIC },
+    { L"OtherTargetOS", CIM_STRING },
+    { L"PrimaryBIOS", CIM_BOOLEAN },
+    { L"SMBIOSPresent", CIM_BOOLEAN },
+    { L"SoftwareElementID", CIM_STRING },
+    { L"SoftwareElementState", CIM_UINT16 },
+    { L"Status", CIM_STRING },
+    { L"SystemBiosMajorVersion", CIM_UINT8 },
+    { L"SystemBiosMinorVersion", CIM_UINT8 },
+    { L"TargetOperatingSystem", CIM_UINT16 }
 };
 static const struct column col_cdromdrive[] =
 {
@@ -540,13 +560,67 @@ static const struct column col_compsys[] =
     { prop_descriptionW,          CIM_STRING },
     { prop_domainW,               CIM_STRING },
     { prop_domainroleW,           CIM_UINT16 },
-    { prop_manufacturerW,         CIM_STRING },
-    { prop_modelW,                CIM_STRING },
+    { prop_manufacturerW,         CIM_STRING|COL_FLAG_DYNAMIC },
+    { prop_modelW,                CIM_STRING|COL_FLAG_DYNAMIC },
     { prop_nameW,                 CIM_STRING|COL_FLAG_DYNAMIC },
     { prop_numlogicalprocessorsW, CIM_UINT32 },
     { prop_numprocessorsW,        CIM_UINT32 },
     { prop_totalphysicalmemoryW,  CIM_UINT64 },
-    { prop_usernameW,             CIM_STRING|COL_FLAG_DYNAMIC }
+    { prop_usernameW,             CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"AdminPasswordStatus", CIM_UINT16 },
+    { L"AutomaticManagedPagefile", CIM_BOOLEAN },
+    { L"AutomaticResetBootOption", CIM_BOOLEAN },
+    { L"AutomaticResetCapability", CIM_BOOLEAN },
+    { L"BootOptionOnLimit", CIM_UINT16 },
+    { L"BootOptionOnWatchDog", CIM_UINT16 },
+    { L"BootROMSupported", CIM_BOOLEAN },
+    { L"BootStatus", CIM_UINT16|CIM_FLAG_ARRAY|COL_FLAG_DYNAMIC },
+    { L"BootupState", CIM_STRING },
+    { L"Caption", CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"ChassisBootupState", CIM_UINT16 },
+    { L"ChassisSKUNumber", CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"CreationClassName", CIM_STRING },
+    { L"CurrentTimeZone", CIM_SINT16 },
+    { L"DaylightInEffect", CIM_BOOLEAN },
+    { L"DNSHostName", CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"EnableDaylightSavingsTime", CIM_BOOLEAN },
+    { L"FrontPanelResetStatus", CIM_UINT16 },
+    { L"HypervisorPresent", CIM_BOOLEAN },
+    { L"InfraredSupported", CIM_BOOLEAN },
+    { L"InitialLoadInfo", CIM_STRING|CIM_FLAG_ARRAY|COL_FLAG_DYNAMIC },
+    { L"InstallDate", CIM_DATETIME },
+    { L"KeyboardPasswordStatus", CIM_UINT16 },
+    { L"LastLoadInfo", CIM_STRING },
+    { L"NameFormat", CIM_STRING },
+    { L"NetworkServerModeEnabled", CIM_BOOLEAN },
+    { L"OEMStringArray", CIM_STRING|CIM_FLAG_ARRAY|COL_FLAG_DYNAMIC },
+    { L"PartOfDomain", CIM_BOOLEAN },
+    { L"PauseAfterReset", CIM_SINT64 },
+    { L"PCSystemType", CIM_UINT16 },
+    { L"PCSystemTypeEx", CIM_UINT16 },
+    { L"PowerManagementCapabilities", CIM_UINT16|CIM_FLAG_ARRAY|COL_FLAG_DYNAMIC },
+    { L"PowerManagementSupported", CIM_BOOLEAN },
+    { L"PowerOnPasswordStatus", CIM_UINT16 },
+    { L"PowerState", CIM_UINT16 },
+    { L"PowerSupplyState", CIM_UINT16 },
+    { L"PrimaryOwnerContact", CIM_STRING },
+    { L"PrimaryOwnerName", CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"ResetCapability", CIM_UINT16 },
+    { L"ResetCount", CIM_SINT16 },
+    { L"ResetLimit", CIM_SINT16 },
+    { L"Roles", CIM_STRING|CIM_FLAG_ARRAY|COL_FLAG_DYNAMIC },
+    { L"Status", CIM_STRING },
+    { L"SupportContactDescription", CIM_STRING|CIM_FLAG_ARRAY|COL_FLAG_DYNAMIC },
+    { L"SystemFamily", CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"SystemSKUNumber", CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"SystemStartupDelay", CIM_UINT16 },
+    { L"SystemStartupOptions", CIM_STRING|CIM_FLAG_ARRAY|COL_FLAG_DYNAMIC },
+    { L"SystemStartupSetting", CIM_UINT8 },
+    { L"SystemType", CIM_STRING },
+    { L"ThermalState", CIM_UINT16 },
+    { L"WakeUpType", CIM_UINT16 },
+    { L"Workgroup", CIM_STRING },
+    { L"OEMLogoBitmap", CIM_UINT8|CIM_FLAG_ARRAY }
 };
 static const struct column col_compsysproduct[] =
 {
@@ -614,6 +688,71 @@ static const struct column col_ip4routetable[] =
     { prop_interfaceindexW, CIM_SINT32|COL_FLAG_KEY },
     { prop_nexthopW,        CIM_STRING|COL_FLAG_DYNAMIC|COL_FLAG_KEY },
 };
+static const struct column col_keyboard[] =
+{
+    { L"Availability",                CIM_UINT16 },
+    { L"Caption",                     CIM_STRING },
+    { L"ConfigManagerErrorCode",      CIM_UINT32 },
+    { L"ConfigManagerUserConfig",     CIM_BOOLEAN },
+    { L"CreationClassName",           CIM_STRING },
+    { L"Description",                 CIM_STRING },
+    { L"DeviceID",                    CIM_STRING|COL_FLAG_KEY },
+    { L"ErrorCleared",                CIM_BOOLEAN },
+    { L"ErrorDescription",            CIM_STRING },
+    { L"InstallDate",                 CIM_DATETIME },
+    { L"IsLocked",                    CIM_BOOLEAN },
+    { L"LastErrorCode",               CIM_UINT32 },
+    { L"Layout",                      CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"Name",                        CIM_STRING },
+    { L"NumberOfFunctionKeys",        CIM_UINT16 },
+    { L"Password",                    CIM_UINT16 },
+    { L"PNPDeviceID",                 CIM_STRING },
+    { L"PowerManagementCapabilities", CIM_UINT16|CIM_FLAG_ARRAY },
+    { L"PowerManagementSupported",    CIM_BOOLEAN },
+    { L"Status",                      CIM_STRING },
+    { L"StatusInfo",                  CIM_UINT16 },
+    { L"SystemCreationClassName",     CIM_STRING },
+    { L"SystemName",                  CIM_STRING|COL_FLAG_DYNAMIC }
+};
+static const struct column col_pagefileusage[] =
+{
+    { L"AllocatedBaseSize", CIM_UINT32 },
+    { L"Caption",           CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"CurrentUsage",      CIM_UINT32 },
+    { L"Description",       CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"InstallDate",       CIM_DATETIME },
+    { L"Name",              CIM_STRING|COL_FLAG_DYNAMIC|COL_FLAG_KEY },
+    { L"PeakUsage",         CIM_UINT32 },
+    { L"Status",            CIM_STRING },
+    { L"TempPageFile",      CIM_BOOLEAN }
+};
+static const struct column col_timezone[] =
+{
+    { L"Bias",                CIM_SINT32 },
+    { L"Caption",             CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"DaylightBias",        CIM_SINT32 },
+    { L"DaylightDay",         CIM_UINT32 },
+    { L"DaylightDayOfWeek",   CIM_UINT8 },
+    { L"DaylightHour",        CIM_UINT32 },
+    { L"DaylightMillisecond", CIM_UINT32 },
+    { L"DaylightMinute",      CIM_UINT32 },
+    { L"DaylightMonth",       CIM_UINT32 },
+    { L"DaylightName",        CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"DaylightSecond",      CIM_UINT32 },
+    { L"DaylightYear",        CIM_UINT32 },
+    { L"Description",         CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"SettingID",           CIM_STRING },
+    { L"StandardBias",        CIM_UINT32 },
+    { L"StandardDay",         CIM_UINT32 },
+    { L"StandardDayOfWeek",   CIM_UINT8 },
+    { L"StandardHour",        CIM_UINT32 },
+    { L"StandardMillisecond", CIM_UINT32 },
+    { L"StandardMinute",      CIM_UINT32 },
+    { L"StandardMonth",       CIM_UINT32 },
+    { L"StandardName",        CIM_STRING|COL_FLAG_DYNAMIC|COL_FLAG_KEY },
+    { L"StandardSecond",      CIM_UINT32 },
+    { L"StandardYear",        CIM_UINT32 }
+};
 static const struct column col_logicaldisk[] =
 {
     { prop_deviceidW,           CIM_STRING|COL_FLAG_DYNAMIC|COL_FLAG_KEY },
@@ -623,7 +762,39 @@ static const struct column col_logicaldisk[] =
     { prop_nameW,               CIM_STRING|COL_FLAG_DYNAMIC },
     { prop_sizeW,               CIM_UINT64 },
     { prop_volumenameW,         CIM_STRING|COL_FLAG_DYNAMIC },
-    { prop_volumeserialnumberW, CIM_STRING|COL_FLAG_DYNAMIC }
+    { prop_volumeserialnumberW, CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"Access", CIM_UINT16 },
+    { L"Availability", CIM_UINT16 },
+    { L"BlockSize", CIM_UINT64 },
+    { L"Caption", CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"Compressed", CIM_BOOLEAN },
+    { L"ConfigManagerErrorCode", CIM_UINT32 },
+    { L"ConfigManagerUserConfig", CIM_BOOLEAN },
+    { L"CreationClassName", CIM_STRING },
+    { L"Description", CIM_STRING },
+    { L"ErrorCleared", CIM_BOOLEAN },
+    { L"ErrorDescription", CIM_STRING },
+    { L"ErrorMethodology", CIM_STRING },
+    { L"InstallDate", CIM_DATETIME },
+    { L"LastErrorCode", CIM_UINT32 },
+    { L"MaximumComponentLength", CIM_UINT32 },
+    { L"MediaType", CIM_UINT32 },
+    { L"NumberOfBlocks", CIM_UINT64 },
+    { L"PNPDeviceID", CIM_STRING },
+    { L"PowerManagementCapabilities", CIM_UINT16|CIM_FLAG_ARRAY|COL_FLAG_DYNAMIC },
+    { L"PowerManagementSupported", CIM_BOOLEAN },
+    { L"ProviderName", CIM_STRING },
+    { L"Purpose", CIM_STRING },
+    { L"QuotasDisabled", CIM_BOOLEAN },
+    { L"QuotasIncomplete", CIM_BOOLEAN },
+    { L"QuotasRebuilding", CIM_BOOLEAN },
+    { L"Status", CIM_STRING },
+    { L"StatusInfo", CIM_UINT16 },
+    { L"SupportsDiskQuotas", CIM_BOOLEAN },
+    { L"SupportsFileBasedCompression", CIM_BOOLEAN },
+    { L"SystemCreationClassName", CIM_STRING },
+    { L"SystemName", CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"VolumeDirty", CIM_BOOLEAN }
 };
 static const struct column col_logicaldisktopartition[] =
 {
@@ -691,7 +862,42 @@ static const struct column col_operatingsystem[] =
     { prop_systemdriveW,            CIM_STRING|COL_FLAG_DYNAMIC },
     { prop_totalvirtualmemorysizeW, CIM_UINT64 },
     { prop_totalvisiblememorysizeW, CIM_UINT64 },
-    { prop_versionW,                CIM_STRING|COL_FLAG_DYNAMIC }
+    { prop_versionW,                CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"BootDevice", CIM_STRING },
+    { L"BuildType", CIM_STRING },
+    { L"CreationClassName", CIM_STRING },
+    { L"CSCreationClassName", CIM_STRING },
+    { L"DataExecutionPrevention_32BitApplications", CIM_BOOLEAN },
+    { L"DataExecutionPrevention_Available", CIM_BOOLEAN },
+    { L"DataExecutionPrevention_Drivers", CIM_BOOLEAN },
+    { L"DataExecutionPrevention_SupportPolicy", CIM_UINT8 },
+    { L"Debug", CIM_BOOLEAN },
+    { L"Description", CIM_STRING },
+    { L"Distributed", CIM_BOOLEAN },
+    { L"EncryptionLevel", CIM_UINT32 },
+    { L"ForegroundApplicationBoost", CIM_UINT8 },
+    { L"FreeSpaceInPagingFiles", CIM_UINT64 },
+    { L"FreeVirtualMemory", CIM_UINT64 },
+    { L"LargeSystemCache", CIM_UINT32 },
+    { L"MaxNumberOfProcesses", CIM_UINT32 },
+    { L"MaxProcessMemorySize", CIM_UINT64 },
+    { L"MUILanguages", CIM_STRING|CIM_FLAG_ARRAY|COL_FLAG_DYNAMIC },
+    { L"NumberOfLicensedUsers", CIM_UINT32 },
+    { L"NumberOfProcesses", CIM_UINT32 },
+    { L"NumberOfUsers", CIM_UINT32 },
+    { L"Organization", CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"OtherTypeDescription", CIM_STRING },
+    { L"PAEEnabled", CIM_BOOLEAN },
+    { L"PlusProductID", CIM_STRING },
+    { L"PlusVersionNumber", CIM_STRING },
+    { L"PortableOperatingSystem", CIM_BOOLEAN },
+    { L"ProductType", CIM_UINT32 },
+    { L"RegisteredUser", CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"SizeStoredInPagingFiles", CIM_UINT64 },
+    { L"Status", CIM_STRING },
+    { L"SystemDevice", CIM_STRING },
+    { L"TotalSwapSpaceSize", CIM_UINT64 },
+    { L"WindowsDirectory", CIM_STRING|COL_FLAG_DYNAMIC }
 };
 static const struct column col_param[] =
 {
@@ -743,6 +949,42 @@ static const struct column col_process[] =
     { prop_threadcountW,    CIM_UINT32 },
     { prop_workingsetsizeW, CIM_UINT64 },
     /* methods */
+    { L"CreationDate", CIM_DATETIME|COL_FLAG_DYNAMIC },
+    { L"CreationClassName", CIM_STRING },
+    { L"CSCreationClassName", CIM_STRING },
+    { L"CSName", CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"ExecutablePath", CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"ExecutionState", CIM_UINT16 },
+    { L"HandleCount", CIM_UINT32 },
+    { L"InstallDate", CIM_DATETIME },
+    { L"KernelModeTime", CIM_UINT64 },
+    { L"MaximumWorkingSetSize", CIM_UINT32 },
+    { L"MinimumWorkingSetSize", CIM_UINT32 },
+    { L"OSCreationClassName", CIM_STRING },
+    { L"OSName", CIM_STRING },
+    { L"OtherOperationCount", CIM_UINT64 },
+    { L"OtherTransferCount", CIM_UINT64 },
+    { L"PageFaults", CIM_UINT32 },
+    { L"PageFileUsage", CIM_UINT32 },
+    { L"PeakPageFileUsage", CIM_UINT32 },
+    { L"PeakVirtualSize", CIM_UINT64 },
+    { L"PeakWorkingSetSize", CIM_UINT32 },
+    { L"Priority", CIM_UINT32 },
+    { L"PrivatePageCount", CIM_UINT64 },
+    { L"QuotaNonPagedPoolUsage", CIM_UINT32 },
+    { L"QuotaPagedPoolUsage", CIM_UINT32 },
+    { L"QuotaPeakNonPagedPoolUsage", CIM_UINT32 },
+    { L"QuotaPeakPagedPoolUsage", CIM_UINT32 },
+    { L"ReadOperationCount", CIM_UINT64 },
+    { L"ReadTransferCount", CIM_UINT64 },
+    { L"SessionId", CIM_UINT32 },
+    { L"Status", CIM_STRING },
+    { L"TerminationDate", CIM_DATETIME },
+    { L"UserModeTime", CIM_UINT64 },
+    { L"VirtualSize", CIM_UINT64 },
+    { L"WindowsVersion", CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"WriteOperationCount", CIM_UINT64 },
+    { L"WriteTransferCount", CIM_UINT64 },
     { method_getownerW,     CIM_FLAG_ARRAY|COL_FLAG_METHOD }
 };
 static const struct column col_processor[] =
@@ -766,7 +1008,44 @@ static const struct column col_processor[] =
     { prop_processortypeW,        CIM_UINT16 },
     { prop_revisionW,             CIM_UINT16 },
     { prop_uniqueidW,             CIM_STRING },
-    { prop_versionW,              CIM_STRING|COL_FLAG_DYNAMIC }
+    { prop_versionW,              CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"AssetTag", CIM_STRING },
+    { L"Availability", CIM_UINT16 },
+    { L"Characteristics", CIM_UINT32 },
+    { L"ConfigManagerErrorCode", CIM_UINT32 },
+    { L"ConfigManagerUserConfig", CIM_BOOLEAN },
+    { L"CreationClassName", CIM_STRING },
+    { L"CurrentVoltage", CIM_UINT16 },
+    { L"ErrorCleared", CIM_BOOLEAN },
+    { L"ErrorDescription", CIM_STRING },
+    { L"ExtClock", CIM_UINT32 },
+    { L"InstallDate", CIM_DATETIME },
+    { L"L2CacheSize", CIM_UINT32 },
+    { L"L2CacheSpeed", CIM_UINT32 },
+    { L"L3CacheSize", CIM_UINT32 },
+    { L"L3CacheSpeed", CIM_UINT32 },
+    { L"LastErrorCode", CIM_UINT32 },
+    { L"LoadPercentage", CIM_UINT16 },
+    { L"NumberOfEnabledCore", CIM_UINT32 },
+    { L"OtherFamilyDescription", CIM_STRING },
+    { L"PartNumber", CIM_STRING },
+    { L"PNPDeviceID", CIM_STRING },
+    { L"PowerManagementCapabilities", CIM_UINT16|CIM_FLAG_ARRAY|COL_FLAG_DYNAMIC },
+    { L"PowerManagementSupported", CIM_BOOLEAN },
+    { L"Role", CIM_STRING },
+    { L"SecondLevelAddressTranslationExtensions", CIM_BOOLEAN },
+    { L"SerialNumber", CIM_STRING },
+    { L"SocketDesignation", CIM_STRING },
+    { L"Status", CIM_STRING },
+    { L"StatusInfo", CIM_UINT16 },
+    { L"Stepping", CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"SystemCreationClassName", CIM_STRING },
+    { L"SystemName", CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"ThreadCount", CIM_UINT32 },
+    { L"UpgradeMethod", CIM_UINT16 },
+    { L"VirtualizationFirmwareEnabled", CIM_BOOLEAN },
+    { L"VMMonitorModeExtensions", CIM_BOOLEAN },
+    { L"VoltageCaps", CIM_UINT32 }
 };
 static const struct column col_qualifier[] =
 {
@@ -796,6 +1075,23 @@ static const struct column col_service[] =
     { prop_stateW,            CIM_STRING },
     { prop_systemnameW,       CIM_STRING|COL_FLAG_DYNAMIC },
     /* methods */
+    { L"Caption", CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"CheckPoint", CIM_UINT32 },
+    { L"CreationClassName", CIM_STRING },
+    { L"DelayedAutoStart", CIM_BOOLEAN },
+    { L"Description", CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"DesktopInteract", CIM_BOOLEAN },
+    { L"ErrorControl", CIM_STRING },
+    { L"ExitCode", CIM_UINT32 },
+    { L"InstallDate", CIM_DATETIME },
+    { L"PathName", CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"ServiceSpecificExitCode", CIM_UINT32 },
+    { L"Started", CIM_BOOLEAN },
+    { L"StartName", CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"Status", CIM_STRING },
+    { L"SystemCreationClassName", CIM_STRING },
+    { L"TagId", CIM_UINT32 },
+    { L"WaitHint", CIM_UINT32 },
     { method_pauseserviceW,   CIM_FLAG_ARRAY|COL_FLAG_METHOD },
     { method_resumeserviceW,  CIM_FLAG_ARRAY|COL_FLAG_METHOD },
     { method_startserviceW,   CIM_FLAG_ARRAY|COL_FLAG_METHOD },
@@ -1010,6 +1306,26 @@ struct record_bios
     UINT16       smbiosmajorversion;
     UINT16       smbiosminorversion;
     const WCHAR *version;
+    const struct array * bioscharacteristics;
+    const struct array * biosversion;
+    const WCHAR * buildnumber;
+    const WCHAR * caption;
+    const WCHAR * codeset;
+    UINT8        ec_major;
+    UINT8        ec_minor;
+    const WCHAR * installdate;
+    UINT16       installablelanguages;
+    const WCHAR * languageedition;
+    const struct array * listoflanguages;
+    const WCHAR * othertargetos;
+    int          primarybios;
+    int          smbiospresent;
+    const WCHAR * softwareelementid;
+    UINT16       softwareelementstate;
+    const WCHAR * status;
+    UINT8        bios_major;
+    UINT8        bios_minor;
+    UINT16       targetoperatingsystem;
 };
 struct record_cdromdrive
 {
@@ -1031,6 +1347,60 @@ struct record_computersystem
     UINT32       num_processors;
     UINT64       total_physical_memory;
     const WCHAR *username;
+    UINT16       adminpasswordstatus;
+    int          automaticmanagedpagefile;
+    int          automaticresetbootoption;
+    int          automaticresetcapability;
+    UINT16       bootoptiononlimit;
+    UINT16       bootoptiononwatchdog;
+    int          bootromsupported;
+    const struct array * bootstatus;
+    const WCHAR * bootupstate;
+    const WCHAR * caption;
+    UINT16       chassisbootupstate;
+    const WCHAR * chassisskunumber;
+    const WCHAR * creationclassname;
+    INT16        currenttimezone;
+    int          daylightineffect;
+    const WCHAR * dnshostname;
+    int          enabledaylightsavingstime;
+    UINT16       frontpanelresetstatus;
+    int          hypervisorpresent;
+    int          infraredsupported;
+    const struct array * initialloadinfo;
+    const WCHAR * installdate;
+    UINT16       keyboardpasswordstatus;
+    const WCHAR * lastloadinfo;
+    const WCHAR * nameformat;
+    int          networkservermodeenabled;
+    const struct array * oemstringarray;
+    int          partofdomain;
+    INT64        pauseafterreset;
+    UINT16       pcsystemtype;
+    UINT16       pcsystemtypeex;
+    const struct array * powermanagementcapabilities;
+    int          powermanagementsupported;
+    UINT16       poweronpasswordstatus;
+    UINT16       powerstate;
+    UINT16       powersupplystate;
+    const WCHAR * primaryownercontact;
+    const WCHAR * primaryownername;
+    UINT16       resetcapability;
+    INT16        resetcount;
+    INT16        resetlimit;
+    const struct array * roles;
+    const WCHAR * status;
+    const struct array * supportcontactdescription;
+    const WCHAR * systemfamily;
+    const WCHAR * systemskunumber;
+    UINT16       systemstartupdelay;
+    const struct array * systemstartupoptions;
+    UINT8        systemstartupsetting;
+    const WCHAR * systemtype;
+    UINT16       thermalstate;
+    UINT16       wakeuptype;
+    const WCHAR * workgroup;
+    const struct array * oemlogobitmap;
 };
 struct record_computersystemproduct
 {
@@ -1098,6 +1468,71 @@ struct record_ip4routetable
     INT32        interfaceindex;
     const WCHAR *nexthop;
 };
+struct record_keyboard
+{
+    UINT16       availability;
+    const WCHAR *caption;
+    UINT32       configmanagererrorcode;
+    int          configmanageruserconfig;
+    const WCHAR *creationclassname;
+    const WCHAR *description;
+    const WCHAR *deviceid;
+    int          errorcleared;
+    const WCHAR *errordescription;
+    const WCHAR *installdate;
+    int          islocked;
+    UINT32       lasterrorcode;
+    const WCHAR *layout;
+    const WCHAR *name;
+    UINT16       numberoffunctionkeys;
+    UINT16       password;
+    const WCHAR *pnpdeviceid;
+    const struct array *powermanagementcapabilities;
+    int          powermanagementsupported;
+    const WCHAR *status;
+    UINT16       statusinfo;
+    const WCHAR *systemcreationclassname;
+    const WCHAR *systemname;
+};
+struct record_pagefileusage
+{
+    UINT32       allocatedbasesize;
+    const WCHAR *caption;
+    UINT32       currentusage;
+    const WCHAR *description;
+    const WCHAR *installdate;
+    const WCHAR *name;
+    UINT32       peakusage;
+    const WCHAR *status;
+    int          temppagefile;
+};
+struct record_timezone
+{
+    INT32        bias;
+    const WCHAR *caption;
+    INT32        daylightbias;
+    UINT32       daylightday;
+    UINT8        daylightdayofweek;
+    UINT32       daylighthour;
+    UINT32       daylightmillisecond;
+    UINT32       daylightminute;
+    UINT32       daylightmonth;
+    const WCHAR *daylightname;
+    UINT32       daylightsecond;
+    UINT32       daylightyear;
+    const WCHAR *description;
+    const WCHAR *settingid;
+    UINT32       standardbias;
+    UINT32       standardday;
+    UINT8        standarddayofweek;
+    UINT32       standardhour;
+    UINT32       standardmillisecond;
+    UINT32       standardminute;
+    UINT32       standardmonth;
+    const WCHAR *standardname;
+    UINT32       standardsecond;
+    UINT32       standardyear;
+};
 struct record_logicaldisk
 {
     const WCHAR *device_id;
@@ -1108,6 +1543,38 @@ struct record_logicaldisk
     UINT64       size;
     const WCHAR *volumename;
     const WCHAR *volumeserialnumber;
+    UINT16       access;
+    UINT16       availability;
+    UINT64       blocksize;
+    const WCHAR * caption;
+    int          compressed;
+    UINT32       configmanagererrorcode;
+    int          configmanageruserconfig;
+    const WCHAR * creationclassname;
+    const WCHAR * description;
+    int          errorcleared;
+    const WCHAR * errordescription;
+    const WCHAR * errormethodology;
+    const WCHAR * installdate;
+    UINT32       lasterrorcode;
+    UINT32       maximumcomponentlength;
+    UINT32       mediatype;
+    UINT64       numberofblocks;
+    const WCHAR * pnpdeviceid;
+    const struct array * powermanagementcapabilities;
+    int          powermanagementsupported;
+    const WCHAR * providername;
+    const WCHAR * purpose;
+    int          quotasdisabled;
+    int          quotasincomplete;
+    int          quotasrebuilding;
+    const WCHAR * status;
+    UINT16       statusinfo;
+    int          supportsdiskquotas;
+    int          supportsfilebasedcompression;
+    const WCHAR * systemcreationclassname;
+    const WCHAR * systemname;
+    int          volumedirty;
 };
 struct record_logicaldisktopartition
 {
@@ -1176,6 +1643,41 @@ struct record_operatingsystem
     UINT64       totalvirtualmemorysize;
     UINT64       totalvisiblememorysize;
     const WCHAR *version;
+    const WCHAR * bootdevice;
+    const WCHAR * buildtype;
+    const WCHAR * creationclassname;
+    const WCHAR * cscreationclassname;
+    int          dep_32bit;
+    int          dep_available;
+    int          dep_drivers;
+    UINT8        dep_policy;
+    int          debug;
+    const WCHAR * description;
+    int          distributed;
+    UINT32       encryptionlevel;
+    UINT8        foregroundapplicationboost;
+    UINT64       freespaceinpagingfiles;
+    UINT64       freevirtualmemory;
+    UINT32       largesystemcache;
+    UINT32       maxnumberofprocesses;
+    UINT64       maxprocessmemorysize;
+    const struct array * muilanguages;
+    UINT32       numberoflicensedusers;
+    UINT32       numberofprocesses;
+    UINT32       numberofusers;
+    const WCHAR * organization;
+    const WCHAR * othertypedescription;
+    int          paeenabled;
+    const WCHAR * plusproductid;
+    const WCHAR * plusversionnumber;
+    int          portableoperatingsystem;
+    UINT32       producttype;
+    const WCHAR * registereduser;
+    UINT64       sizestoredinpagingfiles;
+    const WCHAR * status;
+    const WCHAR * systemdevice;
+    UINT64       totalswapspacesize;
+    const WCHAR * windowsdirectory;
 };
 struct record_param
 {
@@ -1226,6 +1728,42 @@ struct record_process
     UINT32       process_id;
     UINT32       thread_count;
     UINT64       workingsetsize;
+    const WCHAR * creationdate;
+    const WCHAR * creationclassname;
+    const WCHAR * cscreationclassname;
+    const WCHAR * csname;
+    const WCHAR * executablepath;
+    UINT16       executionstate;
+    UINT32       handlecount;
+    const WCHAR * installdate;
+    UINT64       kernelmodetime;
+    UINT32       maximumworkingsetsize;
+    UINT32       minimumworkingsetsize;
+    const WCHAR * oscreationclassname;
+    const WCHAR * osname;
+    UINT64       otheroperationcount;
+    UINT64       othertransfercount;
+    UINT32       pagefaults;
+    UINT32       pagefileusage;
+    UINT32       peakpagefileusage;
+    UINT64       peakvirtualsize;
+    UINT32       peakworkingsetsize;
+    UINT32       priority;
+    UINT64       privatepagecount;
+    UINT32       quotanonpagedpoolusage;
+    UINT32       quotapagedpoolusage;
+    UINT32       quotapeaknonpagedpoolusage;
+    UINT32       quotapeakpagedpoolusage;
+    UINT64       readoperationcount;
+    UINT64       readtransfercount;
+    UINT32       sessionid;
+    const WCHAR * status;
+    const WCHAR * terminationdate;
+    UINT64       usermodetime;
+    UINT64       virtualsize;
+    const WCHAR * windowsversion;
+    UINT64       writeoperationcount;
+    UINT64       writetransfercount;
     /* methods */
     class_method *get_owner;
 };
@@ -1251,6 +1789,43 @@ struct record_processor
     UINT16       revision;
     const WCHAR *unique_id;
     const WCHAR *version;
+    const WCHAR * assettag;
+    UINT16       availability;
+    UINT32       characteristics;
+    UINT32       configmanagererrorcode;
+    int          configmanageruserconfig;
+    const WCHAR * creationclassname;
+    UINT16       currentvoltage;
+    int          errorcleared;
+    const WCHAR * errordescription;
+    UINT32       extclock;
+    const WCHAR * installdate;
+    UINT32       l2cachesize;
+    UINT32       l2cachespeed;
+    UINT32       l3cachesize;
+    UINT32       l3cachespeed;
+    UINT32       lasterrorcode;
+    UINT16       loadpercentage;
+    UINT32       numberofenabledcore;
+    const WCHAR * otherfamilydescription;
+    const WCHAR * partnumber;
+    const WCHAR * pnpdeviceid;
+    const struct array * powermanagementcapabilities;
+    int          powermanagementsupported;
+    const WCHAR * role;
+    int          slat;
+    const WCHAR * serialnumber;
+    const WCHAR * socketdesignation;
+    const WCHAR * status;
+    UINT16       statusinfo;
+    const WCHAR * stepping;
+    const WCHAR * systemcreationclassname;
+    const WCHAR * systemname;
+    UINT32       threadcount;
+    UINT16       upgrademethod;
+    int          vtfirmware;
+    int          vmx;
+    UINT32       voltagecaps;
 };
 struct record_qualifier
 {
@@ -1279,6 +1854,23 @@ struct record_service
     const WCHAR *startmode;
     const WCHAR *state;
     const WCHAR *systemname;
+    const WCHAR * caption;
+    UINT32       checkpoint;
+    const WCHAR * creationclassname;
+    int          delayedautostart;
+    const WCHAR * description;
+    int          desktopinteract;
+    const WCHAR * errorcontrol;
+    UINT32       exitcode;
+    const WCHAR * installdate;
+    const WCHAR * pathname;
+    UINT32       servicespecificexitcode;
+    int          started;
+    const WCHAR * startname;
+    const WCHAR * status;
+    const WCHAR * systemcreationclassname;
+    UINT32       tagid;
+    UINT32       waithint;
     /* methods */
     class_method *pause_service;
     class_method *resume_service;
@@ -1643,6 +2235,108 @@ static WCHAR *get_baseboard_version( const char *buf, UINT len )
     return ret;
 }
 
+/* ReactOS: helpers for the properties Windows reports and the MI/CIM cmdlets read */
+static struct array *new_string_array( UINT count, const WCHAR **strings )
+{
+    struct array *ret;
+    WCHAR **ptr;
+    UINT i;
+
+    if (!(ret = heap_alloc( sizeof(*ret) ))) return NULL;
+    if (!(ptr = heap_alloc( (count ? count : 1) * sizeof(*ptr) )))
+    {
+        heap_free( ret );
+        return NULL;
+    }
+    for (i = 0; i < count; i++) ptr[i] = heap_strdupW( strings[i] );
+    ret->elem_size = sizeof(*ptr);
+    ret->count     = count;
+    ret->ptr       = ptr;
+    return ret;
+}
+
+static struct array *new_uint16_array( UINT count, const UINT16 *values )
+{
+    struct array *ret;
+    UINT16 *ptr;
+
+    if (!(ret = heap_alloc( sizeof(*ret) ))) return NULL;
+    if (!(ptr = heap_alloc( (count ? count : 1) * sizeof(*ptr) )))
+    {
+        heap_free( ret );
+        return NULL;
+    }
+    if (count) memcpy( ptr, values, count * sizeof(*ptr) );
+    ret->elem_size = sizeof(*ptr);
+    ret->count     = count;
+    ret->ptr       = ptr;
+    return ret;
+}
+
+static WCHAR *get_reg_string( HKEY root, const WCHAR *subkey, const WCHAR *name )
+{
+    HKEY key;
+    DWORD type, size = 0;
+    WCHAR *ret = NULL;
+
+    if (RegOpenKeyExW( root, subkey, 0, KEY_READ | KEY_WOW64_64KEY, &key )) return NULL;
+    if (!RegQueryValueExW( key, name, NULL, &type, NULL, &size ) && (type == REG_SZ || type == REG_EXPAND_SZ) &&
+        (ret = heap_alloc( size + sizeof(WCHAR) )))
+    {
+        if (RegQueryValueExW( key, name, NULL, NULL, (BYTE *)ret, &size )) { heap_free( ret ); ret = NULL; }
+        else ret[size / sizeof(WCHAR)] = 0;
+    }
+    RegCloseKey( key );
+    return ret;
+}
+
+static char *get_smbios_buffer( UINT *len )
+{
+    char *buf;
+    *len = GetSystemFirmwareTable( RSMB, 0, NULL, 0 );
+    if (!*len || !(buf = heap_alloc( *len ))) { *len = 0; return NULL; }
+    GetSystemFirmwareTable( RSMB, 0, buf, *len );
+    return buf;
+}
+
+/* string field (a string number at field_offset) of the first SMBIOS structure of a type */
+static WCHAR *get_smbios_field_string( enum smbios_type type, UINT field_offset, const char *buf, UINT len )
+{
+    const struct smbios_header *hdr;
+    if (!buf || !(hdr = find_smbios_entry( type, buf, len )) || hdr->length <= field_offset) return NULL;
+    return get_smbios_string( ((const BYTE *)hdr)[field_offset], buf, (const char *)hdr - buf + hdr->length, len );
+}
+
+static BYTE get_smbios_field_byte( enum smbios_type type, UINT field_offset, const char *buf, UINT len, BYTE def )
+{
+    const struct smbios_header *hdr;
+    if (!buf || !(hdr = find_smbios_entry( type, buf, len )) || hdr->length <= field_offset) return def;
+    return ((const BYTE *)hdr)[field_offset];
+}
+
+static BOOL is_64bit_os(void)
+{
+#ifdef _WIN64
+    return TRUE;
+#else
+    BOOL wow64 = FALSE;
+    IsWow64Process( GetCurrentProcess(), &wow64 );
+    return wow64;
+#endif
+}
+
+static WCHAR *get_dns_hostname(void)
+{
+    WCHAR *ret;
+    DWORD size = 0;
+    GetComputerNameExW( ComputerNameDnsHostname, NULL, &size );
+    if (!size || !(ret = heap_alloc( size * sizeof(WCHAR) ))) return NULL;
+    if (!GetComputerNameExW( ComputerNameDnsHostname, ret, &size )) { heap_free( ret ); return NULL; }
+    return ret;
+}
+
+static const WCHAR currentversionW_ros[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion";
+
 static enum fill_status fill_baseboard( struct table *table, const struct expr *cond )
 {
     struct record_baseboard *rec;
@@ -1755,6 +2449,42 @@ static WCHAR *get_bios_smbiosbiosversion( const char *buf, UINT len )
     return ret;
 }
 
+static struct array *get_bios_characteristics( const char *buf, UINT len )
+{
+    const struct smbios_header *hdr;
+    const BYTE *raw;
+    UINT16 values[80];
+    UINT count = 0, bit;
+    UINT64 chars;
+
+    if (!buf || !(hdr = find_smbios_entry( SMBIOS_TYPE_BIOS, buf, len )) || hdr->length < 0x12) return NULL;
+    raw = (const BYTE *)hdr;
+    memcpy( &chars, raw + 0x0a, sizeof(chars) );
+    for (bit = 0; bit < 64; bit++)
+        if (chars & ((UINT64)1 << bit)) values[count++] = bit;
+    if (hdr->length > 0x12)
+        for (bit = 0; bit < 8; bit++) if (raw[0x12] & (1 << bit)) values[count++] = 40 + bit;
+    if (hdr->length > 0x13)
+        for (bit = 0; bit < 8; bit++) if (raw[0x13] & (1 << bit)) values[count++] = 48 + bit;
+    return new_uint16_array( count, values );
+}
+
+static struct array *get_bios_versions( const char *buf, UINT len )
+{
+    const WCHAR *strs[2];
+    WCHAR *version = get_smbios_field_string( SMBIOS_TYPE_BIOS, 5, buf, len );
+    WCHAR sm[32];
+    struct array *ret;
+    UINT count = 0;
+
+    if (version) strs[count++] = version;
+    swprintf( sm, L"SMBIOS %u.%u", get_bios_smbiosmajorversion( buf, len ), get_bios_smbiosminorversion( buf, len ) );
+    strs[count++] = sm;
+    ret = new_string_array( count, (const WCHAR **)strs );
+    heap_free( version );
+    return ret;
+}
+
 static enum fill_status fill_bios( struct table *table, const struct expr *cond )
 {
     struct record_bios *rec;
@@ -1780,6 +2510,26 @@ static enum fill_status fill_bios( struct table *table, const struct expr *cond 
     rec->smbiosmajorversion = get_bios_smbiosmajorversion( buf, len );
     rec->smbiosminorversion = get_bios_smbiosminorversion( buf, len );
     rec->version            = bios_versionW;
+    rec->bioscharacteristics = get_bios_characteristics( buf, len );
+    rec->biosversion = get_bios_versions( buf, len );
+    rec->buildnumber = NULL;
+    rec->caption = bios_descriptionW;
+    rec->codeset = NULL;
+    rec->ec_major = get_smbios_field_byte( SMBIOS_TYPE_BIOS, 0x16, buf, len, 0xff );
+    rec->ec_minor = get_smbios_field_byte( SMBIOS_TYPE_BIOS, 0x17, buf, len, 0xff );
+    rec->installdate = NULL;
+    rec->installablelanguages = 0;
+    rec->languageedition = NULL;
+    rec->listoflanguages = NULL;
+    rec->othertargetos = NULL;
+    rec->primarybios = -1;
+    rec->smbiospresent = len ? -1 : 0;
+    rec->softwareelementid = bios_descriptionW;
+    rec->softwareelementstate = 3;
+    rec->status = L"OK";
+    rec->bios_major = get_smbios_field_byte( SMBIOS_TYPE_BIOS, 0x14, buf, len, 0xff );
+    rec->bios_minor = get_smbios_field_byte( SMBIOS_TYPE_BIOS, 0x15, buf, len, 0xff );
+    rec->targetoperatingsystem = 0;
     if (!match_row( table, row, cond, &status )) free_row_values( table, row );
     else row++;
 
@@ -1965,20 +2715,85 @@ static WCHAR *get_username(void)
     return ret;
 }
 
+static struct array *get_compsys_roles(void)
+{
+    static const WCHAR *roles[] = { L"LM_Workstation", L"LM_Server", L"NT" };
+    return new_string_array( ARRAY_SIZE(roles), roles );
+}
+
+static struct array *get_compsys_initialloadinfo(void)
+{
+    return NULL;
+}
+
+static struct array *get_compsys_bootstatus(void)
+{
+    static const UINT16 status[] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    return new_uint16_array( ARRAY_SIZE(status), status );
+}
+
+static int get_daylight_in_effect(void)
+{
+    TIME_ZONE_INFORMATION info;
+    return GetTimeZoneInformation( &info ) == TIME_ZONE_ID_DAYLIGHT ? -1 : 0;
+}
+
+static int get_hypervisor_present(void)
+{
+#if defined(__i386__) || defined(__x86_64__)
+    unsigned int regs[4] = {0, 0, 0, 0};
+    extern void do_cpuid( unsigned int ax, unsigned int *p );
+    do_cpuid( 1, regs );
+    return (regs[2] & (1u << 31)) ? -1 : 0;
+#else
+    return 0;
+#endif
+}
+
+static INT16 get_compsys_timezone(void)
+{
+    TIME_ZONE_INFORMATION info;
+    DWORD status = GetTimeZoneInformation( &info );
+    if (status == TIME_ZONE_ID_INVALID) return 0;
+    if (status == TIME_ZONE_ID_DAYLIGHT) return -(info.Bias + info.DaylightBias);
+    return -(info.Bias + info.StandardBias);
+}
+
+static WCHAR *get_compsys_manufacturer_smbios( const char *buf, UINT len )
+{
+    WCHAR *ret = get_smbios_field_string( SMBIOS_TYPE_SYSTEM, 4, buf, len );
+    return ret ? ret : heap_strdupW( compsys_manufacturerW );
+}
+
+static WCHAR *get_compsys_model_smbios( const char *buf, UINT len )
+{
+    WCHAR *ret = get_smbios_field_string( SMBIOS_TYPE_SYSTEM, 5, buf, len );
+    return ret ? ret : heap_strdupW( compsys_modelW );
+}
+
+static UINT16 get_compsys_pcsystemtype(void)
+{
+    SYSTEM_POWER_STATUS power;
+    if (GetSystemPowerStatus( &power ) && power.BatteryFlag != 128 && power.BatteryFlag != 255) return 2; /* mobile */
+    return 1; /* desktop */
+}
+
 static enum fill_status fill_compsys( struct table *table, const struct expr *cond )
 {
     struct record_computersystem *rec;
     enum fill_status status = FILL_STATUS_UNFILTERED;
-    UINT row = 0;
+    UINT row = 0, smbios_len;
+    char *smbios;
 
     if (!resize_table( table, 1, sizeof(*rec) )) return FILL_STATUS_FAILED;
+    smbios = get_smbios_buffer( &smbios_len );
 
     rec = (struct record_computersystem *)table->data;
     rec->description            = compsys_descriptionW;
     rec->domain                 = compsys_domainW;
     rec->domainrole             = 0; /* standalone workstation */
-    rec->manufacturer           = compsys_manufacturerW;
-    rec->model                  = compsys_modelW;
+    rec->manufacturer           = get_compsys_manufacturer_smbios( smbios, smbios_len );
+    rec->model                  = get_compsys_model_smbios( smbios, smbios_len );
     rec->name                   = get_computername();
 #ifdef __REACTOS__
     rec->num_logical_processors = get_logical_processor_count( NULL );
@@ -1988,8 +2803,64 @@ static enum fill_status fill_compsys( struct table *table, const struct expr *co
 #endif
     rec->total_physical_memory  = get_total_physical_memory();
     rec->username               = get_username();
+    rec->adminpasswordstatus = 3;
+    rec->automaticmanagedpagefile = -1;
+    rec->automaticresetbootoption = -1;
+    rec->automaticresetcapability = -1;
+    rec->bootoptiononlimit = 3;
+    rec->bootoptiononwatchdog = 3;
+    rec->bootromsupported = -1;
+    rec->bootstatus = get_compsys_bootstatus();
+    rec->bootupstate = GetSystemMetrics( SM_CLEANBOOT ) ? L"Fail-safe boot" : L"Normal boot";
+    rec->caption = get_computername();
+    rec->chassisbootupstate = 3;
+    rec->chassisskunumber = get_smbios_field_string( SMBIOS_TYPE_CHASSIS, 0x15 + get_smbios_field_byte( SMBIOS_TYPE_CHASSIS, 0x13, smbios, smbios_len, 0 ) * get_smbios_field_byte( SMBIOS_TYPE_CHASSIS, 0x14, smbios, smbios_len, 0 ), smbios, smbios_len );
+    rec->creationclassname = L"Win32_ComputerSystem";
+    rec->currenttimezone = get_compsys_timezone();
+    rec->daylightineffect = get_daylight_in_effect();
+    rec->dnshostname = get_dns_hostname();
+    rec->enabledaylightsavingstime = -1;
+    rec->frontpanelresetstatus = 3;
+    rec->hypervisorpresent = get_hypervisor_present();
+    rec->infraredsupported = 0;
+    rec->initialloadinfo = get_compsys_initialloadinfo();
+    rec->installdate = NULL;
+    rec->keyboardpasswordstatus = 3;
+    rec->lastloadinfo = NULL;
+    rec->nameformat = NULL;
+    rec->networkservermodeenabled = -1;
+    rec->oemstringarray = NULL;
+    rec->partofdomain = 0;
+    rec->pauseafterreset = -1;
+    rec->pcsystemtype = get_compsys_pcsystemtype();
+    rec->pcsystemtypeex = rec->pcsystemtype;
+    rec->powermanagementcapabilities = NULL;
+    rec->powermanagementsupported = 0;
+    rec->poweronpasswordstatus = 3;
+    rec->powerstate = 0;
+    rec->powersupplystate = 3;
+    rec->primaryownercontact = NULL;
+    rec->primaryownername = get_reg_string( HKEY_LOCAL_MACHINE, currentversionW_ros, L"RegisteredOwner" );
+    rec->resetcapability = 1;
+    rec->resetcount = -1;
+    rec->resetlimit = -1;
+    rec->roles = get_compsys_roles();
+    rec->status = L"OK";
+    rec->supportcontactdescription = NULL;
+    rec->systemfamily = get_smbios_field_string( SMBIOS_TYPE_SYSTEM, 0x1a, smbios, smbios_len );
+    rec->systemskunumber = get_smbios_field_string( SMBIOS_TYPE_SYSTEM, 0x19, smbios, smbios_len );
+    rec->systemstartupdelay = 0;
+    rec->systemstartupoptions = NULL;
+    rec->systemstartupsetting = 0;
+    rec->systemtype = is_64bit_os() ? L"x64-based PC" : L"X86-based PC";
+    rec->thermalstate = 3;
+    rec->wakeuptype = get_smbios_field_byte( SMBIOS_TYPE_SYSTEM, 0x18, smbios, smbios_len, 6 );
+    rec->workgroup = L"WORKGROUP";
+    rec->oemlogobitmap = NULL;
     if (!match_row( table, row, cond, &status )) free_row_values( table, row );
     else row++;
+
+    heap_free( smbios );
 
     TRACE("created %u rows\n", row);
     table->num_rows = row;
@@ -2931,11 +3802,30 @@ static WCHAR *get_volumeserialnumber( const WCHAR *root )
     return heap_strdupW( buffer );
 }
 
+static void get_volume_flags( const WCHAR *root, DWORD *flags, DWORD *maxlen )
+{
+    *flags = *maxlen = 0;
+    GetVolumeInformationW( root, NULL, 0, NULL, maxlen, flags, NULL, 0 );
+}
+
+static const WCHAR *get_logicaldisk_description( UINT type )
+{
+    switch (type)
+    {
+    case DRIVE_FIXED: return L"Local Fixed Disk";
+    case DRIVE_CDROM: return L"CD-ROM Disc";
+    case DRIVE_REMOVABLE: return L"Removable Disk";
+    case DRIVE_REMOTE: return L"Network Connection";
+    default: return NULL;
+    }
+}
+
 static enum fill_status fill_logicaldisk( struct table *table, const struct expr *cond )
 {
     static const WCHAR fmtW[] = {'%','c',':',0};
     WCHAR device_id[3], root[] = {'A',':','\\',0};
     struct record_logicaldisk *rec;
+    DWORD volflags, volmaxlen;
     UINT i, row = 0, offset = 0, type;
     UINT64 size = 1024 * 1024 * 1024;
     DWORD drives = GetLogicalDrives();
@@ -2956,6 +3846,7 @@ static enum fill_status fill_logicaldisk( struct table *table, const struct expr
 
             rec = (struct record_logicaldisk *)(table->data + offset);
             swprintf( device_id, fmtW, 'A' + i );
+            get_volume_flags( root, &volflags, &volmaxlen );
             rec->device_id          = heap_strdupW( device_id );
             rec->drivetype          = type;
             rec->filesystem         = get_filesystem( root );
@@ -2964,6 +3855,38 @@ static enum fill_status fill_logicaldisk( struct table *table, const struct expr
             rec->size               = size;
             rec->volumename         = get_volumename( root );
             rec->volumeserialnumber = get_volumeserialnumber( root );
+            rec->access = 0;
+            rec->availability = 0;
+            rec->blocksize = 0;
+            rec->caption = heap_strdupW( device_id );
+            rec->compressed = (volflags & FILE_VOLUME_IS_COMPRESSED) ? -1 : 0;
+            rec->configmanagererrorcode = 0;
+            rec->configmanageruserconfig = 0;
+            rec->creationclassname = L"Win32_LogicalDisk";
+            rec->description = get_logicaldisk_description( type );
+            rec->errorcleared = 0;
+            rec->errordescription = NULL;
+            rec->errormethodology = NULL;
+            rec->installdate = NULL;
+            rec->lasterrorcode = 0;
+            rec->maximumcomponentlength = volmaxlen;
+            rec->mediatype = type == DRIVE_FIXED ? 12 : 0;
+            rec->numberofblocks = 0;
+            rec->pnpdeviceid = NULL;
+            rec->powermanagementcapabilities = NULL;
+            rec->powermanagementsupported = 0;
+            rec->providername = NULL;
+            rec->purpose = NULL;
+            rec->quotasdisabled = -1;
+            rec->quotasincomplete = 0;
+            rec->quotasrebuilding = 0;
+            rec->status = NULL;
+            rec->statusinfo = 0;
+            rec->supportsdiskquotas = (volflags & FILE_VOLUME_QUOTAS) ? -1 : 0;
+            rec->supportsfilebasedcompression = (volflags & FILE_FILE_COMPRESSION) ? -1 : 0;
+            rec->systemcreationclassname = L"Win32_ComputerSystem";
+            rec->systemname = get_computername();
+            rec->volumedirty = 0;
             if (!match_row( table, row, cond, &status ))
             {
                 free_row_values( table, row );
@@ -3367,6 +4290,56 @@ static WCHAR *get_settingid( UINT32 index )
     return ret;
 }
 
+#ifdef __REACTOS__
+/* ReactOS: IP_ADAPTER_UNICAST_ADDRESS has no OnLinkPrefixLength, the masks come from the IPv4 table */
+static struct array *get_ipaddress_ros( IP_ADAPTER_UNICAST_ADDRESS *list, BOOL subnet )
+{
+    IP_ADAPTER_UNICAST_ADDRESS *address;
+    MIB_IPADDRTABLE *table = NULL;
+    struct array *ret;
+    ULONG buflen, i = 0, count = 0, size = 0, j;
+    WCHAR **ptr, buf[54];
+
+    if (!list) return NULL;
+    for (address = list; address; address = address->Next) count++;
+    if (subnet && GetIpAddrTable( NULL, &size, FALSE ) == ERROR_INSUFFICIENT_BUFFER && (table = heap_alloc( size )))
+    {
+        if (GetIpAddrTable( table, &size, FALSE )) { heap_free( table ); table = NULL; }
+    }
+    if (!(ret = heap_alloc( sizeof(*ret) ))) { heap_free( table ); return NULL; }
+    if (!(ptr = heap_alloc( sizeof(*ptr) * count ))) { heap_free( ret ); heap_free( table ); return NULL; }
+    for (address = list; address; address = address->Next)
+    {
+        buf[0] = 0;
+        if (!subnet)
+        {
+            buflen = ARRAY_SIZE( buf );
+            if (WSAAddressToStringW( address->Address.lpSockaddr, address->Address.iSockaddrLength, NULL, buf, &buflen ))
+                buf[0] = 0;
+        }
+        else if (address->Address.lpSockaddr->sa_family == AF_INET)
+        {
+            DWORD addr = ((SOCKADDR_IN *)address->Address.lpSockaddr)->sin_addr.S_un.S_addr, mask = 0;
+            SOCKADDR_IN sin;
+            for (j = 0; table && j < table->dwNumEntries; j++)
+                if (table->table[j].dwAddr == addr) { mask = table->table[j].dwMask; break; }
+            memset( &sin, 0, sizeof(sin) );
+            sin.sin_family = AF_INET;
+            sin.sin_addr.S_un.S_addr = mask;
+            buflen = ARRAY_SIZE( buf );
+            if (WSAAddressToStringW( (SOCKADDR *)&sin, sizeof(sin), NULL, buf, &buflen )) buf[0] = 0;
+        }
+        else wcscpy( buf, L"64" );
+        ptr[i++] = heap_strdupW( buf );
+    }
+    heap_free( table );
+    ret->elem_size = sizeof(*ptr);
+    ret->count     = count;
+    ret->ptr       = ptr;
+    return ret;
+}
+#endif
+
 static enum fill_status fill_networkadapterconfig( struct table *table, const struct expr *cond )
 {
     struct record_networkadapterconfig *rec;
@@ -3406,11 +4379,15 @@ static enum fill_status fill_networkadapterconfig( struct table *table, const st
         rec->index                = aa->u.s.IfIndex;
 #ifndef __REACTOS__
         rec->ipaddress            = get_ipaddress( aa->FirstUnicastAddress );
+#else
+        rec->ipaddress            = get_ipaddress_ros( aa->FirstUnicastAddress, FALSE );
 #endif
         rec->ipconnectionmetric   = 20;
         rec->ipenabled            = -1;
 #ifndef __REACTOS__
         rec->ipsubnet             = get_ipsubnet( aa->FirstUnicastAddress );
+#else
+        rec->ipsubnet             = get_ipaddress_ros( aa->FirstUnicastAddress, TRUE );
 #endif
         rec->mac_address          = get_mac_address( aa->PhysicalAddress, aa->PhysicalAddressLength );
         rec->settingid            = get_settingid( rec->index );
@@ -3557,11 +4534,122 @@ static WCHAR *get_cmdline( DWORD process_id )
     return NULL; /* FIXME handle different process case */
 }
 
+struct process_extra
+{
+    UINT64 kernel, user, virt, peak_virt, private_bytes, reads, writes, others, read_bytes, write_bytes, other_bytes, ws;
+    UINT32 handles, page_faults, pagefile, peak_pagefile, peak_ws, min_ws, max_ws;
+    UINT32 paged, nonpaged, peak_paged, peak_nonpaged, priority;
+    DWORD session;
+    WCHAR *path;
+    WCHAR *creation;
+};
+
+static WCHAR *filetime_to_datetime( const FILETIME *ft )
+{
+    TIME_ZONE_INFORMATION tzi;
+    SYSTEMTIME local;
+    FILETIME lft;
+    LONG bias = 0;
+    DWORD tz;
+    WCHAR *ret;
+
+    if (!ft->dwLowDateTime && !ft->dwHighDateTime) return NULL;
+    if (!FileTimeToLocalFileTime( ft, &lft ) || !FileTimeToSystemTime( &lft, &local )) return NULL;
+    tz = GetTimeZoneInformation( &tzi );
+    if (tz == TIME_ZONE_ID_DAYLIGHT) bias = -(tzi.Bias + tzi.DaylightBias);
+    else if (tz != TIME_ZONE_ID_INVALID) bias = -(tzi.Bias + tzi.StandardBias);
+    if (!(ret = heap_alloc( 26 * sizeof(WCHAR) ))) return NULL;
+    swprintf( ret, L"%04u%02u%02u%02u%02u%02u.%06u%+04d", local.wYear, local.wMonth, local.wDay, local.wHour,
+              local.wMinute, local.wSecond, local.wMilliseconds * 1000, bias );
+    return ret;
+}
+
+static void get_process_extra( DWORD pid, struct process_extra *x )
+{
+    HANDLE process;
+    FILETIME create, exit, kernel, user;
+    VM_COUNTERS vm;
+    IO_COUNTERS io;
+    SIZE_T minws = 0, maxws = 0;
+    DWORD size, count;
+    WCHAR buf[MAX_PATH];
+
+    memset( x, 0, sizeof(*x) );
+    x->priority = 8;
+    ProcessIdToSessionId( pid, &x->session );
+    if (!(process = OpenProcess( PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid )) &&
+        !(process = OpenProcess( PROCESS_QUERY_INFORMATION, FALSE, pid ))) return;
+    if (GetProcessTimes( process, &create, &exit, &kernel, &user ))
+    {
+        x->kernel = ((UINT64)kernel.dwHighDateTime << 32) | kernel.dwLowDateTime;
+        x->user = ((UINT64)user.dwHighDateTime << 32) | user.dwLowDateTime;
+        x->creation = filetime_to_datetime( &create );
+    }
+    if (!NtQueryInformationProcess( process, ProcessVmCounters, &vm, sizeof(vm), NULL ))
+    {
+        x->page_faults = vm.PageFaultCount;
+        x->ws = vm.WorkingSetSize;
+        x->peak_ws = (UINT32)(vm.PeakWorkingSetSize / 1024);
+        x->pagefile = (UINT32)(vm.PagefileUsage / 1024);
+        x->peak_pagefile = (UINT32)(vm.PeakPagefileUsage / 1024);
+        x->paged = (UINT32)(vm.QuotaPagedPoolUsage / 1024);
+        x->nonpaged = (UINT32)(vm.QuotaNonPagedPoolUsage / 1024);
+        x->peak_paged = (UINT32)(vm.QuotaPeakPagedPoolUsage / 1024);
+        x->peak_nonpaged = (UINT32)(vm.QuotaPeakNonPagedPoolUsage / 1024);
+        x->private_bytes = vm.PagefileUsage;
+        x->virt = vm.VirtualSize;
+        x->peak_virt = vm.PeakVirtualSize;
+    }
+    if (!NtQueryInformationProcess( process, ProcessIoCounters, &io, sizeof(io), NULL ))
+    {
+        x->reads = io.ReadOperationCount;
+        x->writes = io.WriteOperationCount;
+        x->others = io.OtherOperationCount;
+        x->read_bytes = io.ReadTransferCount;
+        x->write_bytes = io.WriteTransferCount;
+        x->other_bytes = io.OtherTransferCount;
+    }
+    if (!NtQueryInformationProcess( process, ProcessHandleCount, &count, sizeof(count), NULL )) x->handles = count;
+    switch (GetPriorityClass( process ))
+    {
+    case IDLE_PRIORITY_CLASS: x->priority = 4; break;
+    case BELOW_NORMAL_PRIORITY_CLASS: x->priority = 6; break;
+    case ABOVE_NORMAL_PRIORITY_CLASS: x->priority = 10; break;
+    case HIGH_PRIORITY_CLASS: x->priority = 13; break;
+    case REALTIME_PRIORITY_CLASS: x->priority = 24; break;
+    default: x->priority = 8; break;
+    }
+    if (GetProcessWorkingSetSize( process, &minws, &maxws ))
+    {
+        x->min_ws = (UINT32)(minws / 1024);
+        x->max_ws = (UINT32)(maxws / 1024);
+    }
+    {
+        static BOOL (WINAPI *pQueryFullProcessImageNameW)( HANDLE, DWORD, WCHAR *, DWORD * );
+        if (!pQueryFullProcessImageNameW)
+            pQueryFullProcessImageNameW = (void *)GetProcAddress( GetModuleHandleW( L"kernel32.dll" ), "QueryFullProcessImageNameW" );
+        size = ARRAY_SIZE(buf);
+        if (pQueryFullProcessImageNameW && pQueryFullProcessImageNameW( process, 0, buf, &size )) x->path = heap_strdupW( buf );
+    }
+    CloseHandle( process );
+}
+
+static WCHAR *get_osversion_string(void)
+{
+    OSVERSIONINFOW ver;
+    WCHAR *ret;
+    ver.dwOSVersionInfoSize = sizeof(ver);
+    if (!GetVersionExW( &ver ) || !(ret = heap_alloc( 33 * sizeof(WCHAR) ))) return NULL;
+    swprintf( ret, L"%u.%u.%u", ver.dwMajorVersion, ver.dwMinorVersion, ver.dwBuildNumber );
+    return ret;
+}
+
 static enum fill_status fill_process( struct table *table, const struct expr *cond )
 {
     static const WCHAR fmtW[] = {'%','u',0};
     WCHAR handle[11];
     struct record_process *rec;
+    struct process_extra x;
     PROCESSENTRY32W entry;
     HANDLE snap;
     enum fill_status status = FILL_STATUS_FAILED;
@@ -3583,6 +4671,7 @@ static enum fill_status fill_process( struct table *table, const struct expr *co
         }
 
         rec = (struct record_process *)(table->data + offset);
+        get_process_extra( entry.th32ProcessID, &x );
         rec->caption        = heap_strdupW( entry.szExeFile );
         rec->commandline    = get_cmdline( entry.th32ProcessID );
         rec->description    = heap_strdupW( entry.szExeFile );
@@ -3592,8 +4681,44 @@ static enum fill_status fill_process( struct table *table, const struct expr *co
         rec->process_id     = entry.th32ProcessID;
         rec->pprocess_id    = entry.th32ParentProcessID;
         rec->thread_count   = entry.cntThreads;
-        rec->workingsetsize = 0;
+        rec->workingsetsize = x.ws;
         rec->get_owner      = process_get_owner;
+        rec->creationdate = x.creation;
+        rec->creationclassname = L"Win32_Process";
+        rec->cscreationclassname = L"Win32_ComputerSystem";
+        rec->csname = get_computername();
+        rec->executablepath = x.path;
+        rec->executionstate = 0;
+        rec->handlecount = x.handles;
+        rec->installdate = NULL;
+        rec->kernelmodetime = x.kernel;
+        rec->maximumworkingsetsize = x.max_ws;
+        rec->minimumworkingsetsize = x.min_ws;
+        rec->oscreationclassname = L"Win32_OperatingSystem";
+        rec->osname = NULL;
+        rec->otheroperationcount = x.others;
+        rec->othertransfercount = x.other_bytes;
+        rec->pagefaults = x.page_faults;
+        rec->pagefileusage = x.pagefile;
+        rec->peakpagefileusage = x.peak_pagefile;
+        rec->peakvirtualsize = x.peak_virt;
+        rec->peakworkingsetsize = x.peak_ws;
+        rec->priority = x.priority;
+        rec->privatepagecount = x.private_bytes;
+        rec->quotanonpagedpoolusage = x.nonpaged;
+        rec->quotapagedpoolusage = x.paged;
+        rec->quotapeaknonpagedpoolusage = x.peak_nonpaged;
+        rec->quotapeakpagedpoolusage = x.peak_paged;
+        rec->readoperationcount = x.reads;
+        rec->readtransfercount = x.read_bytes;
+        rec->sessionid = x.session;
+        rec->status = NULL;
+        rec->terminationdate = NULL;
+        rec->usermodetime = x.user;
+        rec->virtualsize = x.virt;
+        rec->windowsversion = get_osversion_string();
+        rec->writeoperationcount = x.writes;
+        rec->writetransfercount = x.write_bytes;
         if (!match_row( table, row, cond, &status ))
         {
             free_row_values( table, row );
@@ -3786,11 +4911,88 @@ static UINT get_processor_maxclockspeed( UINT index )
     return ret;
 }
 
+static void do_cpuid_subleaf( unsigned int ax, unsigned int cx, unsigned int *p )
+{
+#if defined(_MSC_VER)
+    __cpuidex( (int *)p, ax, cx );
+#elif defined(__i386__) || defined(__x86_64__)
+    __asm__ __volatile__( "cpuid" : "=a"(p[0]), "=b"(p[1]), "=c"(p[2]), "=d"(p[3]) : "a"(ax), "c"(cx) );
+#else
+    p[0] = p[1] = p[2] = p[3] = 0;
+#endif
+}
+
+static UINT32 get_processor_cache_size( BYTE level )
+{
+    unsigned int regs[4] = {0, 0, 0, 0}, i;
+
+    do_cpuid( 0, regs );
+    if (regs[0] >= 4 && regs[1] == 0x756e6547) /* GenuineIntel: deterministic cache parameters */
+    {
+        for (i = 0; i < 16; i++)
+        {
+            unsigned int type, lvl, ways, parts, line, sets;
+            do_cpuid_subleaf( 4, i, regs );
+            type = regs[0] & 0x1f;
+            if (!type) break;
+            lvl = (regs[0] >> 5) & 7;
+            if (lvl != level || type == 1 || type == 2) continue;
+            ways = ((regs[1] >> 22) & 0x3ff) + 1;
+            parts = ((regs[1] >> 12) & 0x3ff) + 1;
+            line = (regs[1] & 0xfff) + 1;
+            sets = regs[2] + 1;
+            return (ways * parts * line * sets) / 1024;
+        }
+        return 0;
+    }
+    do_cpuid( 0x80000000, regs );
+    if (regs[0] < 0x80000006) return 0;
+    do_cpuid( 0x80000006, regs );
+    if (level == 2) return regs[2] >> 16;
+    if (level == 3) return (regs[3] >> 18) * 512;
+    return 0;
+}
+
+static UINT16 get_processor_load(void)
+{
+    FILETIME idle1, kernel1, user1, idle2, kernel2, user2;
+    ULONGLONG di, dk, du;
+
+    if (!GetSystemTimes( &idle1, &kernel1, &user1 )) return 0;
+    Sleep( 100 );
+    if (!GetSystemTimes( &idle2, &kernel2, &user2 )) return 0;
+    di = (((ULONGLONG)idle2.dwHighDateTime << 32) | idle2.dwLowDateTime) - (((ULONGLONG)idle1.dwHighDateTime << 32) | idle1.dwLowDateTime);
+    dk = (((ULONGLONG)kernel2.dwHighDateTime << 32) | kernel2.dwLowDateTime) - (((ULONGLONG)kernel1.dwHighDateTime << 32) | kernel1.dwLowDateTime);
+    du = (((ULONGLONG)user2.dwHighDateTime << 32) | user2.dwLowDateTime) - (((ULONGLONG)user1.dwHighDateTime << 32) | user1.dwLowDateTime);
+    if (!(dk + du) || di > dk + du) return 0;
+    return (UINT16)(100 - (di * 100) / (dk + du));
+}
+
+static int get_processor_feature( unsigned int leaf, int reg, unsigned int bit )
+{
+    unsigned int regs[4] = {0, 0, 0, 0};
+    do_cpuid( leaf, regs );
+    return (regs[reg] & (1u << bit)) ? -1 : 0;
+}
+
+static WCHAR *get_processor_stepping(void)
+{
+    unsigned int regs[4] = {0, 0, 0, 0}, stepping;
+    WCHAR *ret;
+    do_cpuid( 1, regs );
+    get_processor_model( regs[0], &stepping, NULL );
+    if (!(ret = heap_alloc( 11 * sizeof(WCHAR) ))) return NULL;
+    swprintf( ret, L"%u", stepping );
+    return ret;
+}
+
 static enum fill_status fill_processor( struct table *table, const struct expr *cond )
 {
     static const WCHAR fmtW[] = {'C','P','U','%','u',0};
     WCHAR caption[100], device_id[14], processor_id[17], manufacturer[13], name[49] = {0}, version[50];
     struct record_processor *rec;
+    UINT32 l2cache, l3cache;
+    UINT16 load;
 #ifdef __REACTOS__
     UINT i, offset = 0, num_rows = 0, num_cores, num_logical_processors, count = get_processor_count();
 #else
@@ -3811,6 +5013,9 @@ static enum fill_status fill_processor( struct table *table, const struct expr *
     get_processor_manufacturer( manufacturer, ARRAY_SIZE( manufacturer ) );
     get_processor_name( name );
     get_processor_version( version, ARRAY_SIZE( version ) );
+    l2cache = get_processor_cache_size( 2 );
+    l3cache = get_processor_cache_size( 3 );
+    load    = get_processor_load();
 
 #ifdef __REACTOS__
     num_logical_processors = get_logical_processor_count( &num_cores ) / count;
@@ -3848,6 +5053,43 @@ static enum fill_status fill_processor( struct table *table, const struct expr *
         rec->revision               = get_processor_revision();
         rec->unique_id              = NULL;
         rec->version                = heap_strdupW( version );
+        rec->assettag = NULL;
+        rec->availability = 3;
+        rec->characteristics = 252;
+        rec->configmanagererrorcode = 0;
+        rec->configmanageruserconfig = 0;
+        rec->creationclassname = L"Win32_Processor";
+        rec->currentvoltage = 0;
+        rec->errorcleared = 0;
+        rec->errordescription = NULL;
+        rec->extclock = 0;
+        rec->installdate = NULL;
+        rec->l2cachesize = l2cache;
+        rec->l2cachespeed = 0;
+        rec->l3cachesize = l3cache;
+        rec->l3cachespeed = 0;
+        rec->lasterrorcode = 0;
+        rec->loadpercentage = load;
+        rec->numberofenabledcore = rec->num_cores;
+        rec->otherfamilydescription = NULL;
+        rec->partnumber = NULL;
+        rec->pnpdeviceid = NULL;
+        rec->powermanagementcapabilities = NULL;
+        rec->powermanagementsupported = 0;
+        rec->role = L"CPU";
+        rec->slat = 0;
+        rec->serialnumber = NULL;
+        rec->socketdesignation = L"CPU 0";
+        rec->status = L"OK";
+        rec->statusinfo = 3;
+        rec->stepping = get_processor_stepping();
+        rec->systemcreationclassname = L"Win32_ComputerSystem";
+        rec->systemname = get_computername();
+        rec->threadcount = rec->num_logical_processors;
+        rec->upgrademethod = 1;
+        rec->vtfirmware = 0;
+        rec->vmx = get_processor_feature( 1, 2, 5 );
+        rec->voltagecaps = 0;
         if (!match_row( table, i, cond, &status ))
         {
             free_row_values( table, i );
@@ -4037,18 +5279,253 @@ static INT16 get_currenttimezone(void)
     return -(info.Bias + info.StandardBias);
 }
 
+static UINT32 get_process_count(void)
+{
+    PROCESSENTRY32W entry;
+    HANDLE snap = CreateToolhelp32Snapshot( TH32CS_SNAPPROCESS, 0 );
+    UINT32 count = 0;
+
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+    entry.dwSize = sizeof(entry);
+    if (Process32FirstW( snap, &entry )) do count++; while (Process32NextW( snap, &entry ));
+    CloseHandle( snap );
+    return count;
+}
+
+static WCHAR *get_windowsdirectory(void)
+{
+    WCHAR *ret;
+    if (!(ret = heap_alloc( MAX_PATH * sizeof(WCHAR) ))) return NULL;
+    GetWindowsDirectoryW( ret, MAX_PATH );
+    return ret;
+}
+
+static struct array *get_muilanguages(void)
+{
+    WCHAR name[LOCALE_NAME_MAX_LENGTH];
+    const WCHAR *names[1] = { name };
+    if (!GetLocaleInfoW( MAKELCID( GetSystemDefaultUILanguage(), SORT_DEFAULT ), LOCALE_SNAME, name, ARRAY_SIZE(name) ))
+        wcscpy( name, L"en-US" );
+    return new_string_array( 1, names );
+}
+
+static void get_os_memory( UINT64 *commit_total, UINT64 *commit_avail, UINT64 *paging_total, UINT64 *paging_free )
+{
+    MEMORYSTATUSEX status;
+    status.dwLength = sizeof(status);
+    if (!GlobalMemoryStatusEx( &status ))
+    {
+        *commit_total = *commit_avail = *paging_total = *paging_free = 0;
+        return;
+    }
+    *commit_total = status.ullTotalPageFile / 1024;
+    *commit_avail = status.ullAvailPageFile / 1024;
+    *paging_total = status.ullTotalPageFile > status.ullTotalPhys ? (status.ullTotalPageFile - status.ullTotalPhys) / 1024 : 0;
+    *paging_free  = *paging_total;
+    if (status.ullTotalPageFile - status.ullAvailPageFile > status.ullTotalPhys - status.ullAvailPhys)
+    {
+        UINT64 used = (status.ullTotalPageFile - status.ullAvailPageFile) - (status.ullTotalPhys - status.ullAvailPhys);
+        *paging_free = *paging_total > used / 1024 ? *paging_total - used / 1024 : 0;
+    }
+}
+
+static UINT64 get_max_process_memory(void)
+{
+    SYSTEM_INFO info;
+    GetNativeSystemInfo( &info );
+    return ((UINT_PTR)info.lpMaximumApplicationAddress - (UINT_PTR)info.lpMinimumApplicationAddress) / 1024;
+}
+
+static enum fill_status fill_keyboard( struct table *table, const struct expr *cond )
+{
+    static const WCHAR deviceidW[] = L"ACPI\\PNP0303\\0";
+    struct record_keyboard *rec;
+    enum fill_status status = FILL_STATUS_UNFILTERED;
+    WCHAR layout[KL_NAMELENGTH];
+    UINT row = 0;
+    int keys;
+
+    if (!resize_table( table, 1, sizeof(*rec) )) return FILL_STATUS_FAILED;
+    if (!GetKeyboardLayoutNameW( layout )) wcscpy( layout, L"00000409" );
+    keys = GetKeyboardType( 2 );
+
+    rec = (struct record_keyboard *)table->data;
+    rec->availability                = 3; /* running/full power */
+    rec->caption                     = L"Enhanced (101- or 102-key)";
+    rec->configmanagererrorcode      = 0;
+    rec->configmanageruserconfig     = 0;
+    rec->creationclassname           = L"Win32_Keyboard";
+    rec->description                 = L"Standard PS/2 Keyboard";
+    rec->deviceid                    = deviceidW;
+    rec->errorcleared                = 0;
+    rec->errordescription            = NULL;
+    rec->installdate                 = NULL;
+    rec->islocked                    = 0;
+    rec->lasterrorcode               = 0;
+    rec->layout                      = heap_strdupW( layout );
+    rec->name                        = L"Enhanced (101- or 102-key)";
+    rec->numberoffunctionkeys        = keys > 0 ? keys : 12;
+    rec->password                    = 0;
+    rec->pnpdeviceid                 = deviceidW;
+    rec->powermanagementcapabilities = NULL;
+    rec->powermanagementsupported    = 0;
+    rec->status                      = L"OK";
+    rec->statusinfo                  = 3;
+    rec->systemcreationclassname     = L"Win32_ComputerSystem";
+    rec->systemname                  = get_computername();
+    if (!match_row( table, row, cond, &status )) free_row_values( table, row );
+    else row++;
+
+    TRACE("created %u rows\n", row);
+    table->num_rows = row;
+    return status;
+}
+
+struct pagefile_information
+{
+    ULONG NextEntryOffset;
+    ULONG TotalSize;
+    ULONG TotalInUse;
+    ULONG PeakUsage;
+    UNICODE_STRING PageFileName;
+};
+
+static enum fill_status fill_pagefileusage( struct table *table, const struct expr *cond )
+{
+    struct pagefile_information *info, *entry;
+    struct record_pagefileusage *rec;
+    enum fill_status status = FILL_STATUS_UNFILTERED;
+    ULONG size = 4096, offset = 0;
+    UINT row = 0, rec_offset = 0;
+    SYSTEM_INFO si;
+    NTSTATUS ret;
+
+    GetSystemInfo( &si );
+    for (;;)
+    {
+        if (!(info = heap_alloc( size ))) return FILL_STATUS_FAILED;
+        ret = NtQuerySystemInformation( (SYSTEM_INFORMATION_CLASS)18 /* SystemPageFileInformation */, info, size, NULL );
+        if (ret != STATUS_INFO_LENGTH_MISMATCH) break;
+        heap_free( info );
+        size *= 2;
+    }
+    if (ret)
+    {
+        heap_free( info );
+        table->num_rows = 0;
+        return FILL_STATUS_UNFILTERED;
+    }
+    for (;;)
+    {
+        WCHAR *name;
+        const WCHAR *p;
+        UINT len;
+
+        entry = (struct pagefile_information *)((char *)info + offset);
+        if (!entry->TotalSize && !entry->PageFileName.Length) break;
+        if (!resize_table( table, row + 1, sizeof(*rec) )) break;
+
+        p = entry->PageFileName.Buffer;
+        len = entry->PageFileName.Length / sizeof(WCHAR);
+        if (len >= 4 && p && !wcsncmp( p, L"\\??\\", 4 )) { p += 4; len -= 4; }
+        if ((name = heap_alloc( (len + 1) * sizeof(WCHAR) )))
+        {
+            if (p) memcpy( name, p, len * sizeof(WCHAR) );
+            name[len] = 0;
+        }
+        rec = (struct record_pagefileusage *)(table->data + rec_offset);
+        rec->allocatedbasesize = (UINT32)(((UINT64)entry->TotalSize * si.dwPageSize) >> 20);
+        rec->caption           = heap_strdupW( name );
+        rec->currentusage      = (UINT32)(((UINT64)entry->TotalInUse * si.dwPageSize) >> 20);
+        rec->description       = heap_strdupW( name );
+        rec->installdate       = NULL;
+        rec->name              = name;
+        rec->peakusage         = (UINT32)(((UINT64)entry->PeakUsage * si.dwPageSize) >> 20);
+        rec->status            = NULL;
+        rec->temppagefile      = 0;
+        if (!match_row( table, row, cond, &status )) free_row_values( table, row );
+        else
+        {
+            rec_offset += sizeof(*rec);
+            row++;
+        }
+        if (!entry->NextEntryOffset) break;
+        offset += entry->NextEntryOffset;
+    }
+    heap_free( info );
+
+    TRACE("created %u rows\n", row);
+    table->num_rows = row;
+    return status;
+}
+
+static WCHAR *get_timezone_display( const WCHAR *standard_name )
+{
+    WCHAR key[256];
+    if (!standard_name || !standard_name[0]) return NULL;
+    swprintf( key, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Time Zones\\%s", standard_name );
+    return get_reg_string( HKEY_LOCAL_MACHINE, key, L"Display" );
+}
+
+static enum fill_status fill_timezone( struct table *table, const struct expr *cond )
+{
+    struct record_timezone *rec;
+    enum fill_status status = FILL_STATUS_UNFILTERED;
+    TIME_ZONE_INFORMATION tzi;
+    UINT row = 0;
+    WCHAR *display;
+
+    if (!resize_table( table, 1, sizeof(*rec) )) return FILL_STATUS_FAILED;
+    if (GetTimeZoneInformation( &tzi ) == TIME_ZONE_ID_INVALID) memset( &tzi, 0, sizeof(tzi) );
+    display = get_timezone_display( tzi.StandardName );
+
+    rec = (struct record_timezone *)table->data;
+    rec->bias                = -tzi.Bias;
+    rec->caption             = display ? heap_strdupW( display ) : heap_strdupW( tzi.StandardName );
+    rec->daylightbias        = tzi.DaylightBias;
+    rec->daylightday         = tzi.DaylightDate.wDay;
+    rec->daylightdayofweek   = (UINT8)tzi.DaylightDate.wDayOfWeek;
+    rec->daylighthour        = tzi.DaylightDate.wHour;
+    rec->daylightmillisecond = tzi.DaylightDate.wMilliseconds;
+    rec->daylightminute      = tzi.DaylightDate.wMinute;
+    rec->daylightmonth       = tzi.DaylightDate.wMonth;
+    rec->daylightname        = heap_strdupW( tzi.DaylightName );
+    rec->daylightsecond      = tzi.DaylightDate.wSecond;
+    rec->daylightyear        = tzi.DaylightDate.wYear;
+    rec->description         = display ? display : heap_strdupW( tzi.StandardName );
+    rec->settingid           = NULL;
+    rec->standardbias        = tzi.StandardBias;
+    rec->standardday         = tzi.StandardDate.wDay;
+    rec->standarddayofweek   = (UINT8)tzi.StandardDate.wDayOfWeek;
+    rec->standardhour        = tzi.StandardDate.wHour;
+    rec->standardmillisecond = tzi.StandardDate.wMilliseconds;
+    rec->standardminute      = tzi.StandardDate.wMinute;
+    rec->standardmonth       = tzi.StandardDate.wMonth;
+    rec->standardname        = heap_strdupW( tzi.StandardName );
+    rec->standardsecond      = tzi.StandardDate.wSecond;
+    rec->standardyear        = tzi.StandardDate.wYear;
+    if (!match_row( table, row, cond, &status )) free_row_values( table, row );
+    else row++;
+
+    TRACE("created %u rows\n", row);
+    table->num_rows = row;
+    return status;
+}
+
 static enum fill_status fill_operatingsystem( struct table *table, const struct expr *cond )
 {
     static const WCHAR wineprojectW[] = {'T','h','e',' ','W','i','n','e',' ','P','r','o','j','e','c','t',0};
     struct record_operatingsystem *rec;
     enum fill_status status = FILL_STATUS_UNFILTERED;
     OSVERSIONINFOEXW ver;
+    UINT64 commit_total, commit_avail, paging_total, paging_free;
     UINT row = 0;
 
     if (!resize_table( table, 1, sizeof(*rec) )) return FILL_STATUS_FAILED;
 
     ver.dwOSVersionInfoSize = sizeof(ver);
     GetVersionExW( (OSVERSIONINFOW *)&ver );
+    get_os_memory( &commit_total, &commit_avail, &paging_total, &paging_free );
 
     rec = (struct record_operatingsystem *)table->data;
     rec->buildnumber            = get_osbuildnumber( &ver );
@@ -4067,6 +5544,14 @@ static enum fill_status fill_operatingsystem( struct table *table, const struct 
     rec->name                   = get_osname( rec->caption );
 #ifndef __REACTOS__
     rec->operatingsystemsku     = get_operatingsystemsku();
+#else
+    {
+        BOOL (WINAPI *pGetProductInfo)( DWORD, DWORD, DWORD, DWORD, DWORD * );
+        DWORD sku = 0;
+        pGetProductInfo = (void *)GetProcAddress( GetModuleHandleW( L"kernel32.dll" ), "GetProductInfo" );
+        if (!pGetProductInfo || !pGetProductInfo( ver.dwMajorVersion, ver.dwMinorVersion, 0, 0, &sku )) sku = 0;
+        rec->operatingsystemsku = sku;
+    }
 #endif
     rec->osarchitecture         = get_osarchitecture();
     rec->oslanguage             = GetSystemDefaultLangID();
@@ -4079,9 +5564,44 @@ static enum fill_status fill_operatingsystem( struct table *table, const struct 
     rec->suitemask              = 272;     /* Single User + Terminal */
     rec->systemdirectory        = get_systemdirectory();
     rec->systemdrive            = get_systemdrive();
-    rec->totalvirtualmemorysize = get_total_physical_memory() / 1024;
-    rec->totalvisiblememorysize = rec->totalvirtualmemorysize;
+    rec->totalvisiblememorysize = get_total_physical_memory() / 1024;
+    rec->totalvirtualmemorysize = commit_total ? commit_total : rec->totalvisiblememorysize;
     rec->version                = get_osversion( &ver );
+    rec->bootdevice = L"\\Device\\HarddiskVolume1";
+    rec->buildtype = get_processor_count() > 1 ? L"Multiprocessor Free" : L"Uniprocessor Free";
+    rec->creationclassname = L"Win32_OperatingSystem";
+    rec->cscreationclassname = L"Win32_ComputerSystem";
+    rec->dep_32bit = -1;
+    rec->dep_available = -1;
+    rec->dep_drivers = -1;
+    rec->dep_policy = 2;
+    rec->debug = GetSystemMetrics( SM_DEBUG ) ? -1 : 0;
+    rec->description = L"";
+    rec->distributed = 0;
+    rec->encryptionlevel = 256;
+    rec->foregroundapplicationboost = 2;
+    rec->freespaceinpagingfiles = paging_free;
+    rec->freevirtualmemory = commit_avail;
+    rec->largesystemcache = 0;
+    rec->maxnumberofprocesses = 0xffffffff;
+    rec->maxprocessmemorysize = get_max_process_memory();
+    rec->muilanguages = get_muilanguages();
+    rec->numberoflicensedusers = 0;
+    rec->numberofprocesses = get_process_count();
+    rec->numberofusers = 1;
+    rec->organization = get_reg_string( HKEY_LOCAL_MACHINE, currentversionW_ros, L"RegisteredOrganization" );
+    rec->othertypedescription = NULL;
+    rec->paeenabled = 0;
+    rec->plusproductid = NULL;
+    rec->plusversionnumber = NULL;
+    rec->portableoperatingsystem = 0;
+    rec->producttype = ver.wProductType;
+    rec->registereduser = get_reg_string( HKEY_LOCAL_MACHINE, currentversionW_ros, L"RegisteredOwner" );
+    rec->sizestoredinpagingfiles = paging_total;
+    rec->status = L"OK";
+    rec->systemdevice = L"\\Device\\HarddiskVolume1";
+    rec->totalswapspacesize = 0;
+    rec->windowsdirectory = get_windowsdirectory();
     if (!match_row( table, row, cond, &status )) free_row_values( table, row );
     else row++;
 
@@ -4172,6 +5692,37 @@ done:
     return config;
 }
 
+static WCHAR *get_service_description( SC_HANDLE manager, const WCHAR *name )
+{
+    SERVICE_DESCRIPTIONW *desc;
+    SC_HANDLE service;
+    DWORD size = 0;
+    WCHAR *ret = NULL;
+
+    if (!(service = OpenServiceW( manager, name, SERVICE_QUERY_CONFIG ))) return NULL;
+    QueryServiceConfig2W( service, SERVICE_CONFIG_DESCRIPTION, NULL, 0, &size );
+    if (size && (desc = heap_alloc( size )))
+    {
+        if (QueryServiceConfig2W( service, SERVICE_CONFIG_DESCRIPTION, (BYTE *)desc, size, &size ) && desc->lpDescription)
+            ret = heap_strdupW( desc->lpDescription );
+        heap_free( desc );
+    }
+    CloseServiceHandle( service );
+    return ret;
+}
+
+static const WCHAR *get_service_errorcontrol( DWORD control )
+{
+    switch (control)
+    {
+    case SERVICE_ERROR_IGNORE: return L"Ignore";
+    case SERVICE_ERROR_NORMAL: return L"Normal";
+    case SERVICE_ERROR_SEVERE: return L"Severe";
+    case SERVICE_ERROR_CRITICAL: return L"Critical";
+    default: return L"Unknown";
+    }
+}
+
 static enum fill_status fill_service( struct table *table, const struct expr *cond )
 {
     struct record_service *rec;
@@ -4227,6 +5778,23 @@ static enum fill_status fill_service( struct table *table, const struct expr *co
         rec->resume_service = service_resume_service;
         rec->start_service  = service_start_service;
         rec->stop_service   = service_stop_service;
+        rec->caption = heap_strdupW( services[i].lpDisplayName );
+        rec->checkpoint = status->dwCheckPoint;
+        rec->creationclassname = L"Win32_Service";
+        rec->delayedautostart = 0;
+        rec->description = get_service_description( manager, services[i].lpServiceName );
+        rec->desktopinteract = (status->dwServiceType & SERVICE_INTERACTIVE_PROCESS) ? -1 : 0;
+        rec->errorcontrol = get_service_errorcontrol( config->dwErrorControl );
+        rec->exitcode = status->dwWin32ExitCode;
+        rec->installdate = NULL;
+        rec->pathname = config->lpBinaryPathName ? heap_strdupW( config->lpBinaryPathName ) : NULL;
+        rec->servicespecificexitcode = status->dwServiceSpecificExitCode;
+        rec->started = status->dwCurrentState == SERVICE_RUNNING ? -1 : 0;
+        rec->startname = config->lpServiceStartName ? heap_strdupW( config->lpServiceStartName ) : NULL;
+        rec->status = L"OK";
+        rec->systemcreationclassname = L"Win32_ComputerSystem";
+        rec->tagid = config->dwTagId;
+        rec->waithint = status->dwWaitHint;
         heap_free( config );
         if (!match_row( table, row, cond, &fill_status ))
         {
@@ -4571,12 +6139,14 @@ static struct table builtin_classes[] =
     { class_diskpartitionW, C(col_diskpartition), 0, 0, NULL, fill_diskpartition },
     { class_displaycontrollerconfigW, C(col_displaycontrollerconfig), 0, 0, NULL, fill_displaycontrollerconfig },
     { class_ip4routetableW, C(col_ip4routetable), 0, 0, NULL, fill_ip4routetable },
+    { L"Win32_Keyboard", C(col_keyboard), 0, 0, NULL, fill_keyboard },
     { class_logicaldiskW, C(col_logicaldisk), 0, 0, NULL, fill_logicaldisk },
     { class_logicaldisk2W, C(col_logicaldisk), 0, 0, NULL, fill_logicaldisk },
     { class_logicaldisktopartitionW, C(col_logicaldisktopartition), 0, 0, NULL, fill_logicaldisktopartition },
     { class_networkadapterW, C(col_networkadapter), 0, 0, NULL, fill_networkadapter },
     { class_networkadapterconfigW, C(col_networkadapterconfig), 0, 0, NULL, fill_networkadapterconfig },
     { class_operatingsystemW, C(col_operatingsystem), 0, 0, NULL, fill_operatingsystem },
+    { L"Win32_PageFileUsage", C(col_pagefileusage), 0, 0, NULL, fill_pagefileusage },
     { class_paramsW, C(col_param), D(data_param) },
     { class_physicalmediaW, C(col_physicalmedia), D(data_physicalmedia) },
     { class_physicalmemoryW, C(col_physicalmemory), 0, 0, NULL, fill_physicalmemory },
@@ -4597,6 +6167,7 @@ static struct table builtin_classes[] =
     /* Requires dxgi.dll */
     { class_videocontrollerW, C(col_videocontroller), 0, 0, NULL, fill_videocontroller },
 #endif
+    { L"Win32_TimeZone", C(col_timezone), 0, 0, NULL, fill_timezone },
     { class_winsatW, C(col_winsat), D(data_winsat) },
 };
 #undef C

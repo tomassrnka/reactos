@@ -241,6 +241,54 @@ static HRESULT WINAPI qualifier_set_GetNames(
     hr = create_qualifier_enum( set->class, set->member, NULL, &iter );
     if (FAILED( hr )) return hr;
 
+#ifdef __REACTOS__
+    {
+        /* the names are the Name column of the matching __QUALIFIERS rows */
+        static const WCHAR nameW[] = {'N','a','m','e',0};
+        SAFEARRAY *sa;
+        BSTR *names = NULL, *tmp;
+        ULONG count = 0, size = 0, got;
+        LONG i;
+        VARIANT var;
+
+        for (;;)
+        {
+            obj = NULL;
+            got = 0;
+            if (IEnumWbemClassObject_Next( iter, WBEM_INFINITE, 1, &obj, &got ) != S_OK || !got) break;
+            VariantInit( &var );
+            if (IWbemClassObject_Get( obj, nameW, 0, &var, NULL, NULL ) == S_OK && V_VT( &var ) == VT_BSTR)
+            {
+                if (count == size)
+                {
+                    size = size ? size * 2 : 8;
+                    tmp = names ? heap_realloc( names, size * sizeof(*names) ) : heap_alloc( size * sizeof(*names) );
+                    if (!tmp)
+                    {
+                        VariantClear( &var );
+                        IWbemClassObject_Release( obj );
+                        break;
+                    }
+                    names = tmp;
+                }
+                names[count++] = V_BSTR( &var );
+            }
+            else VariantClear( &var );
+            IWbemClassObject_Release( obj );
+        }
+        IEnumWbemClassObject_Release( iter );
+        if (!(sa = SafeArrayCreateVector( VT_BSTR, 0, count ))) hr = E_OUTOFMEMORY;
+        else
+        {
+            for (i = 0; i < (LONG)count; i++) SafeArrayPutElement( sa, &i, names[i] );
+            *pNames = sa;
+            hr = S_OK;
+        }
+        for (i = 0; i < (LONG)count; i++) SysFreeString( names[i] );
+        heap_free( names );
+        return hr;
+    }
+#else
     hr = create_class_object( NULL, iter, 0, NULL, &obj );
     IEnumWbemClassObject_Release( iter );
     if (FAILED( hr )) return hr;
@@ -248,6 +296,7 @@ static HRESULT WINAPI qualifier_set_GetNames(
     hr = IWbemClassObject_GetNames( obj, NULL, 0, NULL, pNames );
     IWbemClassObject_Release( obj );
     return hr;
+#endif
 }
 
 static HRESULT WINAPI qualifier_set_BeginEnumeration(

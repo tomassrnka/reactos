@@ -1187,11 +1187,26 @@ HRESULT get_propval( const struct view *view, UINT index, const WCHAR *name, VAR
     if ((hr = map_view_index( view, index, &table_index, &result_index )) != S_OK) return hr;
 
     if (is_system_prop( name )) return get_system_propval( view, table_index, result_index, name, ret, type, flavor );
+#ifdef __REACTOS__
+    if (!view->result_count && view->cond) return WBEM_E_NOT_FOUND; /* empty filtered result */
+    if (!is_result_prop( view, name )) return WBEM_E_NOT_FOUND;
+#else
     if (!view->result_count || !is_result_prop( view, name )) return WBEM_E_NOT_FOUND;
+#endif
 
     table = view->table[table_index];
     hr = get_column_index( table, name, &column );
     if (hr != S_OK || is_method( table, column )) return WBEM_E_NOT_FOUND;
+#ifdef __REACTOS__
+    if (!view->result_count && !view->cond)
+    {
+        /* class object of a table without rows: the property exists, its value is NULL */
+        if (type) *type = table->columns[column].type & COL_TYPE_MASK;
+        if (flavor) *flavor = 0;
+        if (ret) V_VT( ret ) = VT_NULL;
+        return S_OK;
+    }
+#endif
 
     row = view->result[result_index];
     hr = get_value( table, row, column, &val );
