@@ -1189,6 +1189,12 @@ CloseConsoleHandle(HANDLE hHandle)
 }
 
 
+static BOOLEAN
+BaseIsConsoleImage(VOID)
+{
+    return NtCurrentPeb()->ImageSubsystem == IMAGE_SUBSYSTEM_WINDOWS_CUI;
+}
+
 /*
  * @implemented
  */
@@ -1214,10 +1220,16 @@ GetStdHandle(DWORD nStdHandle)
     {
         case STD_INPUT_HANDLE:
             Handle = Ppb->StandardInput;
+            /* The shell hands the hot key of a shortcut to a GUI program in
+             * this slot, and the monitor in the output slot: no handles. */
+            if ((Ppb->WindowFlags & STARTF_USEHOTKEY) && !BaseIsConsoleImage())
+                Handle = NULL;
             break;
 
         case STD_OUTPUT_HANDLE:
             Handle = Ppb->StandardOutput;
+            if ((Ppb->WindowFlags & STARTF_SHELLPRIVATE) && !BaseIsConsoleImage())
+                Handle = NULL;
             break;
 
         case STD_ERROR_HANDLE:
@@ -1259,10 +1271,12 @@ SetStdHandle(DWORD  nStdHandle,
     {
         case STD_INPUT_HANDLE:
             Ppb->StandardInput = hHandle;
+            Ppb->WindowFlags &= ~STARTF_USEHOTKEY;   /* the slot is a handle now */
             return TRUE;
 
         case STD_OUTPUT_HANDLE:
             Ppb->StandardOutput = hHandle;
+            Ppb->WindowFlags &= ~STARTF_SHELLPRIVATE;
             return TRUE;
 
         case STD_ERROR_HANDLE:

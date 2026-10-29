@@ -750,6 +750,18 @@ BasePushProcessParameters(IN ULONG ParameterFlags,
         ProcessParameters->StandardInput = StartupInfo->hStdInput;
         ProcessParameters->StandardOutput = StartupInfo->hStdOutput;
         ProcessParameters->StandardError = StartupInfo->hStdError;
+
+        /*
+         * Windows 8 and later ignore the handles of STARTF_USESTDHANDLES when
+         * the handle table is not inherited: the child sees NULL, not numbers
+         * that name nothing in its table (also for console handles).
+         */
+        if ((StartupInfo->dwFlags & STARTF_USESTDHANDLES) && !InheritHandles)
+        {
+            ProcessParameters->StandardInput = NULL;
+            ProcessParameters->StandardOutput = NULL;
+            ProcessParameters->StandardError = NULL;
+        }
     }
 
     /* Use Special Flags for ConDllInitialize in Kernel32 */
