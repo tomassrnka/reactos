@@ -128,6 +128,7 @@ extern void func_QueryUnbiasedInterruptTime(void);
 extern void func_ProcessToken(void);
 extern void func_ProcessorGroups(void);
 extern void func_QueueUserAPC(void);
+extern void func_QueueUserWorkItem(void);
 extern void func_RaiseFailFastException(void);
 extern void func_RegisterWait(void);
 extern void func_ResolveLocaleName(void);
@@ -293,6 +294,7 @@ const struct test winetest_testlist[] =
     { "ProcessToken",                func_ProcessToken },
     { "ProcessorGroups",             func_ProcessorGroups },
     { "QueueUserAPC",                func_QueueUserAPC },
+    { "QueueUserWorkItem",           func_QueueUserWorkItem },
     { "RaiseFailFastException",      func_RaiseFailFastException },
     { "RegisterWait",                func_RegisterWait },
     { "ResolveLocaleName",           func_ResolveLocaleName },

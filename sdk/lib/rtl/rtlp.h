@@ -235,12 +235,6 @@ DebugService2(
     IN ULONG Service
 );
 
-/* Timer Queue */
-extern HANDLE TimerThreadHandle;
-
-NTSTATUS
-RtlpInitializeTimerThread(VOID);
-
 #endif /* !_BLDR_ */
 
 /* bitmap64.c */

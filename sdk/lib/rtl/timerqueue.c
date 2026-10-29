@@ -21,13 +21,6 @@
 
 extern PRTL_START_POOL_THREAD RtlpStartThreadFunc;
 extern PRTL_EXIT_POOL_THREAD RtlpExitThreadFunc;
-HANDLE TimerThreadHandle = NULL;
-
-NTSTATUS
-RtlpInitializeTimerThread(VOID)
-{
-    return STATUS_NOT_IMPLEMENTED;
-}
 
 static inline PLARGE_INTEGER get_nt_timeout( PLARGE_INTEGER pTime, ULONG timeout )
 {
