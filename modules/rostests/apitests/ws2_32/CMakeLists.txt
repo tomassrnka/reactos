@@ -33,6 +33,7 @@ list(APPEND SOURCE
     WSARecvMsg.c
     WSASendMsg.c
     send.c
+    selecttimeval.c
     sotimeout.c
     socketscale.c
     udpbindretry.c
