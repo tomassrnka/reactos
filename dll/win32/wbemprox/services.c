@@ -881,7 +881,13 @@ static HRESULT WINAPI wbem_services_ExecMethod(
     hr = create_class_object( table->name, result, 0, NULL, &obj );
     if (hr != S_OK) goto done;
 
+#ifdef __REACTOS__
+    lock_tables();
+#endif
     hr = get_method( table, strMethodName, &func );
+#ifdef __REACTOS__
+    unlock_tables();
+#endif
     if (hr != S_OK) goto done;
 
     hr = func( obj, pInParams, ppOutParams );

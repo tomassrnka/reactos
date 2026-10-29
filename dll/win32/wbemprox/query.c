@@ -694,7 +694,22 @@ done:
     return hr;
 }
 
+#ifdef __REACTOS__
+static HRESULT exec_select_view_locked( struct view *view );
+
 static HRESULT exec_select_view( struct view *view )
+{
+    HRESULT hr;
+    lock_tables();
+    hr = exec_select_view_locked( view );
+    unlock_tables();
+    return hr;
+}
+
+static HRESULT exec_select_view_locked( struct view *view )
+#else
+static HRESULT exec_select_view( struct view *view )
+#endif
 {
     UINT i, j = 0, len;
     enum fill_status status = FILL_STATUS_UNFILTERED;
@@ -1174,8 +1189,26 @@ struct table *get_view_table( const struct view *view, UINT index )
     }
 }
 
+#ifdef __REACTOS__
+static HRESULT get_propval_locked( const struct view *view, UINT index, const WCHAR *name, VARIANT *ret, CIMTYPE *type,
+                                   LONG *flavor );
+
 HRESULT get_propval( const struct view *view, UINT index, const WCHAR *name, VARIANT *ret, CIMTYPE *type,
                      LONG *flavor )
+{
+    HRESULT hr;
+    lock_tables();
+    hr = get_propval_locked( view, index, name, ret, type, flavor );
+    unlock_tables();
+    return hr;
+}
+
+static HRESULT get_propval_locked( const struct view *view, UINT index, const WCHAR *name, VARIANT *ret, CIMTYPE *type,
+                                   LONG *flavor )
+#else
+HRESULT get_propval( const struct view *view, UINT index, const WCHAR *name, VARIANT *ret, CIMTYPE *type,
+                     LONG *flavor )
+#endif
 {
     HRESULT hr;
     UINT column, row, table_index, result_index;
@@ -1209,6 +1242,10 @@ HRESULT get_propval( const struct view *view, UINT index, const WCHAR *name, VAR
 #endif
 
     row = view->result[result_index];
+#ifdef __REACTOS__
+    /* another client refilled a volatile table behind this view: never read past its rows */
+    if (row >= table->num_rows) return WBEM_E_NOT_FOUND;
+#endif
     hr = get_value( table, row, column, &val );
     if (hr != S_OK) return hr;
 

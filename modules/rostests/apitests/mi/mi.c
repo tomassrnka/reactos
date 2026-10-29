@@ -424,6 +424,347 @@ static void test_session(MI_Application *app, const MI_Char *protocol)
     ok(res == MI_RESULT_OK, "Session Close returned %d\n", res);
 }
 
+/* ---- filtered enumeration, concurrency and callback lifetime (review fixes) ---- */
+
+/* pull a WQL query on a session and check that every instance has property `prop` equal to `expect`.
+ * Returns the final result; *bad counts instances that do not match (wrong rows). */
+static MI_Result query_checked(MI_Session *session, const WCHAR *query, const WCHAR *prop, const WCHAR *expect,
+                               UINT *count, UINT *bad)
+{
+    MI_Operation op = MI_OPERATION_NULL;
+    MI_Boolean more = MI_TRUE;
+    MI_Result result = MI_RESULT_FAILED, res;
+    UINT guard = 0;
+
+    *count = *bad = 0;
+    session->ft->QueryInstances(session, 0, NULL, L"root/cimv2", L"WQL", query, NULL, &op);
+    if (!op.ft) return MI_RESULT_FAILED;
+    while (more && guard++ < 100000)
+    {
+        const MI_Instance *inst = NULL, *details = NULL;
+        const MI_Char *message = NULL;
+
+        res = op.ft->GetInstance(&op, &inst, &more, &result, &message, &details);
+        if (res != MI_RESULT_OK) { result = res; break; }
+        if (!inst) continue;
+        (*count)++;
+        {
+            MI_Value v;
+            MI_Type type;
+            MI_Uint32 flags;
+            if (inst->ft->GetElement(inst, prop, &v, &type, &flags, NULL) != MI_RESULT_OK || type != MI_STRING ||
+                (flags & MI_FLAG_NULL) || !v.string || _wcsicmp(v.string, expect))
+                (*bad)++;
+        }
+    }
+    op.ft->Close(&op);
+    return result;
+}
+
+static void own_exe_name(WCHAR *name, DWORD size)
+{
+    WCHAR path[MAX_PATH], *p;
+    GetModuleFileNameW(NULL, path, ARRAYSIZE(path));
+    p = wcsrchr(path, '\\');
+    wcsncpy(name, p ? p + 1 : path, size - 1);
+    name[size - 1] = 0;
+}
+
+struct verify_ctx
+{
+    HANDLE done;
+    const WCHAR *prop, *expect;
+    LONG count, bad, finals;
+    MI_Result result;
+};
+
+static void MI_CALL verify_instance(MI_Operation *op, void *context, const MI_Instance *inst, MI_Boolean more,
+                                    MI_Result result, const MI_Char *message, const MI_Instance *details,
+                                    MI_Result (MI_CALL *ack)(MI_Operation *))
+{
+    struct verify_ctx *ctx = context;
+    if (inst)
+    {
+        MI_Value v;
+        MI_Type type;
+        MI_Uint32 flags;
+        InterlockedIncrement(&ctx->count);
+        if (inst->ft->GetElement(inst, ctx->prop, &v, &type, &flags, NULL) != MI_RESULT_OK || type != MI_STRING ||
+            (flags & MI_FLAG_NULL) || !v.string || _wcsicmp(v.string, ctx->expect))
+            InterlockedIncrement(&ctx->bad);
+    }
+    if (!more)
+    {
+        ctx->result = result;
+        ctx->finals++;
+    }
+    if (ack) ack(op);
+    if (!more) SetEvent(ctx->done);
+}
+
+static void test_filtered_enumeration(MI_Application *app)
+{
+    MI_Session session = MI_SESSION_NULL;
+    MI_Operation op = MI_OPERATION_NULL;
+    MI_OperationCallbacks cb = MI_OPERATIONCALLBACKS_NULL;
+    struct verify_ctx ctx;
+    WCHAR exe[MAX_PATH], query[MAX_PATH + 64];
+    UINT count, bad, total, i;
+    MI_Result res;
+
+    res = app->ft->NewSession(app, NULL, NULL, NULL, NULL, NULL, &session);
+    ok(res == MI_RESULT_OK, "NewSession returned %d\n", res);
+    if (res) return;
+
+    /* a filtered enumeration must return exactly the rows that match the filter */
+    res = query_checked(&session, L"SELECT * FROM Win32_Service WHERE State = 'Running'", L"State", L"Running", &count, &bad);
+    ok(res == MI_RESULT_OK, "running services result %d\n", res);
+    ok(count > 0, "no running service returned\n");
+    ok(bad == 0, "%u of %u 'Running' services do not match the filter\n", bad, count);
+
+    res = query_checked(&session, L"SELECT * FROM Win32_Service WHERE State = 'Stopped'", L"State", L"Stopped", &count, &bad);
+    ok(res == MI_RESULT_OK, "stopped services result %d\n", res);
+    ok(bad == 0, "%u of %u 'Stopped' services do not match the filter\n", bad, count);
+
+    own_exe_name(exe, ARRAYSIZE(exe));
+    _snwprintf(query, ARRAYSIZE(query) - 1, L"SELECT * FROM Win32_Process WHERE Name = '%s'", exe);
+    query[ARRAYSIZE(query) - 1] = 0;
+    res = query_checked(&session, query, L"Name", exe, &count, &bad);
+    ok(res == MI_RESULT_OK, "process by name result %d\n", res);
+    ok(count >= 1, "own process %ls not returned\n", exe);
+    ok(bad == 0, "%u of %u processes do not match Name = '%ls'\n", bad, count, exe);
+
+    /* unfiltered: every process must have a name, and the total is at least the filtered count */
+    res = query_checked(&session, L"SELECT * FROM Win32_Process", L"Name", L"", &total, &bad);
+    ok(res == MI_RESULT_OK, "all processes result %d\n", res);
+    ok(total >= count && total > 3, "total %u filtered %u\n", total, count);
+
+    /* the same filter through push callbacks */
+    for (i = 0; i < 2; i++)
+    {
+        memset(&ctx, 0, sizeof(ctx));
+        ctx.done = CreateEventW(NULL, TRUE, FALSE, NULL);
+        ctx.prop = L"State";
+        ctx.expect = i ? L"Stopped" : L"Running";
+        ctx.result = MI_RESULT_FAILED;
+        cb.callbackContext = &ctx;
+        cb.instanceResult = verify_instance;
+        memset(&op, 0, sizeof(op));
+        _snwprintf(query, ARRAYSIZE(query) - 1, L"SELECT * FROM Win32_Service WHERE State = '%s'", ctx.expect);
+        query[ARRAYSIZE(query) - 1] = 0;
+        session.ft->QueryInstances(&session, 0, NULL, L"root/cimv2", L"WQL", query, &cb, &op);
+        ok(WaitForSingleObject(ctx.done, 60000) == WAIT_OBJECT_0, "push query timed out\n");
+        ok(ctx.result == MI_RESULT_OK && ctx.finals == 1, "push result %d finals %ld\n", ctx.result, ctx.finals);
+        ok(ctx.bad == 0, "push: %ld of %ld services do not match State = %ls\n", ctx.bad, ctx.count, ctx.expect);
+        if (op.ft) op.ft->Close(&op);
+        CloseHandle(ctx.done);
+    }
+    session.ft->Close(&session, NULL, NULL);
+}
+
+struct thread_ctx
+{
+    MI_Application *app;
+    int id;
+    LONG failures;
+    UINT enumerations;
+};
+
+#define CONCURRENT_ROUNDS 15
+
+static DWORD WINAPI concurrent_thread(void *arg)
+{
+    struct thread_ctx *t = arg;
+    MI_Session session = MI_SESSION_NULL;
+    WCHAR exe[MAX_PATH], query[MAX_PATH + 64];
+    UINT i, count, bad;
+    MI_Result res;
+
+    if (t->app->ft->NewSession(t->app, NULL, NULL, NULL, NULL, NULL, &session) != MI_RESULT_OK)
+    {
+        t->failures++;
+        return 0;
+    }
+    own_exe_name(exe, ARRAYSIZE(exe));
+    for (i = 0; i < CONCURRENT_ROUNDS; i++)
+    {
+        /* every thread uses the same two classes, so they share wbemprox's tables */
+        res = query_checked(&session, L"SELECT * FROM Win32_Service WHERE State = 'Running'", L"State", L"Running",
+                            &count, &bad);
+        if (res != MI_RESULT_OK || !count || bad) t->failures++;
+        _snwprintf(query, ARRAYSIZE(query) - 1, L"SELECT * FROM Win32_Process WHERE Name = '%s'", exe);
+        query[ARRAYSIZE(query) - 1] = 0;
+        res = query_checked(&session, query, L"Name", exe, &count, &bad);
+        if (res != MI_RESULT_OK || !count || bad) t->failures++;
+        res = query_checked(&session, L"SELECT * FROM Win32_Process", L"Name", L"", &count, &bad);
+        if (res != MI_RESULT_OK || count < 4) t->failures++;
+        t->enumerations += 3;
+    }
+    session.ft->Close(&session, NULL, NULL);
+    return 0;
+}
+
+static void test_concurrent_enumeration(MI_Application *app)
+{
+    struct thread_ctx ctx[4];
+    HANDLE threads[4];
+    int i;
+
+    for (i = 0; i < 4; i++)
+    {
+        memset(&ctx[i], 0, sizeof(ctx[i]));
+        ctx[i].app = app;
+        ctx[i].id = i;
+        threads[i] = CreateThread(NULL, 0, concurrent_thread, &ctx[i], 0, NULL);
+        ok(threads[i] != NULL, "CreateThread failed\n");
+    }
+    for (i = 0; i < 4; i++)
+    {
+        if (!threads[i]) continue;
+        ok(WaitForSingleObject(threads[i], 240000) == WAIT_OBJECT_0, "thread %d did not finish\n", i);
+        CloseHandle(threads[i]);
+        ok(ctx[i].failures == 0, "thread %d: %ld wrong or failed enumerations of %u\n", i, ctx[i].failures,
+           ctx[i].enumerations);
+    }
+}
+
+struct life_ctx
+{
+    HANDLE in_final, done;
+    LONG final_returned;
+    LONG callbacks;
+    BOOL close_inside;
+    MI_Result close_result;
+    MI_Result (MI_CALL *first_ack)(MI_Operation *);
+    MI_Operation *first_op;
+    HANDLE first_seen;
+    BOOL manual;
+};
+
+static void MI_CALL life_callback(MI_Operation *op, void *context, const MI_Instance *inst, MI_Boolean more,
+                                  MI_Result result, const MI_Char *message, const MI_Instance *details,
+                                  MI_Result (MI_CALL *ack)(MI_Operation *))
+{
+    struct life_ctx *ctx = context;
+    LONG n = InterlockedIncrement(&ctx->callbacks);
+
+    if (ctx->manual)
+    {
+        /* hold the first result un-acked; every later one is acked at once */
+        if (n == 1)
+        {
+            ctx->first_ack = ack;
+            ctx->first_op = op;
+            SetEvent(ctx->first_seen);
+            return;
+        }
+    }
+    if (more) { if (ack) ack(op); return; }
+    SetEvent(ctx->in_final);
+    if (ctx->close_inside) ctx->close_result = op->ft->Close(op);
+    else Sleep(400); /* the client is still using its context while the final callback runs */
+    InterlockedExchange(&ctx->final_returned, 1);
+    SetEvent(ctx->done);
+}
+
+static void init_life(struct life_ctx *ctx)
+{
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->in_final = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ctx->done = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ctx->first_seen = CreateEventW(NULL, TRUE, FALSE, NULL);
+}
+
+static void free_life(struct life_ctx *ctx)
+{
+    CloseHandle(ctx->in_final);
+    CloseHandle(ctx->done);
+    CloseHandle(ctx->first_seen);
+}
+
+static BOOL running_on_reactos(void)
+{
+    WCHAR root[MAX_PATH];
+    if (GetEnvironmentVariableW(L"MI_TEST_STRICT_CLOSE", root, ARRAYSIZE(root))) return TRUE;
+    return GetEnvironmentVariableW(L"SystemRoot", root, ARRAYSIZE(root)) && wcsstr(root, L"ReactOS") != NULL;
+}
+
+static void test_callback_lifetime(MI_Application *app)
+{
+    MI_Session session = MI_SESSION_NULL;
+    MI_Operation op = MI_OPERATION_NULL;
+    MI_OperationCallbacks cb = MI_OPERATIONCALLBACKS_NULL;
+    struct life_ctx ctx;
+    MI_Result res;
+
+    res = app->ft->NewSession(app, NULL, NULL, NULL, NULL, NULL, &session);
+    ok(res == MI_RESULT_OK, "NewSession returned %d\n", res);
+    if (res) return;
+
+    /* Close from another thread while the final callback is still running must wait for it. Windows'
+     * mi.dll does not wait and then crashes in its own worker (checked on the 22H2 oracle), so this and the
+     * next case only run on ReactOS. */
+    if (running_on_reactos())
+    {
+        trace("callback lifetime: Close during the final callback\n");
+        init_life(&ctx);
+        cb.callbackContext = &ctx;
+        cb.instanceResult = life_callback;
+        session.ft->EnumerateInstances(&session, 0, NULL, L"root/cimv2", L"Win32_OperatingSystem", MI_FALSE, &cb, &op);
+        ok(op.ft != NULL, "no operation\n");
+        if (op.ft)
+        {
+            ok(WaitForSingleObject(ctx.in_final, 60000) == WAIT_OBJECT_0, "final callback never started\n");
+            res = op.ft->Close(&op);
+            ok(res == MI_RESULT_OK, "Close returned %d\n", res);
+            ok(ctx.final_returned, "Close returned while the final callback was still running\n");
+            WaitForSingleObject(ctx.done, 5000);
+        }
+        free_life(&ctx);
+    }
+    cb.callbackContext = &ctx;
+    cb.instanceResult = life_callback;
+
+    /* Close from inside the final callback must not deadlock. */
+    if (running_on_reactos())
+    {
+        trace("callback lifetime: Close inside the final callback\n");
+        init_life(&ctx);
+        ctx.close_inside = TRUE;
+        ctx.close_result = MI_RESULT_FAILED;
+        memset(&op, 0, sizeof(op));
+        session.ft->EnumerateInstances(&session, 0, NULL, L"root/cimv2", L"Win32_OperatingSystem", MI_FALSE, &cb, &op);
+        ok(WaitForSingleObject(ctx.done, 20000) == WAIT_OBJECT_0, "Close inside the callback deadlocked\n");
+        ok(ctx.close_result == MI_RESULT_OK, "Close inside the callback returned %d\n", ctx.close_result);
+        free_life(&ctx);
+    }
+
+    /* manual-ack pacing: Cancel does not acknowledge the result the client still holds.
+     * The 22H2 oracle behaves the same way up to the ack (no further callback after Cancel while the result
+     * is un-acked), but its mi.dll then hangs in the session/application teardown, so only ReactOS runs it. */
+    if (running_on_reactos())
+    {
+        init_life(&ctx);
+        ctx.manual = TRUE;
+        memset(&op, 0, sizeof(op));
+        session.ft->EnumerateInstances(&session, MI_OPERATIONFLAGS_MANUAL_ACK_RESULTS, NULL, L"root/cimv2", L"Win32_Process",
+                                       MI_FALSE, &cb, &op);
+        if (op.ft && WaitForSingleObject(ctx.first_seen, 60000) == WAIT_OBJECT_0)
+        {
+            op.ft->Cancel(&op, MI_REASON_NONE);
+            Sleep(400);
+            ok(ctx.callbacks == 1, "%ld callbacks arrived after Cancel without an ack\n", ctx.callbacks);
+            if (ctx.first_ack) ctx.first_ack(&op);
+            ok(WaitForSingleObject(ctx.done, 30000) == WAIT_OBJECT_0, "no final callback after the ack\n");
+        }
+        else ok(0, "manual-ack enumeration did not start\n");
+        if (op.ft) op.ft->Close(&op);
+        free_life(&ctx);
+    }
+
+    session.ft->Close(&session, NULL, NULL);
+}
+
 static void test_remote(MI_Application *app)
 {
     MI_Session session = MI_SESSION_NULL;
@@ -461,6 +802,9 @@ START_TEST(mi)
     test_options(&app);
     test_session(&app, NULL);
     test_session(&app, L"WMIDCOM");
+    test_filtered_enumeration(&app);
+    test_concurrent_enumeration(&app);
+    test_callback_lifetime(&app);
     test_remote(&app);
 
     res = app.ft->Close(&app);

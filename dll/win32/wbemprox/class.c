@@ -622,7 +622,16 @@ static BSTR get_object_text( const struct view *view, UINT index )
 
     len = ARRAY_SIZE( fmtW );
     len += lstrlenW( table->name );
-    if (!(body = get_body_text( table, row, &len_body ))) return NULL;
+#ifdef __REACTOS__
+    lock_tables();
+    if (row >= table->num_rows) body = NULL;
+    else
+#endif
+    body = get_body_text( table, row, &len_body );
+#ifdef __REACTOS__
+    unlock_tables();
+#endif
+    if (!body) return NULL;
     len += len_body;
 
     if (!(ret = SysAllocStringLen( NULL, len ))) return NULL;

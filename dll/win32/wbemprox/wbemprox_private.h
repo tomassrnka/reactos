@@ -208,6 +208,13 @@ void destroy_view( struct view * ) DECLSPEC_HIDDEN;
 HRESULT execute_view( struct view * ) DECLSPEC_HIDDEN;
 struct table *get_view_table( const struct view *, UINT ) DECLSPEC_HIDDEN;
 void init_table_list( void ) DECLSPEC_HIDDEN;
+#ifdef __REACTOS__
+/* One recursive lock serialises everything that refills or reads the process-global tables
+ * (exec_select_view clear/fill, row readers, method lookup): a refill frees the rows other
+ * enumerators index into. */
+void lock_tables( void ) DECLSPEC_HIDDEN;
+void unlock_tables( void ) DECLSPEC_HIDDEN;
+#endif
 struct table *grab_table( const WCHAR * ) DECLSPEC_HIDDEN;
 struct table *addref_table( struct table * ) DECLSPEC_HIDDEN;
 void release_table( struct table * ) DECLSPEC_HIDDEN;

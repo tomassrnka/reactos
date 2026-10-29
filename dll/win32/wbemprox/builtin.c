@@ -4340,7 +4340,25 @@ static struct array *get_ipaddress_ros( IP_ADAPTER_UNICAST_ADDRESS *list, BOOL s
 }
 #endif
 
+#ifdef __REACTOS__
+static enum fill_status fill_networkadapterconfig_inner( struct table *table, const struct expr *cond );
+
+/* WSAAddressToStringW needs the process to have called WSAStartup; wmic and scripts may not have */
 static enum fill_status fill_networkadapterconfig( struct table *table, const struct expr *cond )
+{
+    WSADATA data;
+    enum fill_status status;
+    BOOL started = !WSAStartup( MAKEWORD(2, 2), &data );
+
+    status = fill_networkadapterconfig_inner( table, cond );
+    if (started) WSACleanup();
+    return status;
+}
+
+static enum fill_status fill_networkadapterconfig_inner( struct table *table, const struct expr *cond )
+#else
+static enum fill_status fill_networkadapterconfig( struct table *table, const struct expr *cond )
+#endif
 {
     struct record_networkadapterconfig *rec;
     IP_ADAPTER_ADDRESSES *aa, *buffer;
@@ -4953,6 +4971,47 @@ static UINT32 get_processor_cache_size( BYTE level )
     return 0;
 }
 
+#ifdef __REACTOS__
+/* Load = busy share of the time since the previous sample. The sample is kept between fills (the
+ * caller holds the tables lock), so only the very first fill waits 100 ms for a second sample;
+ * a fill that comes within 100 ms of the last sample reuses the last result. */
+static ULONGLONG filetime_to_u64( const FILETIME *ft )
+{
+    return ((ULONGLONG)ft->dwHighDateTime << 32) | ft->dwLowDateTime;
+}
+
+static UINT16 get_processor_load(void)
+{
+    static BOOL have_sample;
+    static ULONGLONG idle0, busy0, tick0;
+    static UINT16 last_load;
+    FILETIME idle, kernel, user;
+    ULONGLONG idle1, busy1, tick1, di, db;
+
+    if (!GetSystemTimes( &idle, &kernel, &user )) return last_load;
+    idle1 = filetime_to_u64( &idle );
+    busy1 = filetime_to_u64( &kernel ) + filetime_to_u64( &user ); /* kernel time includes idle */
+    tick1 = GetTickCount64();
+    if (!have_sample)
+    {
+        have_sample = TRUE;
+        idle0 = idle1; busy0 = busy1; tick0 = tick1;
+        Sleep( 100 );
+        if (!GetSystemTimes( &idle, &kernel, &user )) return 0;
+        idle1 = filetime_to_u64( &idle );
+        busy1 = filetime_to_u64( &kernel ) + filetime_to_u64( &user );
+        tick1 = GetTickCount64();
+    }
+    else if (tick1 - tick0 < 100) return last_load;
+
+    di = idle1 - idle0;
+    db = busy1 - busy0;
+    idle0 = idle1; busy0 = busy1; tick0 = tick1;
+    if (!db || di > db) last_load = 0;
+    else last_load = (UINT16)(100 - (di * 100) / db);
+    return last_load;
+}
+#else
 static UINT16 get_processor_load(void)
 {
     FILETIME idle1, kernel1, user1, idle2, kernel2, user2;
@@ -4968,6 +5027,7 @@ static UINT16 get_processor_load(void)
     return (UINT16)(100 - (di * 100) / (dk + du));
 }
 
+#endif
 static int get_processor_feature( unsigned int leaf, int reg, unsigned int bit )
 {
     unsigned int regs[4] = {0, 0, 0, 0};

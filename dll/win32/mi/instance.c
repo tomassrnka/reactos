@@ -63,20 +63,39 @@ MI_Result copy_value(MI_Value *dst, const MI_Value *src, MI_Type type)
     }
 
     size = element_size(type);
-    dst->array.size = src->array.size;
+    if (!size) return MI_RESULT_INVALID_PARAMETER;
     if (!src->array.size || !src->array.data) { dst->array.data = NULL; return MI_RESULT_OK; }
-    if (!(dst->array.data = mi_alloc(size * src->array.size))) return MI_RESULT_SERVER_LIMITS_EXCEEDED;
+    /* size * count must fit: array.size is a caller-controlled 32-bit count */
+    if (src->array.size > ((SIZE_T)-1) / size) return MI_RESULT_SERVER_LIMITS_EXCEEDED;
+    dst->array.size = src->array.size;
+    if (!(dst->array.data = mi_alloc(size * src->array.size)))
+    {
+        dst->array.size = 0;
+        return MI_RESULT_SERVER_LIMITS_EXCEEDED;
+    }
 
     switch (type & ~MI_ARRAY)
     {
     case MI_STRING:
         for (i = 0; i < src->array.size; i++)
-            dst->stringa.data[i] = mi_strdup(src->stringa.data[i]);
+        {
+            if (src->stringa.data[i] && !(dst->stringa.data[i] = mi_strdup(src->stringa.data[i])))
+            {
+                free_value(dst, type);
+                return MI_RESULT_SERVER_LIMITS_EXCEEDED;
+            }
+        }
         break;
     case MI_REFERENCE:
     case MI_INSTANCE:
         for (i = 0; i < src->array.size; i++)
-            dst->instancea.data[i] = clone_instance(src->instancea.data[i]);
+        {
+            if (src->instancea.data[i] && !(dst->instancea.data[i] = clone_instance(src->instancea.data[i])))
+            {
+                free_value(dst, type);
+                return MI_RESULT_FAILED;
+            }
+        }
         break;
     default:
         memcpy(dst->array.data, src->array.data, size * src->array.size);
@@ -624,6 +643,12 @@ static void instance_clear(struct mi_instance *inst)
     inst->class_name = inst->nameSpace = inst->server = NULL;
     class_data_release(inst->cls);
     inst->cls = NULL;
+    /* MI_Instance_Destruct leaves the block with the caller: nothing may point at the freed names */
+    inst->decl.name = NULL;
+    inst->decl.superClass = NULL;
+    inst->base.classDecl = NULL;
+    inst->base.nameSpace = NULL;
+    inst->base.serverName = NULL;
 }
 
 void instance_delete(struct mi_instance *inst)
@@ -648,24 +673,38 @@ struct mi_element *instance_find(const struct mi_instance *inst, const WCHAR *na
 
 static MI_Result store_value(struct mi_element *elem, const MI_Value *value, MI_Type type, MI_Uint32 flags)
 {
-    MI_Result res = MI_RESULT_OK;
+    MI_Value fresh;
+    MI_Result res;
+    MI_Uint32 new_flags = flags & ~(MI_FLAG_BORROW | MI_FLAG_ADOPT | MI_FLAG_NULL);
 
-    free_value(&elem->value, elem->type);
-    elem->type = type;
-    elem->flags = flags & ~(MI_FLAG_BORROW | MI_FLAG_ADOPT | MI_FLAG_NULL);
     if (!value || (flags & MI_FLAG_NULL))
     {
-        elem->flags |= MI_FLAG_NULL;
+        free_value(&elem->value, elem->type);
+        elem->type = type;
+        elem->flags = new_flags | MI_FLAG_NULL;
         return MI_RESULT_OK;
     }
-    if (flags & MI_FLAG_ADOPT) elem->value = *value;
-    else res = copy_value(&elem->value, value, type);
-    return res;
+    if (value == &elem->value)
+    {
+        /* storing the element's own value: nothing to copy or free, the new type must match */
+        if (type != elem->type) return MI_RESULT_INVALID_PARAMETER;
+        elem->flags = new_flags;
+        return MI_RESULT_OK;
+    }
+    /* build the new value before the old one goes away: on failure the element is unchanged */
+    if (flags & MI_FLAG_ADOPT) fresh = *value;
+    else if ((res = copy_value(&fresh, value, type)) != MI_RESULT_OK) return res;
+    free_value(&elem->value, elem->type);
+    elem->value = fresh;
+    elem->type = type;
+    elem->flags = new_flags;
+    return MI_RESULT_OK;
 }
 
 MI_Result instance_add(struct mi_instance *inst, const WCHAR *name, const MI_Value *value, MI_Type type, MI_Uint32 flags)
 {
     struct mi_element *elem;
+    MI_Result res;
 
     if (!name || !valid_type(type)) return MI_RESULT_INVALID_PARAMETER;
     if (instance_find(inst, name, NULL)) return MI_RESULT_ALREADY_EXISTS;
@@ -682,8 +721,14 @@ MI_Result instance_add(struct mi_instance *inst, const WCHAR *name, const MI_Val
     elem = &inst->elems[inst->count];
     memset(elem, 0, sizeof(*elem));
     if (!(elem->name = mi_strdup(name))) return MI_RESULT_SERVER_LIMITS_EXCEEDED;
+    if ((res = store_value(elem, value, type, flags)) != MI_RESULT_OK)
+    {
+        mi_free(elem->name);
+        memset(elem, 0, sizeof(*elem));
+        return res;
+    }
     inst->count++;
-    return store_value(elem, value, type, flags);
+    return MI_RESULT_OK;
 }
 
 static MI_Result MI_CALL instance_Clone(const MI_Instance *self, MI_Instance **copy)

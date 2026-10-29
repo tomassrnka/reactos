@@ -632,9 +632,12 @@ static MI_Result MI_CALL app_Close(MI_Application *application)
     TRACE("%p\n", application);
     if (!a) return MI_RESULT_INVALID_PARAMETER;
     if (InterlockedExchange(&a->closed, 1)) return MI_RESULT_INVALID_PARAMETER;
-    /* sessions keep their own state; the application block itself stays valid
-     * (never freed) so that late calls through stale handles fail cleanly */
+    /* sessions keep their own state and never refer to the application block */
     application->ft = NULL;
+    application->reserved2 = 0;
+    a->magic = 0;
+    mi_free(a->id);
+    mi_free(a);
     return MI_RESULT_OK;
 }
 
@@ -956,6 +959,15 @@ MI_Result MI_MAIN_CALL MI_Application_InitializeV1(MI_Uint32 flags, const MI_Cha
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void *reserved)
 {
-    if (reason == DLL_PROCESS_ATTACH) DisableThreadLibraryCalls(instance);
+    switch (reason)
+    {
+    case DLL_PROCESS_ATTACH:
+        DisableThreadLibraryCalls(instance);
+        mi_init_locks();
+        break;
+    case DLL_PROCESS_DETACH:
+        if (!reserved) mi_free_locks();
+        break;
+    }
     return TRUE;
 }

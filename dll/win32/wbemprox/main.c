@@ -37,6 +37,13 @@ static HINSTANCE instance;
 
 struct list *table_list;
 
+#ifdef __REACTOS__
+static CRITICAL_SECTION tables_cs;
+
+void lock_tables( void ) { EnterCriticalSection( &tables_cs ); }
+void unlock_tables( void ) { LeaveCriticalSection( &tables_cs ); }
+#endif
+
 typedef HRESULT (*fnCreateInstance)( LPVOID *ppObj );
 
 typedef struct
@@ -121,8 +128,16 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
         case DLL_PROCESS_ATTACH:
             instance = hinstDLL;
             DisableThreadLibraryCalls(hinstDLL);
+#ifdef __REACTOS__
+            InitializeCriticalSection( &tables_cs );
+#endif
             init_table_list();
             break;
+#ifdef __REACTOS__
+        case DLL_PROCESS_DETACH:
+            if (!lpvReserved) DeleteCriticalSection( &tables_cs );
+            break;
+#endif
     }
 
     return TRUE;

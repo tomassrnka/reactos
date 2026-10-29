@@ -173,6 +173,8 @@ extern const MI_OperationFT mi_operation_ft;
 MI_Result session_new(MI_Application *app, const MI_Char *protocol, const MI_Char *destination,
                       MI_Instance **extendedError, MI_Session *session);
 MI_Result hresult_to_mi(HRESULT hr);
+void mi_init_locks(void);
+void mi_free_locks(void);
 
 #define MI_OPTIONS_MAGIC 0x4f494d21 /* "!MIO" */
 #define MI_CLASSDECL_MAGIC 0x434d4921 /* "!IMC" */

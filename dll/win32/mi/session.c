@@ -19,6 +19,15 @@ WINE_DEFAULT_DEBUG_CHANNEL(mi);
 #define MI_SESSION_MAGIC 0x53534d49 /* "IMSS" */
 #define MI_OPERATION_MAGIC 0x504f4d49 /* "IMOP" */
 
+/* wbemprox keeps one process-global table per class and refills it on every query: the WMI phase
+ * of every operation (connect, query, drain the enumerator, read classes) runs under this lock, so
+ * a second operation can never refill a table another one still has row indices into. No client
+ * callback ever runs while it is held. */
+static CRITICAL_SECTION wmi_cs;
+
+void mi_init_locks(void) { InitializeCriticalSection(&wmi_cs); }
+void mi_free_locks(void) { DeleteCriticalSection(&wmi_cs); }
+
 struct mi_session
 {
     LONG magic;
@@ -446,9 +455,19 @@ static MI_Result variant_to_mi(const VARIANT *var, MI_Type type, MI_Value *value
     SAFEARRAY *sa;
     VARTYPE vt;
     LONG lb, ub, i;
+    SIZE_T esize;
+    MI_Uint32 out, count;
     MI_Type elem_type = type & ~MI_ARRAY;
+    MI_Result res = MI_RESULT_OK;
+    BOOL *present;
 
-    if (!(type & MI_ARRAY)) return variant_to_value(var, type, value, is_null, ns, server);
+    if (!(type & MI_ARRAY))
+    {
+        res = variant_to_value(var, type, value, is_null, ns, server);
+        /* an out-of-memory string must not look like a valid value */
+        if (type == MI_STRING && !*is_null && !value->string) *is_null = TRUE;
+        return res;
+    }
 
     memset(value, 0, sizeof(*value));
     *is_null = FALSE;
@@ -460,8 +479,13 @@ static MI_Result variant_to_mi(const VARIANT *var, MI_Type type, MI_Value *value
         return MI_RESULT_OK;
     }
     if (ub < lb) return MI_RESULT_OK;
-    value->array.size = ub - lb + 1;
-    if (!(value->array.data = mi_alloc(mi_element_size(type) * value->array.size))) return MI_RESULT_SERVER_LIMITS_EXCEEDED;
+    count = (MI_Uint32)((LONGLONG)ub - lb + 1);
+    esize = mi_element_size(type);
+    *is_null = TRUE;
+    if (count > MAXLONG || count > (~(SIZE_T)0) / esize) return MI_RESULT_SERVER_LIMITS_EXCEEDED;
+    if (!(present = mi_alloc(count * sizeof(*present)))) return MI_RESULT_SERVER_LIMITS_EXCEEDED;
+    if (!(value->array.data = mi_alloc(esize * count))) { mi_free(present); return MI_RESULT_SERVER_LIMITS_EXCEEDED; }
+    value->array.size = count;
     for (i = lb; i <= ub; i++)
     {
         VARIANT elem;
@@ -479,9 +503,38 @@ static MI_Result variant_to_mi(const VARIANT *var, MI_Type type, MI_Value *value
             if (FAILED(SafeArrayGetElement(sa, &i, &V_I8(&elem)))) { V_VT(&elem) = VT_EMPTY; continue; }
         }
         variant_to_value(&elem, elem_type, &v, &null, ns, server);
-        if (!null) store_array_element(value, type, i - lb, &v);
+        if (!null)
+        {
+            store_array_element(value, type, i - lb, &v);
+            present[i - lb] = TRUE;
+        }
         VariantClear(&elem);
     }
+
+    if (elem_type == MI_STRING)
+    {
+        /* no NULL entries: a missing string becomes "" */
+        for (i = 0; i < (LONG)count && res == MI_RESULT_OK; i++)
+            if (!value->stringa.data[i] && !(value->stringa.data[i] = mi_strdup(L""))) res = MI_RESULT_SERVER_LIMITS_EXCEEDED;
+    }
+    else if (elem_type == MI_INSTANCE || elem_type == MI_REFERENCE)
+    {
+        /* instance arrays cannot hold NULL either: drop the elements that did not convert */
+        for (out = 0, i = 0; i < (LONG)count; i++)
+        {
+            if (!present[i] || !value->instancea.data[i]) continue;
+            value->instancea.data[out++] = value->instancea.data[i];
+        }
+        for (i = out; i < (LONG)count; i++) value->instancea.data[i] = NULL;
+        value->array.size = out;
+    }
+    mi_free(present);
+    if (res != MI_RESULT_OK)
+    {
+        free_value(value, type);
+        return res;
+    }
+    *is_null = FALSE;
     return MI_RESULT_OK;
 }
 
@@ -612,6 +665,14 @@ done:
     SafeArrayDestroy(names);
 }
 
+static void free_property_contents(struct mi_property *p)
+{
+    mi_free(p->name);
+    mi_free(p->refclass);
+    if (p->has_value) free_value(&p->value, p->type);
+    qualifier_set_free(&p->quals);
+}
+
 static void read_methods(IWbemClassObject *obj, struct mi_class_data *cls)
 {
     BSTR name;
@@ -633,14 +694,27 @@ static void read_methods(IWbemClassObject *obj, struct mi_class_data *cls)
         {
             UINT new_size = size ? size * 2 : 8;
             struct mi_method *tmp = mi_alloc(new_size * sizeof(*tmp));
-            if (!tmp) break;
+            if (!tmp)
+            {
+                if (in) IWbemClassObject_Release(in);
+                if (out) IWbemClassObject_Release(out);
+                SysFreeString(name);
+                break;
+            }
             if (cls->methods) memcpy(tmp, cls->methods, cls->method_count * sizeof(*tmp));
             mi_free(cls->methods);
             cls->methods = tmp;
             size = new_size;
         }
         m = &cls->methods[cls->method_count++];
-        m->name = mi_strdup(name);
+        if (!(m->name = mi_strdup(name)))
+        {
+            cls->method_count--;
+            if (in) IWbemClassObject_Release(in);
+            if (out) IWbemClassObject_Release(out);
+            SysFreeString(name);
+            break;
+        }
         m->return_type = MI_UINT32;
         if (SUCCEEDED(IWbemClassObject_GetMethodQualifierSet(obj, name, &qs)))
         {
@@ -672,13 +746,18 @@ static void read_methods(IWbemClassObject *obj, struct mi_class_data *cls)
                 else m->params[m->count++] = out_props[i];
             }
         }
+        else
+        {
+            /* no room for the merged parameter list: free what read_properties built */
+            for (i = 0; i < in_count; i++) free_property_contents(&in_props[i]);
+            for (i = 0; i < out_count; i++) free_property_contents(&out_props[i]);
+        }
         mi_free(in_props);
         mi_free(out_props);
         if (in) IWbemClassObject_Release(in);
         if (out) IWbemClassObject_Release(out);
         SysFreeString(name);
     }
-    if (name) SysFreeString(name);
     IWbemClassObject_EndMethodEnumeration(obj);
 }
 
@@ -743,7 +822,9 @@ static struct mi_instance *convert_object(IWbemClassObject *obj, const WCHAR *ns
                 flags = MI_FLAG_PROPERTY | MI_FLAG_NOT_MODIFIED;
                 if (relpath && path_has_key(relpath, name)) flags |= MI_FLAG_KEY;
                 if (null) flags |= MI_FLAG_NULL;
-                instance_add(inst, name, null ? NULL : &value, mt, flags | MI_FLAG_ADOPT);
+                /* an adopted value that was not stored (duplicate name, out of memory) is still ours */
+                if (instance_add(inst, name, null ? NULL : &value, mt, flags | MI_FLAG_ADOPT) != MI_RESULT_OK && !null)
+                    free_value(&value, mt);
             }
             VariantClear(&var);
             SysFreeString(name);
@@ -1111,10 +1192,12 @@ static struct mi_class_data *cached_class(struct class_cache *cache, IWbemServic
     return cls;
 }
 
-static void add_instance_result(struct mi_operation *op, IWbemServices *services, struct class_cache *cache,
-                                IWbemClassObject *obj, const WCHAR *server)
+/* attach the class and the schema flags to an already converted instance and add it to the result.
+ * cached_class issues a new WMI query for the class, which refills the class table: never call this
+ * while an enumerator over the same table is still being read. */
+static void finalize_instance(struct mi_operation *op, IWbemServices *services, struct class_cache *cache,
+                              struct mi_instance *inst, const WCHAR *server)
 {
-    struct mi_instance *inst = convert_object(obj, op->nameSpace, server, TRUE);
     struct mi_class_data *cls;
     UINT i;
 
@@ -1152,27 +1235,60 @@ static void add_instance_result(struct mi_operation *op, IWbemServices *services
     op_add_result(op, inst, NULL);
 }
 
+/* Convert every object first (the enumerator indexes rows of the shared wbemprox table), and only
+ * then, with the enumerator drained, look up the class data. */
 static void run_enum(struct mi_operation *op, IWbemServices *services, IEnumWbemClassObject *enumerator, const WCHAR *server)
 {
     struct class_cache cache;
+    struct mi_instance **list = NULL;
     IWbemClassObject *obj;
+    MI_Result result = MI_RESULT_OK;
+    const WCHAR *message = NULL;
+    HRESULT hr, final_hr = 0;
+    UINT count = 0, size = 0, i;
     ULONG got;
-    HRESULT hr;
-    UINT i;
 
     memset(&cache, 0, sizeof(cache));
     set_blanket((IUnknown *)enumerator);
     for (;;)
     {
-        if (op_cancelled(op)) { op_complete(op, MI_RESULT_FAILED, 0, L"The operation was cancelled"); break; }
+        struct mi_instance *inst;
+
+        if (op_cancelled(op)) { result = MI_RESULT_FAILED; message = L"The operation was cancelled"; break; }
         obj = NULL;
         got = 0;
         hr = IEnumWbemClassObject_Next(enumerator, WBEM_INFINITE, 1, &obj, &got);
-        if (hr == WBEM_S_FALSE || (hr == S_OK && !got)) { op_complete(op, MI_RESULT_OK, 0, NULL); break; }
-        if (FAILED(hr)) { op_complete(op, hresult_to_mi(hr), hr, NULL); break; }
-        add_instance_result(op, services, &cache, obj, server);
+        if (hr == WBEM_S_FALSE || (hr == S_OK && !got)) break;
+        if (FAILED(hr)) { result = hresult_to_mi(hr); final_hr = hr; break; }
+        inst = convert_object(obj, op->nameSpace, server, TRUE);
         IWbemClassObject_Release(obj);
+        if (!inst) continue;
+        if (count == size)
+        {
+            UINT new_size = size ? size * 2 : 64;
+            struct mi_instance **tmp = mi_alloc(new_size * sizeof(*tmp));
+            if (!tmp)
+            {
+                instance_delete(inst);
+                result = MI_RESULT_SERVER_LIMITS_EXCEEDED;
+                final_hr = E_OUTOFMEMORY;
+                break;
+            }
+            if (list) memcpy(tmp, list, count * sizeof(*tmp));
+            mi_free(list);
+            list = tmp;
+            size = new_size;
+        }
+        list[count++] = inst;
     }
+
+    for (i = 0; i < count; i++)
+    {
+        if (result == MI_RESULT_FAILED && message) instance_delete(list[i]); /* cancelled: nobody wants the rest */
+        else finalize_instance(op, services, &cache, list[i], server);
+    }
+    mi_free(list);
+    op_complete(op, result, final_hr, message);
     for (i = 0; i < cache.count; i++) class_data_release(cache.items[i]);
 }
 
@@ -1238,8 +1354,11 @@ static void run_operation(struct mi_operation *op)
     WCHAR *server = local_server_name();
     BSTR str = NULL, lang = NULL;
     HRESULT hr;
+    BOOL locked = FALSE;
 
     if (op->kind == OP_FAILED || op->done) goto done; /* completed at creation */
+    EnterCriticalSection(&wmi_cs);
+    locked = TRUE;
     if (op->kind == OP_TEST_CONNECTION)
     {
         hr = connect_namespace(L"root\\cimv2", &services);
@@ -1278,7 +1397,7 @@ static void run_operation(struct mi_operation *op)
         {
             struct class_cache cache;
             memset(&cache, 0, sizeof(cache));
-            add_instance_result(op, services, &cache, obj, server);
+            finalize_instance(op, services, &cache, convert_object(obj, op->nameSpace, server, TRUE), server);
             if (cache.count) class_data_release(cache.items[0]);
             op_complete(op, MI_RESULT_OK, 0, NULL);
         }
@@ -1311,6 +1430,7 @@ done:
     if (obj) IWbemClassObject_Release(obj);
     if (enumerator) IEnumWbemClassObject_Release(enumerator);
     if (services) IWbemServices_Release(services);
+    if (locked) LeaveCriticalSection(&wmi_cs);
     SysFreeString(str);
     SysFreeString(lang);
     mi_free(server);
@@ -1340,7 +1460,6 @@ static void deliver_push(struct mi_operation *op)
         last = (i >= op->count);
         if (!last) { inst = op->instances[i]; cls = op->classes[i]; }
         else { result = op->result; message = op->error_message; details = op->error_details ? &op->error_details->base : NULL; }
-        if (last) op->final_delivered = TRUE;
         op_unlock(op);
         if (stop) break;
 
@@ -1356,7 +1475,16 @@ static void deliver_push(struct mi_operation *op)
             op->callbacks.instanceResult(op->client, op->callbacks.callbackContext, inst ? &inst->base : NULL,
                                          last ? MI_FALSE : MI_TRUE, result, message, details, op_result_ack);
         }
-        if (last) break;
+        if (last)
+        {
+            /* only now may MI_Operation_Close from another thread return: the client frees its callback
+             * context after Close, so the final callback must have returned. Close from inside the
+             * callback (same thread) never waits. */
+            op_lock(op);
+            op->final_delivered = TRUE;
+            op_unlock(op);
+            break;
+        }
         if (manual)
         {
             HANDLE handles[1] = { op->ack };
@@ -1430,10 +1558,10 @@ static MI_Result MI_CALL op_Cancel(MI_Operation *operation, MI_CancellationReaso
     struct mi_operation *op = get_operation(operation);
     TRACE("%p %d\n", operation, reason);
     if (!op) return MI_RESULT_INVALID_PARAMETER;
+    /* the ack event belongs to the client's manual-ack pacing: Close wakes the worker, Cancel must not */
     op_lock(op);
     op->cancelled = TRUE;
     op_unlock(op);
-    SetEvent(op->ack);
     return MI_RESULT_OK;
 }
 
@@ -1614,6 +1742,7 @@ static struct mi_operation *op_create(struct mi_session *s, MI_Uint32 flags, con
 {
     struct mi_operation *op;
 
+    memset(operation, 0, sizeof(*operation));
     if (!(op = mi_alloc(sizeof(*op)))) return NULL;
     op->magic = MI_OPERATION_MAGIC;
     op->refs = 1;
@@ -1624,6 +1753,16 @@ static struct mi_operation *op_create(struct mi_session *s, MI_Uint32 flags, con
     InitializeCriticalSection(&op->cs);
     op->ready = CreateEventW(NULL, TRUE, FALSE, NULL);
     op->ack = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!op->nameSpace || !op->ready || !op->ack)
+    {
+        mi_free(op->nameSpace);
+        if (op->ready) CloseHandle(op->ready);
+        if (op->ack) CloseHandle(op->ack);
+        DeleteCriticalSection(&op->cs);
+        op->magic = 0;
+        mi_free(op);
+        return NULL; /* *operation stays zeroed: it never looks like a live handle */
+    }
     if (has_callbacks(callbacks))
     {
         op->push = TRUE;
