@@ -258,6 +258,53 @@ static BOOLEAN GuestSpan(ULONG Address, ULONG64 Size)
     return (ULONG64)Address + Size <= (ULONG64)Wow64HighestUserAddress + 1;
 }
 
+/*
+ * IOCTL_AFD_GET_CONTEXT of a 32-bit msafd. AFD answers with its own SOCK_SHARED_INFO
+ * (the one it keeps the socket state in) only when the output buffer has exactly the
+ * native size; otherwise it returns the opaque blob the guest stored with SET_CONTEXT,
+ * whose State never changes after an accept. SO_UPDATE_ACCEPT_CONTEXT and
+ * SO_UPDATE_CONNECT_CONTEXT read the State to learn that AcceptEx or ConnectEx connected
+ * the socket, so a guest that asks with its own, smaller, structure size gets AFD's
+ * structure converted to the guest layout: the same fields, hWnd narrowed to 32 bits.
+ */
+#define WOW64_SOCK_SHARED_INFO_SIZE 140
+#define WOW64_SOCK_SHARED_HEAD      (FIELD_OFFSET(SOCK_SHARED_INFO, SocketLastError) + sizeof(INT))
+#define WOW64_SOCK_SHARED_TAIL      (FIELD_OFFSET(SOCK_SHARED_INFO, WSRemoteAddress) + sizeof(SOCKADDR) - \
+                                     FIELD_OFFSET(SOCK_SHARED_INFO, Unknown))
+C_ASSERT(WOW64_SOCK_SHARED_HEAD == 84);
+C_ASSERT(WOW64_SOCK_SHARED_TAIL == 52);
+C_ASSERT(WOW64_SOCK_SHARED_HEAD + sizeof(ULONG) + WOW64_SOCK_SHARED_TAIL == WOW64_SOCK_SHARED_INFO_SIZE);
+
+static NTSTATUS AfdGetContext32(const ULONG *a)
+{
+    SOCK_SHARED_INFO Native;
+    IO_STATUS_BLOCK Io = {{0}};
+    UCHAR *Guest = PTR32(a[8]);
+    NTSTATUS Status;
+
+    ProbeOutput(a[8], WOW64_SOCK_SHARED_INFO_SIZE);
+    ProbeOutput(a[4], sizeof(WOW64_IOSB));
+    RtlZeroMemory(&Native, sizeof(Native));
+    /* AFD completes this request inline; the guest's event is still signalled by the kernel. */
+    Status = NtDeviceIoControlFile(HANDLE32(a[0]), HANDLE32(a[1]), NULL, NULL, &Io, IOCTL_AFD_GET_CONTEXT,
+                                   NULL, 0, &Native, sizeof(Native));
+    if (Status == STATUS_PENDING)
+    {
+        NtWaitForSingleObject(HANDLE32(a[0]), FALSE, NULL);
+        Status = Io.Status;
+    }
+    if (NT_SUCCESS(Status))
+    {
+        ULONG Hwnd = PtrToUlong(Native.hWnd);
+        RtlCopyMemory(Guest, &Native, WOW64_SOCK_SHARED_HEAD);
+        RtlCopyMemory(Guest + WOW64_SOCK_SHARED_HEAD, &Hwnd, sizeof(Hwnd));
+        RtlCopyMemory(Guest + WOW64_SOCK_SHARED_HEAD + sizeof(Hwnd), &Native.Unknown, WOW64_SOCK_SHARED_TAIL);
+        Io.Information = WOW64_SOCK_SHARED_INFO_SIZE;
+    }
+    StoreIo(a[4], &Io);
+    return Status;
+}
+
 /* The handle refers to the calling process */
 static BOOLEAN IsCurrentProcess(HANDLE Process)
 {
@@ -1449,6 +1496,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         AFD_SEND_INFO_UDP Datagram;
         AFD_RECV_INFO_MSG RecvDatagram;
         AFD_ACCEPT_DATA Accept;
+        AFD_SUPER_ACCEPT_INFO SuperAccept;
         /* These requests contain counted strings/addresses or opaque bytes.
          * AFD requests carrying handles or WSABUF arrays need translation. */
         switch (a[5])
@@ -1473,6 +1521,9 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         case IOCTL_AFD_SET_CONTEXT:
         case IOCTL_AFD_GET_CONTEXT_SIZE:
         case IOCTL_AFD_GET_CONTEXT: /* opaque socket-context blob; output only, symmetric of SET_CONTEXT. */
+            /* The guest's own SOCK_SHARED_INFO size gets AFD's current structure, converted. */
+            if (a[9] == WOW64_SOCK_SHARED_INFO_SIZE && !a[2] && !a[3] && a[8])
+                return AfdGetContext32(a);
         case IOCTL_AFD_GET_TDI_HANDLES: /* AFD captures the 32-bit output handles. */
         case IOCTL_AFD_EVENT_SELECT: /* AFD captures event handles and the in/out record. */
         case IOCTL_AFD_ENUM_NETWORK_EVENTS:
@@ -1486,6 +1537,44 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             Input = &Accept;
             InputLength = sizeof(Accept);
             break;
+        case IOCTL_AFD_SET_CONNECT_DATA_SIZE:
+        case IOCTL_AFD_SET_CONNECT_OPTIONS_SIZE:
+        case IOCTL_AFD_SET_DISCONNECT_DATA_SIZE:
+        case IOCTL_AFD_SET_DISCONNECT_OPTIONS_SIZE:
+        case IOCTL_AFD_SET_CONNECT_DATA: /* opaque bytes in; AFD copies them under its own probe. */
+        case IOCTL_AFD_SET_CONNECT_OPTIONS:
+        case IOCTL_AFD_SET_DISCONNECT_DATA:
+        case IOCTL_AFD_SET_DISCONNECT_OPTIONS:
+            break;
+        case IOCTL_AFD_GET_CONNECT_DATA: /* opaque bytes out, written by AFD straight to the guest buffer. */
+        case IOCTL_AFD_GET_CONNECT_OPTIONS:
+        case IOCTL_AFD_GET_DISCONNECT_DATA:
+        case IOCTL_AFD_GET_DISCONNECT_OPTIONS:
+            /* AFD copies into the output buffer without a probe of its own, so a
+             * bad guest buffer must fail here, not fault in the kernel. */
+            if (a[9]) ProbeOutput(a[8], a[9]);
+            break;
+        case IOCTL_AFD_SUPER_ACCEPT:
+        {
+            /* 32-bit AFD_SUPER_ACCEPT_INFO: SanActive and FixAddressAlignment
+             * bytes, the accept socket HANDLE, then the three lengths (20 bytes).
+             * The native request is padded to 32 bytes; AFD copies it when it
+             * locks the request, so a stack copy is enough even when the accept
+             * stays pending. The output buffer (data + addresses) is probed and
+             * locked by AFD itself. */
+            const ULONG *From = Input;
+            if (InputLength < 5 * sizeof(ULONG)) return STATUS_INVALID_PARAMETER;
+            RtlZeroMemory(&SuperAccept, sizeof(SuperAccept));
+            SuperAccept.SanActive = ((const UCHAR *)Input)[0];
+            SuperAccept.FixAddressAlignment = ((const UCHAR *)Input)[1];
+            SuperAccept.AcceptHandle = HANDLE32(From[1]);
+            SuperAccept.ReceiveDataLength = From[2];
+            SuperAccept.LocalAddressLength = From[3];
+            SuperAccept.RemoteAddressLength = From[4];
+            Input = &SuperAccept;
+            InputLength = sizeof(SuperAccept);
+            break;
+        }
         case IOCTL_AFD_SEND_DATAGRAM:
         {
             /* 32-bit AFD_SEND_INFO_UDP: BufferArray, BufferCount, AfdFlags,
