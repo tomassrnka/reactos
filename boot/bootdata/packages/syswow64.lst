@@ -76,6 +76,9 @@ SysWOW64/normaliz.dll
 SysWOW64/ole32.dll
 SysWOW64/oleaut32.dll
 SysWOW64/olepro32.dll
+# MI client API (CimCmdlets / Microsoft.Management.Infrastructure). Local sessions need
+# the WMI provider, which is not in SysWOW64 yet, so 32-bit callers get errors, not a load failure.
+SysWOW64/mi.dll
 # Proxy/stubs for IServiceProvider and the other ActiveX interfaces: a 32-bit COM
 # LocalServer/LocalService registers its class objects through IServiceProvider.
 SysWOW64/actxprxy.dll
