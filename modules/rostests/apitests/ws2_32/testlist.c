@@ -45,6 +45,7 @@ extern void func_udprecv(void);
 extern void func_udpzerolen(void);
 extern void func_timewait(void);
 extern void func_WSAAsync(void);
+extern void func_WSAEnumNameSpaceProviders(void);
 extern void func_WSAIoctl(void);
 extern void func_WSAPoll(void);
 extern void func_WSALookupService(void);

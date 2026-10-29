@@ -43,6 +43,7 @@ list(APPEND SOURCE
     udpzerolen.c
     timewait.c
     WSAAsync.c
+    WSAEnumNameSpaceProviders.c
     WSAIoctl.c
     WSAPoll.c
     WSALookupService.c

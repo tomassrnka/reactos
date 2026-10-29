@@ -218,6 +218,8 @@ typedef struct _NSPROVIDER_ENUM_CONTEXT
     DWORD BufferLength;
     DWORD BufferUsed;
     DWORD Count;
+    DWORD Index;
+    DWORD StringBytes;
     BOOLEAN Unicode;
     INT ErrorCode;
 } NSPROVIDER_ENUM_CONTEXT, *PNSPROVIDER_ENUM_CONTEXT;

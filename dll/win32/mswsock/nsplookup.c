@@ -1161,7 +1161,7 @@ End:
 /* Build the WSAQUERYSET describing current network connectivity for an NLA
  * query. On success the result carries the NLA service class, the connected
  * network's friendly name (LUP_RETURN_NAME) and an NLA_CONNECTIVITY blob
- * (LUP_RETURN_BLOB). When no network is connected we report WSAENOMORE (no
+ * (LUP_RETURN_BLOB). When no network is connected we report WSA_E_NO_MORE (no
  * networks) rather than an error, which NLA-aware clients read as "offline". */
 INT
 NSP_BuildNLAResultW(_In_ PWSHANDLEINTERN data,
@@ -1187,7 +1187,7 @@ NSP_BuildNLAResultW(_In_ PWSHANDLEINTERN data,
     if (!connected)
     {
         /* No connected network -> no NLA entries to return. */
-        return WSAENOMORE;
+        return WSA_E_NO_MORE;
     }
 
     if (nameW[0] == L'\0')
@@ -1278,7 +1278,9 @@ NSP_LookupServiceNextW(_In_ PWSHANDLEINTERN data,
     {
         if (data->CallIDCounter >= 1)
         {
-            result = WSAENOMORE;
+            /* Windows ends a lookup with WSA_E_NO_MORE (10110), not the
+             * Winsock 1 WSAENOMORE (10102) */
+            result = WSA_E_NO_MORE;
             goto End;
         }
     }
