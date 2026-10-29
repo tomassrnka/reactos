@@ -385,6 +385,14 @@ TestCallbackException(ULONG Flags)
     BOOL Ret;
     int i;
 
+    /* Windows ends the process on an exception in a wait callback. ReactOS contains it, and ends
+       only the wait */
+    if (!strcmp(winetest_platform, "windows"))
+    {
+        skip("Flags %lx: an exception in a wait callback ends the process on Windows\n", Flags);
+        return;
+    }
+
     Object = CreateEventW(NULL, TRUE, FALSE, NULL);
     Completion = CreateEventW(NULL, TRUE, FALSE, NULL);
     ok(Object && Completion, "CreateEventW failed: %lu\n", GetLastError());
@@ -670,7 +678,8 @@ TestSharedThread(void)
 }
 
 /* --- Callbacks that touch other waits of their thread. Registered one after the other, the waits
-   share a wait thread. WT_EXECUTEDEFAULT and WT_EXECUTEINWAITTHREAD both run on it --- */
+   share a wait thread. WT_EXECUTEINWAITTHREAD callbacks run on it, WT_EXECUTEDEFAULT ones in the
+   pool --- */
 
 typedef struct _CB_CTX
 {
@@ -869,7 +878,14 @@ TestSelfUnregister(ULONG Flags)
     Sleep(200);
     Fired = s_SelfFired;
     Sleep(200);
-    ok(s_SelfFired == Fired && Fired == 1, "Flags %lx: the wait fired %ld times, 1 expected\n", Flags, s_SelfFired);
+    /* The wait thread runs the callback of WT_EXECUTEINWAITTHREAD and waits for nothing meanwhile. In
+       the pool the wait goes on while the callback runs, and fires again for the object that stays
+       signalled, until the callback unregistered it (Windows 10: twice) */
+    if (Flags & WT_EXECUTEINWAITTHREAD)
+        ok(Fired == 1, "Flags %lx: the wait fired %ld times, 1 expected\n", Flags, Fired);
+    else
+        ok(Fired >= 1, "Flags %lx: the wait fired %ld times\n", Flags, Fired);
+    ok(s_SelfFired == Fired, "Flags %lx: the wait fired after it was unregistered (%ld, then %ld)\n", Flags, Fired, s_SelfFired);
     /* The wait is gone and freed: nothing to unregister again */
     CloseHandle(Done);
     CloseHandle(Object);
@@ -1001,6 +1017,534 @@ TestSharedThreadCallbacks(void)
     }
 }
 
+/* --- Pool dispatch: Windows queues the callback of a wait without WT_EXECUTEINWAITTHREAD to the pool,
+   and the wait thread goes on waiting --- */
+
+typedef struct _BLOCK_CTX
+{
+    HANDLE ObjB;        /* the object of the other wait */
+    HANDLE Notice;      /* the other wait sets it */
+    HANDLE Done;
+    DWORD Result;
+} BLOCK_CTX;
+
+static VOID CALLBACK
+BlockOnOtherCallback(PVOID Context, BOOLEAN TimerOrWaitFired)
+{
+    BLOCK_CTX *Ctx = Context;
+
+    SetEvent(Ctx->ObjB);
+    Ctx->Result = WaitForSingleObject(Ctx->Notice, 3000);
+    SetEvent(Ctx->Done);
+}
+
+/* A callback that waits for something another wait of its thread must notice: the wait thread must
+   not be the thread that runs the callback */
+static void
+TestCallbackBlocksOnOtherWait(ULONG FlagsB)
+{
+    HANDLE ObjA, WaitA, WaitB;
+    BLOCK_CTX Ctx;
+    DWORD Result;
+    BOOL Ret;
+
+    ObjA = CreateEventW(NULL, FALSE, FALSE, NULL);
+    Ctx.ObjB = CreateEventW(NULL, FALSE, FALSE, NULL);
+    Ctx.Notice = CreateEventW(NULL, TRUE, FALSE, NULL);
+    Ctx.Done = CreateEventW(NULL, TRUE, FALSE, NULL);
+    Ctx.Result = 0xdeadbeef;
+    ok(ObjA && Ctx.ObjB && Ctx.Notice && Ctx.Done, "CreateEventW failed: %lu\n", GetLastError());
+
+    Ret = RegisterWaitForSingleObject(&WaitA, ObjA, BlockOnOtherCallback, &Ctx, INFINITE, WT_EXECUTEONLYONCE);
+    ok(Ret, "RegisterWaitForSingleObject failed: %lu\n", GetLastError());
+    Ret = RegisterWaitForSingleObject(&WaitB, Ctx.ObjB, SetEventCallback, Ctx.Notice, INFINITE,
+                                      FlagsB | WT_EXECUTEONLYONCE);
+    ok(Ret, "RegisterWaitForSingleObject failed: %lu\n", GetLastError());
+
+    SetEvent(ObjA);
+    Result = WaitForSingleObject(Ctx.Done, 10000);
+    ok(Result == WAIT_OBJECT_0, "Flags %lx: the callback did not return: %lu\n", FlagsB, Result);
+    ok(Ctx.Result == WAIT_OBJECT_0, "Flags %lx: the other wait did not fire while the callback waited for it: %lu\n",
+       FlagsB, Ctx.Result);
+
+    Ret = UnregisterWaitEx(WaitA, INVALID_HANDLE_VALUE);
+    ok(Ret, "UnregisterWaitEx failed: %lu\n", GetLastError());
+    Ret = UnregisterWaitEx(WaitB, INVALID_HANDLE_VALUE);
+    ok(Ret, "UnregisterWaitEx failed: %lu\n", GetLastError());
+    CloseHandle(Ctx.Done);
+    CloseHandle(Ctx.Notice);
+    CloseHandle(Ctx.ObjB);
+    CloseHandle(ObjA);
+}
+
+static VOID CALLBACK
+LongCallback(PVOID Context, BOOLEAN TimerOrWaitFired)
+{
+    Sleep(1000);
+    SetEvent((HANDLE)Context);
+}
+
+/* A long callback does not hold up the timeouts of the other waits of its thread */
+static void
+TestLongCallbackTimeouts(ULONG FlagsT)
+{
+    HANDLE Signalled, Quiet, LongDone, WaitL, WaitT;
+    LONG Timed;
+    BOOL Ret;
+
+    Signalled = CreateEventW(NULL, TRUE, TRUE, NULL);
+    Quiet = CreateEventW(NULL, TRUE, FALSE, NULL);
+    LongDone = CreateEventW(NULL, TRUE, FALSE, NULL);
+    s_Timed = 0;
+
+    Ret = RegisterWaitForSingleObject(&WaitL, Signalled, LongCallback, LongDone, INFINITE, WT_EXECUTEONLYONCE);
+    ok(Ret, "RegisterWaitForSingleObject failed: %lu\n", GetLastError());
+    Ret = RegisterWaitForSingleObject(&WaitT, Quiet, TimedCallback, NULL, 100, FlagsT);
+    ok(Ret, "RegisterWaitForSingleObject failed: %lu\n", GetLastError());
+
+    Sleep(1050);
+    Timed = s_Timed;
+    ok(Timed >= 8 && Timed <= 11, "Flags %lx: the wait with 100 ms fired %ld times while a callback took 1 s, about 10 expected\n",
+       FlagsT, Timed);
+
+    ok(WaitForSingleObject(LongDone, 5000) == WAIT_OBJECT_0, "Flags %lx: the long callback did not return\n", FlagsT);
+    Ret = UnregisterWaitEx(WaitL, INVALID_HANDLE_VALUE);
+    ok(Ret, "UnregisterWaitEx failed: %lu\n", GetLastError());
+    Ret = UnregisterWaitEx(WaitT, INVALID_HANDLE_VALUE);
+    ok(Ret, "UnregisterWaitEx failed: %lu\n", GetLastError());
+    CloseHandle(LongDone);
+    CloseHandle(Quiet);
+    CloseHandle(Signalled);
+}
+
+typedef struct _TID_CTX
+{
+    HANDLE Done;
+    DWORD Tid;
+} TID_CTX;
+
+static VOID CALLBACK
+TidCallback(PVOID Context, BOOLEAN TimerOrWaitFired)
+{
+    TID_CTX *Ctx = Context;
+
+    Ctx->Tid = GetCurrentThreadId();
+    SetEvent(Ctx->Done);
+}
+
+/* WT_EXECUTEINWAITTHREAD callbacks of waits of one thread run on that thread, and so do those of
+   WT_EXECUTEINPERSISTENTTHREAD (Windows 10); any other callback runs on another thread */
+static void
+TestCallbackThreads(void)
+{
+    static const ULONG Flags[] = { WT_EXECUTEINWAITTHREAD, WT_EXECUTEDEFAULT, WT_EXECUTEINWAITTHREAD,
+                                   WT_EXECUTEINIOTHREAD, WT_EXECUTELONGFUNCTION, WT_EXECUTEINPERSISTENTTHREAD };
+    HANDLE Objects[6], Waits[6], Done[6];
+    TID_CTX Ctx[6];
+    DWORD Result;
+    BOOL Ret;
+    int i;
+
+    for (i = 0; i < 6; i++)
+    {
+        Objects[i] = CreateEventW(NULL, TRUE, FALSE, NULL);
+        Done[i] = CreateEventW(NULL, TRUE, FALSE, NULL);
+        Ctx[i].Done = Done[i];
+        Ctx[i].Tid = 0;
+        Ret = RegisterWaitForSingleObject(&Waits[i], Objects[i], TidCallback, &Ctx[i], INFINITE,
+                                          Flags[i] | WT_EXECUTEONLYONCE);
+        ok(Ret, "RegisterWaitForSingleObject(%lx) failed: %lu\n", Flags[i], GetLastError());
+    }
+    for (i = 0; i < 6; i++)
+        SetEvent(Objects[i]);
+    Result = WaitForMultipleObjects(6, Done, TRUE, 5000);
+    ok(Result == WAIT_OBJECT_0, "Not every callback ran: %lu\n", Result);
+
+    ok(Ctx[0].Tid != 0 && Ctx[0].Tid == Ctx[2].Tid,
+       "WT_EXECUTEINWAITTHREAD callbacks of one wait thread ran on threads %lu and %lu\n", Ctx[0].Tid, Ctx[2].Tid);
+    ok(Ctx[0].Tid != GetCurrentThreadId(), "A WT_EXECUTEINWAITTHREAD callback ran on the thread that registered it\n");
+    ok(Ctx[5].Tid == Ctx[0].Tid, "The WT_EXECUTEINPERSISTENTTHREAD callback ran on thread %lu, not on the wait thread %lu\n",
+       Ctx[5].Tid, Ctx[0].Tid);
+    for (i = 1; i < 5; i++)
+    {
+        if (i == 2)
+            continue;
+        ok(Ctx[i].Tid != 0 && Ctx[i].Tid != Ctx[0].Tid,
+           "The callback with flags %lx ran on the wait thread %lu\n", Flags[i], Ctx[i].Tid);
+        ok(Ctx[i].Tid != GetCurrentThreadId(), "The callback with flags %lx ran on the thread that registered it\n", Flags[i]);
+    }
+
+    for (i = 0; i < 6; i++)
+    {
+        Ret = UnregisterWaitEx(Waits[i], INVALID_HANDLE_VALUE);
+        ok(Ret, "UnregisterWaitEx failed: %lu\n", GetLastError());
+        CloseHandle(Done[i]);
+        CloseHandle(Objects[i]);
+    }
+}
+
+static HANDLE s_Gate;
+static HANDLE s_GateStarted;
+static volatile LONG s_GateRan;
+
+static VOID CALLBACK
+GateCallback(PVOID Context, BOOLEAN TimerOrWaitFired)
+{
+    SetEvent(s_GateStarted);
+    WaitForSingleObject(s_Gate, 10000);
+    InterlockedIncrement(&s_GateRan);
+}
+
+static DWORD WINAPI
+UnregisterBlockingThread(PVOID Context)
+{
+    return UnregisterWaitEx((HANDLE)Context, INVALID_HANDLE_VALUE);
+}
+
+/* Unregister while the callback runs: blocking waits for it, otherwise ERROR_IO_PENDING and the event
+   is set once it returned; the wait does not fire again */
+static void
+TestUnregisterRunning(ULONG Flags)
+{
+    HANDLE Object, Completion, Wait, Thread;
+    DWORD Result, Error, Code;
+    BOOL Ret;
+
+    Object = CreateEventW(NULL, FALSE, FALSE, NULL);
+    Completion = CreateEventW(NULL, TRUE, FALSE, NULL);
+    s_Gate = CreateEventW(NULL, TRUE, FALSE, NULL);
+    s_GateStarted = CreateEventW(NULL, TRUE, FALSE, NULL);
+
+    /* With an event */
+    s_GateRan = 0;
+    Ret = RegisterWaitForSingleObject(&Wait, Object, GateCallback, NULL, INFINITE, Flags);
+    ok(Ret, "RegisterWaitForSingleObject failed: %lu\n", GetLastError());
+    SetEvent(Object);
+    ok(WaitForSingleObject(s_GateStarted, 5000) == WAIT_OBJECT_0, "Flags %lx: the callback did not start\n", Flags);
+    SetLastError(0xdeadbeef);
+    Ret = UnregisterWaitEx(Wait, Completion);
+    Error = GetLastError();
+    ok(!Ret && Error == ERROR_IO_PENDING, "Flags %lx: UnregisterWaitEx(event) returned %d, error %lu\n", Flags, Ret, Error);
+    Result = WaitForSingleObject(Completion, 300);
+    ok(Result == WAIT_TIMEOUT, "Flags %lx: the event was set while the callback ran: %lu\n", Flags, Result);
+    SetEvent(Object);   /* would fire the wait again if it were still there */
+    SetEvent(s_Gate);
+    Result = WaitForSingleObject(Completion, 5000);
+    ok(Result == WAIT_OBJECT_0, "Flags %lx: the event was not set after the callback: %lu\n", Flags, Result);
+    Sleep(200);
+    ok(s_GateRan == 1, "Flags %lx: %ld callbacks ran, 1 expected\n", Flags, s_GateRan);
+
+    /* Without an event */
+    ResetEvent(Object);
+    ResetEvent(s_Gate);
+    ResetEvent(s_GateStarted);
+    s_GateRan = 0;
+    Ret = RegisterWaitForSingleObject(&Wait, Object, GateCallback, NULL, INFINITE, Flags);
+    ok(Ret, "RegisterWaitForSingleObject failed: %lu\n", GetLastError());
+    SetEvent(Object);
+    ok(WaitForSingleObject(s_GateStarted, 5000) == WAIT_OBJECT_0, "Flags %lx: the callback did not start\n", Flags);
+    SetLastError(0xdeadbeef);
+    Ret = UnregisterWait(Wait);
+    Error = GetLastError();
+    ok(!Ret && Error == ERROR_IO_PENDING, "Flags %lx: UnregisterWait returned %d, error %lu\n", Flags, Ret, Error);
+    SetEvent(Object);
+    SetEvent(s_Gate);
+    Sleep(300);
+    ok(s_GateRan == 1, "Flags %lx: %ld callbacks ran, 1 expected\n", Flags, s_GateRan);
+
+    /* Blocking */
+    ResetEvent(Object);
+    ResetEvent(s_Gate);
+    ResetEvent(s_GateStarted);
+    s_GateRan = 0;
+    Ret = RegisterWaitForSingleObject(&Wait, Object, GateCallback, NULL, INFINITE, Flags);
+    ok(Ret, "RegisterWaitForSingleObject failed: %lu\n", GetLastError());
+    SetEvent(Object);
+    ok(WaitForSingleObject(s_GateStarted, 5000) == WAIT_OBJECT_0, "Flags %lx: the callback did not start\n", Flags);
+    Thread = CreateThread(NULL, 0, UnregisterBlockingThread, Wait, 0, NULL);
+    ok(Thread != NULL, "CreateThread failed: %lu\n", GetLastError());
+    if (Thread)
+    {
+        Result = WaitForSingleObject(Thread, 300);
+        ok(Result == WAIT_TIMEOUT, "Flags %lx: UnregisterWaitEx(INVALID_HANDLE_VALUE) returned while the callback ran: %lu\n",
+           Flags, Result);
+        SetEvent(s_Gate);
+        Result = WaitForSingleObject(Thread, 5000);
+        ok(Result == WAIT_OBJECT_0, "Flags %lx: UnregisterWaitEx(INVALID_HANDLE_VALUE) did not return: %lu\n", Flags, Result);
+        Code = 0;
+        GetExitCodeThread(Thread, &Code);
+        ok(Code == TRUE, "Flags %lx: UnregisterWaitEx(INVALID_HANDLE_VALUE) failed\n", Flags);
+        ok(s_GateRan == 1, "Flags %lx: %ld callbacks ran, 1 expected\n", Flags, s_GateRan);
+        CloseHandle(Thread);
+    }
+    else
+    {
+        SetEvent(s_Gate);
+    }
+
+    CloseHandle(s_GateStarted);
+    CloseHandle(s_Gate);
+    CloseHandle(Completion);
+    CloseHandle(Object);
+}
+
+static volatile LONG s_QueuedRan;
+
+static VOID CALLBACK
+QueuedCallback(PVOID Context, BOOLEAN TimerOrWaitFired)
+{
+    InterlockedIncrement(&s_QueuedRan);
+}
+
+/* The wait thread runs a long callback, and another wait of the thread fires meanwhile: unregistering
+   that one without blocking completes at once, and its callback does not run. Unregistering it with
+   blocking may wait for the wait thread (Windows 10 does), and nothing runs after it returned */
+static void
+TestUnregisterWhileThreadBusy(ULONG FlagsA, BOOL Blocking)
+{
+    HANDLE ObjA, ObjB, Completion, WaitA, WaitB, Thread = NULL;
+    LONG RanAtReturn = 0;
+    DWORD Result, Error, Code;
+    BOOL Ret;
+
+    ObjA = CreateEventW(NULL, FALSE, FALSE, NULL);
+    ObjB = CreateEventW(NULL, FALSE, FALSE, NULL);
+    Completion = CreateEventW(NULL, TRUE, FALSE, NULL);
+    s_Gate = CreateEventW(NULL, TRUE, FALSE, NULL);
+    s_GateStarted = CreateEventW(NULL, TRUE, FALSE, NULL);
+    s_GateRan = 0;
+    s_QueuedRan = 0;
+
+    Ret = RegisterWaitForSingleObject(&WaitA, ObjA, GateCallback, NULL, INFINITE, FlagsA | WT_EXECUTEONLYONCE);
+    ok(Ret, "RegisterWaitForSingleObject failed: %lu\n", GetLastError());
+    Ret = RegisterWaitForSingleObject(&WaitB, ObjB, QueuedCallback, NULL, INFINITE, FlagsA | WT_EXECUTEONLYONCE);
+    ok(Ret, "RegisterWaitForSingleObject failed: %lu\n", GetLastError());
+
+    SetEvent(ObjA);
+    ok(WaitForSingleObject(s_GateStarted, 5000) == WAIT_OBJECT_0, "Flags %lx: the callback did not start\n", FlagsA);
+    SetEvent(ObjB);
+    Sleep(200);
+    ok(s_QueuedRan == 0, "Flags %lx: the other wait fired while the wait thread ran a callback\n", FlagsA);
+
+    if (Blocking)
+    {
+        Thread = CreateThread(NULL, 0, UnregisterBlockingThread, WaitB, 0, NULL);
+        ok(Thread != NULL, "CreateThread failed: %lu\n", GetLastError());
+        if (Thread && WaitForSingleObject(Thread, 300) == WAIT_OBJECT_0)
+            RanAtReturn = s_QueuedRan;
+        else
+            RanAtReturn = -1;   /* still blocked: let the wait thread go */
+    }
+    else
+    {
+        SetLastError(0xdeadbeef);
+        Ret = UnregisterWaitEx(WaitB, Completion);
+        Error = GetLastError();
+        ok(Ret, "Flags %lx: UnregisterWaitEx(event) of a wait that did not fire yet returned %d, error %lu\n", FlagsA, Ret, Error);
+        Result = WaitForSingleObject(Completion, 0);
+        ok(Result == WAIT_OBJECT_0, "Flags %lx: the event was not set at once: %lu\n", FlagsA, Result);
+    }
+
+    SetEvent(s_Gate);
+    if (Thread)
+    {
+        Result = WaitForSingleObject(Thread, 5000);
+        ok(Result == WAIT_OBJECT_0, "Flags %lx: UnregisterWaitEx(INVALID_HANDLE_VALUE) did not return: %lu\n", FlagsA, Result);
+        Code = 0;
+        GetExitCodeThread(Thread, &Code);
+        ok(Code == TRUE, "Flags %lx: UnregisterWaitEx(INVALID_HANDLE_VALUE) failed\n", FlagsA);
+        if (RanAtReturn < 0)
+            RanAtReturn = s_QueuedRan;
+        CloseHandle(Thread);
+    }
+    Sleep(300);
+    ok(s_GateRan == 1, "Flags %lx: the first callback ran %ld times\n", FlagsA, s_GateRan);
+    if (Blocking)
+        ok(s_QueuedRan == RanAtReturn, "Flags %lx: the callback ran after UnregisterWaitEx returned\n", FlagsA);
+    else
+        ok(s_QueuedRan == 0, "Flags %lx: the callback of the unregistered wait ran %ld times\n", FlagsA, s_QueuedRan);
+
+    Ret = UnregisterWaitEx(WaitA, INVALID_HANDLE_VALUE);
+    ok(Ret, "UnregisterWaitEx failed: %lu\n", GetLastError());
+    CloseHandle(s_GateStarted);
+    CloseHandle(s_Gate);
+    CloseHandle(Completion);
+    CloseHandle(ObjB);
+    CloseHandle(ObjA);
+}
+
+static volatile LONG s_InCallback;
+static volatile LONG s_MaxInCallback;
+static volatile LONG s_Calls;
+static DWORD s_CallbackSleep;
+
+static VOID CALLBACK
+OverlapCallback(PVOID Context, BOOLEAN TimerOrWaitFired)
+{
+    LONG n = InterlockedIncrement(&s_InCallback), Max;
+
+    while ((Max = s_MaxInCallback) < n && InterlockedCompareExchange(&s_MaxInCallback, n, Max) != Max)
+        ;
+    InterlockedIncrement(&s_Calls);
+    Sleep(s_CallbackSleep);
+    InterlockedDecrement(&s_InCallback);
+}
+
+/* A wait goes on while its callback runs in the pool: an object that stays signalled, or a timeout
+   that comes again, fires it again, and the callbacks overlap (Windows 10). A WT_EXECUTEINWAITTHREAD
+   callback is alone. Once unregistered, nothing runs any more */
+static void
+TestOverlap(ULONG Flags, DWORD Milliseconds)
+{
+    HANDLE Object, Wait;
+    LONG Calls;
+    BOOL Ret;
+
+    Object = CreateEventW(NULL, TRUE, Milliseconds == INFINITE, NULL);
+    s_InCallback = 0;
+    s_MaxInCallback = 0;
+    s_Calls = 0;
+    s_CallbackSleep = (Milliseconds == INFINITE) ? 100 : 200;
+
+    Ret = RegisterWaitForSingleObject(&Wait, Object, OverlapCallback, NULL, Milliseconds, Flags);
+    ok(Ret, "RegisterWaitForSingleObject failed: %lu\n", GetLastError());
+    Sleep(1000);
+    Ret = UnregisterWaitEx(Wait, INVALID_HANDLE_VALUE);
+    ok(Ret, "UnregisterWaitEx failed: %lu\n", GetLastError());
+    ok(s_InCallback == 0, "Flags %lx, %lu ms: a callback still ran after UnregisterWaitEx returned\n", Flags, Milliseconds);
+    Calls = s_Calls;
+    trace("flags %lx, %lu ms: %ld callbacks in 1 s, %ld at most at the same time\n", Flags, Milliseconds, Calls, s_MaxInCallback);
+
+    if (Flags & WT_EXECUTEINWAITTHREAD)
+    {
+        ok(s_MaxInCallback == 1, "Flags %lx, %lu ms: %ld callbacks ran at the same time\n", Flags, Milliseconds, s_MaxInCallback);
+        ok(Calls >= 4 && Calls <= 11, "Flags %lx, %lu ms: %ld callbacks\n", Flags, Milliseconds, Calls);
+    }
+    else
+    {
+        ok(s_MaxInCallback >= 2, "Flags %lx, %lu ms: the callbacks did not overlap\n", Flags, Milliseconds);
+        ok(Calls >= 8, "Flags %lx, %lu ms: %ld callbacks\n", Flags, Milliseconds, Calls);
+    }
+
+    Sleep(300);
+    ok(s_Calls == Calls, "Flags %lx, %lu ms: a callback ran after UnregisterWaitEx returned\n", Flags, Milliseconds);
+    CloseHandle(Object);
+}
+
+/* A wait whose object stays signalled, with callbacks that take a while, fires faster than the pool
+   starts them: callbacks wait in the queue. Unregistering with an event is pending while callbacks
+   run, the event is set once they returned, and no queued callback starts after UnregisterWaitEx
+   returned (Windows 10 drops them) */
+static void
+TestUnregisterQueued(void)
+{
+    HANDLE Object, Completion, Wait;
+    LONG CallsAtReturn;
+    DWORD Result, Error;
+    BOOL Ret;
+
+    Object = CreateEventW(NULL, TRUE, TRUE, NULL);
+    Completion = CreateEventW(NULL, TRUE, FALSE, NULL);
+    s_InCallback = 0;
+    s_MaxInCallback = 0;
+    s_Calls = 0;
+    s_CallbackSleep = 500;
+
+    Ret = RegisterWaitForSingleObject(&Wait, Object, OverlapCallback, NULL, INFINITE, WT_EXECUTEDEFAULT);
+    ok(Ret, "RegisterWaitForSingleObject failed: %lu\n", GetLastError());
+    Sleep(150);
+    SetLastError(0xdeadbeef);
+    Ret = UnregisterWaitEx(Wait, Completion);
+    Error = GetLastError();
+    CallsAtReturn = s_Calls;
+    ok(!Ret && Error == ERROR_IO_PENDING, "UnregisterWaitEx(event) returned %d, error %lu\n", Ret, Error);
+    Result = WaitForSingleObject(Completion, 5000);
+    ok(Result == WAIT_OBJECT_0, "The event was not set: %lu\n", Result);
+    ok(s_InCallback == 0, "%ld callbacks still ran when the event was set\n", s_InCallback);
+    Sleep(700);
+    ok(s_Calls == CallsAtReturn, "%ld callbacks started after UnregisterWaitEx returned\n", s_Calls - CallsAtReturn);
+    trace("%ld callbacks started, %ld at most at the same time\n", CallsAtReturn, s_MaxInCallback);
+    CloseHandle(Completion);
+    CloseHandle(Object);
+}
+
+/* Unregister with an event at the moment the wait fires, many times: the event is set, and once it is,
+   no callback runs or starts */
+static void
+TestUnregisterEventRace(ULONG Flags)
+{
+    HANDLE Object, Completion, Wait;
+    LONG FiredAtEvent;
+    int i, Bad = 0, Failed = 0, Pending = 0;
+    DWORD Result;
+    BOOL Ret;
+
+    Object = CreateEventW(NULL, FALSE, FALSE, NULL);
+    Completion = CreateEventW(NULL, TRUE, FALSE, NULL);
+    for (i = 0; i < 500; i++)
+    {
+        s_RaceFired = 0;
+        ResetEvent(Completion);
+        Ret = RegisterWaitForSingleObject(&Wait, Object, RaceCallback, NULL, INFINITE, Flags);
+        if (!Ret)
+        {
+            Failed++;
+            continue;
+        }
+        SetEvent(Object);
+        if (i % 3 == 1)
+            YieldProcessor();
+        else if (i % 3 == 2)
+            Sleep(0);
+        SetLastError(0xdeadbeef);
+        Ret = UnregisterWaitEx(Wait, Completion);
+        if (!Ret)
+        {
+            if (GetLastError() == ERROR_IO_PENDING)
+                Pending++;
+            else
+                Failed++;
+        }
+        Result = WaitForSingleObject(Completion, 5000);
+        if (Result != WAIT_OBJECT_0)
+            Failed++;
+        FiredAtEvent = s_RaceFired;
+        if (s_RaceInCallback)
+            Bad++;
+        Sleep(0);
+        if (s_RaceFired != FiredAtEvent)
+            Bad++;
+        ResetEvent(Object);
+    }
+    ok(Failed == 0, "Flags %lx: %d registers, unregisters or events failed\n", Flags, Failed);
+    ok(Bad == 0, "Flags %lx: %d times a callback ran after the event was set\n", Flags, Bad);
+    trace("flags %lx: the callback ran when the wait was unregistered %d times in 500\n", Flags, Pending);
+    CloseHandle(Completion);
+    CloseHandle(Object);
+}
+
+static void
+TestPoolDispatch(void)
+{
+    TestCallbackBlocksOnOtherWait(WT_EXECUTEINWAITTHREAD);
+    TestCallbackBlocksOnOtherWait(WT_EXECUTEDEFAULT);
+    TestLongCallbackTimeouts(WT_EXECUTEINWAITTHREAD);
+    TestLongCallbackTimeouts(WT_EXECUTEDEFAULT);
+    TestCallbackThreads();
+    TestUnregisterRunning(WT_EXECUTEDEFAULT);
+    TestUnregisterRunning(WT_EXECUTELONGFUNCTION);
+    TestUnregisterWhileThreadBusy(WT_EXECUTEINWAITTHREAD, FALSE);
+    TestUnregisterWhileThreadBusy(WT_EXECUTEINWAITTHREAD, TRUE);
+    TestUnregisterWhileThreadBusy(WT_EXECUTEINPERSISTENTTHREAD, FALSE);
+    TestUnregisterQueued();
+    TestOverlap(WT_EXECUTEDEFAULT, INFINITE);
+    TestOverlap(WT_EXECUTEDEFAULT, 50);
+    TestOverlap(WT_EXECUTEINWAITTHREAD, INFINITE);
+    TestOverlap(WT_EXECUTEINWAITTHREAD, 50);
+    TestUnregisterEventRace(WT_EXECUTEDEFAULT);
+    TestUnregisterEventRace(WT_EXECUTEINWAITTHREAD);
+}
+
 START_TEST(RegisterWait)
 {
     TestCompletionEventWithoutCallback();
@@ -1009,9 +1553,11 @@ START_TEST(RegisterWait)
     TestHandleBeforeCallback();
     TestManyWaits();
     TestCallbackException(WT_EXECUTEINWAITTHREAD);
+    TestCallbackException(WT_EXECUTEDEFAULT);
     TestCallbackException(WT_EXECUTEINIOTHREAD);
     TestIdleLingerBoundary();
     TestSharedThread();
     TestSharedThreadCallbacks();
+    TestPoolDispatch();
     TestThreadGrowth();
 }
