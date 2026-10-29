@@ -251,6 +251,34 @@ Done:
     closesocket(Receiver);
 }
 
+
+/* The bytes FIONREAD reports for the datagrams queued with these lengths, and after one receive */
+static
+void
+CheckQueued(ULONG Address, const int *Lengths, int Count, u_long Total, u_long Rest)
+{
+    SOCKET Receiver, Sender;
+    struct sockaddr_in To;
+    char Buffer[16] = { 0 };
+    u_long Queued = 99;
+    int i;
+
+    if (!OpenReceiver(&Receiver, &To, Address))
+        return;
+    Sender = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    for (i = 0; i < Count; i++)
+        sendto(Sender, Buffer, Lengths[i], 0, (struct sockaddr *)&To, sizeof(To));
+    Sleep(400);
+    ioctlsocket(Receiver, FIONREAD, &Queued);
+    ok(Queued == Total, "%d datagrams starting with %d bytes: FIONREAD %lu, expected %lu\n", Count, Lengths[0], Queued, Total);
+    recv(Receiver, Buffer, sizeof(Buffer), 0);
+    Queued = 99;
+    ioctlsocket(Receiver, FIONREAD, &Queued);
+    ok(Queued == Rest, "after one receive: FIONREAD %lu, expected %lu\n", Queued, Rest);
+    closesocket(Sender);
+    closesocket(Receiver);
+}
+
 static
 ULONG
 FindInterfaceAddress(void)
@@ -306,6 +334,19 @@ START_TEST(udpzerolen)
             CheckReceive("interface zero-length", Interface, Mode, 0);
     }
     CheckSequence(htonl(INADDR_LOOPBACK));
+
+    {
+        /* A queued zero-length datagram makes FIONREAD report 1 */
+        static const int Zero[] = { 0 }, Three[] = { 3 }, ThreeFive[] = { 3, 5 }, ZeroThree[] = { 0, 3 },
+                         ThreeZero[] = { 3, 0 }, ZeroZero[] = { 0, 0 };
+
+        CheckQueued(htonl(INADDR_LOOPBACK), Zero, 1, 1, 0);
+        CheckQueued(htonl(INADDR_LOOPBACK), Three, 1, 3, 0);
+        CheckQueued(htonl(INADDR_LOOPBACK), ThreeFive, 2, 8, 5);
+        CheckQueued(htonl(INADDR_LOOPBACK), ZeroThree, 2, 3, 3);
+        CheckQueued(htonl(INADDR_LOOPBACK), ThreeZero, 2, 3, 1);
+        CheckQueued(htonl(INADDR_LOOPBACK), ZeroZero, 2, 1, 1);
+    }
 
     WSACleanup();
 }

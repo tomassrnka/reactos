@@ -539,6 +539,8 @@ AfdCreateSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         /* A datagram socket is always sendable */
         FCB->PollState |= AFD_EVENT_SEND;
         FCB->PollStatus[FD_WRITE_BIT] = STATUS_SUCCESS;
+        /* but FD_WRITE is only signalled once the socket is bound */
+        FCB->EventSelectDisabled |= AFD_EVENT_SEND;
         PollReeval( FCB->DeviceExt, FCB->FileObject );
     }
 

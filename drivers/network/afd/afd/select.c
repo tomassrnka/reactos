@@ -567,13 +567,13 @@ AfdEnumEvents( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     if (Guest)
     {
         AFD_ENUM_NETWORK_EVENTS_INFO32 *To = (PVOID)EnumReq;
-        To->PollEvents = FCB->PollState & ~FCB->EventSelectDisabled;
+        To->PollEvents = FCB->PollState & FCB->EventSelectTriggers & ~FCB->EventSelectDisabled;
         RtlCopyMemory(To->EventStatus, FCB->PollStatus, sizeof(To->EventStatus));
     }
     else
 #endif
     {
-        EnumReq->PollEvents = (FCB->PollState & ~FCB->EventSelectDisabled);
+        EnumReq->PollEvents = (FCB->PollState & FCB->EventSelectTriggers & ~FCB->EventSelectDisabled);
         RtlCopyMemory(EnumReq->EventStatus, FCB->PollStatus, sizeof(EnumReq->EventStatus));
     }
 

@@ -9,6 +9,7 @@
  */
 
 #include "afd.h"
+#include <reactos/drivers/tdiext.h>
 
 NTSTATUS NTAPI
 AfdGetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
@@ -62,6 +63,11 @@ AfdGetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     case AFD_INFO_RECEIVE_CONTENT_SIZE:
         InfoReq->Information.Ulong = FCB->Recv.Content - FCB->Recv.BytesUsed;
+        /* A queued zero-length datagram counts as one byte, as on Windows */
+        if (InfoReq->Information.Ulong == 0 &&
+            (FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS) &&
+            !IsListEmpty(&FCB->DatagramList))
+            InfoReq->Information.Ulong = 1;
         break;
 
     case AFD_INFO_CONNECT_ERROR:
@@ -278,11 +284,6 @@ AfdSetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     return UnlockAndMaybeComplete(FCB, Status, Irp, 0);
 }
 
-/* Private query to tcpip.sys, see tcpip dispatch.c: the input is a TA_IP_ADDRESS
- * with a destination, the output the same structure holding the address of the
- * interface a datagram sent to it leaves from */
-#define TDI_QUERY_ROS_SOURCE_ADDRESS 0x00008001
-
 /* Runs a TDI query into a kernel buffer; the query takes ownership of the MDL */
 static NTSTATUS
 AfdQueryTransportBuffer(PFILE_OBJECT Object, LONG QueryType, PVOID Buffer, ULONG Size)
@@ -308,6 +309,35 @@ AfdQueryTransportBuffer(PFILE_OBJECT Object, LONG QueryType, PVOID Buffer, ULONG
     return TdiQueryInformation(Object, QueryType, Mdl);
 }
 
+/* The address of the interface a datagram from this socket to Destination (a
+ * network-order IPv4 address) leaves from; fails when there is no route */
+NTSTATUS
+AfdQueryRouteSource(PAFD_FCB FCB, ULONG Destination, PULONG Source)
+{
+    PTA_IP_ADDRESS Query;
+    NTSTATUS Status;
+
+    Query = ExAllocatePoolWithTag(NonPagedPool, 64, TAG_AFD_TRANSPORT_ADDRESS);
+    if (Query == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    RtlZeroMemory(Query, 64);
+
+    Query->TAAddressCount = 1;
+    Query->Address[0].AddressLength = TDI_ADDRESS_LENGTH_IP;
+    Query->Address[0].AddressType = TDI_ADDRESS_TYPE_IP;
+    Query->Address[0].Address[0].in_addr = Destination;
+
+    Status = AfdQueryTransportBuffer(FCB->AddressFile.Object,
+                                     TDI_QUERY_ROS_SOURCE_ADDRESS,
+                                     Query,
+                                     sizeof(TA_IP_ADDRESS));
+    if (NT_SUCCESS(Status))
+        *Source = Query->Address[0].Address[0].in_addr;
+
+    ExFreePoolWithTag(Query, TAG_AFD_TRANSPORT_ADDRESS);
+    return Status;
+}
+
 /* The local name of a connected datagram socket: a socket bound to the wildcard
  * address reports the address of the interface its datagrams to the peer leave
  * from, as Windows does. Called with the state lock held; completes the IRP. */
@@ -317,19 +347,17 @@ AfdGetConnectedDatagramName(PAFD_FCB FCB, PIRP Irp, PIO_STACK_LOCATION IrpSp)
     const ULONG InfoSize = FIELD_OFFSET(TDI_ADDRESS_INFO, Address.Address[0].Address) +
                            sizeof(TDI_ADDRESS_IP);
     PTDI_ADDRESS_INFO Info;
-    PTA_IP_ADDRESS Source;
     PTDI_ADDRESS_IP Local, Remote;
+    ULONG Source;
     NTSTATUS Status;
 
     if (IrpSp->Parameters.DeviceIoControl.OutputBufferLength < InfoSize)
         return UnlockAndMaybeComplete(FCB, STATUS_BUFFER_TOO_SMALL, Irp, 0);
 
-    /* The address information, then the route query, in one allocation */
-    Info = ExAllocatePoolWithTag(NonPagedPool, 2 * 64, TAG_AFD_TRANSPORT_ADDRESS);
+    Info = ExAllocatePoolWithTag(NonPagedPool, 64, TAG_AFD_TRANSPORT_ADDRESS);
     if (Info == NULL)
         return UnlockAndMaybeComplete(FCB, STATUS_INSUFFICIENT_RESOURCES, Irp, 0);
-    RtlZeroMemory(Info, 2 * 64);
-    Source = (PTA_IP_ADDRESS)((PUCHAR)Info + 64);
+    RtlZeroMemory(Info, 64);
 
     Status = AfdQueryTransportBuffer(FCB->AddressFile.Object,
                                      TDI_QUERY_ADDRESS_INFO,
@@ -340,21 +368,11 @@ AfdGetConnectedDatagramName(PAFD_FCB FCB, PIRP Irp, PIO_STACK_LOCATION IrpSp)
         Local = (PTDI_ADDRESS_IP)Info->Address.Address[0].Address;
         Remote = (PTDI_ADDRESS_IP)FCB->RemoteAddress->Address[0].Address;
 
-        if (Local->in_addr == 0)
+        if (Local->in_addr == 0 && Remote->in_addr != 0)
         {
-            Source->TAAddressCount = 1;
-            Source->Address[0].AddressLength = TDI_ADDRESS_LENGTH_IP;
-            Source->Address[0].AddressType = TDI_ADDRESS_TYPE_IP;
-            Source->Address[0].Address[0].in_addr = Remote->in_addr;
-
             /* Without a route the socket stays on the wildcard address */
-            if (NT_SUCCESS(AfdQueryTransportBuffer(FCB->AddressFile.Object,
-                                                   TDI_QUERY_ROS_SOURCE_ADDRESS,
-                                                   Source,
-                                                   sizeof(TA_IP_ADDRESS))))
-            {
-                Local->in_addr = Source->Address[0].Address[0].in_addr;
-            }
+            if (NT_SUCCESS(AfdQueryRouteSource(FCB, Remote->in_addr, &Source)))
+                Local->in_addr = Source;
         }
 
         /* This is a METHOD_NEITHER IOCTL: probe the raw user pointer and copy under SEH */

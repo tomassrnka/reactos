@@ -38,6 +38,7 @@ list(APPEND SOURCE
     udpbindretry.c
     udpcancel.c
     udpconnectname.c
+    udpevents.c
     udprecv.c
     udpzerolen.c
     timewait.c

@@ -59,7 +59,8 @@ NTSTATUS AddUDPHeaderIPv4(
 			    IPPacket->Header, IPPacket->Data,
 			    (PCHAR)IPPacket->Data - (PCHAR)IPPacket->Header));
 
-    RtlCopyMemory(IPPacket->Data, Data, DataLength);
+    if (DataLength)
+        RtlCopyMemory(IPPacket->Data, Data, DataLength);
 
     UDPHeader->Checksum = UDPv4ChecksumCalculate((PIPv4_HEADER)IPPacket->Header,
                                                  (PUCHAR)UDPHeader,

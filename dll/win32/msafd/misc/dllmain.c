@@ -2406,6 +2406,13 @@ WSPConnect(SOCKET Handle,
         Socket->SharedData->ConnectTime = GetCurrentTimeInSeconds();
     }
 
+    /* Connecting to the unspecified family dissolved the association with the peer */
+    if (Status == STATUS_SUCCESS && SocketAddress->sa_family == AF_UNSPEC &&
+        Socket->SharedData->State == SocketConnected)
+    {
+        Socket->SharedData->State = SocketBound;
+    }
+
     /* Get any pending connect data */
     if (lpCalleeData != NULL && Status == STATUS_SUCCESS)
     {

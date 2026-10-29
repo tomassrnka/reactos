@@ -146,7 +146,16 @@ AfdBindSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                                        Irp->RequestorMode,
                                        &UserHandle);
         if (NT_SUCCESS(Status))
+        {
             FCB->SharedData.State = SOCKET_STATE_BOUND;
+
+            /* A bound datagram socket signals FD_WRITE */
+            if (FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS)
+            {
+                FCB->EventSelectDisabled &= ~AFD_EVENT_SEND;
+                PollReeval( FCB->DeviceExt, FCB->FileObject );
+            }
+        }
     }
 
     /* MSAFD relies on us returning the address file handle in the IOSB */
