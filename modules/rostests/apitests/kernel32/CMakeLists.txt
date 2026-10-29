@@ -122,6 +122,7 @@ list(APPEND SOURCE
     ProcessToken.c
     ProcessorGroups.c
     QueueUserAPC.c
+    QueueUserWorkItem.c
     RaiseFailFastException.c
     ReadFile.c
     RegisterWait.c
