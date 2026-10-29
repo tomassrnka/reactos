@@ -21,6 +21,7 @@ list(APPEND SOURCE
     DrawText.c
     EditInk.c
     desktop.c
+    DesktopHeapNonInteractive.c
     ClipboardSynthBitmap.c
     ConsoleClipText.c
     EmptyClipboard.c

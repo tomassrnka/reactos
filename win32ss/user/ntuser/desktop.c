@@ -33,6 +33,15 @@ IntFreeDesktopHeap(IN PDESKTOP pdesk);
  * Windows 7 x86: 12 MB / 512 KB
  * Windows 7 x64: 20 MB / 768 KB
  * Windows 10 x64: 20 MB / 4 MB
+ *
+ * The non-interactive heap is the one of the Service-0x0-3e7$\Default desktop,
+ * shared by every process the SYSTEM account starts outside the interactive
+ * window station (the Chrome updater and its crash handlers, COM surrogates).
+ * With 128 KB it ran out of room for the CLIENTTHREADINFO of the threads that
+ * connect, and the next process failed with STATUS_DLL_INIT_FAILED (0xC0000142)
+ * from user32's DllMain. Windows 7 uses 512 KB (x86) and 768 KB (x64), the third
+ * value of SharedSection in Session Manager\SubSystems\Windows; Windows 10 is
+ * not smaller (see above).
  * See:
  * - https://dbmentors.blogspot.com/2011/09/desktop-heap-overview.html
  * - https://www.ibm.com/support/pages/using-microsoft-desktop-heap-monitor-dheapmon-determine-desktop-heap-space-and-troubleshoot-filenet-p8-and-image-services-issues
@@ -45,7 +54,11 @@ DWORD gdwDesktopSectionSize = 20 * 1024; // 20 MB (Windows 7 style)
 #else
 DWORD gdwDesktopSectionSize = 3 * 1024;  // 3 MB (Windows 2003 style)
 #endif
-DWORD gdwNOIOSectionSize    = 128;
+#ifdef _WIN64
+DWORD gdwNOIOSectionSize    = 768;
+#else
+DWORD gdwNOIOSectionSize    = 512;
+#endif
 DWORD gdwWinlogonSectionSize = 128;
 
 PDESKTOP gpdeskInputDesktop = NULL;     ///< Currently active desktop.
