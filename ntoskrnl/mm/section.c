@@ -4081,12 +4081,11 @@ MmUnmapViewOfSegment(PMMSUPPORT AddressSpace,
     MmUnlockSectionSegment(Segment);
     MmDereferenceSegment(Segment);
 
-    /* Give back what the view was charged */
+    /* Give back what the view was charged: pageable commitment (MiCommitUserPageable) */
     Process = MmGetAddressSpaceOwner(AddressSpace);
     if (Process != NULL)
-        MiReturnProcessCommit(Process, CommitCharge);
-    else
-        MiReturnCommit(CommitCharge);
+        MiSubtractProcessCommit(Process, CommitCharge);
+    MiReturnPageableCommit(CommitCharge);
 
     return Status;
 }
@@ -4697,7 +4696,7 @@ MmMapViewOfSection(
         for (i = 0; i < NrSegments; i++)
             Unassigned += MiViewCommitCharge(&SectionSegments[i], SectionSegments[i].Protection,
                                              (SIZE_T)SectionSegments[i].Length.QuadPart);
-        if (!MiChargeCommit(Unassigned, MiCommitUser))
+        if (!MiChargeCommit(Unassigned, MiCommitUserPageable))
         {
             Status = STATUS_COMMITMENT_LIMIT;
             goto Exit;
@@ -4723,7 +4722,7 @@ MmMapViewOfSection(
             MmUnlockSectionSegment(&SectionSegments[i]);
             if (!NT_SUCCESS(Status))
             {
-                MiReturnCommit(Unassigned);
+                MiReturnPageableCommit(Unassigned);
 
                 /* roll-back: MmUnmapViewOfSegment takes the segment lock itself */
                 while (i--)
@@ -4892,7 +4891,7 @@ MmMapViewOfSection(
 
         /* A copy-on-write view is charged in full: any page can become private */
         ViewCommit = MiViewCommitCharge(Segment, Protect, *ViewSize);
-        if (!MiChargeCommit(ViewCommit, MiCommitUser))
+        if (!MiChargeCommit(ViewCommit, MiCommitUserPageable))
         {
             Status = STATUS_COMMITMENT_LIMIT;
             goto Exit;
@@ -4911,7 +4910,7 @@ MmMapViewOfSection(
         MmUnlockSectionSegment(Segment);
         if (!NT_SUCCESS(Status))
         {
-            MiReturnCommit(ViewCommit);
+            MiReturnPageableCommit(ViewCommit);
             goto Exit;
         }
     }

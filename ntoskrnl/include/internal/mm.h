@@ -921,6 +921,12 @@ typedef enum _MI_COMMIT_TIER
 {
     /* Fails above the commit limit minus the kernel reserve */
     MiCommitUser,
+    /*
+     * Legacy Mm copy-on-write views, whose private pages can be paged out:
+     * fails above RAM plus all paging file space, minus the kernel reserve.
+     * Return it with MiReturnPageableCommit.
+     */
+    MiCommitUserPageable,
     /* Fails above the commit limit only (pool, kernel stack growth) */
     MiCommitKernel
 } MI_COMMIT_TIER;
@@ -942,6 +948,15 @@ MiChargeCommit(
 VOID
 NTAPI
 MiReturnBootCommit(
+    _In_ SIZE_T Pages);
+
+SIZE_T
+NTAPI
+MiGetCommitLimit(VOID);
+
+VOID
+NTAPI
+MiReturnPageableCommit(
     _In_ SIZE_T Pages);
 
 VOID

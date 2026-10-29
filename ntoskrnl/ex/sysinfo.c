@@ -723,9 +723,10 @@ QSI_DEF(SystemPerformanceInformation)
 
     Spi->AvailablePages = (ULONG)MmAvailablePages;
 
-    /* Commit charge and limit (RAM plus the current paging files), in pages */
+    /* Commit charge and limit (what RAM and the paging files can back), in pages */
     Spi->CommittedPages = MmTotalCommittedPages;
-    Spi->CommitLimit = MmTotalCommitLimit;
+    /* Kernel charges may go into the resident headroom: never report less than is committed */
+    Spi->CommitLimit = max(MiGetCommitLimit(), MmTotalCommittedPages);
 
     Spi->PeakCommitment = MmPeakCommitment;
     Spi->PageFaultCount = 0; /* FIXME */
