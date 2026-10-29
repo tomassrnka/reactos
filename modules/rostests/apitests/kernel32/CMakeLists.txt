@@ -94,6 +94,7 @@ list(APPEND SOURCE
     JobList.c
     JobObject.c
     LCMapString.c
+    LCMapStringHash.c
     LoadString.c
     LoadLibraryErrorMode.c
     LoadLibraryExW.c

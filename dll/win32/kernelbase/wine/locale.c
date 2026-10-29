@@ -6833,6 +6833,34 @@ INT WINAPI DECLSPEC_HOTPATCH LCIDToLocaleName( LCID lcid, WCHAR *name, INT count
 }
 
 
+/* implementation of LCMAP_HASH: a hash of the sort key, equal exactly when CompareStringEx says equal */
+static int lcmap_hash( const struct sortguid *sortid, DWORD flags, const WCHAR *src, int srclen, void *dst )
+{
+    BYTE stack_key[256], *key = stack_key;
+    UINT32 hash = 2166136261u;
+    int i, len;
+
+    if (!(len = get_sortkey( sortid, flags, src, srclen, NULL, 0 ))) return 0;
+    if (len > sizeof(stack_key) && !(key = HeapAlloc( GetProcessHeap(), 0, len )))
+    {
+        SetLastError( ERROR_NOT_ENOUGH_MEMORY );
+        return 0;
+    }
+    len = get_sortkey( sortid, flags, src, srclen, key, len );
+    for (i = 0; i < len; i++) hash = (hash ^ key[i]) * 16777619u;
+    if (key != stack_key) HeapFree( GetProcessHeap(), 0, key );
+
+    hash ^= hash >> 15;
+    hash *= 0x2c1b3c6du;
+    hash ^= hash >> 12;
+    hash *= 0x297a2d39u;
+    hash ^= hash >> 15;
+    if (!hash) hash = 0x9e3779b9u; /* 0 is the failure result */
+    memcpy( dst, &hash, sizeof(hash) );
+    return hash;
+}
+
+
 /***********************************************************************
  *	LCMapStringEx   (kernelbase.@)
  */
@@ -6856,6 +6884,30 @@ INT WINAPI DECLSPEC_HOTPATCH LCMapStringEx( const WCHAR *locale, DWORD flags, co
         return 0;
     }
 
+    if (flags & LCMAP_HASH)
+    {
+        const DWORD hash_flags = NORM_IGNORECASE | NORM_IGNORENONSPACE | NORM_IGNORESYMBOLS | SORT_STRINGSORT |
+                                 NORM_IGNOREKANATYPE | NORM_IGNOREWIDTH | NORM_LINGUISTIC_CASING |
+                                 LINGUISTIC_IGNORECASE | LINGUISTIC_IGNOREDIACRITIC | SORT_DIGITSASNUMBERS |
+                                 0x10000000;
+
+        /* the destination is exactly the 4-byte hash; parameters are checked before the locale and the flags */
+        if (!dst || dstlen != sizeof(UINT32) || (const void *)src == (const void *)dst || (flags & LCMAP_SORTHANDLE))
+        {
+            SetLastError( ERROR_INVALID_PARAMETER );
+            return 0;
+        }
+        if (!(sortid = get_language_sort( locale ))) return 0;
+        flags &= ~(LCMAP_HASH | LOCALE_USE_CP_ACP);
+        if (flags & ~hash_flags)
+        {
+            SetLastError( ERROR_INVALID_FLAGS );
+            return 0;
+        }
+        if (srclen < 0) srclen = lstrlenW(src);
+        return lcmap_hash( sortid, flags, src, srclen, dst );
+    }
+
     if (srclen < 0) srclen = lstrlenW(src) + 1;
 
     TRACE( "(%s,0x%08lx,%s,%d,%p,%d)\n",
@@ -6871,11 +6923,6 @@ INT WINAPI DECLSPEC_HOTPATCH LCMapStringEx( const WCHAR *locale, DWORD flags, co
     if (flags & (LCMAP_LOWERCASE | LCMAP_UPPERCASE | LCMAP_SORTKEY))
     {
         if (!(sortid = get_language_sort( locale ))) return 0;
-    }
-    if (flags & LCMAP_HASH)
-    {
-        FIXME( "LCMAP_HASH %s not supported\n", debugstr_wn( src, srclen ));
-        return 0;
     }
     if (flags & LCMAP_SORTHANDLE)
     {

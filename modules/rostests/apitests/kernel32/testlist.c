@@ -97,6 +97,7 @@ extern void func_JapaneseCalendar(void);
 extern void func_JobList(void);
 extern void func_JobObject(void);
 extern void func_LCMapString(void);
+extern void func_LCMapStringHash(void);
 extern void func_LoadString(void);
 extern void func_LoadLibraryErrorMode(void);
 extern void func_LoadLibraryExW(void);
@@ -261,6 +262,7 @@ const struct test winetest_testlist[] =
     { "JobList",                    func_JobList },
     { "JobObject",                   func_JobObject },
     { "LCMapString",                 func_LCMapString },
+    { "LCMapStringHash",             func_LCMapStringHash },
     { "LoadString", func_LoadString },
     { "LoadLibraryErrorMode",        func_LoadLibraryErrorMode },
     { "LoadLibraryExW",              func_LoadLibraryExW },
