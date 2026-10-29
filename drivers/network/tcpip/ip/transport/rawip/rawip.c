@@ -155,7 +155,8 @@ NTSTATUS BuildRawIpPacket(
 			    Packet->Header, Packet->Data,
 			    (PCHAR)Packet->Data - (PCHAR)Packet->Header));
 
-    RtlCopyMemory( Packet->Data, DataBuffer, DataLen );
+    if (DataLen)
+        RtlCopyMemory( Packet->Data, DataBuffer, DataLen );
 
     Packet->Flags |= IP_PACKET_FLAG_RAW;
 

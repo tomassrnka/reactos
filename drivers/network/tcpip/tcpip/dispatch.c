@@ -13,9 +13,7 @@
 
 #include <datagram.h>
 #include <pseh/pseh2.h>
-
-/* Private query, shared with AFD (afd/info.c) */
-#define TDI_QUERY_ROS_SOURCE_ADDRESS 0x00008001
+#include <reactos/drivers/tdiext.h>
 
 typedef struct _QUERY_HW_WORK_ITEM {
     PIO_WORKITEM WorkItem;
@@ -739,6 +737,7 @@ NTSTATUS DispTdiQueryInformation(
          * out the source address. */
         PTA_IP_ADDRESS Ta;
         PNEIGHBOR_CACHE_ENTRY NCE;
+        PIP_INTERFACE Interface;
         IP_ADDRESS Destination;
 
         if (!Irp->MdlAddress ||
@@ -751,7 +750,17 @@ NTSTATUS DispTdiQueryInformation(
           return STATUS_INVALID_PARAMETER;
 
         AddrInitIPv4(&Destination, Ta->Address[0].Address[0].in_addr);
-        NCE = RouteGetRouteToDestination(&Destination);
+        /* Look the route up without creating a neighbor: that would solicit
+         * the peer with ARP and leave an unresolved cache entry behind */
+        Interface = FindOnLinkInterface(&Destination);
+        if (Interface)
+        {
+          Ta->Address[0].Address[0].in_addr = Interface->Unicast.Address.IPv4Address;
+          IPDereferenceInterface(Interface);
+          return STATUS_SUCCESS;
+        }
+
+        NCE = RouterGetRoute(&Destination);
         if (!NCE)
           return STATUS_NETWORK_UNREACHABLE;
 

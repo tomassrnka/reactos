@@ -40,6 +40,7 @@ extern void func_socketscale(void);
 extern void func_udpbindretry(void);
 extern void func_udpcancel(void);
 extern void func_udpconnectname(void);
+extern void func_udpevents(void);
 extern void func_udprecv(void);
 extern void func_udpzerolen(void);
 extern void func_timewait(void);
@@ -93,6 +94,7 @@ const struct test winetest_testlist[] =
     { "udpbindretry", func_udpbindretry },
     { "udpcancel", func_udpcancel },
     { "udpconnectname", func_udpconnectname },
+    { "udpevents", func_udpevents },
     { "udprecv", func_udprecv },
     { "udpzerolen", func_udpzerolen },
     { "timewait", func_timewait },

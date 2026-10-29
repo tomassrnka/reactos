@@ -9,6 +9,7 @@
  */
 
 #include "afd.h"
+#include <reactos/drivers/tdiext.h>
 
 NTSTATUS
 NTAPI
@@ -660,21 +661,81 @@ AfdStreamSocketConnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
    if( FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS )
    {
-        if (FCB->RemoteAddress)
+        PTRANSPORT_ADDRESS NewAddress;
+
+        /* An address of the unspecified family ends the association with the peer */
+        if( ConnectReq->RemoteAddress.TAAddressCount >= 1 &&
+            ConnectReq->RemoteAddress.Address[0].AddressType == 0 )
         {
+            if( !FCB->RemoteAddress )
+                return UnlockAndMaybeComplete( FCB, STATUS_PROTOCOL_NOT_SUPPORTED, Irp, 0 );
+
             ExFreePoolWithTag(FCB->RemoteAddress, TAG_AFD_TRANSPORT_ADDRESS);
+            FCB->RemoteAddress = NULL;
+            return UnlockAndMaybeComplete( FCB, STATUS_SUCCESS, Irp, 0 );
         }
 
-        FCB->RemoteAddress =
+        NewAddress =
             TaCopyTransportAddressBounded( &ConnectReq->RemoteAddress,
                 IrpSp->Parameters.DeviceIoControl.InputBufferLength - FIELD_OFFSET(AFD_CONNECT_INFO, RemoteAddress) );
 
-        if( !FCB->RemoteAddress )
-            Status = STATUS_NO_MEMORY;
-        else
-            Status = STATUS_SUCCESS;
+        if( !NewAddress )
+            return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY, Irp, 0 );
 
-        return UnlockAndMaybeComplete( FCB, Status, Irp, 0 );
+        if( NewAddress->TAAddressCount == 1 &&
+            NewAddress->Address[0].AddressType == TDI_ADDRESS_TYPE_IP &&
+            NewAddress->Address[0].AddressLength >= TDI_ADDRESS_LENGTH_IP )
+        {
+            ULONG Peer = ((PTDI_ADDRESS_IP)NewAddress->Address[0].Address)->in_addr;
+            ULONG Bound = 0, Source;
+
+            if( FCB->LocalAddress &&
+                FCB->LocalAddress->TAAddressCount == 1 &&
+                FCB->LocalAddress->Address[0].AddressType == TDI_ADDRESS_TYPE_IP &&
+                FCB->LocalAddress->Address[0].AddressLength >= TDI_ADDRESS_LENGTH_IP )
+                Bound = ((PTDI_ADDRESS_IP)FCB->LocalAddress->Address[0].Address)->in_addr;
+
+            Status = STATUS_SUCCESS;
+            if( Peer == 0 )
+            {
+                /* The unspecified address is no peer */
+                Status = STATUS_INVALID_ADDRESS;
+            }
+            else if( Bound != 0 && FCB->AddressFile.Object &&
+                     NT_SUCCESS(AfdQueryRouteSource(FCB, Peer, &Source)) )
+            {
+                /* A socket bound to the loopback address cannot reach a peer through
+                 * another interface, nor one bound to another address a loopback peer */
+                BOOLEAN BoundLoopback = (Bound & 0xFF) == 127;
+                BOOLEAN SourceLoopback = (Source & 0xFF) == 127;
+                /* Multicast, broadcast and link-local peers are accepted whatever the socket is bound to */
+                BOOLEAN AnyBinding = (Peer & 0xF0) == 0xE0 || Peer == 0xFFFFFFFF ||
+                                     (Peer & 0xFFFF) == 0xFEA9;
+
+                if( BoundLoopback && !SourceLoopback && !AnyBinding )
+                    Status = STATUS_NETWORK_UNREACHABLE;
+                else if( !BoundLoopback && SourceLoopback )
+                    Status = STATUS_INVALID_ADDRESS;
+            }
+
+            if( !NT_SUCCESS(Status) )
+            {
+                ExFreePoolWithTag(NewAddress, TAG_AFD_TRANSPORT_ADDRESS);
+                return UnlockAndMaybeComplete( FCB, Status, Irp, 0 );
+            }
+        }
+
+        if (FCB->RemoteAddress)
+            ExFreePoolWithTag(FCB->RemoteAddress, TAG_AFD_TRANSPORT_ADDRESS);
+        FCB->RemoteAddress = NewAddress;
+
+        /* Every connect signals FD_CONNECT, and FD_WRITE again */
+        FCB->PollState |= AFD_EVENT_CONNECT;
+        FCB->PollStatus[FD_CONNECT_BIT] = STATUS_SUCCESS;
+        FCB->EventSelectDisabled &= ~(AFD_EVENT_CONNECT | AFD_EVENT_SEND);
+        PollReeval( FCB->DeviceExt, FCB->FileObject );
+
+        return UnlockAndMaybeComplete( FCB, STATUS_SUCCESS, Irp, 0 );
    }
 
     switch(FCB->SharedData.State)

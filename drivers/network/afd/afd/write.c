@@ -565,15 +565,23 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     if( !SocketAcquireStateLock( FCB ) ) return LostSocket( Irp );
 
-    FCB->EventSelectDisabled &= ~AFD_EVENT_SEND;
+    /* A datagram socket signals FD_WRITE when it is bound or connected, not on each send */
+    if( !(FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS) )
+        FCB->EventSelectDisabled &= ~AFD_EVENT_SEND;
 
     if( FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS )
     {
         PAFD_SEND_INFO_UDP SendReq;
         PTDI_CONNECTION_INFORMATION TargetAddress;
 
+        /* Without a peer there is nothing to send to, bound or not */
+        if( !FCB->RemoteAddress )
+        {
+            return UnlockAndMaybeComplete( FCB, STATUS_INVALID_CONNECTION, Irp, 0 );
+        }
+
         /* Check that the socket is bound */
-        if( FCB->SharedData.State != SOCKET_STATE_BOUND || !FCB->RemoteAddress )
+        if( FCB->SharedData.State != SOCKET_STATE_BOUND )
         {
             AFD_DbgPrint(MIN_TRACE,("Invalid parameter\n"));
             return UnlockAndMaybeComplete( FCB, STATUS_INVALID_PARAMETER, Irp,
@@ -799,7 +807,9 @@ AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     if( !SocketAcquireStateLock( FCB ) ) return LostSocket( Irp );
 
-    FCB->EventSelectDisabled &= ~AFD_EVENT_SEND;
+    /* A datagram socket signals FD_WRITE when it is bound or connected, not on each send */
+    if( !(FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS) )
+        FCB->EventSelectDisabled &= ~AFD_EVENT_SEND;
 
     /* Check that the socket is bound */
     if( FCB->SharedData.State != SOCKET_STATE_BOUND &&

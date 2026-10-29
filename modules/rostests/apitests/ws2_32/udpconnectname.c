@@ -69,6 +69,92 @@ CheckLoopbackPeer(const char *Peer)
     closesocket(Socket);
 }
 
+
+/* connect() outcome, with the socket optionally bound first */
+static
+int
+ConnectError(SOCKET Socket, const char *Peer)
+{
+    int Error = 0;
+
+    return ConnectTo(Socket, Peer, &Error) ? 0 : Error;
+}
+
+static
+void
+CheckErrors(const char *Interface)
+{
+    struct sockaddr_in Address, Name;
+    SOCKET Socket;
+    char Buffer[4];
+    int Result, Error, Length;
+
+    /* The unspecified address is no peer */
+    Socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    Error = ConnectError(Socket, "0.0.0.0");
+    ok(Error == WSAEADDRNOTAVAIL, "connect to 0.0.0.0: error %d, expected %d\n", Error, WSAEADDRNOTAVAIL);
+    Length = sizeof(Name);
+    Result = getpeername(Socket, (struct sockaddr *)&Name, &Length);
+    ok(Result == SOCKET_ERROR && WSAGetLastError() == WSAENOTCONN, "getpeername: %d, error %d\n", Result, WSAGetLastError());
+    closesocket(Socket);
+
+    /* Not connected: no peer to send to or to disconnect from */
+    Socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    Result = send(Socket, "x", 1, 0);
+    ok(Result == SOCKET_ERROR && WSAGetLastError() == WSAENOTCONN, "send on an unconnected socket: %d, error %d\n", Result, WSAGetLastError());
+    ZeroMemory(&Address, sizeof(Address));
+    Result = connect(Socket, (struct sockaddr *)&Address, sizeof(Address));
+    ok(Result == SOCKET_ERROR && WSAGetLastError() == WSAEAFNOSUPPORT, "disconnect while unconnected: %d, error %d\n", Result, WSAGetLastError());
+
+    /* Disconnecting leaves no peer */
+    ok(ConnectTo(Socket, "127.0.0.1", &Error), "connect failed: %d\n", Error);
+    Length = sizeof(Name);
+    ok(getpeername(Socket, (struct sockaddr *)&Name, &Length) == 0, "getpeername while connected failed\n");
+    Result = connect(Socket, (struct sockaddr *)&Address, sizeof(Address));
+    ok(Result == 0, "disconnect failed: %d\n", WSAGetLastError());
+    Length = sizeof(Name);
+    Result = getpeername(Socket, (struct sockaddr *)&Name, &Length);
+    ok(Result == SOCKET_ERROR && WSAGetLastError() == WSAENOTCONN, "getpeername after disconnect: %d, error %d\n", Result, WSAGetLastError());
+    Result = send(Socket, Buffer, 1, 0);
+    ok(Result == SOCKET_ERROR && WSAGetLastError() == WSAENOTCONN, "send after disconnect: %d, error %d\n", Result, WSAGetLastError());
+    closesocket(Socket);
+
+    /* A socket bound to the loopback address reaches loopback peers only */
+    ZeroMemory(&Address, sizeof(Address));
+    Address.sin_family = AF_INET;
+    Address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    Socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    ok(bind(Socket, (struct sockaddr *)&Address, sizeof(Address)) == 0, "bind failed: %d\n", WSAGetLastError());
+    Error = ConnectError(Socket, "8.8.8.8");
+    ok(Error == WSAENETUNREACH, "bound to 127.0.0.1, connect to 8.8.8.8: error %d, expected %d\n", Error, WSAENETUNREACH);
+    Error = ConnectError(Socket, "127.0.0.1");
+    ok(Error == 0, "bound to 127.0.0.1, connect to 127.0.0.1: error %d\n", Error);
+    Error = ConnectError(Socket, Interface);
+    ok(Error == WSAENETUNREACH, "bound to 127.0.0.1, connect to %s: error %d, expected %d\n", Interface, Error, WSAENETUNREACH);
+    /* multicast, broadcast and link-local peers are accepted */
+    Error = ConnectError(Socket, "224.0.0.251");
+    ok(Error == 0, "bound to 127.0.0.1, connect to 224.0.0.251: error %d\n", Error);
+    Error = ConnectError(Socket, "255.255.255.255");
+    ok(Error == 0, "bound to 127.0.0.1, connect to 255.255.255.255: error %d\n", Error);
+    Error = ConnectError(Socket, "169.254.7.7");
+    ok(Error == 0, "bound to 127.0.0.1, connect to 169.254.7.7: error %d\n", Error);
+    closesocket(Socket);
+
+    /* and one bound to the interface address no loopback peer */
+    Address.sin_addr.s_addr = inet_addr(Interface);
+    Socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    ok(bind(Socket, (struct sockaddr *)&Address, sizeof(Address)) == 0, "bind failed: %d\n", WSAGetLastError());
+    Error = ConnectError(Socket, "127.0.0.1");
+    ok(Error == WSAEADDRNOTAVAIL, "bound to %s, connect to 127.0.0.1: error %d, expected %d\n", Interface, Error, WSAEADDRNOTAVAIL);
+    Error = ConnectError(Socket, "127.5.5.5");
+    ok(Error == WSAEADDRNOTAVAIL, "bound to %s, connect to 127.5.5.5: error %d, expected %d\n", Interface, Error, WSAEADDRNOTAVAIL);
+    Error = ConnectError(Socket, "8.8.8.8");
+    ok(Error == 0, "bound to %s, connect to 8.8.8.8: error %d\n", Interface, Error);
+    Error = ConnectError(Socket, "224.0.0.251");
+    ok(Error == 0, "bound to %s, connect to 224.0.0.251: error %d\n", Interface, Error);
+    closesocket(Socket);
+}
+
 START_TEST(udpconnectname)
 {
     static const char *const ExternalPeers[] = { "8.8.8.8", "255.255.255.255", "224.0.0.251", "169.254.7.7" };
@@ -178,6 +264,8 @@ START_TEST(udpconnectname)
         }
         closesocket(Socket);
     }
+
+    CheckErrors(Interface);
 
     WSACleanup();
 }
