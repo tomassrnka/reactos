@@ -11,6 +11,44 @@
 #include "afd.h"
 #include "ntdef.h"
 
+/* An accept completes into a fresh stream socket only: not bound, connected,
+ * listening or claimed by another accept, with no transport objects of its
+ * own, and not the listener. Anything else would overwrite a live connection
+ * and its in-flight receive. Windows fails such an AcceptEx with WSAEINVAL and
+ * leaves the connection queued. Called with AcceptFcb's state lock held. */
+static BOOLEAN AfdIsFreshAcceptSocket(PAFD_FCB ListenFcb, PAFD_FCB AcceptFcb)
+{
+    return AcceptFcb != ListenFcb &&
+           AcceptFcb->SharedData.State == SOCKET_STATE_CREATED &&
+           !(AcceptFcb->Flags & AFD_ENDPOINT_CONNECTIONLESS) &&
+           !AcceptFcb->Connection.Object &&
+           !AcceptFcb->AddressFile.Object;
+}
+
+static VOID ReleaseListenConnection(PAFD_FCB FCB);
+
+/* Lock-free first look at a candidate accept socket, taken before its mutex
+ * so that a socket that can never qualify is rejected without waiting on it.
+ * The authoritative check is AfdIsFreshAcceptSocket under the lock. */
+static BOOLEAN AfdMayBeFreshAcceptSocket(PAFD_FCB ListenFcb, PAFD_FCB AcceptFcb)
+{
+    return AcceptFcb != ListenFcb &&
+           *(volatile ULONG *)&AcceptFcb->SharedData.State == SOCKET_STATE_CREATED;
+}
+
+/* Take the accept socket's lock while holding the listener's. Waiting here
+ * could deadlock two listeners that accept into each other from two threads
+ * (the wait is not alertable, so the threads could not even be killed), so the
+ * lock is only tried: a socket that is busy is not a fresh, idle socket. */
+static BOOLEAN AfdTryLockAcceptSocket(PAFD_FCB AcceptFcb)
+{
+    LARGE_INTEGER NoWait;
+
+    NoWait.QuadPart = 0;
+    return KeWaitForMutexObject(&AcceptFcb->Mutex, Executive, KernelMode,
+                                FALSE, &NoWait) == STATUS_SUCCESS;
+}
+
 static NTSTATUS SatisfyAccept(PAFD_DEVICE_EXTENSION DeviceExt,
                               PIRP Irp,
                               PFILE_OBJECT NewFileObject,
@@ -50,11 +88,24 @@ static NTSTATUS SatisfyAccept(PAFD_DEVICE_EXTENSION DeviceExt,
     if (NT_SUCCESS(Status))
         Status = TdiBuildConnectionInfo(&FCB->ConnectReturnInfo, FCB->RemoteAddress);
 
+    /* A failure before the socket became a connection leaves it as it was, so
+     * it can be used for another accept: the connection taken from the listener
+     * is dropped (the peer sees it closed) rather than kept in FCB->Connection.
+     * Once the socket is CONNECTED (receive started), the connection stays with
+     * it and is consumed; the accept fails and the socket is closed by the caller. */
+    if (!NT_SUCCESS(Status) && FCB->SharedData.State != SOCKET_STATE_CONNECTED)
+        ReleaseListenConnection(FCB);
+
     if (SuperAccept)
     {
         SocketStateUnlock(FCB);
         return Status;
     }
+
+    /* AfdAccept claimed the socket (CONNECTING); a failure before it became a
+     * connection releases the claim, as SatisfySuperAccept does */
+    if (!NT_SUCCESS(Status) && FCB->SharedData.State != SOCKET_STATE_CONNECTED)
+        FCB->SharedData.State = SOCKET_STATE_CREATED;
 
     return UnlockAndMaybeComplete(FCB, Status, Irp, 0);
 }
@@ -812,6 +863,7 @@ NTSTATUS AfdAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
         if( PendingConnObj->Seq == AcceptData->SequenceNumber ) {
             PFILE_OBJECT NewFileObject = NULL;
+            PAFD_FCB NewFcb;
 
             /* A bad accept handle leaves the connection queued for a retry */
             /* Reference with the requestor mode so the handle is resolved
@@ -838,6 +890,36 @@ NTSTATUS AfdAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                 ObDereferenceObject( NewFileObject );
                 return UnlockAndMaybeComplete( FCB, STATUS_INVALID_HANDLE, Irp, 0 );
             }
+
+            /* Only a fresh socket can take the connection (as in
+             * AfdSuperAccept). A rejected one leaves the connection queued.
+             * Claim the socket (CONNECTING) under its lock, so nothing binds,
+             * connects or accepts into it before SatisfyAccept relocks it. The
+             * listener itself is rejected too: its mutex is ours already. */
+            NewFcb = NewFileObject->FsContext;
+            if( !NewFcb || !AfdMayBeFreshAcceptSocket( FCB, NewFcb ) ) {
+                AFD_DbgPrint(MIN_TRACE,("Accept socket is not a fresh socket\n"));
+                ObDereferenceObject( NewFileObject );
+                return UnlockAndMaybeComplete( FCB, STATUS_INVALID_PARAMETER, Irp, 0 );
+            }
+
+            /* Never wait for the second lock (see AfdTryLockAcceptSocket) */
+            if( !AfdTryLockAcceptSocket( NewFcb ) ) {
+                AFD_DbgPrint(MIN_TRACE,("Accept socket is busy\n"));
+                ObDereferenceObject( NewFileObject );
+                return UnlockAndMaybeComplete( FCB, STATUS_INVALID_PARAMETER, Irp, 0 );
+            }
+
+            /* The state may have changed before the lock was taken */
+            if( !AfdIsFreshAcceptSocket( FCB, NewFcb ) ) {
+                AFD_DbgPrint(MIN_TRACE,("Accept socket is not a fresh socket\n"));
+                SocketStateUnlock( NewFcb );
+                ObDereferenceObject( NewFileObject );
+                return UnlockAndMaybeComplete( FCB, STATUS_INVALID_PARAMETER, Irp, 0 );
+            }
+
+            NewFcb->SharedData.State = SOCKET_STATE_CONNECTING;
+            SocketStateUnlock( NewFcb );
 
             RemoveEntryList( PendingConn );
 
@@ -947,15 +1029,18 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     PAFD_FCB Fcb2 = NewFileObject->FsContext;
 
-    if (!SocketAcquireStateLock(Fcb2))
+    /* Reject the listener itself and a socket that cannot qualify before
+     * touching its lock; never wait for it while holding ours (deadlock when two
+     * listeners accept into each other) */
+    if (!Fcb2 || !AfdMayBeFreshAcceptSocket(Fcb, Fcb2) || !AfdTryLockAcceptSocket(Fcb2))
     {
-        ObDereferenceObject(NewFileObject);
         AfdFreeAcceptMdl(Irp);
-        return LostSocket(Irp);
+        ObDereferenceObject(NewFileObject);
+        return UnlockAndMaybeComplete(Fcb, STATUS_INVALID_PARAMETER, Irp, 0);
     }
 
     /* Verify that the acceptor socket has not been already binded/connected or that it has been used by AcceptEx */
-    if (Fcb2->SharedData.State != SOCKET_STATE_CREATED)
+    if (!AfdIsFreshAcceptSocket(Fcb, Fcb2))
     {
         AfdFreeAcceptMdl(Irp);
         SocketStateUnlock(Fcb2);
