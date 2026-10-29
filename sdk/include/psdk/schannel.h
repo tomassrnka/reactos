@@ -20,6 +20,7 @@ extern "C" {
 #define SCH_CRED_VERSION      2
 #define SCH_CRED_V3           3
 #define SCHANNEL_CRED_VERSION 4
+#define SCH_CREDENTIALS_VERSION 5
 
 #define SCHANNEL_RENEGOTIATE 0
 #define SCHANNEL_SHUTDOWN    1
@@ -40,6 +41,7 @@ extern "C" {
 #define SP_PROT_TLS1_0_SERVER SP_PROT_TLS1_SERVER
 #define SP_PROT_TLS1_1_SERVER 256
 #define SP_PROT_TLS1_2_SERVER 1024
+#define SP_PROT_TLS1_3_SERVER 4096
 
 #define SP_PROT_PCT1_CLIENT 2
 #define SP_PROT_PCT1_SERVER 1
@@ -48,6 +50,10 @@ extern "C" {
 #define SP_PROT_SSL3 (SP_PROT_SSL3_CLIENT | SP_PROT_SSL3_SERVER)
 #define SP_PROT_SSL2 (SP_PROT_SSL2_CLIENT | SP_PROT_SSL2_SERVER)
 #define SP_PROT_PCT1 (SP_PROT_PCT1_CLIENT | SP_PROT_PCT1_SERVER)
+#define SP_PROT_TLS1_0 (SP_PROT_TLS1_0_CLIENT | SP_PROT_TLS1_0_SERVER)
+#define SP_PROT_TLS1_1 (SP_PROT_TLS1_1_CLIENT | SP_PROT_TLS1_1_SERVER)
+#define SP_PROT_TLS1_2 (SP_PROT_TLS1_2_CLIENT | SP_PROT_TLS1_2_SERVER)
+#define SP_PROT_TLS1_3 (SP_PROT_TLS1_3_CLIENT | SP_PROT_TLS1_3_SERVER)
 
 #define SP_PROT_TLS1_1PLUS_CLIENT (SP_PROT_TLS1_1_CLIENT | SP_PROT_TLS1_2_CLIENT)
 
@@ -62,6 +68,20 @@ extern "C" {
 #define SCH_CRED_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT 1024
 #define SCH_CRED_IGNORE_NO_REVOCATION_CHECK          2048
 #define SCH_CRED_IGNORE_REVOCATION_OFFLINE           4096
+#define SCH_CRED_DISABLE_RECONNECTS                  0x00000080
+#define SCH_CRED_RESTRICTED_ROOTS                    0x00002000
+#define SCH_CRED_REVOCATION_CHECK_CACHE_ONLY         0x00004000
+#define SCH_CRED_CACHE_ONLY_URL_RETRIEVAL            0x00008000
+#define SCH_CRED_MEMORY_STORE_CERT                   0x00010000
+#define SCH_CRED_CACHE_ONLY_URL_RETRIEVAL_ON_CREATE  0x00020000
+#define SCH_SEND_ROOT_CERT                           0x00040000
+#define SCH_CRED_SNI_CREDENTIAL                      0x00080000
+#define SCH_CRED_SNI_ENABLE_OCSP                     0x00100000
+#define SCH_SEND_AUX_RECORD                          0x00200000
+#define SCH_USE_STRONG_CRYPTO                        0x00400000
+#define SCH_USE_PRESHAREDKEY_ONLY                    0x00800000
+#define SCH_USE_DTLS_ONLY                            0x01000000
+#define SCH_ALLOW_NULL_ENCRYPTION                    0x02000000
 
 #define SECPKG_ATTR_ISSUER_LIST         0x50
 #define SECPKG_ATTR_REMOTE_CRED         0x51
@@ -100,6 +120,98 @@ typedef struct _SCHANNEL_CRED
     DWORD dwFlags;
     DWORD dwCredFormat;
 } SCHANNEL_CRED, *PSCHANNEL_CRED;
+
+/* Version 5 credentials (Windows 10 1809+). As in the Windows SDK, these need
+ * SCHANNEL_USE_BLACKLISTS and a UNICODE_STRING definition (subauth.h, winternl.h or ntsecapi.h). */
+#ifdef SCHANNEL_USE_BLACKLISTS
+
+typedef enum _eTlsAlgorithmUsage
+{
+    TlsParametersCngAlgUsageKeyExchange,
+    TlsParametersCngAlgUsageSignature,
+    TlsParametersCngAlgUsageCipher,
+    TlsParametersCngAlgUsageDigest,
+    TlsParametersCngAlgUsageCertSig
+} eTlsAlgorithmUsage;
+
+typedef struct _CRYPTO_SETTINGS
+{
+    eTlsAlgorithmUsage eAlgorithmUsage;
+    UNICODE_STRING strCngAlgId;
+    DWORD cChainingModes;
+    PUNICODE_STRING rgstrChainingModes;
+    DWORD dwMinBitLength;
+    DWORD dwMaxBitLength;
+} CRYPTO_SETTINGS, *PCRYPTO_SETTINGS;
+
+typedef struct _TLS_PARAMETERS
+{
+    DWORD cAlpnIds;
+    PUNICODE_STRING rgstrAlpnIds;
+    DWORD grbitDisabledProtocols;
+    DWORD cDisabledCrypto;
+    PCRYPTO_SETTINGS pDisabledCrypto;
+    DWORD dwFlags;
+} TLS_PARAMETERS, *PTLS_PARAMETERS;
+
+#define TLS_PARAMS_OPTIONAL 0x00000001
+
+typedef struct _SCH_CREDENTIALS
+{
+    DWORD dwVersion;
+    DWORD dwCredFormat;
+    DWORD cCreds;
+    PCCERT_CONTEXT *paCred;
+    HCERTSTORE hRootStore;
+    DWORD cMappers;
+    struct _HMAPPER **aphMappers;
+    DWORD dwSessionLifespan;
+    DWORD dwFlags;
+    DWORD cTlsParameters;
+    PTLS_PARAMETERS pTlsParameters;
+} SCH_CREDENTIALS, *PSCH_CREDENTIALS;
+
+#define SCH_CRED_MAX_SUPPORTED_PARAMETERS      16
+#define SCH_CRED_MAX_SUPPORTED_ALPN_IDS        16
+#define SCH_CRED_MAX_SUPPORTED_CRYPTO_SETTINGS 16
+#define SCH_CRED_MAX_SUPPORTED_CHAINING_MODES  16
+
+#endif /* SCHANNEL_USE_BLACKLISTS */
+
+typedef struct _SCHANNEL_ALERT_TOKEN
+{
+    DWORD dwTokenType;
+    DWORD dwAlertType;
+    DWORD dwAlertNumber;
+} SCHANNEL_ALERT_TOKEN;
+
+#define TLS1_ALERT_WARNING 1
+#define TLS1_ALERT_FATAL   2
+
+#define TLS1_ALERT_CLOSE_NOTIFY         0
+#define TLS1_ALERT_UNEXPECTED_MESSAGE   10
+#define TLS1_ALERT_BAD_RECORD_MAC       20
+#define TLS1_ALERT_DECRYPTION_FAILED    21
+#define TLS1_ALERT_RECORD_OVERFLOW      22
+#define TLS1_ALERT_DECOMPRESSION_FAIL   30
+#define TLS1_ALERT_HANDSHAKE_FAILURE    40
+#define TLS1_ALERT_BAD_CERTIFICATE      42
+#define TLS1_ALERT_UNSUPPORTED_CERT     43
+#define TLS1_ALERT_CERTIFICATE_REVOKED  44
+#define TLS1_ALERT_CERTIFICATE_EXPIRED  45
+#define TLS1_ALERT_CERTIFICATE_UNKNOWN  46
+#define TLS1_ALERT_ILLEGAL_PARAMETER    47
+#define TLS1_ALERT_UNKNOWN_CA           48
+#define TLS1_ALERT_ACCESS_DENIED        49
+#define TLS1_ALERT_DECODE_ERROR         50
+#define TLS1_ALERT_DECRYPT_ERROR        51
+#define TLS1_ALERT_EXPORT_RESTRICTION   60
+#define TLS1_ALERT_PROTOCOL_VERSION     70
+#define TLS1_ALERT_INSUFFIENT_SECURITY  71
+#define TLS1_ALERT_INTERNAL_ERROR       80
+#define TLS1_ALERT_USER_CANCELED        90
+#define TLS1_ALERT_NO_RENEGOTIATION     100
+#define TLS1_ALERT_UNSUPPORTED_EXT      110
 
 typedef struct _SecPkgCred_SupportedAlgs
 {

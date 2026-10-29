@@ -16,6 +16,7 @@
 #include <sspi.h>
 #include <ntsecapi.h>
 #include <ntsecpkg.h>
+#define SCHANNEL_USE_BLACKLISTS /* SCH_CREDENTIALS; UNICODE_STRING comes from ntsecapi.h */
 #include <schannel.h>
 
 #include <wine/debug.h>
