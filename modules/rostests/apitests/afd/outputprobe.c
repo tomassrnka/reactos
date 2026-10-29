@@ -58,15 +58,6 @@ OpIoctl(
     return Status;
 }
 
-static
-BOOL
-IsWow64(void)
-{
-    BOOL Wow64 = FALSE;
-    IsWow64Process(GetCurrentProcess(), &Wow64);
-    return Wow64;
-}
-
 /* Bad output pointers: an unmapped (reserved, not committed) page, a read-only
  * page, and a kernel address (on amd64 a non-canonical one). The unmapped page
  * goes first: before the fix a raw kernel write to it stops the test right
@@ -201,11 +192,6 @@ TestDataOptionsBadOutput(void)
     for (i = 0; i < RTL_NUMBER_OF(DataOptions); i++)
     {
         Status = OpIoctl((HANDLE)s, DataOptions[i].SetCode, Blob, sizeof(Blob), NULL, 0, NULL);
-        if (Status == STATUS_NOT_SUPPORTED && IsWow64())
-        {
-            skip("SET_%s is not thunked for WoW64\n", DataOptions[i].Name);
-            continue;
-        }
         ok(Status == STATUS_SUCCESS, "SET_%s: got 0x%lx\n", DataOptions[i].Name, Status);
         if (!NT_SUCCESS(Status))
             continue;
@@ -267,11 +253,6 @@ TestConnectDisconnectWithOptions(void)
     for (i = 0; i < RTL_NUMBER_OF(DataOptions); i++)
     {
         Status = OpIoctl((HANDLE)cli, DataOptions[i].SetCode, Blob, sizeof(Blob), NULL, 0, NULL);
-        if (Status == STATUS_NOT_SUPPORTED && IsWow64())
-        {
-            skip("SET_%s is not thunked for WoW64\n", DataOptions[i].Name);
-            goto out;
-        }
         ok(Status == STATUS_SUCCESS, "client SET_%s: got 0x%lx\n", DataOptions[i].Name, Status);
     }
 

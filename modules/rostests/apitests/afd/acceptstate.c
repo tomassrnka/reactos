@@ -325,16 +325,6 @@ TestAcceptEx(void)
         { "bound, not connected", &t.Bound },
     };
 
-    {
-        BOOL Wow64 = FALSE;
-        IsWow64Process(GetCurrentProcess(), &Wow64);
-        if (Wow64)
-        {
-            skip("AcceptEx: IOCTL_AFD_SUPER_ACCEPT is not thunked for WoW64\n");
-            return;
-        }
-    }
-
     lst = MakeListener(&ListenAddr);
     if (lst == INVALID_SOCKET)
         return;
