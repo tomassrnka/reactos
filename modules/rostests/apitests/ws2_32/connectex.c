@@ -263,6 +263,97 @@ TestSecondWhileConnecting(void)
     Drain(200);
 }
 
+/* ConnectEx with send data: the data arrives, the packet reports its size, and after
+ * SO_UPDATE_CONNECT_CONTEXT the socket names both ends. A send buffer that is NULL with a
+ * length, or unreadable, fails with WSAEFAULT. */
+static
+void
+TestDataAndNames(void)
+{
+    static CX_REQUEST Request, Bad;
+    static char Data[3 * 4096 + 100], Received[sizeof(Data) + 16];
+    SOCKET Server, Client, Accepted = INVALID_SOCKET;
+    struct sockaddr_in Addr, Peer, Name, Remote;
+    int Error, Len, Total = 0, Count, i;
+    fd_set Set;
+    struct timeval Timeout;
+
+    Server = Listener(&Addr);
+    Client = BoundSocket(htonl(INADDR_LOOPBACK));
+    if (Server == INVALID_SOCKET || Client == INVALID_SOCKET)
+    {
+        skip("Setup failed: %d\n", WSAGetLastError());
+        goto Cleanup;
+    }
+    for (i = 0; i < (int)sizeof(Data); i++)
+        Data[i] = (char)(i * 7 + 3);
+
+    Error = StartConnectEx(Client, &Addr, NULL, 5, &Bad);
+    ok(Error == WSAEFAULT, "ConnectEx with a NULL buffer and a length: error %d\n", Error);
+    Error = StartConnectEx(Client, &Addr, (PVOID)(ULONG_PTR)0x10, 8, &Bad);
+    ok(Error == WSAEFAULT, "ConnectEx with an unreadable buffer: error %d\n", Error);
+    Drain(300);
+    ok(Bad.Packets == 0, "Failed ConnectEx calls got %ld completions\n", Bad.Packets);
+
+    /* The data spans several pages */
+    Error = StartConnectEx(Client, &Addr, Data, sizeof(Data), &Request);
+    ok(Error == 0, "ConnectEx with data failed: %d\n", Error);
+    if (Error)
+        goto Cleanup;
+    Accepted = AcceptWithin(Server, 5000);
+    ok(Accepted != INVALID_SOCKET, "accept failed: %d\n", WSAGetLastError());
+    ok(WaitRequest(&Request, 5000), "ConnectEx did not complete\n");
+    ok(Request.Packets == 1 && Request.Error == 0 && Request.Bytes == sizeof(Data),
+       "ConnectEx: %ld packets, error %lu, %lu bytes\n", Request.Packets, Request.Error, Request.Bytes);
+    if (Accepted == INVALID_SOCKET)
+        goto Cleanup;
+
+    ok(setsockopt(Client, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0) == 0,
+       "SO_UPDATE_CONNECT_CONTEXT failed: %d\n", WSAGetLastError());
+    Len = sizeof(Peer);
+    memset(&Peer, 0x55, sizeof(Peer));
+    Error = getpeername(Client, (struct sockaddr *)&Peer, &Len);
+    ok(Error == 0, "getpeername failed: %d\n", WSAGetLastError());
+    ok(Len == sizeof(Peer) && Peer.sin_family == AF_INET && Peer.sin_port == Addr.sin_port &&
+       Peer.sin_addr.s_addr == Addr.sin_addr.s_addr, "getpeername: length %d, port %u\n", Len, ntohs(Peer.sin_port));
+    Len = sizeof(Name);
+    memset(&Name, 0x55, sizeof(Name));
+    Error = getsockname(Client, (struct sockaddr *)&Name, &Len);
+    ok(Error == 0, "getsockname failed: %d\n", WSAGetLastError());
+    ok(Len == sizeof(Name) && Name.sin_family == AF_INET && Name.sin_port != 0 &&
+       Name.sin_addr.s_addr == htonl(INADDR_LOOPBACK), "getsockname: length %d, port %u\n", Len, ntohs(Name.sin_port));
+    Len = sizeof(Remote);
+    ok(getpeername(Accepted, (struct sockaddr *)&Remote, &Len) == 0 && Remote.sin_port == Name.sin_port,
+       "the peer of the accepted socket is not the client's local address\n");
+
+    while (Total < (int)sizeof(Data))
+    {
+        FD_ZERO(&Set);
+        FD_SET(Accepted, &Set);
+        Timeout.tv_sec = 3;
+        Timeout.tv_usec = 0;
+        if (select(0, &Set, NULL, NULL, &Timeout) != 1)
+            break;
+        Count = recv(Accepted, Received + Total, sizeof(Data) - Total, 0);
+        if (Count <= 0)
+            break;
+        Total += Count;
+    }
+    ok(Total == sizeof(Data), "the server received %d of %d bytes\n", Total, (int)sizeof(Data));
+    ok(Total != sizeof(Data) || !memcmp(Received, Data, sizeof(Data)), "the data differs\n");
+    Drain(300);
+    ok(Request.Packets == 1, "ConnectEx got %ld completions\n", Request.Packets);
+
+Cleanup:
+    if (Accepted != INVALID_SOCKET)
+        closesocket(Accepted);
+    if (Client != INVALID_SOCKET)
+        closesocket(Client);
+    if (Server != INVALID_SOCKET)
+        closesocket(Server);
+    Drain(200);
+}
+
 /* After a ConnectEx completed, another one reports the socket connected */
 static
 void
@@ -708,6 +799,7 @@ START_TEST(connectex)
     ok(Port != NULL, "CreateIoCompletionPort failed: %lu\n", GetLastError());
     if (Port)
     {
+        TestDataAndNames();
         TestSecondAfterConnected();
         TestSecondWhileConnecting();
         TestFailedThenAgain();
