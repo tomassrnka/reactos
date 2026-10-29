@@ -631,6 +631,38 @@ MiCopyPfn(
     MiReleaseSystemPtes(SysPtes, 2, SystemPteSpace);
 }
 
+/*
+ * Free pages that a demand-zero fault on a user address leaves to requests
+ * that cannot wait for more: page tables brought in under an address space
+ * lock (a view fault, NtAllocateVirtualMemory), pool, faults of threads that
+ * own an address space lock. Windows does the same in
+ * MiEnsureAvailablePageOrWait: below MM_HIGH_LIMIT an ordinary fault waits,
+ * a privileged one may take the last pages. Without the band, a process that
+ * keeps faulting in new pages takes every page the balancer frees, and a
+ * lock holder, which may not wait for the balancer, runs out of its bounded
+ * retries and fails a page table (bugcheck 0x7A) or a probe. Kept below the
+ * balancer's own floor (MiMinimumAvailablePages, 256), so one balancer pass
+ * lets the waiting fault go on.
+ */
+#define MI_DEMAND_ZERO_FAULT_RESERVE 128
+
+static
+BOOLEAN
+MiCanFaultWaitForPages(VOID)
+{
+    /* Critical processes and the System process may take the last pages: they must not stall for an application */
+    if (MiIsCriticalProcess(PsGetCurrentProcess()))
+        return FALSE;
+
+    /*
+     * Same predicate as the wait itself (MmRebalanceMemoryConsumersAndWait):
+     * a fault that cannot wait for the balancer must not be refused pages.
+     * The fault's own working set lock is released when the fault returns
+     * STATUS_NO_MEMORY, before the wait, so it does not count here.
+     */
+    return MiThreadCanWaitForBalancer(TRUE);
+}
+
 static
 NTSTATUS
 NTAPI
@@ -688,6 +720,15 @@ MiResolveDemandZeroFault(IN PVOID Address,
         /* Acquire it and remember we should release it after */
         OldIrql = MiAcquirePfnLock();
         HaveLock = TRUE;
+
+        /* A user page whose fault can wait leaves the last pages to those that cannot (MmAccessFault waits and retries) */
+        if ((Address <= MM_HIGHEST_USER_ADDRESS) &&
+            (MmAvailablePages < MI_DEMAND_ZERO_FAULT_RESERVE) &&
+            MiCanFaultWaitForPages())
+        {
+            MiReleasePfnLock(OldIrql);
+            return STATUS_NO_MEMORY;
+        }
     }
 
     /* We either manually locked the PFN DB, or already came with it locked */

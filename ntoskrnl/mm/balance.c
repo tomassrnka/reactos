@@ -303,6 +303,27 @@ MmRebalanceMemoryConsumers(VOID)
 
 BOOLEAN
 NTAPI
+MiThreadCanWaitForBalancer(
+    _In_ BOOLEAN IgnoreWorkingSetLocks)
+{
+    PETHREAD Thread = PsGetCurrentThread();
+    PMMSUPPORT KernelSpace = MmGetKernelAddressSpace();
+
+    if (PsGetCurrentProcess()->AddressCreationLock.Owner == &Thread->Tcb)
+        return FALSE;
+    if (KernelSpace &&
+        (CONTAINING_RECORD(KernelSpace, EPROCESS, Vm)->AddressCreationLock.Owner == &Thread->Tcb))
+        return FALSE;
+    if (!IgnoreWorkingSetLocks && MM_ANY_WS_LOCK_HELD(Thread))
+        return FALSE;
+    if (PsGetCurrentThreadId() == MiBalancerThreadId.UniqueThread)
+        return FALSE;
+
+    return TRUE;
+}
+
+BOOLEAN
+NTAPI
 MmRebalanceMemoryConsumersAndWait(VOID)
 {
     ASSERT(KeGetCurrentIrql() < DISPATCH_LEVEL);
@@ -316,11 +337,7 @@ MmRebalanceMemoryConsumersAndWait(VOID)
      * not guarantee progress: the balancer still blocks if it needs the
      * lock this thread keeps across the retries.
      */
-    if ((PsGetCurrentProcess()->AddressCreationLock.Owner == KeGetCurrentThread()) ||
-        (MmGetKernelAddressSpace() &&
-         (CONTAINING_RECORD(MmGetKernelAddressSpace(), EPROCESS, Vm)->AddressCreationLock.Owner == KeGetCurrentThread())) ||
-        MM_ANY_WS_LOCK_HELD(PsGetCurrentThread()) ||
-        (PsGetCurrentThreadId() == MiBalancerThreadId.UniqueThread))
+    if (!MiThreadCanWaitForBalancer(FALSE))
     {
         LARGE_INTEGER Delay;
 

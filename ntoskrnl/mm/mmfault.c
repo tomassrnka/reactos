@@ -256,6 +256,19 @@ MiWaitForFreePages(VOID)
 ULONG MiMaxOomSpinRetries = 1024;
 
 /*
+ * Longest a user thread waits, in total, for a fault on a user address to get
+ * a page (100 ns units). Each balancer pass resets the no-progress count, so
+ * with nothing the balancer can free a thread that cannot get a page waits
+ * for ever. After this the fault fails with STATUS_NO_MEMORY, which the trap
+ * handler turns into an in-page error exception in that process: it dies or
+ * handles the error, the system goes on. A bugcheck is the alternative:
+ * giving it the reserved pages starves page tables and lock holders (0x7A),
+ * and exhaustion of the balancer's floor can bugcheck it (0x4D). Critical
+ * processes and the System process are not bounded: failing them is fatal.
+ */
+#define MI_MAX_FAULT_WAIT (30LL * 10000000LL)
+
+/*
  * Decide how to handle STATUS_NO_MEMORY from a page fault. A real balancer wait
  * (progress possible) resets the no-progress counter and always retries, exactly
  * as the fault path always did. A no-progress spin (a lock we hold blocks the
@@ -264,11 +277,38 @@ ULONG MiMaxOomSpinRetries = 1024;
  */
 static
 BOOLEAN
-MiRetryOutOfMemoryFault(PULONG NoProgressSpins)
+MiRetryOutOfMemoryFault(PULONG NoProgressSpins, PLONGLONG WaitStart, PVOID Address)
 {
+    BOOLEAN Bounded;
+    LONGLONG Now;
+
+    Bounded = ((ULONG_PTR)Address <= (ULONG_PTR)MM_HIGHEST_USER_ADDRESS) &&
+              !MiIsCriticalProcess(PsGetCurrentProcess());
+    if (Bounded)
+    {
+        Now = (LONGLONG)KeQueryInterruptTime();
+        if (*WaitStart == 0)
+            *WaitStart = Now;
+        else if ((Now - *WaitStart) > MI_MAX_FAULT_WAIT)
+        {
+            DPRINT1("MM: fault at %p in %.16s waited %I64d s for memory, failing it\n", Address,
+                    PsGetCurrentProcess()->ImageFileName, (Now - *WaitStart) / 10000000LL);
+            return FALSE;
+        }
+    }
+
     if (MiWaitForFreePages())
     {
         *NoProgressSpins = 0;
+
+        /* A balancer pass that freed nothing returns at once: do not spin through the pass until the bound */
+        if (Bounded && (MmAvailablePages < 256))
+        {
+            LARGE_INTEGER Delay;
+
+            Delay.QuadPart = -10 * 10000;
+            KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+        }
         return TRUE;
     }
 
@@ -298,6 +338,7 @@ MmDbgTestOomRetryBound(IN ULONG SimulatedMax,
 {
     ULONG SavedMax = MiMaxOomSpinRetries;
     ULONG NoProgressSpins = 0;
+    LONGLONG WaitStart = 0;
     ULONG Iterations = 0;
     PMMSUPPORT AddressSpace = &PsGetCurrentProcess()->Vm;
     BOOLEAN KeepGoing;
@@ -309,7 +350,7 @@ MmDbgTestOomRetryBound(IN ULONG SimulatedMax,
 
     do
     {
-        KeepGoing = MiRetryOutOfMemoryFault(&NoProgressSpins);
+        KeepGoing = MiRetryOutOfMemoryFault(&NoProgressSpins, &WaitStart, (PVOID)MmSystemRangeStart);
         Iterations++;
     }
     while (KeepGoing && (Iterations < Ceiling));
@@ -333,6 +374,7 @@ MmAccessFault(IN ULONG FaultCode,
     NTSTATUS Status;
     BOOLEAN IsArm3Fault = FALSE;
     ULONG NoProgressSpins = 0;
+    LONGLONG WaitStart = 0;
 
     /* Before any lock: the fault may come from DISPATCH_LEVEL or above. User mode keeps its access violation. */
     if (MmSpecialPoolEnabled && (Mode == KernelMode) && ((ULONG_PTR)Address >= (ULONG_PTR)MmSystemRangeStart))
@@ -425,7 +467,7 @@ Again:
 
     if (Status == STATUS_NO_MEMORY)
     {
-        if (MiRetryOutOfMemoryFault(&NoProgressSpins))
+        if (MiRetryOutOfMemoryFault(&NoProgressSpins, &WaitStart, Address))
             goto Again;
         return Status;
     }
@@ -439,7 +481,7 @@ Arm3Done:
      */
     if (Status == STATUS_NO_MEMORY)
     {
-        if (MiRetryOutOfMemoryFault(&NoProgressSpins))
+        if (MiRetryOutOfMemoryFault(&NoProgressSpins, &WaitStart, Address))
             goto Again;
         return Status;
     }

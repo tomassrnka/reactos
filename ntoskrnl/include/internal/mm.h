@@ -921,6 +921,12 @@ typedef enum _MI_COMMIT_TIER
 {
     /* Fails above the commit limit minus the kernel reserve */
     MiCommitUser,
+    /*
+     * Legacy Mm copy-on-write views, whose private pages can be paged out:
+     * fails above RAM plus all paging file space, minus the kernel reserve.
+     * Return it with MiReturnPageableCommit.
+     */
+    MiCommitUserPageable,
     /* Fails above the commit limit only (pool, kernel stack growth) */
     MiCommitKernel
 } MI_COMMIT_TIER;
@@ -942,6 +948,35 @@ MiChargeCommit(
 VOID
 NTAPI
 MiReturnBootCommit(
+    _In_ SIZE_T Pages);
+
+SIZE_T
+NTAPI
+MiGetCommitLimit(VOID);
+
+SIZE_T
+NTAPI
+MiGetPageableCommittedPages(VOID);
+
+/* The System process and processes marked critical: their commitment and faults keep a reserve */
+BOOLEAN
+NTAPI
+MiIsCriticalProcess(
+    _In_opt_ PEPROCESS Process);
+
+/*
+ * Whether the calling thread may wait for a balancer pass to free pages.
+ * FALSE when it holds what the balancer may need (an address space lock,
+ * a working set lock unless IgnoreWorkingSetLocks) or is the balancer.
+ */
+BOOLEAN
+NTAPI
+MiThreadCanWaitForBalancer(
+    _In_ BOOLEAN IgnoreWorkingSetLocks);
+
+VOID
+NTAPI
+MiReturnPageableCommit(
     _In_ SIZE_T Pages);
 
 VOID

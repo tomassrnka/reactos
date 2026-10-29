@@ -25,6 +25,30 @@ SIZE_T MiCommitReserve;
 /* Boot-time memory charged at initialisation that may still be freed (loader data, INIT code) */
 static volatile SIZE_T MiBootCommitCharge;
 
+/*
+ * Commitment that paging files can back: the copy-on-write views of the
+ * legacy Mm, whose private pages MmPageOutPhysicalAddress writes to a paging
+ * file. ARM3 has no working set trimming and no modified page writer for
+ * private pages and paging file backed sections: what it commits is backed
+ * by RAM alone. Windows never commits more than its backing store, and
+ * without a paging file it limits commitment to RAM; a paging file that
+ * the memory cannot be written to is no backing store for it. So the commit
+ * limit counts paging file space only up to this much: committing ARM3
+ * memory beyond RAM would only defer the failure from the allocation, which
+ * can report it, to a page fault, which cannot (bugcheck 0x7A when a page
+ * table page cannot be had for an address space operation).
+ */
+static volatile SIZE_T MiPageableCommittedPages;
+
+/*
+ * Part of RAM that commitments other than the kernel's leave to memory that
+ * is not charged and must stay resident to run at all: image code and data,
+ * mapped files, the cache, page tables. These are what the balancer can
+ * reclaim; with all of RAM charged to memory that cannot be paged there is
+ * nothing left to reclaim and the pages run out in a page fault.
+ */
+static SIZE_T MiResidentHeadroom;
+
 /* PRIVATE FUNCTIONS **********************************************************/
 
 static
@@ -41,6 +65,40 @@ MiUpdatePeakCommitment(
     {
         PeakCommitment = MmPeakCommitment;
     }
+}
+
+/* What RAM can back, Headroom left over, plus what paging files can back */
+static
+SIZE_T
+MiGetBackedCeiling(
+    _In_ SIZE_T Headroom)
+{
+    SIZE_T Backed = MmNumberOfPhysicalPages + MiPageableCommittedPages;
+
+    return (Backed > Headroom) ? (Backed - Headroom) : 0;
+}
+
+static
+SIZE_T
+MiGetCommitCeiling(
+    _In_ SIZE_T Headroom)
+{
+    SIZE_T Limit = *(volatile SIZE_T *)&MmTotalCommitLimit;
+
+    return min(Limit, MiGetBackedCeiling(Headroom));
+}
+
+/*
+ * The commit limit: RAM less the resident headroom, plus the paging file
+ * space that pageable commitment can use. User commitment is charged against
+ * it (less the kernel reserve), and it is what the system reports. Kernel
+ * charges may also use the headroom.
+ */
+SIZE_T
+NTAPI
+MiGetCommitLimit(VOID)
+{
+    return MiGetCommitCeiling(MiResidentHeadroom);
 }
 
 CODE_SEG("INIT")
@@ -75,8 +133,13 @@ MiInitializeCommitLimit(VOID)
     if (MiCommitReserve < 1024) MiCommitReserve = 1024;
     if (MiCommitReserve > 8192) MiCommitReserve = 8192;
 
-    DPRINT1("Commit limit %Iu pages (RAM), %Iu charged for boot-time memory, reserve %Iu pages\n",
-            MmTotalCommitLimit, BootResident, MiCommitReserve);
+    /* An eighth of RAM, 16 MB to 1 GB, for what is resident but not charged */
+    MiResidentHeadroom = MmNumberOfPhysicalPages / 8;
+    if (MiResidentHeadroom < (16 * _1MB) / PAGE_SIZE) MiResidentHeadroom = (16 * _1MB) / PAGE_SIZE;
+    if (MiResidentHeadroom > _1GB / PAGE_SIZE) MiResidentHeadroom = _1GB / PAGE_SIZE;
+
+    DPRINT1("Commit limit %Iu pages (RAM), %Iu charged for boot-time memory, reserve %Iu pages, resident headroom %Iu pages\n",
+            MmTotalCommitLimit, BootResident, MiCommitReserve, MiResidentHeadroom);
 }
 
 VOID
@@ -104,10 +167,20 @@ MiChargeCommit(
     _In_ SIZE_T Pages,
     _In_ MI_COMMIT_TIER Tier)
 {
-    SIZE_T OldCommitted, NewCommitted, Ceiling;
+    SIZE_T OldCommitted, NewCommitted, Ceiling, Headroom;
 
     if (Pages == 0)
         return TRUE;
+
+    /*
+     * Critical tier: the System process and critical processes (csrss, lsass,
+     * winlogon...) do not give up the resident headroom. When an application
+     * fills the cap, these must still be able to allocate, or the system dies
+     * (bugcheck 0xF4 when a critical process cannot continue).
+     */
+    Headroom = MiResidentHeadroom;
+    if ((Tier == MiCommitKernel) || MiIsCriticalProcess(PsGetCurrentProcess()))
+        Headroom = 0;
 
     for (;;)
     {
@@ -116,8 +189,12 @@ MiChargeCommit(
         if (NewCommitted < OldCommitted)
             return FALSE;
 
-        Ceiling = *(volatile SIZE_T *)&MmTotalCommitLimit;
-        if (Tier == MiCommitUser)
+        /* Only pageable commitment may use the paging files beyond RAM */
+        if (Tier == MiCommitUserPageable)
+            Ceiling = *(volatile SIZE_T *)&MmTotalCommitLimit;
+        else
+            Ceiling = MiGetCommitCeiling(Headroom);
+        if (Tier != MiCommitKernel)
             Ceiling = (Ceiling > MiCommitReserve) ? (Ceiling - MiCommitReserve) : 0;
 
         if (NewCommitted > Ceiling)
@@ -131,8 +208,52 @@ MiChargeCommit(
         }
     }
 
+    if (Tier == MiCommitUserPageable)
+        InterlockedExchangeAddSizeT(&MiPageableCommittedPages, Pages);
+
     MiUpdatePeakCommitment(NewCommitted);
     return TRUE;
+}
+
+SIZE_T
+NTAPI
+MiGetPageableCommittedPages(VOID)
+{
+    return *(volatile SIZE_T *)&MiPageableCommittedPages;
+}
+
+BOOLEAN
+NTAPI
+MiIsCriticalProcess(
+    _In_opt_ PEPROCESS Process)
+{
+    /* Before the first process exists, charges are the kernel's own */
+    if ((Process == NULL) || (Process == PsIdleProcess) || (Process == PsInitialSystemProcess))
+        return TRUE;
+
+    return Process->BreakOnTermination != 0;
+}
+
+/* Return a charge taken with MiCommitUserPageable */
+VOID
+NTAPI
+MiReturnPageableCommit(
+    _In_ SIZE_T Pages)
+{
+    SIZE_T OldPageable;
+
+    if (Pages == 0)
+        return;
+
+    OldPageable = InterlockedExchangeAddSizeT(&MiPageableCommittedPages, -(LONG_PTR)Pages);
+    if (OldPageable < Pages)
+    {
+        DPRINT1("MiReturnPageableCommit: returning %Iu pages, only %Iu charged\n", Pages, OldPageable);
+        ASSERT(FALSE);
+        InterlockedExchangeAddSizeT(&MiPageableCommittedPages, Pages - OldPageable);
+    }
+
+    MiReturnCommit(Pages);
 }
 
 VOID
@@ -173,11 +294,11 @@ MiReportKernelCommitFailure(
     SIZE_T Committed, Limit;
 
     Committed = MmTotalCommittedPages;
-    Limit = MmTotalCommitLimit;
+    Limit = MiGetCommitLimit();
 
-    /* Room for this charge, were the limit raised */
-    if (Committed + Pages > Limit)
-        MiRequestPagingFileGrowth(Committed + Pages - Limit);
+    /* Room for this charge, were the limit raised; growth cannot raise it past RAM plus pageable commitment */
+    if ((Committed + Pages > MmTotalCommitLimit) && (MmTotalCommitLimit < MiGetBackedCeiling(0)))
+        MiRequestPagingFileGrowth(Committed + Pages - MmTotalCommitLimit);
 
     Now = (LONG64)KeQueryInterruptTime();
     Next = NextReport;
@@ -200,11 +321,15 @@ MiWaitForCommitGrowth(
     SIZE_T Ceiling, Committed;
 
     /* Grow by what a user charge of this size lacks now, not by its size */
-    Ceiling = MmTotalCommitLimit;
+    Ceiling = MiGetCommitLimit();
     Ceiling = (Ceiling > MiCommitReserve) ? (Ceiling - MiCommitReserve) : 0;
     Committed = MmTotalCommittedPages;
     if (Committed + Pages <= Ceiling)
         return TRUE;
+
+    /* RAM binds, not the paging files: growing them cannot make room for memory that cannot be paged */
+    if (MmTotalCommitLimit >= MiGetBackedCeiling(MiResidentHeadroom))
+        return FALSE;
 
     return MiWaitForPagingFileGrowth(Committed + Pages - Ceiling);
 }
