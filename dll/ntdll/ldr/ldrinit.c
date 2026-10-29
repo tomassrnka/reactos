@@ -3560,10 +3560,8 @@ VOID NTAPI LdrInitializeWow64(PVOID NtdllBase, PCONTEXT StartContext)
 {
     static ANSI_STRING FilterName = RTL_CONSTANT_STRING("UnhandledExceptionFilter");
     static ANSI_STRING ExitThreadName = RTL_CONSTANT_STRING("ExitThread");
-    static ANSI_STRING ExitProcessName = RTL_CONSTANT_STRING("ExitProcess");
     LONG (WINAPI *Filter)(PEXCEPTION_POINTERS) = NULL;
     VOID (WINAPI *ExitThreadRoutine)(ULONG) = NULL;
-    VOID (WINAPI *ExitProcessRoutine)(ULONG) = NULL;
     ULONG (NTAPI *Entry)(VOID);
     PIMAGE_NT_HEADERS Header;
     PVOID Kernel32;
@@ -3580,11 +3578,12 @@ VOID NTAPI LdrInitializeWow64(PVOID NtdllBase, PCONTEXT StartContext)
      * An exception that no frame of the image handles must reach
      * UnhandledExceptionFilter, which reports it, instead of a second-chance
      * dispatch that ends the process silently. The entry's return value ends
-     * the thread. An image that does not use kernel32 keeps the plain call. */
+     * the thread; an unhandled exception ends the process at once, without
+     * DLL detach, as on Windows. An image that does not use kernel32 keeps
+     * the plain call. */
     if (NT_SUCCESS(LdrGetDllHandle(NULL, NULL, &Kernel32String, &Kernel32)) &&
         NT_SUCCESS(LdrGetProcedureAddress(Kernel32, &FilterName, 0, (PVOID *)&Filter)) &&
-        NT_SUCCESS(LdrGetProcedureAddress(Kernel32, &ExitThreadName, 0, (PVOID *)&ExitThreadRoutine)) &&
-        NT_SUCCESS(LdrGetProcedureAddress(Kernel32, &ExitProcessName, 0, (PVOID *)&ExitProcessRoutine)))
+        NT_SUCCESS(LdrGetProcedureAddress(Kernel32, &ExitThreadName, 0, (PVOID *)&ExitThreadRoutine)))
     {
         _SEH2_TRY
         {
@@ -3592,7 +3591,7 @@ VOID NTAPI LdrInitializeWow64(PVOID NtdllBase, PCONTEXT StartContext)
         }
         _SEH2_EXCEPT(Filter(_SEH2_GetExceptionInformation()))
         {
-            ExitProcessRoutine(_SEH2_GetExceptionCode());
+            NtTerminateProcess(NtCurrentProcess(), _SEH2_GetExceptionCode());
         }
         _SEH2_END;
     }
