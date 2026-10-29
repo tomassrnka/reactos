@@ -258,6 +258,53 @@ static BOOLEAN GuestSpan(ULONG Address, ULONG64 Size)
     return (ULONG64)Address + Size <= (ULONG64)Wow64HighestUserAddress + 1;
 }
 
+/*
+ * IOCTL_AFD_GET_CONTEXT of a 32-bit msafd. AFD answers with its own SOCK_SHARED_INFO
+ * (the one it keeps the socket state in) only when the output buffer has exactly the
+ * native size; otherwise it returns the opaque blob the guest stored with SET_CONTEXT,
+ * whose State never changes after an accept. SO_UPDATE_ACCEPT_CONTEXT and
+ * SO_UPDATE_CONNECT_CONTEXT read the State to learn that AcceptEx or ConnectEx connected
+ * the socket, so a guest that asks with its own, smaller, structure size gets AFD's
+ * structure converted to the guest layout: the same fields, hWnd narrowed to 32 bits.
+ */
+#define WOW64_SOCK_SHARED_INFO_SIZE 140
+#define WOW64_SOCK_SHARED_HEAD      (FIELD_OFFSET(SOCK_SHARED_INFO, SocketLastError) + sizeof(INT))
+#define WOW64_SOCK_SHARED_TAIL      (FIELD_OFFSET(SOCK_SHARED_INFO, WSRemoteAddress) + sizeof(SOCKADDR) - \
+                                     FIELD_OFFSET(SOCK_SHARED_INFO, Unknown))
+C_ASSERT(WOW64_SOCK_SHARED_HEAD == 84);
+C_ASSERT(WOW64_SOCK_SHARED_TAIL == 52);
+C_ASSERT(WOW64_SOCK_SHARED_HEAD + sizeof(ULONG) + WOW64_SOCK_SHARED_TAIL == WOW64_SOCK_SHARED_INFO_SIZE);
+
+static NTSTATUS AfdGetContext32(const ULONG *a)
+{
+    SOCK_SHARED_INFO Native;
+    IO_STATUS_BLOCK Io = {{0}};
+    UCHAR *Guest = PTR32(a[8]);
+    NTSTATUS Status;
+
+    ProbeOutput(a[8], WOW64_SOCK_SHARED_INFO_SIZE);
+    ProbeOutput(a[4], sizeof(WOW64_IOSB));
+    RtlZeroMemory(&Native, sizeof(Native));
+    /* AFD completes this request inline; the guest's event is still signalled by the kernel. */
+    Status = NtDeviceIoControlFile(HANDLE32(a[0]), HANDLE32(a[1]), NULL, NULL, &Io, IOCTL_AFD_GET_CONTEXT,
+                                   NULL, 0, &Native, sizeof(Native));
+    if (Status == STATUS_PENDING)
+    {
+        NtWaitForSingleObject(HANDLE32(a[0]), FALSE, NULL);
+        Status = Io.Status;
+    }
+    if (NT_SUCCESS(Status))
+    {
+        ULONG Hwnd = PtrToUlong(Native.hWnd);
+        RtlCopyMemory(Guest, &Native, WOW64_SOCK_SHARED_HEAD);
+        RtlCopyMemory(Guest + WOW64_SOCK_SHARED_HEAD, &Hwnd, sizeof(Hwnd));
+        RtlCopyMemory(Guest + WOW64_SOCK_SHARED_HEAD + sizeof(Hwnd), &Native.Unknown, WOW64_SOCK_SHARED_TAIL);
+        Io.Information = WOW64_SOCK_SHARED_INFO_SIZE;
+    }
+    StoreIo(a[4], &Io);
+    return Status;
+}
+
 /* The handle refers to the calling process */
 static BOOLEAN IsCurrentProcess(HANDLE Process)
 {
@@ -1474,6 +1521,9 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         case IOCTL_AFD_SET_CONTEXT:
         case IOCTL_AFD_GET_CONTEXT_SIZE:
         case IOCTL_AFD_GET_CONTEXT: /* opaque socket-context blob; output only, symmetric of SET_CONTEXT. */
+            /* The guest's own SOCK_SHARED_INFO size gets AFD's current structure, converted. */
+            if (a[9] == WOW64_SOCK_SHARED_INFO_SIZE && !a[2] && !a[3] && a[8])
+                return AfdGetContext32(a);
         case IOCTL_AFD_GET_TDI_HANDLES: /* AFD captures the 32-bit output handles. */
         case IOCTL_AFD_EVENT_SELECT: /* AFD captures event handles and the in/out record. */
         case IOCTL_AFD_ENUM_NETWORK_EVENTS:
