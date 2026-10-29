@@ -77,8 +77,12 @@ BaseThreadStartup(
         /* Get the Exit code from the SEH Handler */
         if (!BaseRunningInServerProcess)
         {
-            /* Kill the whole process, usually */
-            ExitProcess(_SEH2_GetExceptionCode());
+            /*
+             * Kill the whole process, usually. Like Windows, end it at once:
+             * a crashed process does not run DLL_PROCESS_DETACH or atexit
+             * handlers, which may wait for threads that are already gone.
+             */
+            NtTerminateProcess(NtCurrentProcess(), _SEH2_GetExceptionCode());
         }
         else
         {

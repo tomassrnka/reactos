@@ -148,6 +148,7 @@ extern void func_TunnelCache(void);
 extern void func_VolumeMountPoint(void);
 extern void func_TzSetPrivilege(void);
 extern void func_UEFIFirmware(void);
+extern void func_UnhandledExceptionExit(void);
 extern void func_UnmapViewOfFileEx(void);
 extern void func_WaitOnAddress(void);
 extern void func_WerFlags(void);
@@ -312,6 +313,7 @@ const struct test winetest_testlist[] =
     { "VolumeMountPoint",            func_VolumeMountPoint },
     { "TzSetPrivilege",              func_TzSetPrivilege },
     { "UEFIFirmware",                func_UEFIFirmware },
+    { "UnhandledExceptionExit",      func_UnhandledExceptionExit },
     { "UnmapViewOfFileEx",           func_UnmapViewOfFileEx },
     { "WaitOnAddress",               func_WaitOnAddress },
     { "WerFlags",                    func_WerFlags },

@@ -33,6 +33,8 @@
 #define IDC_CRASH_CLOSE             207
 
 #define DEBUGGER_EXIT_CODE 0xDEB0DEB0
+/* The child could not load uhexit_dll.dll: no dialog, and the wrong exit code */
+#define NO_DLL_EXIT_CODE   0x0BADD11
 
 static BOOL IsReactOS;
 static REGSAM RegistryView;
@@ -77,6 +79,9 @@ static VOID FakeDebugger(PCSTR ProcessId, PCSTR Event)
 
 static VOID RunChild(PCSTR Mode)
 {
+    /* Its DLL_PROCESS_DETACH leaves a marker: a crashed process must not run it */
+    if (!LoadLibraryW(L"uhexit_dll.dll"))
+        ExitProcess(NO_DLL_EXIT_CODE);
     /* The test framework turns off the fault error box */
     SetErrorMode(0);
     if (!strcmp(Mode, "nogp"))
@@ -373,6 +378,19 @@ static BOOL FileExists(PCWSTR Path)
     return GetFileAttributesW(Path) != INVALID_FILE_ATTRIBUTES;
 }
 
+/* Written by uhexit_dll.dll when the child runs DLL detach */
+static BOOL DetachRan(DWORD ProcessId)
+{
+    WCHAR Path[MAX_PATH], Temp[MAX_PATH];
+    BOOL Ran;
+
+    GetTempPathW(_countof(Temp), Temp);
+    StringCchPrintfW(Path, _countof(Path), L"%suhexit.%lu.txt", Temp, ProcessId);
+    Ran = FileExists(Path);
+    DeleteFileW(Path);
+    return Ran;
+}
+
 static VOID DumpPath(PWSTR Path, DWORD ProcessId)
 {
     StringCchPrintfW(Path, MAX_PATH, L"%s\\kernel32_apitest.exe.%lu.dmp", DumpFolder, ProcessId);
@@ -517,6 +535,7 @@ static VOID TestDialog_(PCSTR Mode, BOOL Debug, ANSWER Answer, DWORD ExpectedCod
     ok_(__FILE__, Line)(Code == ExpectedCode, "%s: exit code 0x%lx, expected 0x%lx\n", Mode, Code, ExpectedCode);
     ok_(__FILE__, Line)(FileExists(MarkerPath) == (ExpectedCode == DEBUGGER_EXIT_CODE),
                         "%s: debugger %s\n", Mode, FileExists(MarkerPath) ? "started" : "not started");
+    ok_(__FILE__, Line)(!DetachRan(ProcessId), "%s: the crashed program ran DLL detach\n", Mode);
 
     /* The dialog goes away with its answer, or with the program */
     if (IsReactOS)
@@ -559,6 +578,7 @@ static VOID TestNoDialog_(PCSTR Mode, DWORD ExpectedCode, BOOL Reported, int Lin
     ok_(__FILE__, Line)(Code == ExpectedCode, "%s: exit code 0x%lx, expected 0x%lx\n", Mode, Code, ExpectedCode);
     ok_(__FILE__, Line)(FileExists(MarkerPath) == (ExpectedCode == DEBUGGER_EXIT_CODE),
                         "%s: debugger %s\n", Mode, FileExists(MarkerPath) ? "started" : "not started");
+    ok_(__FILE__, Line)(!DetachRan(ProcessId), "%s: the crashed program ran DLL detach\n", Mode);
     DumpPath(Path, ProcessId);
     ok_(__FILE__, Line)(FileExists(Path) == Reported, "%s: dump %s\n", Mode, FileExists(Path) ? "written" : "missing");
 
@@ -592,6 +612,10 @@ START_TEST(CrashDialog)
         RunChild(Argv[2]);
         return;
     }
+
+    /* Without the DLL the checks for DLL detach would pass for nothing */
+    ok(SearchPathW(NULL, L"uhexit_dll.dll", NULL, _countof(DumpFolder), DumpFolder, NULL) != 0,
+       "uhexit_dll.dll not found: %lu\n", GetLastError());
 
     if (!GetUserObjectInformationW(GetProcessWindowStation(), UOI_FLAGS, &Flags, sizeof(Flags), NULL) ||
         !(Flags.dwFlags & WSF_VISIBLE))

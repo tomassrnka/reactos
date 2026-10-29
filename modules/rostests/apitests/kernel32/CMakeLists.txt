@@ -147,6 +147,7 @@ list(APPEND SOURCE
     VolumeMountPoint.c
     TzSetPrivilege.c
     UEFIFirmware.c
+    UnhandledExceptionExit.c
     UnmapViewOfFileEx.c
     WaitOnAddress.c
     WerFlags.c
@@ -174,7 +175,7 @@ target_link_libraries(kernel32_apitest wine ${PSEH_LIB})
 set_module_type(kernel32_apitest win32cui)
 add_delay_importlibs(kernel32_apitest advapi32 shlwapi user32 gdi32)
 add_importlibs(kernel32_apitest netapi32 msvcrt kernel32 ntdll)
-add_dependencies(kernel32_apitest FormatMessage)
+add_dependencies(kernel32_apitest FormatMessage uhexit_dll)
 set_source_files_properties(CopyFile2Identity.c PROPERTIES INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/copy2_embedded")
 add_pch(kernel32_apitest precomp.h "${PCH_SKIP_SOURCE}")
 add_rostests_file(TARGET kernel32_apitest)
@@ -227,3 +228,9 @@ add_library(wow64_thread MODULE wow64_thread.c ${CMAKE_CURRENT_BINARY_DIR}/wow64
 set_module_type(wow64_thread win32dll ENTRYPOINT DllMain 12)
 add_importlibs(wow64_thread kernel32)
 add_rostests_file(TARGET wow64_thread)
+
+spec2def(uhexit_dll.dll uhexit_dll.spec)
+add_library(uhexit_dll MODULE uhexit_dll.c ${CMAKE_CURRENT_BINARY_DIR}/uhexit_dll.def)
+set_module_type(uhexit_dll win32dll ENTRYPOINT DllMain 12)
+add_importlibs(uhexit_dll kernel32)
+add_rostests_file(TARGET uhexit_dll)
