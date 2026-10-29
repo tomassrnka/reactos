@@ -805,6 +805,16 @@ static BOOL PendingRebootActive(HKEY state)
 
 #define SW_RUN_TIMEOUT_MS (60u * 60u * 1000u)   /* download + install of a big app */
 
+/* An installer or uninstaller may have changed the registry environment (the PowerShell 7 MSI adds its
+ * folder to the system PATH). Windows installers broadcast this; explorer re-reads the environment on it,
+ * so a command prompt opened afterwards sees the change without a logoff. Bounded: a hung window is skipped. */
+static void NotifyEnvironmentChanged(void)
+{
+    DWORD_PTR res;
+    SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, (LPARAM)L"Environment",
+                        SMTO_ABORTIFHUNG | SMTO_NORMAL, 3000, &res);
+}
+
 /* Run a command line, wait, return its exit code in *code. A run that exceeds the
  * timeout is terminated (exact process handle) and reported as ERROR_TIMEOUT. */
 static HRESULT RunAndWait(LPCWSTR cmdline, DWORD timeoutMs, DWORD *code, FILE *log)
@@ -925,6 +935,7 @@ static HRESULT SoftwareInstall(const FM_FEATURE *f, HKEY state, FILE *log)
     }
     SetStateSz(state, L"Provider", f->Provider);
     SetStateSz(state, L"Uninstall", uninst);
+    NotifyEnvironmentChanged();
     return S_OK;
 }
 
@@ -945,6 +956,7 @@ static HRESULT SoftwareUninstall(HKEY state, FILE *log)
     cmd[ARRAYSIZE(cmd) - 1] = L'\0';
     hr = RunAndWait(cmd, SW_RUN_TIMEOUT_MS, &code, log);
     if (FAILED(hr)) return hr;
+    NotifyEnvironmentChanged();
     if (code != 0)
     {
         LOGF(log, L"error: uninstaller failed (exit code %lu)\n", code);

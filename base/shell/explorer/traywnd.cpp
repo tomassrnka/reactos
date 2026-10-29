@@ -306,6 +306,70 @@ public:
     END_MSG_MAP()
 };
 
+/* Rebuild this process' environment from the registry: system variables, then the user's; PATH is the
+ * system PATH followed by the user PATH (as the logon-time environment is built). Only variables present
+ * in the registry are touched. */
+static void RefreshEnvironmentFromRegistry()
+{
+    static const struct { HKEY Root; LPCWSTR SubKey; } Sources[] =
+    {
+        { HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment" },
+        { HKEY_CURRENT_USER, L"Environment" },
+    };
+    CStringW systemPath;
+
+    for (UINT i = 0; i < _countof(Sources); i++)
+    {
+        HKEY hKey;
+        if (RegOpenKeyExW(Sources[i].Root, Sources[i].SubKey, 0, KEY_READ, &hKey) != ERROR_SUCCESS)
+            continue;
+
+        for (DWORD idx = 0; ; idx++)
+        {
+            WCHAR name[256];
+            DWORD cchName = _countof(name), type = 0, cb = 0;
+            LONG err = RegEnumValueW(hKey, idx, name, &cchName, NULL, &type, NULL, &cb);
+            if (err == ERROR_NO_MORE_ITEMS)
+                break;
+            if (err != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ) || !name[0])
+                continue;
+
+            CStringW raw;
+            DWORD cbRaw = cb + 2 * sizeof(WCHAR);
+            PWSTR buf = raw.GetBuffer(cbRaw / sizeof(WCHAR));
+            ZeroMemory(buf, cbRaw);
+            err = RegQueryValueExW(hKey, name, NULL, &type, (LPBYTE)buf, &cb);
+            raw.ReleaseBuffer();
+            if (err != ERROR_SUCCESS)
+                continue;
+
+            CStringW value = raw;
+            if (type == REG_EXPAND_SZ)
+            {
+                DWORD cch = ExpandEnvironmentStringsW(raw, NULL, 0);
+                if (cch)
+                {
+                    PWSTR out = value.GetBuffer(cch);
+                    DWORD got = ExpandEnvironmentStringsW(raw, out, cch);
+                    value.ReleaseBuffer(got ? got - 1 : 0);
+                }
+            }
+
+            if (!lstrcmpiW(name, L"Path"))
+            {
+                if (i == 0)
+                    systemPath = value;
+                else if (!value.IsEmpty())
+                    value = systemPath + (systemPath.IsEmpty() || systemPath.Right(1) == L";" ? L"" : L";") + value;
+                else
+                    value = systemPath;
+            }
+            SetEnvironmentVariableW(name, value);
+        }
+        RegCloseKey(hKey);
+    }
+}
+
 class CTrayWindow :
     public CComCoClass<CTrayWindow>,
     public CComObjectRootEx<CComMultiThreadModelNoCS>,
@@ -2550,6 +2614,12 @@ ChangePos:
 
     LRESULT OnSettingChanged(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
     {
+        // Installers broadcast WM_SETTINGCHANGE "Environment" after changing the registry environment
+        // (e.g. a new PATH entry). Like Windows' explorer, re-read it so programs started from the
+        // shell afterwards see it without a logoff.
+        if (lParam && lstrcmpiW((LPCWSTR)lParam, L"Environment") == 0)
+            RefreshEnvironmentFromRegistry();
+
         if (wParam == SPI_SETNONCLIENTMETRICS)
         {
             SendMessage(m_TrayNotify, uMsg, wParam, lParam);

@@ -1,0 +1,34 @@
+; RAPPS-format entry for PowerShell 7 (FEATMGMT software tier, [Rapps] Entry=).
+; Not in the online RAPPS database, so featmgr stages this file into the RAPPS appdb right before it
+; runs "rapps /install /S powershell-7". Nothing from Microsoft is bundled: rapps downloads the official
+; MSI from the PowerShell GitHub release at install time, checks its SHA-256 (and SHA1), and runs
+; "msiexec /i <msi> /qn <MsiProperties>".
+;
+; MsiProperties (all public properties of the official MSI):
+;   PWRSHPLUGIN_VERSION=1  waive the launch condition "WMF 4+ (System32\pwrshplugin.dll) required";
+;                          that file is the WinRM remoting plugin, which nitro has no use for
+;   ADD_PATH=1             add the install folder to the system PATH
+;   ENABLE_PSREMOTING=0    do not enable PowerShell remoting (nitro has no WinRM)
+;   REGISTER_MANIFEST=0    do not register the ETW/event manifest (wevtutil)
+;   USE_MU=0 ENABLE_MU=0   no Microsoft Update opt-in
+;   ADD_EXPLORER_CONTEXT_MENU_OPENPOWERSHELL=0 ADD_FILE_CONTEXT_MENU_RUNPOWERSHELL=0  no shell verbs
+; The Start-menu shortcut "PowerShell 7 (x64)" is unconditional in the MSI.
+; To move to a newer 7.4.x LTS update Version, URLDownload, SHA256, SHA1 and SizeBytes here and the same
+; fields in Catalog\powershell-7.ini (Version, Artifact URL, ArtifactSHA256, SizeBytes). Keep them identical.
+[Section]
+Name = PowerShell 7 (LTS)
+Version = 7.4.22
+License = MIT
+LicenseType = 2
+Description = Microsoft's PowerShell 7.4 LTS (pwsh). The official x64 MSI is downloaded from the PowerShell GitHub release at install time.
+Category = 7
+URLSite = https://github.com/PowerShell/PowerShell
+Publisher = Microsoft Corporation
+Scope = Machine
+MsiProperties = PWRSHPLUGIN_VERSION=1 ADD_PATH=1 ENABLE_PSREMOTING=0 REGISTER_MANIFEST=0 USE_MU=0 ENABLE_MU=0 ADD_EXPLORER_CONTEXT_MENU_OPENPOWERSHELL=0 ADD_FILE_CONTEXT_MENU_RUNPOWERSHELL=0
+
+[Section.amd64]
+URLDownload = https://github.com/PowerShell/PowerShell/releases/download/v7.4.22/PowerShell-7.4.22-win-x64.msi
+SHA256 = 78e819df51a672fba8362258a19db0e681452dcee6fee63c60bcb5aa45d1b859
+SHA1 = 0016c5c73e03302600ff7532e76b5e269967e5ed
+SizeBytes = 110120960

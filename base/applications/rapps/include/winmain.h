@@ -15,3 +15,4 @@ extern BOOL g_bSilentMode;
 
 // integrity.cpp
 BOOL VerifyInteg(LPCWSTR lpSHA1Hash, LPCWSTR lpFileName);
+BOOL VerifyInteg256(LPCWSTR lpSHA256Hash, LPCWSTR lpFileName);
