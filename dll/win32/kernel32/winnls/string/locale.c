@@ -3723,6 +3723,184 @@ static int lcmap_string(DWORD flags, const WCHAR *src, int srclen, WCHAR *dst, i
 }
 #endif // __REACTOS__
 
+#ifndef LOCALE_ALLOW_NEUTRAL_NAMES
+#define LOCALE_ALLOW_NEUTRAL_NAMES 0x08000000
+#endif
+#ifndef NORM_LINGUISTIC_CASING
+#define NORM_LINGUISTIC_CASING 0x08000000
+#endif
+#ifndef LINGUISTIC_IGNORECASE
+#define LINGUISTIC_IGNORECASE 0x00000010
+#endif
+#ifndef LINGUISTIC_IGNOREDIACRITIC
+#define LINGUISTIC_IGNOREDIACRITIC 0x00000020
+#endif
+#ifndef SORT_DIGITSASNUMBERS
+#define SORT_DIGITSASNUMBERS 0x00000008
+#endif
+#ifndef LCMAP_HASH
+#define LCMAP_HASH 0x00040000
+#endif
+#ifndef LCMAP_SORTHANDLE
+#define LCMAP_SORTHANDLE 0x20000000
+#endif
+
+/*
+ * LCMAP_HASH: a 32-bit hash of the string such that strings which compare equal under the NORM_* / LINGUISTIC_*
+ * flags hash equal. .NET without ICU hashes every culture-aware string through it. The hash is not the one of
+ * Windows (those are process-local); only the equivalence is: the string is folded the way the flags say (symbols
+ * and nonspacing marks dropped, width and kana type folded, case folded with the Turkic i rules when
+ * NORM_LINGUISTIC_CASING is given for tr/az), and the folded characters are hashed.
+ */
+extern const unsigned int collation_table[];
+LCID WINAPI LocaleNameToLCID(LPCWSTR name, DWORD flags);
+
+#define LCMAP_HASH_FLAGS (NORM_IGNORECASE | NORM_IGNORENONSPACE | NORM_IGNORESYMBOLS | SORT_STRINGSORT | \
+                          NORM_IGNOREKANATYPE | NORM_IGNOREWIDTH | LINGUISTIC_IGNORECASE | \
+                          LINGUISTIC_IGNOREDIACRITIC | NORM_LINGUISTIC_CASING | SORT_DIGITSASNUMBERS | \
+                          0x10000000 /* undocumented, accepted by Windows */)
+
+static BOOL hash_ignorable(DWORD flags, WCHAR ch)
+{
+    WORD c3;
+
+    if (ch == 0x00ad) return TRUE; /* soft hyphen has no weight */
+    if (flags & NORM_IGNORESYMBOLS)
+    {
+        if (get_char_typeW(ch) & (C1_PUNCT | C1_SPACE | C1_CNTRL)) return TRUE;
+        if (GetStringTypeW(CT_CTYPE3, &ch, 1, &c3) && (c3 & C3_SYMBOL)) return TRUE;
+    }
+    if (flags & (NORM_IGNORENONSPACE | LINGUISTIC_IGNOREDIACRITIC))
+    {
+        /* combining marks; the character type table does not mark all of them */
+        if ((ch >= 0x0300 && ch <= 0x036f) || (ch >= 0x1ab0 && ch <= 0x1aff) || (ch >= 0x1dc0 && ch <= 0x1dff) ||
+            (ch >= 0x20d0 && ch <= 0x20ff) || (ch >= 0xfe20 && ch <= 0xfe2f))
+            return TRUE;
+        if (GetStringTypeW(CT_CTYPE3, &ch, 1, &c3) && (c3 & C3_NONSPACING)) return TRUE;
+    }
+    return FALSE;
+}
+
+static INT lcmap_hash(const WCHAR *locale, DWORD flags, const WCHAR *src, int srclen, void *dst, int dstlen)
+{
+    WCHAR stack_buf[128], *buf = stack_buf;
+    BOOL turkic = FALSE, fold_case, ignore_diacritics;
+    UINT32 hash = 2166136261u, key;
+    int len, i;
+
+    /* the destination is exactly the 4-byte hash; parameters are checked before the locale and the flags */
+    if (!dst || dstlen != sizeof(hash) || (const void *)src == dst)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if (flags & LCMAP_SORTHANDLE)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if (locale && locale[0])
+    {
+        LCID lcid = LocaleNameToLCID(locale, LOCALE_ALLOW_NEUTRAL_NAMES);
+
+        if (!lcid)
+        {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        turkic = PRIMARYLANGID(LANGIDFROMLCID(lcid)) == LANG_TURKISH ||
+                 PRIMARYLANGID(LANGIDFROMLCID(lcid)) == LANG_AZERI;
+    }
+    flags &= ~(LCMAP_HASH | LOCALE_USE_CP_ACP);
+    if (flags & ~LCMAP_HASH_FLAGS)
+    {
+        SetLastError(ERROR_INVALID_FLAGS);
+        return 0;
+    }
+
+    len = srclen < 0 ? lstrlenW(src) : srclen;
+    if (len > ARRAY_SIZE(stack_buf))
+    {
+        buf = HeapAlloc(GetProcessHeap(), 0, len * sizeof(WCHAR));
+        if (!buf)
+        {
+            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return 0;
+        }
+    }
+
+    /* drop what the flags ignore (before width folding: it turns ASCII punctuation into fullwidth forms) */
+    for (i = 0, srclen = 0; i < len; i++)
+    {
+        WCHAR ch = src[i];
+
+        if (hash_ignorable(flags, ch)) continue;
+        switch (ch) /* singletons that are canonically equivalent to a letter */
+        {
+        case 0x2126: ch = 0x03a9; break; /* ohm sign */
+        case 0x212a: ch = 'K'; break;    /* kelvin sign */
+        case 0x212b: ch = 0x00c5; break; /* angstrom sign */
+        }
+        if (flags & NORM_IGNOREWIDTH) /* Latin-1 signs with a fullwidth form (the width mapping covers ASCII) */
+        {
+            switch (ch)
+            {
+            case 0x00a2: ch = 0xffe0; break;
+            case 0x00a3: ch = 0xffe1; break;
+            case 0x00ac: ch = 0xffe2; break;
+            case 0x00af: ch = 0xffe3; break;
+            case 0x00a6: ch = 0xffe4; break;
+            case 0x00a5: ch = 0xffe5; break;
+            }
+        }
+        buf[srclen++] = ch;
+    }
+    len = srclen;
+    if (flags & NORM_IGNOREWIDTH) len = map_to_fullwidth(buf, len, buf, len);
+    if (flags & NORM_IGNOREKANATYPE) map_to_katakana(buf, len, buf, len);
+
+    fold_case = (flags & (NORM_IGNORECASE | LINGUISTIC_IGNORECASE)) != 0;
+    turkic = turkic && (flags & NORM_LINGUISTIC_CASING);
+    if (fold_case)
+    {
+        for (i = 0; i < len; i++)
+        {
+            if (turkic && buf[i] == 'i') buf[i] = 0x0130;
+            else if (turkic && buf[i] == 0x0131) buf[i] = 'I';
+            else if (buf[i] != 0x0131) buf[i] = toupperW(buf[i]); /* dotless i is no simple case pair of I */
+        }
+    }
+
+    while (len && !buf[len - 1]) len--; /* trailing NULs do not count */
+
+    ignore_diacritics = (flags & (NORM_IGNORENONSPACE | LINGUISTIC_IGNOREDIACRITIC)) != 0;
+    for (i = 0; i < len; i++)
+    {
+        key = buf[i];
+        if (ignore_diacritics)
+        {
+            /* the collation table gives accented letters the weight of their base letter; keep the case */
+            unsigned int ce = collation_table[collation_table[key >> 8] + (key & 0xff)];
+
+            if (ce != (unsigned int)-1 && (ce >> 16))
+                key = 0x80000000u | (ce >> 16) | (tolowerW(buf[i]) != buf[i] ? 0x10000u : 0);
+        }
+        hash = (hash ^ (key & 0xffff)) * 16777619u;
+        hash = (hash ^ (key >> 16)) * 16777619u;
+    }
+    if (buf != stack_buf) HeapFree(GetProcessHeap(), 0, buf);
+
+    hash ^= hash >> 15;
+    hash *= 0x2c1b3c6du;
+    hash ^= hash >> 12;
+    hash *= 0x297a2d39u;
+    hash ^= hash >> 15;
+    if (!hash) hash = 0x9e3779b9u; /* 0 is the failure result */
+
+    RtlCopyMemory(dst, &hash, sizeof(hash));
+    return (INT)hash;
+}
+
 /*************************************************************************
  *           LCMapStringEx   (KERNEL32.@)
  *
@@ -3760,6 +3938,8 @@ INT WINAPI LCMapStringEx(LPCWSTR locale, DWORD flags, LPCWSTR src, INT srclen, L
         return 0;
     }
 
+    if (flags & LCMAP_HASH) return lcmap_hash(locale, flags, src, srclen, dst, dstlen);
+
     if (srclen < 0) srclen = lstrlenW(src) + 1;
 
     TRACE( "(%s,0x%08lx,%s,%d,%p,%d)\n",
@@ -3785,8 +3965,8 @@ INT WINAPI LCMapStringEx(LPCWSTR locale, DWORD flags, LPCWSTR src, INT srclen, L
         ret = wine_get_sortkey(flags, src, srclen, (char *)dst, dstlen);
         if (ret == 0)
             SetLastError(ERROR_INSUFFICIENT_BUFFER);
-        else
-            ret++;
+        else if (dstlen)
+            ret++; /* the size query already counts the terminating NUL that the key written does not */
         return ret;
     }
 
