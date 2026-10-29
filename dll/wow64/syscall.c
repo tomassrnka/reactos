@@ -187,6 +187,21 @@ C_ASSERT(sizeof(WOW64_THREAD_TLS_INFORMATION) == 16);
 C_ASSERT(FIELD_OFFSET(PROCESS_TLS_INFORMATION, ThreadData) == 16);
 
 static VOID ProbeOutput(ULONG Address, ULONG Size);
+static VOID ProbeInput(ULONG Address, ULONG Size);
+
+/* Read one byte per page, plus the last byte, so that a bad guest range faults here under
+ * the dispatcher SEH instead of in the kernel after the request was queued */
+static VOID ProbeInput(ULONG Address, ULONG Size)
+{
+    volatile const UCHAR *Bytes = PTR32(Address);
+    ULONG i;
+    UCHAR Sink = 0;
+    if (!Size) return;
+    for (i = 0; i < Size; i += PAGE_SIZE)
+        Sink |= Bytes[i];
+    Sink |= Bytes[Size - 1];
+    (void)Sink;
+}
 
 /* Size bytes at a guest address lie below the guest's highest address */
 static BOOLEAN GuestRange32(ULONG Address, ULONG64 Size)
@@ -1573,6 +1588,27 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             SuperAccept.RemoteAddressLength = From[4];
             Input = &SuperAccept;
             InputLength = sizeof(SuperAccept);
+            break;
+        }
+        case IOCTL_AFD_SUPER_CONNECT:
+        {
+            /* ConnectEx. The request is a SanActive byte followed by an inline TDI
+             * TRANSPORT_ADDRESS: counts, lengths and address bytes, no pointer and no
+             * handle, so the 32-bit and native layouts are identical and the request
+             * passes through (AFD validates the address against the input length).
+             * The initial send data is the METHOD_NEITHER output buffer, which AFD
+             * probes and copies while it still owns the IRP; the guest OVERLAPPED is
+             * the IOSB. Fail a bad input, send buffer or IOSB here, in the guest. */
+            if (InputLength < FIELD_OFFSET(AFD_SUPER_CONNECT_INFO, RemoteAddress) + sizeof(ULONG) +
+                              2 * sizeof(USHORT))
+                return STATUS_INVALID_PARAMETER;
+            if (!GuestSpan(a[6], InputLength)) return STATUS_ACCESS_VIOLATION;
+            ProbeInput(a[6], InputLength);
+            if (a[9])
+            {
+                if (!P(8) || !GuestSpan(a[8], a[9])) return STATUS_ACCESS_VIOLATION;
+                ProbeInput(a[8], a[9]);
+            }
             break;
         }
         case IOCTL_AFD_SEND_DATAGRAM:
