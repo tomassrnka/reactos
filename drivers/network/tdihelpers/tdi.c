@@ -1218,12 +1218,6 @@ NTSTATUS TdiSendDatagram(
         return STATUS_INVALID_PARAMETER;
     }
 
-    if (BufferLength == 0)
-    {
-        DPRINT("Succeeding send with length 0.\n");
-        return STATUS_SUCCESS;
-    }
-
     *Irp = TdiBuildInternalDeviceControlIrp(TDI_SEND_DATAGRAM,
                                             DeviceObject,
                                             TransportObject,
@@ -1235,32 +1229,37 @@ NTSTATUS TdiSendDatagram(
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    DPRINT("Allocating irp for %p:%u\n", Buffer,BufferLength);
+    /* A zero-length datagram is still a datagram: it goes out with no MDL */
+    Mdl = NULL;
+    if (BufferLength != 0)
+    {
+        DPRINT("Allocating irp for %p:%u\n", Buffer,BufferLength);
 
-    Mdl = IoAllocateMdl(Buffer,         /* Virtual address */
-                        BufferLength,   /* Length of buffer */
-                        FALSE,          /* Not secondary */
-                        FALSE,          /* Don't charge quota */
-                        NULL);          /* Don't use IRP */
+        Mdl = IoAllocateMdl(Buffer,         /* Virtual address */
+                            BufferLength,   /* Length of buffer */
+                            FALSE,          /* Not secondary */
+                            FALSE,          /* Don't charge quota */
+                            NULL);          /* Don't use IRP */
 
-    if (!Mdl) {
-        DPRINT("Insufficient resources.\n");
-        IoCompleteRequest(*Irp, IO_NO_INCREMENT);
-        *Irp = NULL;
-        return STATUS_INSUFFICIENT_RESOURCES;
+        if (!Mdl) {
+            DPRINT("Insufficient resources.\n");
+            IoCompleteRequest(*Irp, IO_NO_INCREMENT);
+            *Irp = NULL;
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        _SEH2_TRY {
+            MmProbeAndLockPages(Mdl, (*Irp)->RequestorMode, IoReadAccess);
+        } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
+            DPRINT("MmProbeAndLockPages() failed.\n");
+            IoFreeMdl(Mdl);
+            IoCompleteRequest(*Irp, IO_NO_INCREMENT);
+            *Irp = NULL;
+            _SEH2_YIELD(return STATUS_INSUFFICIENT_RESOURCES);
+        } _SEH2_END;
+
+        DPRINT("AFD>>> Got an MDL: %p\n", Mdl);
     }
-
-    _SEH2_TRY {
-        MmProbeAndLockPages(Mdl, (*Irp)->RequestorMode, IoReadAccess);
-    } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
-        DPRINT("MmProbeAndLockPages() failed.\n");
-        IoFreeMdl(Mdl);
-        IoCompleteRequest(*Irp, IO_NO_INCREMENT);
-        *Irp = NULL;
-        _SEH2_YIELD(return STATUS_INSUFFICIENT_RESOURCES);
-    } _SEH2_END;
-
-    DPRINT("AFD>>> Got an MDL: %p\n", Mdl);
 
     TdiBuildSendDatagram(*Irp,
                          DeviceObject,

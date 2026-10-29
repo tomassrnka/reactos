@@ -37,7 +37,9 @@ list(APPEND SOURCE
     socketscale.c
     udpbindretry.c
     udpcancel.c
+    udpconnectname.c
     udprecv.c
+    udpzerolen.c
     timewait.c
     WSAAsync.c
     WSAIoctl.c
