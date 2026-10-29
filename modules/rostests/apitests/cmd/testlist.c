@@ -7,6 +7,7 @@ extern void func_echo(void);
 extern void func_echoenc(void);
 extern void func_exit(void);
 extern void func_fc(void);
+extern void func_mklink(void);
 extern void func_pipe(void);
 extern void func_ftype(void);
 extern void func_pushd(void);
@@ -21,6 +22,7 @@ const struct test winetest_testlist[] =
     { "echoenc", func_echoenc },
     { "exit", func_exit },
     { "fc", func_fc },
+    { "mklink", func_mklink },
     { "pipe", func_pipe },
     { "ftype", func_ftype },
     { "pushd", func_pushd },

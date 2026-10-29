@@ -166,11 +166,13 @@ cmd_mklink(LPTSTR param)
             Name[NumFiles++] = arg[i];
         }
     }
-    freep(arg);
 
+    /* Name[] points into the buffer owned by arg: it must stay alive
+     * until the link has been created and reported, so free it on exit. */
     if (NumFiles != 2)
     {
         error_req_param_missing();
+        freep(arg);
         return 1;
     }
 
@@ -189,6 +191,7 @@ cmd_mklink(LPTSTR param)
         if (CreateSymbolicLink && CreateSymbolicLink(Name[0], Name[1], Flags))
         {
             ConOutResPrintf(STRING_MKLINK_CREATED_SYMBOLIC, Name[0], Name[1]);
+            freep(arg);
             return 0;
         }
     }
@@ -205,6 +208,7 @@ cmd_mklink(LPTSTR param)
         if (CreateHardLink && CreateHardLink(Name[0], Name[1], NULL))
         {
             ConOutResPrintf(STRING_MKLINK_CREATED_HARD, Name[0], Name[1]);
+            freep(arg);
             return 0;
         }
     }
@@ -213,11 +217,13 @@ cmd_mklink(LPTSTR param)
         if (CreateJunction(Name[0], Name[1]))
         {
             ConOutResPrintf(STRING_MKLINK_CREATED_JUNCTION, Name[0], Name[1]);
+            freep(arg);
             return 0;
         }
     }
 
     ErrorMessage(GetLastError(), _T("MKLINK"));
+    freep(arg);
     return 1;
 }
 
