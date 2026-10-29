@@ -523,6 +523,37 @@ NTSTATUS LostSocket( PIRP Irp ) {
     return Status;
 }
 
+/* Copy Length bytes of Data to the output of a METHOD_NEITHER request.
+ * Irp->UserBuffer is the caller's raw pointer: the I/O manager never checks it.
+ * Probe the whole declared output for a write (user-mode requests), as
+ * AfdGetContext does, and copy under SEH, so a kernel address or an unmapped or
+ * read-only page fails the request with the exception code instead of
+ * becoming a kernel-mode write. */
+NTSTATUS AfdCopyToUserOutput(PIRP Irp, PIO_STACK_LOCATION IrpSp,
+                             const VOID *Data, ULONG Length)
+{
+    ULONG OutputLength = IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    ASSERT(Length <= OutputLength);
+
+    _SEH2_TRY
+    {
+        if (Irp->RequestorMode != KernelMode && OutputLength != 0)
+            ProbeForWrite(Irp->UserBuffer, OutputLength, sizeof(UCHAR));
+        if (Length != 0)
+            RtlCopyMemory(Irp->UserBuffer, Data, Length);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        AFD_DbgPrint(MIN_TRACE,("Exception writing the output buffer\n"));
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    return Status;
+}
+
 NTSTATUS QueueUserModeIrp(PAFD_FCB FCB, PIRP Irp, UINT Function)
 {
     NTSTATUS Status;

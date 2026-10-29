@@ -14,6 +14,9 @@ extern void func_dgramlate(void);
 extern void func_tcpnonadmin(void);
 extern void func_tcpsetinfoex(void);
 extern void func_tcpaccept(void);
+extern void func_outputprobe(void);
+extern void func_connectoptions(void);
+extern void func_acceptstate(void);
 
 const struct test winetest_testlist[] =
 {
@@ -30,5 +33,8 @@ const struct test winetest_testlist[] =
     { "tcpnonadmin", func_tcpnonadmin },
     { "tcpsetinfoex", func_tcpsetinfoex },
     { "tcpaccept", func_tcpaccept },
+    { "outputprobe", func_outputprobe },
+    { "connectoptions", func_connectoptions },
+    { "acceptstate", func_acceptstate },
     { 0, 0 }
 };
