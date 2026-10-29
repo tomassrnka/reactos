@@ -250,17 +250,19 @@ VOID UnlockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp )
     Irp->MdlAddress = NULL;
 }
 
-/* Note: We add an extra buffer if LockAddress is true.  This allows us to
- * treat the address buffer as an ordinary client buffer.  It's only used
- * for datagrams. */
+/* Note: We add EXTRA_LOCK_BUFFERS extra buffers if LockAddress is true.  This allows
+ * us to treat the address buffer (and, for WSARecvMsg, the control buffer, its
+ * length and the message flags: Msg) as ordinary client buffers.  They're only
+ * used for datagrams. */
 
 PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
                          PVOID AddressBuf, PINT AddressLen,
                          BOOLEAN Write, BOOLEAN LockAddress,
-                         KPROCESSOR_MODE LockMode) {
+                         KPROCESSOR_MODE LockMode,
+                         PAFD_RECV_INFO_MSG Msg) {
     UINT i;
     /* Copy the buffer array so we don't lose it */
-    UINT Lock = LockAddress ? 2 : 0;
+    UINT Lock = LockAddress ? EXTRA_LOCK_BUFFERS : 0;
     /* Count is user-supplied: size the block in 64-bit and cap it so a large Count
      * cannot wrap the 32-bit product and undersize the pool block we then fill. */
     ULONGLONG Size64 = (ULONGLONG)(sizeof(AFD_WSABUF) + sizeof(AFD_MAPBUF)) *
@@ -292,6 +294,8 @@ PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
                     ProbeForRead( Buf, sizeof(AFD_WSABUF) * Count, 1 );
                 if( LockAddress && AddressBuf && AddressLen )
                     ProbeForRead( AddressLen, sizeof(*AddressLen), 1 );
+                if( LockAddress && Msg && Msg->ControlLength )
+                    ProbeForRead( Msg->ControlLength, sizeof(*Msg->ControlLength), 1 );
             }
             RtlCopyMemory( NewBuf, Buf, sizeof(AFD_WSABUF) * Count );
             if( LockAddress ) {
@@ -301,7 +305,22 @@ PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
                     NewBuf[Count + 1].buf = (PVOID)AddressLen;
                     NewBuf[Count + 1].len = sizeof(*AddressLen);
                 }
-                Count += 2;
+                if (Msg && Msg->ControlLength) {
+                    /* The control buffer is locked for the size it was given. The
+                     * length and the flags are written back (an unlocked slot,
+                     * for an absent pointer, is skipped when writing). */
+                    NewBuf[Count + EXTRA_LOCK_CONTROL_LENGTH].buf = (PVOID)Msg->ControlLength;
+                    NewBuf[Count + EXTRA_LOCK_CONTROL_LENGTH].len = sizeof(*Msg->ControlLength);
+                    if (Msg->ControlBuffer) {
+                        NewBuf[Count + EXTRA_LOCK_CONTROL].buf = Msg->ControlBuffer;
+                        NewBuf[Count + EXTRA_LOCK_CONTROL].len = *Msg->ControlLength;
+                    }
+                }
+                if (Msg && Msg->MsgFlags) {
+                    NewBuf[Count + EXTRA_LOCK_MSG_FLAGS].buf = (PVOID)Msg->MsgFlags;
+                    NewBuf[Count + EXTRA_LOCK_MSG_FLAGS].len = sizeof(*Msg->MsgFlags);
+                }
+                Count += EXTRA_LOCK_BUFFERS;
             }
         } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
             AFD_DbgPrint(MIN_TRACE,("Access violation copying buffer info "
@@ -316,8 +335,16 @@ PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
                                     i, NewBuf[i].buf, NewBuf[i].len));
 
             if( NewBuf[i].buf && NewBuf[i].len ) {
+                ULONG LockLength = NewBuf[i].len;
+
+                /* The control buffer length is the caller's (up to 4 GB); AFD never writes
+                 * more than one IP_PKTINFO message (16 byte header + 8), so pin only that.
+                 * The slot keeps the full length: it is the capacity for MSG_CTRUNC. */
+                if( LockAddress && Msg && i == Count - EXTRA_LOCK_BUFFERS + EXTRA_LOCK_CONTROL )
+                    LockLength = MIN(LockLength, AFD_MAX_CONTROL_LOCK);
+
                 MapBuf[i].Mdl = IoAllocateMdl( NewBuf[i].buf,
-                                               NewBuf[i].len,
+                                               LockLength,
                                                FALSE,
                                                FALSE,
                                                NULL );
@@ -358,7 +385,7 @@ PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
 }
 
 VOID UnlockBuffers( PAFD_WSABUF Buf, UINT Count, BOOL Address ) {
-    UINT Lock = Address ? 2 : 0;
+    UINT Lock = Address ? EXTRA_LOCK_BUFFERS : 0;
     PAFD_MAPBUF Map = (PAFD_MAPBUF)(Buf + Count + Lock);
     UINT i;
 

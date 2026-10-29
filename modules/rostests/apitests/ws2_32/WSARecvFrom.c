@@ -192,6 +192,7 @@ TestRecvFromTruncated(VOID)
                          (SOCKADDR *)&From.Addr, &FromLen, NULL, NULL);
     ok(Result == SOCKET_ERROR, "truncated: WSARecvFrom returned %d\n", Result);
     ok(WSAGetLastError() == WSAEMSGSIZE, "truncated: error %d\n", WSAGetLastError());
+    ok(Received == 4, "truncated: Received = %lu\n", Received);
     CheckBuffers(Mem, sizeof(Mem), Buffers, 2, "abcdef", 4, "truncated");
 }
 

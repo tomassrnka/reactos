@@ -26,6 +26,7 @@ BOOLEAN DGRemoveIRP(
     PIRP Irp);
 
 VOID DGDeliverData(
+  PIP_INTERFACE Interface,
   PADDRESS_FILE AddrFile,
   PIP_ADDRESS SrcAddress,
   PIP_ADDRESS DstAddress,

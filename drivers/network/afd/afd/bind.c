@@ -44,7 +44,19 @@ NTSTATUS WarmSocketForBind( PAFD_FCB FCB, ULONG ShareType ) {
 
     if (FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS)
     {
-        if (!FCB->Recv.Size)
+        /* The receive reports the source address and, through the Options, the packet
+         * information in AddressFrom. An implicit bind (connect) has not built it yet. */
+        if (!FCB->AddressFrom)
+            Status = TdiBuildConnectionInfo(&FCB->AddressFrom, FCB->LocalAddress);
+
+        if (NT_SUCCESS(Status) && FCB->AddressFrom)
+        {
+            RtlZeroMemory(&FCB->RecvPktInfo, sizeof(FCB->RecvPktInfo));
+            FCB->AddressFrom->Options = &FCB->RecvPktInfo;
+            FCB->AddressFrom->OptionsLength = sizeof(FCB->RecvPktInfo);
+        }
+
+        if (NT_SUCCESS(Status) && !FCB->Recv.Size)
         {
             Status = TdiQueryMaxDatagramLength(FCB->AddressFile.Object,
                                                &FCB->Recv.Size);

@@ -48,8 +48,21 @@ BOOLEAN DGRemoveIRP(
     return Found;
 }
 
+/*
+ * What a receive reports besides the source address, through the Options of the connection
+ * information it was posted with (AFD points them at a structure of this layout,
+ * AFD_RECV_PKTINFO in drivers/network/afd/include/afd.h): the datagram's destination
+ * address and the index of the interface that owns it, for IP_PKTINFO.
+ */
+typedef struct _DG_RECV_PKTINFO {
+    ULONG Valid;
+    ULONG DstAddress;
+    ULONG IfIndex;
+} DG_RECV_PKTINFO, *PDG_RECV_PKTINFO;
+
 VOID
 DGDeliverData(
+    PIP_INTERFACE Interface,
     PADDRESS_FILE AddrFile,
     PIP_ADDRESS SrcAddress,
     PIP_ADDRESS DstAddress,
@@ -101,6 +114,7 @@ DGDeliverData(
         PLIST_ENTRY CurrentEntry;
         PDATAGRAM_RECEIVE_REQUEST Current = NULL;
         PTA_IP_ADDRESS RTAIPAddress;
+        PIP_INTERFACE OwnerIF = NULL;
 
         TI_DbgPrint(MAX_TRACE, ("There is a receive request.\n"));
 
@@ -146,12 +160,43 @@ DGDeliverData(
                     RtlZeroMemory(RTAIPAddress->Address->Address->sin_zero, 8);
                 }
 
+                if (Current->ReturnInfo &&
+                    Current->ReturnInfo->Options &&
+                    Current->ReturnInfo->OptionsLength == sizeof(DG_RECV_PKTINFO) &&
+                    DstAddress->Type == IP_ADDRESS_V4)
+                {
+                    PDG_RECV_PKTINFO PktInfo = Current->ReturnInfo->Options;
+
+                    /* The interface to report for IP_PKTINFO: the one that owns the destination
+                     * address (a datagram to a local address of an adapter arrives over the
+                     * loopback interface, but is reported on the adapter, as on Windows), else
+                     * the one it arrived on. Only looked up for a receive that asked for it;
+                     * the interface list lock nests inside the address file lock. */
+                    OwnerIF = AddrLocateInterface(DstAddress);
+                    if (OwnerIF)
+                        PktInfo->IfIndex = OwnerIF->Index;
+                    else if (Interface)
+                        PktInfo->IfIndex = Interface->Index;
+                    else
+                        PktInfo->IfIndex = 0;
+
+                    PktInfo->DstAddress = DstAddress->Address.IPv4Address;
+                    PktInfo->Valid = TRUE;
+                }
+
                 TI_DbgPrint(MAX_TRACE, ("(A: %08x) Addr %08x Port %04x\n",
                             RTAIPAddress,
                             SrcAddress->Address.IPv4Address, SrcPort));
 
                 ReferenceObject(AddrFile);
                 UnlockObject(AddrFile);
+
+                /* Dropped outside the address file lock: the last reference frees the interface */
+                if (OwnerIF)
+                {
+                    IPDereferenceInterface(OwnerIF);
+                    OwnerIF = NULL;
+                }
 
                 /* Complete the receive request */
                 if (Current->BufferSize < DataSize)
