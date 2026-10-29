@@ -38,6 +38,7 @@ extern void func_CreateFileDirectory(void);
 extern void func_CreateRemoteThreadEx(void);
 extern void func_CreateProcess(void);
 extern void func_CreateProcessRace(void);
+extern void func_CreateProcessStdHandles(void);
 extern void func_DefaultDllDirectories(void);
 extern void func_CreateWaitableTimerEx(void);
 extern void func_ThreadImpersonationToken(void);
@@ -205,6 +206,7 @@ const struct test winetest_testlist[] =
     { "CreateRemoteThreadEx",        func_CreateRemoteThreadEx },
     { "CreateProcess",               func_CreateProcess },
     { "CreateProcessRace",           func_CreateProcessRace },
+    { "CreateProcessStdHandles",     func_CreateProcessStdHandles },
     { "DefaultDllDirectories",      func_DefaultDllDirectories },
     { "CreateWaitableTimerEx",       func_CreateWaitableTimerEx },
     { "ThreadImpersonationToken",    func_ThreadImpersonationToken },

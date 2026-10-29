@@ -750,6 +750,18 @@ BasePushProcessParameters(IN ULONG ParameterFlags,
         ProcessParameters->StandardInput = StartupInfo->hStdInput;
         ProcessParameters->StandardOutput = StartupInfo->hStdOutput;
         ProcessParameters->StandardError = StartupInfo->hStdError;
+
+        /*
+         * Windows 8 and later ignore the handles of STARTF_USESTDHANDLES when
+         * the handle table is not inherited: the child sees NULL, not numbers
+         * that name nothing in its table (also for console handles).
+         */
+        if ((StartupInfo->dwFlags & STARTF_USESTDHANDLES) && !InheritHandles)
+        {
+            ProcessParameters->StandardInput = NULL;
+            ProcessParameters->StandardOutput = NULL;
+            ProcessParameters->StandardError = NULL;
+        }
     }
 
     /* Use Special Flags for ConDllInitialize in Kernel32 */
@@ -4532,6 +4544,23 @@ StartScan:
             goto Quickie;
         }
         if (EmptyList) KernelHandleCount = ConsoleHandleCount = 0;
+
+        /* A console handle is only checked by the console server when the child
+         * connects to a console. A GUI child never does, so a value that is no
+         * console handle of ours (or not inheritable) would slip through; check
+         * it here, as the kernel checks the other handles of the list. */
+        for (HandleIndex = 0; HandleIndex < ConsoleHandleCount; ++HandleIndex)
+        {
+            DWORD HandleFlags;
+
+            if (!GetHandleInformation(ConsoleHandleList[HandleIndex], &HandleFlags) ||
+                !(HandleFlags & HANDLE_FLAG_INHERIT))
+            {
+                BaseSetLastNTError(STATUS_INVALID_PARAMETER);
+                Result = FALSE;
+                goto Quickie;
+            }
+        }
         NativeAttributes.TotalLength = sizeof(NativeAttributes);
         NativeAttributes.Attributes[0].Attribute = ROS_PS_ATTRIBUTE_HANDLE_LIST;
         NativeAttributes.Attributes[0].Size = KernelHandleCount * sizeof(HANDLE);

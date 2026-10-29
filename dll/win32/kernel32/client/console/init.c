@@ -668,6 +668,21 @@ ConDllInitialize(IN ULONG Reason,
     {
         /* Do not inherit the parent's console if we are not a console app */
         Parameters->ConsoleHandle = NULL;
+
+        /*
+         * A console handle only means something to a process connected to
+         * that console. A GUI process has no such connection, so the
+         * parent's console handles it inherited name nothing; Windows gives
+         * it NULL there, and callers such as Rust's Command::spawn treat a
+         * non-NULL standard handle they cannot duplicate as an error.
+         * Handles to files, pipes and devices are kept.
+         */
+        if (IsConsoleHandle(Parameters->StandardInput))
+            Parameters->StandardInput = NULL;
+        if (IsConsoleHandle(Parameters->StandardOutput))
+            Parameters->StandardOutput = NULL;
+        if (IsConsoleHandle(Parameters->StandardError))
+            Parameters->StandardError = NULL;
     }
 
     /* Now use the proper console handle */
