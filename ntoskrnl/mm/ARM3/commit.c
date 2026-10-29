@@ -167,10 +167,20 @@ MiChargeCommit(
     _In_ SIZE_T Pages,
     _In_ MI_COMMIT_TIER Tier)
 {
-    SIZE_T OldCommitted, NewCommitted, Ceiling;
+    SIZE_T OldCommitted, NewCommitted, Ceiling, Headroom;
 
     if (Pages == 0)
         return TRUE;
+
+    /*
+     * Critical tier: the System process and critical processes (csrss, lsass,
+     * winlogon...) do not give up the resident headroom. When an application
+     * fills the cap, these must still be able to allocate, or the system dies
+     * (bugcheck 0xF4 when a critical process cannot continue).
+     */
+    Headroom = MiResidentHeadroom;
+    if ((Tier == MiCommitKernel) || MiIsCriticalProcess(PsGetCurrentProcess()))
+        Headroom = 0;
 
     for (;;)
     {
@@ -183,7 +193,7 @@ MiChargeCommit(
         if (Tier == MiCommitUserPageable)
             Ceiling = *(volatile SIZE_T *)&MmTotalCommitLimit;
         else
-            Ceiling = MiGetCommitCeiling((Tier == MiCommitKernel) ? 0 : MiResidentHeadroom);
+            Ceiling = MiGetCommitCeiling(Headroom);
         if (Tier != MiCommitKernel)
             Ceiling = (Ceiling > MiCommitReserve) ? (Ceiling - MiCommitReserve) : 0;
 
@@ -203,6 +213,25 @@ MiChargeCommit(
 
     MiUpdatePeakCommitment(NewCommitted);
     return TRUE;
+}
+
+SIZE_T
+NTAPI
+MiGetPageableCommittedPages(VOID)
+{
+    return *(volatile SIZE_T *)&MiPageableCommittedPages;
+}
+
+BOOLEAN
+NTAPI
+MiIsCriticalProcess(
+    _In_opt_ PEPROCESS Process)
+{
+    /* Before the first process exists, charges are the kernel's own */
+    if ((Process == NULL) || (Process == PsIdleProcess) || (Process == PsInitialSystemProcess))
+        return TRUE;
+
+    return Process->BreakOnTermination != 0;
 }
 
 /* Return a charge taken with MiCommitUserPageable */

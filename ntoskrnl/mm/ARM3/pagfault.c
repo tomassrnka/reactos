@@ -650,16 +650,17 @@ static
 BOOLEAN
 MiCanFaultWaitForPages(VOID)
 {
-    PKTHREAD Thread = KeGetCurrentThread();
-    PMMSUPPORT KernelSpace = MmGetKernelAddressSpace();
-
-    /* The balancer may need an address space lock this thread owns: it can only spin (MmAccessFault) */
-    if (PsGetCurrentProcess()->AddressCreationLock.Owner == Thread)
-        return FALSE;
-    if (KernelSpace && (CONTAINING_RECORD(KernelSpace, EPROCESS, Vm)->AddressCreationLock.Owner == Thread))
+    /* Critical processes and the System process may take the last pages: they must not stall for an application */
+    if (MiIsCriticalProcess(PsGetCurrentProcess()))
         return FALSE;
 
-    return TRUE;
+    /*
+     * Same predicate as the wait itself (MmRebalanceMemoryConsumersAndWait):
+     * a fault that cannot wait for the balancer must not be refused pages.
+     * The fault's own working set lock is released when the fault returns
+     * STATUS_NO_MEMORY, before the wait, so it does not count here.
+     */
+    return MiThreadCanWaitForBalancer(TRUE);
 }
 
 static

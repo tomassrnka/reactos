@@ -954,6 +954,26 @@ SIZE_T
 NTAPI
 MiGetCommitLimit(VOID);
 
+SIZE_T
+NTAPI
+MiGetPageableCommittedPages(VOID);
+
+/* The System process and processes marked critical: their commitment and faults keep a reserve */
+BOOLEAN
+NTAPI
+MiIsCriticalProcess(
+    _In_opt_ PEPROCESS Process);
+
+/*
+ * Whether the calling thread may wait for a balancer pass to free pages.
+ * FALSE when it holds what the balancer may need (an address space lock,
+ * a working set lock unless IgnoreWorkingSetLocks) or is the balancer.
+ */
+BOOLEAN
+NTAPI
+MiThreadCanWaitForBalancer(
+    _In_ BOOLEAN IgnoreWorkingSetLocks);
+
 VOID
 NTAPI
 MiReturnPageableCommit(

@@ -1454,6 +1454,14 @@ MiCheckProcessCommitReturned(
     {
         DPRINT1("MM: process %p (%.16s) still charged %Iu pages after address space cleanup\n",
                 Process, Process->ImageFileName, Residue);
+        /*
+         * The residue is returned as plain commitment. Were any of it charged
+         * as pageable (MiCommitUserPageable), MiPageableCommittedPages keeps
+         * it and the commit ceiling stays too high by that much: leaks of
+         * that counter are only visible here.
+         */
+        DPRINT1("MM: pageable commitment counter at %Iu pages, may be skewed by up to %Iu\n",
+                MiGetPageableCommittedPages(), min(Residue, MiGetPageableCommittedPages()));
         MiReturnProcessCommit(Process, Residue);
     }
 }
