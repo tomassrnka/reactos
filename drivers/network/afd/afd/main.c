@@ -50,6 +50,7 @@ AfdGetDisconnectOptions(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
     UINT BufferSize = IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
+    NTSTATUS Status;
 
     UNREFERENCED_PARAMETER(DeviceObject);
 
@@ -65,11 +66,10 @@ AfdGetDisconnectOptions(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     if (FCB->FilledDisconnectOptions < BufferSize) BufferSize = FCB->FilledDisconnectOptions;
 
-    RtlCopyMemory(Irp->UserBuffer,
-                  FCB->DisconnectOptions,
-                  BufferSize);
+    /* METHOD_NEITHER: probe the caller's output and copy under SEH */
+    Status = AfdCopyToUserOutput(Irp, IrpSp, FCB->DisconnectOptions, BufferSize);
 
-    return UnlockAndMaybeComplete(FCB, STATUS_SUCCESS, Irp, BufferSize);
+    return UnlockAndMaybeComplete(FCB, Status, Irp, NT_SUCCESS(Status) ? BufferSize : 0);
 }
 
 NTSTATUS
@@ -161,6 +161,7 @@ AfdGetDisconnectData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
     UINT BufferSize = IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
+    NTSTATUS Status;
 
     UNREFERENCED_PARAMETER(DeviceObject);
 
@@ -177,11 +178,10 @@ AfdGetDisconnectData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     if (FCB->FilledDisconnectData < BufferSize)
         BufferSize = FCB->FilledDisconnectData;
 
-    RtlCopyMemory(Irp->UserBuffer,
-                  FCB->DisconnectData,
-                  BufferSize);
+    /* METHOD_NEITHER: probe the caller's output and copy under SEH */
+    Status = AfdCopyToUserOutput(Irp, IrpSp, FCB->DisconnectData, BufferSize);
 
-    return UnlockAndMaybeComplete(FCB, STATUS_SUCCESS, Irp, BufferSize);
+    return UnlockAndMaybeComplete(FCB, Status, Irp, NT_SUCCESS(Status) ? BufferSize : 0);
 }
 
 NTSTATUS
@@ -275,9 +275,9 @@ AfdGetTdiHandles(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PAFD_FCB FCB = FileObject->FsContext;
     PULONG HandleFlags;
     PAFD_TDI_HANDLE_DATA HandleData = Irp->UserBuffer;
+    NTSTATUS Status;
 #if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
     BOOLEAN Wow64 = IoIs32bitProcess(Irp);
-    NTSTATUS Status;
 
     if (Wow64 && (!IrpSp->Parameters.DeviceIoControl.Type3InputBuffer ||
                   IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(ULONG) ||
@@ -327,13 +327,29 @@ AfdGetTdiHandles(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         return UnlockAndMaybeComplete(FCB, STATUS_BUFFER_TOO_SMALL, Irp, 0);
     }
 
-    if ((*HandleFlags) & AFD_ADDRESS_HANDLE)
-        HandleData->TdiAddressHandle = FCB->AddressFile.Handle;
+    /* METHOD_NEITHER: HandleData is the caller's raw output pointer. Probe it
+     * for the write (user-mode requests) and write under SEH, as the WoW64
+     * path above does, so it cannot become a kernel-mode write. */
+    Status = STATUS_SUCCESS;
+    _SEH2_TRY
+    {
+        if (Irp->RequestorMode != KernelMode)
+            ProbeForWrite(HandleData, sizeof(*HandleData), sizeof(ULONG));
 
-    if ((*HandleFlags) & AFD_CONNECTION_HANDLE)
-        HandleData->TdiConnectionHandle = FCB->Connection.Handle;
+        if ((*HandleFlags) & AFD_ADDRESS_HANDLE)
+            HandleData->TdiAddressHandle = FCB->AddressFile.Handle;
 
-    return UnlockAndMaybeComplete(FCB, STATUS_SUCCESS, Irp, 0);
+        if ((*HandleFlags) & AFD_CONNECTION_HANDLE)
+            HandleData->TdiConnectionHandle = FCB->Connection.Handle;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        AFD_DbgPrint(MIN_TRACE,("Exception writing the TDI handles\n"));
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    return UnlockAndMaybeComplete(FCB, Status, Irp, 0);
 }
 
 /*
@@ -815,7 +831,12 @@ DisconnectComplete(PDEVICE_OBJECT DeviceObject,
 
     if (NT_SUCCESS(Irp->IoStatus.Status) && (FCB->DisconnectFlags & TDI_DISCONNECT_RELEASE))
     {
-        FCB->FilledDisconnectData = MIN(FCB->DisconnectDataSize, FCB->ConnectReturnInfo->UserDataLength);
+        /* The return info reports OptionsLength = sizeof(ULONG) with no
+           Options buffer (TdiBuildConnectionInfo) and the transport does not
+           fill it in: copy only what has a source */
+        FCB->FilledDisconnectData = 0;
+        if (FCB->ConnectReturnInfo && FCB->ConnectReturnInfo->UserData)
+            FCB->FilledDisconnectData = MIN(FCB->DisconnectDataSize, FCB->ConnectReturnInfo->UserDataLength);
         if (FCB->FilledDisconnectData)
         {
             RtlCopyMemory(FCB->DisconnectData,
@@ -823,7 +844,9 @@ DisconnectComplete(PDEVICE_OBJECT DeviceObject,
                           FCB->FilledDisconnectData);
         }
 
-        FCB->FilledDisconnectOptions = MIN(FCB->DisconnectOptionsSize, FCB->ConnectReturnInfo->OptionsLength);
+        FCB->FilledDisconnectOptions = 0;
+        if (FCB->ConnectReturnInfo && FCB->ConnectReturnInfo->Options)
+            FCB->FilledDisconnectOptions = MIN(FCB->DisconnectOptionsSize, FCB->ConnectReturnInfo->OptionsLength);
         if (FCB->FilledDisconnectOptions)
         {
             RtlCopyMemory(FCB->DisconnectOptions,
