@@ -335,8 +335,16 @@ PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
                                     i, NewBuf[i].buf, NewBuf[i].len));
 
             if( NewBuf[i].buf && NewBuf[i].len ) {
+                ULONG LockLength = NewBuf[i].len;
+
+                /* The control buffer length is the caller's (up to 4 GB); AFD never writes
+                 * more than one IP_PKTINFO message (16 byte header + 8), so pin only that.
+                 * The slot keeps the full length: it is the capacity for MSG_CTRUNC. */
+                if( LockAddress && Msg && i == Count - EXTRA_LOCK_BUFFERS + EXTRA_LOCK_CONTROL )
+                    LockLength = MIN(LockLength, AFD_MAX_CONTROL_LOCK);
+
                 MapBuf[i].Mdl = IoAllocateMdl( NewBuf[i].buf,
-                                               NewBuf[i].len,
+                                               LockLength,
                                                FALSE,
                                                FALSE,
                                                NULL );

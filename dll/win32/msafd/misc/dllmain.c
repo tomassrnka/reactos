@@ -3516,7 +3516,7 @@ WSPSetSockOpt(
             if (lpErrno) *lpErrno = WSAEINVAL;
             return SOCKET_ERROR;
         }
-        if (optlen < (INT)sizeof(DWORD))
+        if (!optval || optlen < (INT)sizeof(DWORD))
         {
             if (lpErrno) *lpErrno = WSAEFAULT;
             return SOCKET_ERROR;

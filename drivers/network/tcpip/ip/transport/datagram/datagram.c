@@ -90,28 +90,8 @@ DGDeliverData(
     ULONG BytesTaken;
     NTSTATUS Status;
     PVOID DataBuffer;
-    ULONG PktIfIndex = 0;
 
     TI_DbgPrint(MIN_TRACE, ("Called.\n"));
-
-    /* The interface to report for IP_PKTINFO: the one that owns the destination address (a
-     * datagram to a local address of an adapter arrives over the loopback interface, but is
-     * reported on the adapter, as on Windows), else the one it arrived on. Looked up before
-     * the address file is locked. */
-    if (DstAddress->Type == IP_ADDRESS_V4)
-    {
-        PIP_INTERFACE Owner = AddrLocateInterface(DstAddress);
-
-        if (Owner)
-        {
-            PktIfIndex = Owner->Index;
-            IPDereferenceInterface(Owner);
-        }
-        else if (Interface)
-        {
-            PktIfIndex = Interface->Index;
-        }
-    }
 
     LockObject(AddrFile);
 
@@ -134,6 +114,7 @@ DGDeliverData(
         PLIST_ENTRY CurrentEntry;
         PDATAGRAM_RECEIVE_REQUEST Current = NULL;
         PTA_IP_ADDRESS RTAIPAddress;
+        PIP_INTERFACE OwnerIF = NULL;
 
         TI_DbgPrint(MAX_TRACE, ("There is a receive request.\n"));
 
@@ -186,8 +167,20 @@ DGDeliverData(
                 {
                     PDG_RECV_PKTINFO PktInfo = Current->ReturnInfo->Options;
 
+                    /* The interface to report for IP_PKTINFO: the one that owns the destination
+                     * address (a datagram to a local address of an adapter arrives over the
+                     * loopback interface, but is reported on the adapter, as on Windows), else
+                     * the one it arrived on. Only looked up for a receive that asked for it;
+                     * the interface list lock nests inside the address file lock. */
+                    OwnerIF = AddrLocateInterface(DstAddress);
+                    if (OwnerIF)
+                        PktInfo->IfIndex = OwnerIF->Index;
+                    else if (Interface)
+                        PktInfo->IfIndex = Interface->Index;
+                    else
+                        PktInfo->IfIndex = 0;
+
                     PktInfo->DstAddress = DstAddress->Address.IPv4Address;
-                    PktInfo->IfIndex = PktIfIndex;
                     PktInfo->Valid = TRUE;
                 }
 
@@ -197,6 +190,13 @@ DGDeliverData(
 
                 ReferenceObject(AddrFile);
                 UnlockObject(AddrFile);
+
+                /* Dropped outside the address file lock: the last reference frees the interface */
+                if (OwnerIF)
+                {
+                    IPDereferenceInterface(OwnerIF);
+                    OwnerIF = NULL;
+                }
 
                 /* Complete the receive request */
                 if (Current->BufferSize < DataSize)

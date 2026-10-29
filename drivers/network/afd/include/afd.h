@@ -106,6 +106,8 @@ typedef struct IPADDR_ENTRY {
 #define EXTRA_LOCK_CONTROL              2
 #define EXTRA_LOCK_CONTROL_LENGTH       3
 #define EXTRA_LOCK_MSG_FLAGS            4
+/* The most control data AFD writes: one IP_PKTINFO message (16 byte header + in_pktinfo) */
+#define AFD_MAX_CONTROL_LOCK            24
 
 /* The referenced handle table of a select request; the caller's buffer is copied back to it */
 #define AFD_HANDLES(Irp) ((PAFD_HANDLE)(Irp)->Tail.Overlay.DriverContext[2])

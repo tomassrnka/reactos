@@ -436,11 +436,9 @@ StoreToLockedBuffer(
     if( !Map->Mdl )
         return;
 
-    Map->BufferAddress = MmMapLockedPages( Map->Mdl, KernelMode );
-    if( Map->BufferAddress ) {
+    Map->BufferAddress = MmGetSystemAddressForMdlSafe( Map->Mdl, NormalPagePriority );
+    if( Map->BufferAddress )
         RtlCopyMemory( Map->BufferAddress, Data, MIN(Length, MmGetMdlByteCount(Map->Mdl)) );
-        MmUnmapLockedPages( Map->BufferAddress, Map->Mdl );
-    }
 }
 
 /*
@@ -538,17 +536,15 @@ SatisfyPacketRecvRequest( PAFD_FCB FCB, PIRP Irp,
 
         AFD_DbgPrint(MID_TRACE,("Copying %u bytes of address\n", AddrLen));
 
-        AddrMap->BufferAddress = MmMapLockedPages( AddrMap->Mdl, KernelMode );
+        AddrMap->BufferAddress = MmGetSystemAddressForMdlSafe( AddrMap->Mdl, NormalPagePriority );
+        if( AddrMap->BufferAddress )
+            RtlCopyMemory( AddrMap->BufferAddress,
+                          &DatagramRecv->Address->Address->AddressType,
+                          AddrLen );
 
-        RtlCopyMemory( AddrMap->BufferAddress,
-                      &DatagramRecv->Address->Address->AddressType,
-                      AddrLen );
-
-        MmUnmapLockedPages( AddrMap->BufferAddress, AddrMap->Mdl );
-
-        AddrLenMap->BufferAddress = MmMapLockedPages( AddrLenMap->Mdl, KernelMode );
-        *((PINT)AddrLenMap->BufferAddress) = AddrLen;
-        MmUnmapLockedPages( AddrLenMap->BufferAddress, AddrLenMap->Mdl );
+        AddrLenMap->BufferAddress = MmGetSystemAddressForMdlSafe( AddrLenMap->Mdl, NormalPagePriority );
+        if( AddrLenMap->BufferAddress )
+            *((PINT)AddrLenMap->BufferAddress) = AddrLen;
     }
 
     /* Scatter the datagram over the data buffers in order */
@@ -559,18 +555,17 @@ SatisfyPacketRecvRequest( PAFD_FCB FCB, PIRP Irp,
         BytesToCopy = MIN( RecvReq->BufferArray[i].len,
                            BytesAvailable - BytesCopied );
 
-        Map[i].BufferAddress = MmMapLockedPages( Map[i].Mdl, KernelMode );
+        Map[i].BufferAddress = MmGetSystemAddressForMdlSafe( Map[i].Mdl, NormalPagePriority );
 
         AFD_DbgPrint(MID_TRACE,("Buffer %u: %p:%u\n",
                                 i,
                                 Map[i].BufferAddress,
                                 BytesToCopy));
 
-        RtlCopyMemory( Map[i].BufferAddress,
-                      DatagramRecv->Buffer + BytesCopied,
-                      BytesToCopy );
-
-        MmUnmapLockedPages( Map[i].BufferAddress, Map[i].Mdl );
+        if( Map[i].BufferAddress )
+            RtlCopyMemory( Map[i].BufferAddress,
+                          DatagramRecv->Buffer + BytesCopied,
+                          BytesToCopy );
 
         BytesCopied += BytesToCopy;
     }
