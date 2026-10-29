@@ -1699,6 +1699,11 @@ HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\Environment","PATHEXT",0x
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\Environment","TEMP",0x00020002,"%SystemRoot%\TEMP"
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\Environment","TMP",0x00020002,"%SystemRoot%\TEMP"
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\Environment","windir",0x00020002,"%SystemRoot%"
+; wgpu (Rust egui/eframe apps) defaults to Direct3D 12 on Windows. There is no d3d12.dll in the image, and the
+; Wine/vkd3d HLSL compiler cannot build the DX12 shaders wgpu generates (SM 5.1 resource arrays), so a DX12-only wgpu app
+; (DeckCraft) exits with "Failed to create surface". The software OpenGL driver (Mesa llvmpipe) renders wgpu apps;
+; a user or application WGPU_BACKEND setting still takes precedence over this system default.
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\Environment","WGPU_BACKEND",0x00000000,"gl"
 ;HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\Environment","SHIMENG_DEBUG_LEVEL",0x00000000,"4"
 ;HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\Environment","SHIM_DEBUG_LEVEL",0x00000000,"4"
 
