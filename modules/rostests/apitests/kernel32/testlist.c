@@ -145,6 +145,7 @@ extern void func_Toolhelp32(void);
 extern void func_TerminateProcess(void);
 extern void func_ThreadContextNpx(void);
 extern void func_ThreadContextObjects(void);
+extern void func_ThreadHandleLeak(void);
 extern void func_ThreadInformation(void);
 extern void func_TunnelCache(void);
 extern void func_VolumeMountPoint(void);
@@ -311,6 +312,7 @@ const struct test winetest_testlist[] =
     { "Toolhelp32",                  func_Toolhelp32 },
     { "TerminateProcess",            func_TerminateProcess },
     { "ThreadContextNpx",            func_ThreadContextNpx },
+    { "ThreadHandleLeak",            func_ThreadHandleLeak },
     { "ThreadInformation",           func_ThreadInformation },
     { "ThreadContextObjects",        func_ThreadContextObjects },
     { "TunnelCache",                 func_TunnelCache },

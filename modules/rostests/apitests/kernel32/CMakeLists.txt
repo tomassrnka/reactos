@@ -144,6 +144,7 @@ list(APPEND SOURCE
     TerminateProcess.c
     ThreadContextNpx.c
     ThreadContextObjects.c
+    ThreadHandleLeak.c
     ThreadInformation.c
     TunnelCache.c
     VolumeMountPoint.c

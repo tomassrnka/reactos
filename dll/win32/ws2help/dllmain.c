@@ -132,8 +132,15 @@ Ws2HelpDllMain(
             /* Save our handle */
             LibraryHdl = hModule;
 
-            /* Improve Performance */
+#if (DLL_EXPORT_VERSION < 0x600)
+            /* Improve Performance (ws2help.dll itself; it has no per-thread state) */
             DisableThreadLibraryCalls(hModule);
+#else
+            /* On Vista+ ws2help is linked into ws2_32.dll and this is called with
+             * ws2_32's module handle: disabling thread notifications here would
+             * stop ws2_32 getting DLL_THREAD_DETACH and leak the per-thread WSTHREAD
+             * (and the duplicated thread handle held in it) for every thread that used Winsock. */
+#endif
 
             /* Initialize startup CS */
             InitializeCriticalSection(&StartupSynchronization);
