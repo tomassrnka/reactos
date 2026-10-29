@@ -1869,6 +1869,13 @@ RegDeleteTreeW(HKEY hKey,
 
     TRACE("(hkey=%p,%p %s)\n", hKey, lpszSubKey, debugstr_w(lpszSubKey));
 
+    /* An empty subkey name means hKey itself, same as NULL: its subkeys and
+     * values are deleted and the key stays. Windows does not delete hKey here;
+     * callers such as .NET RegistryKey.DeleteSubKeyTree delete it afterwards
+     * with RegDeleteKeyEx(hKey, ""), which fails if the key is already gone. */
+    if (lpszSubKey && !*lpszSubKey)
+        lpszSubKey = NULL;
+
     Status = MapDefaultKey(&KeyHandle,
                            hKey);
     if (!NT_SUCCESS(Status))

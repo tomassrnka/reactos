@@ -26,6 +26,7 @@ list(APPEND SOURCE
     RegConcurrentWrite.c
     RegCreateKeyEx.c
     RegCreateKeyTransacted.c
+    RegDeleteTreeOpenHandles.c
     RegEnumKey.c
     RegEnumKeyClass.c
     RegEnumValueW.c
