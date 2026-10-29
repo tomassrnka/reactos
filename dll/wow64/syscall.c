@@ -1449,6 +1449,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         AFD_SEND_INFO_UDP Datagram;
         AFD_RECV_INFO_MSG RecvDatagram;
         AFD_ACCEPT_DATA Accept;
+        AFD_SUPER_ACCEPT_INFO SuperAccept;
         /* These requests contain counted strings/addresses or opaque bytes.
          * AFD requests carrying handles or WSABUF arrays need translation. */
         switch (a[5])
@@ -1486,6 +1487,44 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             Input = &Accept;
             InputLength = sizeof(Accept);
             break;
+        case IOCTL_AFD_SET_CONNECT_DATA_SIZE:
+        case IOCTL_AFD_SET_CONNECT_OPTIONS_SIZE:
+        case IOCTL_AFD_SET_DISCONNECT_DATA_SIZE:
+        case IOCTL_AFD_SET_DISCONNECT_OPTIONS_SIZE:
+        case IOCTL_AFD_SET_CONNECT_DATA: /* opaque bytes in; AFD copies them under its own probe. */
+        case IOCTL_AFD_SET_CONNECT_OPTIONS:
+        case IOCTL_AFD_SET_DISCONNECT_DATA:
+        case IOCTL_AFD_SET_DISCONNECT_OPTIONS:
+            break;
+        case IOCTL_AFD_GET_CONNECT_DATA: /* opaque bytes out, written by AFD straight to the guest buffer. */
+        case IOCTL_AFD_GET_CONNECT_OPTIONS:
+        case IOCTL_AFD_GET_DISCONNECT_DATA:
+        case IOCTL_AFD_GET_DISCONNECT_OPTIONS:
+            /* AFD copies into the output buffer without a probe of its own, so a
+             * bad guest buffer must fail here, not fault in the kernel. */
+            if (a[9]) ProbeOutput(a[8], a[9]);
+            break;
+        case IOCTL_AFD_SUPER_ACCEPT:
+        {
+            /* 32-bit AFD_SUPER_ACCEPT_INFO: SanActive and FixAddressAlignment
+             * bytes, the accept socket HANDLE, then the three lengths (20 bytes).
+             * The native request is padded to 32 bytes; AFD copies it when it
+             * locks the request, so a stack copy is enough even when the accept
+             * stays pending. The output buffer (data + addresses) is probed and
+             * locked by AFD itself. */
+            const ULONG *From = Input;
+            if (InputLength < 5 * sizeof(ULONG)) return STATUS_INVALID_PARAMETER;
+            RtlZeroMemory(&SuperAccept, sizeof(SuperAccept));
+            SuperAccept.SanActive = ((const UCHAR *)Input)[0];
+            SuperAccept.FixAddressAlignment = ((const UCHAR *)Input)[1];
+            SuperAccept.AcceptHandle = HANDLE32(From[1]);
+            SuperAccept.ReceiveDataLength = From[2];
+            SuperAccept.LocalAddressLength = From[3];
+            SuperAccept.RemoteAddressLength = From[4];
+            Input = &SuperAccept;
+            InputLength = sizeof(SuperAccept);
+            break;
+        }
         case IOCTL_AFD_SEND_DATAGRAM:
         {
             /* 32-bit AFD_SEND_INFO_UDP: BufferArray, BufferCount, AfdFlags,
