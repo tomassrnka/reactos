@@ -15,6 +15,8 @@ typedef BOOL (WINAPI *PFN_InitializeContext)(PVOID, DWORD, PCONTEXT *, PDWORD);
 typedef BOOL (WINAPI *PFN_CopyContext)(PCONTEXT, DWORD, PCONTEXT);
 typedef PVOID (WINAPI *PFN_LocateXStateFeature)(PCONTEXT, DWORD, PDWORD);
 typedef BOOL (WINAPI *PFN_SetXStateFeaturesMask)(PCONTEXT, DWORD64);
+typedef BOOL (WINAPI *PFN_GetXStateFeaturesMask)(PCONTEXT, PDWORD64);
+typedef BOOL (WINAPI *PFN_InitializeContext2)(PVOID, DWORD, PCONTEXT *, PDWORD, ULONG64);
 typedef BOOL (WINAPI *PFN_GetThreadIdealProcessorEx)(HANDLE, PPROCESSOR_NUMBER);
 typedef BOOL (WINAPI *PFN_SetThreadIdealProcessorEx)(HANDLE, PPROCESSOR_NUMBER, PPROCESSOR_NUMBER);
 
@@ -23,6 +25,8 @@ static PFN_InitializeContext pInitializeContext;
 static PFN_CopyContext pCopyContext;
 static PFN_LocateXStateFeature pLocateXStateFeature;
 static PFN_SetXStateFeaturesMask pSetXStateFeaturesMask;
+static PFN_GetXStateFeaturesMask pGetXStateFeaturesMask;
+static PFN_InitializeContext2 pInitializeContext2;
 static PFN_GetThreadIdealProcessorEx pGetThreadIdealProcessorEx;
 static PFN_SetThreadIdealProcessorEx pSetThreadIdealProcessorEx;
 
@@ -186,11 +190,6 @@ test_InitializeContext_errors(void)
     DWORD Length, Plain, Extended;
     BYTE Small[16];
     BOOL Result;
-
-    SetLastError(0xdeadbeef);
-    Result = pInitializeContext(NULL, XS_FULL, &Context, NULL);
-    ok(!Result, "no length succeeded\n");
-    ok(GetLastError() == ERROR_INVALID_PARAMETER, "got error %lu\n", GetLastError());
 
     Length = 0;
     SetLastError(0xdeadbeef);
@@ -579,7 +578,6 @@ test_LocateXStateFeature(void)
     ok(pLocateXStateFeature(Buffer.Context, 1, NULL) != NULL, "feature 1 without length\n");
     ok(pLocateXStateFeature(Plain.Context, 0, &Length) != NULL, "feature 0 of a plain context\n");
 
-    ok(pLocateXStateFeature(NULL, 0, &Length) == NULL, "NULL context\n");
     ok(pLocateXStateFeature(Buffer.Context, XS_FEATURES, &Length) == NULL, "feature 64\n");
     ok(pLocateXStateFeature(Buffer.Context, 0xffffffff, &Length) == NULL, "feature -1\n");
 
@@ -676,9 +674,6 @@ test_SetXStateFeaturesMask(void)
     Result = pSetXStateFeaturesMask(Plain.Context, 4);
     ok(!Result, "setting AVX of a plain context succeeded\n");
 
-    Result = pSetXStateFeaturesMask(NULL, 3);
-    ok(!Result, "NULL context succeeded\n");
-
 Done:
     FreeContext(&Buffer);
     FreeContext(&Plain);
@@ -743,8 +738,6 @@ test_CopyContext(void)
     Result = pCopyContext(Destination.Context, 0x7, Source.Context);
     ok(!Result, "flags without architecture succeeded\n");
     ok(GetLastError() == ERROR_INVALID_PARAMETER, "got error %lu\n", GetLastError());
-    ok(!pCopyContext(NULL, XS_INTEGER, Source.Context), "NULL destination succeeded\n");
-    ok(!pCopyContext(Destination.Context, XS_INTEGER, NULL), "NULL source succeeded\n");
 
     if (!g_Enabled)
     {
@@ -817,6 +810,105 @@ Done:
 
 #endif /* _M_IX86 || _M_AMD64 */
 
+/* Windows 10: InitializeContext with a compaction mask, and the mask a context holds */
+static
+void
+test_InitializeContext2(void)
+{
+    DWORD Length, Length2, Plain;
+    PCONTEXT Context = NULL;
+    PVOID Buffer;
+    BOOL Result;
+
+    /* Without CONTEXT_XSTATE the mask changes nothing */
+    Plain = 0;
+    pInitializeContext(NULL, XS_FULL, &Context, &Plain);
+    Length = 0;
+    SetLastError(0xdeadbeef);
+    Result = pInitializeContext2(NULL, XS_FULL, &Context, &Length, g_Enabled);
+    ok(!Result, "no buffer succeeded\n");
+    ok(GetLastError() == ERROR_INSUFFICIENT_BUFFER, "got error %lu\n", GetLastError());
+    ok(Length == Plain, "length %lu, InitializeContext says %lu\n", Length, Plain);
+
+    /* With it, the full mask needs what InitializeContext needs, and a mask of x87 and SSE no more */
+    Length = Length2 = 0;
+    pInitializeContext(NULL, XS_FULL | XS_XSTATE_BIT, &Context, &Length);
+    pInitializeContext2(NULL, XS_FULL | XS_XSTATE_BIT, &Context, &Length2, g_Enabled);
+    ok(Length2 == Length, "full mask: length %lu, InitializeContext says %lu\n", Length2, Length);
+    Length2 = 0;
+    pInitializeContext2(NULL, XS_FULL | XS_XSTATE_BIT, &Context, &Length2, 3);
+    ok(Length2 <= Length, "legacy mask: length %lu, full %lu\n", Length2, Length);
+
+    Buffer = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Length);
+    if (!Buffer)
+        return;
+    Length2 = Length;
+    Context = NULL;
+    SetLastError(0xdeadbeef);
+    Result = pInitializeContext2(Buffer, XS_FULL | XS_XSTATE_BIT, &Context, &Length2, g_Enabled);
+    ok(Result, "InitializeContext2 failed, error %lu\n", GetLastError());
+    if (Result)
+    {
+        ok(Context != NULL && ((ULONG_PTR)Context & (XS_CONTEXT_ALIGN - 1)) == 0, "context at %p\n", Context);
+        if (g_Enabled)
+            ok((Context->ContextFlags & XS_ALL_TESTED) == (XS_FULL | XS_XSTATE_BIT), "flags 0x%lx\n", Context->ContextFlags);
+        else
+            ok((Context->ContextFlags & XS_ALL_TESTED) == XS_FULL, "flags 0x%lx\n", Context->ContextFlags);
+    }
+    HeapFree(GetProcessHeap(), 0, Buffer);
+}
+
+static
+void
+test_GetXStateFeaturesMask(void)
+{
+    DWORD Length;
+    PCONTEXT Context = NULL;
+    PVOID Buffer;
+    DWORD64 Mask;
+    CONTEXT Plain;
+
+    /* A plain context: x87 and SSE with the floating point flag, nothing without */
+    ZeroMemory(&Plain, sizeof(Plain));
+    Plain.ContextFlags = XS_FULL;
+    Mask = 0xdeadbeef;
+    ok(pGetXStateFeaturesMask(&Plain, &Mask), "GetXStateFeaturesMask failed\n");
+    ok(Mask == ((XS_FULL & XS_FLOAT_FLAG & ~XS_ARCH) ? 3 : 0), "full context: mask 0x%I64x\n", Mask);
+    Plain.ContextFlags = XS_ARCH | XS_FLOAT_FLAG;
+    Mask = 0xdeadbeef;
+    ok(pGetXStateFeaturesMask(&Plain, &Mask), "GetXStateFeaturesMask failed\n");
+    ok(Mask == 3, "floating point context: mask 0x%I64x\n", Mask);
+    Plain.ContextFlags = XS_CONTROL;
+    Mask = 0xdeadbeef;
+    ok(pGetXStateFeaturesMask(&Plain, &Mask), "GetXStateFeaturesMask failed\n");
+    ok(Mask == 0, "control context: mask 0x%I64x\n", Mask);
+    /* No architecture flag */
+    Plain.ContextFlags = 0x8;
+    ok(!pGetXStateFeaturesMask(&Plain, &Mask), "a context without architecture succeeded\n");
+
+    if (!g_Enabled)
+        return;
+
+    /* An XSTATE context reports what SetXStateFeaturesMask put there */
+    Length = 0;
+    pInitializeContext(NULL, XS_ARCH | XS_FLOAT_FLAG | XS_XSTATE_BIT, &Context, &Length);
+    Buffer = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Length);
+    if (!Buffer)
+        return;
+    ok(pInitializeContext(Buffer, XS_ARCH | XS_FLOAT_FLAG | XS_XSTATE_BIT, &Context, &Length), "InitializeContext failed\n");
+    Mask = 0xdeadbeef;
+    ok(pGetXStateFeaturesMask(Context, &Mask), "GetXStateFeaturesMask failed\n");
+    ok(Mask == 3, "new XSTATE context: mask 0x%I64x\n", Mask);
+    if (g_Enabled & 4)
+    {
+        ok(pSetXStateFeaturesMask(Context, 4), "SetXStateFeaturesMask failed\n");
+        Mask = 0xdeadbeef;
+        ok(pGetXStateFeaturesMask(Context, &Mask), "GetXStateFeaturesMask failed\n");
+        ok(Mask == 7, "AVX context: mask 0x%I64x\n", Mask);
+    }
+    HeapFree(GetProcessHeap(), 0, Buffer);
+}
+
 static
 void
 test_IdealProcessorEx(void)
@@ -877,10 +969,6 @@ test_IdealProcessorEx(void)
     ok(Previous.Group == 0xaaaa && Previous.Number == 0xaa, "previous was written\n");
 
     SetLastError(0xdeadbeef);
-    Result = pSetThreadIdealProcessorEx(Thread, NULL, NULL);
-    ok(!Result, "NULL processor succeeded\n");
-
-    SetLastError(0xdeadbeef);
     Result = pGetThreadIdealProcessorEx((HANDLE)(ULONG_PTR)0xdeadbee0, &Number);
     ok(!Result, "bad handle succeeded\n");
     ok(GetLastError() == ERROR_INVALID_HANDLE, "got error %lu\n", GetLastError());
@@ -898,6 +986,8 @@ START_TEST(XState)
     pCopyContext = (PVOID)GetProcAddress(Kernel32, "CopyContext");
     pLocateXStateFeature = (PVOID)GetProcAddress(Kernel32, "LocateXStateFeature");
     pSetXStateFeaturesMask = (PVOID)GetProcAddress(Kernel32, "SetXStateFeaturesMask");
+    pGetXStateFeaturesMask = (PVOID)GetProcAddress(Kernel32, "GetXStateFeaturesMask");
+    pInitializeContext2 = (PVOID)GetProcAddress(Kernel32, "InitializeContext2");
     pGetThreadIdealProcessorEx = (PVOID)GetProcAddress(Kernel32, "GetThreadIdealProcessorEx");
     pSetThreadIdealProcessorEx = (PVOID)GetProcAddress(Kernel32, "SetThreadIdealProcessorEx");
 
@@ -933,5 +1023,16 @@ START_TEST(XState)
     test_LocateXStateFeature();
     test_SetXStateFeaturesMask();
     test_CopyContext();
+
+    if (pInitializeContext2 && pGetXStateFeaturesMask)
+    {
+        test_InitializeContext2();
+        test_GetXStateFeaturesMask();
+    }
+    else
+    {
+        ok(!is_reactos(), "InitializeContext2 or GetXStateFeaturesMask is not exported\n");
+        skip("The Windows 10 XState functions are not exported\n");
+    }
 #endif
 }

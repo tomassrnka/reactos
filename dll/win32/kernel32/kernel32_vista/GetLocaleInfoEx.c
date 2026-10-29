@@ -25,10 +25,18 @@ INT WINAPI GetLocaleInfoEx(LPCWSTR locale, LCTYPE info, LPWSTR buffer, INT len)
 
     if (!lcid) return 0;
 
-    /* special handling for neutral locale names */
+    /* The invariant locale has no parent */
+    if (locale && !locale[0] && (info & ~LOCALE_NOUSEROVERRIDE) == LOCALE_SPARENT)
+    {
+        if (len) buffer[0] = 0;
+        return 1;
+    }
+
+    /* special handling for neutral locale names; the LCID of a neutral name is that of its default specific
+       locale, and LOCALE_NOUSEROVERRIDE must not send the name and the parent to that one */
     if (locale && strlenW(locale) == 2)
     {
-        switch (info)
+        switch (info & ~LOCALE_NOUSEROVERRIDE)
         {
         case LOCALE_SNAME:
             if (len && len < 3)

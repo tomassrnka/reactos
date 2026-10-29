@@ -991,6 +991,137 @@ LdrpSetProtection(PVOID ViewBase,
     return STATUS_SUCCESS;
 }
 
+#ifdef _WIN64
+/*
+ * An IL-only .NET assembly built for any CPU is a PE32 file. A 64-bit runtime (CoreCLR) loads it with LoadLibraryEx
+ * and reads it as data, and Windows serves that: the loader rewrites the mapped headers to PE32+ (the machine stays
+ * i386), and it neither relocates the image, nor snaps its imports (mscoree.dll), nor calls its x86 entry stub.
+ * Returns TRUE when the image was such an assembly and its headers are now PE32+.
+ */
+static
+BOOLEAN
+LdrpCorFixupIlOnlyImage(
+    _In_ PVOID ViewBase,
+    _In_ PIMAGE_NT_HEADERS NtHeaders)
+{
+    PIMAGE_NT_HEADERS32 Nt32 = (PIMAGE_NT_HEADERS32)NtHeaders;
+    PIMAGE_NT_HEADERS64 Nt64 = (PIMAGE_NT_HEADERS64)NtHeaders;
+    IMAGE_OPTIONAL_HEADER32 Opt32;
+    IMAGE_OPTIONAL_HEADER64 Opt64;
+    PIMAGE_SECTION_HEADER Sections;
+    PIMAGE_COR20_HEADER Cor;
+    ULONG Directories, CorRva, CorSize, CorFlags, i;
+    ULONG_PTR HeaderEnd;
+    PVOID ProtectBase;
+    SIZE_T ProtectSize;
+    ULONG OldProtect;
+    NTSTATUS Status;
+
+    if (Nt32->FileHeader.Machine != IMAGE_FILE_MACHINE_I386 ||
+        Nt32->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC)
+    {
+        return FALSE;
+    }
+
+    /* The COM descriptor must be there and say IL-only, not 32-bit only */
+    Directories = min(Nt32->OptionalHeader.NumberOfRvaAndSizes, IMAGE_NUMBEROF_DIRECTORY_ENTRIES);
+    if (Directories <= IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR ||
+        Nt32->FileHeader.SizeOfOptionalHeader <
+            FIELD_OFFSET(IMAGE_OPTIONAL_HEADER32, DataDirectory) + Directories * sizeof(IMAGE_DATA_DIRECTORY))
+    {
+        return FALSE;
+    }
+    CorRva = Nt32->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR].VirtualAddress;
+    CorSize = Nt32->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR].Size;
+    if (!CorRva || CorSize < sizeof(IMAGE_COR20_HEADER) ||
+        Nt32->OptionalHeader.SizeOfImage < sizeof(IMAGE_COR20_HEADER) ||
+        CorRva > Nt32->OptionalHeader.SizeOfImage - sizeof(IMAGE_COR20_HEADER))
+    {
+        return FALSE;
+    }
+    /* The descriptor can lie in a part of the image that is not mapped */
+    Cor = (PIMAGE_COR20_HEADER)((ULONG_PTR)ViewBase + CorRva);
+    _SEH2_TRY
+    {
+        CorFlags = Cor->Flags;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        CorFlags = 0;
+    }
+    _SEH2_END;
+
+    /* Windows loads it in a 64-bit process only if it does not require 32 bits, whether or not it prefers them */
+    if (!(CorFlags & COMIMAGE_FLAGS_ILONLY) || (CorFlags & COMIMAGE_FLAGS_32BITREQUIRED))
+        return FALSE;
+
+    /* The wider headers must still fit in the header page, below the first section */
+    Sections = IMAGE_FIRST_SECTION(Nt32);
+    HeaderEnd = (ULONG_PTR)Nt64 + FIELD_OFFSET(IMAGE_NT_HEADERS64, OptionalHeader) + sizeof(IMAGE_OPTIONAL_HEADER64) +
+                Nt32->FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER) - (ULONG_PTR)ViewBase;
+    if (HeaderEnd > PAGE_SIZE)
+        return FALSE;
+    for (i = 0; i < Nt32->FileHeader.NumberOfSections; i++)
+    {
+        if (Sections[i].VirtualAddress < HeaderEnd)
+            return FALSE;
+    }
+
+    Opt32 = Nt32->OptionalHeader;
+    RtlZeroMemory(&Opt64, sizeof(Opt64));
+    Opt64.Magic = IMAGE_NT_OPTIONAL_HDR64_MAGIC;
+    Opt64.MajorLinkerVersion = Opt32.MajorLinkerVersion;
+    Opt64.MinorLinkerVersion = Opt32.MinorLinkerVersion;
+    Opt64.SizeOfCode = Opt32.SizeOfCode;
+    Opt64.SizeOfInitializedData = Opt32.SizeOfInitializedData;
+    Opt64.SizeOfUninitializedData = Opt32.SizeOfUninitializedData;
+    Opt64.AddressOfEntryPoint = Opt32.AddressOfEntryPoint;
+    Opt64.BaseOfCode = Opt32.BaseOfCode;
+    Opt64.ImageBase = Opt32.ImageBase;
+    Opt64.SectionAlignment = Opt32.SectionAlignment;
+    Opt64.FileAlignment = Opt32.FileAlignment;
+    Opt64.MajorOperatingSystemVersion = Opt32.MajorOperatingSystemVersion;
+    Opt64.MinorOperatingSystemVersion = Opt32.MinorOperatingSystemVersion;
+    Opt64.MajorImageVersion = Opt32.MajorImageVersion;
+    Opt64.MinorImageVersion = Opt32.MinorImageVersion;
+    Opt64.MajorSubsystemVersion = Opt32.MajorSubsystemVersion;
+    Opt64.MinorSubsystemVersion = Opt32.MinorSubsystemVersion;
+    Opt64.Win32VersionValue = Opt32.Win32VersionValue;
+    Opt64.SizeOfImage = Opt32.SizeOfImage;
+    Opt64.SizeOfHeaders = Opt32.SizeOfHeaders;
+    Opt64.CheckSum = Opt32.CheckSum;
+    Opt64.Subsystem = Opt32.Subsystem;
+    Opt64.DllCharacteristics = Opt32.DllCharacteristics;
+    Opt64.SizeOfStackReserve = Opt32.SizeOfStackReserve;
+    Opt64.SizeOfStackCommit = Opt32.SizeOfStackCommit;
+    Opt64.SizeOfHeapReserve = Opt32.SizeOfHeapReserve;
+    Opt64.SizeOfHeapCommit = Opt32.SizeOfHeapCommit;
+    Opt64.LoaderFlags = Opt32.LoaderFlags;
+    Opt64.NumberOfRvaAndSizes = Directories;
+    for (i = 0; i < Directories; i++)
+        Opt64.DataDirectory[i] = Opt32.DataDirectory[i];
+
+    /* The header page of an image view is read-only; the write makes it a private copy */
+    ProtectBase = ViewBase;
+    ProtectSize = PAGE_SIZE;
+    Status = NtProtectVirtualMemory(NtCurrentProcess(), &ProtectBase, &ProtectSize, PAGE_READWRITE, &OldProtect);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+
+    /* The section table moves up behind the wider optional header */
+    RtlMoveMemory(&Nt64->OptionalHeader + 1,
+                  Sections,
+                  Nt32->FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER));
+    Nt64->FileHeader.SizeOfOptionalHeader = sizeof(IMAGE_OPTIONAL_HEADER64);
+    Nt64->OptionalHeader = Opt64;
+
+    ProtectBase = ViewBase;
+    ProtectSize = PAGE_SIZE;
+    NtProtectVirtualMemory(NtCurrentProcess(), &ProtectBase, &ProtectSize, OldProtect, &OldProtect);
+    return TRUE;
+}
+#endif
+
 /* NOTE: Not yet reviewed */
 NTSTATUS
 NTAPI
@@ -1028,6 +1159,7 @@ LdrpMapDll(IN PWSTR SearchPath OPTIONAL,
     UNICODE_STRING IllegalDll;
     PVOID RelocData;
     ULONG RelocDataSize = 0;
+    BOOLEAN CorIlOnly = FALSE;
 
     // FIXME: AppCompat stuff is missing
 
@@ -1196,7 +1328,22 @@ SkipCheck:
         return STATUS_INVALID_IMAGE_FORMAT;
     }
 
-    // FIXME: .NET support is missing
+#ifdef _WIN64
+    /* An IL-only assembly for any CPU is loaded as data for the runtime. The kernel says the machine is not ours
+       when the image has code, and it is not relocated either way. An import is no such load: Windows fails the
+       image there, and its import tables are PE32 anyway */
+    if (!Static &&
+        (Status == STATUS_IMAGE_MACHINE_TYPE_MISMATCH || Status == STATUS_IMAGE_NOT_AT_BASE || Status == STATUS_SUCCESS) &&
+        LdrpCorFixupIlOnlyImage(ViewBase, NtHeaders))
+    {
+        if (ShowSnaps)
+        {
+            DPRINT1("LDR: %wZ is an IL-only PE32 image, its headers are now PE32+\n", &FullDllName);
+        }
+        CorIlOnly = TRUE;
+        Status = STATUS_SUCCESS;
+    }
+#endif
 
     /* Allocate an entry */
     if (!(LdrEntry = LdrpAllocateDataTableEntry(ViewBase)))
@@ -1294,6 +1441,13 @@ SkipCheck:
         {
             LdrEntry->EntryPoint = 0;
         }
+    }
+
+    /* Its x86 entry stub never runs and its imports stay unsnapped */
+    if (CorIlOnly)
+    {
+        LdrEntry->Flags |= LDRP_COR_IMAGE;
+        LdrEntry->EntryPoint = 0;
     }
 
 #if (_WIN32_WINNT >= _WIN32_WINNT_VISTA) || (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA)

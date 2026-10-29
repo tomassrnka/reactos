@@ -103,6 +103,59 @@ InitializeContext(
     return TRUE;
 }
 
+/*
+ * InitializeContext with the XSAVE compaction mask of the context given (Windows 10): a compacted XSTATE area then
+ * has room for those features only. A system without extended state drops CONTEXT_XSTATE as InitializeContext does.
+ */
+BOOL
+WINAPI
+InitializeContext2(
+    _Out_writes_bytes_opt_(*ContextLength) PVOID Buffer,
+    _In_ DWORD ContextFlags,
+    _Out_opt_ PCONTEXT *Context,
+    _Inout_ PDWORD ContextLength,
+    _In_ ULONG64 XStateCompactionMask)
+{
+    PXCONTEXT_EX ContextEx;
+    NTSTATUS Status;
+    ULONG Needed;
+    DWORD Available;
+
+    if (!ContextLength)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    Available = *ContextLength;
+    Status = RtlGetExtendedContextLength2(ContextFlags, &Needed, XStateCompactionMask);
+    if (Status == STATUS_NOT_SUPPORTED && (ContextFlags & XSTATE_CONTEXT_FLAG))
+    {
+        ContextFlags &= ~XSTATE_CONTEXT_FLAG;
+        Status = RtlGetExtendedContextLength2(ContextFlags, &Needed, XStateCompactionMask);
+    }
+    if (!K32SetNtStatus(Status))
+        return FALSE;
+    *ContextLength = Needed;
+
+    if (!Buffer || Available < Needed)
+    {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    if (!Context)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if (!K32SetNtStatus(RtlInitializeExtendedContext2(Buffer, ContextFlags, &ContextEx, XStateCompactionMask)))
+        return FALSE;
+
+    *Context = (PCONTEXT)((PUCHAR)ContextEx + ContextEx->Legacy.Offset);
+    return TRUE;
+}
+
 BOOL
 WINAPI
 CopyContext(
@@ -147,6 +200,22 @@ LocateXStateFeature(
     if (Length)
         *Length = FIELD_OFFSET(XSAVE_FORMAT, XmmRegisters);
     return Area;
+}
+
+/* The x87 and SSE bits come from the context flags, the others from the XSTATE header (Windows 10) */
+BOOL
+WINAPI
+GetXStateFeaturesMask(
+    _In_ PCONTEXT Context,
+    _Out_ PDWORD64 FeatureMask)
+{
+    if (!Context || !FeatureMask || (Context->ContextFlags & K32_CONTEXT_ARCH) != K32_CONTEXT_ARCH)
+        return FALSE;
+
+    *FeatureMask = ((Context->ContextFlags & K32_CONTEXT_LEGACY_FLOAT) == K32_CONTEXT_LEGACY_FLOAT) ? 3 : 0;
+    if ((Context->ContextFlags & CONTEXT_XSTATE) == CONTEXT_XSTATE)
+        *FeatureMask |= RtlGetExtendedFeaturesMask((PXCONTEXT_EX)(Context + 1));
+    return TRUE;
 }
 
 /* The x87 and SSE bits go to the context flags, the others to the XSTATE header; they need CONTEXT_XSTATE */

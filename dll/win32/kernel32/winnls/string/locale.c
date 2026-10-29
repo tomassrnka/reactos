@@ -3987,6 +3987,11 @@ INT WINAPI CompareStringEx(LPCWSTR locale, DWORD flags, LPCWSTR str1, INT len1,
     if (len1 < 0) len1 = strlenW(str1);
     if (len2 < 0) len2 = strlenW(str2);
 
+#ifdef __REACTOS__
+    /* The comparison only knows NORM_IGNORECASE; linguistic case folding is the closest it has */
+    if (flags & LINGUISTIC_IGNORECASE)
+        flags |= NORM_IGNORECASE;
+#endif
     ret = wine_compare_string(flags, str1, len1, str2, len2);
 
     if (ret) /* need to translate result */

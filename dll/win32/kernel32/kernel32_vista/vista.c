@@ -1217,3 +1217,76 @@ FindStringOrdinal(
     }
     return -1;
 }
+
+/******************************************************************************
+ *           FindNLSStringEx    (KERNEL32.@)
+ *
+ * After Wine's kernel32 (dlls/kernel32/locale.c, Wine 4.x), Copyright 2001 Alexandre Julliard and others, LGPL-2.1+.
+ * A window the length of the value slides over the source and CompareStringEx decides each position, so a match
+ * is always as long as the value: the source is not normalized, and a linguistic match of a different length
+ * (ignorable characters, expansions) is not found.
+ */
+INT
+WINAPI
+FindNLSStringEx(
+    _In_opt_ LPCWSTR lpLocaleName,
+    _In_ DWORD dwFindNLSStringFlags,
+    _In_ LPCWSTR lpStringSource,
+    _In_ INT cchSource,
+    _In_ LPCWSTR lpStringValue,
+    _In_ INT cchValue,
+    _Out_opt_ LPINT pcchFound,
+    _In_opt_ LPNLSVERSIONINFO lpVersionInformation,
+    _In_opt_ LPVOID lpReserved,
+    _In_opt_ LPARAM sortHandle)
+{
+    const DWORD FindFlags = FIND_FROMSTART | FIND_FROMEND | FIND_STARTSWITH | FIND_ENDSWITH;
+    DWORD CompareFlags, Direction;
+    INT offset, inc, count, ret;
+
+    /* The version information, the reserved pointer and the sort handle are ignored (Windows takes them without an error) */
+    UNREFERENCED_PARAMETER(lpVersionInformation);
+    UNREFERENCED_PARAMETER(lpReserved);
+    UNREFERENCED_PARAMETER(sortHandle);
+    if (!lpStringSource || !cchSource || cchSource < -1 ||
+        !lpStringValue || !cchValue || cchValue < -1)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return -1;
+    }
+
+    /* One direction at most, and none means from the start (measured on Windows 10 22H2) */
+    Direction = dwFindNLSStringFlags & FindFlags;
+    if (Direction & (Direction - 1))
+    {
+        SetLastError(ERROR_INVALID_FLAGS);
+        return -1;
+    }
+    if (!Direction) dwFindNLSStringFlags |= FIND_FROMSTART;
+
+    if (cchSource == -1) cchSource = lstrlenW(lpStringSource);
+    if (cchValue == -1) cchValue = lstrlenW(lpStringValue);
+
+    SetLastError(ERROR_SUCCESS);
+    cchSource -= cchValue;
+    if (cchSource < 0) return -1;
+
+    CompareFlags = dwFindNLSStringFlags & ~FindFlags;
+    count = dwFindNLSStringFlags & (FIND_FROMSTART | FIND_FROMEND) ? cchSource + 1 : 1;
+    offset = dwFindNLSStringFlags & (FIND_FROMSTART | FIND_STARTSWITH) ? 0 : cchSource;
+    inc = dwFindNLSStringFlags & (FIND_FROMSTART | FIND_STARTSWITH) ? 1 : -1;
+    while (count--)
+    {
+        ret = CompareStringEx(lpLocaleName, CompareFlags, lpStringSource + offset, cchValue,
+                              lpStringValue, cchValue, NULL, NULL, 0);
+        if (ret == CSTR_EQUAL)
+        {
+            if (pcchFound) *pcchFound = cchValue;
+            return offset;
+        }
+        /* A bad locale or flag: CompareStringEx has set the error */
+        if (!ret) return -1;
+        offset += inc;
+    }
+    return -1;
+}

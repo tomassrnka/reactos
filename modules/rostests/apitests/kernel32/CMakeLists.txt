@@ -55,7 +55,9 @@ list(APPEND SOURCE
     FindActCtxSectionStringW.c
     FindFiles.c
     FindFirstFileEx.c
+    FindNLSStringEx.c
     FindStringOrdinal.c
+    FlushProcessWriteBuffers.c
     FLS.c
     ForcedRelocation.c
     FormatMessage.c
@@ -95,6 +97,7 @@ list(APPEND SOURCE
     LoadString.c
     LoadLibraryErrorMode.c
     LoadLibraryExW.c
+    LoadLibraryILOnly.c
     LoadLibraryMachine.c
     LocalDumps.c
     CrashDialog.c

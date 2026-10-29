@@ -455,3 +455,37 @@ KiIpiSendRequest(
     KeLowerIrql(OldIrql);
 }
 
+
+static
+VOID
+NTAPI
+KiFlushProcessWriteBuffersTarget(
+    _In_ PKIPI_CONTEXT PacketContext,
+    _In_ PVOID Parameter1,
+    _In_ PVOID Parameter2,
+    _In_ PVOID Parameter3)
+{
+    UNREFERENCED_PARAMETER(PacketContext);
+    UNREFERENCED_PARAMETER(Parameter1);
+    UNREFERENCED_PARAMETER(Parameter2);
+    UNREFERENCED_PARAMETER(Parameter3);
+
+    /* The interrupt serializes this processor; the barrier drains its store buffer */
+    KeMemoryBarrier();
+}
+
+/*
+ * @implemented
+ *
+ * Every processor that may run a thread of the process drains its write buffer before the call returns, so the
+ * caller sees the stores those threads made before (a runtime suspending its threads relies on it).
+ */
+NTSTATUS
+NTAPI
+NtFlushProcessWriteBuffers(VOID)
+{
+    PAGED_CODE();
+
+    KiIpiSendRequest(KeActiveProcessors, KiFlushProcessWriteBuffersTarget, NULL, NULL, NULL);
+    return STATUS_SUCCESS;
+}

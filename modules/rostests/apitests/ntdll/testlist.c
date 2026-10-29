@@ -142,6 +142,7 @@ extern void func_RtlGetProcessHeaps(void);
 extern void func_RtlGrowableFunctionTable(void);
 extern void func_RtlGetProductInfo(void);
 extern void func_RtlGetUnloadEventTrace(void);
+extern void func_RtlPlaceholderCompatibilityMode(void);
 extern void func_RtlHandle(void);
 extern void func_RtlHeapTailCheck(void);
 extern void func_RtlImageDirectoryEntryToData(void);
@@ -342,6 +343,7 @@ const struct test winetest_testlist[] =
     { "RtlGrowableFunctionTable",       func_RtlGrowableFunctionTable },
     { "RtlGetProductInfo",              func_RtlGetProductInfo },
     { "RtlGetUnloadEventTrace",         func_RtlGetUnloadEventTrace },
+    { "RtlPlaceholderCompatibilityMode", func_RtlPlaceholderCompatibilityMode },
     { "RtlHandle",                      func_RtlHandle },
     { "RtlHeapTailCheck",               func_RtlHeapTailCheck },
     { "RtlImageDirectoryEntryToData",   func_RtlImageDirectoryEntryToData },
