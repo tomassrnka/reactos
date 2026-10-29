@@ -389,6 +389,64 @@ static void TestAcceptExBadAcceptor(void)
     closesocket(Listener);
 }
 
+/*
+ * A remote address area shorter than 8 bytes is refused with WSAEFAULT instead of being
+ * queued; the local area may be any length. Measured on Windows 10, 32 and 64 bit.
+ */
+static void TestAcceptExShortAddress(void)
+{
+    static const DWORD RemoteLengths[] = { 0, 1, 4, 7 };
+    SOCKET Listener, Acceptor;
+    SOCKADDR_IN ListenAddress;
+    OVERLAPPED Overlapped;
+    UCHAR Buffer[64];
+    DWORD Bytes, i;
+    BOOL Result;
+    int Error;
+
+    if (!CreateListener(&Listener, &ListenAddress))
+        return;
+    ZeroMemory(&Overlapped, sizeof(Overlapped));
+    Overlapped.hEvent = WSACreateEvent();
+
+    for (i = 0; i < ARRAYSIZE(RemoteLengths); i++)
+    {
+        Acceptor = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        ok(Acceptor != INVALID_SOCKET, "socket failed: %d\n", WSAGetLastError());
+        if (Acceptor == INVALID_SOCKET)
+            break;
+        Bytes = 0;
+        Result = AcceptEx(Listener, Acceptor, Buffer, 0, ADDRESS_LENGTH, RemoteLengths[i], &Bytes, &Overlapped);
+        Error = WSAGetLastError();
+        ok(!Result && Error == WSAEFAULT, "remote length %lu: result %d, error %d\n", RemoteLengths[i], Result, Error);
+        closesocket(Acceptor);
+    }
+
+    /* 8 bytes are enough, whatever the local area; the request waits for a connection */
+    Acceptor = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    ok(Acceptor != INVALID_SOCKET, "socket failed: %d\n", WSAGetLastError());
+    if (Acceptor != INVALID_SOCKET)
+    {
+        Bytes = 0;
+        Result = AcceptEx(Listener, Acceptor, Buffer, 0, 0, 8, &Bytes, &Overlapped);
+        Error = WSAGetLastError();
+        ok(!Result && Error == ERROR_IO_PENDING, "remote length 8: result %d, error %d\n", Result, Error);
+        if (!CloseSockets(Listener, Acceptor, INVALID_SOCKET) ||
+            (!Result && Error == ERROR_IO_PENDING &&
+             WaitForSingleObject(Overlapped.hEvent, WAIT_MS) != WAIT_OBJECT_0))
+        {
+            ok(0, "the short address AcceptEx did not finish after its sockets were closed\n");
+            TeardownHung = TRUE;
+            return;
+        }
+    }
+    else
+    {
+        closesocket(Listener);
+    }
+    WSACloseEvent(Overlapped.hEvent);
+}
+
 START_TEST(AcceptEx)
 {
     GUID AcceptExGuid = WSAID_ACCEPTEX, SockaddrsGuid = WSAID_GETACCEPTEXSOCKADDRS;
@@ -429,6 +487,8 @@ START_TEST(AcceptEx)
     TestAcceptEx(AcceptEx, GetAcceptExSockaddrs, "mswsock", DATA_LENGTH, ADDRESS_LENGTH, SendAfterPost);
     TestAcceptEx(AcceptEx, GetAcceptExSockaddrs, "mswsock", 0, ADDRESS_LENGTH, SendAfterPost);
 
+    if (!TeardownHung)
+        TestAcceptExShortAddress();
     if (!TeardownHung)
         TestAcceptExBadAcceptor();
 

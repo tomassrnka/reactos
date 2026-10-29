@@ -2055,7 +2055,8 @@ WSPAcceptEx(
         return FALSE;
     }
 
-    if (!lpOutputBuffer || !dwRemoteAddressLength)
+    /* Windows: the remote address area must hold at least 8 bytes */
+    if (!lpOutputBuffer || dwRemoteAddressLength < 8)
     {
         SetLastError(WSAEFAULT);
         return FALSE;
@@ -2505,7 +2506,7 @@ WSPConnectEx(
 
     if (!lpSendBuffer && dwSendDataLength)
     {
-        SetLastError(ERROR_INVALID_PARAMETER);
+        SetLastError(WSAEFAULT);
         return FALSE;
     }
 

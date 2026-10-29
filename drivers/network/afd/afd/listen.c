@@ -953,6 +953,8 @@ NTSTATUS AfdAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     return UnlockAndMaybeComplete( FCB, STATUS_UNSUCCESSFUL, Irp, 0 );
 }
 
+#define AFD_MIN_SUPER_ACCEPT_REMOTE_LENGTH 8
+
 NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                     PIO_STACK_LOCATION IrpSp ) {
     NTSTATUS Status = STATUS_SUCCESS;
@@ -987,6 +989,12 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     {
         return UnlockAndMaybeComplete(Fcb, STATUS_INVALID_PARAMETER, Irp, 0);
     }
+
+    /* Windows answers an AcceptEx whose remote address area is shorter than 8 bytes
+     * with WSAEFAULT instead of queueing it (measured on Windows 10, 32 and 64 bit;
+     * the local area may be any length, even 0) */
+    if (AcceptRequest->RemoteAddressLength < AFD_MIN_SUPER_ACCEPT_REMOTE_LENGTH)
+        return UnlockAndMaybeComplete(Fcb, STATUS_INVALID_PARAMETER, Irp, 0);
 
     /* Allow the IRP to access UserBuffer later */
     Irp->Tail.Overlay.DriverContext[3] = IoAllocateMdl(Irp->UserBuffer, OutputLength, FALSE, FALSE, NULL);
