@@ -7,6 +7,10 @@
 
 #include "precomp.h"
 
+#ifndef LOCALE_SPARENT
+#define LOCALE_SPARENT 0x6d
+#endif
+
 typedef
 int
 WINAPI
@@ -81,6 +85,35 @@ static void Test_GetLocaleInfoEx(void)
     ok_eq_long(GetLastError(), (ULONG)ERROR_INVALID_PARAMETER);
     ok(CodePage == 0xdeadbeef, "CodePage should not have been modified: %lx\n", CodePage);
 
+    // A neutral name keeps its name and its parent, with LOCALE_NOUSEROVERRIDE too (the .NET culture chain)
+    {
+        static const struct { PCWSTR Locale; LCTYPE Type; PCWSTR Expected; } Names[] =
+        {
+            { L"en-US", LOCALE_SNAME, L"en-US" },
+            { L"en-US", LOCALE_SPARENT, L"en" },
+            { L"en-US", LOCALE_SPARENT | LOCALE_NOUSEROVERRIDE, L"en" },
+            { L"en", LOCALE_SNAME, L"en" },
+            { L"en", LOCALE_SNAME | LOCALE_NOUSEROVERRIDE, L"en" },
+            { L"en", LOCALE_SPARENT, L"" },
+            { L"en", LOCALE_SPARENT | LOCALE_NOUSEROVERRIDE, L"" },
+            { L"de", LOCALE_SPARENT | LOCALE_NOUSEROVERRIDE, L"" },
+            { L"", LOCALE_SNAME, L"" },
+            { L"", LOCALE_SPARENT, L"" },
+            { L"", LOCALE_SPARENT | LOCALE_NOUSEROVERRIDE, L"" },
+        };
+        WCHAR Buffer[85];
+        ULONG i;
+
+        for (i = 0; i < _countof(Names); i++)
+        {
+            Buffer[0] = L'?';
+            Buffer[1] = 0;
+            Ret = pGetLocaleInfoEx(Names[i].Locale, Names[i].Type, Buffer, _countof(Buffer));
+            ok(Ret == (INT)wcslen(Names[i].Expected) + 1, "%ls 0x%lx: returned %d\n", Names[i].Locale, Names[i].Type, Ret);
+            ok(!wcscmp(Buffer, Names[i].Expected), "%ls 0x%lx: got '%ls', expected '%ls'\n",
+               Names[i].Locale, Names[i].Type, Buffer, Names[i].Expected);
+        }
+    }
 }
 
 #undef GetLocaleInfo

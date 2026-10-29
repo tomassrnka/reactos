@@ -701,6 +701,13 @@ NtYieldExecution(
     VOID
 );
 
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtFlushProcessWriteBuffers(
+    VOID
+);
+
 NTSYSAPI
 NTSTATUS
 NTAPI
@@ -904,6 +911,13 @@ NTSYSAPI
 NTSTATUS
 NTAPI
 ZwYieldExecution(
+    VOID
+);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+ZwFlushProcessWriteBuffers(
     VOID
 );
 #endif

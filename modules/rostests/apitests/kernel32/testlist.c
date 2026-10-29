@@ -58,7 +58,9 @@ extern void func_ExitThread(void);
 extern void func_FindActCtxSectionStringW(void);
 extern void func_FindFiles(void);
 extern void func_FindFirstFileEx(void);
+extern void func_FindNLSStringEx(void);
 extern void func_FindStringOrdinal(void);
+extern void func_FlushProcessWriteBuffers(void);
 extern void func_FLS(void);
 extern void func_ForcedRelocation(void);
 extern void func_FormatMessage(void);
@@ -98,6 +100,7 @@ extern void func_LCMapString(void);
 extern void func_LoadString(void);
 extern void func_LoadLibraryErrorMode(void);
 extern void func_LoadLibraryExW(void);
+extern void func_LoadLibraryILOnly(void);
 extern void func_LoadLibraryMachine(void);
 extern void func_LocalDumps(void);
 extern void func_CrashDialog(void);
@@ -219,7 +222,9 @@ const struct test winetest_testlist[] =
     { "FindActCtxSectionStringW",    func_FindActCtxSectionStringW },
     { "FindFiles",                   func_FindFiles },
     { "FindFirstFileEx",             func_FindFirstFileEx },
+    { "FindNLSStringEx",             func_FindNLSStringEx },
     { "FindStringOrdinal",           func_FindStringOrdinal },
+    { "FlushProcessWriteBuffers",     func_FlushProcessWriteBuffers },
     { "FLS",                         func_FLS },
     { "ForcedRelocation",            func_ForcedRelocation },
     { "FormatMessage",               func_FormatMessage },
@@ -259,6 +264,7 @@ const struct test winetest_testlist[] =
     { "LoadString", func_LoadString },
     { "LoadLibraryErrorMode",        func_LoadLibraryErrorMode },
     { "LoadLibraryExW",              func_LoadLibraryExW },
+    { "LoadLibraryILOnly",            func_LoadLibraryILOnly },
     { "LoadLibraryMachine",          func_LoadLibraryMachine },
     { "LocalDumps",                  func_LocalDumps },
     { "CrashDialog",                 func_CrashDialog },

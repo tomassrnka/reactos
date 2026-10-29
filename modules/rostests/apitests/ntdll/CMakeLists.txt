@@ -157,6 +157,7 @@ list(APPEND SOURCE
     RtlGetProcessHeaps.c
     RtlGetProductInfo.c
     RtlGetUnloadEventTrace.c
+    RtlPlaceholderCompatibilityMode.c
     RtlHandle.c
     RtlHeapTailCheck.c
     RtlImageDirectoryEntryToData.c

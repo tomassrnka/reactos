@@ -1528,13 +1528,7 @@ DWORD CDECL MSVCP__crtGetCurrentProcessorNumber(void)
  */
 VOID CDECL MSVCP__crtFlushProcessWriteBuffers(void)
 {
-#ifdef __REACTOS__
-    /* kernel32 has only a stub of FlushProcessWriteBuffers and the kernel has no barrier on the
-     * other processors: the caller gets a barrier on its own processor only */
-    MemoryBarrier();
-#else
     FlushProcessWriteBuffers();
-#endif
 }
 
 /*********************************************************************

@@ -1000,6 +1000,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
     }
     case W64_NtTestAlert: return NtTestAlert();
     case W64_NtYieldExecution: return NtYieldExecution();
+    case W64_NtFlushProcessWriteBuffers: return NtFlushProcessWriteBuffers();
     case W64_NtIsProcessInJob: return NtIsProcessInJob(H(0), H(1));
     case W64_NtTerminateProcess: return NtTerminateProcess(H(0), a[1]);
     case W64_NtTerminateThread: return NtTerminateThread(H(0), a[1]);
