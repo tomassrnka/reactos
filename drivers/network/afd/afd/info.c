@@ -278,6 +278,100 @@ AfdSetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     return UnlockAndMaybeComplete(FCB, Status, Irp, 0);
 }
 
+/* Private query to tcpip.sys, see tcpip dispatch.c: the input is a TA_IP_ADDRESS
+ * with a destination, the output the same structure holding the address of the
+ * interface a datagram sent to it leaves from */
+#define TDI_QUERY_ROS_SOURCE_ADDRESS 0x00008001
+
+/* Runs a TDI query into a kernel buffer; the query takes ownership of the MDL */
+static NTSTATUS
+AfdQueryTransportBuffer(PFILE_OBJECT Object, LONG QueryType, PVOID Buffer, ULONG Size)
+{
+    NTSTATUS Status = STATUS_SUCCESS;
+    PMDL Mdl = IoAllocateMdl(Buffer, Size, FALSE, FALSE, NULL);
+
+    if (Mdl == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    _SEH2_TRY {
+        MmProbeAndLockPages(Mdl, KernelMode, IoModifyAccess);
+    } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
+        Status = _SEH2_GetExceptionCode();
+    } _SEH2_END;
+
+    if (!NT_SUCCESS(Status))
+    {
+        IoFreeMdl(Mdl);
+        return Status;
+    }
+
+    return TdiQueryInformation(Object, QueryType, Mdl);
+}
+
+/* The local name of a connected datagram socket: a socket bound to the wildcard
+ * address reports the address of the interface its datagrams to the peer leave
+ * from, as Windows does. Called with the state lock held; completes the IRP. */
+static NTSTATUS
+AfdGetConnectedDatagramName(PAFD_FCB FCB, PIRP Irp, PIO_STACK_LOCATION IrpSp)
+{
+    const ULONG InfoSize = FIELD_OFFSET(TDI_ADDRESS_INFO, Address.Address[0].Address) +
+                           sizeof(TDI_ADDRESS_IP);
+    PTDI_ADDRESS_INFO Info;
+    PTA_IP_ADDRESS Source;
+    PTDI_ADDRESS_IP Local, Remote;
+    NTSTATUS Status;
+
+    if (IrpSp->Parameters.DeviceIoControl.OutputBufferLength < InfoSize)
+        return UnlockAndMaybeComplete(FCB, STATUS_BUFFER_TOO_SMALL, Irp, 0);
+
+    /* The address information, then the route query, in one allocation */
+    Info = ExAllocatePoolWithTag(NonPagedPool, 2 * 64, TAG_AFD_TRANSPORT_ADDRESS);
+    if (Info == NULL)
+        return UnlockAndMaybeComplete(FCB, STATUS_INSUFFICIENT_RESOURCES, Irp, 0);
+    RtlZeroMemory(Info, 2 * 64);
+    Source = (PTA_IP_ADDRESS)((PUCHAR)Info + 64);
+
+    Status = AfdQueryTransportBuffer(FCB->AddressFile.Object,
+                                     TDI_QUERY_ADDRESS_INFO,
+                                     Info,
+                                     InfoSize);
+    if (NT_SUCCESS(Status))
+    {
+        Local = (PTDI_ADDRESS_IP)Info->Address.Address[0].Address;
+        Remote = (PTDI_ADDRESS_IP)FCB->RemoteAddress->Address[0].Address;
+
+        if (Local->in_addr == 0)
+        {
+            Source->TAAddressCount = 1;
+            Source->Address[0].AddressLength = TDI_ADDRESS_LENGTH_IP;
+            Source->Address[0].AddressType = TDI_ADDRESS_TYPE_IP;
+            Source->Address[0].Address[0].in_addr = Remote->in_addr;
+
+            /* Without a route the socket stays on the wildcard address */
+            if (NT_SUCCESS(AfdQueryTransportBuffer(FCB->AddressFile.Object,
+                                                   TDI_QUERY_ROS_SOURCE_ADDRESS,
+                                                   Source,
+                                                   sizeof(TA_IP_ADDRESS))))
+            {
+                Local->in_addr = Source->Address[0].Address[0].in_addr;
+            }
+        }
+
+        /* This is a METHOD_NEITHER IOCTL: probe the raw user pointer and copy under SEH */
+        _SEH2_TRY {
+            if (Irp->RequestorMode != KernelMode)
+                ProbeForWrite(Irp->UserBuffer, InfoSize, sizeof(CHAR));
+            RtlCopyMemory(Irp->UserBuffer, Info, InfoSize);
+        } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
+            Status = STATUS_INVALID_PARAMETER;
+        } _SEH2_END;
+    }
+
+    ExFreePoolWithTag(Info, TAG_AFD_TRANSPORT_ADDRESS);
+
+    return UnlockAndMaybeComplete(FCB, Status, Irp, 0);
+}
+
 NTSTATUS NTAPI
 AfdGetSockName( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                 PIO_STACK_LOCATION IrpSp ) {
@@ -293,6 +387,16 @@ AfdGetSockName( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     if( FCB->AddressFile.Object == NULL && FCB->Connection.Object == NULL ) {
          return UnlockAndMaybeComplete( FCB, STATUS_INVALID_PARAMETER, Irp, 0 );
+    }
+
+    /* connect() on a datagram socket only records the peer */
+    if( (FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS) &&
+        FCB->AddressFile.Object &&
+        FCB->RemoteAddress &&
+        FCB->RemoteAddress->TAAddressCount == 1 &&
+        FCB->RemoteAddress->Address[0].AddressType == TDI_ADDRESS_TYPE_IP &&
+        FCB->RemoteAddress->Address[0].AddressLength >= TDI_ADDRESS_LENGTH_IP ) {
+        return AfdGetConnectedDatagramName( FCB, Irp, IrpSp );
     }
 
     Mdl = IoAllocateMdl( Irp->UserBuffer,

@@ -14,6 +14,9 @@
 #include <datagram.h>
 #include <pseh/pseh2.h>
 
+/* Private query, shared with AFD (afd/info.c) */
+#define TDI_QUERY_ROS_SOURCE_ADDRESS 0x00008001
+
 typedef struct _QUERY_HW_WORK_ITEM {
     PIO_WORKITEM WorkItem;
     PIRP Irp;
@@ -728,6 +731,35 @@ NTSTATUS DispTdiQueryInformation(
 
   switch (Parameters->QueryType)
   {
+    case TDI_QUERY_ROS_SOURCE_ADDRESS:
+      {
+        /* The address of the interface a datagram to the given destination
+         * leaves from (AFD answers getsockname of a connected UDP socket
+         * with it). The buffer holds a TA_IP_ADDRESS: in the destination,
+         * out the source address. */
+        PTA_IP_ADDRESS Ta;
+        PNEIGHBOR_CACHE_ENTRY NCE;
+        IP_ADDRESS Destination;
+
+        if (!Irp->MdlAddress ||
+            MmGetMdlByteCount(Irp->MdlAddress) < sizeof(TA_IP_ADDRESS))
+          return STATUS_BUFFER_TOO_SMALL;
+
+        Ta = (PTA_IP_ADDRESS)MmGetSystemAddressForMdl(Irp->MdlAddress);
+        if (Ta->TAAddressCount != 1 ||
+            Ta->Address[0].AddressType != TDI_ADDRESS_TYPE_IP)
+          return STATUS_INVALID_PARAMETER;
+
+        AddrInitIPv4(&Destination, Ta->Address[0].Address[0].in_addr);
+        NCE = RouteGetRouteToDestination(&Destination);
+        if (!NCE)
+          return STATUS_NETWORK_UNREACHABLE;
+
+        Ta->Address[0].Address[0].in_addr = NCE->Interface->Unicast.Address.IPv4Address;
+        NBDereferenceNeighbor(NCE);
+        return STATUS_SUCCESS;
+      }
+
     case TDI_QUERY_ADDRESS_INFO:
       {
         PTDI_ADDRESS_INFO AddressInfo;
@@ -1115,9 +1147,18 @@ NTSTATUS DispTdiSendDatagram(
 
 	TI_DbgPrint(MID_TRACE,("About to query buffer %x\n", Irp->MdlAddress));
 
-	NdisQueryBuffer( (PNDIS_BUFFER)Irp->MdlAddress,
-			 &DataBuffer,
-			 &BufferSize );
+	/* A zero-length datagram comes with no MDL */
+	if (Irp->MdlAddress)
+	{
+	    NdisQueryBuffer( (PNDIS_BUFFER)Irp->MdlAddress,
+			     &DataBuffer,
+			     &BufferSize );
+	}
+	else
+	{
+	    DataBuffer = NULL;
+	    BufferSize = 0;
+	}
 
         /* FIXME: DgramInfo->SendDatagramInformation->RemoteAddress
            must be of type PTDI_ADDRESS_IP */

@@ -121,11 +121,7 @@ static void TestData(SOCKET Sender)
     Ret = pWSASendMsg(Sender, &Msg, 0, &Sent, NULL, NULL);
     ok(Ret == 0, "One empty buffer: returned %d, error %d\n", Ret, WSAGetLastError());
     ok(Sent == 0, "One empty buffer: sent %lu bytes\n", Sent);
-    /* The TCP/IP driver of ReactOS sends nothing for an empty datagram */
-    todo_if(is_reactos())
-    {
-        ExpectDatagram("empty datagram", "", 0);
-    }
+    ExpectDatagram("empty datagram", "", 0);
     Buffers[0].len = 5;
 
     /* A NULL buffer is fine when it is empty */
