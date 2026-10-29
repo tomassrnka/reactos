@@ -1210,20 +1210,21 @@ WSPSelect(IN int nfds,
     }
     else
     {
-        Timeout = RtlEnlargedIntegerMultiply
-            ((timeout->tv_sec * 1000) + (timeout->tv_usec / 1000), -10000);
-        /* Negative timeouts are illegal.  Since the kernel represents an
-         * incremental timeout as a negative number, we check for a positive
-         * result.
-         */
-        if (Timeout.QuadPart > 0)
-        {
-            if (lpErrno) *lpErrno = WSAEINVAL;
-            return SOCKET_ERROR;
-        }
-        TRACE("Timeout: Orig %d.%06d kernel %d\n",
+        /* Like Windows: the timeout is tv_sec * 10^6 + tv_usec microseconds, as a
+         * signed 64-bit sum of the two (signed, 32-bit) fields. Nothing is rejected:
+         * a sum <= 0 (negative tv_sec, negative tv_usec) polls without waiting, a
+         * tv_usec >= 10^6 just adds to the seconds, and large sums simply wait very
+         * long (INT_MAX seconds in 100 ns units still fits 64 bits). The kernel
+         * takes a relative timeout as a negative number. */
+        LONGLONG Micro = (LONGLONG)timeout->tv_sec * 1000000 + timeout->tv_usec;
+
+        if (Micro <= 0)
+            Timeout.QuadPart = 0;
+        else
+            Timeout.QuadPart = -(Micro * 10);
+        TRACE("Timeout: Orig %d.%06d kernel %I64d\n",
                      timeout->tv_sec, timeout->tv_usec,
-                     Timeout.u.LowPart);
+                     Timeout.QuadPart);
     }
 
     Status = NtCreateEvent(&SockEvent,
