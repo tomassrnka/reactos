@@ -5,6 +5,7 @@ list(APPEND SOURCE
     ChainTrust.c
     CryptExportPublicKeyInfoFromBCryptKeyHandle.c
     CryptTimeStamp.c
+    CryptStringToBinaryStrict.c
     testlist.c)
 
 add_executable(crypt32_apitest ${SOURCE})
