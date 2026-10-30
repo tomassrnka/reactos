@@ -19,6 +19,7 @@ extern void func_getaddrinfo(void);
 extern void func_GetHostNameW(void);
 extern void func_gethostname(void);
 extern void func_getnameinfo(void);
+extern void func_getnameinfoserv(void);
 extern void func_getpeername(void);
 extern void func_getservbyname(void);
 extern void func_getservbyport(void);
@@ -80,6 +81,7 @@ const struct test winetest_testlist[] =
     { "GetHostNameW", func_GetHostNameW },
     { "gethostname", func_gethostname },
     { "getnameinfo", func_getnameinfo },
+    { "getnameinfoserv", func_getnameinfoserv },
     { "getpeername", func_getpeername },
     { "getservbyname", func_getservbyname },
     { "getservbyport", func_getservbyport },
