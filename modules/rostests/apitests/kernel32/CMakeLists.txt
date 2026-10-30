@@ -56,6 +56,7 @@ list(APPEND SOURCE
     FindActCtxSectionStringW.c
     FindFiles.c
     FindFirstFileEx.c
+    FindFirstStream.c
     FindNLSStringEx.c
     FindStringOrdinal.c
     FlushProcessWriteBuffers.c

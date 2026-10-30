@@ -457,11 +457,8 @@ HRESULT CALLBACK CFolderItems::ItemsEnumFilter(void *Cookie, LPCITEMIDLIST pidl)
     return ((CFolderItems*)Cookie)->IncludeItem(pidl) ? S_OK : S_FALSE;
 }
 
-HRESULT CFolderItems::EnumObjects()
+HRESULT CFolderItems::CreateIDListEnum(IEnumIDList **ppEnum)
 {
-    if (m_EnumIDList)
-        return S_OK;
-
     CComPtr<IShellFolder> psf;
     HRESULT hr = SHBindToObject(NULL, m_idlist, NULL, IID_PPV_ARG(IShellFolder, &psf));
     if (FAILED_UNEXPECTEDLY(hr))
@@ -481,8 +478,24 @@ HRESULT CFolderItems::EnumObjects()
 
     if (FAILED(hr))
         return hr;
-    m_EnumIDList = pEnum;
+    *ppEnum = pEnum.Detach();
     return S_OK;
+}
+
+HRESULT CFolderItems::EnumObjects()
+{
+    if (m_EnumIDList)
+        return S_OK;
+    return CreateIDListEnum(&m_EnumIDList);
+}
+
+HRESULT CFolderItems::CreateItem(LPCITEMIDLIST pidlChild, FolderItem **ppItem)
+{
+    CComHeapPtr<ITEMIDLIST> pidlFull;
+    HRESULT hr = SHILCombine(m_idlist, pidlChild, &pidlFull);
+    if (FAILED_UNEXPECTEDLY(hr))
+        return hr;
+    return ShellObjectCreatorInit<CFolderItem>(m_Folder, pidlFull, IID_PPV_ARG(FolderItem, ppItem));
 }
 
 // *** FolderItems methods ***
@@ -590,7 +603,112 @@ HRESULT STDMETHODCALLTYPE CFolderItems::Item(VARIANT var, FolderItem **ppid)
 
 HRESULT STDMETHODCALLTYPE CFolderItems::_NewEnum(IUnknown **ppunk)
 {
-    return ShellObjectCreatorInit<CFolderItems>(static_cast<LPITEMIDLIST>(m_idlist), m_Folder, IID_FolderItems, reinterpret_cast<void**>(ppunk));
+    TRACE("(%p, %p)\n", this, ppunk);
+    if (!ppunk)
+        return E_POINTER;
+    *ppunk = NULL;
+    return ShellObjectCreatorInit<CFolderItemsEnum>(this, IID_PPV_ARG(IUnknown, ppunk));
+}
+
+CFolderItemsEnum::CFolderItemsEnum() : m_Items(NULL), m_Pos(0)
+{
+}
+
+CFolderItemsEnum::~CFolderItemsEnum()
+{
+}
+
+HRESULT CFolderItemsEnum::Initialize(CFolderItems *items)
+{
+    m_Keep = static_cast<IDispatch*>(items);
+    m_Items = items;
+    m_Pos = 0;
+    return m_Items->CreateIDListEnum(&m_EnumIDList);
+}
+
+HRESULT STDMETHODCALLTYPE CFolderItemsEnum::Next(ULONG celt, VARIANT *rgVar, ULONG *pCeltFetched)
+{
+    ULONG fetched = 0;
+    HRESULT hr = S_OK;
+
+    if (pCeltFetched)
+        *pCeltFetched = 0;
+    if (!rgVar)
+        return E_POINTER;
+    if (!pCeltFetched && celt != 1)
+        return E_INVALIDARG;
+
+    for (ULONG i = 0; i < celt; i++)
+        VariantInit(&rgVar[i]);
+
+    while (fetched < celt)
+    {
+        CComHeapPtr<ITEMIDLIST> pidl;
+        hr = m_EnumIDList->Next(1, &pidl, NULL);
+        if (hr != S_OK)
+        {
+            hr = S_FALSE;
+            break;
+        }
+
+        CComPtr<FolderItem> pItem;
+        hr = m_Items->CreateItem(pidl, &pItem);
+        if (FAILED(hr))
+            break;
+
+        V_VT(&rgVar[fetched]) = VT_DISPATCH;
+        hr = pItem->QueryInterface(IID_PPV_ARG(IDispatch, &V_DISPATCH(&rgVar[fetched])));
+        if (FAILED(hr))
+        {
+            V_VT(&rgVar[fetched]) = VT_EMPTY;
+            break;
+        }
+        fetched++;
+        m_Pos++;
+    }
+
+    if (FAILED(hr))
+    {
+        for (ULONG i = 0; i < fetched; i++)
+            VariantClear(&rgVar[i]);
+        m_Pos -= fetched;
+        fetched = 0;
+    }
+    if (pCeltFetched)
+        *pCeltFetched = fetched;
+    return FAILED(hr) ? hr : (fetched == celt ? S_OK : S_FALSE);
+}
+
+HRESULT STDMETHODCALLTYPE CFolderItemsEnum::Skip(ULONG celt)
+{
+    HRESULT hr = m_EnumIDList->Skip(celt);
+    if (SUCCEEDED(hr))
+        m_Pos += celt;      // a short skip leaves the enumerator at the end; Clone replays the same short skip
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE CFolderItemsEnum::Reset()
+{
+    HRESULT hr = m_EnumIDList->Reset();
+    if (SUCCEEDED(hr))
+        m_Pos = 0;
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE CFolderItemsEnum::Clone(IEnumVARIANT **ppEnum)
+{
+    if (!ppEnum)
+        return E_POINTER;
+    *ppEnum = NULL;
+
+    CComPtr<IEnumVARIANT> pClone;
+    HRESULT hr = ShellObjectCreatorInit<CFolderItemsEnum>(m_Items, IID_PPV_ARG(IEnumVARIANT, &pClone));
+    if (FAILED(hr))
+        return hr;
+    if (m_Pos)
+        pClone->Skip(m_Pos);
+    *ppEnum = pClone.Detach();
+    return S_OK;
 }
 
 HRESULT STDMETHODCALLTYPE CFolderItems::InvokeVerbEx(VARIANT vVerb, VARIANT vArgs)

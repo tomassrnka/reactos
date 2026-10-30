@@ -1241,8 +1241,9 @@ int ngc_streams(ngc_node *n, ngc_stream_t fn, void *arg)
 	struct mft_record *m;
 	int err = 0;
 
+	/* A handle to one stream lists the streams of its file, as on Windows. */
 	if (NInoAttr(ni))
-		return -EINVAL;
+		ni = ni->ext.base_ntfs_ino;
 	m = map_mft_record(ni);
 	if (IS_ERR(m))
 		return PTR_ERR(m);

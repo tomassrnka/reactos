@@ -1000,14 +1000,18 @@ FindFirstStreamW(IN LPCWSTR lpFileName,
                                NULL,
                                NULL);
 
+    /*
+     * Windows refuses a create with no desired access at all (STATUS_ACCESS_DENIED), so the
+     * handle needs FILE_READ_ATTRIBUTES, which is what FileStreamInformation is queried with.
+     */
     Status = NtCreateFile(&FileHandle,
-                          0,
+                          FILE_READ_ATTRIBUTES | SYNCHRONIZE,
                           &ObjectAttributes,
                           &IoStatusBlock,
                           NULL, 0,
                           FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
                           FILE_OPEN,
-                          0, NULL, 0);
+                          FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
     if (!NT_SUCCESS(Status)) goto Cleanup;
 
     /*
@@ -1078,7 +1082,11 @@ FindFirstStreamW(IN LPCWSTR lpFileName,
                                         BufferSize,
                                         FileStreamInformation);
 
-    } while (Status == STATUS_BUFFER_TOO_SMALL);
+    } while (Status == STATUS_BUFFER_TOO_SMALL || Status == STATUS_BUFFER_OVERFLOW);
+
+    /* A file system may report a success with nothing in it: a directory without streams */
+    if (NT_SUCCESS(Status) && IoStatusBlock.Information == 0)
+        Status = STATUS_END_OF_FILE;
 
     if (NT_SUCCESS(Status))
     {

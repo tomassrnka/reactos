@@ -90,8 +90,11 @@ private:
     void ResetEnum();
     BOOL IncludeItem(LPCITEMIDLIST pidl);
     static HRESULT CALLBACK ItemsEnumFilter(void *Cookie, LPCITEMIDLIST pidl);
+    HRESULT CreateIDListEnum(IEnumIDList **ppEnum);
     HRESULT EnumObjects();
     HRESULT GetNext(LPITEMIDLIST *ppidl) { return m_EnumIDList->Next(1, ppidl, NULL); }
+    HRESULT CreateItem(LPCITEMIDLIST pidlChild, FolderItem **ppItem);
+    friend class CFolderItemsEnum;
 
 public:
     CFolderItems();
@@ -122,6 +125,37 @@ BEGIN_COM_MAP(CFolderItems)
     COM_INTERFACE_ENTRY_IID(IID_FolderItems, FolderItems2)
     COM_INTERFACE_ENTRY_IID(IID_FolderItems, FolderItems3)
     COM_INTERFACE_ENTRY_IID(IID_IDispatch, IDispatch)
+END_COM_MAP()
+};
+
+// The IEnumVARIANT behind FolderItems::_NewEnum: what for-each (VBScript, PowerShell) walks.
+class CFolderItemsEnum:
+    public CComObjectRootEx<CComMultiThreadModelNoCS>,
+    public IEnumVARIANT
+{
+private:
+    CComPtr<IDispatch> m_Keep;      // the FolderItems this enumerates
+    CFolderItems *m_Items;
+    CComPtr<IEnumIDList> m_EnumIDList;
+    ULONG m_Pos;
+
+public:
+    CFolderItemsEnum();
+    ~CFolderItemsEnum();
+
+    HRESULT Initialize(CFolderItems *items);
+
+    // *** IEnumVARIANT methods ***
+    STDMETHOD(Next)(ULONG celt, VARIANT *rgVar, ULONG *pCeltFetched) override;
+    STDMETHOD(Skip)(ULONG celt) override;
+    STDMETHOD(Reset)() override;
+    STDMETHOD(Clone)(IEnumVARIANT **ppEnum) override;
+
+DECLARE_NOT_AGGREGATABLE(CFolderItemsEnum)
+DECLARE_PROTECT_FINAL_CONSTRUCT()
+
+BEGIN_COM_MAP(CFolderItemsEnum)
+    COM_INTERFACE_ENTRY_IID(IID_IEnumVARIANT, IEnumVARIANT)
 END_COM_MAP()
 };
 
