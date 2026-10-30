@@ -3611,10 +3611,9 @@ fallback_expand:
         if (SUCCEEDED(hr)) lstrcpyW(szTemp, szDest);
     }
 end:
-#ifndef __REACTOS__
+    /* _SHOpenProfilesKey() runs on ReactOS too: always close the key, or every expansion leaks a handle */
     if (key)
         RegCloseKey(key);
-#endif
     TRACE("returning 0x%08lx (input was %s, output is %s)\n", hr,
      debugstr_w(szSrc), debugstr_w(szDest));
     return hr;
