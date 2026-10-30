@@ -2211,13 +2211,18 @@ static void start_assoc_query(struct mi_session *s, MI_Uint32 flags, MI_Operatio
 {
     struct mi_instance *in = instance_from_mi(keys);
     struct mi_operation *op;
+    BOOL keys_ok = TRUE;
     WCHAR *query;
+    UINT i;
 
     assoc = optional_name(assoc);
     result_class = optional_name(result_class);
     role = optional_name(role);
     result_role = optional_name(result_role);
-    if (!s || !in || !in->class_name || !is_wql_name(in->class_name) || !check_options(options) ||
+    /* the key names are pasted into the object path of the query */
+    if (in) for (i = 0; i < in->count; i++)
+        if ((in->elems[i].flags & MI_FLAG_KEY) && (!in->elems[i].name || !is_wql_name(in->elems[i].name))) keys_ok = FALSE;
+    if (!s || !in || !keys_ok || !in->class_name || !is_wql_name(in->class_name) || !check_options(options) ||
         (assoc && !is_wql_name(assoc)) || (result_class && !is_wql_name(result_class)) ||
         (role && !is_wql_name(role)) || (result_role && !is_wql_name(result_role)))
     {
@@ -2229,6 +2234,8 @@ static void start_assoc_query(struct mi_session *s, MI_Uint32 flags, MI_Operatio
     {
         op_complete(op, MI_RESULT_SERVER_LIMITS_EXCEEDED, E_OUTOFMEMORY, NULL);
         op->kind = OP_FAILED;
+        op_start(op);
+        return;
     }
     op->query = query;
     op->keys_only = keys_only;
