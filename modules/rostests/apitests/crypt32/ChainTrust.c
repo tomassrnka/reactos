@@ -10,6 +10,9 @@
  * (through a cross certificate) ends at a root trusted for all purposes, CertGetCertificateChain
  * picks that one.
  *
+ * The policies do not check the usages again: a chain built without a requested usage passes
+ * them (all of them) even when its root is restricted to code signing, as on Windows.
+ *
  * A chain that does not reach any root (the issuer of its last certificate is unknown) is not
  * trusted: the base and Authenticode policies fail it with CERT_E_CHAINING, the SSL policy with
  * CERT_E_UNTRUSTEDROOT, as on Windows.
@@ -96,18 +99,20 @@ static DWORD BuildChainEx(HCERTSTORE RootStore, HCERTSTORE Extra, PCCERT_CONTEXT
         if (Policies)
         {
             static const LPCSTR Oids[] = { CERT_CHAIN_POLICY_BASE, CERT_CHAIN_POLICY_AUTHENTICODE,
-                                           CERT_CHAIN_POLICY_SSL };
+                                           CERT_CHAIN_POLICY_SSL, CERT_CHAIN_POLICY_SSL };
             SSL_EXTRA_CERT_CHAIN_POLICY_PARA Ssl = { { sizeof(Ssl) } };
             DWORD i;
 
-            Ssl.dwAuthType = AUTHTYPE_SERVER;
             for (i = 0; i < ARRAYSIZE(Oids); i++)
             {
                 CERT_CHAIN_POLICY_PARA PolicyPara = { sizeof(PolicyPara) };
                 CERT_CHAIN_POLICY_STATUS PolicyStatus = { sizeof(PolicyStatus) };
 
                 if (Oids[i] == CERT_CHAIN_POLICY_SSL)
+                {
+                    Ssl.dwAuthType = (i == 2) ? AUTHTYPE_SERVER : AUTHTYPE_CLIENT;
                     PolicyPara.pvExtraPolicyPara = &Ssl;
+                }
                 Policies[i] = CertVerifyCertificateChainPolicy(Oids[i], Chain, &PolicyPara, &PolicyStatus) ?
                               PolicyStatus.dwError : ~0u;
             }
@@ -126,15 +131,26 @@ static DWORD BuildChain(HCERTSTORE RootStore, HCERTSTORE Extra, PCCERT_CONTEXT L
     return BuildChainEx(RootStore, Extra, Leaf, Usage, Top, NULL);
 }
 
+/* The base, Authenticode, SSL server and SSL client policies all report what the chain's trust status
+ * says: the usage properties and extensions are checked when the chain is built (for the requested
+ * usage), the policies do not look at them again, as on Windows */
+static void CheckPolicies(const char *What, const DWORD *Policies, DWORD Expected)
+{
+    ok(Policies[0] == Expected, "%s, base policy: %#lx\n", What, Policies[0]);
+    ok(Policies[1] == Expected, "%s, Authenticode policy: %#lx\n", What, Policies[1]);
+    ok(Policies[2] == Expected, "%s, SSL server policy: %#lx\n", What, Policies[2]);
+    ok(Policies[3] == Expected, "%s, SSL client policy: %#lx\n", What, Policies[3]);
+}
+
 START_TEST(ChainTrust)
 {
     PCCERT_CONTEXT RootA = Decode(UsRootA), RootB = Decode(UsRootB), CrossB = Decode(UsCrossB),
-                   Leaf = Decode(UsLeaf), Top;
+                   Leaf = Decode(UsLeaf), LeafCs = Decode(UsLeafCs), Top;
     HCERTSTORE Extra, Roots, Peer;
-    DWORD Status, Policies[3];
+    DWORD Status, Policies[4], Order;
 
-    ok(RootA && RootB && CrossB && Leaf, "Decoding the certificates failed\n");
-    if (!RootA || !RootB || !CrossB || !Leaf)
+    ok(RootA && RootB && CrossB && Leaf && LeafCs, "Decoding the certificates failed\n");
+    if (!RootA || !RootB || !CrossB || !Leaf || !LeafCs)
         return;
     Extra = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0, 0, NULL);
     ok(Extra != NULL && AddCert(Extra, CrossB, NULL), "Cannot set up the additional store\n");
@@ -152,17 +168,25 @@ START_TEST(ChainTrust)
     /* only root A, trusted for code signing only */
     Roots = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0, 0, NULL);
     ok(AddCert(Roots, RootA, CodeSigning), "Adding root A failed\n");
-    Status = BuildChain(Roots, Extra, Leaf, ServerAuth, &Top);
+    Status = BuildChainEx(Roots, Extra, Leaf, ServerAuth, &Top, Policies);
     ok(Status != ~0u && (Status & CERT_TRUST_IS_NOT_VALID_FOR_USAGE),
        "code signing root, server authentication: status %#lx\n", Status);
     ok(Status != ~0u && !(Status & CERT_TRUST_IS_UNTRUSTED_ROOT),
        "code signing root, server authentication: status %#lx\n", Status);
+    if (Status != ~0u)
+        CheckPolicies("code signing root, server authentication requested", Policies, CERT_E_WRONG_USAGE);
     if (Top) CertFreeCertificateContext(Top);
-    Status = BuildChain(Roots, Extra, Leaf, CodeSigning, &Top);
+    Status = BuildChainEx(Roots, Extra, Leaf, CodeSigning, &Top, Policies);
     ok(Status == 0, "code signing root, code signing: status %#lx\n", Status);
+    if (Status != ~0u)
+        CheckPolicies("code signing root, code signing requested", Policies, 0);
     if (Top) CertFreeCertificateContext(Top);
-    Status = BuildChain(Roots, Extra, Leaf, NULL, &Top);
+    /* a chain built without a requested usage is not checked for one, and the policies do not
+     * restrict it either: callers that care (schannel, WinHTTP, WinInet) request the usage */
+    Status = BuildChainEx(Roots, Extra, Leaf, NULL, &Top, Policies);
     ok(Status == 0, "code signing root, no usage requested: status %#lx\n", Status);
+    if (Status != ~0u)
+        CheckPolicies("code signing root, no usage requested", Policies, 0);
     if (Top) CertFreeCertificateContext(Top);
 
     /* the root also comes with the certificate to verify, as a server or a signature may send it:
@@ -185,6 +209,70 @@ START_TEST(ChainTrust)
     if (Top) CertFreeCertificateContext(Top);
     CertCloseStore(Roots, 0);
 
+    /* root B restricted to code signing, root A not, the cross certificate in another store than
+     * either root: the leaf has two issuers, root B itself and the cross certificate, and the chain
+     * for server authentication has to take the second */
+    Roots = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0, 0, NULL);
+    ok(AddCert(Roots, RootA, NULL) && AddCert(Roots, RootB, CodeSigning), "Adding the roots failed\n");
+    Status = BuildChain(Roots, Extra, Leaf, ServerAuth, &Top);
+    ok(Status == 0, "restricted root B, cross certificate elsewhere, server authentication: status %#lx\n", Status);
+    ok(Top && CertCompareCertificate(X509_ASN_ENCODING, Top->pCertInfo, RootA->pCertInfo),
+       "restricted root B, cross certificate elsewhere: the chain does not end at root A\n");
+    if (Top) CertFreeCertificateContext(Top);
+    Status = BuildChain(Roots, Extra, Leaf, CodeSigning, &Top);
+    ok(Status == 0, "restricted root B, cross certificate elsewhere, code signing: status %#lx\n", Status);
+    if (Top) CertFreeCertificateContext(Top);
+    CertCloseStore(Roots, 0);
+
+    /* the same with the certificates in stores of one collection, in both orders: wherever the
+     * search for the issuer starts, the alternative issuer is found in another store */
+    for (Order = 0; Order < 2; Order++)
+    {
+        HCERTSTORE Collection = CertOpenStore(CERT_STORE_PROV_COLLECTION, 0, 0, 0, NULL);
+        HCERTSTORE StoreA = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0, 0, NULL);
+        HCERTSTORE StoreB = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0, 0, NULL);
+        HCERTSTORE StoreC = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0, 0, NULL);
+        HCERTSTORE Stores[3];
+
+        ok(Collection && StoreA && StoreB && StoreC, "Cannot set up the collection\n");
+        ok(AddCert(StoreA, RootA, NULL) && AddCert(StoreB, RootB, CodeSigning) && AddCert(StoreC, CrossB, NULL),
+           "Cannot fill the stores of the collection\n");
+        Stores[0] = Order ? StoreA : StoreB;
+        Stores[1] = StoreC;
+        Stores[2] = Order ? StoreB : StoreA;
+        ok(CertAddStoreToCollection(Collection, Stores[0], 0, 0) &&
+           CertAddStoreToCollection(Collection, Stores[1], 0, 0) &&
+           CertAddStoreToCollection(Collection, Stores[2], 0, 0), "Cannot add the stores to the collection\n");
+        Status = BuildChain(Collection, NULL, Leaf, ServerAuth, &Top);
+        ok(Status == 0, "stores of a collection (order %lu), server authentication: status %#lx\n", Order, Status);
+        ok(Top && CertCompareCertificate(X509_ASN_ENCODING, Top->pCertInfo, RootA->pCertInfo),
+           "stores of a collection (order %lu): the chain does not end at root A\n", Order);
+        if (Top) CertFreeCertificateContext(Top);
+        CertCloseStore(Collection, 0);
+        CertCloseStore(StoreA, 0);
+        CertCloseStore(StoreB, 0);
+        CertCloseStore(StoreC, 0);
+    }
+
+    /* the usage extension of the end certificate: only the requested usage checks it */
+    Roots = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0, 0, NULL);
+    ok(AddCert(Roots, RootB, NULL), "Adding root B failed\n");
+    Status = BuildChainEx(Roots, NULL, LeafCs, NULL, &Top, Policies);
+    ok(Status == 0, "code signing end certificate, no usage requested: status %#lx\n", Status);
+    if (Status != ~0u)
+        CheckPolicies("code signing end certificate, no usage requested", Policies, 0);
+    if (Top) CertFreeCertificateContext(Top);
+    Status = BuildChainEx(Roots, NULL, LeafCs, ServerAuth, &Top, Policies);
+    ok(Status != ~0u && (Status & CERT_TRUST_IS_NOT_VALID_FOR_USAGE),
+       "code signing end certificate, server authentication: status %#lx\n", Status);
+    if (Status != ~0u)
+        CheckPolicies("code signing end certificate, server authentication requested", Policies, CERT_E_WRONG_USAGE);
+    if (Top) CertFreeCertificateContext(Top);
+    Status = BuildChainEx(Roots, NULL, LeafCs, CodeSigning, &Top, Policies);
+    ok(Status == 0, "code signing end certificate, code signing: status %#lx\n", Status);
+    if (Top) CertFreeCertificateContext(Top);
+    CertCloseStore(Roots, 0);
+
     /* no cross certificate: the issuer of the leaf is unknown, the chain ends nowhere */
     Roots = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0, 0, NULL);
     ok(AddCert(Roots, RootA, NULL), "Adding root A failed\n");
@@ -200,6 +288,7 @@ START_TEST(ChainTrust)
     CertCloseStore(Roots, 0);
 
     CertCloseStore(Extra, 0);
+    CertFreeCertificateContext(LeafCs);
     CertFreeCertificateContext(Leaf);
     CertFreeCertificateContext(CrossB);
     CertFreeCertificateContext(RootB);
