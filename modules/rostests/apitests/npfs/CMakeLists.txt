@@ -2,6 +2,7 @@
 list(APPEND SOURCE
     DirectoryQuery.c
     GetConnectionAttributes.c
+    QueryAttributes.c
     QueryClientProcess.c)
 
 add_executable(npfs_apitest ${SOURCE})

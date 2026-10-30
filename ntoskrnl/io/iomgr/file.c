@@ -1318,6 +1318,47 @@ IopParseDevice(IN PVOID ParseObject,
                     sizeof(FILE_NETWORK_OPEN_INFORMATION),
                     OpenPacket->NetworkInformation,
                     &ReturnLength);
+
+                /*
+                 * A file system that does not answer FileNetworkOpenInformation on a handle (npfs
+                 * answers STATUS_INVALID_PARAMETER) still reports its attributes by name: build the
+                 * answer from the basic and standard information, as Windows does.
+                 */
+                if (Status == STATUS_INVALID_PARAMETER ||
+                    Status == STATUS_INVALID_INFO_CLASS ||
+                    Status == STATUS_NOT_IMPLEMENTED ||
+                    Status == STATUS_NOT_SUPPORTED ||
+                    Status == STATUS_INVALID_DEVICE_REQUEST)
+                {
+                    FILE_BASIC_INFORMATION LocalBasicInfo;
+                    FILE_STANDARD_INFORMATION LocalStandardInfo;
+
+                    Status = IoQueryFileInformation(FileObject,
+                                                    FileBasicInformation,
+                                                    sizeof(LocalBasicInfo),
+                                                    &LocalBasicInfo,
+                                                    &ReturnLength);
+                    if (NT_SUCCESS(Status))
+                    {
+                        Status = IoQueryFileInformation(FileObject,
+                                                        FileStandardInformation,
+                                                        sizeof(LocalStandardInfo),
+                                                        &LocalStandardInfo,
+                                                        &ReturnLength);
+                    }
+                    if (NT_SUCCESS(Status))
+                    {
+                        PFILE_NETWORK_OPEN_INFORMATION NetworkInfo = OpenPacket->NetworkInformation;
+
+                        NetworkInfo->CreationTime = LocalBasicInfo.CreationTime;
+                        NetworkInfo->LastAccessTime = LocalBasicInfo.LastAccessTime;
+                        NetworkInfo->LastWriteTime = LocalBasicInfo.LastWriteTime;
+                        NetworkInfo->ChangeTime = LocalBasicInfo.ChangeTime;
+                        NetworkInfo->AllocationSize = LocalStandardInfo.AllocationSize;
+                        NetworkInfo->EndOfFile = LocalStandardInfo.EndOfFile;
+                        NetworkInfo->FileAttributes = LocalBasicInfo.FileAttributes;
+                    }
+                }
                 if (!NT_SUCCESS(Status)) ASSERT(Status != STATUS_NOT_IMPLEMENTED);
             }
         }
