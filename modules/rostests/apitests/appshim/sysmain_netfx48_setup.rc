@@ -1,0 +1,9 @@
+/* Setup.exe that the .NET Framework 4.8 installer extracts and starts: the entry for the 4.5 to 4.8 Setup.exe matches */
+#define NF_VERSION 14,8,4110,0
+#define NF_VERSION_STRING "14.8.4110.0 built by: NET48REL1LAST_B"
+#define NF_COMPANY "Microsoft Corporation"
+#define NF_DESCRIPTION "Setup Installer"
+#define NF_INTERNAL_NAME "Setup.exe"
+#define NF_ORIGINAL_NAME "SetupUI.exe"
+#define NF_PRODUCT "Microsoft\256 .NET Framework"
+#include "sysmain_netfx.rc.in"

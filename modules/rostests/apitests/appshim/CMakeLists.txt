@@ -42,6 +42,15 @@ set_module_type(appshim_sysmain_firefox115 win32cui)
 add_importlibs(appshim_sysmain_firefox115 advapi32 msvcrt kernel32)
 add_rostests_file(TARGET appshim_sysmain_firefox115)
 
+# Version resources of the .NET Framework setup programs (and look-alikes), see sysmain.c
+foreach(_probe netfx48 netfx48_setup netfx48_util netfx40 netfx_tool netfx_other)
+    add_executable(appshim_sysmain_${_probe} sysmain_probe.c sysmain_${_probe}.rc)
+    set_module_type(appshim_sysmain_${_probe} win32cui)
+    add_importlibs(appshim_sysmain_${_probe} advapi32 msvcrt kernel32)
+    add_rostests_file(TARGET appshim_sysmain_${_probe})
+    list(APPEND NETFX_PROBES appshim_sysmain_${_probe})
+endforeach()
+
 add_executable(appshim_manifestver_none manifestver_probe.c manifestver_none.rc)
 set_module_type(appshim_manifestver_none win32cui)
 add_importlibs(appshim_manifestver_none msvcrt kernel32 ntdll)
@@ -63,6 +72,6 @@ add_importlibs(appshim_manifestver_vista_win10 msvcrt kernel32 ntdll)
 add_rostests_file(TARGET appshim_manifestver_vista_win10)
 
 add_dependencies(appshim_apitest appshim_sysmain_probe appshim_sysmain_other
-                 appshim_sysmain_firefox158 appshim_sysmain_firefox115
+                 appshim_sysmain_firefox158 appshim_sysmain_firefox115 ${NETFX_PROBES}
                  appshim_manifestver_none appshim_manifestver_vista
                  appshim_manifestver_span appshim_manifestver_vista_win10)

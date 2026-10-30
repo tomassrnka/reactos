@@ -1,0 +1,9 @@
+/* SetupUtility.exe that the .NET Framework 4.8 installer starts: the entry for the 4.5 to 4.8 installers matches */
+#define NF_VERSION 14,8,4110,0
+#define NF_VERSION_STRING "14.8.4110.0 built by: NET48REL1LAST_B"
+#define NF_COMPANY "Microsoft Corporation"
+#define NF_DESCRIPTION "Microsoft .NET Framework 4.5 Setup"
+#define NF_INTERNAL_NAME "SetupUtility.exe"
+#define NF_ORIGINAL_NAME "SetupUtility.exe"
+#define NF_PRODUCT "Microsoft\256 .NET Framework 4.5"
+#include "sysmain_netfx.rc.in"
