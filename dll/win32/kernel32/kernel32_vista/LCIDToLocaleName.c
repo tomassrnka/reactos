@@ -48,6 +48,17 @@ LCIDToLocaleName(
 
     /* Call the RTL function */
     Status = RtlLcidToLocaleName(Locale, &LocaleNameString, RtlFlags, FALSE);
+    if (!NT_SUCCESS(Status) && !(dwFlags & LOCALE_ALLOW_NEUTRAL_NAMES))
+    {
+        /* Without the flag Windows names the locale a neutral LCID stands for; LOCALE_NEUTRAL is the default */
+        LCID Specific = Locale ? BasepNeutralLcidToSpecific(Locale) : GetUserDefaultLCID();
+
+        if (Specific)
+        {
+            LocaleNameString.Length = 0;
+            Status = RtlLcidToLocaleName(Specific, &LocaleNameString, RtlFlags, FALSE);
+        }
+    }
     if (!NT_SUCCESS(Status))
     {
         SetLastError(RtlNtStatusToDosError(Status));

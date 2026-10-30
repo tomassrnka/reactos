@@ -39,33 +39,16 @@ GetSpecificLocaleName(
 
 /* The specific locale that a neutral locale stands for */
 static
-LCID
-NeutralToSpecific(
-    _In_ LCID Lcid)
-{
-    switch (Lcid)
-    {
-        /* Neutral locales whose SUBLANG_DEFAULT locale is not the one Windows picks, or does not exist */
-        case 0x00004: return 0x00804; // "zh-Hans" -> "zh-CN" (SUBLANG_DEFAULT is zh-TW)
-        case 0x0000A: return 0x00C0A; // "es" -> "es-ES" (SUBLANG_DEFAULT is es-ES_tradnl)
-        case 0x0003C: return 0x0083C; // "ga" -> "ga-IE"
-        case 0x07C1A: return 0x0241A; // "sr" -> "sr-Latn-RS"
-    }
-
-    if (SUBLANGID(LANGIDFROMLCID(Lcid)) == SUBLANG_NEUTRAL)
-        return MAKELCID(MAKELANGID(PRIMARYLANGID(LANGIDFROMLCID(Lcid)), SUBLANG_DEFAULT), SORT_DEFAULT);
-
-    return BasepSpecialNeutralLcidToSpecific(Lcid);
-}
-
-/* Resolves one candidate name to the name of a specific locale; FALSE if it matches no locale */
-static
 BOOL
 ResolveCandidate(
     _In_ PCWSTR Candidate,
     _Out_writes_(LOCALE_NAME_MAX_LENGTH) PWSTR Resolved)
 {
+    PCWSTR Alias = BasepLocaleNameAlias(Candidate);
     LCID Lcid;
+
+    if (Alias)
+        Candidate = Alias;
 
     if (!NT_SUCCESS(RtlLocaleNameToLcid(Candidate, &Lcid, RTL_LOCALE_ALLOW_NEUTRAL_NAMES)))
         return FALSE;
@@ -80,9 +63,16 @@ ResolveCandidate(
     }
 
     if (GetSpecificLocaleName(Lcid, Resolved))
-        return TRUE;
+    {
+        /* The traditional sort of Spanish is a sort of es-ES to Windows 10 */
+        SIZE_T Length = wcslen(Resolved);
 
-    Lcid = NeutralToSpecific(Lcid);
+        if (Length > 7 && _wcsicmp(Resolved + Length - 7, L"_tradnl") == 0)
+            Resolved[Length - 7] = UNICODE_NULL;
+        return TRUE;
+    }
+
+    Lcid = BasepNeutralLcidToSpecific(Lcid);
     return Lcid && GetSpecificLocaleName(Lcid, Resolved);
 }
 

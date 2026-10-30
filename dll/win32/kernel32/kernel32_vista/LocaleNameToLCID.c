@@ -55,12 +55,60 @@ BasepSpecialNeutralLcidToSpecific(
 }
 
 LCID
+BasepNeutralLcidToSpecific(
+    _In_ LCID Lcid)
+{
+    switch (Lcid)
+    {
+        /* Neutral locales whose SUBLANG_DEFAULT locale is not the one Windows picks, or does not exist */
+        case 0x00004: return 0x00804; // "zh-Hans" -> "zh-CN" (SUBLANG_DEFAULT is zh-TW)
+        case 0x0000A: return 0x00C0A; // "es" -> "es-ES" (SUBLANG_DEFAULT is es-ES_tradnl)
+        case 0x0003C: return 0x0083C; // "ga" -> "ga-IE"
+        case 0x00045: return 0x00845; // "bn" -> "bn-BD"
+        case 0x00059: return 0x00859; // "sd" -> "sd-Arab-PK"
+        case 0x0005D: return 0x0085D; // "iu" -> "iu-Latn-CA"
+        case 0x0005F: return 0x0085F; // "tzm" -> "tzm-Latn-DZ"
+        case 0x00067: return 0x00867; // "ff" -> "ff-Latn-SN"
+        case 0x00073: return 0x00873; // "ti" -> "ti-ER"
+        case 0x07C1A: return 0x0241A; // "sr" -> "sr-Latn-RS"
+    }
+
+    if (SUBLANGID(LANGIDFROMLCID(Lcid)) == SUBLANG_NEUTRAL)
+        return MAKELCID(MAKELANGID(PRIMARYLANGID(LANGIDFROMLCID(Lcid)), SUBLANG_DEFAULT), SORT_DEFAULT);
+
+    return BasepSpecialNeutralLcidToSpecific(Lcid);
+}
+
+PCWSTR
+BasepLocaleNameAlias(
+    _In_ PCWSTR Name)
+{
+    static const struct { PCWSTR Alias; PCWSTR Name; } Aliases[] =
+    {
+        { L"zh-Hans-CN", L"zh-CN" },
+        { L"zh-Hans-SG", L"zh-SG" },
+        { L"zh-Hant-TW", L"zh-TW" },
+        { L"zh-Hant-HK", L"zh-HK" },
+        { L"zh-Hant-MO", L"zh-MO" },
+    };
+    ULONG i;
+
+    for (i = 0; i < RTL_NUMBER_OF(Aliases); i++)
+    {
+        if (_wcsicmp(Name, Aliases[i].Alias) == 0)
+            return Aliases[i].Name;
+    }
+    return NULL;
+}
+
+LCID
 WINAPI
 LocaleNameToLCID(
     _In_ LPCWSTR lpName,
     _In_ DWORD dwFlags)
 {
     NTSTATUS Status;
+    PCWSTR Alias;
     LCID Lcid;
 
     /* Validate flags */
@@ -82,6 +130,11 @@ LocaleNameToLCID(
         return MAKELCID(MAKELANGID(LANG_INVARIANT, SUBLANG_NEUTRAL), SORT_DEFAULT);
     }
 
+    /* Script-tagged names of the Chinese locales are not in the RTL table */
+    Alias = BasepLocaleNameAlias(lpName);
+    if (Alias)
+        lpName = Alias;
+
     /* Call the RTL function (include neutral names) */
     Status = RtlLocaleNameToLcid(lpName, &Lcid, RTL_LOCALE_ALLOW_NEUTRAL_NAMES);
     if (!NT_SUCCESS(Status))
@@ -94,23 +147,15 @@ LocaleNameToLCID(
     if ((dwFlags & LOCALE_ALLOW_NEUTRAL_NAMES) == 0)
     {
         /* Check if we got a neutral locale */
-        LANGID LangId = LANGIDFROMLCID(Lcid);
-        USHORT SubLangId = SUBLANGID(LangId);
-        if (SubLangId == SUBLANG_NEUTRAL)
-        {
-            /* Adjust it to be the default locale */
-            Lcid = MAKELCID(MAKELANGID(PRIMARYLANGID(LangId), SUBLANG_DEFAULT), SORT_DEFAULT);
-        }
-        else if (SubLangId >= 0x18)
-        {
-           /* Handle special neutral LCIDs */
-            LCID SpecificLcid = BasepSpecialNeutralLcidToSpecific(Lcid);
-            if (SpecificLcid)
-                return SpecificLcid;
+        LCID SpecificLcid = BasepNeutralLcidToSpecific(Lcid);
 
+        if (SpecificLcid)
+            return SpecificLcid;
+        if (SUBLANGID(LANGIDFROMLCID(Lcid)) == SUBLANG_NEUTRAL ||
+            SUBLANGID(LANGIDFROMLCID(Lcid)) >= 0x18)
+        {
             /* Should not happen */
             DPRINT1("Unandled neutral LCID %x\n", Lcid);
-            ASSERT(FALSE);
             return 0;
         }
     }
