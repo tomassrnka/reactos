@@ -6,3 +6,20 @@
 /* v6 comctl32: themed list/checkboxes/buttons = the native "Windows Features" look */
 #include <winuser.h>
 #include <reactos/manifest_exe.rc>
+
+#include "resource.h"
+
+/* "Add bucket": Scoop's known buckets only, behind an explicit confirmation (checkbox) */
+IDD_ADDBUCKET DIALOGEX 0, 0, 280, 156
+STYLE DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Add Scoop bucket"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT           "&Bucket:", -1, 10, 12, 36, 10
+    COMBOBOX        IDC_AB_COMBO, 50, 10, 220, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "", IDC_AB_URL, 50, 27, 220, 20
+    LTEXT           "These are the buckets on Scoop's own list (scoop bucket known). Adding one downloads its manifests with git, and installing an app from it lets that bucket's PowerShell hooks run as administrator. Only add a bucket whose maintainers you trust. Any other bucket can only be added from the command line, with /trust.", IDC_AB_WARN, 10, 50, 260, 50
+    AUTOCHECKBOX    "I trust the maintainers of this bucket and want to add it", IDC_AB_TRUST, 10, 106, 260, 12, WS_TABSTOP
+    DEFPUSHBUTTON   "&Add bucket", IDOK, 150, 134, 58, 14, WS_DISABLED | WS_TABSTOP
+    PUSHBUTTON      "Cancel", IDCANCEL, 214, 134, 56, 14, WS_TABSTOP
+END

@@ -367,6 +367,11 @@ static BOOL LoadManifestEx(LPCWSTR path, FM_FEATURE *f, BOOL fast)
             IniGet(&ini, L"Scoop", L"Bucket", L"", b, ARRAYSIZE(b));
             IniGet(&ini, L"Scoop", L"App", L"", f->App, ARRAYSIZE(f->App));
             StringCchPrintfW(f->Source, ARRAYSIZE(f->Source), L"scoop/%s", b[0] ? b : L"?");
+            StringCchCopyW(f->Bucket, ARRAYSIZE(f->Bucket), b);
+            IniGet(&ini, L"Scoop", L"Homepage", L"", f->Homepage, ARRAYSIZE(f->Homepage));
+            IniGet(&ini, L"Scoop", L"License", L"", f->License, ARRAYSIZE(f->License));
+            IniGet(&ini, L"Scoop", L"Verified", L"1", tmp, 16);
+            f->Verified = _wtoi(tmp) != 0;
         }
         else
             StringCchCopyW(f->Source, ARRAYSIZE(f->Source), f->Provider[0] ? f->Provider : L"payload");
@@ -521,8 +526,14 @@ static void ReadStateExtras(FM_FEATURE *f)
     WCHAR v[32];
 
     f->InstallDate[0] = L'\0';
+    f->InstalledVersion[0] = L'\0';
     f->PendingReboot = FALSE;
     if (OpenStateKey(f->Id, FALSE, KEY_READ, &k) != ERROR_SUCCESS) return;
+    cb = sizeof(f->InstalledVersion) - sizeof(WCHAR);
+    if (RegQueryValueExW(k, L"Version", NULL, &type, (LPBYTE)f->InstalledVersion, &cb) != ERROR_SUCCESS
+        || type != REG_SZ)
+        f->InstalledVersion[0] = L'\0';
+    f->InstalledVersion[FM_MAX_VER - 1] = L'\0';
     cb = sizeof(f->InstallDate) - sizeof(WCHAR);
     if (RegQueryValueExW(k, L"InstallDate", NULL, &type, (LPBYTE)f->InstallDate, &cb) != ERROR_SUCCESS
         || type != REG_SZ)
@@ -573,7 +584,55 @@ static void ResolveState(FM_FEATURE *f)
         f->State = FM_STATE_NOT_INSTALLED;
 }
 
+/* Installed version: an enabled entry shows the version featmgr recorded when it enabled it
+ * (ReadStateExtras); a Scoop app shows what is actually on disk, apps\\<app>\\current\\manifest.json,
+ * which also covers installs and updates done with the scoop CLI. UpdateAvailable: the imported
+ * catalog (the bucket manifest as of the last import) is newer than that. */
+static void ResolveVersion(FM_FEATURE *f)
+{
+    f->UpdateAvailable = FALSE;
+    if (f->State != FM_STATE_ENABLED) { f->InstalledVersion[0] = L'\0'; return; }
+    if (!_wcsicmp(f->Provider, L"scoop"))
+    {
+        WCHAR v[FM_MAX_VER];
+        if (FmScoopInstalledVersion(f->App, v, ARRAYSIZE(v)))
+            StringCchCopyW(f->InstalledVersion, ARRAYSIZE(f->InstalledVersion), v);
+        if (f->InstalledVersion[0] && f->Version[0] && wcscmp(f->Version, L"-")
+            && FmCompareVersions(f->Version, f->InstalledVersion) > 0)
+            f->UpdateAvailable = TRUE;
+    }
+}
+
+/* State, availability, installed version of a freshly loaded entry. usable: -1 = ask, else
+ * the Provider=scoop answer the caller already has (one lookup per enumeration, not per entry). */
+static void FinishEntry(FM_FEATURE *f, int scoopUsable)
+{
+    f->State = RawState(f->Id);
+    ResolveState(f);
+    if (scoopUsable >= 0 && !_wcsicmp(f->Provider, L"scoop"))
+        f->PayloadAvailable = scoopUsable != 0;
+    else
+        f->PayloadAvailable = PayloadPresent(f);
+    ReadStateExtras(f);
+    ResolveVersion(f);
+}
+
 /* ---- enumeration --------------------------------------------------------- */
+
+static BOOL AppendFeature(const FM_FEATURE *f, FM_FEATURE **parr, int *pcount, int *pcap)
+{
+    if (*pcount == *pcap)
+    {
+        int nc = *pcap ? *pcap * 2 : 8;
+        FM_FEATURE *na = *parr
+            ? (FM_FEATURE *)HeapReAlloc(GetProcessHeap(), 0, *parr, nc * sizeof(FM_FEATURE))
+            : (FM_FEATURE *)HeapAlloc(GetProcessHeap(), 0, nc * sizeof(FM_FEATURE));
+        if (!na) return FALSE;
+        *parr = na; *pcap = nc;
+    }
+    (*parr)[(*pcount)++] = *f;
+    return TRUE;
+}
 
 /* Append every valid manifest in dir (*.ini) to the growing array. */
 static void EnumDir(LPCWSTR dir, BOOL fast, FM_FEATURE **parr, int *pcount, int *pcap)
@@ -591,23 +650,20 @@ static void EnumDir(LPCWSTR dir, BOOL fast, FM_FEATURE **parr, int *pcount, int 
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
         StringCchPrintfW(path, MAX_PATH, L"%s\\%s", dir, fd.cFileName);
         if (!LoadManifestEx(path, &f, fast)) continue;
-        f.State = RawState(f.Id);
-        ResolveState(&f);
-        f.PayloadAvailable = PayloadPresent(&f);
-        ReadStateExtras(&f);
-
-        if (*pcount == *pcap)
-        {
-            int nc = *pcap ? *pcap * 2 : 8;
-            FM_FEATURE *na = *parr
-                ? (FM_FEATURE *)HeapReAlloc(GetProcessHeap(), 0, *parr, nc * sizeof(FM_FEATURE))
-                : (FM_FEATURE *)HeapAlloc(GetProcessHeap(), 0, nc * sizeof(FM_FEATURE));
-            if (!na) break;
-            *parr = na; *pcap = nc;
-        }
-        (*parr)[(*pcount)++] = f;
+        FinishEntry(&f, -1);
+        if (!AppendFeature(&f, parr, pcount, pcap)) break;
     } while (FindNextFileW(h, &fd));
     FindClose(h);
+}
+
+typedef struct _IDXENUM { FM_FEATURE **parr; int *pcount, *pcap; int usable; } IDXENUM;
+
+static BOOL IdxEnumCb(void *ctx, const FM_FEATURE *rec)
+{
+    IDXENUM *e = (IDXENUM *)ctx;
+    FM_FEATURE f = *rec;
+    FinishEntry(&f, e->usable);
+    return AppendFeature(&f, e->parr, e->pcount, e->pcap);
 }
 
 /* Catalog = in-image OS manifests (Catalog\*.ini) + the generated software
@@ -622,7 +678,13 @@ int FmEnumFeatures(FM_FEATURE **outArr)
     if (!FmGetCatalogDir(catDir, MAX_PATH)) return 0;
     EnumDir(catDir, FALSE, &arr, &count, &cap);
     if (FmGetSoftwareCatalogDir(swDir, MAX_PATH))
+    {
+        IDXENUM e;
         EnumDir(swDir, TRUE, &arr, &count, &cap);
+        e.parr = &arr; e.pcount = &count; e.pcap = &cap;
+        e.usable = FmScoopUsable() ? 1 : 0;
+        FmScoopIndexEnum(swDir, IdxEnumCb, &e);
+    }
 
     *outArr = arr;
     return count;
@@ -648,12 +710,14 @@ static BOOL FindByName(LPCWSTR id, FM_FEATURE *out)
         if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) continue;
         if (LoadManifestEx(path, out, k == 1) && !_wcsicmp(out->Id, id))
         {
-            out->State = RawState(out->Id);
-            ResolveState(out);
-            out->PayloadAvailable = PayloadPresent(out);
-            ReadStateExtras(out);
+            FinishEntry(out, -1);
             return TRUE;
         }
+    }
+    if (FmGetSoftwareCatalogDir(dir, MAX_PATH) && FmScoopIndexFind(dir, id, out))
+    {
+        FinishEntry(out, -1);
+        return TRUE;
     }
     return FALSE;
 }
@@ -1288,9 +1352,7 @@ static HRESULT BuildSoftwareCommands(const FM_FEATURE *f, LPWSTR inst, LPWSTR un
 
     if (!_wcsicmp(f->Provider, L"scoop"))
     {
-        WCHAR app[64], bucket[32];
-        GetPrivateProfileStringW(L"Scoop", L"App", L"", app, ARRAYSIZE(app), f->ManifestPath);
-        GetPrivateProfileStringW(L"Scoop", L"Bucket", L"", bucket, ARRAYSIZE(bucket), f->ManifestPath);
+        const WCHAR *app = f->App, *bucket = f->Bucket;
         {
             WCHAR pw[MAX_PATH], runner[MAX_PATH];
             if (!GetEnvironmentVariableW(L"FEATMGR_SCOOP_RUNNER", runner, MAX_PATH)
@@ -1906,4 +1968,218 @@ HRESULT FmUninstallEx(LPCWSTR id, DWORD flags, FILE *log)
     }
     LOGF(log, L"'%s' uninstalled (state record removed).\n", id);
     return S_OK;
+}
+
+/* ---- search ---------------------------------------------------------------- */
+
+BOOL FmMatchSearch(const FM_FEATURE *f, LPCWSTR text)
+{
+    if (!text || !text[0]) return TRUE;
+    return StrStrIW(f->Name, text) != NULL || StrStrIW(f->Description, text) != NULL;
+}
+
+/* ---- Scoop operations beyond install/uninstall (SCOOP-FEATMGR-01 M2) ------- */
+
+static HRESULT ScoopPrereq(FILE *log)
+{
+    WCHAR pw[MAX_PATH], runner[MAX_PATH];
+
+    if (!FmScoopSupported())
+    {
+        LOGF(log, L"error: Scoop needs 64-bit PowerShell 7, which is not available on this architecture (x86)\n");
+        SetLastMsg(L"Scoop needs 64-bit PowerShell 7, which is not available on this architecture (x86).");
+        return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+    }
+    if (!GetEnvironmentVariableW(L"FEATMGR_SCOOP_RUNNER", runner, MAX_PATH)
+        && (!FmPwshPath(pw, MAX_PATH) || GetFileAttributesW(pw) == INVALID_FILE_ATTRIBUTES))
+    {
+        LOGF(log, L"error: PowerShell 7 is required to run Scoop but is not installed\n");
+        SetLastMsg(L"PowerShell 7 is required to run Scoop but is not installed. Install the 'powershell-7' feature first.");
+        return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+    }
+    return S_OK;
+}
+
+/* "scoop <args>" (args pre-validated by the caller), output streamed to log. */
+static HRESULT RunScoop(LPCWSTR args, FILE *log)
+{
+    WCHAR cmd[2048];
+    DWORD code;
+    HRESULT hr;
+
+    hr = ScoopPrereq(log);
+    if (FAILED(hr)) return hr;
+    if (!FmScoopCommandArgs(args, cmd, ARRAYSIZE(cmd)))
+    {
+        LOGF(log, L"error: cannot build a Scoop command line for '%s'\n", args);
+        SetLastMsg(L"Cannot build a valid Scoop command line for '%s'.", args);
+        return E_INVALIDARG;
+    }
+    FmScoopPrepareEnv();
+    hr = RunAndWait(cmd, SW_RUN_TIMEOUT_MS, &code, log);
+    if (FAILED(hr)) return hr;
+    if (code != 0)
+    {
+        LOGF(log, L"error: 'scoop %s' failed (exit code %lu)\n", args, code);
+        SetLastMsg(L"'scoop %s' failed (exit code %lu).\n\n%s", args, code, g_Tail);
+        return HRESULT_FROM_WIN32(ERROR_INSTALL_FAILURE);
+    }
+    return S_OK;
+}
+
+static HRESULT FmUpdateInner(LPCWSTR id, FILE *log)
+{
+    FM_FEATURE f, after;
+    WCHAR before[FM_MAX_VER], args[128];
+    HRESULT hr;
+
+    if (!FmFindFeature(id, &f))
+    {
+        LOGF(log, L"error: unknown feature '%s'\n", id);
+        SetLastMsg(L"Unknown feature '%s'.", id);
+        return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+    }
+    if (_wcsicmp(f.Provider, L"scoop"))
+    {
+        LOGF(log, L"error: '%s' cannot be updated by featmgr: only Scoop apps have an updater (provider: %s)\n",
+             f.Id, f.Provider[0] ? f.Provider : L"none");
+        SetLastMsg(L"'%s' cannot be updated by featmgr: only Scoop apps have an updater.", f.Name);
+        return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+    }
+    if (f.State != FM_STATE_ENABLED)
+    {
+        LOGF(log, L"error: '%s' is not installed\n", f.Id);
+        SetLastMsg(L"'%s' is not installed.", f.Name);
+        return HRESULT_FROM_WIN32(ERROR_INVALID_STATE);
+    }
+    if (!FmScoopValidApp(f.App))
+    {
+        SetLastMsg(L"'%s' has an invalid Scoop app name.", f.Id);
+        return E_INVALIDARG;
+    }
+    StringCchCopyW(before, ARRAYSIZE(before), f.InstalledVersion);
+    LOGF(log, L"updating '%s' (installed %s, catalog %s)\n", f.Id, before[0] ? before : L"?", f.Version);
+    StringCchPrintfW(args, ARRAYSIZE(args), L"update %s", f.App);
+    hr = RunScoop(args, log);
+    if (FAILED(hr))
+    {
+        LOGF(log, L"update FAILED (0x%08lx)\n", hr);
+        return hr;
+    }
+    /* "scoop update" may have pulled the bucket: read its manifests again */
+    if (f.Bucket[0] && FmScoopReimport(f.Bucket, log) < 0)
+        LOGF(log, L"  note: the catalog entries of bucket '%s' were not refreshed\n", f.Bucket);
+    if (FmFindFeature(id, &after) && after.InstalledVersion[0])
+    {
+        if (!wcscmp(before, after.InstalledVersion))
+            LOGF(log, L"'%s' is at the latest version Scoop has for it (%s).\n", id, after.InstalledVersion);
+        else
+            LOGF(log, L"'%s' updated: %s -> %s\n", id, before[0] ? before : L"?", after.InstalledVersion);
+    }
+    else
+        LOGF(log, L"'%s' updated.\n", id);
+    return S_OK;
+}
+
+HRESULT FmUpdate(LPCWSTR id, FILE *log)
+{
+    HRESULT hr;
+    if (g_OpDepth++ == 0) { g_LastMsg[0] = L'\0'; g_Tail[0] = L'\0'; }
+    hr = FmUpdateInner(id, log);
+    g_OpDepth--;
+    return hr;
+}
+
+HRESULT FmUpdateAll(FILE *log)
+{
+    HRESULT hr;
+
+    if (g_OpDepth++ == 0) { g_LastMsg[0] = L'\0'; g_Tail[0] = L'\0'; }
+    LOGF(log, L"updating Scoop and its buckets\n");
+    hr = RunScoop(L"update", log);
+    if (SUCCEEDED(hr))
+    {
+        int n = FmScoopReimportAll(log);
+        LOGF(log, L"catalog refreshed from the updated buckets (%d entries)\n", n < 0 ? 0 : n);
+        LOGF(log, L"updating all installed Scoop apps\n");
+        hr = RunScoop(L"update *", log);
+        if (SUCCEEDED(hr)) LOGF(log, L"all Scoop apps are up to date.\n");
+    }
+    if (FAILED(hr)) LOGF(log, L"update FAILED (0x%08lx)\n", hr);
+    g_OpDepth--;
+    return hr;
+}
+
+/* Add a bucket to Scoop and import it. A bucket on Scoop's own list ("scoop bucket known") is added
+ * by name. Anything else, and any explicit URL, is the command-line-only path and needs the
+ * trust flag: a bucket's manifests can run PowerShell as administrator. The import that follows
+ * is covered by the same consent. */
+HRESULT FmScoopAddBucket(LPCWSTR name, LPCWSTR url, DWORD flags, FILE *log)
+{
+    WCHAR root[MAX_PATH], d[MAX_PATH], args[320];
+    BOOL known, haveUrl = url && url[0];
+    HRESULT hr;
+    int n, skipped = 0;
+
+    if (g_OpDepth++ == 0) { g_LastMsg[0] = L'\0'; g_Tail[0] = L'\0'; }
+    hr = ScoopPrereq(log);
+    if (FAILED(hr)) goto out;
+    if (!FmScoopValidBucket(name))
+    {
+        LOGF(log, L"error: '%s' is not a valid bucket name\n", name);
+        SetLastMsg(L"'%s' is not a valid bucket name.", name);
+        hr = E_INVALIDARG; goto out;
+    }
+    known = FmScoopBucketIsKnown(name);
+    if (haveUrl && !FmScoopValidUrl(url))
+    {
+        LOGF(log, L"error: the bucket URL must be a plain https:// URL (letters, digits and . _ ~ : / ? # @ ! * + , = - only)\n");
+        SetLastMsg(L"The bucket URL must be a plain https:// URL.");
+        hr = E_INVALIDARG; goto out;
+    }
+    if ((haveUrl || !known) && !(flags & FM_BUCKET_TRUST))
+    {
+        if (!known && !haveUrl)
+            LOGF(log, L"error: '%s' is not one of Scoop's known buckets (see featmgr /scoop-buckets). To add another bucket "
+                      L"give its https URL and /trust: featmgr /add-bucket <name> <url> /trust\n", name);
+        else
+            LOGF(log, L"error: adding a bucket from a URL needs your explicit consent: its manifests can run PowerShell as "
+                      L"administrator. Add /trust if you trust the maintainers.\n");
+        SetLastMsg(L"Only Scoop's known buckets can be added without an explicit /trust.");
+        hr = HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED); goto out;
+    }
+    if (!known && !haveUrl)
+    {
+        LOGF(log, L"error: '%s' is not one of Scoop's known buckets; give its https URL: featmgr /add-bucket %s <url> /trust\n", name, name);
+        SetLastMsg(L"'%s' is not one of Scoop's known buckets.", name);
+        hr = E_INVALIDARG; goto out;
+    }
+    if (!FmScoopRoot(root, MAX_PATH)) { hr = E_FAIL; goto out; }
+    StringCchPrintfW(d, MAX_PATH, L"%s\\buckets\\%s", root, name);
+    if (GetFileAttributesW(d) != INVALID_FILE_ATTRIBUTES)
+        LOGF(log, L"bucket '%s' is already added to Scoop\n", name);
+    else
+    {
+        if (haveUrl) StringCchPrintfW(args, ARRAYSIZE(args), L"bucket add %s %s", name, url);
+        else         StringCchPrintfW(args, ARRAYSIZE(args), L"bucket add %s", name);
+        hr = RunScoop(args, log);
+        if (FAILED(hr))
+        {
+            WCHAR g[MAX_PATH];
+            StringCchPrintfW(g, MAX_PATH, L"%s\\apps\\git\\current", root);
+            if (GetFileAttributesW(g) == INVALID_FILE_ATTRIBUTES)
+                LOGF(log, L"hint: Scoop adds buckets with git. If git is not installed: featmgr /install git\n");
+            goto out;
+        }
+        if (GetFileAttributesW(d) == INVALID_FILE_ATTRIBUTES)
+        {
+            LOGF(log, L"error: scoop reported success but %s does not exist\n", d);
+            hr = E_FAIL; goto out;
+        }
+    }
+    n = FmImportScoop(name, NULL, FM_SCOOP_TRUST, 0, &skipped, log);
+    hr = n < 0 ? E_FAIL : S_OK;
+out:
+    g_OpDepth--;
+    return hr;
 }

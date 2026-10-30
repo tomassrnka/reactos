@@ -29,6 +29,17 @@ rem install dependent -> pulls in its dependency
 call :rc0 "3 install fmt-dep"
 call :st fmt-dep Enabled "4 dep enabled"
 call :st fmt-base Enabled "5 base auto-enabled by dependency"
+%FM% /query fmt-base > %O%\q.txt 2>&1
+find "InstalledVersion: 1.0" %O%\q.txt >nul
+call :rc0 "V1 query: InstalledVersion recorded at enable (os tier)"
+%FM% /list /state:enabled > %O%\l.txt 2>&1
+find "INSTALLED" %O%\l.txt >nul
+call :rc0 "V2 /list has the INSTALLED column"
+%FM% "/list" "/search:test BASE feature" > %O%\l.txt 2>&1
+find "fmt-base" %O%\l.txt >nul
+call :rc0 "V3 /list /search finds the os-tier fixture by its name (case-insensitive)"
+find "fmt-dep" %O%\l.txt >nul
+call :rc1 "V4 ...and nothing else"
 call :ex %R%\fmt-base.out 1 "6 base file placed"
 call :ex %R%\fmt-dep.out 1 "7 dep file placed"
 reg query HKLM\SOFTWARE\ReactOS\Nitro\FmTest /v Base >nul 2>&1
@@ -219,6 +230,9 @@ copy /y %FX%\fmt-swstuck-uninst.cmd %R%\Payload\fmt-swstuck\ >nul
 call :st fmt-sw NotInstalled "77 sw initial"
 %FM% /install fmt-sw > %O%\i.txt 2>&1
 call :rc0 "78 install runs the installer (rc0)"
+%FM% /query fmt-sw > %O%\q.txt 2>&1
+find "InstalledVersion: 1.0" %O%\q.txt >nul
+call :rc0 "V5 software tier (command provider): InstalledVersion recorded at install"
 type %O%\i.txt >> %LOG%
 call :st fmt-sw Enabled "79 sw Enabled after install"
 call :ex %R%\fmt-sw.installed 1 "80 installer ran (side-effect file)"
@@ -500,6 +514,280 @@ call :rc0 "185 ...with its exit code"
 call :st fmsc-fail NotInstalled "186 failed install leaves NotInstalled"
 reg query HKLM\SOFTWARE\ReactOS\Nitro\OptionalFeatures\fmsc-fail >nul 2>&1
 call :rc1 "187 failed install leaves no record"
+rem ===== SCOOP M2: per-bucket index file, installed version, update, search, bucket add, scale =====
+rem --- the import writes ONE index file per bucket, not one ini per app
+call :ex %SW%\scoop-fmfix.idx 1 "M1 index file for bucket fmfix"
+call :ex %SW%\scoop-main.idx 1 "M2 index file for bucket main (imported from the Scoop root)"
+call :ex %SW%\fmsc-plain.ini 0 "M3 no per-app ini written"
+find "#featmgr-scoop-index" %SW%\scoop-fmfix.idx >nul
+call :rc0 "M4 index header present"
+find "bucket=fmfix" %SW%\scoop-fmfix.idx >nul
+call :rc0 "M5 header names the bucket"
+find "fmsc-plain" %SW%\scoop-fmfix.idx >nul
+call :rc0 "M6 index holds the entries"
+rem per-app ini files of an M1 import: still read; replaced by the index when their bucket is imported again
+> %SW%\fmsc-legacy.ini echo [Feature]
+>> %SW%\fmsc-legacy.ini echo Id=fmsc-legacy
+>> %SW%\fmsc-legacy.ini echo Name=fmsc-legacy
+>> %SW%\fmsc-legacy.ini echo Description=M1-style per-app entry
+>> %SW%\fmsc-legacy.ini echo Version=3.1
+>> %SW%\fmsc-legacy.ini echo Tier=software
+>> %SW%\fmsc-legacy.ini echo Dependencies=scoop
+>> %SW%\fmsc-legacy.ini echo [Install]
+>> %SW%\fmsc-legacy.ini echo Provider=scoop
+>> %SW%\fmsc-legacy.ini echo [Scoop]
+>> %SW%\fmsc-legacy.ini echo App=fmsc-legacy
+>> %SW%\fmsc-legacy.ini echo Bucket=fmlegacy
+> %SW%\fmsc-plain.ini echo [Feature]
+>> %SW%\fmsc-plain.ini echo Id=fmsc-plain
+>> %SW%\fmsc-plain.ini echo Name=fmsc-plain
+>> %SW%\fmsc-plain.ini echo Version=0.0.1
+>> %SW%\fmsc-plain.ini echo Tier=software
+>> %SW%\fmsc-plain.ini echo Dependencies=scoop
+>> %SW%\fmsc-plain.ini echo [Install]
+>> %SW%\fmsc-plain.ini echo Provider=scoop
+>> %SW%\fmsc-plain.ini echo [Scoop]
+>> %SW%\fmsc-plain.ini echo App=fmsc-plain
+>> %SW%\fmsc-plain.ini echo Bucket=fmfix
+%FM% /query fmsc-legacy > %O%\q.txt 2>&1
+call :rc0 "M7 per-app ini of an older import still readable"
+find "Source:       scoop/fmlegacy" %O%\q.txt >nul
+call :rc0 "M8 ...with its source"
+%FM% /import-scoop fmfix /dir:%FXS% /trust > %O%\imp.txt 2>&1
+call :rc0 "M9 re-import of fmfix"
+call :ex %SW%\fmsc-plain.ini 0 "M10 the older per-app ini of the re-imported bucket is gone"
+call :ex %SW%\fmsc-legacy.ini 1 "M11 other buckets' per-app ini untouched"
+%FM% /query fmsc-plain > %O%\q.txt 2>&1
+find "Version:      1.2.3" %O%\q.txt >nul
+call :rc0 "M12 the entry now comes from the index (version 1.2.3, not the stale ini's 0.0.1)"
+del /q %SW%\fmsc-legacy.ini
+
+rem --- search: name and description, case-insensitive
+%FM% /list /search:FMSC-PLAIN > %O%\l.txt 2>&1
+find "fmsc-plain" %O%\l.txt >nul
+call :rc0 "S1 /list /search matches the name, case-insensitively"
+find "fmsc-arch" %O%\l.txt >nul
+call :rc1 "S2 ...and hides the others"
+%FM% "/list" "/search:Plain Scoop TEST" > %O%\l.txt 2>&1
+find "fmsc-plain" %O%\l.txt >nul
+call :rc0 "S3 /list /search matches the description"
+%FM% /list /search:CAF > %O%\l.txt 2>&1
+find "fmsc-arch" %O%\l.txt >nul
+call :rc0 "S4 description match (Caf in the description of fmsc-arch, not in its name)"
+%FM% /list /search:zzznomatchzzz > %O%\l.txt 2>&1
+find "0 feature(s)" %O%\l.txt >nul
+call :rc0 "S5 no match lists nothing"
+%FM% /list /tier:software /search:fmsc /source:scoop/fmfix > %O%\l.txt 2>&1
+find "fmsc-plain" %O%\l.txt >nul
+call :rc0 "S6 /search combines with /tier and /source"
+
+rem --- installed version and update (the stub keeps the bucket manifest as apps\<app>\current\manifest.json)
+mkdir %FSROOT%\pending 2>nul
+mkdir %FSROOT%\bucketsrc 2>nul
+copy /y %FX%\scoop-upd\v1\fmsc-upd.json %FSROOT%\buckets\main\bucket\ >nul
+copy /y %FX%\scoop-upd\v1\fmsc-failupd.json %FSROOT%\buckets\main\bucket\ >nul
+%FM% /import-scoop > %O%\imp.txt 2>&1
+call :rc0 "U1 import of the official buckets with the update fixture (1.0.0)"
+%FM% /query fmsc-upd > %O%\q.txt 2>&1
+find "Version:      1.0.0" %O%\q.txt >nul
+call :rc0 "U2 catalog version 1.0.0"
+find "InstalledVersion: (not installed)" %O%\q.txt >nul
+call :rc0 "U3 not installed: no installed version"
+%FM% /install fmsc-upd > %O%\i.txt 2>&1
+call :rc0 "U4 install fmsc-upd"
+call :ex %FSROOT%\apps\fmsc-upd\current\manifest.json 1 "U5 stub left current\manifest.json"
+%FM% /query fmsc-upd > %O%\q.txt 2>&1
+type %O%\q.txt >> %LOG%
+find "InstalledVersion: 1.0.0" %O%\q.txt >nul
+call :rc0 "U6 installed version read from current\manifest.json"
+find "UpdateAvailable" %O%\q.txt >nul
+call :rc1 "U7 no update while the catalog matches"
+%FM% /list /state:enabled /tier:software > %O%\l.txt 2>&1
+find "INSTALLED" %O%\l.txt >nul
+call :rc0 "U8 /list has the INSTALLED column"
+findstr /b "fmsc-upd" %O%\l.txt | find "1.0.0" >nul
+call :rc0 "U9 /list shows the installed version of fmsc-upd"
+rem "scoop update" pulled a newer manifest into the bucket: the catalog still has the old one until it is re-imported
+copy /y %FX%\scoop-upd\v2\fmsc-upd.json %FSROOT%\buckets\main\bucket\ >nul
+%FM% /query fmsc-upd > %O%\q.txt 2>&1
+find "UpdateAvailable" %O%\q.txt >nul
+call :rc1 "U10 catalog not refreshed yet: no update shown"
+%FM% /import-scoop > %O%\imp.txt 2>&1
+call :rc0 "U11 re-import after the bucket changed"
+%FM% /query fmsc-upd > %O%\q.txt 2>&1
+type %O%\q.txt >> %LOG%
+find "Version:      1.1.0" %O%\q.txt >nul
+call :rc0 "U12 catalog version now 1.1.0"
+find "InstalledVersion: 1.0.0" %O%\q.txt >nul
+call :rc0 "U13 installed version still 1.0.0"
+find "UpdateAvailable: Yes (1.0.0 -> 1.1.0)" %O%\q.txt >nul
+call :rc0 "U14 update available 1.0.0 -> 1.1.0"
+%FM% /list /state:enabled /tier:software > %O%\l.txt 2>&1
+find "[update available]" %O%\l.txt >nul
+call :rc0 "U15 /list marks the update"
+%FM% /update fmsc-upd > %O%\u.txt 2>&1
+call :rc0 "U16 featmgr /update fmsc-upd rc0"
+type %O%\u.txt >> %LOG%
+findstr /x /c:"update fmsc-upd" %FSROOT%\calls.txt >nul
+call :rc0 "U17 scoop was called: update fmsc-upd"
+find "updated: 1.0.0 -> 1.1.0" %O%\u.txt >nul
+call :rc0 "U18 the report says 1.0.0 -> 1.1.0"
+%FM% /query fmsc-upd > %O%\q.txt 2>&1
+find "InstalledVersion: 1.1.0" %O%\q.txt >nul
+call :rc0 "U19 installed version is 1.1.0"
+find "UpdateAvailable" %O%\q.txt >nul
+call :rc1 "U20 no update pending after the update"
+%FM% /update fmsc-upd > %O%\u.txt 2>&1
+call :rc0 "U21 update when already current: rc0"
+find "latest version Scoop has" %O%\u.txt >nul
+call :rc0 "U22 ...says so"
+rem /update /all: scoop update (pulls the bucket), re-import, scoop update *
+copy /y %FX%\scoop-upd\v3\fmsc-upd.json %FSROOT%\pending\ >nul
+%FM% /update /all > %O%\u.txt 2>&1
+call :rc0 "U23 featmgr /update /all rc0"
+type %O%\u.txt >> %LOG%
+findstr /x /c:"update" %FSROOT%\calls.txt >nul
+call :rc0 "U24 scoop was called: update (Scoop and buckets)"
+findstr /x /c:"update *" %FSROOT%\calls.txt >nul
+call :rc0 "U25 scoop was called: update * (apps)"
+%FM% /query fmsc-upd > %O%\q.txt 2>&1
+find "Version:      1.2.0" %O%\q.txt >nul
+call :rc0 "U26 catalog refreshed from the pulled bucket (1.2.0)"
+find "InstalledVersion: 1.2.0" %O%\q.txt >nul
+call :rc0 "U27 app updated to 1.2.0"
+find "UpdateAvailable" %O%\q.txt >nul
+call :rc1 "U28 nothing pending"
+%FM% /update fmsc-nohash > %O%\u.txt 2>&1
+call :rc1 "U29 /update of an app that is not in the catalog"
+%FM% /update fmsc-plain > %O%\u.txt 2>&1
+call :rc1 "U30 /update of an app that is not installed"
+find "not installed" %O%\u.txt >nul
+call :rc0 "U31 ...says it is not installed"
+%FM% /update fmt-sw > %O%\u.txt 2>&1
+call :rc1 "U32 /update of a non-Scoop entry refused"
+find "only Scoop apps" %O%\u.txt >nul
+call :rc0 "U33 ...says only Scoop apps have an updater"
+%FM% /update > %O%\u.txt 2>&1
+call :rc1 "U34 /update without an argument is a usage error"
+%FM% /install fmsc-failupd > %O%\i.txt 2>&1
+call :rc0 "U35 install fmsc-failupd"
+%FM% /update fmsc-failupd > %O%\u.txt 2>&1
+call :rc1 "U36 a failing scoop update fails"
+type %O%\u.txt >> %LOG%
+find "download failed" %O%\u.txt >nul
+call :rc0 "U37 Scoop's own output is shown"
+find "exit code 7" %O%\u.txt >nul
+call :rc0 "U38 ...with its exit code"
+%FM% /uninstall fmsc-failupd >> %LOG% 2>&1
+%FM% /uninstall fmsc-upd >> %LOG% 2>&1
+
+rem --- add bucket: Scoop's known buckets by name, anything else needs /trust and an https URL
+copy /y %FXS%\fmsc-arch.json %FSROOT%\bucketsrc\ >nul
+%FM% /scoop-buckets > %O%\b.txt 2>&1
+type %O%\b.txt >> %LOG%
+find "Known buckets" %O%\b.txt >nul
+call :rc0 "B1 /scoop-buckets lists Scoop's known buckets"
+find "versions" %O%\b.txt >nul
+call :rc0 "B2 ...built-in names when Scoop's buckets.json is absent"
+%FM% /add-bucket versions > %O%\ab.txt 2>&1
+call :rc0 "B3 /add-bucket versions (known) rc0"
+type %O%\ab.txt >> %LOG%
+findstr /x /c:"bucket add versions" %FSROOT%\calls.txt >nul
+call :rc0 "B4 scoop was called: bucket add versions"
+call :ex %SW%\scoop-versions.idx 1 "B5 the bucket was imported (index file)"
+%FM% /query versions-fmsc-arch > %O%\q.txt 2>&1
+call :rc0 "B6 imported entry (id prefixed: fmsc-arch is taken by another bucket's index)"
+find "Source:       scoop/versions" %O%\q.txt >nul
+call :rc0 "B7 ...Source=scoop/versions"
+%FM% /add-bucket versions > %O%\ab.txt 2>&1
+call :rc0 "B8 adding a bucket twice is harmless"
+find "already added" %O%\ab.txt >nul
+call :rc0 "B9 ...says it is already added"
+%FM% /add-bucket nosuchbucket > %O%\ab.txt 2>&1
+call :rc1 "B10 unknown bucket refused without a URL"
+find "not one of Scoop's known buckets" %O%\ab.txt >nul
+call :rc0 "B11 ...with the reason"
+%FM% /add-bucket fmthird https://example.invalid/fmthird > %O%\ab.txt 2>&1
+call :rc1 "B12 arbitrary URL refused without /trust"
+find "explicit consent" %O%\ab.txt >nul
+call :rc0 "B13 ...asks for consent"
+%FM% /add-bucket versions https://example.invalid/other > %O%\ab.txt 2>&1
+call :rc1 "B14 a known name with a different URL also needs /trust"
+%FM% /add-bucket fmthird "https://example.invalid/a&b" /trust > %O%\ab.txt 2>&1
+call :rc1 "B15 URL with a shell metacharacter refused even with /trust"
+%FM% /add-bucket fmthird http://example.invalid/fmthird /trust > %O%\ab.txt 2>&1
+call :rc1 "B16 plain http URL refused"
+%FM% /add-bucket fmthird /trust > %O%\ab.txt 2>&1
+call :rc1 "B17 unknown bucket without URL refused even with /trust"
+%FM% /add-bucket bad/name /trust > %O%\ab.txt 2>&1
+call :rc1 "B18 invalid bucket name refused"
+find "fmthird" %FSROOT%\calls.txt >nul
+call :rc1 "B19 scoop was never called for any refused request"
+%FM% /add-bucket fmthird https://example.invalid/fmthird /trust > %O%\ab.txt 2>&1
+call :rc0 "B20 /add-bucket <name> <https-url> /trust rc0"
+type %O%\ab.txt >> %LOG%
+findstr /x /c:"bucket add fmthird https://example.invalid/fmthird" %FSROOT%\calls.txt >nul
+call :rc0 "B21 scoop was called with the URL"
+%FM% /query fmthird-fmsc-arch > %O%\q.txt 2>&1
+call :rc0 "B22 third-party bucket imported"
+find "trust=1" %SW%\scoop-fmthird.idx >nul
+call :rc0 "B23 the index records that the import had /trust"
+rem Scoop's own list (buckets.json) decides what is known
+> %FSROOT%\apps\scoop\current\buckets.json echo {"fmknown": "https://example.invalid/fmknown", "main": "https://example.invalid/main"}
+%FM% /scoop-buckets > %O%\b.txt 2>&1
+find "fmknown" %O%\b.txt >nul
+call :rc0 "B24 /scoop-buckets reads Scoop's buckets.json"
+find "https://example.invalid/fmknown" %O%\b.txt >nul
+call :rc0 "B25 ...with the URL"
+%FM% /add-bucket fmknown > %O%\ab.txt 2>&1
+call :rc0 "B26 a bucket from buckets.json is known"
+%FM% /add-bucket nirsoft > %O%\ab.txt 2>&1
+call :rc1 "B27 a built-in name that buckets.json does not list is not known"
+rem a refresh keeps the consent of the original import and never widens it
+%FM% /update /all > %O%\u.txt 2>&1
+call :rc0 "B28 /update /all refreshes added buckets too"
+find "trust=1" %SW%\scoop-fmthird.idx >nul
+call :rc0 "B29 fmthird keeps its recorded flags"
+del /q %FSROOT%\apps\scoop\current\buckets.json
+
+rem --- scale: 4000 manifests in one bucket
+set PERF=%O%\perfbucket
+rd /s /q %PERF% 2>nul
+mkdir %PERF%
+for /l %%i in (1,1,4000) do @echo {"version":"1.0.%%i","description":"Perf app %%i","homepage":"https://example.invalid/p%%i","license":"MIT","url":"https://example.invalid/p%%i.zip","hash":"0123456789abcdef"}> %PERF%\perf-%%i.json
+dir /b %PERF%\*.json | find /c ".json" > %O%\pc.txt
+type %O%\pc.txt >> %LOG%
+find "4000" %O%\pc.txt >nul
+call :rc0 "P1 4000 fixture manifests generated"
+%FM% /import-scoop fmperf /dir:%PERF% /trust /timing > %O%\imp.txt 2>&1
+call :rc0 "P2 import of 4000 manifests rc0"
+find "imported 4000 Scoop app(s)" %O%\imp.txt >nul
+call :rc0 "P3 4000 imported"
+findstr /b "timing:" %O%\imp.txt >> %LOG%
+set IMS=999999
+for /f "tokens=3" %%a in ('findstr /b "timing:" %O%\imp.txt') do set IMS=%%a
+echo import of 4000 manifests: %IMS% ms>> %LOG%
+if %IMS% LSS 30000 (echo PASS P4 import of 4000 manifests under 30 s>> %LOG%) else (call :fail "P4 import of 4000 manifests under 30 s" "%IMS% ms")
+call :ex %SW%\scoop-fmperf.idx 1 "P5 one index file for the bucket"
+%FM% /list /tier:software /timing > %O%\l.txt 2>&1
+call :rc0 "P6 /list over 4000+ entries rc0"
+findstr /b "timing:" %O%\l.txt >> %LOG%
+set LMS=999999
+for /f "tokens=3" %%a in ('findstr /b "timing:" %O%\l.txt') do set LMS=%%a
+echo list of 4000+ entries: %LMS% ms>> %LOG%
+if %LMS% LSS 5000 (echo PASS P7 /list enumerates 4000+ entries in under 5 s>> %LOG%) else (call :fail "P7 /list enumerates 4000+ entries in under 5 s" "%LMS% ms")
+find "perf-4000" %O%\l.txt >nul
+call :rc0 "P8 the last entry is listed"
+%FM% "/list" "/search:Perf app 3999" > %O%\l.txt 2>&1
+find "perf-3999" %O%\l.txt >nul
+call :rc0 "P9 search finds one of 4000 by description"
+find "1 feature(s)" %O%\l.txt >nul
+call :rc0 "P10 ...and only that one"
+%FM% /query perf-2500 > %O%\q.txt 2>&1
+find "Version:      1.0.2500" %O%\q.txt >nul
+call :rc0 "P11 /query of one entry out of 4000+"
+rd /s /q %PERF% 2>nul
+
 rem the install of a feature that is available only with scoop present
 set FEATMGR_SCOOP_ROOT=
 set FEATMGR_SCOOP_RUNNER=
@@ -537,6 +825,12 @@ call :rc0 "X3 ...with a clear message"
 call :rc1 "X4 /import-scoop (no args) refused on x86"
 %FM% /query fmsc-plain >nul 2>&1
 call :rc1 "X5 nothing imported on x86"
+%FM% /update /all > %O%\u.txt 2>&1
+call :rc1 "X6 /update /all refused on x86"
+find "not available on this architecture" %O%\u.txt >nul
+call :rc0 "X7 ...with a clear message"
+%FM% /add-bucket versions > %O%\u.txt 2>&1
+call :rc1 "X8 /add-bucket refused on x86"
 
 :scoop_done
 set FEATMGR_SCOOP_ROOT=
@@ -559,7 +853,7 @@ rmdir %R%\Payload\fmt-base 2>nul
 rmdir %R%\Payload\fmt-dep 2>nul
 reg delete HKLM\SOFTWARE\ReactOS\Nitro\FmTest /f >nul 2>&1
 
-if "%FAILS%"=="0" (echo ROUNDTRIP-RESULT: PASS>> %LOG%) else (echo ROUNDTRIP-RESULT: FAIL %FAILS%>> %LOG%)
+if "%FAILS%"=="0" (echo ROUNDTRIP-RESULT: PASS>> %LOG%) else (echo ROUNDTRIP-RESULT: FAIL %FAILS% >> %LOG%)
 goto :eof
 
 :st
