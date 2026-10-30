@@ -620,6 +620,9 @@ INT cmd_rmdir(LPTSTR param)
 
 INT CommandExit(LPTSTR param)
 {
+    BOOL bExitBatch = FALSE;
+    BOOL bHasCode = FALSE;
+
     if (!_tcsncmp(param, _T("/?"), 2))
     {
         ConOutResPaging(TRUE, STRING_EXIT_HELP);
@@ -631,6 +634,7 @@ INT CommandExit(LPTSTR param)
 
     if (_tcsnicmp(param, _T("/B"), 2) == 0)
     {
+        bExitBatch = TRUE;
         param += 2;
 
         /*
@@ -678,12 +682,23 @@ INT CommandExit(LPTSTR param)
     while (_istspace(*param))
         ++param;
 
-    /* Set the errorlevel to the exit code */
-    if (_istdigit(*param))
+    /* Set the errorlevel to the exit code. As in Windows' CMD, it is a
+     * number with an optional sign, and anything after it is ignored. */
+    if (_istdigit(*param) ||
+        ((*param == _T('-') || *param == _T('+')) && _istdigit(param[1])))
     {
         nErrorLevel = _ttoi(param);
+        bHasCode = TRUE;
         // if (fSingleCommand == 1) return nErrorLevel;
     }
+
+    /*
+     * EXIT /B out of a batch file returns the exit code it was given. With
+     * none, the command itself succeeds and ERRORLEVEL is left alone: that is
+     * what CMD /C reports for the file, while CALL takes the ERRORLEVEL.
+     */
+    if (bExitBatch && !bExit)
+        return (bHasCode ? nErrorLevel : 0);
 
     return (bExit ? nErrorLevel : 0);
 }
