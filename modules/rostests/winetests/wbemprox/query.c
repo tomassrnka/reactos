@@ -352,6 +352,293 @@ out:
     SysFreeString( class );
 }
 
+/* run a query on Win32_Service, return the number of results and whether one of them is named "name" */
+static UINT query_service_names( IWbemServices *services, const WCHAR *str, const WCHAR *name, BOOL *found )
+{
+    static const WCHAR nameW[] = {'N','a','m','e',0};
+    IEnumWbemClassObject *result;
+    IWbemClassObject *obj;
+    BSTR wql = SysAllocString( wqlW ), query = SysAllocString( str );
+    UINT count = 0;
+    ULONG num;
+    HRESULT hr;
+
+    if (found) *found = FALSE;
+    hr = IWbemServices_ExecQuery( services, wql, query, WBEM_FLAG_RETURN_IMMEDIATELY | WBEM_FLAG_FORWARD_ONLY,
+                                  NULL, &result );
+    ok( hr == S_OK, "%s: got %08x\n", wine_dbgstr_w(str), hr );
+    if (hr == S_OK)
+    {
+        for (;;)
+        {
+            VARIANT var;
+
+            IEnumWbemClassObject_Next( result, 10000, 1, &obj, &num );
+            if (!num) break;
+            count++;
+            if (name && IWbemClassObject_Get( obj, nameW, 0, &var, NULL, NULL ) == S_OK)
+            {
+                if (V_VT( &var ) == VT_BSTR && !lstrcmpiW( V_BSTR( &var ), name ) && found) *found = TRUE;
+                VariantClear( &var );
+            }
+            IWbemClassObject_Release( obj );
+        }
+        IEnumWbemClassObject_Release( result );
+    }
+    SysFreeString( wql );
+    SysFreeString( query );
+    return count;
+}
+
+/* WQL compares strings case-insensitively */
+static void test_string_compare_case( IWbemServices *services )
+{
+    static const WCHAR allW[] = {'S','E','L','E','C','T',' ','N','a','m','e',' ','F','R','O','M',' ',
+        'W','i','n','3','2','_','S','e','r','v','i','c','e',0};
+    IEnumWbemClassObject *result;
+    IWbemClassObject *obj;
+    BSTR wql, query;
+    WCHAR name[64], upper[64], lower[64], swap[64], mid[64], q[256], path[256];
+    UINT len = 0, i, count;
+    BOOL found;
+    ULONG num;
+    HRESULT hr;
+
+    /* find a service with an all-alphanumeric name of at least 4 characters and at least 2 letters */
+    wql = SysAllocString( wqlW );
+    query = SysAllocString( allW );
+    hr = IWbemServices_ExecQuery( services, wql, query, WBEM_FLAG_RETURN_IMMEDIATELY | WBEM_FLAG_FORWARD_ONLY,
+                                  NULL, &result );
+    SysFreeString( wql );
+    SysFreeString( query );
+    ok( hr == S_OK, "got %08x\n", hr );
+    if (hr != S_OK) return;
+    name[0] = 0;
+    for (;;)
+    {
+        VARIANT var;
+        UINT n, letters = 0;
+        BOOL good = TRUE;
+
+        IEnumWbemClassObject_Next( result, 10000, 1, &obj, &num );
+        if (!num) break;
+        if (IWbemClassObject_Get( obj, L"Name", 0, &var, NULL, NULL ) == S_OK)
+        {
+            if (V_VT( &var ) == VT_BSTR && !name[0])
+            {
+                n = lstrlenW( V_BSTR( &var ) );
+                for (i = 0; i < n; i++)
+                {
+                    WCHAR c = V_BSTR( &var )[i];
+                    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) letters++;
+                    else if (!(c >= '0' && c <= '9')) good = FALSE;
+                }
+                if (good && n >= 4 && n < ARRAY_SIZE(name) && letters >= 2) lstrcpyW( name, V_BSTR( &var ) );
+            }
+            VariantClear( &var );
+        }
+        IWbemClassObject_Release( obj );
+    }
+    IEnumWbemClassObject_Release( result );
+    if (!name[0])
+    {
+        skip( "no suitable service\n" );
+        return;
+    }
+    trace( "using service %s\n", wine_dbgstr_w(name) );
+
+    len = lstrlenW( name );
+    for (i = 0; i <= len; i++)
+    {
+        upper[i] = (name[i] >= 'a' && name[i] <= 'z') ? name[i] - 32 : name[i];
+        lower[i] = (name[i] >= 'A' && name[i] <= 'Z') ? name[i] + 32 : name[i];
+        swap[i] = name[i] == upper[i] ? lower[i] : upper[i];
+    }
+    /* "mid" is the name with its second character replaced by "_", and the swapped-case version of the rest */
+    lstrcpyW( mid, swap );
+    mid[1] = '_';
+
+#define QUERY(fmt, arg) wsprintfW( q, L"SELECT Name FROM Win32_Service WHERE " fmt, arg )
+#define CHECK(expected_found, msg) \
+    ok( found == (expected_found), "%s: %s\n", wine_dbgstr_w(q), msg )
+
+    /* = and <> */
+    QUERY( L"Name='%s'", upper );
+    count = query_service_names( services, q, name, &found );
+    ok( count == 1 && found, "%s: got %u\n", wine_dbgstr_w(q), count );
+    QUERY( L"Name='%s'", lower );
+    count = query_service_names( services, q, name, &found );
+    ok( count == 1 && found, "%s: got %u\n", wine_dbgstr_w(q), count );
+    QUERY( L"Name='%s'", swap );
+    count = query_service_names( services, q, name, &found );
+    ok( count == 1 && found, "%s: got %u\n", wine_dbgstr_w(q), count );
+    QUERY( L"'%s'=Name", upper );
+    count = query_service_names( services, q, name, &found );
+    ok( count == 1 && found, "%s: got %u\n", wine_dbgstr_w(q), count );
+    QUERY( L"name='%s'", upper );
+    count = query_service_names( services, q, name, &found );
+    ok( count == 1 && found, "%s: got %u\n", wine_dbgstr_w(q), count );
+    QUERY( L"Name='%s '", upper );
+    count = query_service_names( services, q, name, &found );
+    ok( !count, "%s: got %u\n", wine_dbgstr_w(q), count );
+    QUERY( L"Name<>'%s'", upper );
+    query_service_names( services, q, name, &found );
+    CHECK( FALSE, "found" );
+    QUERY( L"Name!='%s'", lower );
+    query_service_names( services, q, name, &found );
+    CHECK( FALSE, "found" );
+    QUERY( L"'%s'<>Name", swap );
+    query_service_names( services, q, name, &found );
+    CHECK( FALSE, "found" );
+    QUERY( L"NOT Name='%s'", swap );
+    query_service_names( services, q, name, &found );
+    CHECK( FALSE, "found" );
+
+    /* < <= > >=, compared with the name in the other case */
+    QUERY( L"Name<'%s'", upper );
+    query_service_names( services, q, name, &found );
+    CHECK( FALSE, "found" );
+    QUERY( L"Name<'%s'", lower );
+    query_service_names( services, q, name, &found );
+    CHECK( FALSE, "found" );
+    QUERY( L"Name>'%s'", upper );
+    query_service_names( services, q, name, &found );
+    CHECK( FALSE, "found" );
+    QUERY( L"Name>'%s'", lower );
+    query_service_names( services, q, name, &found );
+    CHECK( FALSE, "found" );
+    QUERY( L"Name<='%s'", upper );
+    query_service_names( services, q, name, &found );
+    CHECK( TRUE, "not found" );
+    QUERY( L"Name<='%s'", lower );
+    query_service_names( services, q, name, &found );
+    CHECK( TRUE, "not found" );
+    QUERY( L"Name>='%s'", upper );
+    query_service_names( services, q, name, &found );
+    CHECK( TRUE, "not found" );
+    QUERY( L"Name>='%s'", lower );
+    query_service_names( services, q, name, &found );
+    CHECK( TRUE, "not found" );
+    wsprintfW( q, L"SELECT Name FROM Win32_Service WHERE Name>='%s' AND Name<='%s'", lower, upper );
+    query_service_names( services, q, name, &found );
+    CHECK( TRUE, "not found" );
+    /* every service sorts between "0" and "zzzz" in either case */
+    count = query_service_names( services, L"SELECT Name FROM Win32_Service WHERE Name>='A' AND Name<='ZZZZ'",
+                                 NULL, NULL );
+    ok( count == query_service_names( services, L"SELECT Name FROM Win32_Service WHERE Name>='a' AND Name<='zzzz'",
+                                      NULL, NULL ), "ordering depends on case\n" );
+
+    /* LIKE: case, % _ and [] */
+    QUERY( L"Name LIKE '%s'", upper );
+    query_service_names( services, q, name, &found );
+    CHECK( TRUE, "not found" );
+    QUERY( L"Name LIKE '%s'", lower );
+    query_service_names( services, q, name, &found );
+    CHECK( TRUE, "not found" );
+    wsprintfW( q, L"SELECT Name FROM Win32_Service WHERE Name LIKE '%c%%'", swap[0] );
+    query_service_names( services, q, name, &found );
+    CHECK( TRUE, "not found" );
+    wsprintfW( q, L"SELECT Name FROM Win32_Service WHERE Name LIKE '%%%s'", swap + len - 2 );
+    query_service_names( services, q, name, &found );
+    CHECK( TRUE, "not found" );
+    wsprintfW( q, L"SELECT Name FROM Win32_Service WHERE Name LIKE '%%%s%%'", swap + 1 );
+    query_service_names( services, q, name, &found );
+    CHECK( TRUE, "not found" );
+    wsprintfW( q, L"SELECT Name FROM Win32_Service WHERE Name LIKE '%c%%%c'", swap[0], swap[len - 1] );
+    query_service_names( services, q, name, &found );
+    CHECK( TRUE, "not found" );
+    wsprintfW( q, L"SELECT Name FROM Win32_Service WHERE Name LIKE '%c%%%c%%%c'", swap[0], swap[1], swap[len - 1] );
+    query_service_names( services, q, name, &found );
+    CHECK( TRUE, "not found" );
+    QUERY( L"Name LIKE '%s'", mid );
+    query_service_names( services, q, name, &found );
+    CHECK( TRUE, "not found" );
+    wsprintfW( q, L"SELECT Name FROM Win32_Service WHERE Name LIKE '_%s'", swap + 1 );
+    query_service_names( services, q, name, &found );
+    CHECK( TRUE, "not found" );
+    wsprintfW( q, L"SELECT Name FROM Win32_Service WHERE Name LIKE '%s_'", swap );
+    query_service_names( services, q, name, &found );
+    CHECK( FALSE, "found" );
+    /* a pattern without a wildcard has to match the whole string */
+    swap[len - 1] = 0;
+    QUERY( L"Name LIKE '%s'", swap );
+    query_service_names( services, q, name, &found );
+    CHECK( FALSE, "found" );
+    wsprintfW( q, L"SELECT Name FROM Win32_Service WHERE Name LIKE '%s%%'", swap );
+    query_service_names( services, q, name, &found );
+    CHECK( TRUE, "not found" );
+    swap[len - 1] = name[len - 1] == upper[len - 1] ? lower[len - 1] : upper[len - 1];
+    wsprintfW( q, L"SELECT Name FROM Win32_Service WHERE Name LIKE '%s%s'", swap, swap + len - 1 );
+    query_service_names( services, q, name, &found );
+    CHECK( FALSE, "found" );
+
+    wsprintfW( q, L"SELECT Name FROM Win32_Service WHERE Name LIKE '[%c]%%'", swap[0] );
+    query_service_names( services, q, name, &found );
+    CHECK( TRUE, "not found" );
+    wsprintfW( q, L"SELECT Name FROM Win32_Service WHERE Name LIKE '[^%c]%%'", swap[0] );
+    query_service_names( services, q, name, &found );
+    CHECK( FALSE, "found" );
+    wsprintfW( q, L"SELECT Name FROM Win32_Service WHERE Name LIKE '[a-z0-9]%%'" );
+    query_service_names( services, q, name, &found );
+    CHECK( TRUE, "not found" );
+    wsprintfW( q, L"SELECT Name FROM Win32_Service WHERE Name LIKE '[A-Z0-9]%%'" );
+    query_service_names( services, q, name, &found );
+    CHECK( TRUE, "not found" );
+    wsprintfW( q, L"SELECT Name FROM Win32_Service WHERE Name LIKE '[^A-Z0-9]%%'" );
+    query_service_names( services, q, name, &found );
+    CHECK( FALSE, "found" );
+    wsprintfW( q, L"SELECT Name FROM Win32_Service WHERE Name LIKE '[^a-z0-9]%%'" );
+    query_service_names( services, q, name, &found );
+    CHECK( FALSE, "found" );
+    wsprintfW( q, L"SELECT Name FROM Win32_Service WHERE Name LIKE '%c[%c%c]%s'", swap[0], swap[1], swap[2], swap + 2 );
+    query_service_names( services, q, name, &found );
+    CHECK( TRUE, "not found" );
+    /* a set is not a literal */
+    wsprintfW( q, L"SELECT Name FROM Win32_Service WHERE Name LIKE '%s[]'", swap );
+    query_service_names( services, q, name, &found );
+    CHECK( FALSE, "found" );
+    wsprintfW( q, L"SELECT Name FROM Win32_Service WHERE Name LIKE '%s[x'", swap );
+    query_service_names( services, q, name, &found );
+    CHECK( FALSE, "found" );
+
+    /* NULL */
+    QUERY( L"Name='%s' AND Name IS NOT NULL", swap );
+    count = query_service_names( services, q, name, &found );
+    ok( count == 1 && found, "%s: got %u\n", wine_dbgstr_w(q), count );
+    QUERY( L"Name='%s' AND Name IS NULL", swap );
+    count = query_service_names( services, q, name, &found );
+    ok( !count, "%s: got %u\n", wine_dbgstr_w(q), count );
+
+    /* object paths */
+    for (i = 0; i < 3; i++)
+    {
+        const WCHAR *key = i == 0 ? upper : i == 1 ? lower : swap;
+        wsprintfW( path, L"Win32_Service.Name=\"%s\"", key );
+        query = SysAllocString( path );
+        obj = NULL;
+        hr = IWbemServices_GetObject( services, query, 0, NULL, &obj, NULL );
+        ok( hr == S_OK, "%s: got %08x\n", wine_dbgstr_w(path), hr );
+        if (obj) IWbemClassObject_Release( obj );
+        SysFreeString( query );
+        wsprintfW( path, L"win32_service.name='%s'", key );
+        query = SysAllocString( path );
+        obj = NULL;
+        hr = IWbemServices_GetObject( services, query, 0, NULL, &obj, NULL );
+        ok( hr == S_OK, "%s: got %08x\n", wine_dbgstr_w(path), hr );
+        if (obj) IWbemClassObject_Release( obj );
+        SysFreeString( query );
+    }
+    wsprintfW( path, L"Win32_Service.Name=\"%s_\"", upper );
+    query = SysAllocString( path );
+    obj = NULL;
+    hr = IWbemServices_GetObject( services, query, 0, NULL, &obj, NULL );
+    ok( hr == WBEM_E_NOT_FOUND, "%s: got %08x\n", wine_dbgstr_w(path), hr );
+    if (obj) IWbemClassObject_Release( obj );
+    SysFreeString( query );
+#undef QUERY
+#undef CHECK
+}
+
 static void test_Win32_Bios( IWbemServices *services )
 {
     static const WCHAR queryW[] =
@@ -2354,6 +2641,7 @@ START_TEST(query)
     test_query_async( services );
     test_query_semisync( services );
     test_select( services );
+    test_string_compare_case( services );
 
     /* classes */
     test_StdRegProv( services );
