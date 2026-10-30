@@ -46,6 +46,10 @@ struct schan_context
     schan_imp_session session;
     ULONG req_ctx_attr;
     const CERT_CONTEXT *cert;
+    /* ApplyControlToken: SCHANNEL_SHUTDOWN or SCHANNEL_ALERT, sent by the next InitializeSecurityContext */
+    DWORD control;
+    DWORD alert_type;
+    DWORD alert_number;
 };
 
 static struct schan_handle *schan_handle_table;
@@ -922,6 +926,114 @@ static void dump_buffer_desc(SecBufferDesc *desc)
     }
 }
 
+static ULONG schan_ContextAttributes(ULONG req)
+{
+    /* TLS always provides these and Windows always reports them, requested or not (curl, i.e. git, insists on them) */
+    ULONG attr = ISC_RET_REPLAY_DETECT | ISC_RET_SEQUENCE_DETECT | ISC_RET_CONFIDENTIALITY | ISC_RET_STREAM;
+
+    /* Reported when requested */
+    if (req & ISC_REQ_ALLOCATE_MEMORY)
+        attr |= ISC_RET_ALLOCATED_MEMORY;
+    if (req & ISC_REQ_EXTENDED_ERROR)
+        attr |= ISC_RET_EXTENDED_ERROR;
+    if (req & ISC_REQ_USE_SUPPLIED_CREDS)
+        attr |= ISC_RET_USED_SUPPLIED_CREDS;
+    if (req & ISC_REQ_MUTUAL_AUTH)
+        attr |= ISC_RET_MUTUAL_AUTH;
+    /* Windows reports the flag for the context request only, not for SCH_CRED_MANUAL_CRED_VALIDATION */
+    if (req & ISC_REQ_MANUAL_CRED_VALIDATION)
+        attr |= ISC_RET_MANUAL_CRED_VALIDATION;
+    return attr;
+}
+
+/* Writes the alert record that ApplyControlToken asked for into the output token */
+static SECURITY_STATUS schan_SendControlToken(struct schan_context *ctx, ULONG fContextReq, PSecBufferDesc pOutput,
+                                              ULONG *pfContextAttr)
+{
+    struct schan_transport transport;
+    SECURITY_STATUS ret;
+    int idx;
+
+    /* The alert record goes to the output token */
+    if (!pOutput || !pfContextAttr)
+        return SEC_E_INVALID_PARAMETER;
+
+    ctx->req_ctx_attr = fContextReq;
+    *pfContextAttr = schan_ContextAttributes(fContextReq);
+
+    /* Like Windows 10, the context stays usable afterwards: EncryptMessage still works after close_notify or a
+     * fatal alert, and another SCHANNEL_SHUTDOWN sends another close_notify. Ending the connection is the caller's
+     * business. */
+    transport.ctx = ctx;
+    init_schan_buffers(&transport.in, NULL, NULL);
+    init_schan_buffers(&transport.out, pOutput, schan_init_sec_ctx_get_next_output_buffer);
+    schan_imp_set_session_transport(ctx->session, &transport);
+
+    if (ctx->control == SCHANNEL_SHUTDOWN)
+        ret = schan_imp_send_alert(ctx->session, TLS1_ALERT_WARNING, TLS1_ALERT_CLOSE_NOTIFY);
+    else
+        ret = schan_imp_send_alert(ctx->session, ctx->alert_type, ctx->alert_number);
+
+    /* Keep the request when the record did not fit, so that the caller can retry with a larger buffer */
+    if (ret != SEC_E_BUFFER_TOO_SMALL)
+        ctx->control = 0;
+
+    if (transport.out.current_buffer_idx != -1)
+        pOutput->pBuffers[transport.out.current_buffer_idx].cbBuffer = transport.out.offset;
+    else if ((idx = schan_find_sec_buffer_idx(pOutput, 0, SECBUFFER_TOKEN)) != -1)
+        pOutput->pBuffers[idx].cbBuffer = 0;
+
+    return ret;
+}
+
+/***********************************************************************
+ *              ApplyControlToken
+ */
+static SECURITY_STATUS SEC_ENTRY schan_ApplyControlToken(PCtxtHandle context_handle, PSecBufferDesc input)
+{
+    struct schan_context *ctx;
+    SecBuffer *buffer;
+    DWORD type;
+
+    TRACE("context_handle %p, input %p\n", context_handle, input);
+
+    if (!context_handle) return SEC_E_INVALID_HANDLE;
+    ctx = schan_get_object(context_handle->dwLower, SCHAN_HANDLE_CTX);
+    if (!ctx) return SEC_E_INVALID_HANDLE;
+
+    if (!input || input->cBuffers != 1 || !input->pBuffers)
+        return SEC_E_INVALID_TOKEN;
+    buffer = &input->pBuffers[0];
+    if (buffer->BufferType != SECBUFFER_TOKEN || buffer->cbBuffer < sizeof(DWORD) || !buffer->pvBuffer)
+        return SEC_E_INVALID_TOKEN;
+
+    type = *(DWORD *)buffer->pvBuffer;
+    switch (type)
+    {
+        case SCHANNEL_SHUTDOWN:
+            ctx->control = SCHANNEL_SHUTDOWN;
+            return SEC_E_OK;
+
+        case SCHANNEL_ALERT:
+        {
+            const SCHANNEL_ALERT_TOKEN *alert = buffer->pvBuffer;
+
+            if (buffer->cbBuffer < sizeof(*alert) ||
+                (alert->dwAlertType != TLS1_ALERT_WARNING && alert->dwAlertType != TLS1_ALERT_FATAL) ||
+                alert->dwAlertNumber > 255)
+                return SEC_E_INVALID_TOKEN;
+            ctx->control = SCHANNEL_ALERT;
+            ctx->alert_type = alert->dwAlertType;
+            ctx->alert_number = alert->dwAlertNumber;
+            return SEC_E_OK;
+        }
+
+        default:
+            FIXME("unsupported control token %u\n", type);
+            return SEC_E_UNSUPPORTED_FUNCTION;
+    }
+}
+
 /***********************************************************************
  *              InitializeSecurityContextW
  */
@@ -964,6 +1076,7 @@ SECURITY_STATUS SEC_ENTRY schan_InitializeSecurityContextW(
         if (!ctx) return SEC_E_INSUFFICIENT_MEMORY;
 
         ctx->cert = NULL;
+        ctx->control = 0;
         handle = schan_alloc_handle(ctx, SCHAN_HANDLE_CTX);
         if (handle == SCHAN_INVALID_HANDLE)
         {
@@ -1002,6 +1115,13 @@ SECURITY_STATUS SEC_ENTRY schan_InitializeSecurityContextW(
         SecBuffer *buffer;
         int idx;
 
+        ctx = schan_get_object(phContext->dwLower, SCHAN_HANDLE_CTX);
+        if (!ctx) return SEC_E_INVALID_HANDLE;
+
+        /* A token from ApplyControlToken is answered with the alert record, whatever the input */
+        if (ctx->control)
+            return schan_SendControlToken(ctx, fContextReq, pOutput, pfContextAttr);
+
         if (!pInput)
             return SEC_E_INCOMPLETE_MESSAGE;
 
@@ -1032,8 +1152,6 @@ SECURITY_STATUS SEC_ENTRY schan_InitializeSecurityContextW(
         }
 
         TRACE("Using expected_size %lu.\n", expected_size);
-
-        ctx = schan_get_object(phContext->dwLower, SCHAN_HANDLE_CTX);
     }
 
     ctx->req_ctx_attr = fContextReq;
@@ -1069,21 +1187,7 @@ SECURITY_STATUS SEC_ENTRY schan_InitializeSecurityContextW(
             pOutput->pBuffers[idx].cbBuffer = 0;
     }
 
-    /* TLS always provides these and Windows always reports them, requested or not
-     * (curl, i.e. git for Windows, refuses the context otherwise: "failed to setup sequence detection") */
-    *pfContextAttr = ISC_RET_REPLAY_DETECT | ISC_RET_SEQUENCE_DETECT | ISC_RET_CONFIDENTIALITY | ISC_RET_STREAM;
-    /* Reported when requested */
-    if (ctx->req_ctx_attr & ISC_REQ_ALLOCATE_MEMORY)
-        *pfContextAttr |= ISC_RET_ALLOCATED_MEMORY;
-    if (ctx->req_ctx_attr & ISC_REQ_EXTENDED_ERROR)
-        *pfContextAttr |= ISC_RET_EXTENDED_ERROR;
-    if (ctx->req_ctx_attr & ISC_REQ_USE_SUPPLIED_CREDS)
-        *pfContextAttr |= ISC_RET_USED_SUPPLIED_CREDS;
-    if (ctx->req_ctx_attr & ISC_REQ_MUTUAL_AUTH)
-        *pfContextAttr |= ISC_RET_MUTUAL_AUTH;
-    /* Windows reports the flag for the context request only, not for SCH_CRED_MANUAL_CRED_VALIDATION */
-    if (ctx->req_ctx_attr & ISC_REQ_MANUAL_CRED_VALIDATION)
-        *pfContextAttr |= ISC_RET_MANUAL_CRED_VALIDATION;
+    *pfContextAttr = schan_ContextAttributes(ctx->req_ctx_attr);
 
     return ret;
 }
@@ -1290,6 +1394,7 @@ static SECURITY_STATUS SEC_ENTRY schan_EncryptMessage(PCtxtHandle context_handle
 
     if (!context_handle) return SEC_E_INVALID_HANDLE;
     ctx = schan_get_object(context_handle->dwLower, SCHAN_HANDLE_CTX);
+    if (!ctx) return SEC_E_INVALID_HANDLE;
 
     dump_buffer_desc(message);
 
@@ -1522,7 +1627,7 @@ SecurityFunctionTableA schanTableA = {
     NULL, /* AcceptSecurityContext */
     NULL, /* CompleteAuthToken */
     schan_DeleteSecurityContext,
-    NULL, /* ApplyControlToken */
+    schan_ApplyControlToken,
     schan_QueryContextAttributesA,
     NULL, /* ImpersonateSecurityContext */
     NULL, /* RevertSecurityContext */
@@ -1553,7 +1658,7 @@ SecurityFunctionTableW schanTableW = {
     NULL, /* AcceptSecurityContext */
     NULL, /* CompleteAuthToken */
     schan_DeleteSecurityContext,
-    NULL, /* ApplyControlToken */
+    schan_ApplyControlToken,
     schan_QueryContextAttributesW,
     NULL, /* ImpersonateSecurityContext */
     NULL, /* RevertSecurityContext */

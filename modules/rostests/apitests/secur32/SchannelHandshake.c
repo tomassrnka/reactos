@@ -760,6 +760,48 @@ static void TestControlToken(DWORD Type)
     ok(Status == SEC_E_INCOMPLETE_MESSAGE, "type %lu: second call returned 0x%08lx\n", Type, Status);
     if (Out.pvBuffer)
         FreeContextBuffer(Out.pvBuffer);
+
+    /* Windows 10 keeps the context usable after close_notify or a fatal alert: ending the connection is up to the caller */
+    {
+        SecPkgContext_StreamSizes Sizes;
+        SecBuffer Msg[4];
+        SecBufferDesc MsgDesc;
+        BYTE Data[512];
+
+        if (QueryContextAttributesW(&Conn.Ctx, SECPKG_ATTR_STREAM_SIZES, &Sizes) == SEC_E_OK &&
+            Sizes.cbHeader + 16 + Sizes.cbTrailer <= sizeof(Data))
+        {
+            memset(Data, 'x', sizeof(Data));
+            Msg[0].BufferType = SECBUFFER_STREAM_HEADER; Msg[0].pvBuffer = Data; Msg[0].cbBuffer = Sizes.cbHeader;
+            Msg[1].BufferType = SECBUFFER_DATA; Msg[1].pvBuffer = Data + Sizes.cbHeader; Msg[1].cbBuffer = 16;
+            Msg[2].BufferType = SECBUFFER_STREAM_TRAILER; Msg[2].pvBuffer = Data + Sizes.cbHeader + 16;
+            Msg[2].cbBuffer = Sizes.cbTrailer;
+            Msg[3].BufferType = SECBUFFER_EMPTY; Msg[3].pvBuffer = NULL; Msg[3].cbBuffer = 0;
+            MsgDesc.ulVersion = SECBUFFER_VERSION;
+            MsgDesc.cBuffers = 4;
+            MsgDesc.pBuffers = Msg;
+            Status = EncryptMessage(&Conn.Ctx, 0, &MsgDesc, 0);
+            ok(Status == SEC_E_OK, "type %lu: EncryptMessage after the alert returned 0x%08lx\n", Type, Status);
+        }
+    }
+
+    /* and a second shutdown request sends another close_notify */
+    if (Type == SCHANNEL_SHUTDOWN)
+    {
+        Buf.cbBuffer = sizeof(DWORD);
+        Status = ApplyControlToken(&Conn.Ctx, &Desc);
+        ok(Status == SEC_E_OK, "second ApplyControlToken returned 0x%08lx\n", Status);
+        Out.cbBuffer = 0;
+        Out.pvBuffer = NULL;
+        Status = InitializeSecurityContextW(&Conn.Cred, &Conn.Ctx, (SEC_WCHAR *)L"example.com", REQ_FLAGS, 0, 0, NULL, 0,
+                                            &Conn.Ctx, &OutDesc, &Attr, &Expiry);
+        trace("second shutdown: 0x%08lx, %lu bytes\n", Status, Out.cbBuffer);
+        ok(Status == SEC_E_OK, "second shutdown: InitializeSecurityContext returned 0x%08lx\n", Status);
+        ok(Out.cbBuffer > 7 && Out.pvBuffer && ((BYTE *)Out.pvBuffer)[0] == 0x15,
+           "second shutdown: %lu bytes, no alert record\n", Out.cbBuffer);
+        if (Out.pvBuffer)
+            FreeContextBuffer(Out.pvBuffer);
+    }
     Disconnect(&Conn);
 }
 

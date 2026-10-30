@@ -970,6 +970,24 @@ SECURITY_STATUS schan_imp_recv(schan_imp_session session, void *buffer,
     return SEC_E_OK;
 }
 
+/* ApplyControlToken: SCHANNEL_SHUTDOWN (close_notify) or SCHANNEL_ALERT; level and description are the TLS values */
+SECURITY_STATUS schan_imp_send_alert(schan_imp_session session, DWORD level, DWORD description)
+{
+    MBEDTLS_SESSION *s = (MBEDTLS_SESSION *)session;
+    int ret;
+
+    TRACE("MBEDTLS schan_imp_send_alert: %p level %u description %u\n", session, level, description);
+
+    ret = mbedtls_ssl_send_alert_message(&s->ssl, (unsigned char)level, (unsigned char)description);
+    if (ret == 0)
+        return SEC_E_OK;
+    if (ROS_SCHAN_IS_BLOCKING(ret))
+        return SEC_E_BUFFER_TOO_SMALL;
+
+    ERR("MBEDTLS schan_imp_send_alert: mbedtls_ssl_send_alert_message failed with -%x\n", -ret);
+    return SEC_E_INTERNAL_ERROR;
+}
+
 BOOL schan_imp_allocate_certificate_credentials(schan_credentials *c)
 {
     TRACE("MBEDTLS schan_imp_allocate_certificate_credentials %p %p %d\n", c, c->credentials, c->credential_use);

@@ -118,3 +118,4 @@
 @ cdecl mbedtls_dsa_verify(ptr ptr long ptr long)
 @ cdecl mbedtls_dsa_sign(ptr ptr long ptr ptr ptr ptr)
 @ cdecl mbedtls_dsa_free(ptr)
+@ cdecl mbedtls_ssl_send_alert_message(ptr long long)
