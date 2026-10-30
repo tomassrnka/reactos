@@ -174,7 +174,8 @@ DnsIntCacheGetEntryByName(
         CacheEntry = CONTAINING_RECORD(NextEntry, RESOLVER_CACHE_ENTRY, CacheLink);
 
         /* Check if this is the Catalog Entry ID we want */
-        if (_wcsicmp(CacheEntry->Record->pName, Name) == 0)
+        if (_wcsicmp(CacheEntry->Record->pName, Name) == 0 &&
+            (wType == DNS_TYPE_ANY || CacheEntry->Record->wType == wType))
         {
             /* Copy the entry and return it */
             *Record = DnsRecordSetCopyEx(CacheEntry->Record, DnsCharSetUnicode, DnsCharSetUnicode);

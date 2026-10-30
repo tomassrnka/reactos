@@ -83,7 +83,12 @@ VOID
 WINAPI
 Dns_SplitHostFromDomainNameW(IN LPWSTR DomainName)
 {
-    /* FIXME */
+    PWCHAR Dot;
+
+    /* NI_NOFQDN: keep the host label only */
+    Dot = wcschr(DomainName, L'.');
+    if (Dot)
+        *Dot = UNICODE_NULL;
 }
 
 static
@@ -421,7 +426,8 @@ LookupNodeByAddr(IN LPWSTR pNodeBuffer,
     GUID LookupGuid = SVCID_DNS_TYPE_PTR;
     PIN_ADDR Ip4Addr = Addr;
     WCHAR ReverseBuffer[76];
-    WSAQUERYSETW Restrictions, Reply;
+    WSAQUERYSETW Restrictions;
+    LPWSAQUERYSETW Reply;
     DWORD BufferLength;
     INT ErrorCode;
     HANDLE LookupHandle = NULL;
@@ -463,8 +469,11 @@ LookupNodeByAddr(IN LPWSTR pNodeBuffer,
         /* Get the reverse name */
         Dns_Ip4AddressToReverseName_W(ReverseBuffer, *Ip4Addr);
     }
-    /* FIXME: Not implemented for now
-    else if ( */
+    else
+    {
+        /* FIXME: reverse names of other IPv6 addresses (ip6.arpa) are not implemented */
+        return WSAHOST_NOT_FOUND;
+    }
 
     /* By this point we have the Reverse Name, so prepare for lookup */
     RtlZeroMemory(&Restrictions, sizeof(Restrictions));
@@ -481,19 +490,24 @@ LookupNodeByAddr(IN LPWSTR pNodeBuffer,
         ErrorCode = WSAGetLastError();
     if (ErrorCode == ERROR_SUCCESS)
     {
-        /* Lookup successful, now get the data */
-        BufferLength = (NI_MAXHOST - 1) * sizeof(WCHAR) + sizeof(Restrictions);
+        /* Lookup successful, now get the data: the query set is followed by the strings it points to */
+        BufferLength = NI_MAXHOST * sizeof(WCHAR) + sizeof(*Reply) + 256;
+        Reply = HeapAlloc(GetProcessHeap(), 0, BufferLength);
+        if (!Reply)
+        {
+            ErrorCode = WSA_NOT_ENOUGH_MEMORY;
+            goto Finish;
+        }
         ErrorCode = WSALookupServiceNextW(LookupHandle,
                                           0,
                                           &BufferLength,
-                                          &Restrictions);
+                                          Reply);
         if (ErrorCode != ERROR_SUCCESS)
             ErrorCode = WSAGetLastError();
         if (ErrorCode == ERROR_SUCCESS)
         {
             /* Now check if we have a name back */
-            Reply = Restrictions;
-            if (!Reply.lpszServiceInstanceName)
+            if (!Reply->lpszServiceInstanceName)
             {
                 /* Fail */
                 ErrorCode = WSAHOST_NOT_FOUND;
@@ -504,11 +518,11 @@ LookupNodeByAddr(IN LPWSTR pNodeBuffer,
                 if (OnlyNodeName)
                 {
                     /* Split it and get only the partial host name */
-                    Dns_SplitHostFromDomainNameW(Reply.lpszServiceInstanceName);
+                    Dns_SplitHostFromDomainNameW(Reply->lpszServiceInstanceName);
                 }
 
                 /* Check the length and see if it's within our limit */
-                if (wcslen(Reply.lpszServiceInstanceName) + 1 >
+                if (wcslen(Reply->lpszServiceInstanceName) + 1 >
                     NodeBufferSize)
                 {
                     /* It's not, so fail */
@@ -517,12 +531,14 @@ LookupNodeByAddr(IN LPWSTR pNodeBuffer,
                 else
                 {
                     /* It will fit, let's copy it*/
-                    wcscpy(pNodeBuffer, Reply.lpszServiceInstanceName);
+                    wcscpy(pNodeBuffer, Reply->lpszServiceInstanceName);
                 }
             }
         }
+        HeapFree(GetProcessHeap(), 0, Reply);
     }
 
+Finish:
     /* Normalize the error code of a lookup that found nothing */
     if (ErrorCode == WSASERVICE_NOT_FOUND || ErrorCode == WSANO_DATA)
         ErrorCode = WSAHOST_NOT_FOUND;

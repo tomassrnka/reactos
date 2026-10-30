@@ -23,6 +23,8 @@
 #define NSP_CALLID_HOSTBYNAME 0x0003
 #define NSP_CALLID_SERVICEBYNAME 0x0004
 #define NSP_CALLID_NLA 0x0005
+#define NSP_CALLID_PTR 0x0006
+#define NSP_CALLID_HOSTBYADDR 0x0007
 
 /* NLA (Network Location Awareness) blob constants (from mswsock.h).
  * Defined locally so we don't have to pull the whole mswsock.h into the
@@ -85,6 +87,7 @@ static const GUID guid_HOSTNAME = SVCID_HOSTNAME;
 static const GUID guid_INET_HOSTADDRBYINETSTRING = SVCID_INET_HOSTADDRBYINETSTRING;
 static const GUID guid_INET_HOSTADDRBYNAME = SVCID_INET_HOSTADDRBYNAME;
 static const GUID guid_INET_SERVICEBYNAME = SVCID_INET_SERVICEBYNAME;
+static const GUID guid_DNS_TYPE_PTR = SVCID_DNS_TYPE_PTR;
 
 /* GUIDs - maybe they should be loaded from registry? */
 /* Namespace: 32 */
@@ -158,6 +161,11 @@ INT
 NSP_GetServiceByNameHeapAllocW(
   _In_ PWSHANDLEINTERN data,
   _In_ DWORD dwControlFlags,
+  _Out_ PWSHOSTINFOINTERN hostinfo);
+
+INT
+NSP_GetHostByPtrHeapAllocW(
+  _In_ PCWSTR ReverseName,
   _Out_ PWSHOSTINFOINTERN hostinfo);
 
 INT
@@ -449,7 +457,20 @@ mwsNSPLookupServiceBegin(_In_ LPGUID lpProviderId,
     else if (IsEqualGUID(lpqsRestrictions->lpServiceClassId,
                          &guid_INET_HOSTADDRBYINETSTRING))
     {
-        wsaErr = ERROR_CALL_NOT_IMPLEMENTED;
+        /* gethostbyaddr: the instance name is the address in text form */
+        wsaErr = NSP_LookupServiceBeginW(pLook,
+                                         NULL,
+                                         lpqsRestrictions->lpszServiceInstanceName,
+                                         NSP_CALLID_HOSTBYADDR);
+    }
+    else if (IsEqualGUID(lpqsRestrictions->lpServiceClassId,
+                         &guid_DNS_TYPE_PTR))
+    {
+        /* getnameinfo: the instance name is the reverse (in-addr.arpa) name */
+        wsaErr = NSP_LookupServiceBeginW(pLook,
+                                         NULL,
+                                         lpqsRestrictions->lpszServiceInstanceName,
+                                         NSP_CALLID_PTR);
     }
 
 #endif /* NSP_REDIRECT */
@@ -720,8 +741,14 @@ NSP_LookupServiceBeginW(PWSHANDLEINTERN data,
     data->CallID = CallID;
 
     if ((CallID == NSP_CALLID_HOSTBYNAME) ||
-        (CallID == NSP_CALLID_SERVICEBYNAME))
+        (CallID == NSP_CALLID_SERVICEBYNAME) ||
+        (CallID == NSP_CALLID_PTR) ||
+        (CallID == NSP_CALLID_HOSTBYADDR))
     {
+        if ((CallID == NSP_CALLID_PTR || CallID == NSP_CALLID_HOSTBYADDR) &&
+            hostnameW == NULL && hostnameA == NULL)
+            return WSAEFAULT;
+
         hHeap = GetProcessHeap();
 
         if (data->hostnameW != NULL)
@@ -846,6 +873,90 @@ NSP_GetHostByNameHeapAllocW(_In_ PWSHANDLEINTERN data,
         hostinfo->servaliasesA = StrAryCpyHeapAllocWToA(hHeap, (WCHAR**)&Aliases);
     }
     result = ERROR_SUCCESS;
+
+cleanup:
+    if (dp != NULL)
+        DnsRecordListFree(dp, DnsFreeRecordList);
+
+    return result;
+}
+
+/* Parse a dotted-decimal IPv4 address; the result has its bytes in network order */
+static
+BOOLEAN
+NSP_ParseIp4W(_In_ PCWSTR Text,
+              _Out_ PDWORD Addr)
+{
+    BYTE Bytes[4];
+    ULONG Part, Digits;
+    INT i;
+
+    for (i = 0; i < 4; i++)
+    {
+        Part = 0;
+        Digits = 0;
+        while (*Text >= L'0' && *Text <= L'9')
+        {
+            Part = Part * 10 + (*Text - L'0');
+            if (++Digits > 3 || Part > 255)
+                return FALSE;
+            Text++;
+        }
+        if (Digits == 0)
+            return FALSE;
+        Bytes[i] = (BYTE)Part;
+        if (i < 3)
+        {
+            if (*Text != L'.')
+                return FALSE;
+            Text++;
+        }
+    }
+    if (*Text != UNICODE_NULL)
+        return FALSE;
+
+    RtlCopyMemory(Addr, Bytes, sizeof(Bytes));
+    return TRUE;
+}
+
+/*
+ * Look up the PTR record of a reverse name (e.g. "8.8.8.8.in-addr.arpa") and return the
+ * name it points to in hostinfo->hostnameW. The query is recursive: the name servers a client is configured
+ * with are resolvers, which are asked to do the work.
+ */
+INT
+NSP_GetHostByPtrHeapAllocW(_In_ PCWSTR ReverseName,
+                           _Out_ PWSHOSTINFOINTERN hostinfo)
+{
+    DNS_STATUS dns_status;
+    PDNS_RECORDW dp = NULL;
+    PDNS_RECORDW curr;
+    INT result = WSAHOST_NOT_FOUND;
+
+    dns_status = DnsQuery_W(ReverseName,
+                            DNS_TYPE_PTR,
+                            DNS_QUERY_STANDARD,
+                            NULL,
+                            &dp,
+                            NULL);
+    if (dns_status == ERROR_INVALID_NAME)
+    {
+        result = WSAEFAULT;
+        goto cleanup;
+    }
+
+    if ((dns_status != 0) || (dp == NULL))
+        goto cleanup;
+
+    for (curr = dp; curr != NULL; curr = curr->pNext)
+    {
+        if (curr->wType == DNS_TYPE_PTR && curr->Data.PTR.pNameHost != NULL)
+        {
+            hostinfo->hostnameW = StrCpyHeapAllocW(GetProcessHeap(), curr->Data.PTR.pNameHost);
+            result = hostinfo->hostnameW ? ERROR_SUCCESS : WSA_NOT_ENOUGH_MEMORY;
+            break;
+        }
+    }
 
 cleanup:
     if (dp != NULL)
@@ -1274,6 +1385,8 @@ NSP_LookupServiceNextW(_In_ PWSHANDLEINTERN data,
     if ((data->CallID == NSP_CALLID_HOSTNAME) ||
         (data->CallID == NSP_CALLID_HOSTBYNAME) ||
         (data->CallID == NSP_CALLID_SERVICEBYNAME) ||
+        (data->CallID == NSP_CALLID_PTR) ||
+        (data->CallID == NSP_CALLID_HOSTBYADDR) ||
         (data->CallID == NSP_CALLID_NLA))
     {
         if (data->CallIDCounter >= 1)
@@ -1315,6 +1428,34 @@ NSP_LookupServiceNextW(_In_ PWSHANDLEINTERN data,
         if (result != ERROR_SUCCESS)
             goto End;
     }
+    else if (data->CallID == NSP_CALLID_PTR)
+    {
+        result = NSP_GetHostByPtrHeapAllocW(data->hostnameW, &hostinfo);
+        if (result != ERROR_SUCCESS)
+            goto End;
+    }
+    else if (data->CallID == NSP_CALLID_HOSTBYADDR)
+    {
+        WCHAR ReverseName[32];
+
+        /* The address in text form, as gethostbyaddr passes it; only IPv4 can be named */
+        if (!NSP_ParseIp4W(data->hostnameW, &hostinfo.addr4))
+        {
+            result = WSANO_DATA;
+            goto End;
+        }
+        StringCchPrintfW(ReverseName, ARRAYSIZE(ReverseName), L"%u.%u.%u.%u.in-addr.arpa",
+                         ((PBYTE)&hostinfo.addr4)[3], ((PBYTE)&hostinfo.addr4)[2],
+                         ((PBYTE)&hostinfo.addr4)[1], ((PBYTE)&hostinfo.addr4)[0]);
+        result = NSP_GetHostByPtrHeapAllocW(ReverseName, &hostinfo);
+        if (result != ERROR_SUCCESS)
+        {
+            /* gethostbyaddr reports a missing record as WSANO_DATA */
+            if (result == WSAHOST_NOT_FOUND)
+                result = WSANO_DATA;
+            goto End;
+        }
+    }
     else
     {
         ASSERT(data->CallID == NSP_CALLID_SERVICEBYNAME);
@@ -1328,7 +1469,8 @@ NSP_LookupServiceNextW(_In_ PWSHANDLEINTERN data,
     if (((LUP_RETURN_BLOB & data->dwControlFlags) != 0) ||
         ((LUP_RETURN_NAME & data->dwControlFlags) != 0))
     {
-        if (data->CallID == NSP_CALLID_HOSTNAME || data->CallID == NSP_CALLID_HOSTBYNAME)
+        if (data->CallID == NSP_CALLID_HOSTNAME || data->CallID == NSP_CALLID_HOSTBYNAME ||
+            data->CallID == NSP_CALLID_PTR || data->CallID == NSP_CALLID_HOSTBYADDR)
         {
             ServiceInstanceNameW = hostinfo.hostnameW;
             ServiceInstanceNameA = StrW2AHeapAlloc(hHeap, ServiceInstanceNameW);
@@ -1371,7 +1513,7 @@ NSP_LookupServiceNextW(_In_ PWSHANDLEINTERN data,
 
     if ((LUP_RETURN_BLOB & data->dwControlFlags) != 0)
     {
-        if (data->CallID == NSP_CALLID_HOSTBYNAME)
+        if (data->CallID == NSP_CALLID_HOSTBYNAME || data->CallID == NSP_CALLID_HOSTBYADDR)
         {
             /* Write data for PBLOB (hostent) */
             if (!mswBufferAppendBlob_Hostent(&buf,

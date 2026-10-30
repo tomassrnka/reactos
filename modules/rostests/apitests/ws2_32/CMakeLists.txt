@@ -33,6 +33,7 @@ list(APPEND SOURCE
     nostartup.c
     open_osfhandle.c
     OwnHostname.c
+    ReverseLookup.c
     rcvbuf.c
     recv.c
     WSARecvMsg.c
