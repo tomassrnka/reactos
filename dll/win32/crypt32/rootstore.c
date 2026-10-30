@@ -755,6 +755,25 @@ static BOOL CRYPT_BlobHasUsageProperty(const BYTE *blob, DWORD size)
     return FALSE;
 }
 
+/* Whether the Blob value of key already is these bytes: it is left alone then,
+ * so the import does not write a registry value per restricted root on every
+ * start */
+static BOOL CRYPT_RegBlobEquals(HKEY key, const BYTE *blob, DWORD size)
+{
+    BYTE *existing;
+    DWORD existingSize = 0, type;
+    BOOL equal = FALSE;
+
+    if (RegQueryValueExW(key, L"Blob", NULL, &type, NULL, &existingSize) ||
+     type != REG_BINARY || existingSize != size || !(existing = CryptMemAlloc(size)))
+        return FALSE;
+    if (!RegQueryValueExW(key, L"Blob", NULL, &type, existing, &existingSize) &&
+     type == REG_BINARY && existingSize == size)
+        equal = !memcmp(existing, blob, size);
+    CryptMemFree(existing);
+    return equal;
+}
+
 /* The import above takes the certificates of the AuthRoot store, not their
  * properties.  A root there that is only trusted for some purposes (its
  * enhanced key usage property says which, see csroots.inf) must keep that
@@ -781,10 +800,11 @@ static void CRYPT_CopyRestrictedAuthRoots(HKEY rootCerts)
         {
             if (!RegQueryValueExW(src, L"Blob", NULL, &type, blob, &size) &&
              CRYPT_BlobHasUsageProperty(blob, size) &&
-             !RegCreateKeyExW(rootCerts, name, 0, NULL, 0, KEY_SET_VALUE, NULL,
-             &dst, NULL))
+             !RegCreateKeyExW(rootCerts, name, 0, NULL, 0,
+             KEY_QUERY_VALUE | KEY_SET_VALUE, NULL, &dst, NULL))
             {
-                if (RegSetValueExW(dst, L"Blob", 0, REG_BINARY, blob, size))
+                if (!CRYPT_RegBlobEquals(dst, blob, size) &&
+                 RegSetValueExW(dst, L"Blob", 0, REG_BINARY, blob, size))
                     ERR("Failed to restrict root %s\n", debugstr_w(name));
                 RegCloseKey(dst);
             }
