@@ -55,6 +55,13 @@ typedef struct _FM_FEATURE
     WCHAR   Source[32];          /* software tier display source: "rapps", "command", "scoop/<bucket>"; "" for OS tier */
     WCHAR   App[48];             /* Provider=scoop: [Scoop] App (the Scoop app name) */
     WCHAR   Detect[128];         /* software tier: raw [Install] DetectPath (installed iff the path exists) */
+    WCHAR   Bucket[24];          /* Provider=scoop: the bucket the entry came from */
+    WCHAR   Homepage[160];       /* Provider=scoop: [Scoop] Homepage (truncated) */
+    WCHAR   License[48];         /* Provider=scoop: [Scoop] License */
+    BOOL    Verified;            /* Provider=scoop: the manifest has a hash Scoop can check the download against */
+    WCHAR   InstalledVersion[FM_MAX_VER]; /* "" unless installed. Scoop: apps\<app>\current\manifest.json;
+                                           * others: the Version recorded when featmgr enabled it */
+    BOOL    UpdateAvailable;     /* Provider=scoop, installed, and the imported catalog has a newer version */
 } FM_FEATURE;
 
 /* Catalog / layout helpers. featmgr root = %SystemRoot%\Featmgr */
@@ -121,6 +128,35 @@ int    FmImportRapps(LPCWSTR srcDir, DWORD flags, int *skipped, FILE *log);
  * (-2: not supported on this architecture). */
 int    FmImportScoop(LPCWSTR bucket, LPCWSTR dirOverride, DWORD flags, int limit, int *skipped, FILE *log);
 int    FmScoopListBuckets(FILE *log);
+
+/* ---- M2: version, update, buckets, search, per-bucket index ---------------------------------
+ * Imported Scoop apps are stored as ONE index file per bucket (Catalog\Software\scoop-<bucket>.idx,
+ * one tab-separated line per app) instead of one INI per app: enumerating thousands of tiny
+ * files was the superlinear cost in M1. Per-app .ini files of older imports are still read. */
+typedef BOOL (*FM_REC_CB)(void *ctx, const FM_FEATURE *f);
+int    FmScoopIndexEnum(LPCWSTR swDir, FM_REC_CB cb, void *ctx);      /* every record of every index; returns count */
+BOOL   FmScoopIndexFind(LPCWSTR swDir, LPCWSTR id, FM_FEATURE *out);
+/* flags the bucket was imported with (so a refresh never widens the user's earlier consent) */
+BOOL   FmScoopIndexInfo(LPCWSTR swDir, LPCWSTR bucket, DWORD *flags, int *limit);
+int    FmCompareVersions(LPCWSTR a, LPCWSTR b);                       /* <0, 0, >0; 1.10 > 1.9, 1.0 > 1.0-beta */
+BOOL   FmScoopInstalledVersion(LPCWSTR app, LPWSTR out, DWORD cch);
+BOOL   FmScoopCommandArgs(LPCWSTR args, LPWSTR out, DWORD cch);       /* "scoop <args>"; args must be pre-validated */
+BOOL   FmScoopValidUrl(LPCWSTR url);
+#define FM_BUCKET_MAX 24
+typedef struct _FM_BUCKET { WCHAR Name[24]; WCHAR Url[160]; BOOL Added; } FM_BUCKET;
+/* Scoop's own list ("scoop bucket known": apps\scoop\current\buckets.json, built-in names when it is absent) */
+int    FmScoopKnownBuckets(FM_BUCKET *out, int max);
+BOOL   FmScoopBucketIsKnown(LPCWSTR name);
+/* Re-read the bucket manifests with the flags of its earlier import (after "scoop update"). */
+int    FmScoopReimport(LPCWSTR bucket, FILE *log);
+int    FmScoopReimportAll(FILE *log);
+#define FM_BUCKET_TRUST 0x1      /* explicit consent for a bucket that is not on Scoop's known list (needs a url) */
+HRESULT FmScoopAddBucket(LPCWSTR name, LPCWSTR url, DWORD flags, FILE *log);
+/* Provider=scoop: "scoop update <app>", then refresh the app's bucket entries */
+HRESULT FmUpdate(LPCWSTR id, FILE *log);
+HRESULT FmUpdateAll(FILE *log);      /* "scoop update" (scoop + buckets), re-import, "scoop update *" */
+/* case-insensitive search over name and description; empty text matches everything */
+BOOL   FmMatchSearch(const FM_FEATURE *f, LPCWSTR text);
 BOOL   FmScoopSupported(void);
 BOOL   FmScoopRoot(LPWSTR buf, DWORD cch);
 BOOL   FmScoopAppInstalled(LPCWSTR app);
