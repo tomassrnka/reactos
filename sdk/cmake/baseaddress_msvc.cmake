@@ -441,3 +441,4 @@ set(baseaddress_kernelbase                     0x73330000) # manually added
 set(baseaddress_wevtapi                        0x73c10000) # manually added
 set(baseaddress_prntvpt                        0x732b0000) # manually added
 set(baseaddress_windows.data.pdf               0x732f0000) # manually added
+set(baseaddress_pwrshsip                        0x732d0000)

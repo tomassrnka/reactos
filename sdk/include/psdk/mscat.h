@@ -99,6 +99,20 @@ typedef struct CATALOG_INFO_
     WCHAR wszCatalogFile[MAX_PATH];
 } CATALOG_INFO;
 
+typedef struct CRYPTCATSTORE_
+{
+    DWORD cbStruct;
+    DWORD dwPublicVersion;
+    LPWSTR pwszP7File;
+    HCRYPTPROV hProv;
+    DWORD dwEncodingType;
+    DWORD fdwStoreFlags;
+    HANDLE hReserved;
+    HANDLE hAttrs;
+    HCRYPTMSG hCryptMsg;
+    HANDLE hSorted;
+} CRYPTCATSTORE;
+
 typedef struct CRYPTCATCDF_
 {
     DWORD cbStruct;
@@ -131,6 +145,8 @@ CRYPTCATATTRIBUTE * WINAPI CryptCATCDFEnumCatAttributes(CRYPTCATCDF *, CRYPTCATA
 LPWSTR              WINAPI CryptCATCDFEnumMembersByCDFTagEx(CRYPTCATCDF *, LPWSTR,
                                                             PFN_CDF_PARSE_ERROR_CALLBACK,
                                                             CRYPTCATMEMBER **, BOOL, LPVOID);
+CRYPTCATATTRIBUTE * WINAPI CryptCATCDFEnumAttributesWithCDFTag(CRYPTCATCDF *, LPWSTR, CRYPTCATMEMBER *,
+                                                               CRYPTCATATTRIBUTE *, PFN_CDF_PARSE_ERROR_CALLBACK);
 CRYPTCATCDF       * WINAPI CryptCATCDFOpen(LPWSTR, PFN_CDF_PARSE_ERROR_CALLBACK);
 BOOL                WINAPI CryptCATClose(HANDLE);
 CRYPTCATATTRIBUTE * WINAPI CryptCATEnumerateAttr(HANDLE, CRYPTCATMEMBER *, CRYPTCATATTRIBUTE *);
@@ -141,6 +157,7 @@ CRYPTCATATTRIBUTE * WINAPI CryptCATGetCatAttrInfo(HANDLE, LPWSTR);
 CRYPTCATMEMBER    * WINAPI CryptCATGetMemberInfo(HANDLE, LPWSTR);
 HANDLE    WINAPI CryptCATOpen(LPWSTR,DWORD,HCRYPTPROV,DWORD,DWORD);
 BOOL      WINAPI CryptCATPersistStore(HANDLE catalog);
+CRYPTCATSTORE     * WINAPI CryptCATStoreFromHandle(HANDLE);
 CRYPTCATATTRIBUTE * WINAPI CryptCATPutAttrInfo(HANDLE catalog, CRYPTCATMEMBER *member, WCHAR *name, DWORD flags, DWORD size, BYTE *data);
 CRYPTCATATTRIBUTE * WINAPI CryptCATPutCatAttrInfo(HANDLE catalog, WCHAR *name, DWORD flags, DWORD size, BYTE *data);
 CRYPTCATMEMBER    * WINAPI CryptCATPutMemberInfo(HANDLE catalog, WCHAR *filename, WCHAR *member, GUID *subject, DWORD version, DWORD size, BYTE *data);

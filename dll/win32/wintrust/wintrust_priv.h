@@ -25,4 +25,6 @@ BOOL WINAPI WINTRUST_AddCert(CRYPT_PROVIDER_DATA *data, DWORD idxSigner,
  BOOL fCounterSigner, DWORD idxCounterSigner, PCCERT_CONTEXT pCert2Add);
 BOOL WINAPI WINTRUST_AddPrivData(CRYPT_PROVIDER_DATA *data, CRYPT_PROVIDER_PRIVDATA *pPrivData2Add);
 
+BOOL WINTRUST_CalcFileDigest(HANDLE file, ALG_ID alg, DWORD *len, BYTE *digest, BOOL *pe);
+
 #endif /* ndef __WINTRUST_PRIV_H__ */

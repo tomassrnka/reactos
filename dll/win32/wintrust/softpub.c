@@ -158,11 +158,23 @@ static DWORD SOFTPUB_GetSIP(CRYPT_PROVIDER_DATA *data)
     return err;
 }
 
+static DWORD SOFTPUB_GetMessage(CRYPT_PROVIDER_DATA *data, HANDLE file,
+ LPCWSTR filePath, const WINTRUST_BLOB_INFO *blob);
+
 /* Assumes data->pPDSip has been loaded, and data->pPDSip->pSip allocated.
  * Calls data->pPDSip->pSip->pfGet to construct data->hMsg.
  */
 static DWORD SOFTPUB_GetMessageFromFile(CRYPT_PROVIDER_DATA *data, HANDLE file,
  LPCWSTR filePath)
+{
+    return SOFTPUB_GetMessage(data, file, filePath, NULL);
+}
+
+/* Gets the signed message from the SIP.  The subject is a file, or, with a blob, a
+ * piece of memory (the signature is taken from the blob if it holds one).
+ */
+static DWORD SOFTPUB_GetMessage(CRYPT_PROVIDER_DATA *data, HANDLE file,
+ LPCWSTR filePath, const WINTRUST_BLOB_INFO *blob)
 {
     DWORD err = ERROR_SUCCESS;
     BOOL ret;
@@ -170,26 +182,43 @@ static DWORD SOFTPUB_GetMessageFromFile(CRYPT_PROVIDER_DATA *data, HANDLE file,
     DWORD size = 0;
 
     data->pPDSip->psSipSubjectInfo =
-     data->psPfns->pfnAlloc(sizeof(SIP_SUBJECTINFO));
+     data->psPfns->pfnAlloc(sizeof(SIP_SUBJECTINFO) + sizeof(MS_ADDINFO_BLOB));
     if (!data->pPDSip->psSipSubjectInfo)
         return ERROR_OUTOFMEMORY;
+    memset(data->pPDSip->psSipSubjectInfo, 0, sizeof(SIP_SUBJECTINFO) + sizeof(MS_ADDINFO_BLOB));
 
     data->pPDSip->psSipSubjectInfo->cbSize = sizeof(SIP_SUBJECTINFO);
     data->pPDSip->psSipSubjectInfo->pgSubjectType = &data->pPDSip->gSubject;
     data->pPDSip->psSipSubjectInfo->hFile = file;
     data->pPDSip->psSipSubjectInfo->pwsFileName = filePath;
     data->pPDSip->psSipSubjectInfo->hProv = data->hProv;
-    ret = data->pPDSip->pSip->pfGet(data->pPDSip->psSipSubjectInfo,
-     &data->dwEncoding, 0, &size, 0);
-    if (!ret)
-        return TRUST_E_NOSIGNATURE;
+    if (blob)
+    {
+        MS_ADDINFO_BLOB *info = (MS_ADDINFO_BLOB *)(data->pPDSip->psSipSubjectInfo + 1);
 
-    buf = data->psPfns->pfnAlloc(size);
-    if (!buf)
-        return ERROR_OUTOFMEMORY;
+        info->cbStruct = sizeof(*info);
+        info->cbMemObject = blob->cbMemObject;
+        info->pbMemObject = blob->pbMemObject;
+        info->cbMemSignedMsg = blob->cbMemSignedMsg;
+        info->pbMemSignedMsg = blob->pbMemSignedMsg;
+        data->pPDSip->psSipSubjectInfo->pwsDisplayName = blob->pcwszDisplayName;
+        data->pPDSip->psSipSubjectInfo->dwUnionChoice = MSSIP_ADDINFO_BLOB;
+        data->pPDSip->psSipSubjectInfo->psBlob = info;
+    }
+    /* a message supplied in the blob is ignored, like native: the SIP finds the signature in the subject */
+    {
+        ret = data->pPDSip->pSip->pfGet(data->pPDSip->psSipSubjectInfo,
+         &data->dwEncoding, 0, &size, 0);
+        if (!ret || !size)
+            return TRUST_E_NOSIGNATURE;
 
-    ret = data->pPDSip->pSip->pfGet(data->pPDSip->psSipSubjectInfo,
-     &data->dwEncoding, 0, &size, buf);
+        buf = data->psPfns->pfnAlloc(size);
+        if (!buf)
+            return ERROR_OUTOFMEMORY;
+
+        ret = data->pPDSip->pSip->pfGet(data->pPDSip->psSipSubjectInfo,
+         &data->dwEncoding, 0, &size, buf);
+    }
     if (ret)
     {
         data->hMsg = CryptMsgOpenToDecode(data->dwEncoding, 0, 0, data->hProv,
@@ -305,6 +334,26 @@ static BOOL SOFTPUB_HashPEFile(HANDLE file, HCRYPTHASH hash)
     return TRUE;
 }
 
+/* The subjects whose SIP is part of wintrust or msisip */
+static BOOL SOFTPUB_IsBuiltinSubject(const GUID *subject)
+{
+    static const GUID builtin[] =
+    {
+        {0xc689aab8, 0x8e78, 0x11d0, {0x8c, 0x47, 0x00, 0xc0, 0x4f, 0xc2, 0x95, 0xee}},
+        {0xc689aab9, 0x8e78, 0x11d0, {0x8c, 0x47, 0x00, 0xc0, 0x4f, 0xc2, 0x95, 0xee}},
+        {0xc689aaba, 0x8e78, 0x11d0, {0x8c, 0x47, 0x00, 0xc0, 0x4f, 0xc2, 0x95, 0xee}},
+        {0xde351a42, 0x8e59, 0x11d0, {0x8c, 0x47, 0x00, 0xc0, 0x4f, 0xc2, 0x95, 0xee}},
+        {0xde351a43, 0x8e59, 0x11d0, {0x8c, 0x47, 0x00, 0xc0, 0x4f, 0xc2, 0x95, 0xee}},
+        {0x9ba61d3f, 0xe73a, 0x11d0, {0x8c, 0xd2, 0x00, 0xc0, 0x4f, 0xc2, 0x95, 0xee}},
+        {0x000c10f1, 0x0000, 0x0000, {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}},
+    };
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(builtin); i++)
+        if (IsEqualGUID(subject, &builtin[i])) return TRUE;
+    return FALSE;
+}
+
 static DWORD SOFTPUB_VerifyImageHash(CRYPT_PROVIDER_DATA *data, HANDLE file)
 {
     SPC_INDIRECT_DATA_CONTENT *indirect = (SPC_INDIRECT_DATA_CONTENT *)data->pPDSip->psIndirectData;
@@ -318,9 +367,24 @@ static DWORD SOFTPUB_VerifyImageHash(CRYPT_PROVIDER_DATA *data, HANDLE file)
     if (((ULONG_PTR)indirect->Data.pszObjId >> 16) == 0 ||
         strcmp(indirect->Data.pszObjId, SPC_PE_IMAGE_DATA_OBJID))
     {
+        /* A SIP that wintrust does not implement itself checks the digest of its subject */
+        if (data->pPDSip->pSip && data->pPDSip->pSip->pfVerify && data->pPDSip->psSipSubjectInfo &&
+            !SOFTPUB_IsBuiltinSubject(&data->pPDSip->gSubject))
+        {
+            if (!data->pPDSip->pSip->pfVerify(data->pPDSip->psSipSubjectInfo, (SIP_INDIRECT_DATA *)indirect))
+                return TRUST_E_BAD_DIGEST;
+            return ERROR_SUCCESS;
+        }
+        /* a memory object whose digest cannot be checked is not verified */
+        if (data->pWintrustData->dwUnionChoice == WTD_CHOICE_BLOB)
+            return TRUST_E_BAD_DIGEST;
         FIXME("Cannot verify hash for pszObjId=%s\n", debugstr_a(indirect->Data.pszObjId));
         return ERROR_SUCCESS;
     }
+
+    /* a PE image is hashed from its file */
+    if (!file || file == INVALID_HANDLE_VALUE)
+        return data->pWintrustData->dwUnionChoice == WTD_CHOICE_BLOB ? TRUST_E_BAD_DIGEST : ERROR_SUCCESS;
 
     if (!(algID = CertOIDToAlgId(indirect->DigestAlgorithm.pszObjId)))
         return TRUST_E_SYSTEM_ERROR; /* FIXME */
@@ -706,6 +770,40 @@ error:
     return err;
 }
 
+/* The subject is a piece of memory, for example the text of a script. */
+static DWORD SOFTPUB_LoadBlobMessage(CRYPT_PROVIDER_DATA *data)
+{
+    const WINTRUST_BLOB_INFO *blob = data->pWintrustData->pBlob;
+    DWORD err;
+
+    if (!blob || !WVT_ISINSTRUCT(WINTRUST_BLOB_INFO, blob->cbStruct, pbMemSignedMsg) || !blob->pbMemObject)
+        return ERROR_INVALID_PARAMETER;
+
+    /* wintrust's own SIPs hash files, not memory: native finds no signature, whatever message the caller
+     * supplies, so a signature lifted from some other object never vouches for the memory */
+    if (SOFTPUB_IsBuiltinSubject(&blob->gSubject))
+    {
+        static const GUID cat = {0xde351a43, 0x8e59, 0x11d0, {0x8c, 0x47, 0x00, 0xc0, 0x4f, 0xc2, 0x95, 0xee}};
+
+        return IsEqualGUID(&blob->gSubject, &cat) ? ((HRESULT)0x8009200d) : TRUST_E_NOSIGNATURE;
+    }
+
+    data->pPDSip->gSubject = blob->gSubject;
+    err = SOFTPUB_GetSIP(data);
+    if (err)
+        return err;
+    err = SOFTPUB_GetMessage(data, INVALID_HANDLE_VALUE, NULL, blob);
+    if (err)
+        return err;
+    err = SOFTPUB_CreateStoreFromMessage(data);
+    if (err)
+        return err;
+    err = SOFTPUB_DecodeInnerContent(data);
+    if (err)
+        return err;
+    return SOFTPUB_VerifyImageHash(data, INVALID_HANDLE_VALUE);
+}
+
 static DWORD SOFTPUB_LoadCatalogMessage(CRYPT_PROVIDER_DATA *data)
 {
     DWORD err;
@@ -764,6 +862,9 @@ HRESULT WINAPI SoftpubLoadMessage(CRYPT_PROVIDER_DATA *data)
         break;
     case WTD_CHOICE_CATALOG:
         err = SOFTPUB_LoadCatalogMessage(data);
+        break;
+    case WTD_CHOICE_BLOB:
+        err = SOFTPUB_LoadBlobMessage(data);
         break;
     default:
         FIXME("unimplemented for %ld\n", data->pWintrustData->dwUnionChoice);

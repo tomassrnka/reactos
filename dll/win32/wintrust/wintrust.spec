@@ -17,7 +17,7 @@
 #@ stub CryptCATAllocSortedMemberInfo
 @ stdcall CryptCATCDFClose(ptr)
 @ stub CryptCATCDFEnumAttributes
-@ stub CryptCATCDFEnumAttributesWithCDFTag
+@ stdcall CryptCATCDFEnumAttributesWithCDFTag(ptr wstr ptr ptr ptr)
 @ stdcall CryptCATCDFEnumCatAttributes(ptr ptr ptr)
 @ stub CryptCATCDFEnumMembers
 @ stub CryptCATCDFEnumMembersByCDFTag
@@ -38,7 +38,7 @@
 @ stdcall CryptCATPutAttrInfo(ptr ptr wstr long long ptr)
 @ stdcall CryptCATPutCatAttrInfo(ptr wstr long long ptr)
 @ stdcall CryptCATPutMemberInfo(ptr wstr wstr ptr long long ptr)
-@ stub CryptCATStoreFromHandle
+@ stdcall CryptCATStoreFromHandle(ptr)
 @ stub CryptCATVerifyMember
 @ stdcall CryptSIPCreateIndirectData(ptr ptr ptr)
 #@ stub CryptSIPGetCaps

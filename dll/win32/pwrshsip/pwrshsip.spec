@@ -1,0 +1,8 @@
+@ stdcall PwrShSIPIsFileSupportedName(wstr ptr)
+@ stdcall PwrShSIPGetSignedDataMsg(ptr ptr long ptr ptr)
+@ stdcall PwrShSIPPutSignedDataMsg(ptr long ptr long ptr)
+@ stdcall PwrShSIPCreateIndirectData(ptr ptr ptr)
+@ stdcall PwrShSIPVerifyIndirectData(ptr ptr)
+@ stdcall PwrShSIPRemoveSignedDataMsg(ptr long)
+@ stdcall -private DllRegisterServer()
+@ stdcall -private DllUnregisterServer()

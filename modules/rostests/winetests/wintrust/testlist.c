@@ -5,6 +5,7 @@
 
 extern void func_asn(void);
 extern void func_crypt(void);
+extern void func_pwrshsip(void);
 extern void func_register(void);
 extern void func_softpub(void);
 
@@ -12,6 +13,7 @@ const struct test winetest_testlist[] =
 {
     { "asn", func_asn },
     { "crypt", func_crypt },
+    { "pwrshsip", func_pwrshsip },
     { "register", func_register },
     { "softpub", func_softpub },
     { 0, 0 }
