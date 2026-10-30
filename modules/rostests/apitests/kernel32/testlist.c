@@ -115,6 +115,7 @@ extern void func_MailslotRead(void);
 extern void func_MappedFileGrowth(void);
 extern void func_MappedViewEvict(void);
 extern void func_MultiByteToWideChar(void);
+extern void func_NamedPipeInstanceReuse(void);
 extern void func_PerformanceCounter(void);
 extern void func_Pipes(void);
 extern void func_PipeSqos(void);
@@ -285,6 +286,7 @@ const struct test winetest_testlist[] =
     { "MappedFileGrowth",            func_MappedFileGrowth },
     { "MappedViewEvict",            func_MappedViewEvict },
     { "MultiByteToWideChar",         func_MultiByteToWideChar },
+    { "NamedPipeInstanceReuse",     func_NamedPipeInstanceReuse },
     { "PerformanceCounter",          func_PerformanceCounter },
     { "Pipes",                       func_Pipes },
     { "PipeSqos",                    func_PipeSqos },

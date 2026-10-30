@@ -584,7 +584,9 @@ NpCreateExistingNamedPipe(IN PNP_FCB Fcb,
         return IoStatus;
     }
 
-    if (Fcb->CurrentInstances >= Fcb->MaximumInstances)
+    /* Only open server handles count: a server that was closed while its
+       client is still open no longer takes up an instance */
+    if (Fcb->ServerOpenCount >= Fcb->MaximumInstances)
     {
         IoStatus.Status = STATUS_INSTANCE_NOT_AVAILABLE;
         TRACE("Leaving, IoStatus.Status = %lx\n", IoStatus.Status);
@@ -637,7 +639,8 @@ NpCreateExistingNamedPipe(IN PNP_FCB Fcb,
                                      List);
     if (!NT_SUCCESS(IoStatus.Status))
     {
-        --Ccb->Fcb->CurrentInstances;
+        /* NpDeleteCcb drops CurrentInstances */
+        --Ccb->Fcb->ServerOpenCount;
         NpDeleteCcb(Ccb, List);
         TRACE("Leaving, IoStatus.Status = %lx\n", IoStatus.Status);
         return IoStatus;

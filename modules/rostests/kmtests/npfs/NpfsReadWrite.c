@@ -483,9 +483,10 @@ TestReadWrite(
     CheckServerQuota(ServerHandle, 0, 1); CheckClientQuota(ClientHandle, 1, 0);
     Status = ObCloseHandle(ServerHandle, KernelMode);
     ok_eq_hex(Status, STATUS_SUCCESS);
+    /* The server end is closed: it no longer counts as a current instance (Windows 10) */
     NpCheckClientPipe(ClientHandle,
                       BYTE_STREAM, QUEUE, BYTE_STREAM, DUPLEX,
-                      MAX_INSTANCES, 1,
+                      MAX_INSTANCES, 0,
                       IN_QUOTA, 1,
                       OUT_QUOTA, OUT_QUOTA,
                       FILE_PIPE_CLOSING_STATE);

@@ -321,7 +321,7 @@ NpQueryPipeLocalInfo(IN PNP_FCB Fcb,
     InfoBuffer->NamedPipeType = Fcb->NamedPipeType;
     InfoBuffer->NamedPipeConfiguration = Fcb->NamedPipeConfiguration;
     InfoBuffer->MaximumInstances = Fcb->MaximumInstances;
-    InfoBuffer->CurrentInstances = Fcb->CurrentInstances;
+    InfoBuffer->CurrentInstances = Fcb->ServerOpenCount;
     InfoBuffer->InboundQuota = InQueue->Quota;
     InfoBuffer->OutboundQuota = OutQueue->Quota;
     InfoBuffer->NamedPipeState = Ccb->NamedPipeState;
