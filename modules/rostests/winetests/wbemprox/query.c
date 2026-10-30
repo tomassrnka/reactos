@@ -1988,6 +1988,36 @@ static void test_associations( IWbemServices *services )
     ok( hr == WBEM_E_INVALID_QUERY, "ClassDefsOnly of a class: %08x\n", hr );
     hr = query_result( services, L"ASSOCIATORS OF {Win32_Process=@} WHERE SchemaOnly", &count );
     ok( hr == WBEM_E_INVALID_OBJECT_PATH, "singleton path of a class with keys: %08x\n", hr );
+
+    /* the association classes can be queried on their own, whatever their end classes have */
+    hr = query_result( services, L"SELECT * FROM Win32_OperatingSystemQFE", &count );
+    ok( hr == S_OK, "Win32_OperatingSystemQFE: %08x\n", hr );
+    hr = query_result( services, L"SELECT * FROM Win32_SystemPartitions", &count );
+    ok( hr == S_OK, "Win32_SystemPartitions: %08x\n", hr );
+
+    /* a result class that no association of the computer system leads to */
+    {
+        WCHAR name[MAX_COMPUTERNAME_LENGTH + 1];
+        DWORD len = ARRAY_SIZE(name);
+        UINT partitions, drive_links, disks;
+
+        GetComputerNameW( name, &len );
+        wsprintfW( query, L"ASSOCIATORS OF {Win32_ComputerSystem.Name=\"%s\"} WHERE ResultClass=Win32_Process", name );
+        count = query_classes( services, query, L"Win32_Process", WBEM_GENUS_INSTANCE, &matches );
+        ok( count >= 1 && matches == count, "processes of the computer: %u objects, %u matches\n", count, matches );
+
+        /* every partition is on the disk its DiskIndex names; a logical disk is on one partition */
+        hr = query_result( services, L"SELECT * FROM Win32_DiskPartition", &partitions );
+        ok( hr == S_OK, "partitions: %08x\n", hr );
+        hr = query_result( services, L"SELECT * FROM Win32_DiskDriveToDiskPartition", &drive_links );
+        ok( hr == S_OK, "disk drive links: %08x\n", hr );
+        ok( drive_links == partitions, "%u disk drive links for %u partitions\n", drive_links, partitions );
+        hr = query_result( services, L"SELECT * FROM Win32_LogicalDiskToPartition", &count );
+        ok( hr == S_OK, "logical disk links: %08x\n", hr );
+        hr = query_result( services, L"SELECT * FROM Win32_LogicalDisk WHERE DriveType=3", &disks );
+        ok( hr == S_OK, "logical disks: %08x\n", hr );
+        ok( count >= disks, "%u logical disk links for %u fixed disks\n", count, disks );
+    }
 }
 
 /* class hierarchy, class enumeration and the method qualifiers, as Windows reports them */

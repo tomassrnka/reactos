@@ -1013,6 +1013,24 @@ static void test_associations(MI_Application *app)
         keys->ft->Delete(keys);
     }
 
+    /* a key name that is not a property name: Windows refuses to add the element, mi.dll then must not paste it into WQL */
+    res = app->ft->NewInstance(app, L"Win32_Process", NULL, &keys);
+    ok(res == MI_RESULT_OK, "NewInstance returned %d\n", res);
+    if (keys)
+    {
+        v.string = (MI_Char *)L"1";
+        res = keys->ft->AddElement(keys, L"Handle=\"1\"} WHERE ResultClass=Win32_ComputerSystem, X", &v, MI_STRING, MI_FLAG_KEY);
+        if (res == MI_RESULT_OK)
+        {
+            memset(&op, 0, sizeof(op));
+            session.ft->AssociatorInstances(&session, 0, NULL, L"root\\cimv2", keys, NULL, NULL, NULL, NULL, MI_FALSE, NULL, &op);
+            res = pull_all(&op, &count, NULL, NULL);
+            ok(count == 0, "odd key name: result %d count %u\n", res, count);
+            op.ft->Close(&op);
+        }
+        keys->ft->Delete(keys);
+    }
+
     /* no instance */
     memset(&op, 0, sizeof(op));
     session.ft->AssociatorInstances(&session, 0, NULL, L"root\\cimv2", NULL, NULL, NULL, NULL, NULL, MI_FALSE, NULL, &op);
