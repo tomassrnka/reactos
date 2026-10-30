@@ -2465,17 +2465,28 @@ Initialize(VOID)
     }
 
 #ifdef INCLUDE_CMD_COLOR
-    if (wDefColor == 0)
+    /*
+     * Like Windows' cmd, only touch the console when it is asked for:
+     * a /T: argument or a DefaultColor registry value repaints the
+     * screen buffer at startup of an interactive instance (no /C).
+     * A "cmd /C" child must leave the colours already on screen alone;
+     * /T: and DefaultColor still become the default for a later COLOR.
+     */
+    if (fSingleCommand != 1)
     {
-        /*
-         * If we still do not have the console colour attribute set,
-         * retrieve the default one.
-         */
-        ConGetDefaultAttributes(&wDefColor);
+        if (wDefColor == 0)
+        {
+            /*
+             * No colour was requested: just remember the current console
+             * attributes as the default for a later COLOR command.
+             */
+            ConGetDefaultAttributes(&wDefColor);
+        }
+        else
+        {
+            ConSetScreenColor(ConStreamGetOSHandle(StdOut), wDefColor, TRUE);
+        }
     }
-
-    if (wDefColor != 0)
-        ConSetScreenColor(ConStreamGetOSHandle(StdOut), wDefColor, TRUE);
 #endif
 
     /* Reset the output Standard Streams translation modes and code page caches */
