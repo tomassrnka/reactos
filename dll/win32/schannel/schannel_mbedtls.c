@@ -24,6 +24,9 @@
 
 #ifdef __REACTOS__
  #include "precomp.h"
+ #include <inaddr.h>
+ #include <in6addr.h>
+ #include <ip2string.h>
 #else
  #include <stdarg.h>
  #include <errno.h>
@@ -281,6 +284,20 @@ void schan_imp_set_session_transport(schan_imp_session session,
     s->transport = t;
 }
 
+/* RFC 6066 forbids an IP address in server_name, and Windows sends none for an address target */
+static BOOL schan_is_address_literal(const char *target)
+{
+    const char *end;
+    IN_ADDR addr4;
+    IN6_ADDR addr6;
+
+    if (!RtlIpv4StringToAddressA(target, TRUE, &end, &addr4) && !*end)
+        return TRUE;
+    if (!RtlIpv6StringToAddressA(target, &end, &addr6) && !*end)
+        return TRUE;
+    return FALSE;
+}
+
 void schan_imp_set_session_target(schan_imp_session session, const char *target)
 {
     MBEDTLS_SESSION *s = (MBEDTLS_SESSION *)session;
@@ -290,6 +307,10 @@ void schan_imp_set_session_target(schan_imp_session session, const char *target)
     /* FIXME: WINE tests do not pass when we set the hostname because in the test cases
      * contacting 'www.winehq.org' the hostname is defined as 'localhost' so the server
      * sends a non-fatal alert which preemptively forces mbedTLS to close connection. */
+
+    /* The name only feeds SNI: the server certificate is checked against the target by schan_validate_server_chain */
+    if (schan_is_address_literal(target))
+        return;
 
     mbedtls_ssl_set_hostname(&s->ssl, target);
 }
