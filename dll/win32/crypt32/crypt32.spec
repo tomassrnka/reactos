@@ -124,6 +124,7 @@
 @ stub CryptExportPKCS8
 @ stdcall CryptExportPublicKeyInfo(long long long ptr ptr)
 @ stdcall CryptExportPublicKeyInfoEx(long long long str long ptr ptr ptr)
+@ stdcall CryptExportPublicKeyInfoFromBCryptKeyHandle(ptr long str long ptr ptr ptr)
 @ stdcall CryptFindCertificateKeyProvInfo(ptr long ptr)
 @ stdcall CryptFindLocalizedName(wstr)
 @ stdcall CryptFindOIDInfo(long ptr long)
@@ -171,6 +172,7 @@
 @ stdcall CryptQueryObject(long ptr long long long ptr ptr ptr ptr ptr ptr)
 @ stdcall CryptRegisterDefaultOIDFunction(long str long wstr)
 @ stdcall CryptRegisterOIDFunction(long str str wstr str)
+@ stdcall CryptRetrieveTimeStamp(wstr long long str ptr ptr long ptr ptr ptr)
 @ stdcall CryptRegisterOIDInfo(ptr long)
 @ stdcall CryptSIPAddProvider(ptr)
 @ stdcall CryptSIPCreateIndirectData(ptr ptr ptr)
@@ -206,6 +208,7 @@
 @ stdcall CryptVerifyMessageHash(ptr ptr long ptr ptr ptr ptr)
 @ stdcall CryptVerifyMessageSignature(ptr long ptr long ptr ptr ptr)
 @ stub CryptVerifyMessageSignatureWithKey
+@ stdcall CryptVerifyTimeStampSignature(ptr long ptr long ptr ptr ptr ptr)
 @ stub CryptVerifySignatureU
 @ stdcall I_CertUpdateStore(ptr ptr long long)
 @ stdcall I_CryptAllocTls()

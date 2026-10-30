@@ -37,7 +37,9 @@ list(APPEND SOURCE
     sip.c
     store.c
     str.c
+    reactos/bcryptkey.c
     reactos/store.c
+    reactos/timestamp.c
     reactos/unixlib.c
 )
 
