@@ -75,6 +75,34 @@ LCID WINAPI LocaleNameToLCID(_In_ LPCWSTR, _In_ DWORD);
 
 #define IS_LCID_JAPANESE(lcid) PRIMARYLANGID(LANGIDFROMLCID(lcid)) == LANG_JAPANESE
 
+/* TwoDigitYearMax of a calendar (CAL_ITWODIGITYEARMAX): Windows answers for any calendar, whatever the locale */
+static DWORD NLS_GetTwoDigitYearMax(CALID Calendar)
+{
+    switch (Calendar)
+    {
+        case CAL_KOREA:         return 4382;
+        case CAL_HIJRI:         return 1451;
+        case CAL_THAI:          return 2592;
+        case CAL_HEBREW:        return 5810;
+        case 22:                return 1429; /* CAL_PERSIAN */
+        case 23:                return 1451; /* CAL_UMALQURA */
+        case CAL_JAPAN:
+        case CAL_TAIWAN:
+            return 99;
+        case CAL_GREGORIAN:
+        case CAL_GREGORIAN_US:
+        case CAL_GREGORIAN_ME_FRENCH:
+        case CAL_GREGORIAN_ARABIC:
+        case 11: /* CAL_GREGORIAN_XLIT_ENGLISH */
+        case 12: /* CAL_GREGORIAN_XLIT_FRENCH */
+        case 13:
+        case 0:
+            return CALINFO_MAX_YEAR;
+        default:
+            return 99;
+    }
+}
+
 /* Calendar data of the locales (calendar_data.c) */
 
 static const NLS_CAL_ROW *NLS_FindCalRow(const NLS_CAL_ROW *Rows, ULONG Count, DWORD Key)
@@ -2773,14 +2801,14 @@ int WINAPI GetCalendarInfoW(LCID Locale, CALID Calendar, CALTYPE CalType,
 #endif
             if (CalType & CAL_RETURN_NUMBER)
             {
-                *lpValue = CALINFO_MAX_YEAR;
+                *lpValue = NLS_GetTwoDigitYearMax(Calendar);
                 return sizeof(DWORD) / sizeof(WCHAR);
             }
             else
             {
                 static const WCHAR fmtW[] = {'%','u',0};
                 WCHAR buffer[10];
-                int ret = snprintfW( buffer, 10, fmtW, CALINFO_MAX_YEAR  ) + 1;
+                int ret = snprintfW( buffer, 10, fmtW, NLS_GetTwoDigitYearMax(Calendar) ) + 1;
                 if (!lpCalData) return ret;
                 if (ret <= cchData)
                 {
