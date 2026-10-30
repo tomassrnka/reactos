@@ -287,6 +287,17 @@ find "fmt-sw " %O%\l.txt | find "*" >nul
 call :rc0 "102 software entry with missing installer marked deferred (*)"
 %FM% /install fmt-sw >> %LOG% 2>&1
 call :rc1 "103 install refused when installer not staged"
+rem rapps package larger than the free space: refused up front with a clear message (not a bare exit code)
+copy /y %FX%\fmt-bigdisk.ini %R%\Catalog\ >nul
+%FM% /install fmt-bigdisk > %O%\i.txt 2>&1
+call :rc1 "103a oversized rapps package -> install refused"
+type %O%\i.txt >> %LOG%
+find "not enough disk space" %O%\i.txt >nul
+call :rc0 "103b ...with a 'not enough disk space' message"
+find "exit code" %O%\i.txt >nul
+call :rc1 "103c ...and the installer was never started"
+call :st fmt-bigdisk NotInstalled "103d refused install leaves NotInstalled"
+del /q %R%\Catalog\fmt-bigdisk.ini 2>nul
 
 rem ===== RAPPS-provider /S no-hang (RAPPS-S-dialog-hang fix) =====
 rem rapps.exe is only present in a full image. A failing silent download must return

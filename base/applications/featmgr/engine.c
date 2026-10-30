@@ -1397,6 +1397,41 @@ static HRESULT BuildSoftwareCommands(const FM_FEATURE *f, LPWSTR inst, LPWSTR un
     return S_OK;
 }
 
+/* Free space the system volume needs before a [Rapps] install is attempted, as a multiple of the
+ * package size ([Source] SizeBytes): the download (1x) plus the Windows Installer cached copy (1x)
+ * plus the unpacked files and rollback data. Measured with PowerShell 7 (105 MB MSI): an 8 GB volume
+ * with ~0.5 GB free fails inside msiexec, ~1.4 GB free installs and uses ~0.5 GB. The rapps/msiexec
+ * failure itself is only a bare "exit code 1", so refuse early with a clear message instead. */
+#define SW_DISK_FACTOR 6
+
+/* S_OK: enough space (or the size is unknown); ERROR_DISK_FULL: not enough. */
+static HRESULT CheckSoftwareDiskSpace(const FM_FEATURE *f, FILE *log, BOOL failedAlready)
+{
+    WCHAR sz[40], sys[MAX_PATH], root[4];
+    ULARGE_INTEGER avail, total, freeAll;
+    ULONGLONG pkg, need;
+    PWSTR end;
+
+    GetPrivateProfileStringW(L"Source", L"SizeBytes", L"", sz, ARRAYSIZE(sz), f->ManifestPath);
+    if (!sz[0]) return S_OK;
+    pkg = _wcstoui64(sz, &end, 10);
+    if (!pkg || *end) return S_OK;
+    if (pkg > ((ULONGLONG)-1) / SW_DISK_FACTOR) need = (ULONGLONG)-1;
+    else need = pkg * SW_DISK_FACTOR;
+    if (!GetSystemDirectoryW(sys, MAX_PATH) || sys[1] != L':') return S_OK;
+    root[0] = sys[0]; root[1] = L':'; root[2] = L'\\'; root[3] = L'\0';
+    if (!GetDiskFreeSpaceExW(root, &avail, &total, &freeAll)) return S_OK;
+    if (avail.QuadPart >= need) return S_OK;
+    LOGF(log, L"error: not enough disk space on %.2s for '%s': %I64u MB free, about %I64u MB needed%s\n",
+         root, f->Id, avail.QuadPart >> 20, need >> 20,
+         failedAlready ? L" (the installer probably ran out of space)" : L"");
+    SetLastMsg(L"Not enough disk space on %.2s to install '%s': %I64u MB free, about %I64u MB needed "
+               L"(download, installer cache and installed files). Free up space on the system volume and try again. "
+               L"On a small test volume, a large page file (system-managed size = RAM size) can use most of it.",
+               root, f->Id, avail.QuadPart >> 20, need >> 20);
+    return HRESULT_FROM_WIN32(ERROR_DISK_FULL);
+}
+
 /* Download + install. Returns S_OK only if the installer exited 0; on success the
  * uninstall command line is recorded in the state key. */
 static HRESULT SoftwareInstall(const FM_FEATURE *f, HKEY state, FILE *log)
@@ -1410,6 +1445,8 @@ static HRESULT SoftwareInstall(const FM_FEATURE *f, HKEY state, FILE *log)
     if (!_wcsicmp(f->Provider, L"rapps"))
     {
         WCHAR entry[MAX_PATH], pkg[128];
+        hr = CheckSoftwareDiskSpace(f, log, FALSE);
+        if (FAILED(hr)) return hr;
         if (RappsEntryPath(f, entry, MAX_PATH))
         {
             GetPrivateProfileStringW(L"Rapps", L"Pkg", L"", pkg, ARRAYSIZE(pkg), f->ManifestPath);
@@ -1425,6 +1462,8 @@ static HRESULT SoftwareInstall(const FM_FEATURE *f, HKEY state, FILE *log)
     if (code != 0)
     {
         LOGF(log, L"error: installer for '%s' failed (exit code %lu)\n", f->Id, code);
+        if (!_wcsicmp(f->Provider, L"rapps") && FAILED(CheckSoftwareDiskSpace(f, log, TRUE)))
+            return HRESULT_FROM_WIN32(ERROR_DISK_FULL);
         SetLastMsg(L"The %s installer for '%s' failed (exit code %lu).\n\n%s",
                    f->Provider, f->Id, code, g_Tail);
         return HRESULT_FROM_WIN32(ERROR_INSTALL_FAILURE);
