@@ -75,6 +75,14 @@ typedef struct _SOCKET_CONTEXT {
 	/* Plus Helper Data */
 } SOCKET_CONTEXT, *PSOCKET_CONTEXT;
 
+/* The AFD context of a socket: SOCKET_CONTEXT followed by the socket's WSAPROTOCOL_INFOW. A process that
+ * inherits the handle (a child of CreateProcess) rebuilds its socket from it, see MsafdAdoptInheritedSocket. */
+typedef struct _MSAFD_CONTEXT_BLOB
+{
+    SOCKET_CONTEXT Context;
+    WSAPROTOCOL_INFOW ProtocolInfo;
+} MSAFD_CONTEXT_BLOB, *PMSAFD_CONTEXT_BLOB;
+
 typedef struct _ASYNC_DATA {
 	PSOCKET_INFORMATION ParentSocket;
 	DWORD SequenceNumber;

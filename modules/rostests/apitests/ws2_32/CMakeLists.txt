@@ -19,6 +19,7 @@ list(APPEND SOURCE
     getservbyport.c
     getsockname.c
     handleinherit.c
+    inheritedsocket.c
     helpers.c
     iocpskip.c
     ioctlsocket.c
