@@ -70,10 +70,24 @@ transactional against concurrent changes to output memory.
 
 CSR uses a separate private user-mode operation on the same gate. The i386
 CSR library retains local capture buffers; the native bridge constructs
-native Base/console connection messages and native captures for console
-writes. The server continues to receive its native ABI. Base static data
-is copied into an explicitly sized i386 representation, with a read-only
-structure and pointer table. The ordinary i386 kernel32 console code runs.
+native Base/console connection messages, and a native message and native
+capture buffer for each translated request. The server continues to receive
+its native ABI. Base static data is copied into an explicitly sized i386
+representation, with a read-only structure and pointer table. The ordinary
+i386 kernel32 console code runs.
+
+Console requests are translated one by one: input and line reads, input
+records, screen-buffer output (characters, attributes, cells, fill, scroll),
+cursor, window and buffer geometry, title, handles, fonts, display mode,
+aliases, history, selection, AllocConsole/AttachConsole/FreeConsole and the
+process list. Most are described by member tables in `csr.c` (handles widened
+and narrowed, values copied, capture-buffer data sized by a length member);
+requests whose server picks an inline buffer by size are written out. The
+i386 layouts are asserted in `conmsg.h` for the i386 build and mirrored in
+`csr32.h`. Guest buffers are range-checked and touched before native
+resources are allocated, and every guest length is read once. Requests with
+GUI handles (icon, cursor, menu, palette), graphics screen buffers, VDM,
+hardware state, OS/2, IME and NLS mode are not translated.
 
 The mode-switch implementation is original ReactOS code. Wine's public
 `dlls/wow64cpu/cpu.c` was consulted as an architectural reference; no Wine

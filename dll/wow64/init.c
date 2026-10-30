@@ -346,7 +346,11 @@ VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context, BOOLEAN ProcessStartup)
     {
         LARGE_INTEGER Delay;
         /* Native helper threads never initialize or enter the guest loader. */
-        if (Context->Rdx != WOW64_THREAD_START_MARKER) return;
+        if (Context->Rdx != WOW64_THREAD_START_MARKER)
+        {
+            Wow64CsrThreadStart(Context);
+            return;
+        }
         Delay.QuadPart = -10000;
         while (!InterlockedCompareExchange(&Wow64ProcessReady, 0, 0))
             NtDelayExecution(FALSE, &Delay);
