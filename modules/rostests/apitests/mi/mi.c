@@ -714,6 +714,45 @@ static void test_schema(MI_Application *app)
     session.ft->Close(&session, NULL, NULL);
 }
 
+/* a method of the instances does not run on "the first instance of the class"; a class a namespace does not
+ * have is an invalid class */
+static void test_method_scope(MI_Application *app)
+{
+    MI_Session session = MI_SESSION_NULL;
+    MI_Operation op = MI_OPERATION_NULL;
+    MI_Instance *ext = NULL;
+    MI_Result res, result;
+    const MI_Char *message = NULL;
+    UINT count;
+
+    res = app->ft->NewSession(app, NULL, NULL, NULL, NULL, &ext, &session);
+    ok(res == MI_RESULT_OK, "NewSession returned %d\n", res);
+    if (res) return;
+
+    memset(&op, 0, sizeof(op));
+    session.ft->Invoke(&session, 0, NULL, L"root/cimv2", L"Win32_Service", L"ChangeStartMode", NULL, NULL, NULL, &op);
+    result = pull_all(&op, &count, NULL, &message);
+    trace("Invoke ChangeStartMode on the class: %d (%ls)\n", result, message);
+    ok(result == MI_RESULT_FAILED, "ChangeStartMode on the class: %d\n", result);
+    op.ft->Close(&op);
+
+    memset(&op, 0, sizeof(op));
+    session.ft->Invoke(&session, 0, NULL, L"root/cimv2", L"Win32_Process", L"GetOwnerSid", NULL, NULL, NULL, &op);
+    result = pull_all(&op, &count, NULL, &message);
+    ok(result == MI_RESULT_FAILED, "GetOwnerSid on the class: %d\n", result);
+    op.ft->Close(&op);
+
+    memset(&op, 0, sizeof(op));
+    session.ft->EnumerateInstances(&session, 0, NULL, L"root/Interop", L"Win32_Process", MI_FALSE, NULL, &op);
+    result = pull_all(&op, &count, NULL, &message);
+    trace("Win32_Process in root/Interop: %d (%ls)\n", result, message);
+    ok(result == MI_RESULT_INVALID_CLASS, "Win32_Process in root/Interop: %d\n", result);
+    ok(!count, "%u instances\n", count);
+    op.ft->Close(&op);
+
+    session.ft->Close(&session, NULL, NULL);
+}
+
 static void own_exe_name(WCHAR *name, DWORD size)
 {
     WCHAR path[MAX_PATH], *p;
@@ -1275,6 +1314,7 @@ START_TEST(mi)
     test_session(&app, L"WMIDCOM");
     test_filtered_enumeration(&app);
     test_schema(&app);
+    test_method_scope(&app);
     test_concurrent_enumeration(&app);
     test_callback_lifetime(&app);
     test_remote(&app);
