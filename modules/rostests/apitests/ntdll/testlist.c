@@ -178,6 +178,7 @@ extern void func_RtlUnhandledExceptionFilter(void);
 extern void func_RtlUnicodeStringToAnsiString(void);
 extern void func_RtlUnicodeStringToCountedOemString(void);
 extern void func_RtlUnicodeToOemN(void);
+extern void func_RtlUnwindIndirect(void);
 extern void func_RtlUTF8(void);
 extern void func_RtlUnwind(void);
 extern void func_RtlUnwindEx(void);
@@ -382,6 +383,7 @@ const struct test winetest_testlist[] =
     { "RtlUnicodeStringToOemSize",      func_RtlxUnicodeStringToOemSize },
     { "RtlUTF8",                        func_RtlUTF8 },
     { "RtlUnicodeToOemN",               func_RtlUnicodeToOemN },
+    { "RtlUnwindIndirect",              func_RtlUnwindIndirect },
     { "RtlUpcaseUnicodeStringToCountedOemString", func_RtlUpcaseUnicodeStringToCountedOemString },
     { "RtlValidateUnicodeString",       func_RtlValidateUnicodeString },
     { "RtlWaitOnAddress",               func_RtlWaitOnAddress },

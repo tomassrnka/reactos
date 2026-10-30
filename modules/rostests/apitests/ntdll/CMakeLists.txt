@@ -193,6 +193,7 @@ list(APPEND SOURCE
     RtlUnicodeStringToAnsiString.c
     RtlUnicodeStringToCountedOemString.c
     RtlUnicodeToOemN.c
+    RtlUnwindIndirect.c
     RtlUTF8.c
     RtlUpcaseUnicodeStringToCountedOemString.c
     RtlValidateUnicodeString.c
@@ -230,6 +231,10 @@ elseif(ARCH STREQUAL "amd64")
         amd64/StackOverflowDispatch.S
         amd64/BadSegmentFault.S
     )
+    if(NOT MSVC)
+        # Hand-written unwind data in GAS syntax
+        list(APPEND ntdll_apitest_asm amd64/RtlUnwindIndirect.S)
+    endif()
 endif()
 
 list(APPEND PCH_SKIP_SOURCE
