@@ -854,6 +854,26 @@ static HRESULT walk_association( struct view *view, const struct assoc_query *aq
         any |= match[i];
     }
     if (!any) return S_OK;
+    /* the schema tells whether an association can lead to a result before any provider is filled: this
+     * keeps the device walk of Win32_SystemDevices out of a query for the processes of a computer */
+    if (!aq->references && (aq->result_class || aq->result_role))
+    {
+        any = FALSE;
+        for (i = 0; i < roles; i++)
+        {
+            if (!match[i]) continue;
+            for (j = 0; j < roles; j++)
+            {
+                const struct assoc_ref *other = &assoc_refs[first + j];
+                if (j == i) continue;
+                if (aq->result_role && wcsicmp( other->role, aq->result_role )) continue;
+                if (aq->result_class && !is_class_or_subclass( other->refclass, aq->result_class ) &&
+                    !is_class_or_subclass( aq->result_class, other->refclass )) continue;
+                any = TRUE;
+            }
+        }
+        if (!any) return S_OK;
+    }
     if (!(table = grab_visible_table( assoc, view->ns ))) return S_OK;
     if (!has_instances( table ) || is_disk_walk_table( table )) goto done;
     for (i = 0; i < roles; i++)

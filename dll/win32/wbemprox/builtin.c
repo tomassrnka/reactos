@@ -6482,11 +6482,13 @@ struct record_systemoperatingsystem
 /* the most instances of one association class */
 #define MAX_ASSOC_ROWS 65536
 
+/* the join value is the position of the instance in the query: the drive a logical disk is on */
+#define JOIN_ORDINAL L"#"
+
 enum link_kind
 {
     LINK_ALL,       /* every instance of the first query with every one of the second */
     LINK_JOIN,      /* the pairs whose join properties are equal */
-    LINK_POSITION,  /* the n-th instance of the first query with the n-th of the second */
 };
 
 struct assoc_link
@@ -6512,10 +6514,11 @@ static const struct assoc_link assoc_links[] =
     { L"Win32_NetworkAdapterSetting", L"SELECT * FROM Win32_NetworkAdapter", L"SELECT * FROM Win32_NetworkAdapterConfiguration",
       LINK_JOIN, L"Index", L"Index" },
     { L"Win32_OperatingSystemQFE", L"SELECT * FROM Win32_OperatingSystem", L"SELECT * FROM Win32_QuickFixEngineering", LINK_ALL },
-    /* fixed and removable disks are assumed to be enumerated in the same order as the partitions */
-    { L"Win32_DiskDriveToDiskPartition", L"SELECT * FROM Win32_DiskDrive", L"SELECT * FROM Win32_DiskPartition", LINK_POSITION },
+    /* the providers number the fixed and removable disks, and make a partition of each, in the same order */
+    { L"Win32_DiskDriveToDiskPartition", L"SELECT * FROM Win32_DiskDrive", L"SELECT * FROM Win32_DiskPartition",
+      LINK_JOIN, L"Index", L"DiskIndex" },
     { L"Win32_LogicalDiskToPartition", L"SELECT * FROM Win32_DiskPartition",
-      L"SELECT * FROM Win32_LogicalDisk WHERE DriveType=2 OR DriveType=3", LINK_POSITION },
+      L"SELECT * FROM Win32_LogicalDisk WHERE DriveType=2 OR DriveType=3", LINK_JOIN, L"DiskIndex", JOIN_ORDINAL },
 };
 
 struct instance_ref
@@ -6580,7 +6583,13 @@ static HRESULT add_instance_refs( const WCHAR *str, const WCHAR *join, struct in
             hr = E_OUTOFMEMORY;
             break;
         }
-        if (join && get_column_index( table, join, &column ) == S_OK) ref->join = get_value_bstr( table, row, column );
+        if (join && !wcscmp( join, JOIN_ORDINAL ))
+        {
+            WCHAR ordinal[16];
+            _snwprintf( ordinal, ARRAY_SIZE(ordinal), L"%u", refs->count );
+            ref->join = SysAllocString( ordinal );
+        }
+        else if (join && get_column_index( table, join, &column ) == S_OK) ref->join = get_value_bstr( table, row, column );
         refs->count++;
     }
 
@@ -6660,12 +6669,17 @@ static enum fill_status fill_association( struct table *table, const struct expr
     {
         free_instance_refs( &refs );
         free_instance_refs( &refs2 );
-        return FILL_STATUS_FAILED;
+        if (hr == E_OUTOFMEMORY) return FILL_STATUS_FAILED;
+        /* an end this provider cannot list (no such class, or its provider fails) has no instances to link;
+         * failing here would make a query of the association class itself fail */
+        WARN( "%s: an end of the association has no instances (%#x)\n", debugstr_w(table->name), hr );
+        table->num_rows = 0;
+        return FILL_STATUS_UNFILTERED;
     }
 
     for (i = 0; i < refs.count && row < MAX_ASSOC_ROWS; i++)
     {
-        for (j = (link->kind == LINK_POSITION) ? i : 0; j < refs2.count && row < MAX_ASSOC_ROWS; j++)
+        for (j = 0; j < refs2.count && row < MAX_ASSOC_ROWS; j++)
         {
             if (link->kind == LINK_JOIN && (!refs.items[i].join || !refs2.items[j].join ||
                                             wcscmp( refs.items[i].join, refs2.items[j].join ))) continue;
@@ -6674,7 +6688,6 @@ static enum fill_status fill_association( struct table *table, const struct expr
                 status = FILL_STATUS_FAILED;
                 break;
             }
-            if (link->kind == LINK_POSITION) break;
         }
         if (status == FILL_STATUS_FAILED) break;
     }
