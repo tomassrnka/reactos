@@ -260,8 +260,6 @@ NTSTATUS NgQueryInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         {
             NG_STREAMS S = { Fcb->IsDirectory, Buffer, Length, 0, 0, 0, STATUS_SUCCESS };
             int Err;
-            if (Fcb->Stream.Length)
-                return STATUS_INVALID_PARAMETER;
             NgAcquireCore(Vcb);
             Err = NgEnsureNode(Fcb);
             if (!Err)
@@ -269,8 +267,7 @@ NTSTATUS NgQueryInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             NgReleaseCore(Vcb);
             if (Err)
                 return NgErrnoToStatus(Err);
-            if (!S.Count && NT_SUCCESS(S.Status))
-                return STATUS_END_OF_FILE;      /* no streams (a directory): FindFirstStreamW's ERROR_HANDLE_EOF */
+            /* No streams (a directory) is a success with nothing returned, as on Windows. */
             Status = S.Status;
             Used = S.Used;
             break;
