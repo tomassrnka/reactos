@@ -37,6 +37,7 @@ extern void func_manysockets(void);
 extern void func_nonblocking(void);
 extern void func_nostartup(void);
 extern void func_OwnHostname(void);
+extern void func_ReverseLookup(void);
 extern void func_open_osfhandle(void);
 extern void func_rcvbuf(void);
 extern void func_recv(void);
@@ -100,6 +101,7 @@ const struct test winetest_testlist[] =
     { "nostartup", func_nostartup },
     { "open_osfhandle", func_open_osfhandle },
     { "OwnHostname", func_OwnHostname },
+    { "ReverseLookup", func_ReverseLookup },
     { "rcvbuf", func_rcvbuf },
     { "recv", func_recv },
     { "send", func_send },
