@@ -13,6 +13,7 @@ extern void func_LsaLogonContext(void);
 extern void func_ReadConfigHandles(void);
 extern void func_SchannelHandshake(void);
 extern void func_SchannelServerCert(void);
+extern void func_SetCredentialsAttributes(void);
 
 const struct test winetest_testlist[] =
 {
@@ -21,6 +22,7 @@ const struct test winetest_testlist[] =
     { "ReadConfigHandles", func_ReadConfigHandles },
     { "SchannelHandshake", func_SchannelHandshake },
     { "SchannelServerCert", func_SchannelServerCert },
+    { "SetCredentialsAttributes", func_SetCredentialsAttributes },
 
     { 0, 0 }
 };

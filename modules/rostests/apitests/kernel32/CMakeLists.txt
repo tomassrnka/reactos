@@ -88,6 +88,7 @@ list(APPEND SOURCE
     HeapWalk.c
     IdleProcessor.c
     InitOnce.c
+    InterlockedPushListSListEx.c
     KernelBaseTime.c
     interlck.c
     IsApiSetImplemented.c

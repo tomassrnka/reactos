@@ -1119,3 +1119,43 @@ SECURITY_STATUS WINAPI SetContextAttributesW(PCtxtHandle phContext,
         ret = SEC_E_INVALID_HANDLE;
     return ret;
 }
+
+/***********************************************************************
+ *		SetCredentialsAttributesA (SECUR32.@)
+ *
+ * NOTES
+ *  A handle that names no package (a NULL or zeroed one) is SEC_E_INVALID_HANDLE, as on
+ *  Windows 10. The packages here do not set credential attributes, and the function
+ *  tables of this build stop before the entry for it (it is only declared from
+ *  Windows Server 2003 SP1 on), so a handle of a package gives
+ *  SEC_E_UNSUPPORTED_FUNCTION without asking it; so does the SChannel provider of
+ *  Windows 10. NTLM and Negotiate answer with codes of their own on Windows.
+ */
+SECURITY_STATUS WINAPI SetCredentialsAttributesA(PCredHandle phCredential,
+ ULONG ulAttribute, void *pBuffer, ULONG cbBuffer)
+{
+    SECURITY_STATUS ret;
+
+    TRACE("%p %d %p %d\n", phCredential, ulAttribute, pBuffer, cbBuffer);
+    if (phCredential)
+    {
+        SecurePackage *package = (SecurePackage *)phCredential->dwUpper;
+
+        if (package && package->provider)
+            ret = SEC_E_UNSUPPORTED_FUNCTION;
+        else
+            ret = SEC_E_INVALID_HANDLE;
+    }
+    else
+        ret = SEC_E_INVALID_HANDLE;
+    return ret;
+}
+
+/***********************************************************************
+ *		SetCredentialsAttributesW (SECUR32.@)
+ */
+SECURITY_STATUS WINAPI SetCredentialsAttributesW(PCredHandle phCredential,
+ ULONG ulAttribute, void *pBuffer, ULONG cbBuffer)
+{
+    return SetCredentialsAttributesA(phCredential, ulAttribute, pBuffer, cbBuffer);
+}

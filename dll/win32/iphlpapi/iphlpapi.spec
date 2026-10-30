@@ -49,7 +49,7 @@
 @ stdcall GetBestRoute(long long long)
 @ stdcall -version=0x600+ GetBestRoute2(ptr long ptr ptr long ptr ptr)
 @ stub GetBestRouteFromStack
-@ stdcall -stub -version=0x600+ GetCurrentThreadCompartmentId()
+@ stdcall -version=0x600+ GetCurrentThreadCompartmentId()
 @ stdcall GetExtendedTcpTable(ptr ptr long long long long)
 @ stdcall GetExtendedUdpTable(ptr ptr long long long long)
 @ stdcall GetFriendlyIfIndex(long)
@@ -75,6 +75,7 @@
 @ stub GetIpForwardTableFromStack
 @ stdcall -version=0x600+ GetIpInterfaceEntry(ptr)
 @ stdcall -version=0x600+ GetIpInterfaceTable(long ptr)
+@ stdcall -version=0x600+ GetIpNetEntry2(ptr)
 @ stdcall GetIpNetTable(ptr ptr long)
 @ stdcall -version=0x600+ GetIpNetTable2(long ptr)
 @ stub GetIpNetTableFromStack
@@ -167,9 +168,11 @@
 @ stdcall _PfTestPacket@20()
 @ stdcall _PfUnBindInterface@4()
 @ stdcall RestoreMediaSense(ptr ptr)
+@ stdcall -version=0x600+ ResolveIpNetEntry2(ptr ptr)
 @ stdcall SendARP(long long ptr ptr)
 @ stub SetAdapterIpAddress
 @ stub SetBlockRoutes
+@ stdcall -version=0x600+ SetCurrentThreadCompartmentId(long)
 @ stdcall SetIfEntry(ptr)
 @ stub SetIfEntryToStack
 @ stdcall SetIpForwardEntry(ptr)

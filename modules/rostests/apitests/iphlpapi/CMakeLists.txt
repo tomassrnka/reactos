@@ -14,6 +14,7 @@ list(APPEND SOURCE
     icmp.c
     IpInterface.c
     IpTables2.c
+    NeighborEntry2.c
     NotifyAddrChange.c
     NotifyChanges.c
     NotifyIpInterfaceChange.c

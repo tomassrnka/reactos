@@ -77,8 +77,8 @@
 @ stub SecInitUserModeContext
 @ stdcall SetContextAttributesA(ptr long ptr long) secur32.SetContextAttributesA
 @ stdcall SetContextAttributesW(ptr long ptr long) secur32.SetContextAttributesW
-@ stub SetCredentialsAttributesA
-@ stub SetCredentialsAttributesW
+@ stdcall SetCredentialsAttributesA(ptr long ptr long) secur32.SetCredentialsAttributesA
+@ stdcall SetCredentialsAttributesW(ptr long ptr long) secur32.SetCredentialsAttributesW
 @ stub SspiCompareAuthIdentities
 @ stub SspiCopyAuthIdentity
 @ stub SspiDecryptAuthIdentity

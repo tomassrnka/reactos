@@ -1030,7 +1030,18 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             }
             _SEH2_END;
         }
-        return NtRaiseHardError(a[0], a[1], a[2], Native, a[4], P(5));
+        /* The thread error mode of a 32-bit thread (SetThreadErrorMode, which the .NET runtime uses
+         * around its library loads) lives in the 32-bit TEB; the kernel reads the native one. Carry
+         * the no-critical-error-UI bit over for the call, so a failed load returns instead of
+         * putting up a box the program asked not to get. */
+        PTEB Teb = NtCurrentTeb();
+        ULONG OldMode = Teb->HardErrorMode;
+        NTSTATUS Status;
+        if (WOW64_TEB32(Teb)->HardErrorMode & RTL_SEM_FAILCRITICALERRORS)
+            Teb->HardErrorMode = OldMode | RTL_SEM_FAILCRITICALERRORS;
+        Status = NtRaiseHardError(a[0], a[1], a[2], Native, a[4], P(5));
+        Teb->HardErrorMode = OldMode;
+        return Status;
     }
     case W64_NtTestAlert: return NtTestAlert();
     case W64_NtYieldExecution: return NtYieldExecution();
