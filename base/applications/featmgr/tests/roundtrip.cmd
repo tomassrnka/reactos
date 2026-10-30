@@ -300,6 +300,246 @@ if exist %SystemRoot%\system32\rapps.exe (
   echo SKIP 104-107 rapps.exe not present ^(module-only test image^) >> %LOG%
 )
 
+rem ===== SCOOP (SCOOP-FEATMGR-01): bucket import, Provider=scoop install/uninstall/state =====
+rem Offline: the bucket is a fixture directory and "scoop" is a stub (fixtures\scoop-stub.cmd) in a fake
+rem root (FEATMGR_SCOOP_ROOT). The real thing is tests\scoop-live.cmd. FMT_FAT=1 = run on a FAT volume.
+set FXS=%FX%\scoop-bucket
+set FSROOT=%O%\fakescoop
+set FEATMGR_SCOOP_ROOT=
+rd /s /q %SW% 2>nul
+rd /s /q %FSROOT% 2>nul
+%FM% /query scoop > %O%\q.txt 2>&1
+if errorlevel 1 goto :scoop_x86
+type %O%\q.txt >> %LOG%
+find "Provider:     command" %O%\q.txt >nul
+call :rc0 "108 scoop feature in the catalog (amd64): command provider"
+find "Dependencies: powershell-7" %O%\q.txt >nul
+call :rc0 "109 scoop depends on powershell-7"
+find "Source:       command" %O%\q.txt >nul
+call :rc0 "110 scoop source = command"
+if "%FMT_FAT%"=="1" goto :scoop_fat
+
+rem --- import from a fixture bucket
+%FM% /import-scoop fmfix /dir:%FXS% > %O%\imp.txt 2>&1
+call :rc1 "111 unofficial bucket refused without /trust"
+find "not an official Scoop bucket" %O%\imp.txt >nul
+call :rc0 "112 ...with the consent message"
+%FM% /query fmsc-plain >nul 2>&1
+call :rc1 "113 nothing imported by the refused run"
+%FM% /import-scoop fmfix /dir:%FXS% /trust > %O%\imp.txt 2>&1
+call :rc0 "114 import with /trust rc0"
+type %O%\imp.txt >> %LOG%
+find "imported 7 Scoop app(s) (5 skipped: 1 without hash, 1 without a download for this machine, 3 invalid)" %O%\imp.txt >nul
+call :rc0 "115 imported 7, skipped 5 (nohash, arm64-only, 3 unusable/malformed)"
+%FM% /list /tier:software /source:scoop > %O%\l.txt 2>&1
+find "fmsc-plain" %O%\l.txt >nul
+call :rc0 "116 /list /source:scoop shows the entry"
+%FM% /list /tier:software /source:scoop/fmfix > %O%\l.txt 2>&1
+find "fmsc-arch" %O%\l.txt >nul
+call :rc0 "117 /list /source:scoop/fmfix shows the bucket"
+%FM% /list /tier:software /source:rapps > %O%\l.txt 2>&1
+find "fmsc-plain" %O%\l.txt >nul
+call :rc1 "118 /list /source:rapps hides scoop entries"
+%FM% /list /tier:os > %O%\l.txt 2>&1
+find "fmsc-plain" %O%\l.txt >nul
+call :rc1 "119 scoop entries are not os tier"
+call :st fmsc-plain NotInstalled "120 imported entry NotInstalled"
+%FM% /query fmsc-plain > %O%\q.txt 2>&1
+type %O%\q.txt >> %LOG%
+find "Tier:         software" %O%\q.txt >nul
+call :rc0 "121 query: Tier=software"
+find "Provider:     scoop" %O%\q.txt >nul
+call :rc0 "122 query: Provider=scoop"
+find "Source:       scoop/fmfix" %O%\q.txt >nul
+call :rc0 "123 query: Source=scoop/fmfix"
+find "Version:      1.2.3" %O%\q.txt >nul
+call :rc0 "124 query: Version"
+find "Dependencies: scoop" %O%\q.txt >nul
+call :rc0 "125 query: Dependencies=scoop"
+find "Scoop.App: fmsc-plain" %O%\q.txt >nul
+call :rc0 "126 query: Scoop.App"
+find "Scoop.Homepage: https://example.invalid/fmsc-plain" %O%\q.txt >nul
+call :rc0 "127 query: homepage"
+find "Scoop.License: MIT" %O%\q.txt >nul
+call :rc0 "128 query: license string"
+find "Scoop.Verified: 1" %O%\q.txt >nul
+call :rc0 "129 query: verified (manifest has a hash)"
+%FM% /query fmsc-arch > %O%\q.txt 2>&1
+find "Scoop.License: Apache-2.0" %O%\q.txt >nul
+call :rc0 "130 license object -> identifier"
+find "quoted" %O%\q.txt >nul
+call :rc0 "131 JSON escapes decoded in the description"
+%FM% /query fmsc-nodesc > %O%\q.txt 2>&1
+call :rc0 "132 hash only in architecture.64bit imported"
+find "Scoop app from the fmfix bucket" %O%\q.txt >nul
+call :rc0 "133 missing description gets a placeholder"
+%FM% /query fmsc-arr >nul 2>&1
+call :rc0 "134 url/hash arrays imported"
+%FM% /query fmsc-deep >nul 2>&1
+call :rc0 "135 manifest with scripts/braces in strings imported"
+%FM% /query fmsc-nohash >nul 2>&1
+call :rc1 "136 manifest without hash not imported"
+%FM% /query fmsc-arm >nul 2>&1
+call :rc1 "137 arm64-only manifest not imported"
+%FM% /query fmsc-broken >nul 2>&1
+call :rc1 "138 malformed JSON not imported"
+%FM% /query fmfix-fmt-base > %O%\q.txt 2>&1
+call :rc0 "139 id collision with fmt-base -> fmfix-fmt-base"
+find "Scoop.App: fmt-base" %O%\q.txt >nul
+call :rc0 "140 ...still installs the app name fmt-base"
+%FM% /query fmt-base > %O%\q.txt 2>&1
+find "Tier:         os" %O%\q.txt >nul
+call :rc0 "141 original fmt-base catalog entry untouched"
+%FM% /import-scoop fmfix /dir:%FXS% /trust /unverified /clean > %O%\imp.txt 2>&1
+call :rc0 "142 /unverified import rc0"
+find "imported 8 Scoop app(s)" %O%\imp.txt >nul
+call :rc0 "143 /unverified adds the no-hash manifest"
+%FM% /query fmsc-nohash > %O%\q.txt 2>&1
+find "Scoop.Verified: 0" %O%\q.txt >nul
+call :rc0 "144 unverified entry flagged Verified=0"
+find "No hash in the manifest" %O%\q.txt >nul
+call :rc0 "145 ...and labelled in the description"
+%FM% /import-scoop fmfix /dir:%FXS% /trust /clean /limit:1 > %O%\imp.txt 2>&1
+find "imported 1 Scoop app(s)" %O%\imp.txt >nul
+call :rc0 "146 /limit:1 caps the import"
+%FM% /query fmsc-nohash >nul 2>&1
+call :rc1 "147 /clean dropped the bucket's earlier entries"
+%FM% /import-scoop "bad bucket" /dir:%FXS% /trust > %O%\imp.txt 2>&1
+call :rc1 "148 invalid bucket name refused"
+%FM% /import-scoop fmfix /dir:%FXS%\nonexistent /trust > %O%\imp.txt 2>&1
+call :rc1 "149 missing manifest dir fails"
+%FM% /import-scoop fmfix /dir:%FXS% /trust /clean >> %LOG% 2>&1
+
+rem --- official buckets from the Scoop root (fake root with a main bucket, a stub scoop)
+mkdir %FSROOT%\shims
+mkdir %FSROOT%\buckets\main\bucket
+mkdir %FSROOT%\apps\scoop\current
+copy /y %FX%\scoop-stub.cmd %FSROOT%\shims\scoop.cmd >nul
+copy /y %FXS%\fmsc-plain.json %FSROOT%\buckets\main\bucket\ >nul
+copy /y %FXS%\fmsc-nohash.json %FSROOT%\buckets\main\bucket\ >nul
+set FEATMGR_SCOOP_ROOT=%FSROOT%
+%FM% /scoop-buckets > %O%\b.txt 2>&1
+call :rc0 "150 /scoop-buckets rc0"
+type %O%\b.txt >> %LOG%
+find "main" %O%\b.txt >nul
+call :rc0 "151 /scoop-buckets lists main"
+%FM% /import-scoop > %O%\imp.txt 2>&1
+call :rc0 "152 /import-scoop (all official buckets present) rc0"
+type %O%\imp.txt >> %LOG%
+find "bucket 'main': 1 imported" %O%\imp.txt >nul
+call :rc0 "153 main bucket read from the Scoop root, 1 imported (no-hash skipped)"
+%FM% /query main-fmsc-plain > %O%\q.txt 2>&1
+call :rc0 "154 same app in two buckets: second one prefixed (main-fmsc-plain)"
+find "Source:       scoop/main" %O%\q.txt >nul
+call :rc0 "155 ...Source=scoop/main"
+%FM% /import-scoop extras > %O%\imp.txt 2>&1
+call :rc1 "156 bucket that Scoop does not have: import fails"
+type %O%\imp.txt >> %LOG%
+find "scoop bucket add extras" %O%\imp.txt >nul
+call :rc0 "157 ...and says how to add it (never adds one itself)"
+
+rem --- install / uninstall / state through the stub scoop (scoop itself is detected as installed)
+call :st scoop Enabled "158 scoop feature detected as installed (shim present)"
+call :st fmsc-plain NotInstalled "159 app not installed before"
+%FM% /install fmsc-plain > %O%\i.txt 2>&1
+call :rc0 "160 install fmsc-plain runs 'scoop install' (rc0)"
+type %O%\i.txt >> %LOG%
+find "install fmfix/fmsc-plain" %FSROOT%\calls.txt >nul
+call :rc0 "161 scoop was called with the bucket-qualified name"
+call :st fmsc-plain Enabled "162 Enabled after install"
+call :ex %FSROOT%\apps\fmsc-plain\current 1 "163 stub left apps\<app>\current"
+reg query HKLM\SOFTWARE\ReactOS\Nitro\OptionalFeatures\fmsc-plain /v Uninstall >nul 2>&1
+call :rc0 "164 uninstall command recorded in the state"
+%FM% /disable scoop > %O%\i.txt 2>&1
+call :rc1 "165 scoop cannot be disabled while a Scoop app is installed"
+find "fmsc-plain" %O%\i.txt >nul
+call :rc0 "166 ...naming the dependent"
+call :st scoop Enabled "167 scoop untouched"
+%FM% /list /state:enabled /tier:software > %O%\l.txt 2>&1
+find "fmsc-plain" %O%\l.txt >nul
+call :rc0 "168 list shows the installed Scoop app"
+rem an app installed with the scoop CLI is seen without a featmgr record
+mkdir %FSROOT%\apps\fmsc-deep\current
+call :st fmsc-deep Enabled "169 externally installed app detected as Enabled"
+reg query HKLM\SOFTWARE\ReactOS\Nitro\OptionalFeatures\fmsc-deep >nul 2>&1
+call :rc1 "170 ...without any featmgr record"
+%FM% /disable fmsc-deep > %O%\i.txt 2>&1
+call :rc0 "171 disable of an externally installed app runs 'scoop uninstall'"
+type %O%\i.txt >> %LOG%
+find "uninstall fmfix/fmsc-deep" %FSROOT%\calls.txt >nul
+call :rc0 "172 scoop was called to uninstall it"
+call :ex %FSROOT%\apps\fmsc-deep 0 "173 app directory gone"
+%FM% /uninstall fmsc-deep >> %LOG% 2>&1
+call :rc0 "174 uninstall forgets it"
+call :st fmsc-deep NotInstalled "175 NotInstalled again"
+rem removed outside featmgr: the stale record does not claim Enabled
+rd /s /q %FSROOT%\apps\fmsc-plain
+call :st fmsc-plain NotInstalled "176 app removed outside featmgr -> NotInstalled (probe beats the stale record)"
+%FM% /uninstall fmsc-plain >> %LOG% 2>&1
+call :rc0 "177 uninstall clears the stale record"
+reg query HKLM\SOFTWARE\ReactOS\Nitro\OptionalFeatures\fmsc-plain >nul 2>&1
+call :rc1 "178 stale record deleted"
+rem normal uninstall
+%FM% /install fmsc-plain >> %LOG% 2>&1
+%FM% /uninstall fmsc-plain > %O%\i.txt 2>&1
+call :rc0 "179 uninstall of an installed app (scoop uninstall + forget)"
+find "uninstall fmfix/fmsc-plain" %FSROOT%\calls.txt >nul
+call :rc0 "180 scoop was called to uninstall it"
+call :ex %FSROOT%\apps\fmsc-plain 0 "181 app directory gone"
+call :st fmsc-plain NotInstalled "182 NotInstalled"
+rem Scoop's own failure is surfaced and leaves nothing behind
+%FM% /install fmsc-fail > %O%\i.txt 2>&1
+call :rc1 "183 failing scoop install -> rc3"
+type %O%\i.txt >> %LOG%
+find "Hash check failed" %O%\i.txt >nul
+call :rc0 "184 Scoop's own output is shown (hash check failed)"
+find "exit code 7" %O%\i.txt >nul
+call :rc0 "185 ...with its exit code"
+call :st fmsc-fail NotInstalled "186 failed install leaves NotInstalled"
+reg query HKLM\SOFTWARE\ReactOS\Nitro\OptionalFeatures\fmsc-fail >nul 2>&1
+call :rc1 "187 failed install leaves no record"
+rem the install of a feature that is available only with scoop present
+set FEATMGR_SCOOP_ROOT=
+goto :scoop_done
+
+:scoop_fat
+rem FAT volume: Scoop and every Scoop app must be refused up front, nothing downloaded.
+%FM% /install scoop > %O%\i.txt 2>&1
+call :rc1 "F1 install scoop refused on FAT"
+type %O%\i.txt >> %LOG%
+find "NTFS" %O%\i.txt >nul
+call :rc0 "F2 ...with a message naming NTFS"
+call :st scoop NotInstalled "F3 scoop NotInstalled"
+call :st powershell-7 NotInstalled "F4 powershell-7 was not pulled in (refused before the dependency)"
+if exist "%ProgramFiles%\PowerShell\7\pwsh.exe" (call :fail "F5 nothing downloaded or installed" "pwsh present") else (echo PASS F5 nothing downloaded or installed>> %LOG%)
+%FM% /import-scoop fmfix /dir:%FXS% /trust > %O%\imp.txt 2>&1
+%FM% /install fmsc-plain > %O%\i.txt 2>&1
+call :rc1 "F6 a Scoop app is refused on FAT too"
+find "NTFS" %O%\i.txt >nul
+call :rc0 "F7 ...with the NTFS message"
+goto :scoop_done
+
+:scoop_x86
+rem No PowerShell 7 x86: the scoop feature is not in the catalog and the import refuses cleanly.
+echo scoop feature absent from this catalog (x86 image)>> %LOG%
+%FM% /list > %O%\l.txt 2>&1
+find "scoop" %O%\l.txt >nul
+call :rc1 "X1 scoop hidden from /list on x86"
+%FM% /import-scoop fmfix /dir:%FXS% /trust > %O%\imp.txt 2>&1
+call :rc1 "X2 /import-scoop refused on x86"
+type %O%\imp.txt >> %LOG%
+find "not available on this architecture" %O%\imp.txt >nul
+call :rc0 "X3 ...with a clear message"
+%FM% /import-scoop > %O%\imp.txt 2>&1
+call :rc1 "X4 /import-scoop (no args) refused on x86"
+%FM% /query fmsc-plain >nul 2>&1
+call :rc1 "X5 nothing imported on x86"
+
+:scoop_done
+set FEATMGR_SCOOP_ROOT=
+rd /s /q %FSROOT% 2>nul
+rd /s /q %SW% 2>nul
+
 rem --- software-tier cleanup
 del /q %R%\Catalog\fmt-sw.ini %R%\Catalog\fmt-swbad.ini %R%\Catalog\fmt-swstuck.ini 2>nul
 del /q %R%\Payload\fmt-sw\*.* %R%\Payload\fmt-swbad\*.* %R%\Payload\fmt-swstuck\*.* 2>nul

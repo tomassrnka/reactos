@@ -1,0 +1,6 @@
+{
+    "version": "9.9",
+    "description": "App whose name collides with an existing catalog entry (fmt-base): it must get a bucket-prefixed id",
+    "url": "https://example.invalid/fmt-base.zip",
+    "hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+}

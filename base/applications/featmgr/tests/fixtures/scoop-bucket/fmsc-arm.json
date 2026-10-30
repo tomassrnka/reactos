@@ -1,0 +1,12 @@
+{
+    "version": "3.0",
+    "description": "arm64-only app: no download for an x64 machine",
+    "homepage": "https://example.invalid/fmsc-arm",
+    "license": "MIT",
+    "architecture": {
+        "arm64": {
+            "url": "https://example.invalid/fmsc-arm-arm64.zip",
+            "hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+    }
+}
