@@ -2559,6 +2559,60 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             }
             return STATUS_SUCCESS;
         }
+        case SystemHandleInformation:
+        {
+            /* The system-wide handle table, as pss, psapi and the process explorers read it. The native
+             * entry (24 bytes, with a 64-bit object pointer) narrows to the 16 bytes of the 32-bit form. */
+            typedef struct
+            {
+                USHORT UniqueProcessId, CreatorBackTraceIndex;
+                UCHAR ObjectTypeIndex, HandleAttributes;
+                USHORT HandleValue;
+                ULONG Object, GrantedAccess;
+            } WOW64_SYSTEM_HANDLE_ENTRY;
+            typedef struct
+            {
+                ULONG NumberOfHandles;
+                WOW64_SYSTEM_HANDLE_ENTRY Handles[1];
+            } WOW64_SYSTEM_HANDLE_INFORMATION;
+            SYSTEM_HANDLE_INFORMATION *Nh;
+            WOW64_SYSTEM_HANDLE_INFORMATION *Gh;
+            PUCHAR Native = NULL;
+            ULONG NativeSize = 0x40000, Offset, GuestNeeded, i, Retries = 0;
+            C_ASSERT(sizeof(WOW64_SYSTEM_HANDLE_ENTRY) == 16);
+            if (NativeSystemInformation) UNSUPPORTED(CLASS, a[0]);
+            if (a[3]) PROBE(3);
+            for (;;)
+            {
+                if (Native) RtlFreeHeap(RtlGetProcessHeap(), 0, Native);
+                Native = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, NativeSize);
+                if (!Native) return STATUS_NO_MEMORY;
+                Status = NtQuerySystemInformation(a[0], Native, NativeSize, &Offset);
+                if (Status != STATUS_INFO_LENGTH_MISMATCH || ++Retries > 16) break;
+                NativeSize = max(NativeSize * 2, Offset + 0x4000);
+            }
+            if (!NT_SUCCESS(Status)) return Status;
+            Nh = (SYSTEM_HANDLE_INFORMATION *)Native;
+            GuestNeeded = FIELD_OFFSET(WOW64_SYSTEM_HANDLE_INFORMATION, Handles) +
+                          Nh->NumberOfHandles * sizeof(WOW64_SYSTEM_HANDLE_ENTRY);
+            if (a[3]) U(3) = GuestNeeded;
+            if (a[2] < GuestNeeded) return STATUS_INFO_LENGTH_MISMATCH;
+            if (!GuestSpan(a[1], GuestNeeded)) return STATUS_ACCESS_VIOLATION;
+            ProbeOutput(a[1], GuestNeeded);
+            Gh = PTR32(a[1]);
+            Gh->NumberOfHandles = Nh->NumberOfHandles;
+            for (i = 0; i < Nh->NumberOfHandles; ++i)
+            {
+                Gh->Handles[i].UniqueProcessId = Nh->Handles[i].UniqueProcessId;
+                Gh->Handles[i].CreatorBackTraceIndex = Nh->Handles[i].CreatorBackTraceIndex;
+                Gh->Handles[i].ObjectTypeIndex = Nh->Handles[i].ObjectTypeIndex;
+                Gh->Handles[i].HandleAttributes = Nh->Handles[i].HandleAttributes;
+                Gh->Handles[i].HandleValue = Nh->Handles[i].HandleValue;
+                Gh->Handles[i].Object = (ULONG)(ULONG_PTR)Nh->Handles[i].Object;
+                Gh->Handles[i].GrantedAccess = Nh->Handles[i].GrantedAccess;
+            }
+            return STATUS_SUCCESS;
+        }
         case SystemCurrentTimeZoneInformation: /* RTL_TIME_ZONE_INFORMATION has no pointers. */
         case SystemTimeOfDayInformation:
         case SystemPerformanceInformation: /* LARGE_INTEGER/ULONG counters, no pointers, same layout. */
