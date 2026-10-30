@@ -291,7 +291,17 @@ typedef enum _SECURITY_LOGON_TYPE {
   Batch,
   Service,
   Proxy,
-  Unlock
+  Unlock,
+  NetworkCleartext,
+  NewCredentials,
+#if (_WIN32_WINNT >= 0x0501)
+  RemoteInteractive,
+  CachedInteractive,
+#endif
+#if (_WIN32_WINNT >= 0x0502)
+  CachedRemoteInteractive,
+  CachedUnlock
+#endif
 } SECURITY_LOGON_TYPE, *PSECURITY_LOGON_TYPE;
 #if (_WIN32_WINNT >= 0x0600)
 typedef struct _LSA_LAST_INTER_LOGON_INFO {

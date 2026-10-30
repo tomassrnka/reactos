@@ -22,8 +22,10 @@ extern void func_HKEY_CLASSES_ROOT(void);
 extern void func_IsTextUnicode(void);
 extern void func_LockServiceDatabase(void);
 extern void func_LogonUser(void);
+extern void func_LogonUserCleartext(void);
 extern void func_LsaLogonSession(void);
 extern void func_LsaLookupLeak(void);
+extern void func_LsaManageSidNameMapping(void);
 extern void func_NetUserChangePassword(void);
 extern void func_ProcessThreadLabel(void);
 extern void func_QueryServiceConfig(void);
@@ -105,8 +107,10 @@ const struct test winetest_testlist[] =
     { "IsTextUnicode" , func_IsTextUnicode },
     { "LockServiceDatabase" , func_LockServiceDatabase },
     { "LogonUser", func_LogonUser },
+    { "LogonUserCleartext", func_LogonUserCleartext },
     { "LsaLogonSession", func_LsaLogonSession },
     { "LsaLookupLeak", func_LsaLookupLeak },
+    { "LsaManageSidNameMapping", func_LsaManageSidNameMapping },
     { "NetUserChangePassword", func_NetUserChangePassword },
     { "ProcessThreadLabel", func_ProcessThreadLabel },
     { "QueryServiceConfig", func_QueryServiceConfig },

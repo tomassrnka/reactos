@@ -1338,6 +1338,22 @@ LogonUserW(
 }
 
 
+BOOL
+WINAPI
+LogonUserExExW(
+    _In_ LPWSTR lpszUsername,
+    _In_opt_ LPWSTR lpszDomain,
+    _In_opt_ LPWSTR lpszPassword,
+    _In_ DWORD dwLogonType,
+    _In_ DWORD dwLogonProvider,
+    _In_opt_ PTOKEN_GROUPS pTokenGroups,
+    _Out_opt_ PHANDLE phToken,
+    _Out_opt_ PSID *ppLogonSid,
+    _Out_opt_ PVOID *ppProfileBuffer,
+    _Out_opt_ LPDWORD pdwProfileLength,
+    _Out_opt_ PQUOTA_LIMITS pQuotaLimits);
+
+
 /*
  * @implemented
  */
@@ -1349,6 +1365,42 @@ LogonUserExW(
     _In_opt_ LPWSTR lpszPassword,
     _In_ DWORD dwLogonType,
     _In_ DWORD dwLogonProvider,
+    _Out_opt_ PHANDLE phToken,
+    _Out_opt_ PSID *ppLogonSid,
+    _Out_opt_ PVOID *ppProfileBuffer,
+    _Out_opt_ LPDWORD pdwProfileLength,
+    _Out_opt_ PQUOTA_LIMITS pQuotaLimits)
+{
+    return LogonUserExExW(lpszUsername,
+                          lpszDomain,
+                          lpszPassword,
+                          dwLogonType,
+                          dwLogonProvider,
+                          NULL,
+                          phToken,
+                          ppLogonSid,
+                          ppProfileBuffer,
+                          pdwProfileLength,
+                          pQuotaLimits);
+}
+
+
+/*
+ * @implemented
+ *
+ * LOGON32_LOGON_NETWORK_CLEARTEXT (used by OpenSSH for password logons) is an
+ * interactive-format logon that yields an impersonation token. pTokenGroups is not
+ * merged into the token yet.
+ */
+BOOL
+WINAPI
+LogonUserExExW(
+    _In_ LPWSTR lpszUsername,
+    _In_opt_ LPWSTR lpszDomain,
+    _In_opt_ LPWSTR lpszPassword,
+    _In_ DWORD dwLogonType,
+    _In_ DWORD dwLogonProvider,
+    _In_opt_ PTOKEN_GROUPS pTokenGroups,
     _Out_opt_ PHANDLE phToken,
     _Out_opt_ PSID *ppLogonSid,
     _Out_opt_ PVOID *ppProfileBuffer,
@@ -1410,6 +1462,10 @@ LogonUserExW(
 
         case LOGON32_LOGON_SERVICE:
             LogonType = Service;
+            break;
+
+        case LOGON32_LOGON_NETWORK_CLEARTEXT:
+            LogonType = NetworkCleartext;
             break;
 
        default:

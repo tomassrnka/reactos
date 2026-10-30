@@ -22,7 +22,9 @@ list(APPEND SOURCE
     IsTextUnicode.c
     LockServiceDatabase.c
     LogonUser.c
+    LogonUserCleartext.c
     LsaLookupLeak.c
+    LsaManageSidNameMapping.c
     ProcessThreadLabel.c
     QueryServiceConfig.c
     QueryServiceConfig2.c
