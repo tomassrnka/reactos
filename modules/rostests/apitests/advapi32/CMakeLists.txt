@@ -43,6 +43,7 @@ list(APPEND SOURCE
     TokenIntegrity.c
     TokenLogonSid.c
     ServiceArgs.c
+    ServiceControllerQuery.c
     ServiceEnv.c
     ServiceFailureActions.c
     ServiceRecovery.c
