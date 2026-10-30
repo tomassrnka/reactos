@@ -1562,14 +1562,6 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
          * AFD requests carrying handles or WSABUF arrays need translation. */
         switch (a[5])
         {
-        case IOCTL_MOUNTMGR_QUERY_DOS_VOLUME_PATH:
-        case IOCTL_TCP_QUERY_INFORMATION_EX: /* TCP captures the guest context offset. */
-        case IOCTL_TCP_SET_INFORMATION_EX: /* setsockopt partner: TDIObjectID + BufferSize + inline bytes, no pointers. */
-        case IOCTL_SET_IP_ADDRESS: /* AddIPAddress: three integers, no pointers. */
-        case IOCTL_DELETE_IP_ADDRESS: /* DeleteIPAddress: one integer. */
-        case IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST: /* NotifyAddrChange: no data; pends with the guest IOSB. */
-        case IOCTL_IP_ADDCHANGE_CANCEL_REQUEST: /* CancelIPChangeNotify: no data. */
-        case IOCTL_IP_ROUTECHANGE_NOTIFY_REQUEST: /* NotifyRouteChange: no data; pends with the guest IOSB. */
         case IOCTL_AFD_BIND:
         case IOCTL_AFD_CONNECT:
         case IOCTL_AFD_START_LISTEN:
@@ -1585,6 +1577,16 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             /* The guest's own SOCK_SHARED_INFO size gets AFD's current structure, converted. */
             if (a[9] == WOW64_SOCK_SHARED_INFO_SIZE && !a[2] && !a[3] && a[8])
                 return AfdGetContext32(a);
+        /* Not AFD: these must stay below the check above, which would take a request
+         * with a 140-byte output buffer for AFD_GET_CONTEXT. */
+        case IOCTL_MOUNTMGR_QUERY_DOS_VOLUME_PATH:
+        case IOCTL_TCP_QUERY_INFORMATION_EX: /* TCP captures the guest context offset. */
+        case IOCTL_TCP_SET_INFORMATION_EX: /* setsockopt partner: TDIObjectID + BufferSize + inline bytes, no pointers. */
+        case IOCTL_SET_IP_ADDRESS: /* AddIPAddress: three integers, no pointers. */
+        case IOCTL_DELETE_IP_ADDRESS: /* DeleteIPAddress: one integer. */
+        case IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST: /* NotifyAddrChange: no data; pends with the guest IOSB. */
+        case IOCTL_IP_ADDCHANGE_CANCEL_REQUEST: /* CancelIPChangeNotify: no data. */
+        case IOCTL_IP_ROUTECHANGE_NOTIFY_REQUEST: /* NotifyRouteChange: no data; pends with the guest IOSB. */
         case IOCTL_AFD_GET_TDI_HANDLES: /* AFD captures the 32-bit output handles. */
         case IOCTL_AFD_EVENT_SELECT: /* AFD captures event handles and the in/out record. */
         case IOCTL_AFD_ENUM_NETWORK_EVENTS:
