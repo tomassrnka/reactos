@@ -22,6 +22,7 @@ extern void func_IsTextUnicode(void);
 extern void func_LockServiceDatabase(void);
 extern void func_LogonUser(void);
 extern void func_LsaLogonSession(void);
+extern void func_LsaLookupLeak(void);
 extern void func_NetUserChangePassword(void);
 extern void func_ProcessThreadLabel(void);
 extern void func_QueryServiceConfig2(void);
@@ -101,6 +102,7 @@ const struct test winetest_testlist[] =
     { "LockServiceDatabase" , func_LockServiceDatabase },
     { "LogonUser", func_LogonUser },
     { "LsaLogonSession", func_LsaLogonSession },
+    { "LsaLookupLeak", func_LsaLookupLeak },
     { "NetUserChangePassword", func_NetUserChangePassword },
     { "ProcessThreadLabel", func_ProcessThreadLabel },
     { "QueryServiceConfig2", func_QueryServiceConfig2 },
