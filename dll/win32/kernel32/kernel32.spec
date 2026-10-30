@@ -782,6 +782,7 @@
 @ stdcall InterlockedPopEntrySList(ptr) ntdll.RtlInterlockedPopEntrySList
 @ stdcall InterlockedPushEntrySList(ptr ptr) ntdll.RtlInterlockedPushEntrySList
 @ fastcall -version=0x600+ InterlockedPushListSList(ptr ptr ptr long) ntdll.RtlInterlockedPushListSList
+@ stdcall InterlockedPushListSListEx(ptr ptr ptr long) ntdll.RtlInterlockedPushListSListEx
 @ stdcall InvalidateConsoleDIBits(long long)
 @ stdcall -version=0x601+ IsApiSetImplemented(str)
 @ stdcall IsBadCodePtr(ptr)
