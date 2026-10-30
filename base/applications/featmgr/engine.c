@@ -1297,7 +1297,7 @@ out:
  * install time so disable stays data-driven (same as the OS tier's undo lists). */
 static HRESULT BuildSoftwareCommands(const FM_FEATURE *f, LPWSTR inst, LPWSTR uninst, DWORD cch, FILE *log)
 {
-    WCHAR pkg[128], name[128], rapps[MAX_PATH];
+    WCHAR pkg[128], name[128], rapps[MAX_PATH], ucmd[1024];
 
     inst[0] = uninst[0] = L'\0';
     if (!_wcsicmp(f->Provider, L"command"))
@@ -1387,6 +1387,22 @@ static HRESULT BuildSoftwareCommands(const FM_FEATURE *f, LPWSTR inst, LPWSTR un
     }
     if (!RappsExePath(rapps, MAX_PATH)) return E_FAIL;
     StringCchPrintfW(inst, cch, L"\"%s\" /install /S \"%s\"", rapps, pkg);
+    /* [Rapps] UninstallCmd= : the command line that removes the app, for an installer whose registered uninstall
+     * command is not silent (rapps /uninstall starts that one as it is, and the maintenance dialog would wait for
+     * a click). UninstallCmd.amd64 / UninstallCmd.x86 (the architecture of this build, as in the RAPPS entry's
+     * [Section.amd64]) wins over UninstallCmd. Environment variables are expanded, as for the command provider. */
+#ifdef _WIN64
+    GetPrivateProfileStringW(L"Rapps", L"UninstallCmd.amd64", L"", ucmd, ARRAYSIZE(ucmd), f->ManifestPath);
+#else
+    GetPrivateProfileStringW(L"Rapps", L"UninstallCmd.x86", L"", ucmd, ARRAYSIZE(ucmd), f->ManifestPath);
+#endif
+    if (!ucmd[0])
+        GetPrivateProfileStringW(L"Rapps", L"UninstallCmd", L"", ucmd, ARRAYSIZE(ucmd), f->ManifestPath);
+    if (ucmd[0])
+    {
+        ExpandCmd(f->Id, ucmd, uninst, cch);
+        return S_OK;
+    }
     /* [Rapps] UninstallName= : the installed app's display name. Uninstall then resolves it
      * from the registry, so it keeps working when the entry is no longer in the RAPPS DB. */
     GetPrivateProfileStringW(L"Rapps", L"UninstallName", L"", name, ARRAYSIZE(name), f->ManifestPath);
