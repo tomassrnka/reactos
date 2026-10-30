@@ -574,6 +574,19 @@ static HRESULT WINAPI class_object_Get(
         UINT index;
         HRESULT hr;
 
+#ifdef __REACTOS__
+        /* the out-parameters of a method are an instance of __PARAMETERS */
+        if (!wcsicmp( wszName, L"__CLASS" ))
+        {
+            if (pVal)
+            {
+                V_VT( pVal ) = VT_BSTR;
+                V_BSTR( pVal ) = SysAllocString( L"__PARAMETERS" );
+            }
+            if (pType) *pType = CIM_STRING;
+            return S_OK;
+        }
+#endif
         if ((hr = get_column_index( co->record->table, wszName, &index )) != S_OK) return hr;
         return record_get_value( co->record, index, pVal, pType );
     }
@@ -715,6 +728,45 @@ static HRESULT WINAPI class_object_GetNames(
     if (wszQualifierName || pQualifierVal)
         FIXME("qualifier not supported\n");
 
+#ifdef __REACTOS__
+    if (co->record)
+    {
+        /* an object of its own (method parameters): no view behind it, the columns of its table are
+         * the properties */
+        const struct table *table = co->record->table;
+        SAFEARRAY *sa;
+        UINT i, num = 0;
+        LONG j = 0;
+
+        for (i = 0; i < table->num_cols; i++)
+        {
+            BOOL system = table->columns[i].name[0] == '_' && table->columns[i].name[1] == '_';
+            if (is_method( table, i )) continue;
+            if ((lFlags == WBEM_FLAG_NONSYSTEM_ONLY && system) || (lFlags == WBEM_FLAG_SYSTEM_ONLY && !system)) continue;
+            num++;
+        }
+        if (!(sa = SafeArrayCreateVector( VT_BSTR, 0, num ))) return E_OUTOFMEMORY;
+        for (i = 0; i < table->num_cols; i++)
+        {
+            BOOL system = table->columns[i].name[0] == '_' && table->columns[i].name[1] == '_';
+            BSTR str;
+
+            if (is_method( table, i )) continue;
+            if ((lFlags == WBEM_FLAG_NONSYSTEM_ONLY && system) || (lFlags == WBEM_FLAG_SYSTEM_ONLY && !system)) continue;
+            str = SysAllocString( table->columns[i].name );
+            if (!str || SafeArrayPutElement( sa, &j, str ) != S_OK)
+            {
+                SysFreeString( str );
+                SafeArrayDestroy( sa );
+                return E_OUTOFMEMORY;
+            }
+            SysFreeString( str );
+            j++;
+        }
+        *pNames = sa;
+        return S_OK;
+    }
+#endif
     return get_properties( ec->query->view, co->index, lFlags, pNames );
 }
 
