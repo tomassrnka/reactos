@@ -703,7 +703,8 @@ START_TEST(CommitCharge)
 {
     SYSTEM_BASIC_INFORMATION BasicInfo;
     ULONG_PTR Baseline, Committed, PagingFile;
-    ULARGE_INTEGER FreeBytes;
+    ULARGE_INTEGER FreeBytes, TotalBytes;
+    ULONG_PTR InitialPages;
     WCHAR Drive[] = L"C:\\";
     NTSTATUS Status;
     ULONG Round;
@@ -752,19 +753,23 @@ START_TEST(CommitCharge)
 
         /*
          * Over-commit and growth need the test system's fixture: one
-         * system-managed paging file (registry; its maximum is at most 3x
-         * RAM), which starts at RAM size (RAM of 1 GB or more) and has not
-         * grown yet, on a drive with room to grow: smss caps the maximum at
-         * the file plus the free space it found at boot minus 256 MB, and the
-         * growth test needs 64 MB plus the kernel reserve (at most 32 MB).
-         * Anything else skips.
+         * system-managed paging file (registry) that sits at its initial
+         * size (RAM / 8, at least 512 MB; see smss) and has room to grow:
+         * its maximum is 3x RAM or 4 GB, whichever is larger, limited to
+         * 1/8 of the volume and to the file plus the free space smss found
+         * at boot minus 256 MB. The growth test needs 64 MB plus the
+         * kernel reserve (at most 32 MB). Anything else skips.
          */
         PagingFile = QueryPagingFilePages();
+        InitialPages = PhysicalPages / 8;
+        if (InitialPages < MB_PAGES(512))
+            InitialPages = MB_PAGES(512);
         if (!IsSystemManagedPagingFile(&Drive[0]) ||
-            (PagingFile + MB_PAGES(16) < PhysicalPages) || (PagingFile > PhysicalPages + MB_PAGES(16)) ||
+            (PagingFile > InitialPages + MB_PAGES(16)) ||
             (PhysicalPages < MB_PAGES(1024)) ||
-            !GetDiskFreeSpaceExW(Drive, &FreeBytes, NULL, NULL) ||
-            (FreeBytes.QuadPart < 512LL * 1024 * 1024))
+            !GetDiskFreeSpaceExW(Drive, &FreeBytes, &TotalBytes, NULL) ||
+            (FreeBytes.QuadPart < 512LL * 1024 * 1024) ||
+            (TotalBytes.QuadPart / 8 < (LONGLONG)(PagingFile + MB_PAGES(128)) * PageSize))
             skip("not the growth fixture: paging files %Iu pages, physical %lu pages, drive %lc\n",
                  PagingFile, PhysicalPages, Drive[0]);
         else
