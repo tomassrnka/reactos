@@ -110,6 +110,7 @@ PspDumpProcessInfoClassName(
         DBG_PROCESS_INFO_CLASS(ProcessGroupInformation),
         DBG_PROCESS_INFO_CLASS(ProcessConsoleHostProcess),
         DBG_PROCESS_INFO_CLASS(ProcessWindowInformation),
+        DBG_PROCESS_INFO_CLASS(ProcessCommandLineInformation),
     };
 #undef DBG_PROCESS_INFO_CLASS
 
@@ -558,6 +559,192 @@ PspHandleSnapCallback(
 
     /* FALSE: keep walking every entry. */
     return FALSE;
+}
+
+/*
+ * ProcessCommandLineInformation (60, Windows 8.1+): the command line of the
+ * target as its loader sees it, PEB->ProcessParameters->CommandLine, read in
+ * the target's address space. The result is a UNICODE_STRING whose Buffer
+ * points just behind it, followed by the characters and a terminating NUL
+ * (MaximumLength = Length + 2). A short buffer fails with
+ * STATUS_INFO_LENGTH_MISMATCH and the needed size as the return length.
+ * Measured on Windows 10 22H2: PROCESS_QUERY_LIMITED_INFORMATION is enough
+ * (also for protected processes), a process without a PEB (System, Registry)
+ * is STATUS_NOT_FOUND, a terminated one STATUS_PROCESS_IS_TERMINATING, and a
+ * WoW64 process reports the command line of its native PEB.
+ */
+static
+NTSTATUS
+PspQueryProcessCommandLine(
+    _In_ HANDLE ProcessHandle,
+    _In_ KPROCESSOR_MODE PreviousMode,
+    _Out_writes_bytes_opt_(BufferLength) PVOID Buffer,
+    _In_ ULONG BufferLength,
+    _Out_ PULONG RequiredLength)
+{
+    PEPROCESS Process;
+    PPEB Peb;
+    PRTL_USER_PROCESS_PARAMETERS Params;
+    UNICODE_STRING CommandLine = {0};
+    ULONG ParamsFlags = 0, ParamsMaximum = 0;
+    PWCHAR Copy = NULL;
+    KAPC_STATE ApcState;
+    BOOLEAN Attached = FALSE;
+    ULONG Needed;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    *RequiredLength = 0;
+
+    Status = ObReferenceObjectByHandle(ProcessHandle,
+                                       PROCESS_QUERY_LIMITED_INFORMATION,
+                                       PsProcessType,
+                                       PreviousMode,
+                                       (PVOID*)&Process,
+                                       NULL);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    /* Keep the address space alive while it is read */
+    if (!ExAcquireRundownProtection(&Process->RundownProtect))
+    {
+        ObDereferenceObject(Process);
+        return STATUS_PROCESS_IS_TERMINATING;
+    }
+
+    /* System, Idle and minimal processes have no PEB */
+    Peb = Process->Peb;
+    if (Peb == NULL)
+    {
+        Status = STATUS_NOT_FOUND;
+        goto Quit;
+    }
+
+    if (PsGetCurrentProcess() != Process)
+    {
+        KeStackAttachProcess(&Process->Pcb, &ApcState);
+        Attached = TRUE;
+    }
+
+    /* The target's user mode owns every byte read here: probe each pointer
+     * (a kernel address is refused) and read under SEH */
+    _SEH2_TRY
+    {
+        ProbeForRead(Peb, sizeof(*Peb), sizeof(PVOID));
+        Params = Peb->ProcessParameters;
+        if (Params == NULL)
+        {
+            Status = STATUS_NOT_FOUND;
+        }
+        else
+        {
+            ProbeForRead(Params, sizeof(*Params), sizeof(PVOID));
+            CommandLine = Params->CommandLine;
+            ParamsFlags = Params->Flags;
+            ParamsMaximum = Params->MaximumLength;
+            Status = STATUS_SUCCESS;
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = STATUS_NOT_FOUND;
+    }
+    _SEH2_END;
+
+    if (NT_SUCCESS(Status))
+    {
+        /* Bounded by the USHORT length; whole characters only */
+        CommandLine.Length &= ~(USHORT)(sizeof(WCHAR) - 1);
+        if (CommandLine.Length > MAXUSHORT - sizeof(WCHAR))
+            CommandLine.Length = MAXUSHORT - sizeof(WCHAR) - 1;
+        if (!(ParamsFlags & RTL_USER_PROCESS_PARAMETERS_NORMALIZED))
+        {
+            /* A process that has not started yet still holds the block as its
+             * creator built it: the string is an offset into the block */
+            ULONG_PTR Offset = (ULONG_PTR)CommandLine.Buffer;
+
+            if ((Offset > ParamsMaximum) ||
+                (CommandLine.Length > ParamsMaximum - Offset))
+            {
+                Status = STATUS_NOT_FOUND;
+            }
+            else
+            {
+                CommandLine.Buffer = (PWSTR)((PUCHAR)Params + Offset);
+            }
+        }
+        else if ((CommandLine.Length != 0) && (CommandLine.Buffer == NULL))
+        {
+            Status = STATUS_NOT_FOUND;
+        }
+    }
+
+    if (NT_SUCCESS(Status))
+    {
+        Copy = ExAllocatePoolWithTag(PagedPool,
+                                     CommandLine.Length + sizeof(WCHAR),
+                                     TAG_PS_COMMANDLINE);
+        if (Copy == NULL)
+        {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+        }
+        else
+        {
+            _SEH2_TRY
+            {
+                if (CommandLine.Length != 0)
+                {
+                    ProbeForRead(CommandLine.Buffer, CommandLine.Length, sizeof(WCHAR));
+                    RtlCopyMemory(Copy, CommandLine.Buffer, CommandLine.Length);
+                }
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = STATUS_NOT_FOUND;
+            }
+            _SEH2_END;
+        }
+    }
+
+    if (Attached) KeUnstackDetachProcess(&ApcState);
+
+    if (!NT_SUCCESS(Status)) goto Quit;
+
+    /* Only the kernel copy, terminated, is handed to the caller */
+    Copy[CommandLine.Length / sizeof(WCHAR)] = UNICODE_NULL;
+    Needed = sizeof(UNICODE_STRING) + CommandLine.Length + sizeof(WCHAR);
+    *RequiredLength = Needed;
+
+    if (BufferLength < Needed)
+    {
+        Status = STATUS_INFO_LENGTH_MISMATCH;
+        goto Quit;
+    }
+
+    _SEH2_TRY
+    {
+        PUNICODE_STRING Out = (PUNICODE_STRING)Buffer;
+
+        if (PreviousMode != KernelMode)
+            ProbeForWrite(Buffer, Needed, sizeof(ULONG));
+
+        RtlCopyMemory(Out + 1, Copy, CommandLine.Length + sizeof(WCHAR));
+        Out->Length = CommandLine.Length;
+        Out->MaximumLength = CommandLine.Length + sizeof(WCHAR);
+        Out->Buffer = (PWSTR)(Out + 1);
+        Status = STATUS_SUCCESS;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+Quit:
+    if (Copy) ExFreePoolWithTag(Copy, TAG_PS_COMMANDLINE);
+    ExReleaseRundownProtection(&Process->RundownProtect);
+    ObDereferenceObject(Process);
+    return Status;
 }
 
 NTSTATUS
@@ -1873,6 +2060,17 @@ NtQueryInformationProcess(
 
             ExFreePoolWithTag(Snap.Buffer, 'tHsP');
             ObDereferenceObject(Process);
+            break;
+        }
+
+        /* ProcessCommandLineInformation (Windows 8.1+): PEB command line of the target */
+        case ProcessCommandLineInformation:
+        {
+            Status = PspQueryProcessCommandLine(ProcessHandle,
+                                                PreviousMode,
+                                                ProcessInformation,
+                                                ProcessInformationLength,
+                                                &Length);
             break;
         }
 

@@ -289,6 +289,8 @@ typedef enum _PROCESSINFOCLASS {
   ProcessRevokeFileHandles,
   ProcessWorkingSetControl,
   ProcessHandleTable,
+  ProcessCheckStackExtentsMode,
+  ProcessCommandLineInformation,
   MaxProcessInfoClass
 } PROCESSINFOCLASS;
 

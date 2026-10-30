@@ -4548,8 +4548,38 @@ static enum fill_status fill_printer( struct table *table, const struct expr *co
 
 static WCHAR *get_cmdline( DWORD process_id )
 {
+    UNICODE_STRING *str;
+    WCHAR *ret = NULL;
+    ULONG len = 0;
+    int tries = 0;
+    HANDLE process;
+    NTSTATUS status;
+
     if (process_id == GetCurrentProcessId()) return heap_strdupW( GetCommandLineW() );
-    return NULL; /* FIXME handle different process case */
+
+    /* the query only needs PROCESS_QUERY_LIMITED_INFORMATION, so protected processes work too;
+       System, Idle and anything we cannot open have no command line */
+    if (!(process = OpenProcess( PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id ))) return NULL;
+    status = NtQueryInformationProcess( process, ProcessCommandLineInformation, NULL, 0, &len );
+    while (status == STATUS_INFO_LENGTH_MISMATCH && len && tries++ < 3 && (str = heap_alloc( len )))
+    {
+        ULONG size = len;
+        status = NtQueryInformationProcess( process, ProcessCommandLineInformation, str, size, &len );
+        if (!status)
+        {
+            if ((ret = heap_alloc( str->Length + sizeof(WCHAR) )))
+            {
+                memcpy( ret, str->Buffer, str->Length );
+                ret[str->Length / sizeof(WCHAR)] = 0;
+            }
+        }
+        heap_free( str );
+        /* the command line can only change size between the two calls when the process is
+           being created; retry with the new size */
+        if (status != STATUS_INFO_LENGTH_MISMATCH) break;
+    }
+    CloseHandle( process );
+    return ret;
 }
 
 struct process_extra

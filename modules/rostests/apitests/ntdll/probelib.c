@@ -87,6 +87,17 @@ QuerySetProcessValidator(
                     break;
                 }
 
+                /* Windows 8.1+: a UNICODE_STRING and the command line, of variable size */
+                case 60: /* ProcessCommandLineInformation */
+                {
+                    if (GetNTVersion() < 0x0603)
+                        SpecialStatus = STATUS_INVALID_INFO_CLASS;
+                    /* Need to fix up the length */
+                    if (InfoLength == sizeof(UNICODE_STRING))
+                        InfoLength += MAX_PATH * sizeof(WCHAR);
+                    break;
+                }
+
                 /* These classes don't exist in Server 2003 */
                 case ProcessImageFileNameWin32:
                 {

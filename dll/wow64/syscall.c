@@ -2043,7 +2043,8 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             if (a[4]) U(4) = sizeof(ULONG);
             return Status;
         }
-        if (a[1] == ProcessImageFileName || a[1] == ProcessImageFileNameWin32)
+        if (a[1] == ProcessImageFileName || a[1] == ProcessImageFileNameWin32 ||
+            a[1] == 60 /* ProcessCommandLineInformation, Windows 8.1 */)
         {
             /* A UNICODE_STRING followed by its characters: the guest header is
              * eight bytes, the native one sixteen, and the buffer pointer is

@@ -8,6 +8,7 @@
 
 #include "precomp.h"
 #include <internal/ps_i.h>
+#include <tlhelp32.h>
 
 static LARGE_INTEGER TestStartTime;
 
@@ -939,6 +940,396 @@ Cleanup:
         NtFreeVirtualMemory(NtCurrentProcess(), &Committed, &Size, MEM_RELEASE);
 }
 
+/* BEGIN ProcessCommandLineInformation test (extracted verbatim for the Windows oracle build) */
+#define PROCESS_COMMAND_LINE_CLASS  60
+/* A failed query leaves the return length alone; the Windows WoW64 thunk of a 32-bit caller
+ * adjusts it by the header difference whatever happens, so only native callers are held to it */
+#ifdef _WIN64
+#define CMDLINE_UNTOUCHED(Length)   ((Length) == 0x55555555)
+#else
+#define CMDLINE_UNTOUCHED(Length)   (TRUE)
+#endif
+#define CMDLINE_MARKER              L"marker \"quoted arg\" \x00e9 tail"
+
+/* The size of the answer for a command line of Length bytes */
+#define CMDLINE_NEEDED(Length)  (sizeof(UNICODE_STRING) + (Length) + sizeof(WCHAR))
+
+static
+void
+CmdLineCheckString(
+    _In_ const char *Test,
+    _In_ PVOID Buffer,
+    _In_ ULONG Needed,
+    _In_opt_ PCWSTR Expected)
+{
+    PUNICODE_STRING String = Buffer;
+
+    ok(String->Buffer == (PWSTR)(String + 1),
+       "%s: Buffer is %p, expected %p\n", Test, String->Buffer, (PWSTR)(String + 1));
+    ok(String->MaximumLength == String->Length + sizeof(WCHAR),
+       "%s: Length %u, MaximumLength %u\n", Test, String->Length, String->MaximumLength);
+    ok(Needed == CMDLINE_NEEDED(String->Length),
+       "%s: needed %lu for a string of %u bytes\n", Test, Needed, String->Length);
+    if (String->Buffer == (PWSTR)(String + 1) && String->MaximumLength == String->Length + sizeof(WCHAR))
+    {
+        ok(String->Buffer[String->Length / sizeof(WCHAR)] == UNICODE_NULL,
+           "%s: the string is not terminated\n", Test);
+        ok(String->Length != 0, "%s: empty command line\n", Test);
+        if (Expected)
+        {
+            ok(String->Length == wcslen(Expected) * sizeof(WCHAR) &&
+               !memcmp(String->Buffer, Expected, String->Length),
+               "%s: got '%.*ls', expected '%ls'\n", Test, String->Length / (int)sizeof(WCHAR), String->Buffer, Expected);
+        }
+    }
+}
+
+/* Full query, then the size semantics of a short buffer, on one handle */
+static
+void
+CmdLineQueryAll(
+    _In_ const char *Test,
+    _In_ HANDLE Process,
+    _In_opt_ PCWSTR Expected)
+{
+    NTSTATUS Status;
+    ULONG Length, Needed, Try;
+    PVOID Buffer;
+    PUCHAR Bytes;
+
+    /* The size probe: no buffer room at all */
+    Length = 0x55555555;
+    Status = NtQueryInformationProcess(Process, (PROCESSINFOCLASS)PROCESS_COMMAND_LINE_CLASS, NULL, 0, &Length);
+    ok(Status == STATUS_INFO_LENGTH_MISMATCH, "%s: size probe returned 0x%lx\n", Test, Status);
+    if (Status != STATUS_INFO_LENGTH_MISMATCH)
+        return;
+    Needed = Length;
+    ok(Needed > sizeof(UNICODE_STRING) + sizeof(WCHAR), "%s: needed only %lu\n", Test, Needed);
+    if (Needed <= sizeof(UNICODE_STRING) + sizeof(WCHAR) || Needed > 0x20000)
+        return;
+
+    Buffer = HeapAlloc(GetProcessHeap(), 0, Needed + 16);
+    if (!Buffer)
+    {
+        skip("%s: out of memory\n", Test);
+        return;
+    }
+    Bytes = Buffer;
+
+    /* Every length below the need fails, writes nothing and reports the need */
+    for (Try = 0; Try < Needed; Try += (Try < sizeof(UNICODE_STRING) + 2 || Try + 8 > Needed) ? 1 : 7)
+    {
+        ULONG Offset;
+        BOOLEAN Wrote = FALSE;
+
+        memset(Buffer, 0xCC, Needed + 16);
+        Length = 0x55555555;
+        Status = NtQueryInformationProcess(Process, (PROCESSINFOCLASS)PROCESS_COMMAND_LINE_CLASS, Buffer, Try, &Length);
+        ok(Status == STATUS_INFO_LENGTH_MISMATCH, "%s: length %lu returned 0x%lx\n", Test, Try, Status);
+        ok(Length == Needed, "%s: length %lu reported %lu, expected %lu\n", Test, Try, Length, Needed);
+        for (Offset = 0; Offset < Needed + 16; Offset++)
+            Wrote |= (Bytes[Offset] != 0xCC);
+        ok(!Wrote, "%s: length %lu wrote to the buffer\n", Test, Try);
+    }
+
+    /* Exactly enough, and more than enough; nothing is written past the length */
+    for (Try = Needed; Try <= Needed + 6; Try += 6)
+    {
+        memset(Buffer, 0xCC, Needed + 16);
+        Length = 0x55555555;
+        Status = NtQueryInformationProcess(Process, (PROCESSINFOCLASS)PROCESS_COMMAND_LINE_CLASS, Buffer, Try, &Length);
+        ok(Status == STATUS_SUCCESS, "%s: length %lu returned 0x%lx\n", Test, Try, Status);
+        ok(Length == Needed, "%s: length %lu reported %lu, expected %lu\n", Test, Try, Length, Needed);
+        if (Status == STATUS_SUCCESS)
+        {
+            CmdLineCheckString(Test, Buffer, Length, Expected);
+            ok(Bytes[Needed] == 0xCC && Bytes[Needed + 15] == 0xCC, "%s: wrote past the size\n", Test);
+        }
+    }
+
+    /* The return length is optional */
+    memset(Buffer, 0xCC, Needed + 16);
+    Status = NtQueryInformationProcess(Process, (PROCESSINFOCLASS)PROCESS_COMMAND_LINE_CLASS, Buffer, Needed, NULL);
+    ok(Status == STATUS_SUCCESS, "%s: without return length returned 0x%lx\n", Test, Status);
+
+    HeapFree(GetProcessHeap(), 0, Buffer);
+}
+
+static
+BOOL
+CmdLineIsWow64(
+    _In_ HANDLE Process)
+{
+    typedef BOOL (WINAPI *PFN_ISWOW64)(HANDLE, PBOOL);
+    PFN_ISWOW64 pIsWow64Process;
+    BOOL Wow64 = FALSE;
+
+    pIsWow64Process = (PFN_ISWOW64)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "IsWow64Process");
+    if (pIsWow64Process)
+        pIsWow64Process(Process, &Wow64);
+    return Wow64;
+}
+
+/* A suspended child of the given image: its PEB and parameters exist, it never runs */
+static
+BOOL
+CmdLineCreateChild(
+    _In_ PCWSTR ImageName,
+    _In_ PCWSTR Args,
+    _Out_ PROCESS_INFORMATION *ProcessInfo,
+    _Out_writes_(MAX_PATH + 64) PWSTR CommandLine)
+{
+    STARTUPINFOW StartupInfo = { sizeof(StartupInfo) };
+    WCHAR Path[MAX_PATH];
+
+    if (!GetEnvironmentVariableW(L"SystemRoot", Path, RTL_NUMBER_OF(Path)))
+        return FALSE;
+    StringCchCatW(Path, RTL_NUMBER_OF(Path), L"\\");
+    StringCchCatW(Path, RTL_NUMBER_OF(Path), ImageName);
+    if (GetFileAttributesW(Path) == INVALID_FILE_ATTRIBUTES)
+        return FALSE;
+    StringCchPrintfW(CommandLine, MAX_PATH + 64, L"\"%ls\" %ls", Path, Args);
+    return CreateProcessW(Path, CommandLine, NULL, NULL, FALSE, CREATE_SUSPENDED,
+                          NULL, NULL, &StartupInfo, ProcessInfo);
+}
+
+static
+void
+CmdLineTestChild(
+    _In_ const char *Test,
+    _In_ PCWSTR ImageName)
+{
+    PROCESS_INFORMATION ProcessInfo;
+    WCHAR CommandLine[MAX_PATH + 64];
+    HANDLE Handle;
+    NTSTATUS Status;
+    ULONG Length = 0x55555555;
+    ULONGLONG Storage[128];
+    PUCHAR Buffer = (PUCHAR)Storage;
+
+    if (!CmdLineCreateChild(ImageName, L"/c " CMDLINE_MARKER, &ProcessInfo, CommandLine))
+    {
+        skip("%s: cannot start %ls\n", Test, ImageName);
+        return;
+    }
+
+    CmdLineQueryAll(Test, ProcessInfo.hProcess, CommandLine);
+
+    /* Query-limited is all it takes; reading memory alone is not enough */
+    if (DuplicateHandle(GetCurrentProcess(), ProcessInfo.hProcess, GetCurrentProcess(), &Handle,
+                        PROCESS_QUERY_LIMITED_INFORMATION, FALSE, 0))
+    {
+        Status = NtQueryInformationProcess(Handle, (PROCESSINFOCLASS)PROCESS_COMMAND_LINE_CLASS,
+                                           Buffer, sizeof(Storage), &Length);
+        ok(Status == STATUS_SUCCESS, "%s: limited handle returned 0x%lx\n", Test, Status);
+        CloseHandle(Handle);
+    }
+    Length = 0x55555555;
+    if (DuplicateHandle(GetCurrentProcess(), ProcessInfo.hProcess, GetCurrentProcess(), &Handle,
+                        PROCESS_VM_READ | PROCESS_VM_OPERATION, FALSE, 0))
+    {
+        Status = NtQueryInformationProcess(Handle, (PROCESSINFOCLASS)PROCESS_COMMAND_LINE_CLASS,
+                                           Buffer, sizeof(Storage), &Length);
+        ok(Status == STATUS_ACCESS_DENIED, "%s: VM_READ handle returned 0x%lx\n", Test, Status);
+        ok(CMDLINE_UNTOUCHED(Length), "%s: access denied changed the return length to %lu\n", Test, Length);
+        CloseHandle(Handle);
+    }
+
+    /* Once it has exited, there is no process to read */
+    TerminateProcess(ProcessInfo.hProcess, 0);
+    WaitForSingleObject(ProcessInfo.hProcess, 10000);
+    Length = 0x55555555;
+    Status = NtQueryInformationProcess(ProcessInfo.hProcess, (PROCESSINFOCLASS)PROCESS_COMMAND_LINE_CLASS,
+                                       Buffer, sizeof(Storage), &Length);
+    ok(Status == STATUS_PROCESS_IS_TERMINATING, "%s: terminated child returned 0x%lx\n", Test, Status);
+    ok(CMDLINE_UNTOUCHED(Length), "%s: terminated child changed the return length to %lu\n", Test, Length);
+
+    CloseHandle(ProcessInfo.hThread);
+    CloseHandle(ProcessInfo.hProcess);
+}
+
+static
+DWORD
+CmdLineFindProcess(
+    _In_ PCWSTR Name)
+{
+    PROCESSENTRY32W Entry = { sizeof(Entry) };
+    HANDLE Snapshot;
+    DWORD Pid = 0;
+
+    Snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (Snapshot == INVALID_HANDLE_VALUE)
+        return 0;
+    if (Process32FirstW(Snapshot, &Entry))
+    {
+        do
+        {
+            if (!_wcsicmp(Entry.szExeFile, Name))
+            {
+                Pid = Entry.th32ProcessID;
+                break;
+            }
+        } while (Process32NextW(Snapshot, &Entry));
+    }
+    CloseHandle(Snapshot);
+    return Pid;
+}
+
+static
+void
+Test_ProcessCommandLineInformation(void)
+{
+    NTSTATUS Status;
+    ULONG Length;
+    HANDLE Handle, Self;
+    PVOID Page;
+    PCWSTR Own = GetCommandLineW();
+    DWORD Pid;
+    ULONGLONG Storage[128];
+    PUCHAR Buffer = (PUCHAR)Storage;
+    struct { PCSTR Name; DWORD Access; NTSTATUS Expected; } Rights[] =
+    {
+        { "QUERY_LIMITED_INFORMATION", PROCESS_QUERY_LIMITED_INFORMATION, STATUS_SUCCESS },
+        { "QUERY_INFORMATION", PROCESS_QUERY_INFORMATION, STATUS_SUCCESS },
+        { "QUERY_INFORMATION|VM_READ", PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, STATUS_SUCCESS },
+        { "VM_READ", PROCESS_VM_READ, STATUS_ACCESS_DENIED },
+        { "SYNCHRONIZE", SYNCHRONIZE, STATUS_ACCESS_DENIED },
+        { "SET_INFORMATION", PROCESS_SET_INFORMATION, STATUS_ACCESS_DENIED },
+        { "SET_LIMITED_INFORMATION", PROCESS_SET_LIMITED_INFORMATION, STATUS_ACCESS_DENIED },
+        { "TERMINATE", PROCESS_TERMINATE, STATUS_ACCESS_DENIED },
+    };
+    ULONG i;
+
+    /* The calling process, through the pseudo handle and through a real one */
+    CmdLineQueryAll("self", NtCurrentProcess(), Own);
+    Self = OpenProcess(PROCESS_ALL_ACCESS, FALSE, GetCurrentProcessId());
+    ok(Self != NULL, "OpenProcess failed with %lu\n", GetLastError());
+    if (Self)
+        CmdLineQueryAll("self handle", Self, Own);
+
+    /* The rights the query needs */
+    for (i = 0; Self && i < RTL_NUMBER_OF(Rights); i++)
+    {
+        if (!DuplicateHandle(GetCurrentProcess(), Self, GetCurrentProcess(), &Handle, Rights[i].Access, FALSE, 0))
+        {
+            skip("cannot duplicate with %s\n", Rights[i].Name);
+            continue;
+        }
+        Length = 0x55555555;
+        memset(Buffer, 0xCC, sizeof(Storage));
+        Status = NtQueryInformationProcess(Handle, (PROCESSINFOCLASS)PROCESS_COMMAND_LINE_CLASS,
+                                           Buffer, sizeof(Storage), &Length);
+        ok(Status == Rights[i].Expected, "%s: returned 0x%lx, expected 0x%lx\n",
+           Rights[i].Name, Status, Rights[i].Expected);
+        if (Status == STATUS_ACCESS_DENIED)
+        {
+            ok(CMDLINE_UNTOUCHED(Length), "%s: return length %lu\n", Rights[i].Name, Length);
+            ok(Buffer[0] == 0xCC, "%s: wrote to the buffer\n", Rights[i].Name);
+        }
+        CloseHandle(Handle);
+    }
+
+    /* Bad handles and bad pointers */
+    Length = 0x55555555;
+    Status = NtQueryInformationProcess((HANDLE)(ULONG_PTR)0x12345670, (PROCESSINFOCLASS)PROCESS_COMMAND_LINE_CLASS,
+                                       Buffer, sizeof(Storage), &Length);
+    ok(Status == STATUS_INVALID_HANDLE, "bad handle returned 0x%lx\n", Status);
+    ok(CMDLINE_UNTOUCHED(Length), "bad handle changed the return length to %lu\n", Length);
+    Status = NtQueryInformationProcess(NULL, (PROCESSINFOCLASS)PROCESS_COMMAND_LINE_CLASS,
+                                       Buffer, sizeof(Storage), &Length);
+    ok(Status == STATUS_INVALID_HANDLE, "NULL handle returned 0x%lx\n", Status);
+
+    Status = NtQueryInformationProcess(NtCurrentProcess(), (PROCESSINFOCLASS)PROCESS_COMMAND_LINE_CLASS,
+                                       NULL, 0, NULL);
+    ok(Status == STATUS_INFO_LENGTH_MISMATCH, "no buffer and no return length returned 0x%lx\n", Status);
+
+    Status = NtQueryInformationProcess(NtCurrentProcess(), (PROCESSINFOCLASS)PROCESS_COMMAND_LINE_CLASS,
+                                       Buffer, sizeof(Storage), (PULONG)(ULONG_PTR)0x10);
+    ok(Status == STATUS_ACCESS_VIOLATION, "bad return length pointer returned 0x%lx\n", Status);
+
+    Status = NtQueryInformationProcess(NtCurrentProcess(), (PROCESSINFOCLASS)PROCESS_COMMAND_LINE_CLASS,
+                                       (PVOID)(ULONG_PTR)0x10, sizeof(Storage), &Length);
+    ok(Status == STATUS_ACCESS_VIOLATION, "bad buffer pointer returned 0x%lx\n", Status);
+
+    /* A read-only page cannot take the answer, and what is behind it is not touched */
+    Page = VirtualAlloc(NULL, 2 * 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ok(Page != NULL, "VirtualAlloc failed\n");
+    if (Page)
+    {
+        DWORD OldProtect;
+
+        memset(Page, 0xCC, 2 * 4096);
+        VirtualProtect(Page, 4096, PAGE_READONLY, &OldProtect);
+        Status = NtQueryInformationProcess(NtCurrentProcess(), (PROCESSINFOCLASS)PROCESS_COMMAND_LINE_CLASS,
+                                           Page, 4096, &Length);
+        ok(Status == STATUS_ACCESS_VIOLATION, "read-only buffer returned 0x%lx\n", Status);
+        VirtualFree(Page, 0, MEM_RELEASE);
+    }
+
+#ifdef _WIN64
+    /* Alignment is that of a ULONG, and the length is checked first */
+    {
+        PUCHAR Aligned = (PUCHAR)(((ULONG_PTR)Buffer + 7) & ~(ULONG_PTR)7);
+
+        Status = NtQueryInformationProcess(NtCurrentProcess(), (PROCESSINFOCLASS)PROCESS_COMMAND_LINE_CLASS,
+                                           Aligned + 1, 512, &Length);
+        ok(Status == STATUS_DATATYPE_MISALIGNMENT, "misaligned buffer returned 0x%lx\n", Status);
+        Status = NtQueryInformationProcess(NtCurrentProcess(), (PROCESSINFOCLASS)PROCESS_COMMAND_LINE_CLASS,
+                                           Aligned + 4, 512, &Length);
+        ok(Status == STATUS_SUCCESS, "4-byte aligned buffer returned 0x%lx\n", Status);
+        Status = NtQueryInformationProcess(NtCurrentProcess(), (PROCESSINFOCLASS)PROCESS_COMMAND_LINE_CLASS,
+                                           Aligned + 1, 0, &Length);
+        ok(Status == STATUS_INFO_LENGTH_MISMATCH, "misaligned empty buffer returned 0x%lx\n", Status);
+    }
+#endif
+
+    /* A native child, a WoW64 child of a 64-bit caller and the reverse */
+    CmdLineTestChild("child", L"system32\\cmd.exe");
+#ifdef _WIN64
+    CmdLineTestChild("32-bit child", L"SysWOW64\\cmd.exe");
+#else
+    if (CmdLineIsWow64(GetCurrentProcess()))
+        CmdLineTestChild("64-bit child", L"Sysnative\\cmd.exe");
+#endif
+
+    /* System has no PEB and so no command line; the query still needs a valid handle */
+    Handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, 4);
+    if (Handle)
+    {
+        Length = 0x55555555;
+        memset(Buffer, 0xCC, sizeof(Storage));
+        Status = NtQueryInformationProcess(Handle, (PROCESSINFOCLASS)PROCESS_COMMAND_LINE_CLASS,
+                                           Buffer, sizeof(Storage), &Length);
+        ok(Status == STATUS_NOT_FOUND, "System returned 0x%lx\n", Status);
+        ok(CMDLINE_UNTOUCHED(Length) && Buffer[0] == 0xCC, "System: return length %lu\n", Length);
+        Status = NtQueryInformationProcess(Handle, (PROCESSINFOCLASS)PROCESS_COMMAND_LINE_CLASS,
+                                           NULL, 0, &Length);
+        ok(Status == STATUS_NOT_FOUND, "System with no buffer returned 0x%lx\n", Status);
+        CloseHandle(Handle);
+    }
+    else
+    {
+        skip("cannot open System: %lu\n", GetLastError());
+    }
+
+    /* A system process that user mode cannot open for more than query-limited */
+    Pid = CmdLineFindProcess(L"smss.exe");
+    Handle = Pid ? OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, Pid) : NULL;
+    if (Handle)
+    {
+        CmdLineQueryAll("smss", Handle, NULL);
+        CloseHandle(Handle);
+    }
+    else
+    {
+        skip("cannot open smss: %lu\n", GetLastError());
+    }
+
+    if (Self)
+        CloseHandle(Self);
+}
+/* END ProcessCommandLineInformation test */
+
 START_TEST(NtQueryInformationProcess)
 {
     NTSTATUS Status;
@@ -957,4 +1348,5 @@ START_TEST(NtQueryInformationProcess)
     Test_ProcessWx86Information();
     Test_ProcQueryAlignmentProbe();
     Test_ProcessVmCounters();
+    Test_ProcessCommandLineInformation();
 }
