@@ -1889,6 +1889,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         case FileAttributeTagInformation: case FileAllInformation:
         case FilePipeLocalInformation:
         case FileEaInformation: /* a single ULONG EaSize */
+        case FileStreamInformation: /* ULONG, ULONG, two LARGE_INTEGERs and a name: same in both layouts */
             ProbeOutput(a[1], sizeof(WOW64_IOSB));
             Status = NtQueryInformationFile(H(0), &Io, P(2), a[3], a[4]);
             StoreIo(a[1], &Io); return Status;
