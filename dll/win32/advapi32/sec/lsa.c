@@ -2182,7 +2182,11 @@ done:
     }
 
     if (EncryptedData != NULL)
+    {
+        if (EncryptedData->Buffer != NULL)
+            midl_user_free(EncryptedData->Buffer);
         midl_user_free(EncryptedData);
+    }
 
     return Status;
 }

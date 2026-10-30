@@ -26,6 +26,7 @@ extern void func_LockServiceDatabase(void);
 extern void func_LookupAccountSidCaller(void);
 extern void func_LogonUser(void);
 extern void func_LogonUserCleartext(void);
+extern void func_LogonUserServiceSecret(void);
 extern void func_LogonUserUserRights(void);
 extern void func_LsaLogonSession(void);
 extern void func_LsaLookupLeak(void);
@@ -115,6 +116,7 @@ const struct test winetest_testlist[] =
     { "LookupAccountSidCaller", func_LookupAccountSidCaller },
     { "LogonUser", func_LogonUser },
     { "LogonUserCleartext", func_LogonUserCleartext },
+    { "LogonUserServiceSecret", func_LogonUserServiceSecret },
     { "LogonUserUserRights", func_LogonUserUserRights },
     { "LsaLogonSession", func_LsaLogonSession },
     { "LsaLookupLeak", func_LsaLookupLeak },
