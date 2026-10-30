@@ -1091,8 +1091,15 @@ static HRESULT WINAPI drive_Invoke(IDrive *iface, DISPID dispIdMember,
 static HRESULT WINAPI drive_get_Path(IDrive *iface, BSTR *path)
 {
     struct drive *This = impl_from_IDrive(iface);
-    FIXME("(%p)->(%p): stub\n", This, path);
-    return E_NOTIMPL;
+
+    TRACE("(%p)->(%p)\n", This, path);
+
+    if (!path)
+        return E_POINTER;
+
+    /* "C:", without the backslash of the root */
+    *path = SysAllocStringLen(This->root, 2);
+    return *path ? S_OK : E_OUTOFMEMORY;
 }
 
 static HRESULT WINAPI drive_get_DriveLetter(IDrive *iface, BSTR *letter)
@@ -1152,8 +1159,13 @@ static HRESULT WINAPI drive_get_DriveType(IDrive *iface, DriveTypeConst *type)
 static HRESULT WINAPI drive_get_RootFolder(IDrive *iface, IFolder **folder)
 {
     struct drive *This = impl_from_IDrive(iface);
-    FIXME("(%p)->(%p): stub\n", This, folder);
-    return E_NOTIMPL;
+
+    TRACE("(%p)->(%p)\n", This, folder);
+
+    if (!folder)
+        return E_POINTER;
+
+    return create_folder(This->root, folder);
 }
 
 static HRESULT variant_from_largeint(const ULARGE_INTEGER *src, VARIANT *v)
@@ -1318,11 +1330,32 @@ static const IDriveVtbl drivevtbl = {
     drive_get_IsReady
 };
 
+/*
+ * Windows hands out one object per drive: GetDrive, Drives.Item and the enumeration of Drives
+ * all return the same IUnknown, so a caller that compares them (PowerShell's -eq on COM objects
+ * compares the RCW, i.e. the identity) sees the same drive.  The objects only hold the root path,
+ * so they are shared by the whole process and live until it ends.
+ */
+static IDrive *drive_cache[26];
+
 static HRESULT create_drive(WCHAR letter, IDrive **drive)
 {
     struct drive *object;
+    IDrive *cached;
+    int index = letter - 'A';
 
     *drive = NULL;
+
+    if (index >= 0 && index < ARRAY_SIZE(drive_cache))
+    {
+        cached = InterlockedCompareExchangePointer((void **)&drive_cache[index], NULL, NULL);
+        if (cached)
+        {
+            IDrive_AddRef(cached);
+            *drive = cached;
+            return S_OK;
+        }
+    }
 
     object = malloc(sizeof(*object));
     if (!object) return E_OUTOFMEMORY;
@@ -1333,8 +1366,23 @@ static HRESULT create_drive(WCHAR letter, IDrive **drive)
     *object->root = letter;
 
     init_classinfo(&CLSID_Drive, (IUnknown *)&object->IDrive_iface, &object->classinfo);
-    *drive = &object->IDrive_iface;
 
+    if (index >= 0 && index < ARRAY_SIZE(drive_cache))
+    {
+        /* the cache keeps the creation reference; a lost race hands out the winner's object */
+        cached = InterlockedCompareExchangePointer((void **)&drive_cache[index], &object->IDrive_iface, NULL);
+        if (cached)
+        {
+            IDrive_Release(&object->IDrive_iface);
+            *drive = cached;
+        }
+        else
+            *drive = &object->IDrive_iface;
+        IDrive_AddRef(*drive);
+        return S_OK;
+    }
+
+    *drive = &object->IDrive_iface;
     return S_OK;
 }
 
@@ -2316,8 +2364,30 @@ static HRESULT WINAPI drivecoll_Invoke(IDriveCollection *iface, DISPID dispIdMem
 static HRESULT WINAPI drivecoll_get_Item(IDriveCollection *iface, VARIANT key, IDrive **drive)
 {
     struct drivecollection *This = impl_from_IDriveCollection(iface);
-    FIXME("(%p)->(%p): stub\n", This, drive);
-    return E_NOTIMPL;
+    WCHAR letter;
+    UINT len;
+
+    TRACE("(%p)->(vt %d %p)\n", This, V_VT(&key), drive);
+
+    if (!drive) return E_POINTER;
+    *drive = NULL;
+
+    /* the key is a drive spec string: "x", "x:" or "x:\"; anything else is invalid, numbers
+       and a reference to a string included (checked against Windows 10) */
+    if (V_VT(&key) != VT_BSTR || !V_BSTR(&key))
+        return E_INVALIDARG;
+
+    len = SysStringLen(V_BSTR(&key));
+    letter = len ? towupper(V_BSTR(&key)[0]) : 0;
+    if (len < 1 || len > 3 || letter < 'A' || letter > 'Z'
+            || (len >= 2 && V_BSTR(&key)[1] != ':')
+            || (len == 3 && V_BSTR(&key)[2] != '\\'))
+        return E_INVALIDARG;
+
+    if (!(This->drives & (1 << (letter - 'A'))))
+        return CTL_E_DEVICEUNAVAILABLE;
+
+    return create_drive(letter, drive);
 }
 
 static HRESULT WINAPI drivecoll_get__NewEnum(IDriveCollection *iface, IUnknown **ppenum)
