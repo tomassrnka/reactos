@@ -191,6 +191,8 @@ struct view
 #ifdef __REACTOS__
     enum wbm_namespace ns;
     UINT *result_table;                     /* SELECT over a class and its subclasses: table of each result */
+    BOOL references;                        /* REFERENCES OF query */
+    IEnumWbemClassObject *objects;          /* class objects of a SchemaOnly or ClassDefsOnly query */
 #endif
 };
 
@@ -275,6 +277,13 @@ HRESULT create_signature( const WCHAR *, const WCHAR *, enum param_direction,
 #ifdef __REACTOS__
 /* schema.c: class hierarchy, namespaces and property order of the Windows schema */
 HRESULT exec_query_ns( enum wbm_namespace, const WCHAR *, IEnumWbemClassObject ** ) DECLSPEC_HIDDEN;
+HRESULT exec_query_flags( enum wbm_namespace, const WCHAR *, LONG, IEnumWbemClassObject ** ) DECLSPEC_HIDDEN;
+HRESULT EnumWbemClassObjectError_create( HRESULT, IEnumWbemClassObject ** ) DECLSPEC_HIDDEN;
+BOOL is_disk_walk_table( const struct table * ) DECLSPEC_HIDDEN;
+/* assoc.c: ASSOCIATORS OF and REFERENCES OF */
+HRESULT exec_assoc_query( struct view * ) DECLSPEC_HIDDEN;
+WCHAR *build_reference_path( const WCHAR *, const WCHAR *, const WCHAR * ) DECLSPEC_HIDDEN;
+WCHAR *build_row_reference_path( const struct table *, UINT ) DECLSPEC_HIDDEN;
 HRESULT get_object_ns( enum wbm_namespace, const WCHAR *, IWbemClassObject ** ) DECLSPEC_HIDDEN;
 HRESULT create_class_enum( enum wbm_namespace, const WCHAR *, LONG, IEnumWbemClassObject ** ) DECLSPEC_HIDDEN;
 HRESULT create_class_view_object( enum wbm_namespace, const WCHAR *, IWbemClassObject ** ) DECLSPEC_HIDDEN;

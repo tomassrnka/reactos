@@ -1041,6 +1041,8 @@ struct mi_instance *make_error_instance(MI_Result result, HRESULT hr, const WCHA
     WCHAR buf[32];
 
     if (!(inst = instance_create(L"MSFT_WmiError", L"root/cimv2", NULL))) return NULL;
+    /* WMI reports a malformed object path as such, not as the MI result it maps to */
+    if ((!message || !message[0]) && hr == WBEM_E_INVALID_OBJECT_PATH) message = L"Invalid object path ";
     if (!message || !message[0]) message = result_message(result);
     v.uint32 = result;
     instance_add(inst, L"CIMStatusCode", &v, MI_UINT32, 0);

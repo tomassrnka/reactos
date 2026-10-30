@@ -779,7 +779,7 @@ static HRESULT WINAPI wbem_services_ExecQuery(
     if (!strQueryLanguage || !strQuery || !strQuery[0]) return WBEM_E_INVALID_PARAMETER;
     if (wcsicmp( strQueryLanguage, wqlW )) return WBEM_E_INVALID_QUERY_TYPE;
 #ifdef __REACTOS__
-    return exec_query_ns( impl_from_IWbemServices( iface )->ns, strQuery, ppEnum );
+    return exec_query_flags( impl_from_IWbemServices( iface )->ns, strQuery, lFlags, ppEnum );
 #else
     return exec_query( strQuery, ppEnum );
 #endif

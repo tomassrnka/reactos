@@ -7,6 +7,7 @@ include_directories(BEFORE ${REACTOS_SOURCE_DIR}/sdk/include/wine)
 spec2def(wbemprox.dll wbemprox.spec)
 
 list(APPEND SOURCE
+    assoc.c
     builtin.c
     class.c
     main.c
