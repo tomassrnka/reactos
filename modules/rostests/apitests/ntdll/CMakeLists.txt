@@ -109,6 +109,7 @@ list(APPEND SOURCE
     NtQueryValueKey.c
     NtQueryVirtualMemory.c
     NtQueryVolumeInformationFile.c
+    NtRaiseHardErrorMode.c
     NtReadFile.c
     NtSaveKey.c
     NtSetDefaultLocale.c

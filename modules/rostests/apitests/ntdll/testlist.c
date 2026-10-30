@@ -94,6 +94,7 @@ extern void func_NtQuerySystemProcessInformationTail(void);
 extern void func_NtQueryValueKey(void);
 extern void func_NtQueryVirtualMemory(void);
 extern void func_NtQueryVolumeInformationFile(void);
+extern void func_NtRaiseHardErrorMode(void);
 extern void func_NtReadFile(void);
 extern void func_NtSaveKey(void);
 extern void func_NtSetDefaultLocale(void);
@@ -295,6 +296,7 @@ const struct test winetest_testlist[] =
     { "NtQueryValueKey",                func_NtQueryValueKey },
     { "NtQueryVirtualMemory",           func_NtQueryVirtualMemory },
     { "NtQueryVolumeInformationFile",   func_NtQueryVolumeInformationFile },
+    { "NtRaiseHardErrorMode",           func_NtRaiseHardErrorMode },
     { "NtReadFile",                     func_NtReadFile },
     { "NtSaveKey",                      func_NtSaveKey},
     { "NtSetDefaultLocale",             func_NtSetDefaultLocale },
