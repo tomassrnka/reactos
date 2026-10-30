@@ -62,28 +62,83 @@ WerGetFlags(
 }
 
 /*
- * @unimplemented
+ * @implemented
  *
- * A runtime exception module is loaded by the error reporting service when the process crashes. The
- * crash reporter here (drwtsn32) does not load such modules, so a registration could not have any
- * effect: say so instead of accepting it.
+ * A runtime exception module is a DLL the error reporting service loads, out of process, when this
+ * process crashes, so that it can claim the crash (the CLR registers mscordacwks.dll). Windows keeps
+ * up to WER_MAX_REGISTERED_RUNTIME_EXCEPTION_MODULES registrations per process, keyed by the module
+ * path (compared case-sensitively) and the context; registering the same pair again succeeds
+ * without taking another slot. The crash reporter here (drwtsn32) does not load such modules yet, but the
+ * registration contract is kept: the CLR refuses to start when it cannot register.
  */
+#define BASE_WER_MAX_RUNTIME_MODULES 16
+
+typedef struct _BASE_WER_RUNTIME_MODULE
+{
+    PWSTR Path;
+    PVOID Context;
+} BASE_WER_RUNTIME_MODULE;
+
+static BASE_WER_RUNTIME_MODULE BaseWerRuntimeModules[BASE_WER_MAX_RUNTIME_MODULES];
+static RTL_SRWLOCK BaseWerRuntimeModulesLock = RTL_SRWLOCK_INIT;
+
 HRESULT
 WINAPI
 WerRegisterRuntimeExceptionModule(
     _In_ PCWSTR pwszOutOfProcessCallbackDll,
     _In_opt_ PVOID pContext)
 {
+    SIZE_T Size;
+    PWSTR Copy;
+    ULONG i, Free = BASE_WER_MAX_RUNTIME_MODULES;
+
     if (!pwszOutOfProcessCallbackDll || !*pwszOutOfProcessCallbackDll)
         return E_INVALIDARG;
 
-    DPRINT1("WerRegisterRuntimeExceptionModule(%S): the crash reporter does not load runtime exception modules\n",
-            pwszOutOfProcessCallbackDll);
-    return E_NOTIMPL;
+    Size = (wcslen(pwszOutOfProcessCallbackDll) + 1) * sizeof(WCHAR);
+    Copy = RtlAllocateHeap(RtlGetProcessHeap(), 0, Size);
+    if (!Copy)
+        return E_OUTOFMEMORY;
+    RtlCopyMemory(Copy, pwszOutOfProcessCallbackDll, Size);
+
+    RtlAcquireSRWLockExclusive(&BaseWerRuntimeModulesLock);
+    for (i = 0; i < BASE_WER_MAX_RUNTIME_MODULES; i++)
+    {
+        if (!BaseWerRuntimeModules[i].Path)
+        {
+            if (Free == BASE_WER_MAX_RUNTIME_MODULES)
+                Free = i;
+        }
+        else if (BaseWerRuntimeModules[i].Context == pContext &&
+                 !wcscmp(BaseWerRuntimeModules[i].Path, pwszOutOfProcessCallbackDll))
+        {
+            /* Already registered */
+            RtlReleaseSRWLockExclusive(&BaseWerRuntimeModulesLock);
+            RtlFreeHeap(RtlGetProcessHeap(), 0, Copy);
+            return S_OK;
+        }
+    }
+    if (Free < BASE_WER_MAX_RUNTIME_MODULES)
+    {
+        BaseWerRuntimeModules[Free].Path = Copy;
+        BaseWerRuntimeModules[Free].Context = pContext;
+        Copy = NULL;
+    }
+    RtlReleaseSRWLockExclusive(&BaseWerRuntimeModulesLock);
+
+    if (Copy)
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Copy);
+        return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
+    }
+
+    DPRINT("WerRegisterRuntimeExceptionModule(%S, %p): registered in slot %lu\n",
+           pwszOutOfProcessCallbackDll, pContext, Free);
+    return S_OK;
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 HRESULT
 WINAPI
@@ -91,9 +146,29 @@ WerUnregisterRuntimeExceptionModule(
     _In_ PCWSTR pwszOutOfProcessCallbackDll,
     _In_opt_ PVOID pContext)
 {
+    PWSTR Path = NULL;
+    ULONG i;
+
     if (!pwszOutOfProcessCallbackDll || !*pwszOutOfProcessCallbackDll)
         return E_INVALIDARG;
 
-    /* Nothing can have been registered */
-    return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+    RtlAcquireSRWLockExclusive(&BaseWerRuntimeModulesLock);
+    for (i = 0; i < BASE_WER_MAX_RUNTIME_MODULES; i++)
+    {
+        if (BaseWerRuntimeModules[i].Path &&
+            BaseWerRuntimeModules[i].Context == pContext &&
+            !wcscmp(BaseWerRuntimeModules[i].Path, pwszOutOfProcessCallbackDll))
+        {
+            Path = BaseWerRuntimeModules[i].Path;
+            BaseWerRuntimeModules[i].Path = NULL;
+            BaseWerRuntimeModules[i].Context = NULL;
+            break;
+        }
+    }
+    RtlReleaseSRWLockExclusive(&BaseWerRuntimeModulesLock);
+
+    if (!Path)
+        return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+    RtlFreeHeap(RtlGetProcessHeap(), 0, Path);
+    return S_OK;
 }
