@@ -1382,6 +1382,7 @@ static void run_enum_classes(struct mi_operation *op, IWbemServices *services, c
     BSTR super = NULL;
     HRESULT hr;
     ULONG got;
+    BOOL oom = FALSE;
 
     memset(&cache, 0, sizeof(cache));
     if (op->class_name && !(super = SysAllocString(op->class_name)))
@@ -1430,10 +1431,16 @@ static void run_enum_classes(struct mi_operation *op, IWbemServices *services, c
         if (!data) continue;
         cls = class_create(data);
         class_data_release(data);
-        if (cls && !op_add_result(op, NULL, cls)) break;
+        /* a class that cannot be stored must not end the enumeration as a short, successful one */
+        if (!cls || !op_add_result(op, NULL, cls)) { oom = TRUE; break; }
     }
     IEnumWbemClassObject_Release(enumerator);
     cache_free(&cache);
+    if (oom)
+    {
+        op_complete(op, MI_RESULT_SERVER_LIMITS_EXCEEDED, E_OUTOFMEMORY, NULL);
+        return;
+    }
     op_complete(op, FAILED(hr) ? hresult_to_mi(hr) : MI_RESULT_OK, FAILED(hr) ? hr : 0, NULL);
 }
 
