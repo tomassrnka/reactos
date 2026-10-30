@@ -1475,6 +1475,32 @@ static CERT_INFO *WINTRUST_GetSignerCertInfo(CRYPT_PROVIDER_DATA *data,
     return certInfo;
 }
 
+/* The signature of a signer with signed attributes covers those attributes
+ * only: the content is bound to it by the attributes' message digest, which has
+ * to be compared with the digest of the content.  It is taken over the content
+ * octets of the encapsulated content, without its tag and length. */
+static BOOL WINTRUST_CheckSignerContentDigest(CRYPT_PROVIDER_DATA *data,
+ DWORD signerIdx)
+{
+    const CMSG_SIGNER_INFO *signerInfo = data->pasSigners[signerIdx].psSigner;
+    DWORD size;
+    BYTE *content, tag;
+    const BYTE *c;
+    DWORD len;
+    BOOL ret = FALSE;
+
+    if (!signerInfo->AuthAttrs.cAttr) return TRUE;
+    if (!CryptMsgGetParam(data->hMsg, CMSG_CONTENT_PARAM, 0, NULL, &size) ||
+     !(content = HeapAlloc(GetProcessHeap(), 0, size)))
+        return FALSE;
+    if (CryptMsgGetParam(data->hMsg, CMSG_CONTENT_PARAM, 0, content, &size) &&
+     WINTRUST_DerNext(content, content + size, &tag, &c, &len) == content + size)
+        ret = WINTRUST_CheckMessageDigest(&signerInfo->AuthAttrs,
+         signerInfo->HashAlgorithm.pszObjId, c, len);
+    HeapFree(GetProcessHeap(), 0, content);
+    return ret;
+}
+
 static DWORD WINTRUST_VerifySigner(CRYPT_PROVIDER_DATA *data, DWORD signerIdx)
 {
     DWORD err;
@@ -1493,6 +1519,8 @@ static DWORD WINTRUST_VerifySigner(CRYPT_PROVIDER_DATA *data, DWORD signerIdx)
             if (!CryptMsgControl(data->hMsg, 0, CMSG_CTRL_VERIFY_SIGNATURE_EX,
              &para))
                 err = TRUST_E_CERT_SIGNATURE;
+            else if (!WINTRUST_CheckSignerContentDigest(data, signerIdx))
+                err = TRUST_E_NOSIGNATURE;
             else
             {
                 data->psPfns->pfnAddCert2Chain(data, signerIdx, FALSE, 0,
