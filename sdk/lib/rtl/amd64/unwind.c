@@ -1623,5 +1623,13 @@ RtlRestoreContext(
         }
     }
 
+    /* A user mode context with extended state (the one of an exception, for instance) goes
+       through NtContinue, which loads that state too. It does not return on success. */
+    if (((ContextRecord->ContextFlags & CONTEXT_XSTATE) == CONTEXT_XSTATE) &&
+        (RtlpGetMode() == UserMode))
+    {
+        ZwContinue(ContextRecord, FALSE);
+    }
+
     RtlpRestoreContextInternal(ContextRecord);
 }
