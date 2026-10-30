@@ -1,7 +1,7 @@
 /*
  * PROJECT:     ReactOS API tests
  * LICENSE:     LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later)
- * PURPOSE:     Tests for GetCalendarInfoW/Ex
+ * PURPOSE:     Tests for GetCalendarInfoW/Ex and the en-US date formats of GetLocaleInfoW/Ex
  * COPYRIGHT:   Copyright 2026 Tomas Srnka (tomas.srnka@e2b.dev)
  *
  * The expected values were measured on Windows 10 22H2 (build 19045).
@@ -123,8 +123,57 @@ Test_YearRange(void)
     ok(Value == 0, "CAL_IYEAROFFSETRANGE = %lu\n", Value);
 }
 
+static
+void
+ExpectLocale(
+    _In_ PCSTR Name,
+    _In_ LCTYPE Type,
+    _In_ PCWSTR Expected)
+{
+    WCHAR Buffer[64];
+    int Ret;
+
+    RtlFillMemory(Buffer, sizeof(Buffer), 0xcc);
+    SetLastError(0xdeadbeef);
+    Ret = GetLocaleInfoW(EN_US, Type, Buffer, ARRAYSIZE(Buffer));
+    ok(Ret == (int)wcslen(Expected) + 1, "%s: returned %d, expected %d (error %lu)\n",
+       Name, Ret, (int)wcslen(Expected) + 1, GetLastError());
+    if (Ret > 0)
+        ok(!wcscmp(Buffer, Expected), "%s: got '%ls', expected '%ls'\n", Name, Buffer, Expected);
+}
+
+static
+void
+Test_EnUsDateFormats(void)
+{
+    /* Windows 10 dropped the zero padding of the day and the comma after the month */
+    ExpectLocale("LOCALE_SLONGDATE", LOCALE_SLONGDATE, L"dddd, MMMM d, yyyy");
+    ExpectLocale("LOCALE_SSHORTDATE", LOCALE_SSHORTDATE, L"M/d/yyyy");
+    ExpectLocale("LOCALE_SYEARMONTH", LOCALE_SYEARMONTH, L"MMMM yyyy");
+    ExpectLocale("LOCALE_SMONTHDAY", 0x78 /* LOCALE_SMONTHDAY */, L"MMMM d");
+    ExpectLocale("LOCALE_STIMEFORMAT", LOCALE_STIMEFORMAT, L"h:mm:ss tt");
+    ExpectLocale("LOCALE_SSHORTESTDAYNAME1", 0x60 /* LOCALE_SSHORTESTDAYNAME1 */, L"Mo");
+    ExpectLocale("LOCALE_SSHORTESTDAYNAME7", 0x66 /* LOCALE_SSHORTESTDAYNAME7 */, L"Su");
+
+    /* The formats themselves */
+    {
+        WCHAR Buffer[64];
+        SYSTEMTIME St = { 2020, 1, 3, 1, 0, 0, 0, 0 };
+        int Ret;
+
+        Ret = GetDateFormatW(EN_US, DATE_LONGDATE, &St, NULL, Buffer, ARRAYSIZE(Buffer));
+        ok(Ret == 27, "GetDateFormatW returned %d (error %lu)\n", Ret, GetLastError());
+        ok(!wcscmp(Buffer, L"Wednesday, January 1, 2020"), "got '%ls'\n", Buffer);
+
+        Ret = GetDateFormatW(EN_US, DATE_YEARMONTH, &St, NULL, Buffer, ARRAYSIZE(Buffer));
+        ok(Ret == 13, "GetDateFormatW(YEARMONTH) returned %d (error %lu)\n", Ret, GetLastError());
+        ok(!wcscmp(Buffer, L"January 2020"), "got '%ls'\n", Buffer);
+    }
+}
+
 START_TEST(CalendarInfo)
 {
     Test_ShortestDayNamesAndMonthDay();
     Test_YearRange();
+    Test_EnUsDateFormats();
 }
