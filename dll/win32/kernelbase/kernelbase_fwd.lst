@@ -524,6 +524,16 @@
 @ PrefetchVirtualMemory
 @ PrivCopyFileExW
 @ ProcessIdToSessionId
+@ PssCaptureSnapshot
+@ PssDuplicateSnapshot
+@ PssFreeSnapshot
+@ PssQuerySnapshot
+@ PssWalkMarkerCreate
+@ PssWalkMarkerFree
+@ PssWalkMarkerGetPosition
+@ PssWalkMarkerSeekToBeginning
+@ PssWalkMarkerSetPosition
+@ PssWalkSnapshot
 @ PulseEvent
 @ PurgeComm
 @ QueryActCtxW

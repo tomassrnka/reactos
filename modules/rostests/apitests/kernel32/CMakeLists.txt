@@ -137,6 +137,7 @@ list(APPEND SOURCE
     QueryUnbiasedInterruptTime.c
     ProcessToken.c
     ProcessorGroups.c
+    PssSnapshot.c
     QueueUserAPC.c
     QueueUserWorkItem.c
     RaiseFailFastException.c

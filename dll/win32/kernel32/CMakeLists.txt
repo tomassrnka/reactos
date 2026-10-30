@@ -51,6 +51,7 @@ list(APPEND SOURCE
     client/proc.c
     client/procinfo.c
     client/procansi.c
+    client/pss.c
     client/resntfy.c
     client/session.c
     client/synch.c
