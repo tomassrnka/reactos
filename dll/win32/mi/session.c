@@ -2143,13 +2143,108 @@ static void MI_CALL session_QueryInstances(MI_Session *session, MI_Uint32 flags,
     op_start(op);
 }
 
+/* a class or property name as WQL takes it in the WHERE clause of ASSOCIATORS OF and REFERENCES OF */
+static BOOL is_wql_name(const MI_Char *name)
+{
+    size_t i;
+
+    for (i = 0; name[i]; i++)
+    {
+        WCHAR c = name[i];
+        if (i >= 256 || !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'))
+            return FALSE;
+    }
+    return i != 0;
+}
+
+static const MI_Char *optional_name(const MI_Char *name)
+{
+    return name && name[0] ? name : NULL;
+}
+
+/* "ASSOCIATORS OF {path} WHERE AssocClass=x ResultClass=y Role=z ResultRole=w", or REFERENCES OF */
+static WCHAR *build_assoc_query(const struct mi_instance *in, BOOL references, const MI_Char *assoc,
+                                const MI_Char *result_class, const MI_Char *role, const MI_Char *result_role)
+{
+    static const WCHAR *const names[] = { L"AssocClass", L"ResultClass", L"Role", L"ResultRole" };
+    const MI_Char *values[4];
+    WCHAR *query, *p;
+    BSTR path = NULL;
+    BOOL any_key = FALSE, where = FALSE;
+    size_t len;
+    UINT i;
+
+    values[0] = assoc;
+    values[1] = result_class;
+    values[2] = role;
+    values[3] = result_role;
+    for (i = 0; i < in->count; i++) if (in->elems[i].flags & MI_FLAG_KEY) any_key = TRUE;
+    /* the keys name the instance; a class without keys has one instance */
+    if (any_key) path = instance_path(in);
+    else if ((path = SysAllocStringLen(NULL, wcslen(in->class_name) + 2)))
+    {
+        wcscpy(path, in->class_name);
+        wcscat(path, L"=@");
+    }
+    if (!path) return NULL;
+
+    len = wcslen(path) + 32;
+    for (i = 0; i < ARRAYSIZE(values); i++) if (values[i]) len += wcslen(names[i]) + wcslen(values[i]) + 8;
+    if ((query = mi_alloc(len * sizeof(WCHAR))))
+    {
+        p = query + _snwprintf(query, len, L"%s OF {%s}", references ? L"REFERENCES" : L"ASSOCIATORS", path);
+        for (i = 0; i < ARRAYSIZE(values); i++)
+        {
+            if (!values[i]) continue;
+            p += _snwprintf(p, len - (p - query), L"%s%s=%s", where ? L" " : L" WHERE ", names[i], values[i]);
+            where = TRUE;
+        }
+    }
+    SysFreeString(path);
+    return query;
+}
+
+static void start_assoc_query(struct mi_session *s, MI_Uint32 flags, MI_OperationOptions *options, const MI_Char *ns,
+                              const MI_Instance *keys, BOOL references, const MI_Char *assoc, const MI_Char *result_class,
+                              const MI_Char *role, const MI_Char *result_role, MI_Boolean keys_only,
+                              MI_OperationCallbacks *callbacks, MI_Operation *operation)
+{
+    struct mi_instance *in = instance_from_mi(keys);
+    struct mi_operation *op;
+    WCHAR *query;
+
+    assoc = optional_name(assoc);
+    result_class = optional_name(result_class);
+    role = optional_name(role);
+    result_role = optional_name(result_role);
+    if (!s || !in || !in->class_name || !is_wql_name(in->class_name) || !check_options(options) ||
+        (assoc && !is_wql_name(assoc)) || (result_class && !is_wql_name(result_class)) ||
+        (role && !is_wql_name(role)) || (result_role && !is_wql_name(result_role)))
+    {
+        op_fail(s, flags, callbacks, operation, MI_RESULT_INVALID_PARAMETER, OP_QUERY);
+        return;
+    }
+    if (!(op = op_create(s, flags, ns ? ns : in->nameSpace, callbacks, operation, OP_QUERY))) return;
+    if (!(query = build_assoc_query(in, references, assoc, result_class, role, result_role)))
+    {
+        op_complete(op, MI_RESULT_SERVER_LIMITS_EXCEEDED, E_OUTOFMEMORY, NULL);
+        op->kind = OP_FAILED;
+    }
+    op->query = query;
+    op->keys_only = keys_only;
+    op_start(op);
+}
+
 static void MI_CALL session_AssociatorInstances(MI_Session *session, MI_Uint32 flags, MI_OperationOptions *options,
                                                 const MI_Char *ns, const MI_Instance *keys, const MI_Char *assoc,
                                                 const MI_Char *result_class, const MI_Char *role, const MI_Char *result_role,
                                                 MI_Boolean keys_only, MI_OperationCallbacks *callbacks, MI_Operation *operation)
 {
-    FIXME("%p: AssociatorInstances not supported\n", session);
-    op_fail(get_session(session), flags, callbacks, operation, MI_RESULT_NOT_SUPPORTED, OP_ENUMERATE);
+    TRACE("%p %#x %p %s %p %s %s %s %s %d %p %p\n", session, flags, options, debugstr_w(ns), keys, debugstr_w(assoc),
+          debugstr_w(result_class), debugstr_w(role), debugstr_w(result_role), keys_only, callbacks, operation);
+    if (!operation) return;
+    start_assoc_query(get_session(session), flags, options, ns, keys, FALSE, assoc, result_class, role, result_role,
+                      keys_only, callbacks, operation);
 }
 
 static void MI_CALL session_ReferenceInstances(MI_Session *session, MI_Uint32 flags, MI_OperationOptions *options,
@@ -2157,8 +2252,11 @@ static void MI_CALL session_ReferenceInstances(MI_Session *session, MI_Uint32 fl
                                                const MI_Char *role, MI_Boolean keys_only, MI_OperationCallbacks *callbacks,
                                                MI_Operation *operation)
 {
-    FIXME("%p: ReferenceInstances not supported\n", session);
-    op_fail(get_session(session), flags, callbacks, operation, MI_RESULT_NOT_SUPPORTED, OP_ENUMERATE);
+    TRACE("%p %#x %p %s %p %s %s %d %p %p\n", session, flags, options, debugstr_w(ns), keys, debugstr_w(result_class),
+          debugstr_w(role), keys_only, callbacks, operation);
+    if (!operation) return;
+    start_assoc_query(get_session(session), flags, options, ns, keys, TRUE, NULL, result_class, role, NULL,
+                      keys_only, callbacks, operation);
 }
 
 static void MI_CALL session_Subscribe(MI_Session *session, MI_Uint32 flags, MI_OperationOptions *options,
