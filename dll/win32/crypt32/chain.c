@@ -2975,6 +2975,23 @@ PCCERT_CHAIN_CONTEXT WINAPI CertFindChainInStore(HCERTSTORE store,
     return NULL;
 }
 
+/* The first simple chain that does not reach a root */
+static void find_partial_chain(PCCERT_CHAIN_CONTEXT chain, LONG *iChain,
+ LONG *iElement)
+{
+    DWORD i;
+
+    *iElement = -1;
+    for (i = 0; i < chain->cChain; i++)
+        if (chain->rgpChain[i]->TrustStatus.dwErrorStatus &
+         CERT_TRUST_IS_PARTIAL_CHAIN)
+        {
+            *iChain = i;
+            return;
+        }
+    *iChain = 0;
+}
+
 static void find_element_with_error(PCCERT_CHAIN_CONTEXT chain, DWORD error,
  LONG *iChain, LONG *iElement)
 {
@@ -3016,6 +3033,16 @@ static BOOL WINAPI verify_base_policy(LPCSTR szPolicyOID,
          &pPolicyStatus->lChainIndex, &pPolicyStatus->lElementIndex);
         /* For a cyclic chain, which element is a cycle isn't meaningful */
         pPolicyStatus->lElementIndex = -1;
+    }
+    else if (pChainContext->TrustStatus.dwErrorStatus &
+     CERT_TRUST_IS_PARTIAL_CHAIN)
+    {
+        /* The issuer of the last certificate was not found: the chain ends
+         * nowhere, which is no more trusted than an untrusted root (and it
+         * is not flagged as one).  Windows fails it the same way. */
+        pPolicyStatus->dwError = CERT_E_CHAINING;
+        find_partial_chain(pChainContext, &pPolicyStatus->lChainIndex,
+         &pPolicyStatus->lElementIndex);
     }
     if (!pPolicyStatus->dwError &&
      pChainContext->TrustStatus.dwErrorStatus & CERT_TRUST_IS_UNTRUSTED_ROOT &&
@@ -3480,6 +3507,17 @@ static BOOL WINAPI verify_ssl_policy(LPCSTR szPolicyOID,
         pPolicyStatus->dwError = CERT_E_UNTRUSTEDROOT;
         find_element_with_error(pChainContext,
          CERT_TRUST_IS_UNTRUSTED_ROOT, &pPolicyStatus->lChainIndex,
+         &pPolicyStatus->lElementIndex);
+    }
+    else if (pChainContext->TrustStatus.dwErrorStatus &
+     CERT_TRUST_IS_PARTIAL_CHAIN &&
+     !(checks & SECURITY_FLAG_IGNORE_UNKNOWN_CA) &&
+     !(baseChecks & CERT_CHAIN_POLICY_ALLOW_UNKNOWN_CA_FLAG))
+    {
+        /* A chain that does not reach any root: as on Windows, the server's
+         * certificate comes from an unknown authority. */
+        pPolicyStatus->dwError = CERT_E_UNTRUSTEDROOT;
+        find_partial_chain(pChainContext, &pPolicyStatus->lChainIndex,
          &pPolicyStatus->lElementIndex);
     }
     else if (pChainContext->TrustStatus.dwErrorStatus & CERT_TRUST_IS_CYCLIC)
