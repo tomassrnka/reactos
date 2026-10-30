@@ -1049,7 +1049,13 @@ SECURITY_STATUS schan_imp_send_alert(schan_imp_session session, DWORD level, DWO
 
     TRACE("MBEDTLS schan_imp_send_alert: %p level %u description %u\n", session, level, description);
 
-    ret = mbedtls_ssl_send_alert_message(&s->ssl, (unsigned char)level, (unsigned char)description);
+    /* mbedtls_ssl_write_record appends the record to the unsent output (out_left). When an earlier call stopped
+     * because the caller's output buffer was too small, that record is still queued, so building the alert again
+     * would send it twice: only flush what is pending. */
+    if (s->ssl.out_left != 0)
+        ret = mbedtls_ssl_flush_output(&s->ssl);
+    else
+        ret = mbedtls_ssl_send_alert_message(&s->ssl, (unsigned char)level, (unsigned char)description);
     if (ret == 0)
         return SEC_E_OK;
     if (ROS_SCHAN_IS_BLOCKING(ret))

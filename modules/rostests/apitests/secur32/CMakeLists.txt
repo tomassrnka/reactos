@@ -2,6 +2,7 @@
 list(APPEND SOURCE
     AcquireCredentialsHandleVersions.c
     LsaLogonContext.c
+    ReadConfigHandles.c
     SchannelHandshake.c
     SchannelServerCert.c
     testlist.c)

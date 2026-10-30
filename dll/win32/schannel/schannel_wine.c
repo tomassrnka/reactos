@@ -545,8 +545,9 @@ static SECURITY_STATUS schan_GetDisabledProtocols(const SCH_CREDENTIALS *cred, D
                 (crypto->dwMaxBitLength && crypto->dwMinBitLength > crypto->dwMaxBitLength))
                 return SEC_E_INVALID_PARAMETER;
 
-            /* Windows accepts any algorithm name and usage here, so does this provider; the
-             * settings are not enforced (the cipher suite list is mbedTLS's default one). */
+            /* Windows accepts any algorithm name and usage here, so does this provider. pDisabledCrypto is
+             * ACCEPTED BUT NOT ENFORCED: the cipher suite list is mbedTLS's default one, whatever is disabled
+             * here. */
             FIXME("ignoring disabled crypto setting: usage %d, algorithm %s\n", crypto->eAlgorithmUsage,
                   debugstr_wn(crypto->strCngAlgId.Buffer, crypto->strCngAlgId.Length / sizeof(WCHAR)));
         }
@@ -617,14 +618,27 @@ static SECURITY_STATUS schan_AcquireCredentialsV5(ULONG fCredentialUse, const SC
     read_config();
     if (fCredentialUse == SECPKG_CRED_OUTBOUND)
     {
-        /* An empty disabled mask means the system defaults, as with SCHANNEL_CRED */
+        /* An empty disabled mask means the system defaults, as with SCHANNEL_CRED. Only the _CLIENT bits can
+         * remove anything here: config_enabled_protocols holds client flags. A mask with just _SERVER bits
+         * (e.g. SP_PROT_TLS1_2_SERVER) leaves an outbound credential unchanged, which is what Windows 10 22H2
+         * does (oracle probe: ClientHello and SECPKG_ATTR_SUPPORTED_PROTOCOLS identical to an empty mask), so
+         * the disabled bits are deliberately not mirrored to the other direction. */
         enabled = config_enabled_protocols & ~config_default_disabled_protocols & ~disabled;
         if (!enabled)
             return SEC_E_ALGORITHM_MISMATCH;
         return schan_NewClientCredentials(cred->dwFlags, enabled, phCredential, ptsExpiry);
     }
 
-    /* Inbound: a credential without a certificate is accepted, as on Windows Vista and later */
+    /* Inbound: a credential without a certificate is accepted, as on Windows Vista and later.
+     *
+     * Server-side enforcement is UNREACHABLE today: AcceptSecurityContext is NULL in both function tables, so an
+     * inbound credential never gets a session and enabled_protocols is only stored and reported. Whoever adds
+     * AcceptSecurityContext must make sure that (1) the session gets cred->enabled_protocols (schan_imp_create_session
+     * already passes it to schan_imp_set_session_protocols, which sets the mbedTLS version range and
+     * MBEDTLS_SESSION.enabled_protocols) and (2) the negotiated version is checked against it and
+     * MBEDTLS_SESSION.version_checked is set: schan_imp_handshake does that for the client endpoint only, and so do
+     * the fail-closed gates in schan_imp_send/schan_imp_recv, so a server session would otherwise run without the
+     * check and with version_checked never set. */
     enabled = schan_imp_enabled_protocols() & SCHAN_SERVER_PROTOCOLS & ~disabled;
     if (!enabled)
         return SEC_E_ALGORITHM_MISMATCH;
@@ -1624,7 +1638,7 @@ SecurityFunctionTableA schanTableA = {
     schan_FreeCredentialsHandle,
     NULL, /* Reserved2 */
     schan_InitializeSecurityContextA,
-    NULL, /* AcceptSecurityContext */
+    NULL, /* AcceptSecurityContext: see schan_AcquireCredentialsV5 before adding it (enabled_protocols, version_checked) */
     NULL, /* CompleteAuthToken */
     schan_DeleteSecurityContext,
     schan_ApplyControlToken,
@@ -1655,7 +1669,7 @@ SecurityFunctionTableW schanTableW = {
     schan_FreeCredentialsHandle,
     NULL, /* Reserved2 */
     schan_InitializeSecurityContextW,
-    NULL, /* AcceptSecurityContext */
+    NULL, /* AcceptSecurityContext: see schan_AcquireCredentialsV5 before adding it (enabled_protocols, version_checked) */
     NULL, /* CompleteAuthToken */
     schan_DeleteSecurityContext,
     schan_ApplyControlToken,
