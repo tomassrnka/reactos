@@ -848,6 +848,75 @@ LsaGetUserName(OUT PUNICODE_STRING *UserName,
 
 
 /*
+ * The RPC stub returns the referenced domain list as separate heap blocks: the header, the trust array, each
+ * domain name and each SID. Windows returns one block (header, trust array, then names and SIDs), and callers rely
+ * on it: .NET sizes the list for LsaFreeMemory as the distance from the header to the end of the trust array, and a
+ * trust array below the header made that distance wrap past 4 GB (SafeBuffer, "numBytes" overflow) in 32-bit
+ * processes, about one lookup in eight. Pack the list into one block; the old header is freed, the other pieces
+ * stay as before (they were never freed by LsaFreeMemory either).
+ */
+static
+VOID
+LsapPackReferencedDomains(
+    _Inout_ PLSA_REFERENCED_DOMAIN_LIST *ReferencedDomains)
+{
+    PLSA_REFERENCED_DOMAIN_LIST Old = *ReferencedDomains, New;
+    PLSA_TRUST_INFORMATION Trust;
+    SIZE_T Size, Align = sizeof(PVOID) - 1;
+    PUCHAR Cursor;
+    ULONG i, SidLength;
+
+    if (Old == NULL || Old->Entries == 0 || Old->Entries > 0x1000 || Old->Domains == NULL)
+        return;
+
+    Size = (sizeof(*Old) + Align) & ~Align;
+    Size += (SIZE_T)Old->Entries * sizeof(LSA_TRUST_INFORMATION);
+    for (i = 0; i < Old->Entries; i++)
+    {
+        Size = (Size + Align) & ~Align;
+        Size += Old->Domains[i].Name.MaximumLength;
+        Size = (Size + Align) & ~Align;
+        if (Old->Domains[i].Sid != NULL)
+            Size += RtlLengthSid(Old->Domains[i].Sid);
+    }
+
+    New = HeapAlloc(GetProcessHeap(), 0, Size);
+    if (New == NULL)
+        return;
+
+    Cursor = (PUCHAR)New + ((sizeof(*Old) + Align) & ~Align);
+    Trust = (PLSA_TRUST_INFORMATION)Cursor;
+    New->Entries = Old->Entries;
+    New->Domains = Trust;
+    Cursor += (SIZE_T)Old->Entries * sizeof(LSA_TRUST_INFORMATION);
+    for (i = 0; i < Old->Entries; i++)
+    {
+        Trust[i] = Old->Domains[i];
+
+        Cursor = (PUCHAR)(((ULONG_PTR)Cursor + Align) & ~Align);
+        if (Old->Domains[i].Name.Buffer != NULL && Old->Domains[i].Name.MaximumLength != 0)
+        {
+            RtlCopyMemory(Cursor, Old->Domains[i].Name.Buffer, Old->Domains[i].Name.MaximumLength);
+            Trust[i].Name.Buffer = (PWSTR)Cursor;
+            Cursor += Old->Domains[i].Name.MaximumLength;
+        }
+
+        Cursor = (PUCHAR)(((ULONG_PTR)Cursor + Align) & ~Align);
+        if (Old->Domains[i].Sid != NULL)
+        {
+            SidLength = RtlLengthSid(Old->Domains[i].Sid);
+            RtlCopyMemory(Cursor, Old->Domains[i].Sid, SidLength);
+            Trust[i].Sid = (PSID)Cursor;
+            Cursor += SidLength;
+        }
+    }
+
+    *ReferencedDomains = New;
+    HeapFree(GetProcessHeap(), 0, Old);
+}
+
+
+/*
  * @implemented
  */
 NTSTATUS
@@ -884,6 +953,8 @@ LsaLookupNames(IN LSA_HANDLE PolicyHandle,
                                  &MappedCount);
 
         *Sids = (PLSA_TRANSLATED_SID)TranslatedSids.Sids;
+        if (NT_SUCCESS(Status))
+            LsapPackReferencedDomains(ReferencedDomains);
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -938,6 +1009,8 @@ LsaLookupNames2(IN LSA_HANDLE PolicyHandle,
                                   2);
 
         *Sids = (PLSA_TRANSLATED_SID2)TranslatedSids.Sids;
+        if (NT_SUCCESS(Status))
+            LsapPackReferencedDomains(ReferencedDomains);
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -1102,6 +1175,8 @@ LsaLookupSids(IN LSA_HANDLE PolicyHandle,
                                 &MappedCount);
 
         *Names = (PLSA_TRANSLATED_NAME)TranslatedNames.Names;
+        if (NT_SUCCESS(Status))
+            LsapPackReferencedDomains(ReferencedDomains);
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
