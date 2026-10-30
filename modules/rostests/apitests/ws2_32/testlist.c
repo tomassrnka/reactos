@@ -24,6 +24,7 @@ extern void func_getservbyname(void);
 extern void func_getservbyport(void);
 extern void func_getsockname(void);
 extern void func_handleinherit(void);
+extern void func_sendwhole(void);
 extern void func_inheritedsocket(void);
 extern void func_inheritedsocketchild(void);
 extern void func_iocpskip(void);
@@ -84,6 +85,7 @@ const struct test winetest_testlist[] =
     { "getservbyport", func_getservbyport },
     { "getsockname", func_getsockname },
     { "handleinherit", func_handleinherit },
+    { "sendwhole", func_sendwhole },
     { "inheritedsocket", func_inheritedsocket },
     { "inheritedsocketchild", func_inheritedsocketchild },
     { "iocpskip", func_iocpskip },
