@@ -139,7 +139,7 @@ CheckColumn(PCSTR What, SHORT Top, PCSTR Expected)
     for (i = 0; i < Count; ++i)
     {
         WCHAR c = CharAt(0, Top + i);
-        Column[i] = (c == L' ') ? '.' : (c < 128 ? (CHAR)c : '?');
+        Column[i] = (c == L' ') ? '.' : ((c >= 32 && c < 128) ? (CHAR)c : '?');
     }
     Column[Count] = 0;
     ok(!lstrcmpA(Column, Expected), "%s: rows %d.. are '%s', expected '%s'\n", What, Top, Column, Expected);
@@ -154,7 +154,7 @@ CheckRow(PCSTR What, SHORT Y, PCSTR Expected)
     for (i = 0; i < Count; ++i)
     {
         WCHAR c = CharAt(i, Y);
-        Row[i] = (c == L' ') ? '.' : (c < 128 ? (CHAR)c : '?');
+        Row[i] = (c == L' ') ? '.' : ((c >= 32 && c < 128) ? (CHAR)c : '?');
     }
     Row[Count] = 0;
     ok(!lstrcmpA(Row, Expected), "%s: row %d is '%s', expected '%s'\n", What, Y, Row, Expected);
@@ -953,6 +953,221 @@ TestUtf8(VOID)
     SetConsoleOutputCP(OldCP);
 }
 
+/* C1 controls, ESC D / ESC E and strings, as measured on Windows 10 */
+static VOID
+TestControls(VOID)
+{
+    CHAR Title[256], Original[1024];
+    DWORD Written;
+
+    Original[0] = 0;
+    GetConsoleTitleA(Original, sizeof(Original));
+
+    /* ESC D moves left (not IND), ESC E does nothing (not NEL), also on the bottom margin */
+    Reset(VT_MODE);
+    MoveCursor(5, 5);
+    Write("\x1b" "D");
+    CheckCursor("ESC D", 4, 5);
+    Write("\x1b" "E");
+    CheckCursor("ESC E", 4, 5);
+    Reset(VT_MODE);
+    MoveCursor(5, 24);
+    Write("x\x1b" "D");
+    CheckCursor("ESC D at the bottom", 5, 24);
+    CheckView("ESC D at the bottom", 0);
+    Write("\x1b[5;10r\x1b[10;3H\x1b" "D\x1b" "E");
+    CheckCursor("ESC D and ESC E on the bottom margin", 1, 9);
+
+    /* U+009C ends an OSC string; U+009D and a lone U+009C are text */
+    Reset(VT_MODE);
+    WriteConsoleW(hCon, L"\x1b]0;T1\x9c" L"Y", 8, &Written, NULL);
+    GetConsoleTitleA(Title, sizeof(Title));
+    ok(!lstrcmpA(Title, "T1"), "OSC ended by U+009C: title '%s'\n", Title);
+    ok(CharAt(0, 0) == L'Y', "OSC ended by U+009C: U+%04x\n", CharAt(0, 0));
+    Reset(VT_MODE);
+    WriteConsoleW(hCon, L"\x9d" L"0;T2\x07Z", 7, &Written, NULL);
+    CheckCursor("U+009D", 6, 0);
+    ok(CharAt(0, 0) == 0x9D, "U+009D: U+%04x\n", CharAt(0, 0));
+    Reset(VT_MODE);
+    WriteConsoleW(hCon, L"a\x9c" L"b", 3, &Written, NULL);
+    CheckCursor("Lone U+009C", 3, 0);
+    /* A C1 control in a sequence cancels it and is dropped */
+    Reset(VT_MODE);
+    WriteConsoleW(hCon, L"\x1b[3\x9b" L"32mQ", 8, &Written, NULL);
+    CheckRow("U+009B in CSI", 0, "32mQ.");
+    ok(AttrAt(0, 0) == 0x07, "U+009B in CSI: attribute 0x%x\n", AttrAt(0, 0));
+
+    /* ESC P does not start a string */
+    Reset(VT_MODE);
+    Write("\x1bP1;2|abc");
+    CheckCursor("ESC P", 7, 0);
+    CheckRow("ESC P", 0, "1;2|abc.");
+
+    /* An OSC string goes on over several writes until BEL or ST */
+    Reset(VT_MODE);
+    Write("\x1b]0;abc");
+    Write("def");
+    Write("\a");
+    GetConsoleTitleA(Title, sizeof(Title));
+    ok(!lstrcmpA(Title, "abcdef"), "OSC over three writes: title '%s'\n", Title);
+    CheckCursor("OSC over three writes", 0, 0);
+
+    /* Unterminated, it swallows the text; CAN cancels it and is output */
+    Reset(VT_MODE);
+    Write("\x1b]0;unterminated");
+    Write("hello");
+    CheckCursor("Unterminated OSC", 0, 0);
+    Write("\x18" "after");
+    CheckCursor("Unterminated OSC, CAN", 6, 0);
+    CheckRow("Unterminated OSC, CAN", 0, "?after.");
+    GetConsoleTitleA(Title, sizeof(Title));
+    ok(!lstrcmpA(Title, "abcdef"), "Cancelled OSC: title '%s'\n", Title);
+    Reset(VT_MODE);
+    Write("\x1b]0;abc\x1a" "Z");
+    CheckCursor("OSC, SUB", 2, 0);
+    ok(CharAt(1, 0) == L'Z', "OSC, SUB: U+%04x\n", CharAt(1, 0));
+    Reset(VT_MODE);
+    Write("\x1b]0;abc\x1b" "ZQ");
+    CheckRow("OSC, ESC Z", 0, "Q.");
+
+    SetConsoleTitleA(Original);
+}
+
+/* Hostile parameters do not take the buffer out of shape */
+static VOID
+TestAdversarial(VOID)
+{
+    static const PCSTR Counts[] = { "32767", "99999999999" };
+    UINT i;
+    CHAR Sequence[64];
+    CONSOLE_SCREEN_BUFFER_INFO Now;
+
+    /* More parameters than the function takes: ignored */
+    Reset(VT_MODE);
+    MoveCursor(10, 10);
+    Write("\x1b[3;4;5;6;7;8;9;10;11;12;13;14;15;16;17;18;19;20H");
+    CheckCursor("CUP with 18 parameters", 10, 10);
+    Write("\x1b[3;4;5H");
+    CheckCursor("CUP with 3 parameters", 10, 10);
+    Write("\x1b[3;4;;H");
+    CheckCursor("CUP with 4 parameters", 10, 10);
+    Write("\x1b[5;6A\x1b[5;B\x1b[5;6G\x1b[0;1K");
+    CheckCursor("CUU, CUD, CHA with 2 parameters", 10, 10);
+    Write("\x1b[2;3f");
+    CheckCursor("HVP 2;3", 2, 1);
+    Reset(VT_MODE);
+    Write("\x1b[99999999999H");
+    CheckCursor("CUP 99999999999", 0, 24);
+    Write("\x1b[99999999999;99999999999H");
+    CheckCursor("CUP 99999999999;99999999999", 79, 24);
+    Write("\x1b[99999999999A");
+    CheckCursor("CUU 99999999999", 79, 0);
+    Write("\x1b[99999999999G");
+    CheckCursor("CHA 99999999999", 79, 0);
+    CheckView("Huge positions", 0);
+
+    for (i = 0; i < ARRAYSIZE(Counts); ++i)
+    {
+        static const PCSTR Finals[] = { "@", "P", "X", "S" };
+        UINT j;
+
+        for (j = 0; j < ARRAYSIZE(Finals); ++j)
+        {
+            Reset(VT_MODE);
+            PutLetters();
+            PutText(5, "f123456789");
+            MoveCursor(3, 5);
+            StringCbPrintfA(Sequence, sizeof(Sequence), "x\x1b[%s%s", Counts[i], Finals[j]);
+            Write(Sequence);
+            Now = BufferInfo();
+            StringCbPrintfA(Sequence, sizeof(Sequence), "CSI %s%s", Counts[i], Finals[j]);
+            ok(Now.dwSize.X == WIDTH && Now.dwSize.Y == HEIGHT, "%s: size %dx%d\n", Sequence, Now.dwSize.X, Now.dwSize.Y);
+            CheckCursor(Sequence, 4, 5);
+            CheckView(Sequence, 0);
+            CheckColumn(Sequence, 25, "z");
+            if (Finals[j][0] == 'S')
+            {
+                CheckColumn(Sequence, 0, ".........................z");
+            }
+            else
+            {
+                CheckColumn(Sequence, 3, "defg");
+                ok(CharAt(3, 5) == L'x', "%s: U+%04x at 3,5\n", Sequence, CharAt(3, 5));
+                if (Finals[j][0] != '@')
+                    CheckRow(Sequence, 5, "f12x......");
+            }
+        }
+    }
+
+    /* Windows 10 loses the console with these (IL, DL, SD of 32767 lines): only on ReactOS */
+    if (is_reactos())
+    {
+        static const PCSTR Finals[] = { "L", "M", "T", "b" };
+        UINT j;
+
+        for (i = 0; i < ARRAYSIZE(Counts); ++i)
+        {
+            for (j = 0; j < ARRAYSIZE(Finals); ++j)
+            {
+                Reset(VT_MODE);
+                PutLetters();
+                MoveCursor(3, 5);
+                StringCbPrintfA(Sequence, sizeof(Sequence), "x\x1b[%s%s", Counts[i], Finals[j]);
+                Write(Sequence);
+                Now = BufferInfo();
+                StringCbPrintfA(Sequence, sizeof(Sequence), "CSI %s%s", Counts[i], Finals[j]);
+                ok(Now.dwSize.X == WIDTH && Now.dwSize.Y == HEIGHT, "%s: size %dx%d\n", Sequence, Now.dwSize.X, Now.dwSize.Y);
+                ok(Now.dwCursorPosition.X < WIDTH && Now.dwCursorPosition.Y >= Now.srWindow.Top &&
+                   Now.dwCursorPosition.Y <= Now.srWindow.Bottom, "%s: cursor at %d,%d\n",
+                   Sequence, Now.dwCursorPosition.X, Now.dwCursorPosition.Y);
+                if (Finals[j][0] == 'T')
+                    CheckColumn(Sequence, 0, ".........................z");
+                else if (Finals[j][0] != 'b')
+                {
+                    CheckColumn(Sequence, 0, "abcde");
+                    CheckColumn(Sequence, 25, "z");
+                }
+            }
+        }
+    }
+    else
+    {
+        skip("IL, DL, SD with huge counts are not tested on Windows (its console exits)\n");
+    }
+
+    /* The alternate buffer resized, then left, then a buffer closed in it */
+    Reset(VT_MODE);
+    PutText(0, "main");
+    Write("\x1b[?1049h");
+    {
+        COORD Size = { 100, 40 };
+        SetConsoleScreenBufferSize(hCon, Size);
+    }
+    Write("\x1b[?1049l");
+    Now = BufferInfo();
+    ok(Now.dwSize.X == WIDTH && Now.dwSize.Y == HEIGHT, "Alternate buffer resized, then left: size %dx%d\n",
+       Now.dwSize.X, Now.dwSize.Y);
+    CheckRow("Alternate buffer resized, then left", 0, "main");
+    {
+        HANDLE hOther = CreateConsoleScreenBuffer(GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                                  NULL, CONSOLE_TEXTMODE_BUFFER, NULL);
+        DWORD Written;
+
+        ok(hOther != INVALID_HANDLE_VALUE, "CreateConsoleScreenBuffer failed with error %lu\n", GetLastError());
+        if (hOther != INVALID_HANDLE_VALUE)
+        {
+            SetConsoleMode(hOther, VT_MODE);
+            WriteConsoleA(hOther, "\x1b[?1049hx", 9, &Written, NULL);
+            ok(CloseHandle(hOther), "Closing a buffer in its alternate screen failed\n");
+        }
+        hOther = CreateConsoleScreenBuffer(GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                           NULL, CONSOLE_TEXTMODE_BUFFER, NULL);
+        ok(hOther != INVALID_HANDLE_VALUE, "The console is gone after closing a buffer in its alternate screen\n");
+        if (hOther != INVALID_HANDLE_VALUE)
+            CloseHandle(hOther);
+    }
+}
+
 /* The reports come back as typed characters */
 static VOID
 CheckReport(PCSTR What, PCSTR Expected)
@@ -1018,6 +1233,23 @@ TestReports(VOID)
     Write("\x1b[c");
     CheckReport("DA", "^[?1;0c");
 
+    /* A flood of requests that nothing reads does not queue input without bound (Windows queues them all) */
+    if (is_reactos())
+    {
+        DWORD Count = 0;
+        UINT i;
+
+        Reset(VT_MODE);
+        FlushConsoleInputBuffer(hIn);
+        for (i = 0; i < 5000; ++i)
+            Write("\x1b[6n");
+        GetNumberOfConsoleInputEvents(hIn, &Count);
+        ok(Count >= 1000 && Count <= 1100, "5000 DSR requests: %lu input events\n", Count);
+        FlushConsoleInputBuffer(hIn);
+        Write("\x1b[c");
+        CheckReport("DA after the flood", "^[?1;0c");
+    }
+
     FlushConsoleInputBuffer(hIn);
     SetConsoleMode(hIn, InMode);
 }
@@ -1064,6 +1296,8 @@ START_TEST(ConsoleVirtualTerminal)
     TestWrap();
     TestOtherSequences();
     TestUtf8();
+    TestControls();
+    TestAdversarial();
     TestReports();
 
     if (hIn != INVALID_HANDLE_VALUE)
