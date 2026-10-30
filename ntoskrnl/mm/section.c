@@ -347,6 +347,90 @@ PeFmtIsMachineForMagic(USHORT Magic, USHORT Machine)
 #endif
 }
 
+/* The COM descriptor (the .NET runtime header) and its COMIMAGE_FLAGS_* */
+#define PEFMT_COR20_HEADER_SIZE             0x48
+#define PEFMT_COMIMAGE_FLAGS_ILONLY         0x00000001
+#define PEFMT_COMIMAGE_FLAGS_32BITREQUIRED  0x00000002
+#define PEFMT_COMIMAGE_FLAGS_32BITPREFERRED 0x00020000
+
+typedef struct _PEFMT_COR20_PREFIX
+{
+    ULONG cb;
+    USHORT MajorRuntimeVersion;
+    USHORT MinorRuntimeVersion;
+    IMAGE_DATA_DIRECTORY MetaData;
+    ULONG Flags;
+} PEFMT_COR20_PREFIX, *PPEFMT_COR20_PREFIX;
+
+/*
+ * The .NET image flags of the image information, as measured on Windows 10 22H2: the descriptor must be complete
+ * (its size in the directory) and in the file data of the image, and the runtime version at least 2.5 (older images
+ * are for .NET 1.x, which has no 64-bit runtime). Then an IL-only image is ComPlusILOnly; a PE32 one is also
+ * ComPlusNativeReady unless it requires 32 bits without preferring them (Prefer32Bit sets both bits), and
+ * ComPlusPrefer32bit when it prefers them. The 64-bit kernel starts a native-ready PE32 image that does not prefer
+ * 32 bits as a 64-bit process. A descriptor that cannot be read only leaves the flags clear.
+ */
+static
+VOID
+PeFmtSetComPlusFlags(
+    _In_ PVOID File,
+    _Inout_ PMM_IMAGE_SECTION_OBJECT ImageSectionObject,
+    _In_ USHORT Magic,
+    _In_ ULONG ComRva,
+    _In_ ULONG ComSize,
+    _In_ PEXEFMT_CB_READ_FILE ReadFileCb)
+{
+    PMM_SECTION_SEGMENT Segments = ImageSectionObject->Segments;
+    PSECTION_IMAGE_INFORMATION Info = &ImageSectionObject->ImageInformation;
+    LARGE_INTEGER Offset;
+    PPEFMT_COR20_PREFIX Cor;
+    PVOID Data, Buffer = NULL;
+    ULONG ReadSize, Flags, i;
+    ULONGLONG Delta = 0;
+    NTSTATUS Status;
+
+    if (ComSize < PEFMT_COR20_HEADER_SIZE)
+        return;
+
+    /* Find the descriptor in the raw data of a segment (the headers are segment 0) */
+    for (i = 0; i < ImageSectionObject->NrSegments; i++)
+    {
+        if (ComRva < Segments[i].Image.VirtualAddress)
+            continue;
+        Delta = ComRva - Segments[i].Image.VirtualAddress;
+        if ((ULONGLONG)Segments[i].RawLength.QuadPart >= PEFMT_COR20_HEADER_SIZE &&
+            Delta <= (ULONGLONG)Segments[i].RawLength.QuadPart - PEFMT_COR20_HEADER_SIZE)
+        {
+            break;
+        }
+    }
+    if (i == ImageSectionObject->NrSegments)
+        return;
+
+    Offset.QuadPart = Segments[i].Image.FileOffset + Delta;
+    Status = ReadFileCb(File, &Offset, PEFMT_COR20_HEADER_SIZE, &Data, &Buffer, &ReadSize);
+    if (!NT_SUCCESS(Status))
+        return;
+    if (ReadSize >= sizeof(PEFMT_COR20_PREFIX))
+    {
+        Cor = Data;
+        Flags = Cor->Flags;
+        if ((Flags & PEFMT_COMIMAGE_FLAGS_ILONLY) &&
+            (Cor->MajorRuntimeVersion > 2 || (Cor->MajorRuntimeVersion == 2 && Cor->MinorRuntimeVersion >= 5)))
+        {
+            Info->ComPlusILOnly = 1;
+            if (Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC)
+            {
+                if (!(Flags & PEFMT_COMIMAGE_FLAGS_32BITREQUIRED) || (Flags & PEFMT_COMIMAGE_FLAGS_32BITPREFERRED))
+                    Info->ComPlusNativeReady = 1;
+                if (Flags & PEFMT_COMIMAGE_FLAGS_32BITPREFERRED)
+                    Info->ComPlusPrefer32bit = 1;
+            }
+        }
+    }
+    ExFreePool(Buffer);
+}
+
 /*
  References:
   [1] Microsoft Corporation, "Microsoft Portable Executable and Common Object
@@ -384,6 +468,8 @@ NTSTATUS NTAPI PeFmtCreateSection(IN CONST VOID * FileHeader,
     ULONG nSizeOfImage = MAXULONG;
     ULONGLONG AlignedSizeOfImage;
     LARGE_INTEGER FileSize;
+    USHORT Magic;
+    ULONG ComRva = 0, ComSize = 0;
 
     ASSERT(FileHeader);
     ASSERT(FileHeaderSize > 0);
@@ -632,6 +718,13 @@ l_ReadHeaderFromFile:
         if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, LoaderFlags))
             ImageSectionObject->ImageInformation.LoaderFlags = piohOptHeader->LoaderFlags;
 
+        if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR]) &&
+            piohOptHeader->NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR)
+        {
+            ComRva = piohOptHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR].VirtualAddress;
+            ComSize = piohOptHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR].Size;
+        }
+
         if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, DllCharacteristics))
         {
             ImageSectionObject->ImageInformation.DllCharacteristics = piohOptHeader->DllCharacteristics;
@@ -721,6 +814,13 @@ l_ReadHeaderFromFile:
         if (RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptHeaderSize, LoaderFlags))
             ImageSectionObject->ImageInformation.LoaderFlags = pioh64OptHeader->LoaderFlags;
 
+        if (RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptHeaderSize, DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR]) &&
+            pioh64OptHeader->NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR)
+        {
+            ComRva = pioh64OptHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR].VirtualAddress;
+            ComSize = pioh64OptHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR].Size;
+        }
+
         if (RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptHeaderSize, DllCharacteristics))
             ImageSectionObject->ImageInformation.DllCharacteristics = pioh64OptHeader->DllCharacteristics;
 
@@ -732,6 +832,11 @@ l_ReadHeaderFromFile:
     /* [1], section 3.4.2 */
     if((ULONG_PTR)ImageBase % 0x10000)
         DIE(("ImageBase is not aligned on a 64KB boundary"));
+
+    /* Windows marks an image with a COM descriptor for the loader, on top of the header's loader flags */
+    Magic = piohOptHeader->Magic;
+    if (ComRva != 0 && ComSize != 0)
+        ImageSectionObject->ImageInformation.LoaderFlags |= IMAGE_LOADER_FLAGS_COMPLUS;
 
     ImageSectionObject->ImageInformation.ImageCharacteristics = pinhNtHeader->FileHeader.Characteristics;
     ImageSectionObject->ImageInformation.Machine = pinhNtHeader->FileHeader.Machine;
@@ -987,6 +1092,8 @@ l_ReadHeaderFromFile:
         DIE(("SizeOfImage %lx does not cover the sections, which end at %Ix\n", nSizeOfImage, nPrevVirtualEndOfSegment));
     if ((ImageSectionObject->NrSegments == 1) && (AlignedSizeOfImage <= nPrevVirtualEndOfSegment))
         DIE(("The image has no sections and SizeOfImage %lx ends with the headers\n", nSizeOfImage));
+
+    PeFmtSetComPlusFlags(File, ImageSectionObject, Magic, ComRva, ComSize, ReadFileCb);
 
     if(nSectionAlignment >= PAGE_SIZE)
         *Flags |= EXEFMT_LOAD_ASSUME_SEGMENTS_PAGE_ALIGNED;

@@ -357,7 +357,8 @@ typedef struct _SECTION_IMAGE_INFORMATION
     USHORT DllCharacteristics;
     USHORT Machine;
     BOOLEAN ImageContainsCode;
-#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+    /* The kernel fills these whatever NTDDI_VERSION its callers are built for (the 64-bit kernel decides on them
+       whether an image runs under WOW64) */
     union
     {
         struct
@@ -366,20 +367,18 @@ typedef struct _SECTION_IMAGE_INFORMATION
             UCHAR ComPlusILOnly:1;
             UCHAR ImageDynamicallyRelocated:1;
             UCHAR ImageMappedFlat:1;
-            UCHAR Reserved:4;
+            UCHAR BaseBelow4gb:1;
+            UCHAR ComPlusPrefer32bit:1;
+            UCHAR Reserved:2;
         };
         UCHAR ImageFlags;
-    };
-#else
-    BOOLEAN Spare1;
+#if (NTDDI_VERSION < NTDDI_LONGHORN)
+        BOOLEAN Spare1;
 #endif
+    };
     ULONG LoaderFlags;
     ULONG ImageFileSize;
-#if (NTDDI_VERSION >= NTDDI_LONGHORN)
     ULONG CheckSum;
-#else
-    ULONG Reserved[1];
-#endif
 } SECTION_IMAGE_INFORMATION, *PSECTION_IMAGE_INFORMATION;
 
 #ifndef NTOS_MODE_USER
