@@ -9,6 +9,7 @@
 /* INCLUDES ******************************************************************/
 
 #include <k32.h>
+#include "copystreams.h"
 #define NDEBUG
 #include <debug.h>
 
@@ -151,6 +152,76 @@ CreateDirectoryW(IN LPCWSTR lpPathName,
 
     BaseSetLastNTError(Status);
     return FALSE;
+}
+
+/*
+ * Gives the new directory the named streams of its template, as Windows does. The directory is made already, and a
+ * stream that cannot be copied is not a reason to fail it.
+ */
+static VOID
+BasepCopyDirectoryStreams(
+    HANDLE TemplateHandle,
+    HANDLE DirectoryHandle,
+    LPCWSTR TemplateName,
+    LPCWSTR NewName)
+{
+    COPY2_STREAM *Streams = NULL;
+    PVOID StreamBuffer = NULL, Buffer = NULL;
+    PWSTR TemplateFull = NULL, NewFull = NULL;
+    ULONG Count = 0, i;
+    DWORD Error;
+
+    if (Copy2FullPath(TemplateName, &TemplateFull) != ERROR_SUCCESS ||
+        Copy2FullPath(NewName, &NewFull) != ERROR_SUCCESS ||
+        !NT_SUCCESS(Copy2QueryNamedStreams(TemplateHandle, &Streams, &Count, &StreamBuffer)) ||
+        Count == 0)
+    {
+        goto Quit;
+    }
+
+    Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, 0x10000);
+    if (!Buffer)
+        goto Quit;
+
+    for (i = 0; i < Count; i++)
+    {
+        HANDLE Source, Dest;
+        DWORD Read, Written;
+
+        Source = Copy2OpenStream(TemplateFull, Streams[i].Name, GENERIC_READ,
+                                 FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_EXISTING, TemplateHandle,
+                                 FILE_FLAG_BACKUP_SEMANTICS, &Error, NULL);
+        if (Source == INVALID_HANDLE_VALUE)
+            continue;
+
+        Dest = Copy2OpenStream(NewFull, Streams[i].Name, GENERIC_WRITE | DELETE | FILE_READ_ATTRIBUTES,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_ALWAYS, DirectoryHandle,
+                               FILE_FLAG_BACKUP_SEMANTICS, &Error, NULL);
+        if (Dest != INVALID_HANDLE_VALUE)
+        {
+            for (;;)
+            {
+                if (!ReadFile(Source, Buffer, 0x10000, &Read, NULL) || Read == 0)
+                    break;
+                if (!WriteFile(Dest, Buffer, Read, &Written, NULL) || Written != Read)
+                    break;
+            }
+            CloseHandle(Dest);
+        }
+        CloseHandle(Source);
+    }
+
+Quit:
+    if (Buffer)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
+    if (Streams)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Streams);
+    if (StreamBuffer)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, StreamBuffer);
+    if (TemplateFull)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, TemplateFull);
+    if (NewFull)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, NewFull);
 }
 
 /*
@@ -663,13 +734,10 @@ OpenWithoutReparseSupport:
             return TRUE;
         }
 
-#if 1
-        /* FIXME: TODO */
-        DPRINT1("Warning: streams copying is unimplemented!\n");
         RtlFreeHeap(RtlGetProcessHeap(), 0, FileStreamInfo);
+        BasepCopyDirectoryStreams(TemplateHandle, DirectoryHandle, lpTemplateDirectory, lpNewDirectory);
         NtClose(TemplateHandle);
         NtClose(DirectoryHandle);
-#endif
         return TRUE;
     }
 }

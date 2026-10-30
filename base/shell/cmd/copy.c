@@ -47,6 +47,17 @@ enum
     COPY_BINARY      = 0x100,   /* /B  */
 };
 
+static BOOL
+IsDeviceName(LPCTSTR pszName)
+{
+    TCHAR szFull[MAX_PATH];
+    DWORD dwLength = GetFullPathName (pszName, MAX_PATH, szFull, NULL);
+
+    /* A name like CON or NUL comes out as \\.\CON */
+    return dwLength != 0 && dwLength < MAX_PATH &&
+           szFull[0] == _T('\\') && szFull[1] == _T('\\') && szFull[2] == _T('.') && szFull[3] == _T('\\');
+}
+
 INT
 copy(TCHAR source[MAX_PATH],
      TCHAR dest[MAX_PATH],
@@ -155,6 +166,32 @@ copy(TCHAR source[MAX_PATH],
     }
 
 
+    /* A plain copy of one file is left to CopyFileEx: it brings the alternate data streams and the extended
+       attributes of the file along, which a loop of reads and writes does not. Devices (copy x con, copy con x)
+       and anything CopyFileEx cannot do go on in the loop below. */
+    if (!append && !(lpdwFlags & COPY_ASCII) &&
+        GetFileType (hFileSrc) == FILE_TYPE_DISK && !IsDeviceName (source) && !IsDeviceName (dest))
+    {
+        if (IsExistingFile (dest))
+        {
+            TRACE ("SetFileAttributes (%s, FILE_ATTRIBUTE_NORMAL);\n", debugstr_aw(dest));
+            SetFileAttributes (dest, FILE_ATTRIBUTE_NORMAL);
+
+            TRACE ("DeleteFile (%s);\n", debugstr_aw(dest));
+            DeleteFile (dest);
+        }
+
+        if (CopyFileEx (source, dest, NULL, NULL, NULL, 0))
+        {
+            CloseHandle (hFileSrc);
+
+            /* For MS-DOS backwards-compatibility, always remove the read-only attribute */
+            SetFileAttributes (dest, dwAttrib & ~FILE_ATTRIBUTE_READONLY);
+            goto FinishCopy;
+        }
+        TRACE ("CopyFileEx failed with %lu, copying by hand\n", GetLastError ());
+    }
+
     if (!IsExistingFile (dest))
     {
         TRACE ("opening/creating\n");
@@ -261,6 +298,7 @@ copy(TCHAR source[MAX_PATH],
     /* For MS-DOS backwards-compatibility, always remove the read-only attribute */
     SetFileAttributes (dest, dwAttrib & ~FILE_ATTRIBUTE_READONLY);
 
+FinishCopy:
     /* Now finish off the copy if needed with CopyFileEx */
     if (lpdwFlags & COPY_RESTART)
     {

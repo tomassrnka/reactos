@@ -200,10 +200,11 @@ static void XCOPY_FailMessage(DWORD err) {
  * This works recursively. so creating dir1\dir2\dir3 will create dir1 and
  * dir2 if they do not already exist.
  * ========================================================================= */
-static BOOL XCOPY_CreateDirectory(const WCHAR* path)
+static BOOL XCOPY_CreateDirectory(const WCHAR* path, const WCHAR* template_dir)
 {
     int len;
     WCHAR *new_path;
+    WCHAR *template_path = NULL;
     BOOL ret = TRUE;
 
     new_path = HeapAlloc(GetProcessHeap(),0, sizeof(WCHAR) * (lstrlenW(path)+1));
@@ -212,7 +213,21 @@ static BOOL XCOPY_CreateDirectory(const WCHAR* path)
     while ((len = lstrlenW(new_path)) && new_path[len - 1] == '\\')
         new_path[len - 1] = 0;
 
-    while (!CreateDirectoryW(new_path,NULL))
+    /* The directory is made like the one it is copied from (when there is one), so that it has its attributes
+       and alternate data streams, as with Windows. Only the last directory of the path is made so. */
+    if (template_dir && *template_dir)
+    {
+        template_path = HeapAlloc(GetProcessHeap(),0, sizeof(WCHAR) * (lstrlenW(template_dir)+1));
+        lstrcpyW(template_path,template_dir);
+        while ((len = lstrlenW(template_path)) && template_path[len - 1] == '\\')
+            template_path[len - 1] = 0;
+        /* A root, as "C:", is no template */
+        if (!template_path[0] || template_path[lstrlenW(template_path) - 1] == ':')
+            template_path[0] = 0;
+    }
+
+    while (!((template_path && template_path[0] && CreateDirectoryExW(template_path, new_path, NULL)) ||
+             CreateDirectoryW(new_path,NULL)))
     {
         WCHAR *slash;
         DWORD last_error = GetLastError();
@@ -233,7 +248,7 @@ static BOOL XCOPY_CreateDirectory(const WCHAR* path)
 
         len = slash - new_path;
         new_path[len] = 0;
-        if (!XCOPY_CreateDirectory(new_path))
+        if (!XCOPY_CreateDirectory(new_path, NULL))
         {
             ret = FALSE;
             break;
@@ -241,6 +256,7 @@ static BOOL XCOPY_CreateDirectory(const WCHAR* path)
         new_path[len] = '\\';
     }
     HeapFree(GetProcessHeap(),0,new_path);
+    if (template_path) HeapFree(GetProcessHeap(),0,template_path);
     return ret;
 }
 
@@ -402,7 +418,7 @@ static int XCOPY_DoCopy(WCHAR *srcstem, WCHAR *srcspec,
             /* Do the copy */
             WINE_TRACE("ACTION: Copy '%s' -> '%s'\n", wine_dbgstr_w(copyFrom),
                                                       wine_dbgstr_w(copyTo));
-            if (!copiedFile && !(flags & OPT_SIMULATE)) XCOPY_CreateDirectory(deststem);
+            if (!copiedFile && !(flags & OPT_SIMULATE)) XCOPY_CreateDirectory(deststem, srcstem);
 
             /* See if allowed to copy it */
             srcAttribs = GetFileAttributesW(copyFrom);
@@ -604,7 +620,7 @@ static int XCOPY_DoCopy(WCHAR *srcstem, WCHAR *srcspec,
         /* If /E is supplied, create the directory now */
         if ((flags & OPT_EMPTYDIR) &&
            !(flags & OPT_SIMULATE)) {
-            XCOPY_CreateDirectory(deststem);
+            XCOPY_CreateDirectory(deststem, srcstem);
         }
 
         lstrcpyW(inputpath, srcstem);
