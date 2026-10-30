@@ -153,7 +153,13 @@ CreateSymbolicLinkW(IN LPCWSTR lpSymlinkFileName,
     ULONG dwCreateOptions;
     DWORD dwErr;
 
-    if(!lpSymlinkFileName || !lpTargetFileName || (dwFlags | SYMBOLIC_LINK_FLAG_DIRECTORY) != SYMBOLIC_LINK_FLAG_DIRECTORY)
+    /*
+     * SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE (Windows 10 1703+) is accepted. Windows without developer mode
+     * still demands SeCreateSymbolicLinkPrivilege (ERROR_PRIVILEGE_NOT_HELD) even with this flag; ReactOS has no
+     * elevation model and its filesystem drivers do not check that privilege, so the flag is a no-op here.
+     * Like Windows 10 (verified on 22H2), bits other than DIRECTORY and ALLOW_UNPRIVILEGED_CREATE are ignored.
+     */
+    if(!lpSymlinkFileName || !lpTargetFileName)
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
@@ -212,10 +218,10 @@ CreateSymbolicLinkW(IN LPCWSTR lpSymlinkFileName,
     default:
         if(!RtlDosPathNameToNtPathName_U(lpTargetFileName, &TargetFileName, NULL, NULL))
         {
-            bAllocatedTarget = TRUE;
             dwErr = ERROR_INVALID_PARAMETER;
             goto Cleanup;
         }
+        bAllocatedTarget = TRUE;
     }
 
     cbPrintName = wcslen(lpTargetFileName) * sizeof(WCHAR);
@@ -350,11 +356,15 @@ CreateSymbolicLinkA(IN LPCSTR lpSymlinkFileName,
         return FALSE;
     }
 
-    if (!(SymlinkW = FilenameA2W(lpSymlinkFileName, FALSE)))
+    /* Both names are allocated: the TEB static buffer (alloc == FALSE) must not be freed below */
+    if (!(SymlinkW = FilenameA2W(lpSymlinkFileName, TRUE)))
         return FALSE;
 
     if (!(TargetW = FilenameA2W(lpTargetFileName, TRUE)))
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, SymlinkW);
         return FALSE;
+    }
 
     Ret = CreateSymbolicLinkW(SymlinkW,
                               TargetW,
