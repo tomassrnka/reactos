@@ -215,5 +215,23 @@ PCHAR_INFO ConioCoordToPointer(PTEXTMODE_SCREEN_BUFFER Buff, ULONG X, ULONG Y);
 
 /* terminal.c */
 VOID ConioDrawConsole(PCONSRV_CONSOLE Console);
+NTSTATUS
+ConioWriteText(PFRONTEND FrontEnd,
+               PTEXTMODE_SCREEN_BUFFER Buff,
+               PWCHAR Buffer,
+               DWORD Length,
+               BOOL Attrib,
+               BOOLEAN Vt);
+
+/* vt.c */
+NTSTATUS
+ConioVtWriteConsole(PFRONTEND FrontEnd,
+                    PTEXTMODE_SCREEN_BUFFER Buff,
+                    PWCHAR Buffer,
+                    DWORD Length,
+                    BOOL Attrib);
+WCHAR ConioVtTranslateChar(PTEXTMODE_SCREEN_BUFFER Buff, WCHAR Char);
+BOOLEAN ConioVtLineFeedInRegion(PTEXTMODE_SCREEN_BUFFER Buff, PSMALL_RECT UpdateRect);
+VOID ConioVtFollowCursor(PTEXTMODE_SCREEN_BUFFER Buff);
 
 /* EOF */

@@ -1900,8 +1900,13 @@ CON_API(SrvSetConsoleMode,
 
     ASSERT((PCONSOLE)Console == Object->Console);
 
-    /* Set the standard console modes (without the CONSRV-specific input modes) */
-    ConsoleMode &= ~CONSOLE_VALID_CONTROL_MODES; // Remove CONSRV-specific input modes.
+    /*
+     * Set the standard console modes (without the CONSRV-specific input modes).
+     * The control modes only exist for the input buffer: for a screen buffer
+     * they are invalid like any other unknown mode (Windows rejects 0x20).
+     */
+    if (INPUT_BUFFER == Object->Type)
+        ConsoleMode &= ~CONSOLE_VALID_CONTROL_MODES; // Remove CONSRV-specific input modes.
     Status = ConDrvSetConsoleMode((PCONSOLE)Console, Object, ConsoleMode);
     if (NT_SUCCESS(Status))
     {

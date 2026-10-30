@@ -361,7 +361,9 @@ ConDrvSetConsoleMode(IN PCONSOLE Console,
 #define CONSOLE_VALID_INPUT_MODES   ( ENABLE_PROCESSED_INPUT  | ENABLE_LINE_INPUT   | \
                                       ENABLE_ECHO_INPUT       | ENABLE_WINDOW_INPUT | \
                                       ENABLE_MOUSE_INPUT )
-#define CONSOLE_VALID_OUTPUT_MODES  ( ENABLE_PROCESSED_OUTPUT | ENABLE_WRAP_AT_EOL_OUTPUT )
+#define CONSOLE_VALID_OUTPUT_MODES  ( ENABLE_PROCESSED_OUTPUT | ENABLE_WRAP_AT_EOL_OUTPUT | \
+                                      ENABLE_VIRTUAL_TERMINAL_PROCESSING | \
+                                      DISABLE_NEWLINE_AUTO_RETURN | ENABLE_LVB_GRID_WORLDWIDE )
 
     NTSTATUS Status = STATUS_SUCCESS;
 
@@ -397,6 +399,15 @@ ConDrvSetConsoleMode(IN PCONSOLE Console,
         else
         {
             Buffer->Mode = (ConsoleMode & CONSOLE_VALID_OUTPUT_MODES);
+            Console->OutputVtMode = !!(ConsoleMode & ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+
+            /* A sequence that was not finished does not continue once the output is not interpreted */
+            if (TEXTMODE_BUFFER == Object->Type && !CONSOLE_VT_ACTIVE(Buffer))
+            {
+                PTEXTMODE_SCREEN_BUFFER TextBuffer = (PTEXTMODE_SCREEN_BUFFER)Buffer;
+                TextBuffer->Vt.State = 0;
+                TextBuffer->Vt.DelayedWrap = FALSE;
+            }
         }
     }
     else

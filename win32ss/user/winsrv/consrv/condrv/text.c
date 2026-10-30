@@ -108,6 +108,7 @@ TEXTMODE_BUFFER_Initialize(OUT PCONSOLE_SCREEN_BUFFER* Buffer,
 
     NewBuffer->ScreenDefaultAttrib = (TextModeInfo->ScreenAttrib & ~COMMON_LVB_SBCSDBCS);
     NewBuffer->PopupDefaultAttrib  = (TextModeInfo->PopupAttrib  & ~COMMON_LVB_SBCSDBCS);
+    NewBuffer->Vt.DefaultAttrib    = (TextModeInfo->ScreenAttrib & 0xFF);
 
     /* Initialize buffer to be empty with default attributes */
     for (NewBuffer->CursorPosition.Y = 0 ; NewBuffer->CursorPosition.Y < NewBuffer->ScreenBufferSize.Y; NewBuffer->CursorPosition.Y++)
@@ -117,6 +118,9 @@ TEXTMODE_BUFFER_Initialize(OUT PCONSOLE_SCREEN_BUFFER* Buffer,
     NewBuffer->CursorPosition.X = NewBuffer->CursorPosition.Y = 0;
 
     NewBuffer->Mode = ENABLE_PROCESSED_OUTPUT | ENABLE_WRAP_AT_EOL_OUTPUT;
+    /* As on Windows, a new buffer gets the virtual terminal mode last set on a screen buffer */
+    if (Console->OutputVtMode)
+        NewBuffer->Mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
 
     *Buffer = (PCONSOLE_SCREEN_BUFFER)NewBuffer;
     return STATUS_SUCCESS;
@@ -134,6 +138,9 @@ TEXTMODE_BUFFER_Destroy(IN OUT PCONSOLE_SCREEN_BUFFER Buffer)
     Buffer->Header.Type = SCREEN_BUFFER;
 
     ConsoleFreeHeap(Buff->Buffer);
+    /* The main buffer saved while the alternate screen buffer is shown */
+    if (Buff->Vt.AltMainBuffer)
+        ConsoleFreeHeap(Buff->Vt.AltMainBuffer);
 
     CONSOLE_SCREEN_BUFFER_Destroy(Buffer);
 }
@@ -550,6 +557,10 @@ ConDrvChangeScreenBufferAttributes(IN PCONSOLE Console,
     /* Save foreground and background attributes for both screen and popup */
     Buffer->ScreenDefaultAttrib = NewScreenAttrib;
     Buffer->PopupDefaultAttrib  = NewPopupAttrib;
+
+    /* These are also the colors that the virtual terminal resets to */
+    Buffer->Vt.DefaultAttrib = (NewScreenAttrib & 0xFF);
+    Buffer->Vt.Bold = Buffer->Vt.BoldBright = FALSE;
 
     /* Refresh the display if needed */
     if ((PCONSOLE_SCREEN_BUFFER)Buffer == Console->ActiveBuffer)
@@ -1429,6 +1440,8 @@ ConDrvSetConsoleTextAttribute(IN PCONSOLE Console,
     ASSERT(Console == Buffer->Header.Console);
 
     Buffer->ScreenDefaultAttrib = (Attributes & ~COMMON_LVB_SBCSDBCS);
+    /* The attribute replaces the bold rendition of the virtual terminal */
+    Buffer->Vt.Bold = Buffer->Vt.BoldBright = FALSE;
     return STATUS_SUCCESS;
 }
 

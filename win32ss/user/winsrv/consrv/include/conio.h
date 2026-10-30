@@ -121,6 +121,66 @@ typedef struct _TEXTMODE_BUFFER_INFO
     BOOLEAN IsCursorVisible;
 } TEXTMODE_BUFFER_INFO, *PTEXTMODE_BUFFER_INFO;
 
+/* Windows 10 output modes (the SDK defines them only for NTDDI_WIN10_RS1) */
+#ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
+#define ENABLE_VIRTUAL_TERMINAL_PROCESSING  0x0004
+#endif
+#ifndef DISABLE_NEWLINE_AUTO_RETURN
+#define DISABLE_NEWLINE_AUTO_RETURN         0x0008
+#endif
+#ifndef ENABLE_LVB_GRID_WORLDWIDE
+#define ENABLE_LVB_GRID_WORLDWIDE           0x0010
+#endif
+
+/* Output written to the buffer is interpreted for virtual terminal sequences */
+#define CONSOLE_VT_ACTIVE(Buff) \
+    (((Buff)->Mode & (ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING)) == \
+                     (ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING))
+
+#define CONSOLE_VT_MAX_PARAMS   16
+#define CONSOLE_VT_MAX_OSC      255
+
+/*
+ * Virtual terminal state of a text-mode screen buffer (see frontends/vt.c).
+ * It belongs to the buffer, so that a sequence split over several writes
+ * continues where the previous write stopped.
+ */
+typedef struct _CONSOLE_VT_STATE
+{
+    UCHAR   State;                  /* Parser state */
+    UCHAR   Private;                /* CSI private marker or 0 */
+    UCHAR   Intermediate;           /* Last intermediate character or 0 */
+    UCHAR   NumParams;              /* Number of parameters seen so far */
+    USHORT  Params[CONSOLE_VT_MAX_PARAMS];
+    USHORT  OscCommand;             /* OSC command number */
+    USHORT  OscLength;              /* Characters in OscString */
+    BOOLEAN OscHasCommand;          /* The separator after the OSC command number was seen */
+    WCHAR   OscString[CONSOLE_VT_MAX_OSC];
+
+    USHORT  DefaultAttrib;          /* Attribute restored by SGR 0, 39 and 49 */
+    BOOLEAN Bold;                   /* SGR 1 */
+    BOOLEAN BoldBright;             /* The foreground intensity bit comes from Bold */
+    BOOLEAN DecGraphics;            /* G0 is the DEC special graphics character set */
+    BOOLEAN DelayedWrap;            /* A character was written in the last column, the wrap is pending */
+    COORD   DelayedWrapPos;         /* Cursor position the pending wrap belongs to */
+    WCHAR   LastChar;               /* Last printed character, for REP */
+    BOOLEAN Echo;                   /* Line input echo: written as plain text, not interpreted */
+
+    BOOLEAN SavedCursorValid;
+    COORD   SavedCursor;            /* DECSC and CSI s, relative to the view */
+
+    BOOLEAN MarginsSet;             /* DECSTBM scrolling region, relative to the view */
+    SHORT   MarginTop;
+    SHORT   MarginBottom;
+
+    BOOLEAN InAltBuffer;            /* DECSET 1049: the main buffer is saved below */
+    PCHAR_INFO AltMainBuffer;
+    COORD   AltMainSize;
+    USHORT  AltMainVirtualY;
+    COORD   AltMainCursor;
+    COORD   AltMainViewOrigin;
+} CONSOLE_VT_STATE, *PCONSOLE_VT_STATE;
+
 typedef struct _TEXTMODE_SCREEN_BUFFER
 {
     CONSOLE_SCREEN_BUFFER;      /* Screen buffer base class - MUST BE IN FIRST PLACE */
@@ -130,6 +190,8 @@ typedef struct _TEXTMODE_SCREEN_BUFFER
 
     USHORT ScreenDefaultAttrib; /* Default screen char attribute */
     USHORT PopupDefaultAttrib;  /* Default popup char attribute */
+
+    CONSOLE_VT_STATE Vt;        /* Virtual terminal output state */
 } TEXTMODE_SCREEN_BUFFER, *PTEXTMODE_SCREEN_BUFFER;
 
 
@@ -309,6 +371,7 @@ typedef struct _CONSOLE
     COORD   ConsoleSize;                    /* The current size of the console, for text-mode only */
     BOOLEAN FixedSize;                      /* TRUE if the console is of fixed size */
     BOOLEAN IsCJK;                          /* TRUE if Chinese, Japanese or Korean (CJK) */
+    BOOLEAN OutputVtMode;                   /* ENABLE_VIRTUAL_TERMINAL_PROCESSING as last set on a screen buffer, given to new ones */
 } CONSOLE, *PCONSOLE;
 
 /* console.c */

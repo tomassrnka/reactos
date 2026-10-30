@@ -336,6 +336,8 @@ ConDrvSetConsoleCursorPosition(IN PCONSOLE Console,
     OldCursorX = Buffer->CursorPosition.X;
     OldCursorY = Buffer->CursorPosition.Y;
     Buffer->CursorPosition = *Position;
+    /* A wrap pending after the last column does not survive an explicit move */
+    Buffer->Vt.DelayedWrap = FALSE;
 
     if ( ((PCONSOLE_SCREEN_BUFFER)Buffer == Console->ActiveBuffer) &&
          (!TermSetScreenInfo(Console, (PCONSOLE_SCREEN_BUFFER)Buffer, OldCursorX, OldCursorY)) )
