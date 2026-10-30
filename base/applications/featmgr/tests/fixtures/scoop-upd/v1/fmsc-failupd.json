@@ -1,0 +1,8 @@
+{
+    "version": "1.0.0",
+    "description": "App whose update fails in the stub",
+    "homepage": "https://example.invalid/fmsc-failupd",
+    "license": "MIT",
+    "url": "https://example.invalid/fmsc-failupd-1.0.0.zip",
+    "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+}

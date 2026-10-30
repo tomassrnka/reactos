@@ -1,0 +1,9 @@
+{
+    "version": "1.1.0",
+    "description": "Update test app (fixture version 1.1.0)",
+    "homepage": "https://example.invalid/fmsc-upd",
+    "license": "MIT",
+    "url": "https://example.invalid/fmsc-upd-1.1.0.zip",
+    "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "bin": "fmsc-upd.exe"
+}
