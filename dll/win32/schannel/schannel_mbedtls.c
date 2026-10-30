@@ -528,6 +528,19 @@ SECURITY_STATUS schan_imp_handshake(schan_imp_session session)
         ERR("schan_imp_handshake: SSL Feature unavailable...\n");
         return SEC_E_UNSUPPORTED_FUNCTION;
     }
+    else if (err == MBEDTLS_ERR_SSL_BAD_HS_PROTOCOL_VERSION)
+    {
+        /* The server chose a protocol version the session does not offer */
+        WARN("schan_imp_handshake: no common protocol version\n");
+        return SEC_E_ALGORITHM_MISMATCH;
+    }
+    else if (err == MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE && s->ssl.in_msg &&
+             s->ssl.in_msg[1] == MBEDTLS_SSL_ALERT_MSG_PROTOCOL_VERSION)
+    {
+        /* The server refused every version offered; Windows reports this alert as SEC_E_UNSUPPORTED_FUNCTION */
+        WARN("schan_imp_handshake: server refused the offered protocol versions\n");
+        return SEC_E_UNSUPPORTED_FUNCTION;
+    }
     else if (err != 0)
     {
         ERR("schan_imp_handshake: Oops! mbedtls_ssl_handshake returned the following error code: -%#x...\n", -err);
