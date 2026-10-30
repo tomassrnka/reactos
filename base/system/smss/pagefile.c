@@ -113,6 +113,20 @@ typedef struct _SMP_PAGEFILE_DESCRIPTOR
 
 /* FAT cannot hold a file of 4 GB or more: limit paging files there as on 32-bit Windows */
 #define SMP_FAT_MAXIMUM_PAGEFILE_SIZE   MAXIMUM_PAGEFILE_SIZE32
+
+/*
+ * System-managed paging files (Windows 10/11, as documented by Microsoft):
+ * the minimum is RAM / 8 (at most 32 GB), the maximum is 3 x RAM or 4 GB,
+ * whichever is larger, and is then limited to the volume size / 8.
+ * We also never start below 512 MB (or the volume limit, if smaller), since
+ * there is no usage history to size from.
+ */
+#define SMP_SYSMGD_MIN_DIVISOR          8
+#define SMP_SYSMGD_MIN_FLOOR            (512ULL * MEGABYTE)
+#define SMP_SYSMGD_MIN_CEILING          (32ULL * GIGABYTE)
+#define SMP_SYSMGD_MAX_FLOOR            (4ULL * GIGABYTE)
+#define SMP_SYSMGD_VOLUME_DIVISOR       8
+#define SMP_SYSMGD_VOLUME_CAP_FLOOR     (16ULL * MEGABYTE)
 typedef struct _SMP_VOLUME_DESCRIPTOR
 {
     LIST_ENTRY Entry;
@@ -120,6 +134,7 @@ typedef struct _SMP_VOLUME_DESCRIPTOR
     USHORT PageFileCount;
     WCHAR DriveLetter;
     LARGE_INTEGER FreeSpace;
+    LARGE_INTEGER TotalSize;
     FILE_FS_DEVICE_INFORMATION DeviceInfo;
 } SMP_VOLUME_DESCRIPTOR, *PSMP_VOLUME_DESCRIPTOR;
 
@@ -455,6 +470,11 @@ SmpGetVolumeFreeSpace(IN PSMP_VOLUME_DESCRIPTOR Volume)
                          SizeInfo.SectorsPerAllocationUnit;
     FinalFreeSpace.QuadPart = FreeSpace.QuadPart * SizeInfo.BytesPerSector;
 
+    /* Remember the volume size, used to limit system-managed paging files */
+    Volume->TotalSize.QuadPart = SizeInfo.TotalAllocationUnits.QuadPart *
+                                 SizeInfo.SectorsPerAllocationUnit *
+                                 SizeInfo.BytesPerSector;
+
     /* Check if there is less than 32 MB free so we don't starve the disk */
     if (FinalFreeSpace.QuadPart <= MINIMUM_TO_KEEP_FREE)
     {
@@ -544,7 +564,12 @@ SmpCreatePagingFileOnFixedDrive(IN PSMP_PAGEFILE_DESCRIPTOR Descriptor,
     BOOLEAN ShouldDelete;
     NTSTATUS Status;
     LARGE_INTEGER PageFileSize;
+    LARGE_INTEGER RequiredMinimum;
     ASSERT(Descriptor->Name.Buffer[STANDARD_DRIVE_LETTER_OFFSET] != L'?');
+
+    /* Work on a copy: the caller reuses its value for the next volume */
+    RequiredMinimum = *MinimumSize;
+    MinimumSize = &RequiredMinimum;
 
     /* Try to find the volume descriptor for this drive letter */
     ShouldDelete = FALSE;
@@ -617,6 +642,30 @@ SmpCreatePagingFileOnFixedDrive(IN PSMP_PAGEFILE_DESCRIPTOR Descriptor,
     if (Descriptor->ActualMaxSize.QuadPart > PageFileSize.QuadPart)
     {
         Descriptor->ActualMaxSize = PageFileSize;
+    }
+
+    /*
+     * A system-managed paging file never takes more than 1/8 of the volume,
+     * so that a large amount of RAM does not eat a small volume. The minimum
+     * we insist on shrinks with it. Explicit sizes are left alone.
+     */
+    if ((Descriptor->Flags & SMP_PAGEFILE_SYSTEM_MANAGED) &&
+        (Volume->TotalSize.QuadPart > 0))
+    {
+        LARGE_INTEGER VolumeCap;
+
+        VolumeCap.QuadPart = Volume->TotalSize.QuadPart / SMP_SYSMGD_VOLUME_DIVISOR;
+        if (VolumeCap.QuadPart < SMP_SYSMGD_VOLUME_CAP_FLOOR)
+            VolumeCap.QuadPart = SMP_SYSMGD_VOLUME_CAP_FLOOR;
+
+        if (Descriptor->ActualMaxSize.QuadPart > VolumeCap.QuadPart)
+            Descriptor->ActualMaxSize = VolumeCap;
+        if (Descriptor->ActualMinSize.QuadPart > Descriptor->ActualMaxSize.QuadPart)
+            Descriptor->ActualMinSize = Descriptor->ActualMaxSize;
+        if (MinimumSize->QuadPart > VolumeCap.QuadPart)
+            *MinimumSize = VolumeCap;
+        DPRINT("SMSS:PFILE: Volume `%wC' size 0x%I64X, system-managed cap 0x%I64X\n",
+               Volume->DriveLetter, Volume->TotalSize.QuadPart, VolumeCap.QuadPart);
     }
 
     /* On FAT, start at the largest file it can hold instead of failing down to it */
@@ -744,12 +793,24 @@ SmpMakeSystemManagedPagingFileDescriptor(IN PSMP_PAGEFILE_DESCRIPTOR Descriptor)
         return;
     }
 
-    /* Check how much RAM we have and set three times this amount as maximum */
+    /*
+     * Windows 10/11: the minimum is RAM / 8 (at most 32 GB; we have no usage
+     * history or crash dump requirement to raise it), the maximum is three
+     * times RAM or 4 GB, whichever is larger. The volume limit is applied
+     * when the volume is known, in SmpCreatePagingFileOnFixedDrive.
+     */
     Ram = (ULONGLONG)BasicInfo.NumberOfPhysicalPages * BasicInfo.PageSize;
     MaximumSize = 3 * Ram;
+    if (MaximumSize < SMP_SYSMGD_MAX_FLOOR)
+        MaximumSize = SMP_SYSMGD_MAX_FLOOR;
 
-    /* If we have more than 1GB, use that as minimum, otherwise, use 1.5X RAM */
-    MinimumSize = (Ram >= 1024 * MEGABYTE) ? Ram : MaximumSize / 2;
+    MinimumSize = Ram / SMP_SYSMGD_MIN_DIVISOR;
+    if (MinimumSize < SMP_SYSMGD_MIN_FLOOR)
+        MinimumSize = SMP_SYSMGD_MIN_FLOOR;
+    if (MinimumSize > SMP_SYSMGD_MIN_CEILING)
+        MinimumSize = SMP_SYSMGD_MIN_CEILING;
+    if (MinimumSize > MaximumSize)
+        MinimumSize = MaximumSize;
 
     /* Write the new sizes in the descriptor and mark it as system managed */
     Descriptor->MinSize.QuadPart = MinimumSize;
@@ -1047,6 +1108,11 @@ SmpCreateVolumeDescriptors(VOID)
         FreeSpace.QuadPart = SizeInfo.AvailableAllocationUnits.QuadPart *
                              SizeInfo.SectorsPerAllocationUnit;
         FinalFreeSpace.QuadPart = FreeSpace.QuadPart * SizeInfo.BytesPerSector;
+
+    /* Remember the volume size, used to limit system-managed paging files */
+    Volume->TotalSize.QuadPart = SizeInfo.TotalAllocationUnits.QuadPart *
+                                 SizeInfo.SectorsPerAllocationUnit *
+                                 SizeInfo.BytesPerSector;
 
         /* Check if there is less than 32 MB free so we don't starve the disk */
         if (FinalFreeSpace.QuadPart <= MINIMUM_TO_KEEP_FREE)
