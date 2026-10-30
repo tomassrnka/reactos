@@ -164,6 +164,7 @@ extern void func_UnhandledExceptionExit(void);
 extern void func_UnmapViewOfFileEx(void);
 extern void func_WaitOnAddress(void);
 extern void func_WerFlags(void);
+extern void func_WerRegisterMemoryFile(void);
 extern void func_WerRuntimeExceptionModule(void);
 extern void func_WideCharToMultiByte(void);
 extern void func_ReadProcessMemory(void);
@@ -341,6 +342,7 @@ const struct test winetest_testlist[] =
     { "UnmapViewOfFileEx",           func_UnmapViewOfFileEx },
     { "WaitOnAddress",               func_WaitOnAddress },
     { "WerFlags",                    func_WerFlags },
+    { "WerRegisterMemoryFile",      func_WerRegisterMemoryFile },
     { "WerRuntimeExceptionModule",   func_WerRuntimeExceptionModule },
     { "WideCharToMultiByte",         func_WideCharToMultiByte },
     { "ReadProcessMemory",           func_ReadProcessMemory },

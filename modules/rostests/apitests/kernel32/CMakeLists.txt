@@ -163,6 +163,7 @@ list(APPEND SOURCE
     UnmapViewOfFileEx.c
     WaitOnAddress.c
     WerFlags.c
+    WerRegisterMemoryFile.c
     WerRuntimeExceptionModule.c
     WideCharToMultiByte.c
     Wow64Process.c
