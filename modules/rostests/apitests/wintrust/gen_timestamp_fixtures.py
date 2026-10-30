@@ -45,6 +45,7 @@ def oid(s):
     return tlv(0x06, out)
 def utctime(d): return tlv(0x17, d.strftime('%y%m%d%H%M%SZ').encode())
 def gentime(d): return tlv(0x18, d.strftime('%Y%m%d%H%M%SZ').encode())
+def cmstime(d): return utctime(d) if d.year < 2050 else gentime(d)    # CMS Time: UTCTime up to 2049
 
 def read(d, off=0):
     """-> tag, content start, content end"""
@@ -182,7 +183,7 @@ def tsa_token(key, cert, imprint, gen, mode='ok'):
         # validity: the signed attributes still verify, the content they cover does not
         signed_info = tstinfo(imprint, gen.replace(year=gen.year + 5))
     attrs = [attr(OID_CT, oid(OID_TSTINFO)),
-             attr(OID_ST, utctime(gen)),
+             attr(OID_ST, cmstime(gen)),
              attr(OID_MD, octets(sha256(signed_info)))]
     signers = [] if mode == 'unsigned' else [signer_info(key, cert, attrs, bad_sig=(mode == 'badsig'))[0]]
     return signed_data(OID_TSTINFO, octets(content_info), [cert], signers, version=3)
@@ -205,7 +206,8 @@ def main(outpath):
         shutil.rmtree(W, ignore_errors=True)
 
 def generate(outpath):
-    for k in ('root', 'leaf', 'leaffut', 'tsa', 'tsaold', 'tsanoeku', 'tsaevil'):
+    for k in ('root', 'leaf', 'leaffut', 'leafnow', 'leafmid', 'leaf2040', 'tsa', 'tsa2030', 'tsa2040', 'tsaold', 'tsamid', 'tsafut',
+              'tsanoeku', 'tsaevil'):
         mkkey(k)
     root = mkcert('root', 'ReactOS test time stamp root', '20200101000000Z', '20991231000000Z')
     leaf = mkcert('leaf', 'ReactOS test expired signer', '20200101000000Z', '20210101000000Z', 'root',
@@ -214,10 +216,26 @@ def generate(outpath):
     # that time stamp would make the signature valid: the future check alone must refuse it
     leaffut = mkcert('leaffut', 'ReactOS test future signer', '20850101000000Z', '20990101000000Z', 'root',
                      '1.3.6.1.5.5.7.3.3', 7)
+    # valid now but not in 2090, and valid in 2040 but not now
+    leafnow = mkcert('leafnow', 'ReactOS test signer, not valid in 2090', '20200101000000Z', '20600101000000Z',
+                     'root', '1.3.6.1.5.5.7.3.3', 8)
+    leaf2040 = mkcert('leaf2040', 'ReactOS test signer valid in 2040 only', '20350101000000Z',
+                      '20450101000000Z', 'root', '1.3.6.1.5.5.7.3.3', 9)
+    leafmid = mkcert('leafmid', 'ReactOS test signer, not valid in 2040', '20200101000000Z', '20350101000000Z',
+                     'root', '1.3.6.1.5.5.7.3.3', 12)
     tsa = mkcert('tsa', 'ReactOS test TSA', '20200101000000Z', '20950101000000Z', 'root',
                  '1.3.6.1.5.5.7.3.8', 3)
     tsaold = mkcert('tsaold', 'ReactOS test TSA, expired', '20200101000000Z', '20220101000000Z', 'root',
                     '1.3.6.1.5.5.7.3.8', 4)
+    # a TSA valid now but expired by 2090, and one valid in 2090 but not yet now
+    tsamid = mkcert('tsamid', 'ReactOS test TSA, expires 2050', '20200101000000Z', '20500101000000Z', 'root',
+                    '1.3.6.1.5.5.7.3.8', 10)
+    tsafut = mkcert('tsafut', 'ReactOS test TSA, valid from 2085', '20850101000000Z', '20990101000000Z',
+                    'root', '1.3.6.1.5.5.7.3.8', 11)
+    tsa2030 = mkcert('tsa2030', 'ReactOS test TSA, expires 2030', '20200101000000Z', '20300101000000Z', 'root',
+                     '1.3.6.1.5.5.7.3.8', 13)
+    tsa2040 = mkcert('tsa2040', 'ReactOS test TSA, valid 2035-2045', '20350101000000Z', '20450101000000Z',
+                     'root', '1.3.6.1.5.5.7.3.8', 14)
     tsanoeku = mkcert('tsanoeku', 'ReactOS test TSA without time stamping usage', '20200101000000Z',
                       '20950101000000Z', 'root', '1.3.6.1.5.5.7.3.3', 5)
     tsaevil = mkcert('tsaevil', 'ReactOS test self-signed TSA', '20200101000000Z', '20950101000000Z', None,
@@ -255,11 +273,23 @@ def generate(outpath):
     fx['FutureNoTimeStamp'] = build(key='leaffut', cert=leaffut)[0]
     fx['Rfc3161FutureTime'] = build(rfc(tsa_token('tsa', tsa, sha256(futsig), fut)), key='leaffut',
                                     cert=leaffut)[0]
+    # which time the signer and the TSA are checked at when genTime is in the future: Windows checks
+    # both as of genTime, not now
+    _, nowsig = build(key='leafnow', cert=leafnow)
+    _, expsig = build()
+    _, sig40 = build(key='leaf2040', cert=leaf2040)
+    fx['Rfc3161FutureTsaExpired'] = build(rfc(tsa_token('tsamid', tsamid, sha256(futsig), fut)),
+                                          key='leaffut', cert=leaffut)[0]
+    fx['Rfc3161FutureTsaNotYet'] = build(rfc(tsa_token('tsafut', tsafut, sha256(futsig), fut)),
+                                         key='leaffut', cert=leaffut)[0]
+    fx['Rfc3161FutureSignerNow'] = build(rfc(tsa_token('tsa', tsa, sha256(nowsig), fut)),
+                                         key='leafnow', cert=leafnow)[0]
+    fx['Rfc3161FutureSignerExpired'] = build(rfc(tsa_token('tsa', tsa, sha256(expsig), fut)))[0]
     fx['Rfc3161NoEku'] = build(rfc(tsa_token('tsanoeku', tsanoeku, imprint, gen)))[0]
 
     def counter(key, cert, digest, when, bad=False, tamper=False, hash_oid=OID_SHA256):
         def attrs_at(t):
-            return [attr(OID_CT, oid(OID_DATA)), attr(OID_ST, utctime(t)), attr(OID_MD, octets(digest))]
+            return [attr(OID_CT, oid(OID_DATA)), attr(OID_ST, cmstime(t)), attr(OID_MD, octets(digest))]
         if tamper:
             # signed for a later time, carried with a signing time inside the signer's validity
             si, _ = signer_info(key, cert, attrs_at(when.replace(year=when.year + 5)))
@@ -276,6 +306,19 @@ def generate(outpath):
     fx['CounterWrongDigest'] = build(counter('tsa', tsa, other, gen), [tsa])[0]
     fx['CounterNoEku'] = build(counter('tsanoeku', tsanoeku, imprint, gen), [tsanoeku])[0]
     fx['CounterUntrustedTsa'] = build(counter('tsaevil', tsaevil, imprint, gen), [tsaevil])[0]
+    # countersignatures dated in the future (a countersignature's signing time is a UTCTime: up to 2049)
+    t40 = datetime.datetime(2040, 6, 1, 12)
+    fx['CounterFutureUtc'] = build(counter('tsa', tsa, sha256(sig40), t40), [tsa], key='leaf2040',
+                                   cert=leaf2040)[0]
+    fx['CounterFutureTsaExpired'] = build(counter('tsa2030', tsa2030, sha256(sig40), t40), [tsa2030],
+                                          key='leaf2040', cert=leaf2040)[0]
+    fx['CounterFutureTsaNotYet'] = build(counter('tsa2040', tsa2040, sha256(sig40), t40), [tsa2040],
+                                         key='leaf2040', cert=leaf2040)[0]
+    _, midsig = build(key='leafmid', cert=leafmid)
+    fx['CounterFutureSignerNow'] = build(counter('tsa', tsa, sha256(midsig), t40), [tsa], key='leafmid',
+                                         cert=leafmid)[0]
+    fx['CounterFutureSignerExpired'] = build(counter('tsa', tsa, sha256(expsig), t40), [tsa])[0]
+
     # the countersignatures of the time stamping services of the 2000s: digest and signature with MD5
     fx['CounterMd5'] = build(counter('tsa', tsa, digest(OID_MD5, sig), gen, hash_oid=OID_MD5), [tsa])[0]
     fx['CounterMd5WrongDigest'] = build(counter('tsa', tsa, digest(OID_MD5, b'not the signature'), gen,
