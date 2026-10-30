@@ -151,6 +151,13 @@ echo TIMING query 7zip start %time%>> %LOG%
 echo TIMING query end %time%>> %LOG%
 %FM% /list /tier:software /source:scoop/extras > %O%\l.txt 2>&1
 find "feature(s)" %O%\l.txt >> %LOG%
+if not defined SHOT goto :noshot3
+start "" %SystemRoot%\system32\optfeatures.exe /software /source:scoop/extras
+ping -n 30 127.0.0.1 >nul
+echo SCOOPLIVE:SHOT3>COM2
+ping -n 20 127.0.0.1 >nul
+taskkill /f /im optfeatures.exe >nul 2>&1
+:noshot3
 %FM% /uninstall git >> %LOG% 2>&1
 call :rc0 "E6 featmgr /uninstall git rc0"
 
