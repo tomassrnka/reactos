@@ -71,6 +71,7 @@ extern void func_RegWow64SharedLongName(void);
 extern void func_RegWow64Volatile(void);
 extern void func_RegWow64SharedCreate(void);
 extern void func_RegWow64Aliases(void);
+extern void func_RegWow64RelativeView(void);
 extern void func_ServiceProcess(void);
 extern void func_ServiceStructLayout(void);
 
@@ -89,6 +90,7 @@ const struct test winetest_testlist[] =
     { "RegWow64SharedLongName", func_RegWow64SharedLongName },
     { "RegWow64Volatile", func_RegWow64Volatile },
     { "RegWow64Aliases", func_RegWow64Aliases },
+    { "RegWow64RelativeView", func_RegWow64RelativeView },
     { "CreateService", func_CreateService },
     { "CloseTrace", func_CloseTrace },
     { "DuplicateTokenEx", func_DuplicateTokenEx },
