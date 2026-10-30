@@ -73,6 +73,7 @@ struct mi_operation
     HANDLE ack;                 /* manual-ack pacing for push delivery */
     HANDLE thread;
     DWORD thread_id;
+    HMODULE module;             /* reference on mi.dll held for the life of the worker thread */
     BOOL cancelled;
     BOOL closed;
     BOOL done;
@@ -1163,6 +1164,17 @@ static BOOL op_cancelled(struct mi_operation *op)
     return ret;
 }
 
+/* take the WMI lock, giving up when the operation is cancelled or closed while it waits */
+static BOOL wmi_lock(struct mi_operation *op)
+{
+    while (!TryEnterCriticalSection(&wmi_cs))
+    {
+        if (op_cancelled(op)) return FALSE;
+        Sleep(5);
+    }
+    return TRUE;
+}
+
 /* one class object per class name for the instances of an operation */
 struct class_cache
 {
@@ -1357,19 +1369,24 @@ static void run_operation(struct mi_operation *op)
     BOOL locked = FALSE;
 
     if (op->kind == OP_FAILED || op->done) goto done; /* completed at creation */
-    EnterCriticalSection(&wmi_cs);
-    locked = TRUE;
-    if (op->kind == OP_TEST_CONNECTION)
-    {
-        hr = connect_namespace(L"root\\cimv2", &services);
-        op_complete(op, hresult_to_mi(hr), FAILED(hr) ? hr : 0, NULL);
-        goto done;
-    }
-    if (FAILED(hr = connect_namespace(op->nameSpace, &services)))
+    /* connecting does not touch the class tables, so it runs outside the WMI lock */
+    if (FAILED(hr = connect_namespace(op->kind == OP_TEST_CONNECTION ? L"root\\cimv2" : op->nameSpace, &services)))
     {
         op_complete(op, hresult_to_mi(hr), hr, NULL);
         goto done;
     }
+    if (op->kind == OP_TEST_CONNECTION)
+    {
+        op_complete(op, MI_RESULT_OK, 0, NULL);
+        goto done;
+    }
+    /* a long fill by another operation must not hold up Cancel and Close of the ones queued behind it */
+    if (!wmi_lock(op))
+    {
+        op_complete(op, MI_RESULT_FAILED, 0, L"The operation was cancelled");
+        goto done;
+    }
+    locked = TRUE;
     switch (op->kind)
     {
     case OP_ENUMERATE:
@@ -1496,6 +1513,7 @@ static void deliver_push(struct mi_operation *op)
 static DWORD WINAPI operation_thread(void *arg)
 {
     struct mi_operation *op = arg;
+    HMODULE module = op->module;
     HRESULT hr_init;
 
     hr_init = CoInitializeEx(NULL, COINIT_MULTITHREADED);
@@ -1503,6 +1521,9 @@ static DWORD WINAPI operation_thread(void *arg)
     if (SUCCEEDED(hr_init)) CoUninitialize();
     if (op->push) deliver_push(op);
     op_release(op);
+    /* the worker runs mi.dll code until its last instruction: a FreeLibrary by the client (which runs
+     * DllMain and deletes the locks) must wait for that, so drop the module reference on the way out */
+    if (module) FreeLibraryAndExitThread(module, 0);
     return 0;
 }
 
@@ -1782,12 +1803,19 @@ static struct mi_operation *op_create(struct mi_session *s, MI_Uint32 flags, con
 /* start the worker; on failure the operation completes with an error */
 static void op_start(struct mi_operation *op)
 {
+    HMODULE module = NULL;
+
     InterlockedIncrement(&op->refs); /* worker reference */
+    /* pin mi.dll while the worker lives; if that fails the worker still runs, unprotected, as before */
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCWSTR)operation_thread, &module);
+    op->module = module;
     op_lock(op);
     op->thread = CreateThread(NULL, 0, operation_thread, op, 0, &op->thread_id);
     op_unlock(op);
     if (!op->thread)
     {
+        op->module = NULL;
+        if (module) FreeLibrary(module);
         op_complete(op, MI_RESULT_SERVER_LIMITS_EXCEEDED, HRESULT_FROM_WIN32(GetLastError()), NULL);
         if (op->push) deliver_push(op);
         op_release(op);
