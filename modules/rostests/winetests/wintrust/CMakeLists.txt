@@ -4,6 +4,7 @@ add_definitions(-DUSE_WINE_TODOS)
 list(APPEND SOURCE
     asn.c
     crypt.c
+    pwrshsip.c
     register.c
     softpub.c
     testlist.c)
