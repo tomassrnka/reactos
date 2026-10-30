@@ -176,6 +176,7 @@ extern void func_RtlSRWLockStress(void);
 extern void func_RtlSRWLockThroughput(void);
 extern void func_RtlSRWLockWait(void);
 extern void func_RtlUnhandledExceptionFilter(void);
+extern void func_RtlUnwindExConsolidate(void);
 extern void func_RtlUnicodeStringToAnsiString(void);
 extern void func_RtlUnicodeStringToCountedOemString(void);
 extern void func_RtlUnicodeToOemN(void);
@@ -378,6 +379,7 @@ const struct test winetest_testlist[] =
     { "RtlSRWLockThroughput",          func_RtlSRWLockThroughput },
     { "RtlSRWLockWait",                 func_RtlSRWLockWait },
     { "RtlUnhandledExceptionFilter",    func_RtlUnhandledExceptionFilter },
+    { "RtlUnwindExConsolidate",         func_RtlUnwindExConsolidate },
     { "RtlUnicodeStringToAnsiSize",     func_RtlxUnicodeStringToAnsiSize }, /* For some reason, starting test name with Rtlx hides it */
     { "RtlUnicodeStringToAnsiString",   func_RtlUnicodeStringToAnsiString },
     { "RtlUnicodeStringToCountedOemString", func_RtlUnicodeStringToCountedOemString },

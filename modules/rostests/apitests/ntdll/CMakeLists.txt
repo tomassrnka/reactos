@@ -191,6 +191,7 @@ list(APPEND SOURCE
     RtlSRWLockWait.c
     RtlRetrieveNtUserPfn.c
     RtlUnhandledExceptionFilter.c
+    RtlUnwindExConsolidate.c
     RtlUnicodeStringToAnsiString.c
     RtlUnicodeStringToCountedOemString.c
     RtlUnicodeToOemN.c
@@ -230,6 +231,7 @@ elseif(ARCH STREQUAL "amd64")
         amd64/NtCreateThread.S
         amd64/StackOverflowDispatch.S
         amd64/BadSegmentFault.S
+        amd64/RtlUnwindExConsolidate.S
     )
 endif()
 
