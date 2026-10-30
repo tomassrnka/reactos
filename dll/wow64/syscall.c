@@ -864,9 +864,9 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         return Status;
     }
     case W64_NtGetContextThread:
-        return NtQueryInformationThread(H(0), ThreadWow64Context, P(1), sizeof(WOW64_CONTEXT), NULL);
+        return Wow64GetSetContextThread(H(0), P(1), FALSE);
     case W64_NtSetContextThread:
-        return NtSetInformationThread(H(0), ThreadWow64Context, P(1), sizeof(WOW64_CONTEXT));
+        return Wow64GetSetContextThread(H(0), P(1), TRUE);
     case W64_NtQueueApcThread:
         return NtQueueApcThread(H(0), (PKNORMAL_ROUTINE)(ULONG_PTR)(-((LONG64)a[1] << 2)), P(2), P(3), P(4));
     case W64_NtDuplicateObject:

@@ -13,14 +13,124 @@ typedef struct _WOW64_APC_FRAME
 
 PVOID Wow64ApcDispatcher;
 
+/* CONTEXT_XSTATE of a guest context. The processor holds one extended state for
+ * both architectures, so the native services get and set it. For the same
+ * compaction mask the chunk (XSAVE_AREA_HEADER and the features) has the same
+ * layout in a native and a guest CONTEXT_EX, and is copied as it is. */
+#define WOW64_XSTATE_FLAG 0x40
+#define WOW64_XSTATE_MAX 0x1000
+
+typedef struct { LONG Offset; ULONG Length; } WOW64_CONTEXT_CHUNK;
+typedef struct { WOW64_CONTEXT_CHUNK All, Legacy, XState; } WOW64_CONTEXT_EX;
+
+static BOOLEAN Wow64XStateEnabled(VOID)
+{
+    return (SharedUserData->XState.EnabledFeatures & ~(ULONG64)3) != 0;
+}
+
+/* Gets (Set FALSE) or sets the extended state of a thread through the chunk of
+ * a guest context with WOW64_CONTEXT_XSTATE. Without extended state the flag is
+ * ignored, as the native services do. */
+NTSTATUS Wow64XStateContext(HANDLE Thread, WOW64_CONTEXT *Guest, BOOLEAN Set)
+{
+    DECLSPEC_ALIGN(64) UCHAR Buffer[ALIGN_UP_BY(sizeof(CONTEXT) + sizeof(WOW64_CONTEXT_EX), 64) + WOW64_XSTATE_MAX];
+    PCONTEXT Native = (PCONTEXT)Buffer;
+    WOW64_CONTEXT_EX *NativeEx = (WOW64_CONTEXT_EX *)(Native + 1);
+    PUCHAR NativeChunk = Buffer + ALIGN_UP_BY(sizeof(CONTEXT) + sizeof(WOW64_CONTEXT_EX), 64);
+    WOW64_CONTEXT_EX GuestEx;
+    PUCHAR GuestChunk;
+    ULONG Length;
+    NTSTATUS Status;
+
+    if (!Wow64XStateEnabled()) return STATUS_SUCCESS;
+    _SEH2_TRY
+    {
+        GuestEx = *(WOW64_CONTEXT_EX *)(Guest + 1);
+        if (GuestEx.XState.Offset < (LONG)sizeof(GuestEx) || GuestEx.XState.Length < sizeof(XSAVE_AREA_HEADER))
+            _SEH2_YIELD(return STATUS_INVALID_PARAMETER);
+        GuestChunk = (PUCHAR)(Guest + 1) + GuestEx.XState.Offset;
+        Length = min(GuestEx.XState.Length, WOW64_XSTATE_MAX);
+        RtlZeroMemory(Native, sizeof(*Native));
+        Native->ContextFlags = CONTEXT_XSTATE;
+        NativeEx->All.Offset = NativeEx->Legacy.Offset = -(LONG)sizeof(CONTEXT);
+        NativeEx->Legacy.Length = sizeof(CONTEXT);
+        NativeEx->XState.Offset = (LONG)(NativeChunk - (PUCHAR)NativeEx);
+        NativeEx->XState.Length = Length;
+        NativeEx->All.Length = (ULONG)(NativeChunk + Length - Buffer);
+        if (Set) RtlCopyMemory(NativeChunk, GuestChunk, Length);
+        else
+        {
+            RtlZeroMemory(NativeChunk, Length);
+            ((PXSAVE_AREA_HEADER)NativeChunk)->CompactionMask = ((PXSAVE_AREA_HEADER)GuestChunk)->CompactionMask;
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    { _SEH2_YIELD(return _SEH2_GetExceptionCode()); }
+    _SEH2_END;
+    Status = Set ? NtSetContextThread(Thread, Native) : NtGetContextThread(Thread, Native);
+    if (NT_SUCCESS(Status) && !Set)
+    {
+        _SEH2_TRY { RtlCopyMemory(GuestChunk, NativeChunk, Length); }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Status = _SEH2_GetExceptionCode(); }
+        _SEH2_END;
+    }
+    return Status;
+}
+
+/* NtGetContextThread/NtSetContextThread of the guest: the registers through
+ * ThreadWow64Context, the extended state through the native services */
+NTSTATUS Wow64GetSetContextThread(HANDLE Thread, WOW64_CONTEXT *Guest, BOOLEAN Set)
+{
+    WOW64_CONTEXT Local;
+    ULONG Flags;
+    NTSTATUS Status;
+
+    _SEH2_TRY { Flags = Guest->ContextFlags; }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    { _SEH2_YIELD(return _SEH2_GetExceptionCode()); }
+    _SEH2_END;
+    if ((Flags & WOW64_CONTEXT_i386) == 0 || (Flags & WOW64_XSTATE_FLAG) == 0)
+    {
+        return Set ? NtSetInformationThread(Thread, ThreadWow64Context, Guest, sizeof(*Guest))
+                   : NtQueryInformationThread(Thread, ThreadWow64Context, Guest, sizeof(*Guest), NULL);
+    }
+    _SEH2_TRY { Local = *Guest; }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    { _SEH2_YIELD(return _SEH2_GetExceptionCode()); }
+    _SEH2_END;
+    Local.ContextFlags = Flags & ~WOW64_XSTATE_FLAG;
+    if (Set)
+    {
+        Status = NtSetInformationThread(Thread, ThreadWow64Context, &Local, sizeof(Local));
+        if (NT_SUCCESS(Status)) Status = Wow64XStateContext(Thread, Guest, TRUE);
+        return Status;
+    }
+    Status = NtQueryInformationThread(Thread, ThreadWow64Context, &Local, sizeof(Local), NULL);
+    if (!NT_SUCCESS(Status)) return Status;
+    Local.ContextFlags = Flags;
+    _SEH2_TRY { *Guest = Local; }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    { _SEH2_YIELD(return _SEH2_GetExceptionCode()); }
+    _SEH2_END;
+    return Wow64XStateContext(Thread, Guest, FALSE);
+}
+
 NTSTATUS Wow64Continue(const WOW64_CONTEXT *Context, BOOLEAN TestAlert)
 {
     CONTEXT Native;
     WOW64_CPU_STATE *Cpu = NtCurrentTeb()->TlsSlots[WOW64_TLS_CPU];
     WOW64_APC_FRAME *Apc = Cpu->ApcFrame;
+    NTSTATUS Status;
     if ((Context->ContextFlags & WOW64_CONTEXT_FULL) != WOW64_CONTEXT_FULL ||
-        (Context->ContextFlags & ~WOW64_CONTEXT_ALL))
+        (Context->ContextFlags & ~(WOW64_CONTEXT_ALL | WOW64_XSTATE_FLAG)))
         return STATUS_NOT_SUPPORTED;
+    /* The extended state goes to the processor first; nothing on the way to
+     * NtContinue uses those registers, and NtContinue leaves them alone. */
+    if (Context->ContextFlags & WOW64_XSTATE_FLAG)
+    {
+        Status = Wow64XStateContext(NtCurrentThread(), (WOW64_CONTEXT *)Context, TRUE);
+        if (!NT_SUCCESS(Status)) return Status;
+    }
     if (Apc && Context == Apc->Guest)
     {
         /* Return through the interrupted native syscall before leaving its
@@ -146,30 +256,75 @@ VOID NTAPI Wow64PrepareForApc(PVOID Arg1, PVOID Arg2, PVOID Arg3, PCONTEXT Nativ
     Wow64CpuRun(&Cpu);
 }
 
-/* The guest exception frame: the i386 dispatcher takes two pointers at ESP */
+/* The guest exception frame: the i386 dispatcher takes two pointers at ESP.
+ * The CONTEXT_EX follows the context. With extended state the frame is a
+ * WOW64_EXCEPTION_FRAME_XSTATE, whose chunk is 64 byte aligned after it. */
+#define WOW64_XSTATE_FRAME 0xc00
 typedef struct
 {
     ULONG RecordPointer, ContextPointer;
     EXCEPTION_RECORD32 Record;
     WOW64_CONTEXT Context;
+    WOW64_CONTEXT_EX ContextEx;
 } WOW64_EXCEPTION_FRAME;
+
+typedef struct
+{
+    WOW64_EXCEPTION_FRAME Frame;
+    UCHAR XState[WOW64_XSTATE_FRAME + 64];
+} WOW64_EXCEPTION_FRAME_XSTATE;
 
 /* Stack the worker needs below its caller: the guest frame and the native
  * CONTEXT it builds, plus its saved registers and the frames of the calls it
  * makes on the way to NtContinue (Wow64NativeToContext, the copy, NtContinue) */
 #define WOW64_DISPATCH_RESERVE (sizeof(WOW64_EXCEPTION_FRAME) + sizeof(CONTEXT) + 0x200)
+#define WOW64_DISPATCH_RESERVE_XSTATE (WOW64_DISPATCH_RESERVE + sizeof(WOW64_EXCEPTION_FRAME_XSTATE) - sizeof(WOW64_EXCEPTION_FRAME))
 
-static DECLSPEC_NOINLINE VOID DispatchGuestException(PEXCEPTION_RECORD Record, PCONTEXT Context, TEB32 *Teb32)
+/* Whether the native context carries an extended state chunk the guest frame can take */
+static BOOLEAN NativeXState(PCONTEXT Context)
 {
-    WOW64_EXCEPTION_FRAME Frame;
+    const WOW64_CONTEXT_EX *NativeEx = (const WOW64_CONTEXT_EX *)(Context + 1);
+
+    return (Context->ContextFlags & CONTEXT_XSTATE) == CONTEXT_XSTATE &&
+           NativeEx->XState.Offset >= (LONG)sizeof(*NativeEx) &&
+           NativeEx->XState.Length >= sizeof(XSAVE_AREA_HEADER) &&
+           NativeEx->XState.Length <= WOW64_XSTATE_FRAME;
+}
+
+/* Gives the guest context the extended state of the native one, like the
+ * native kernel does for an exception: the guest handlers may change it and
+ * NtContinue loads it back. Without XState the context has none. */
+static VOID DispatchGuestXState(WOW64_EXCEPTION_FRAME *Frame, PUCHAR XState, PCONTEXT Context)
+{
+    const WOW64_CONTEXT_EX *NativeEx = (const WOW64_CONTEXT_EX *)(Context + 1);
+    PUCHAR Chunk;
+
+    Frame->ContextEx.All.Offset = Frame->ContextEx.Legacy.Offset = -(LONG)sizeof(WOW64_CONTEXT);
+    Frame->ContextEx.Legacy.Length = sizeof(WOW64_CONTEXT);
+    Frame->ContextEx.XState.Offset = 25;
+    Frame->ContextEx.XState.Length = 0;
+    Frame->ContextEx.All.Length = sizeof(WOW64_CONTEXT) + sizeof(WOW64_CONTEXT_EX);
+    if (!XState || !NativeXState(Context))
+        return;
+    Chunk = ALIGN_UP_POINTER_BY(XState, 64);
+    RtlCopyMemory(Chunk, (const UCHAR *)NativeEx + NativeEx->XState.Offset, NativeEx->XState.Length);
+    Frame->ContextEx.XState.Offset = (LONG)(Chunk - (PUCHAR)&Frame->ContextEx);
+    Frame->ContextEx.XState.Length = NativeEx->XState.Length;
+    Frame->ContextEx.All.Length = sizeof(WOW64_CONTEXT) + Frame->ContextEx.XState.Offset + NativeEx->XState.Length;
+    Frame->Context.ContextFlags |= WOW64_XSTATE_FLAG;
+}
+
+static VOID DispatchGuestFrame(PEXCEPTION_RECORD Record, PCONTEXT Context, TEB32 *Teb32,
+                               WOW64_EXCEPTION_FRAME *Frame, PUCHAR XState, PUCHAR FrameEnd)
+{
     CONTEXT Native;
     ULONG i;
     NTSTATUS Status;
 
     if (!Wow64ExceptionDispatcher ||
-        (ULONG_PTR)&Frame < GuestStackFloor(Teb32) ||
+        (ULONG_PTR)Frame < GuestStackFloor(Teb32) ||
         (ULONG_PTR)&Native < GuestStackFloor(Teb32) ||
-        (ULONG_PTR)(&Frame + 1) > Teb32->NtTib.StackBase)
+        (ULONG_PTR)FrameEnd > Teb32->NtTib.StackBase)
         goto Failed;
 
     /* The kernel's amd64 frame already lives on the guest stack. A local
@@ -179,18 +334,19 @@ static DECLSPEC_NOINLINE VOID DispatchGuestException(PEXCEPTION_RECORD Record, P
     /* The copy has no extended state behind it. The guest's registers still
      * hold that state, so NtContinue must leave it alone. */
     Native.ContextFlags &= ~(CONTEXT_XSTATE & ~CONTEXT_AMD64);
-    Wow64NativeToContext(&Frame.Context, Context);
-    RtlZeroMemory(&Frame.Record, sizeof(Frame.Record));
-    Frame.Record.ExceptionCode = Record->ExceptionCode;
-    Frame.Record.ExceptionFlags = Record->ExceptionFlags;
-    Frame.Record.ExceptionAddress = PtrToUlong(Record->ExceptionAddress);
-    Frame.Record.NumberParameters = min(Record->NumberParameters, EXCEPTION_MAXIMUM_PARAMETERS);
-    for (i = 0; i < Frame.Record.NumberParameters; ++i)
-        Frame.Record.ExceptionInformation[i] = (ULONG)Record->ExceptionInformation[i];
-    Frame.RecordPointer = PtrToUlong(&Frame.Record);
-    Frame.ContextPointer = PtrToUlong(&Frame.Context);
+    Wow64NativeToContext(&Frame->Context, Context);
+    DispatchGuestXState(Frame, XState, Context);
+    RtlZeroMemory(&Frame->Record, sizeof(Frame->Record));
+    Frame->Record.ExceptionCode = Record->ExceptionCode;
+    Frame->Record.ExceptionFlags = Record->ExceptionFlags;
+    Frame->Record.ExceptionAddress = PtrToUlong(Record->ExceptionAddress);
+    Frame->Record.NumberParameters = min(Record->NumberParameters, EXCEPTION_MAXIMUM_PARAMETERS);
+    for (i = 0; i < Frame->Record.NumberParameters; ++i)
+        Frame->Record.ExceptionInformation[i] = (ULONG)Record->ExceptionInformation[i];
+    Frame->RecordPointer = PtrToUlong(&Frame->Record);
+    Frame->ContextPointer = PtrToUlong(&Frame->Context);
     Native.Rip = (ULONG_PTR)Wow64ExceptionDispatcher;
-    Native.Rsp = (ULONG_PTR)&Frame;
+    Native.Rsp = (ULONG_PTR)Frame;
     Native.SegCs = 0x23;
     Native.SegSs = Native.SegDs = Native.SegEs = 0x2b;
     Native.SegFs = 0x53;
@@ -199,14 +355,27 @@ static DECLSPEC_NOINLINE VOID DispatchGuestException(PEXCEPTION_RECORD Record, P
     DbgPrint("WoW64: exception dispatch failed: %08lx\n", Status);
 Failed:
     DbgPrint("WoW64: cannot dispatch guest exception %08lx (frame %p, guest stack %08lx-%08lx)\n",
-             Record->ExceptionCode, &Frame, Teb32->NtTib.StackLimit, Teb32->NtTib.StackBase);
+             Record->ExceptionCode, Frame, Teb32->NtTib.StackLimit, Teb32->NtTib.StackBase);
     NtTerminateProcess(NtCurrentProcess(), Record->ExceptionCode);
+}
+
+static DECLSPEC_NOINLINE VOID DispatchGuestException(PEXCEPTION_RECORD Record, PCONTEXT Context, TEB32 *Teb32)
+{
+    WOW64_EXCEPTION_FRAME Frame;
+    DispatchGuestFrame(Record, Context, Teb32, &Frame, NULL, (PUCHAR)(&Frame + 1));
+}
+
+static DECLSPEC_NOINLINE VOID DispatchGuestExceptionXState(PEXCEPTION_RECORD Record, PCONTEXT Context, TEB32 *Teb32)
+{
+    WOW64_EXCEPTION_FRAME_XSTATE Frame;
+    DispatchGuestFrame(Record, Context, Teb32, &Frame.Frame, Frame.XState, (PUCHAR)(&Frame + 1));
 }
 
 VOID NTAPI Wow64PrepareForException(PEXCEPTION_RECORD Record, PCONTEXT Context)
 {
     TEB32 *Teb32;
     ULONG_PTR Low, Deallocation, Guarantee;
+    BOOLEAN WithXState;
 
     if (Context->SegCs != 0x23) return;
     Teb32 = WOW64_TEB32(NtCurrentTeb());
@@ -218,7 +387,17 @@ VOID NTAPI Wow64PrepareForException(PEXCEPTION_RECORD Record, PCONTEXT Context)
 #else
     Low = (ULONG_PTR)_AddressOfReturnAddress();
 #endif
+    /* The frame with extended state only when the stack is far from its end:
+     * what is left near it goes to the guest's handlers */
     Low -= WOW64_DISPATCH_RESERVE;
+    Deallocation = PAGE_ROUND_DOWN(Teb32->DeallocationStack);
+    Guarantee = ROUND_TO_PAGES(min((ULONG_PTR)Teb32->GuaranteedStackBytes, Teb32->NtTib.StackBase - Deallocation));
+    WithXState = NativeXState(Context) &&
+                 Low > WOW64_DISPATCH_RESERVE_XSTATE &&
+                 Low - (WOW64_DISPATCH_RESERVE_XSTATE - WOW64_DISPATCH_RESERVE) >= GuestStackFloor(Teb32) &&
+                 PAGE_ROUND_DOWN(Low - (WOW64_DISPATCH_RESERVE_XSTATE - WOW64_DISPATCH_RESERVE)) - Deallocation >
+                     2 * PAGE_SIZE + Guarantee + PAGE_SIZE;
+    if (WithXState) Low -= WOW64_DISPATCH_RESERVE_XSTATE - WOW64_DISPATCH_RESERVE;
     /* Once the stack is committed down to its floor (a stack overflow was just
      * raised) nothing is left to grow: the worker checks its own frame. */
     if (Low < GuestStackFloor(Teb32) && Teb32->NtTib.StackLimit <= GuestStackFloor(Teb32))
@@ -269,7 +448,10 @@ VOID NTAPI Wow64PrepareForException(PEXCEPTION_RECORD Record, PCONTEXT Context)
     {
         WOW64_GROW_GUEST_STACK(Teb32, Low);
     }
-    DispatchGuestException(Record, Context, Teb32);
+    if (WithXState && Record->ExceptionCode != STATUS_STACK_OVERFLOW)
+        DispatchGuestExceptionXState(Record, Context, Teb32);
+    else
+        DispatchGuestException(Record, Context, Teb32);
 }
 
 NTSTATUS Wow64RaiseException(const EXCEPTION_RECORD32 *Record, const WOW64_CONTEXT *Context,
