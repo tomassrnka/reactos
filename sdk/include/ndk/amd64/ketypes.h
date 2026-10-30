@@ -1124,13 +1124,18 @@ typedef struct _UAPC_FRAME
 //
 // Stack frame layout for KiUserExceptionDispatcher
 // The name is totally made up
+// The layout is the one of Windows: the CONTEXT_EX directly follows the CONTEXT, and the
+// extended state chunk (XSAVE_AREA_HEADER and features) the end of this structure, which
+// is 64 byte aligned on the stack.
 //
 typedef struct _KUSER_EXCEPTION_STACK
 {
-    CONTEXT Context;
-    EXCEPTION_RECORD ExceptionRecord;
-    ULONG64 Alignment;
-    MACHINE_FRAME MachineFrame;
+    CONTEXT Context;                    // 0x000
+    ULONG64 ContextEx[4];               // 0x4d0 CONTEXT_EX, padded to CONTEXT_EX_LENGTH
+    EXCEPTION_RECORD ExceptionRecord;   // 0x4f0
+    ULONG64 Alignment;                  // 0x588
+    MACHINE_FRAME MachineFrame;         // 0x590
+    ULONG64 Alignment2;                 // 0x5b8
 } KUSER_EXCEPTION_STACK, * PKUSER_EXCEPTION_STACK;
 
 typedef struct _DISPATCHER_CONTEXT

@@ -52,6 +52,13 @@ KIDTENTRY64 KiIdt[256];
 KDESCRIPTOR KiIdtDescriptor = {{0}, sizeof(KiIdt) - 1, KiIdt};
 
 
+/* The layout KiUserExceptionDispatcher expects, the one of Windows */
+C_ASSERT(FIELD_OFFSET(KUSER_EXCEPTION_STACK, ContextEx) == 0x4d0);
+C_ASSERT(FIELD_OFFSET(KUSER_EXCEPTION_STACK, ExceptionRecord) == 0x4f0);
+C_ASSERT(FIELD_OFFSET(KUSER_EXCEPTION_STACK, MachineFrame) == 0x590);
+C_ASSERT(sizeof(KUSER_EXCEPTION_STACK) == 0x5c0);
+C_ASSERT(sizeof(CONTEXT_EX) <= RTL_FIELD_SIZE(KUSER_EXCEPTION_STACK, ContextEx));
+
 /* FUNCTIONS *****************************************************************/
 
 CODE_SEG("INIT")
@@ -105,6 +112,9 @@ KiDispatchExceptionToUser(
     volatile BOOLEAN Retried = FALSE;
     ULONG64 UserRsp;
     PKUSER_EXCEPTION_STACK UserStack;
+    PCONTEXT_EX UserContextEx;
+    KI_XSTATE_CONTEXT XState;
+    volatile BOOLEAN HaveXState;
     ULONG ParamCount, i;
 
     /* Make sure we have a valid SS */
@@ -122,25 +132,57 @@ KiDispatchExceptionToUser(
         UserRecord = &LocalExceptRecord;
     }
 
-    /* Get new stack pointer and align it to 16 bytes */
-    UserRsp = (Context->Rsp - sizeof(KUSER_EXCEPTION_STACK)) & ~15;
-
-    /* Get pointer to the usermode context, exception record and machine frame */
-    UserStack = (PKUSER_EXCEPTION_STACK)UserRsp;
-
     /* Enable interrupts */
     _enable();
 
-    /* Set up the user-stack */
+    /* Like Windows, pass the extended state with the context: the handlers may change it, and
+       NtContinue loads it back. The kernel does not use these registers, they still hold the
+       values of user mode. A stack overflow leaves what is left of the stack to the handlers. */
+    HaveXState = ((NTSTATUS)UserRecord->ExceptionCode != STATUS_STACK_OVERFLOW) &&
+                 KiPrepareXStateDispatch(&XState);
+    if (HaveXState)
+        KiGetXStateContext(&XState);
+
 DispatchToUser:
+    /* Get new stack pointer and align it to 16 bytes, or 64 for the extended state after the frame */
+    if (HaveXState)
+        UserRsp = (Context->Rsp - sizeof(KUSER_EXCEPTION_STACK) - XState.Length) & ~63;
+    else
+        UserRsp = (Context->Rsp - sizeof(KUSER_EXCEPTION_STACK)) & ~15;
+
+    /* Get pointer to the usermode context, exception record and machine frame */
+    UserStack = (PKUSER_EXCEPTION_STACK)UserRsp;
+    UserContextEx = (PCONTEXT_EX)UserStack->ContextEx;
+
+    /* Set up the user-stack */
     _SEH2_TRY
     {
         /* Probe the user stack frame and zero it out */
-        ProbeForWrite(UserStack, sizeof(*UserStack), TYPE_ALIGNMENT(KUSER_EXCEPTION_STACK));
+        ProbeForWrite(UserStack,
+                      sizeof(*UserStack) + (HaveXState ? XState.Length : 0),
+                      TYPE_ALIGNMENT(KUSER_EXCEPTION_STACK));
         RtlZeroMemory(UserStack, sizeof(*UserStack));
 
         /* Copy Context */
         UserStack->Context = *Context;
+
+        /* Describe the parts of the context, as RtlInitializeExtendedContext does */
+        UserContextEx->All.Offset = -(LONG)sizeof(CONTEXT);
+        UserContextEx->Legacy.Offset = -(LONG)sizeof(CONTEXT);
+        UserContextEx->Legacy.Length = sizeof(CONTEXT);
+        if (HaveXState)
+        {
+            UserContextEx->XState.Offset = sizeof(KUSER_EXCEPTION_STACK) - FIELD_OFFSET(KUSER_EXCEPTION_STACK, ContextEx);
+            UserContextEx->XState.Length = XState.Length;
+            UserContextEx->All.Length = sizeof(KUSER_EXCEPTION_STACK) + XState.Length;
+            RtlCopyMemory(UserStack + 1, XState.Chunk, XState.Length);
+            UserStack->Context.ContextFlags |= CONTEXT_XSTATE;
+        }
+        else
+        {
+            UserContextEx->XState.Offset = 25;
+            UserContextEx->All.Length = sizeof(CONTEXT) + sizeof(CONTEXT_EX);
+        }
 
         /* Copy only the declared exception parameters. UserStack was zeroed
            above, so the unused ExceptionInformation slots - including the one
@@ -181,7 +223,23 @@ DispatchToUser:
             UserRecord = ExceptionRecord;
             Retried = TRUE;
 
+            /* What is left of the stack goes to the handlers, not to the extended state */
+            if (HaveXState)
+            {
+                KiFreeXStateContext(&XState);
+                HaveXState = FALSE;
+            }
+
             /* Do the exception again */
+            _SEH2_YIELD(goto DispatchToUser);
+        }
+
+        /* The stack may have no room left for the extended state, after an
+           overflow for instance: dispatch without it, as before */
+        if (HaveXState)
+        {
+            KiFreeXStateContext(&XState);
+            HaveXState = FALSE;
             _SEH2_YIELD(goto DispatchToUser);
         }
 
@@ -191,6 +249,9 @@ DispatchToUser:
         _SEH2_YIELD(return FALSE);
     }
     _SEH2_END;
+
+    if (HaveXState)
+        KiFreeXStateContext(&XState);
 
     /* Now set the two params for the user-mode dispatcher */
     TrapFrame->Rcx = (ULONG64)&UserStack->ExceptionRecord;

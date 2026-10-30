@@ -176,6 +176,9 @@ static DECLSPEC_NOINLINE VOID DispatchGuestException(PEXCEPTION_RECORD Record, P
      * frame is below it and cannot overwrite the source context or record.
      * The i386 dispatcher takes two pointers at ESP, with no return address. */
     Native = *Context;
+    /* The copy has no extended state behind it. The guest's registers still
+     * hold that state, so NtContinue must leave it alone. */
+    Native.ContextFlags &= ~(CONTEXT_XSTATE & ~CONTEXT_AMD64);
     Wow64NativeToContext(&Frame.Context, Context);
     RtlZeroMemory(&Frame.Record, sizeof(Frame.Record));
     Frame.Record.ExceptionCode = Record->ExceptionCode;
