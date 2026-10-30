@@ -115,17 +115,16 @@ RtlpLookupDynamicFunctionEntry(
     _Out_ PDWORD64 ImageBase,
     _In_ PUNWIND_HISTORY_TABLE HistoryTable);
 
-/*! RtlLookupFunctionEntry
- * \brief Locates the RUNTIME_FUNCTION entry corresponding to a code address.
- * \ref https://learn.microsoft.com/en-us/windows/win32/api/winnt/nf-winnt-rtllookupfunctionentry
- * \todo Implement HistoryTable
+/*! RtlpLookupRawFunctionEntry
+ * \brief Locates the RUNTIME_FUNCTION entry whose range contains a code
+ *        address, without following an indirect entry.
  */
+static
 PRUNTIME_FUNCTION
-NTAPI
-RtlLookupFunctionEntry(
-    IN DWORD64 ControlPc,
-    OUT PDWORD64 ImageBase,
-    OUT PUNWIND_HISTORY_TABLE HistoryTable)
+RtlpLookupRawFunctionEntry(
+    _In_ DWORD64 ControlPc,
+    _Out_ PDWORD64 ImageBase,
+    _Inout_opt_ PUNWIND_HISTORY_TABLE HistoryTable)
 {
     PRUNTIME_FUNCTION FunctionTable, FunctionEntry;
     ULONG TableLength;
@@ -173,6 +172,47 @@ RtlLookupFunctionEntry(
 
     /* Nothing found, return NULL */
     return NULL;
+}
+
+/*! RtlLookupFunctionEntry
+ * \brief Locates the RUNTIME_FUNCTION entry corresponding to a code address.
+ * \remark An entry whose UnwindData has RUNTIME_FUNCTION_INDIRECT set
+ *         describes a part of a function that lies outside the function's
+ *         range (MSVC and PGO builds separate cold code from the body like
+ *         this); its UnwindData is the RVA of the function's own entry, plus
+ *         one. Like Windows, return the function's entry for such a part.
+ * \ref https://learn.microsoft.com/en-us/windows/win32/api/winnt/nf-winnt-rtllookupfunctionentry
+ * \todo Implement HistoryTable
+ */
+PRUNTIME_FUNCTION
+NTAPI
+RtlLookupFunctionEntry(
+    IN DWORD64 ControlPc,
+    OUT PDWORD64 ImageBase,
+    OUT PUNWIND_HISTORY_TABLE HistoryTable)
+{
+    PRUNTIME_FUNCTION FunctionEntry;
+    ULONG Links;
+
+    FunctionEntry = RtlpLookupRawFunctionEntry(ControlPc, ImageBase, HistoryTable);
+
+    for (Links = 0;
+         (FunctionEntry != NULL) &&
+         (FunctionEntry->UnwindData & RUNTIME_FUNCTION_INDIRECT);
+         Links++)
+    {
+        /* Indirect entries point to the function's entry, not to another
+           indirect entry; do not loop on broken data */
+        if (Links >= 8)
+        {
+            return NULL;
+        }
+
+        FunctionEntry = RVA(*ImageBase,
+                            FunctionEntry->UnwindData & ~RUNTIME_FUNCTION_INDIRECT);
+    }
+
+    return FunctionEntry;
 }
 
 static
@@ -293,7 +333,9 @@ GetXmmReg(PCONTEXT Context, BYTE Reg)
 }
 
 /* Checks for a jmp that can end an epilog: a direct jmp out of the function,
-   or a jmp through [rip + disp32] as calls through an import table compile to */
+   or a jmp through [rip + disp32] as calls through an import table compile to.
+   CodeEntry is the entry whose range holds the code, which differs from
+   FunctionEntry in a part of the function that has an indirect entry */
 static
 __inline
 BOOLEAN
@@ -302,6 +344,7 @@ RtlpIsEpilogJump(
     _In_ ULONG64 ImageBase,
     _In_ PRUNTIME_FUNCTION FunctionEntry,
     _In_ PRUNTIME_FUNCTION PrimaryEntry,
+    _In_ PRUNTIME_FUNCTION CodeEntry,
     _Out_ PBOOLEAN IsDirect)
 {
     ULONG64 TargetRva;
@@ -317,7 +360,8 @@ RtlpIsEpilogJump(
         TargetRva -= ImageBase;
 
         return !(((TargetRva >= FunctionEntry->BeginAddress) && (TargetRva < FunctionEntry->EndAddress)) ||
-                 ((TargetRva >= PrimaryEntry->BeginAddress) && (TargetRva < PrimaryEntry->EndAddress)));
+                 ((TargetRva >= PrimaryEntry->BeginAddress) && (TargetRva < PrimaryEntry->EndAddress)) ||
+                 ((TargetRva >= CodeEntry->BeginAddress) && (TargetRva < CodeEntry->EndAddress)));
     }
 
     /* Other indirect forms are also switch table jumps of a function body */
@@ -435,7 +479,8 @@ RtlpTryToUnwindEpilog(
     _In_ ULONG64 ControlPc,
     _Inout_opt_ PKNONVOLATILE_CONTEXT_POINTERS ContextPointers,
     _In_ ULONG64 ImageBase,
-    _In_ PRUNTIME_FUNCTION FunctionEntry)
+    _In_ PRUNTIME_FUNCTION FunctionEntry,
+    _In_ PRUNTIME_FUNCTION CodeEntry)
 {
     CONTEXT LocalContext;
     BYTE *InstrPtr;
@@ -544,7 +589,7 @@ RtlpTryToUnwindEpilog(
     }
 
     /* Loop the pops up to the ret or jmp; code can follow an epilog */
-    EndAddress = FunctionEntry->EndAddress + ImageBase;
+    EndAddress = CodeEntry->EndAddress + ImageBase;
     while ((DWORD64)InstrPtr < EndAddress)
     {
         Instr = *(DWORD UNALIGNED*)InstrPtr;
@@ -577,7 +622,7 @@ RtlpTryToUnwindEpilog(
 
         /* A tail call. GCC also jumps from the body to a cold part outside
            the function, with the whole frame in place */
-        if (RtlpIsEpilogJump(InstrPtr, ImageBase, FunctionEntry, PrimaryEntry, &IsDirect))
+        if (RtlpIsEpilogJump(InstrPtr, ImageBase, FunctionEntry, PrimaryEntry, CodeEntry, &IsDirect))
         {
             if (IsDirect && (PopCount == 0) && RtlpJumpsToFragment(InstrPtr))
                 return FALSE;
@@ -601,7 +646,7 @@ RtlpTryToUnwindEpilog(
        whose compiler did not separate the call from the epilog (GCC), and the
        caller is still in its body, with its handler */
     if (!(HasAllocation && !StackAdjusted) && (PopCount >= PushCount) &&
-        RtlpFollowsCall(ControlPc, ImageBase + FunctionEntry->BeginAddress))
+        RtlpFollowsCall(ControlPc, ImageBase + CodeEntry->BeginAddress))
         return FALSE;
 
     /* Unwind is finished, pop new Rip from Stack */
@@ -680,24 +725,55 @@ RtlVirtualUnwind(
     BYTE Reg;
     PULONG LanguageHandler;
     BOOLEAN InProlog;
-    ULONG64 FrameBase;
+    ULONG64 FrameBase, CodeBase;
+    PRUNTIME_FUNCTION CodeEntry;
 
     /* Get relative virtual address */
     ControlRva = ControlPc - ImageBase;
 
-    /* Sanity checks */
-    if ( (ControlRva < FunctionEntry->BeginAddress) ||
-         (ControlRva >= FunctionEntry->EndAddress) )
+    /* An indirect entry stands for the entry it points to */
+    for (i = 0; FunctionEntry->UnwindData & RUNTIME_FUNCTION_INDIRECT; i++)
     {
-        return NULL;
+        if (i >= 8)
+        {
+            return NULL;
+        }
+
+        FunctionEntry = RVA(ImageBase,
+                            FunctionEntry->UnwindData & ~RUNTIME_FUNCTION_INDIRECT);
+    }
+
+    /* Find the entry whose range holds the code. ControlPc can lie outside
+       the function's range: in a part of the function separated from its
+       body, which has an indirect entry pointing to the function's entry.
+       That code is in the body (past the prolog), as on Windows. */
+    if ((ControlRva >= FunctionEntry->BeginAddress) &&
+        (ControlRva < FunctionEntry->EndAddress))
+    {
+        CodeEntry = FunctionEntry;
+    }
+    else
+    {
+        CodeEntry = RtlpLookupRawFunctionEntry(ControlPc, &CodeBase, NULL);
+        if ((CodeEntry != NULL) && (CodeBase != ImageBase))
+        {
+            CodeEntry = NULL;
+        }
     }
 
     /* Get a pointer to the unwind info */
     UnwindInfo = RVA(ImageBase, FunctionEntry->UnwindData);
 
-
-    /* Calculate relative offset to function start */
-    CodeOffset = ControlRva - FunctionEntry->BeginAddress;
+    /* Calculate relative offset to function start; code outside the
+       function's range counts as past the prolog */
+    if (CodeEntry == FunctionEntry)
+    {
+        CodeOffset = ControlRva - FunctionEntry->BeginAddress;
+    }
+    else
+    {
+        CodeOffset = MAXULONG_PTR;
+    }
 
     /* A function's handler does not cover its prolog; the prolog of a
        chained fragment's function has run */
@@ -707,10 +783,11 @@ RtlVirtualUnwind(
     *EstablisherFrame = GetEstablisherFrame(Context, UnwindInfo, CodeOffset);
 
     /* Check if we are in the function epilog and try to finish it */
-    if (((CodeOffset >= UnwindInfo->SizeOfProlog) && (UnwindInfo->CountOfCodes > 0)) ||
-        ((CodeOffset >= UnwindInfo->SizeOfProlog) && (UnwindInfo->Flags & UNW_FLAG_CHAININFO)))
+    if ((CodeEntry != NULL) &&
+        (((CodeOffset >= UnwindInfo->SizeOfProlog) && (UnwindInfo->CountOfCodes > 0)) ||
+         ((CodeOffset >= UnwindInfo->SizeOfProlog) && (UnwindInfo->Flags & UNW_FLAG_CHAININFO))))
     {
-        if (RtlpTryToUnwindEpilog(Context, ControlPc, ContextPointers, ImageBase, FunctionEntry))
+        if (RtlpTryToUnwindEpilog(Context, ControlPc, ContextPointers, ImageBase, FunctionEntry, CodeEntry))
         {
             /* There's no exception routine */
             return NULL;
