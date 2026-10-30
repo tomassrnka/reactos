@@ -648,7 +648,7 @@ static void read_trusted_roots_from_known_locations(HCERTSTORE store, HCERTSTORE
 
     CryptAcquireContextW( &prov, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT );
     params.buffer = CryptMemAlloc( params.size );
-    while (!CRYPT32_CALL( enum_root_certs, &params ))
+    while (params.buffer && !CRYPT32_CALL( enum_root_certs, &params ))
     {
         if (needed > params.size)
         {

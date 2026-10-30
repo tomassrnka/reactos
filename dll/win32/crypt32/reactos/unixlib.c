@@ -32,8 +32,8 @@ FindCertInRegBlob(
     PCRYPT_CERT_PROP prop;
     DWORD offset = 0;
 
-    /* Parse the registry blob */
-    while ((offset + sizeof(CRYPT_CERT_PROP)) < RegBlob->cbData)
+    /* Parse the registry blob: each property is a header (FIELD_OFFSET(ajData)) and cbData bytes */
+    while (RegBlob->cbData - offset >= FIELD_OFFSET(CRYPT_CERT_PROP, ajData))
     {
         prop = (PCRYPT_CERT_PROP)(RegBlob->pbData + offset);
 
@@ -43,15 +43,15 @@ FindCertInRegBlob(
             return FALSE;
         }
 
+        if (prop->cbData > RegBlob->cbData - offset - FIELD_OFFSET(CRYPT_CERT_PROP, ajData))
+        {
+            /* The property's data (after its header) goes beyond the blob */
+            return FALSE;
+        }
+
         /* Check for the certificate property (ID 32) */
         if (prop->dwPropId == 32)
         {
-            if ((offset + prop->cbData) > RegBlob->cbData)
-            {
-                /* Invalid data size */
-                return FALSE;
-            }
-
             OutCertBlob->cbData = prop->cbData;
             OutCertBlob->pbData = prop->ajData;
             return TRUE;
