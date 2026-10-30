@@ -20,6 +20,7 @@ extern void func_CancelIoEx(void);
 extern void func_IocpCancelStatus(void);
 extern void func_ApplicationRestart(void);
 extern void func_AppModel(void);
+extern void func_CalendarInfo(void);
 extern void func_ConsoleCP(void);
 extern void func_CopyFile2(void);
 extern void func_CopyFile2Identity(void);
@@ -194,6 +195,7 @@ const struct test winetest_testlist[] =
     { "IocpCancelStatus",            func_IocpCancelStatus },
     { "ApplicationRestart",          func_ApplicationRestart },
     { "AppModel",                    func_AppModel },
+    { "CalendarInfo",                func_CalendarInfo },
     { "ConsoleCP",                   func_ConsoleCP },
     { "CopyFile2",                   func_CopyFile2 },
     { "CopyFile2Identity",           func_CopyFile2Identity },

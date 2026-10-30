@@ -2336,6 +2336,82 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             }
             return STATUS_SUCCESS;
         }
+        case SystemPageFileInformation:
+        {
+            /* One entry per paging file, each followed by its NT name. The 32-bit
+             * entry is 24 bytes (UNICODE_STRING is 8); narrow every entry and
+             * repack the names, mirroring the two-call size protocol. */
+            typedef struct { ULONG NextEntryOffset, TotalSize, TotalInUse, PeakUsage; WOW64_STRING PageFileName; } WOW64_SPFI;
+            SYSTEM_PAGEFILE_INFORMATION *Native;
+            ULONG NativeNeeded = 0, GuestNeeded = 0, Offset, GuestOffset = 0, Tries;
+            C_ASSERT(sizeof(WOW64_SPFI) == 24);
+            if (a[3]) PROBE(3);
+            if (a[2] < sizeof(WOW64_SPFI))
+            {
+                if (a[3]) U(3) = sizeof(WOW64_SPFI);
+                return STATUS_INFO_LENGTH_MISMATCH;
+            }
+            NativeNeeded = 0x400;
+            for (Tries = 0; ; Tries++)
+            {
+                if (Cleanup->Buffer) { RtlFreeHeap(RtlGetProcessHeap(), 0, Cleanup->Buffer); Cleanup->Buffer = NULL; }
+                Native = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, NativeNeeded);
+                if (!Native) return STATUS_NO_MEMORY;
+                Status = NtQuerySystemInformation(a[0], Native, NativeNeeded, &NativeNeeded);
+                if (Status != STATUS_INFO_LENGTH_MISMATCH || Tries >= 8) break;
+            }
+            if (Status == STATUS_INFO_LENGTH_MISMATCH)
+            {
+                /* Paging files kept appearing: report a size that covers the native one */
+                if (a[3]) U(3) = NativeNeeded;
+                return Status;
+            }
+            if (!NT_SUCCESS(Status)) return Status;
+            /* Validate the native list (entries and names inside the returned length) */
+            for (Offset = 0; NativeNeeded >= sizeof(*Native); )
+            {
+                SYSTEM_PAGEFILE_INFORMATION *N = (SYSTEM_PAGEFILE_INFORMATION *)((PUCHAR)Native + Offset);
+                PUCHAR NameEnd;
+                if (Offset > NativeNeeded || NativeNeeded - Offset < sizeof(*N)) return STATUS_INFO_LENGTH_MISMATCH;
+                NameEnd = (PUCHAR)N->PageFileName.Buffer + N->PageFileName.Length;
+                if ((PUCHAR)N->PageFileName.Buffer < (PUCHAR)(N + 1) || NameEnd < (PUCHAR)N->PageFileName.Buffer ||
+                    NameEnd > (PUCHAR)Native + NativeNeeded)
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                GuestNeeded += ALIGN_UP_BY(sizeof(WOW64_SPFI) + N->PageFileName.Length + sizeof(WCHAR), sizeof(ULONG));
+                if (!N->NextEntryOffset) break;
+                if (N->NextEntryOffset < sizeof(*N)) return STATUS_INFO_LENGTH_MISMATCH;
+                Offset += N->NextEntryOffset;
+            }
+            if (a[3]) U(3) = GuestNeeded;
+            if (a[2] < GuestNeeded) return STATUS_INFO_LENGTH_MISMATCH;
+            if (!GuestNeeded) return STATUS_SUCCESS;
+            if (!GuestSpan(a[1], GuestNeeded)) return STATUS_ACCESS_VIOLATION;
+            ProbeOutput(a[1], GuestNeeded);
+            for (Offset = 0; ; )
+            {
+                SYSTEM_PAGEFILE_INFORMATION *N = (SYSTEM_PAGEFILE_INFORMATION *)((PUCHAR)Native + Offset);
+                WOW64_SPFI *G = (WOW64_SPFI *)((PUCHAR)PTR32(a[1]) + GuestOffset);
+                PWCHAR Name = (PWCHAR)(G + 1);
+                ULONG Entry = ALIGN_UP_BY(sizeof(WOW64_SPFI) + N->PageFileName.Length + sizeof(WCHAR), sizeof(ULONG));
+                G->TotalSize = N->TotalSize;
+                G->TotalInUse = N->TotalInUse;
+                G->PeakUsage = N->PeakUsage;
+                RtlCopyMemory(Name, N->PageFileName.Buffer, N->PageFileName.Length);
+                Name[N->PageFileName.Length / sizeof(WCHAR)] = UNICODE_NULL;
+                G->PageFileName.Length = N->PageFileName.Length;
+                G->PageFileName.MaximumLength = N->PageFileName.Length + sizeof(WCHAR);
+                G->PageFileName.Buffer = (ULONG)(ULONG_PTR)Name;
+                if (!N->NextEntryOffset)
+                {
+                    G->NextEntryOffset = 0;
+                    break;
+                }
+                G->NextEntryOffset = Entry;
+                GuestOffset += Entry;
+                Offset += N->NextEntryOffset;
+            }
+            return STATUS_SUCCESS;
+        }
         case SystemProcessInformation:
         {
             /* Toolhelp32 snapshots, psapi/EnumProcesses and most process
