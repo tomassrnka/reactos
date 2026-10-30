@@ -389,6 +389,19 @@ static const INFORMATION_CLASS_INFO PsProcessInfoClass[] =
 
     /* ProcessHandleTable (58): queried as a ULONG[] of open handle values (Win8.1+) */
     IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
+
+    /* ProcessCheckStackExtentsMode (59): not implemented */
+    IQS_NONE,
+
+    /* ProcessCommandLineInformation (60, Win8.1+): a UNICODE_STRING followed by
+     * the target's PEB command line; the length is variable and the alignment
+     * that of a ULONG, as measured on Windows 10 x64 */
+    IQS_SAME
+    (
+        UNICODE_STRING,
+        ULONG,
+        ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE
+    ),
 };
 
 //
