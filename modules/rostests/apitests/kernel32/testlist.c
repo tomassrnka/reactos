@@ -41,6 +41,7 @@ extern void func_CreateFile2(void);
 extern void func_CreateFileDirectory(void);
 extern void func_CreateRemoteThreadEx(void);
 extern void func_CreateProcess(void);
+extern void func_CreateProcessILOnly(void);
 extern void func_CreateProcessRace(void);
 extern void func_CreateProcessStdHandles(void);
 extern void func_DefaultDllDirectories(void);
@@ -221,6 +222,7 @@ const struct test winetest_testlist[] =
     { "CreateFileDirectory",         func_CreateFileDirectory },
     { "CreateRemoteThreadEx",        func_CreateRemoteThreadEx },
     { "CreateProcess",               func_CreateProcess },
+    { "CreateProcessILOnly",         func_CreateProcessILOnly },
     { "CreateProcessRace",           func_CreateProcessRace },
     { "CreateProcessStdHandles",     func_CreateProcessStdHandles },
     { "DefaultDllDirectories",      func_DefaultDllDirectories },
