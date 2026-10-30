@@ -3218,12 +3218,20 @@ LdrpInitializeProcess(IN PCONTEXT Context,
             Status = RtlAppendUnicodeStringToString(&MscoreeString, &NtSystemRoot);
             if (NT_SUCCESS(Status))
             {
+                /* The 32-bit ntdll built for SysWOW64 only ever runs under
+                 * WoW64, which has set up TEB32.WOW32Reserved (the gate)
+                 * before it enters this loader; decide at build time anyway,
+                 * so the choice does not depend on that. */
+#if defined(SYSWOW64_GUEST)
+                Status = RtlAppendUnicodeToString(&MscoreeString, L"\\SysWOW64\\mscoree.dll");
+#else
 #ifdef _M_IX86
                 if (NtCurrentTeb()->WOW32Reserved)
                     Status = RtlAppendUnicodeToString(&MscoreeString, L"\\SysWOW64\\mscoree.dll");
                 else
 #endif
                 Status = RtlAppendUnicodeToString(&MscoreeString, L"\\System32\\mscoree.dll");
+#endif
             }
             if (NT_SUCCESS(Status))
                 Status = LdrLoadDll(NULL, NULL, &MscoreeString, &MscoreeBase);
@@ -3643,9 +3651,18 @@ VOID NTAPI LdrInitializeWow64(PVOID NtdllBase, PCONTEXT StartContext)
     else RtlCaptureContext(&Context);
     LdrpInit(&Context, NtdllBase, NULL);
     if (StartContext) NtContinue(&Context, TRUE);
-    Header = RtlImageNtHeader(NtCurrentPeb()->ImageBaseAddress);
-    Entry = (PVOID)((ULONG_PTR)NtCurrentPeb()->ImageBaseAddress +
-                    Header->OptionalHeader.AddressOfEntryPoint);
+    /* The loader's entry for the image, which the IL-only start of a .NET
+     * image without an entry point replaced with mscoree!_CorExeMain */
+    if (LdrpImageEntry && LdrpImageEntry->EntryPoint)
+    {
+        Entry = LdrpImageEntry->EntryPoint;
+    }
+    else
+    {
+        Header = RtlImageNtHeader(NtCurrentPeb()->ImageBaseAddress);
+        Entry = (PVOID)((ULONG_PTR)NtCurrentPeb()->ImageBaseAddress +
+                        Header->OptionalHeader.AddressOfEntryPoint);
+    }
 
     /* Start the main thread as kernel32's BaseProcessStartup does on i386.
      * An exception that no frame of the image handles must reach
