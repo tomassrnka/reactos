@@ -98,7 +98,7 @@ CheckLocation(
     for (i = 0; i < ARRAYSIZE(Required); i++)
         ok(Contains(List, Required[i]), "%s: store %ls is not listed\n", Text, Required[i]);
 
-    /* Every listed default store can be opened for reading */
+    /* The default My store can be opened for reading */
     SetLastError(0xdeadbeef);
     Store = CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0,
                           Location | CERT_STORE_OPEN_EXISTING_FLAG | CERT_STORE_READONLY_FLAG, L"My");

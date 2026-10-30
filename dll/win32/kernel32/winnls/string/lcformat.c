@@ -60,6 +60,9 @@ LCID WINAPI LocaleNameToLCID(_In_ LPCWSTR, _In_ DWORD);
 #ifndef CAL_SMONTHDAY
 #define CAL_SMONTHDAY 56
 #endif
+#ifndef LOCALE_SMONTHDAY
+#define LOCALE_SMONTHDAY 0x78
+#endif
 
 #define CRITICAL_SECTION RTL_CRITICAL_SECTION
 #define CRITICAL_SECTION_DEBUG RTL_CRITICAL_SECTION_DEBUG
@@ -2209,7 +2212,6 @@ int WINAPI GetCalendarInfoW(LCID Locale, CALID Calendar, CALTYPE CalType,
         LOCALE_SABBREVMONTHNAME13,
         LOCALE_SYEARMONTH,
         0, /* CAL_ITWODIGITYEARMAX */
-#if (WINVER >= 0x0600) /* ReactOS */
         LOCALE_SSHORTESTDAYNAME1,
         LOCALE_SSHORTESTDAYNAME2,
         LOCALE_SSHORTESTDAYNAME3,
@@ -2217,7 +2219,6 @@ int WINAPI GetCalendarInfoW(LCID Locale, CALID Calendar, CALTYPE CalType,
         LOCALE_SSHORTESTDAYNAME5,
         LOCALE_SSHORTESTDAYNAME6,
         LOCALE_SSHORTESTDAYNAME7,
-#endif
         LOCALE_SMONTHDAY,
         0, /* CAL_SABBREVERASTRING */
     };
@@ -2340,7 +2341,7 @@ int WINAPI GetCalendarInfoW(LCID Locale, CALID Calendar, CALTYPE CalType,
                 *lpValue = 0;
                 return sizeof(DWORD) / sizeof(WCHAR);
             }
-            if (!lpCalData) return 2;
+            if (!lpCalData || !cchData) return 2;
             if (cchData < 2)
             {
                 SetLastError( ERROR_INSUFFICIENT_BUFFER );
@@ -2411,7 +2412,6 @@ int WINAPI GetCalendarInfoW(LCID Locale, CALID Calendar, CALTYPE CalType,
 	case CAL_SABBREVMONTHNAME12:
 	case CAL_SABBREVMONTHNAME13:
 	case CAL_SYEARMONTH:
-#if (WINVER >= 0x0600) /* ReactOS */
 	case CAL_SSHORTESTDAYNAME1:
 	case CAL_SSHORTESTDAYNAME2:
 	case CAL_SSHORTESTDAYNAME3:
@@ -2419,7 +2419,6 @@ int WINAPI GetCalendarInfoW(LCID Locale, CALID Calendar, CALTYPE CalType,
 	case CAL_SSHORTESTDAYNAME5:
 	case CAL_SSHORTESTDAYNAME6:
 	case CAL_SSHORTESTDAYNAME7:
-#endif
 	case CAL_SMONTHDAY:
             return GetLocaleInfoW(Locale, caltype_lctype_map[calinfo] | localeflags, lpCalData, cchData);
 	case CAL_ITWODIGITYEARMAX:
