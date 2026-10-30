@@ -230,8 +230,12 @@ EnumerateRootCertificates(
 
             if (ret == SEC_E_BUFFER_TOO_SMALL)
             {
-                /* Buffer too small, return required size, but don't increment index! */
-                return ENOBUFS;
+                /* Buffer too small: return the required size, as success, and
+                 * don't increment the index. Like the Unix side of Wine, the
+                 * caller grows its buffer and asks again; any other return
+                 * value ends its enumeration, which then silently missed
+                 * every root after the first one larger than its buffer. */
+                return 0;
             }
 
             if (ret == ERROR_NO_MORE_ITEMS)

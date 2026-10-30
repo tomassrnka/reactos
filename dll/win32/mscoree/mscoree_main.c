@@ -375,6 +375,12 @@ HRESULT WINAPI GetCORVersion(LPWSTR pbuffer, DWORD cchBuffer, DWORD *dwLength)
     ICLRRuntimeInfo *info;
     HRESULT ret;
 
+    {
+        void *fp = mscoree_real_export("GetCORVersion");
+        if (fp)
+            return ((HRESULT (WINAPI *)(LPWSTR, DWORD, DWORD *))fp)(pbuffer, cchBuffer, dwLength);
+    }
+
     TRACE("(%p, %ld, %p)!\n", pbuffer, cchBuffer, dwLength);
 
     if (!dwLength || !pbuffer)

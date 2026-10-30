@@ -57,6 +57,16 @@ NtUserGetRawInputDeviceList NtUserGetRegisteredRawInputDevices NtUserGetWOWClass
 NtUserLoadKeyboardLayoutEx NtUserOpenDesktop NtUserOpenWindowStation NtUserQueryInformationThread
 NtUserRealInternalGetMessage NtUserRegisterRawInputDevices NtUserResolveDesktop NtUserSendInput
 NtUserSetCursorContents NtUserSetImeInfoEx NtUserSetInformationThread NtUserSetWindowWord'''.split())
+# d3dkmt.c: structures with pointers or handles that are wider natively, and the adapter-callback calls
+manual |= set('''NtGdiDdDDIOpenAdapterFromHdc NtGdiDdDDIOpenAdapterFromDeviceName NtGdiDdDDICreateDevice
+NtGdiDdDDISetVidPnSourceOwner NtGdiDdDDIQueryAdapterInfo NtGdiDdDDICheckOcclusion
+NtGdiDdDDICreateDCFromMemory NtGdiDdDDIDestroyDCFromMemory
+NtGdiDdDDICreateAllocation NtGdiDdDDICreateContext NtGdiDdDDICreateOverlay NtGdiDdDDIDestroyAllocation
+NtGdiDdDDIEscape NtGdiDdDDIFlipOverlay NtGdiDdDDIGetDisplayModeList NtGdiDdDDIGetMultisampleMethodList
+NtGdiDdDDIGetPresentHistory NtGdiDdDDIGetRuntimeData NtGdiDdDDIInvalidateActiveVidPn NtGdiDdDDILock
+NtGdiDdDDIOpenResource NtGdiDdDDIPresent NtGdiDdDDIQueryAllocationResidency NtGdiDdDDIQueryResourceInfo
+NtGdiDdDDIQueryStatistics NtGdiDdDDIRender NtGdiDdDDISetAllocationPriority NtGdiDdDDISetGammaRamp
+NtGdiDdDDIUnlock NtGdiDdDDIUpdateOverlay'''.split())
 _svc32 = (ROOT/'win32ss/w32ksvc32.h').read_text()
 services = set('Nt'+n for n in re.findall(r'SVC_\((\w+),', _svc32))
 # w32ksvc32.h declares the checked-build-only services under #if DBG, and the

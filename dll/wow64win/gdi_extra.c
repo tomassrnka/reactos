@@ -237,6 +237,6 @@ ULONG_PTR Wow64WinGdiExtraService(ULONG Number, ULONG *a)
     /* dxg.sys never reads the untyped buffers; the native path always answers DDHAL_DRIVER_NOTHANDLED. */
     case W64_NtGdiDxgGenericThunk: return DDHAL_DRIVER_NOTHANDLED;
     default:
-        return Wow64WinUserInputService(Number, a);
+        return Wow64WinD3dkmtService(Number, a);
     }
 }

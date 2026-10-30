@@ -14,6 +14,14 @@ are unsupported. `coverage.tsv` records every catalogue service, including
 services with no guest entry. Generated coverage is implementation coverage,
 not evidence that every service has passed runtime tests.
 
+`d3dkmt.c` translates the NtGdiDdDDI services whose structures carry pointers
+or handles. The native win32k has no display-driver adapter interface, so it
+answers STATUS_PROCEDURE_NOT_FOUND and gdi32_vista falls back to its software
+adapter; the guest services pass the native status through, with the structure
+converted both ways, instead of reporting an unsupported service. Calls that only
+an adapter callback would read (allocation, context, lock, present, render, ...)
+report that status without reaching the native service.
+
 `user.c` handles creation, class registration, messages, painting, wide
 process connection and selector-dependent calls. `userextra.c` translates
 menus, system parameters, cursor/icon metadata, clipboard queries and

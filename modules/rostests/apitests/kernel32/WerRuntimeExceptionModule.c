@@ -31,15 +31,17 @@ START_TEST(WerRuntimeExceptionModule)
         return;
 
     hr = pRegister(Dll, &Context1);
-    if (is_reactos())
-    {
-        /* The crash reporter does not load runtime exception modules, so registering fails honestly */
-        ok(hr == E_NOTIMPL, "Register returned 0x%lx\n", hr);
-        hr = pUnregister(Dll, &Context1);
-        ok(hr == HRESULT_FROM_WIN32(ERROR_NOT_FOUND), "Unregister returned 0x%lx\n", hr);
-        return;
-    }
     ok(hr == S_OK, "Register returned 0x%lx\n", hr);
+
+    /* Registering the same module and context again does not add a registration */
+    hr = pRegister(Dll, &Context1);
+    ok(hr == S_OK, "Second register returned 0x%lx\n", hr);
+
+    /* The path is compared case-sensitively and the context is part of the key */
+    hr = pUnregister(L"c:\\NONEXISTENT\\werhandler.dll", &Context1);
+    ok(hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), "Unregister with another case returned 0x%lx\n", hr);
+    hr = pUnregister(Dll, NULL);
+    ok(hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), "Unregister with another context returned 0x%lx\n", hr);
 
     /* The same module with another context is another registration */
     hr = pRegister(Dll, &Context2);
@@ -50,14 +52,14 @@ START_TEST(WerRuntimeExceptionModule)
 
     /* Gone now */
     hr = pUnregister(Dll, &Context1);
-    ok(FAILED(hr), "Second unregister returned 0x%lx\n", hr);
+    ok(hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), "Second unregister returned 0x%lx\n", hr);
 
     hr = pUnregister(Dll, &Context2);
     ok(hr == S_OK, "Unregister of the second context returned 0x%lx\n", hr);
 
     /* Never registered */
     hr = pUnregister(L"C:\\nonexistent\\other.dll", NULL);
-    ok(FAILED(hr), "Unregister of an unknown module returned 0x%lx\n", hr);
+    ok(hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), "Unregister of an unknown module returned 0x%lx\n", hr);
 
     /* The table holds WER_MAX_REGISTERED_RUNTIME_EXCEPTION_MODULES (16) modules */
     for (i = 0, Registered = 0; i < 20; i++)

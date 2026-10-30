@@ -839,7 +839,8 @@ function(create_registry_hives)
     list(APPEND _livecd_inf_files
         ${_registry_inf}
         ${CMAKE_SOURCE_DIR}/boot/bootdata/livecd.inf
-        ${CMAKE_SOURCE_DIR}/boot/bootdata/caroots.inf)
+        ${CMAKE_SOURCE_DIR}/boot/bootdata/caroots.inf
+        ${CMAKE_SOURCE_DIR}/boot/bootdata/csroots.inf)
     if(SARCH STREQUAL "xbox")
         list(APPEND _livecd_inf_files
             ${CMAKE_SOURCE_DIR}/boot/bootdata/hiveinst_xbox.inf)

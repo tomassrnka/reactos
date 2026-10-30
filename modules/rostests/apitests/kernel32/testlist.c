@@ -91,6 +91,7 @@ extern void func_GetOverlappedResultEx(void);
 extern void func_GetQueuedCompletionStatusEx(void);
 extern void func_GetSystemTimePrecise(void);
 extern void func_GetVolumeInformation(void);
+extern void func_HeapCreateExecute(void);
 extern void func_HandleList(void);
 extern void func_HeapWalk(void);
 extern void func_IdleProcessor(void);
@@ -165,6 +166,7 @@ extern void func_UnhandledExceptionExit(void);
 extern void func_UnmapViewOfFileEx(void);
 extern void func_WaitOnAddress(void);
 extern void func_WerFlags(void);
+extern void func_WerRegisterMemoryFile(void);
 extern void func_WerRuntimeExceptionModule(void);
 extern void func_WideCharToMultiByte(void);
 extern void func_ReadProcessMemory(void);
@@ -269,6 +271,7 @@ const struct test winetest_testlist[] =
     { "GetQueuedCompletionStatusEx", func_GetQueuedCompletionStatusEx },
     { "GetSystemTimePrecise",        func_GetSystemTimePrecise },
     { "GetVolumeInformation",        func_GetVolumeInformation },
+    { "HeapCreateExecute",           func_HeapCreateExecute },
     { "HandleList",                  func_HandleList },
     { "HeapWalk",                    func_HeapWalk },
     { "IdleProcessor",               func_IdleProcessor },
@@ -343,6 +346,7 @@ const struct test winetest_testlist[] =
     { "UnmapViewOfFileEx",           func_UnmapViewOfFileEx },
     { "WaitOnAddress",               func_WaitOnAddress },
     { "WerFlags",                    func_WerFlags },
+    { "WerRegisterMemoryFile",      func_WerRegisterMemoryFile },
     { "WerRuntimeExceptionModule",   func_WerRuntimeExceptionModule },
     { "WideCharToMultiByte",         func_WideCharToMultiByte },
     { "ReadProcessMemory",           func_ReadProcessMemory },

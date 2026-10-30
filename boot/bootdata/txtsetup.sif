@@ -670,6 +670,7 @@ Default = "XT-, AT- or extended keyboard (83-105 keys)"
 [HiveInfs.Install]
 ; Called "HiveInfs.Fresh" on Windows
 AddReg = caroots.inf,AddReg
+AddReg = csroots.inf,AddReg
 AddReg = registry.inf,AddReg
 
 [HiveInfs.Upgrade]
