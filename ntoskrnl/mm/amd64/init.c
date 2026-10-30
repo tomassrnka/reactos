@@ -301,7 +301,7 @@ MiBuildNonPagedPool(VOID)
 
     /* Check if the user gave a ridicuously large nonpaged pool RAM size */
     if ((MmSizeOfNonPagedPoolInBytes >> PAGE_SHIFT) >
-        (MmNumberOfPhysicalPages * 7 / 8))
+        ((SIZE_T)MmNumberOfPhysicalPages * 7 / 8))
     {
         /* More than 7/8ths of RAM was dedicated to nonpaged pool, ignore! */
         MmSizeOfNonPagedPoolInBytes = 0;
@@ -310,9 +310,11 @@ MiBuildNonPagedPool(VOID)
     /* Check if no registry setting was set, or if the setting was too low */
     if (MmSizeOfNonPagedPoolInBytes < MmMinimumNonPagedPoolSize)
     {
-        /* Start with the minimum (256 KB) and add 32 KB for each MB above 4 */
+        /* Start with the minimum (256 KB) and add 32 KB for each MB above 4.
+         * MmNumberOfPhysicalPages and the per-MB value are ULONGs: compute in
+         * SIZE_T, or this wraps above 128 GB of RAM */
         MmSizeOfNonPagedPoolInBytes = MmMinimumNonPagedPoolSize;
-        MmSizeOfNonPagedPoolInBytes += (MmNumberOfPhysicalPages - 1024) /
+        MmSizeOfNonPagedPoolInBytes += (SIZE_T)(MmNumberOfPhysicalPages - 1024) /
                                        256 * MmMinAdditionNonPagedPoolPerMb;
     }
 
@@ -336,9 +338,13 @@ MiBuildNonPagedPool(VOID)
     /* Now, check if there was a registry size for the maximum size */
     if (!MmMaximumNonPagedPoolInBytes)
     {
-        /* Start with the default (1MB) and add 400 KB for each MB above 4 */
+        /* Start with the default (1MB) and add 400 KB for each MB above 4.
+         * Compute in SIZE_T: in 32 bits this wraps above about 10 GB of RAM,
+         * and from about 20 GB the wrapped maximum can drop below the initial
+         * size, so the expansion start lies past MmNonPagedPoolEnd and the
+         * initial pool's page tables are not mapped (boot crash in MiMapPTEs) */
         MmMaximumNonPagedPoolInBytes = MmDefaultMaximumNonPagedPool;
-        MmMaximumNonPagedPoolInBytes += (MmNumberOfPhysicalPages - 1024) /
+        MmMaximumNonPagedPoolInBytes += (SIZE_T)(MmNumberOfPhysicalPages - 1024) /
                                          256 * MmMaxAdditionNonPagedPoolPerMb;
     }
 

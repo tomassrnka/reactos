@@ -109,6 +109,10 @@ typedef struct _SMP_PAGEFILE_DESCRIPTOR
 #define SMP_VOLUME_INSERTED             0x01
 #define SMP_VOLUME_PAGEFILE_CREATED     0x04
 #define SMP_VOLUME_IS_BOOT              0x08
+#define SMP_VOLUME_IS_FAT               0x10
+
+/* FAT cannot hold a file of 4 GB or more: limit paging files there as on 32-bit Windows */
+#define SMP_FAT_MAXIMUM_PAGEFILE_SIZE   MAXIMUM_PAGEFILE_SIZE32
 typedef struct _SMP_VOLUME_DESCRIPTOR
 {
     LIST_ENTRY Entry;
@@ -614,6 +618,15 @@ SmpCreatePagingFileOnFixedDrive(IN PSMP_PAGEFILE_DESCRIPTOR Descriptor,
     {
         Descriptor->ActualMaxSize = PageFileSize;
     }
+
+    /* On FAT, start at the largest file it can hold instead of failing down to it */
+    if (Volume->Flags & SMP_VOLUME_IS_FAT)
+    {
+        if (Descriptor->ActualMinSize.QuadPart > SMP_FAT_MAXIMUM_PAGEFILE_SIZE)
+            Descriptor->ActualMinSize.QuadPart = SMP_FAT_MAXIMUM_PAGEFILE_SIZE;
+        if (Descriptor->ActualMaxSize.QuadPart > SMP_FAT_MAXIMUM_PAGEFILE_SIZE)
+            Descriptor->ActualMaxSize.QuadPart = SMP_FAT_MAXIMUM_PAGEFILE_SIZE;
+    }
     DPRINT("SMSS:PFILE: min 0x%I64X, max 0x%I64X, real min 0x%I64X\n",
             Descriptor->ActualMinSize.QuadPart,
             Descriptor->ActualMaxSize.QuadPart,
@@ -732,7 +745,7 @@ SmpMakeSystemManagedPagingFileDescriptor(IN PSMP_PAGEFILE_DESCRIPTOR Descriptor)
     }
 
     /* Check how much RAM we have and set three times this amount as maximum */
-    Ram = BasicInfo.NumberOfPhysicalPages * BasicInfo.PageSize;
+    Ram = (ULONGLONG)BasicInfo.NumberOfPhysicalPages * BasicInfo.PageSize;
     MaximumSize = 3 * Ram;
 
     /* If we have more than 1GB, use that as minimum, otherwise, use 1.5X RAM */
@@ -1006,6 +1019,25 @@ SmpCreateVolumeDescriptors(VOID)
             RtlFreeHeap(RtlGetProcessHeap(), 0, Volume);
             NtClose(VolumeHandle);
             continue;
+        }
+
+        /* Note FAT volumes: the paging file size is limited there */
+        {
+            ULONG AttributeBuffer[(sizeof(FILE_FS_ATTRIBUTE_INFORMATION) + 16 * sizeof(WCHAR)) / sizeof(ULONG)];
+            PFILE_FS_ATTRIBUTE_INFORMATION AttributeInfo = (PFILE_FS_ATTRIBUTE_INFORMATION)AttributeBuffer;
+            NTSTATUS AttributeStatus;
+
+            AttributeStatus = NtQueryVolumeInformationFile(VolumeHandle,
+                                                           &IoStatusBlock,
+                                                           AttributeInfo,
+                                                           sizeof(AttributeBuffer),
+                                                           FileFsAttributeInformation);
+            if (NT_SUCCESS(AttributeStatus) &&
+                (AttributeInfo->FileSystemNameLength >= 3 * sizeof(WCHAR)) &&
+                (_wcsnicmp(AttributeInfo->FileSystemName, L"FAT", 3) == 0))
+            {
+                Volume->Flags |= SMP_VOLUME_IS_FAT;
+            }
         }
 
         /* Done querying volume information, close the handle */

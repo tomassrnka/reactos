@@ -751,7 +751,7 @@ MiAllocatePoolPages(IN POOL_TYPE PoolType,
                 // The allocation will begin in this free page area
                 //
                 BaseVa = (PVOID)((ULONG_PTR)FreeEntry +
-                                 (FreeEntry->Size  << PAGE_SHIFT));
+                                 ((ULONG_PTR)FreeEntry->Size << PAGE_SHIFT));
 
                 /* Remove the item from the list, depending if pool is protected */
                 if (MmProtectFreedNonPagedPool)
@@ -1135,7 +1135,7 @@ MiFreePoolPages(IN PVOID StartingVa)
         // It doesn't, so we should actually locate a free entry descriptor
         //
         FreeEntry = (PMMFREE_POOL_ENTRY)((ULONG_PTR)StartingVa +
-                                         (NumberOfPages << PAGE_SHIFT));
+                                         ((ULONG_PTR)NumberOfPages << PAGE_SHIFT));
         ASSERT(FreeEntry->Signature == MM_FREE_POOL_SIGNATURE);
         ASSERT(FreeEntry->Owner == FreeEntry);
 
@@ -1287,7 +1287,7 @@ MiFreePoolPages(IN PVOID StartingVa)
     // become free page chunks.
     //
     NextEntry = StartingVa;
-    LastEntry = (PMMFREE_POOL_ENTRY)((ULONG_PTR)NextEntry + (FreePages << PAGE_SHIFT));
+    LastEntry = (PMMFREE_POOL_ENTRY)((ULONG_PTR)NextEntry + ((ULONG_PTR)FreePages << PAGE_SHIFT));
     do
     {
         //

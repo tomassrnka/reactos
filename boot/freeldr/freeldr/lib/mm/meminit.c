@@ -468,6 +468,15 @@ PVOID MmFindLocationForPageLookupTable(PFN_NUMBER TotalPageCount)
         CandidatePageCount = MemoryDescriptor->PageCount;
     }
 
+    // No free block below MM_MAX_PAGE_LOADER can hold the table (too much RAM):
+    // fail, instead of returning an address computed from page 0
+    if (CandidatePageCount == 0)
+    {
+        ERR("No room below 0x%lx for a page lookup table of 0x%lx pages\n",
+            MM_MAX_PAGE_LOADER, RequiredPages);
+        return NULL;
+    }
+
     // Calculate the end address for the lookup table
     PageLookupTableEndPage = min(CandidateBasePage + CandidatePageCount,
                                  MM_MAX_PAGE_LOADER);

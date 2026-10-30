@@ -63,9 +63,14 @@ typedef struct _FREELDR_MEMORY_DESCRIPTOR
 #define MM_PAGE_SIZE    4096
 #define MM_PAGE_MASK    0xFFF
 #define MM_PAGE_SHIFT    12
-//HACK: ReactOS AMD64 can't handle the full memory range yet CORE-20265
-//#define MM_MAX_PAGE        0xFFFFFFFFF /* 36 bits for the PFN */
-#define MM_MAX_PAGE        0x1FFFFF
+/*
+ * Highest PFN handed to the kernel: the 28-bit page frame number of
+ * ntoskrnl's hardware PTE (MMPTE_HARDWARE for NTDDI < LONGHORN). Tested to
+ * 128 GB; the loader's page lookup table, which has to fit below 1 GB
+ * (MM_MAX_PAGE_LOADER), limits it to roughly 190 GB. This used to be an
+ * 8 GB cap (0x1FFFFF, CORE-20265 hack) that dropped the RAM above it.
+ */
+#define MM_MAX_PAGE        0xFFFFFFF /* 28 bits for the PFN */
 #define MM_MAX_PAGE_LOADER 0x3FFFF /* on x64 freeldr only maps 1 GB */
 
 #define MM_SIZE_TO_PAGES(a)  \

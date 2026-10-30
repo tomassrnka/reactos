@@ -70,7 +70,7 @@ TestEntry(
                                       &Length);
     if (NT_SUCCESS(Status))
     {
-        Memory = (SBI.NumberOfPhysicalPages * SBI.PageSize) / 1024 / 1024;
+        Memory = ((ULONGLONG)SBI.NumberOfPhysicalPages * SBI.PageSize) / 1024 / 1024;
     }
     else
     {
