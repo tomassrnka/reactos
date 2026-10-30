@@ -688,6 +688,32 @@ static const struct column col_ip4routetable[] =
     { prop_interfaceindexW, CIM_SINT32|COL_FLAG_KEY },
     { prop_nexthopW,        CIM_STRING|COL_FLAG_DYNAMIC|COL_FLAG_KEY },
 };
+#ifdef __REACTOS__
+static const struct column col_environment[] =
+{
+    { L"Caption",       CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"Description",   CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"InstallDate",   CIM_DATETIME },
+    { L"Name",          CIM_STRING|COL_FLAG_DYNAMIC|COL_FLAG_KEY },
+    { L"Status",        CIM_STRING },
+    { L"SystemVariable", CIM_BOOLEAN },
+    { L"UserName",      CIM_STRING|COL_FLAG_DYNAMIC|COL_FLAG_KEY },
+    { L"VariableValue", CIM_STRING|COL_FLAG_DYNAMIC },
+};
+#include "pshpack1.h"
+struct record_environment
+{
+    const WCHAR *caption;
+    const WCHAR *description;
+    const WCHAR *installdate;
+    const WCHAR *name;
+    const WCHAR *status;
+    int          systemvariable;
+    const WCHAR *username;
+    const WCHAR *variablevalue;
+};
+#include "poppack.h"
+#endif
 static const struct column col_keyboard[] =
 {
     { L"Availability",                CIM_UINT16 },
@@ -897,7 +923,12 @@ static const struct column col_operatingsystem[] =
     { L"Status", CIM_STRING },
     { L"SystemDevice", CIM_STRING },
     { L"TotalSwapSpaceSize", CIM_UINT64 },
-    { L"WindowsDirectory", CIM_STRING|COL_FLAG_DYNAMIC }
+    { L"WindowsDirectory", CIM_STRING|COL_FLAG_DYNAMIC },
+#ifdef __REACTOS__
+    { L"Reboot",          CIM_FLAG_ARRAY|COL_FLAG_METHOD },
+    { L"Shutdown",        CIM_FLAG_ARRAY|COL_FLAG_METHOD },
+    { L"Win32Shutdown",   CIM_FLAG_ARRAY|COL_FLAG_METHOD },
+#endif
 };
 static const struct column col_param[] =
 {
@@ -985,7 +1016,14 @@ static const struct column col_process[] =
     { L"WindowsVersion", CIM_STRING|COL_FLAG_DYNAMIC },
     { L"WriteOperationCount", CIM_UINT64 },
     { L"WriteTransferCount", CIM_UINT64 },
-    { method_getownerW,     CIM_FLAG_ARRAY|COL_FLAG_METHOD }
+    { method_getownerW,     CIM_FLAG_ARRAY|COL_FLAG_METHOD },
+#ifdef __REACTOS__
+    { L"Create",            CIM_FLAG_ARRAY|COL_FLAG_METHOD },
+    { L"Terminate",         CIM_FLAG_ARRAY|COL_FLAG_METHOD },
+    { L"GetOwnerSid",       CIM_FLAG_ARRAY|COL_FLAG_METHOD },
+    { L"SetPriority",       CIM_FLAG_ARRAY|COL_FLAG_METHOD },
+    { L"AttachDebugger",    CIM_FLAG_ARRAY|COL_FLAG_METHOD },
+#endif
 };
 static const struct column col_processor[] =
 {
@@ -1095,7 +1133,12 @@ static const struct column col_service[] =
     { method_pauseserviceW,   CIM_FLAG_ARRAY|COL_FLAG_METHOD },
     { method_resumeserviceW,  CIM_FLAG_ARRAY|COL_FLAG_METHOD },
     { method_startserviceW,   CIM_FLAG_ARRAY|COL_FLAG_METHOD },
-    { method_stopserviceW,    CIM_FLAG_ARRAY|COL_FLAG_METHOD }
+    { method_stopserviceW,    CIM_FLAG_ARRAY|COL_FLAG_METHOD },
+#ifdef __REACTOS__
+    { L"Change",              CIM_FLAG_ARRAY|COL_FLAG_METHOD },
+    { L"ChangeStartMode",     CIM_FLAG_ARRAY|COL_FLAG_METHOD },
+    { L"Delete",              CIM_FLAG_ARRAY|COL_FLAG_METHOD },
+#endif
 };
 static const struct column col_sid[] =
 {
@@ -1678,6 +1721,11 @@ struct record_operatingsystem
     const WCHAR * systemdevice;
     UINT64       totalswapspacesize;
     const WCHAR * windowsdirectory;
+#ifdef __REACTOS__
+    class_method *reboot;
+    class_method *shutdown;
+    class_method *win32shutdown;
+#endif
 };
 struct record_param
 {
@@ -1766,6 +1814,13 @@ struct record_process
     UINT64       writetransfercount;
     /* methods */
     class_method *get_owner;
+#ifdef __REACTOS__
+    class_method *create;
+    class_method *terminate;
+    class_method *get_owner_sid;
+    class_method *set_priority;
+    class_method *attach_debugger;
+#endif
 };
 struct record_processor
 {
@@ -1876,6 +1931,11 @@ struct record_service
     class_method *resume_service;
     class_method *start_service;
     class_method *stop_service;
+#ifdef __REACTOS__
+    class_method *change;
+    class_method *change_start_mode;
+    class_method *delete_service;
+#endif
 };
 struct record_sid
 {
@@ -1961,6 +2021,39 @@ static const struct record_param data_param[] =
     { class_processW, method_getownerW, -1, param_returnvalueW, CIM_UINT32 },
     { class_processW, method_getownerW, -1, param_userW, CIM_STRING },
     { class_processW, method_getownerW, -1, param_domainW, CIM_STRING },
+#ifdef __REACTOS__
+    { L"Win32_OperatingSystem", L"Reboot", -1, param_returnvalueW, CIM_UINT32 },
+    { L"Win32_OperatingSystem", L"Shutdown", -1, param_returnvalueW, CIM_UINT32 },
+    { L"Win32_OperatingSystem", L"Win32Shutdown", 1, L"Flags", CIM_SINT32 },
+    { L"Win32_OperatingSystem", L"Win32Shutdown", 1, L"Reserved", CIM_SINT32 },
+    { L"Win32_OperatingSystem", L"Win32Shutdown", -1, param_returnvalueW, CIM_UINT32 },
+    { class_processW, L"Create", 1, L"CommandLine", CIM_STRING },
+    { class_processW, L"Create", 1, L"CurrentDirectory", CIM_STRING },
+    { class_processW, L"Create", -1, param_returnvalueW, CIM_UINT32 },
+    { class_processW, L"Create", -1, L"ProcessId", CIM_UINT32 },
+    { class_processW, L"Terminate", 1, L"Reason", CIM_UINT32 },
+    { class_processW, L"Terminate", -1, param_returnvalueW, CIM_UINT32 },
+    { class_processW, L"GetOwnerSid", -1, param_returnvalueW, CIM_UINT32 },
+    { class_processW, L"GetOwnerSid", -1, L"Sid", CIM_STRING },
+    { class_processW, L"SetPriority", 1, L"Priority", CIM_SINT32 },
+    { class_processW, L"SetPriority", -1, param_returnvalueW, CIM_UINT32 },
+    { class_processW, L"AttachDebugger", -1, param_returnvalueW, CIM_UINT32 },
+    { class_serviceW, L"Change", 1, L"DesktopInteract", CIM_BOOLEAN },
+    { class_serviceW, L"Change", 1, L"DisplayName", CIM_STRING },
+    { class_serviceW, L"Change", 1, L"ErrorControl", CIM_UINT8 },
+    { class_serviceW, L"Change", 1, L"LoadOrderGroup", CIM_STRING },
+    { class_serviceW, L"Change", 1, L"LoadOrderGroupDependencies", CIM_STRING|CIM_FLAG_ARRAY },
+    { class_serviceW, L"Change", 1, L"PathName", CIM_STRING },
+    { class_serviceW, L"Change", 1, L"ServiceDependencies", CIM_STRING|CIM_FLAG_ARRAY },
+    { class_serviceW, L"Change", 1, L"ServiceType", CIM_UINT8 },
+    { class_serviceW, L"Change", 1, L"StartMode", CIM_STRING },
+    { class_serviceW, L"Change", 1, L"StartName", CIM_STRING },
+    { class_serviceW, L"Change", 1, L"StartPassword", CIM_STRING },
+    { class_serviceW, L"Change", -1, param_returnvalueW, CIM_UINT32 },
+    { class_serviceW, L"ChangeStartMode", 1, L"StartMode", CIM_STRING },
+    { class_serviceW, L"ChangeStartMode", -1, param_returnvalueW, CIM_UINT32 },
+    { class_serviceW, L"Delete", -1, param_returnvalueW, CIM_UINT32 },
+#endif
     { class_serviceW, method_pauseserviceW, -1, param_returnvalueW, CIM_UINT32 },
     { class_serviceW, method_resumeserviceW, -1, param_returnvalueW, CIM_UINT32 },
     { class_serviceW, method_startserviceW, -1, param_returnvalueW, CIM_UINT32 },
@@ -1987,6 +2080,36 @@ static const struct record_param data_param[] =
     { class_systemsecurityW, method_setsdW, 1, param_sdW, CIM_UINT8|CIM_FLAG_ARRAY },
     { class_systemsecurityW, method_setsdW, -1, param_returnvalueW, CIM_UINT32 },
 };
+
+#ifdef __REACTOS__
+/* parameter of a method signature class "__<CLASS>_<METHOD>_IN|OUT": direction and the ID qualifier (the
+ * position among the parameters of the method, ReturnValue excluded) */
+BOOL get_param_info( const WCHAR *sigclass, const WCHAR *param, int *dir, UINT *id )
+{
+    WCHAR name[128];
+    UINT i, n;
+
+    if (!sigclass || !param || sigclass[0] != '_' || sigclass[1] != '_') return FALSE;
+    for (i = 0; i < ARRAY_SIZE(data_param); i++)
+    {
+        const struct record_param *p = &data_param[i];
+        if (wcsicmp( p->parameter, param ) || !wcsicmp( p->parameter, param_returnvalueW )) continue;
+        if (lstrlenW( p->class ) + lstrlenW( p->method ) + 8 >= ARRAY_SIZE(name)) continue;
+        swprintf( name, L"__%s_%s_%s", p->class, p->method, p->direction >= 0 ? L"IN" : L"OUT" );
+        if (wcsicmp( name, sigclass )) continue;
+        *dir = p->direction;
+        for (*id = 0, n = 0; n < i; n++)
+        {
+            if (wcsicmp( data_param[n].class, p->class ) || wcsicmp( data_param[n].method, p->method )) continue;
+            if (!wcsicmp( data_param[n].parameter, param_returnvalueW )) continue;
+            (*id)++;
+        }
+        return TRUE;
+    }
+    return FALSE;
+}
+#endif
+
 
 #define FLAVOR_ID (WBEM_FLAVOR_FLAG_PROPAGATE_TO_INSTANCE | WBEM_FLAVOR_NOT_OVERRIDABLE |\
                    WBEM_FLAVOR_ORIGIN_PROPAGATED)
@@ -4731,6 +4854,13 @@ static enum fill_status fill_process( struct table *table, const struct expr *co
         rec->thread_count   = entry.cntThreads;
         rec->workingsetsize = x.ws;
         rec->get_owner      = process_get_owner;
+#ifdef __REACTOS__
+        rec->create          = process_create;
+        rec->terminate       = process_terminate;
+        rec->get_owner_sid   = process_get_owner_sid;
+        rec->set_priority    = process_set_priority;
+        rec->attach_debugger = process_attach_debugger;
+#endif
         rec->creationdate = x.creation;
         rec->creationclassname = L"Win32_Process";
         rec->cscreationclassname = L"Win32_ComputerSystem";
@@ -5426,6 +5556,82 @@ static UINT64 get_max_process_memory(void)
     return ((UINT_PTR)info.lpMaximumApplicationAddress - (UINT_PTR)info.lpMinimumApplicationAddress) / 1024;
 }
 
+#ifdef __REACTOS__
+/* Win32_Environment: the system variables and those of the calling user. Other users' variables are not
+ * reported (Windows lists every loaded profile to an administrator). */
+static UINT add_environment_rows( struct table *table, const struct expr *cond, HKEY root, const WCHAR *subkey,
+                                  const WCHAR *user, BOOL system, UINT row, enum fill_status *status )
+{
+    WCHAR name[256];
+    HKEY key;
+    DWORD i, name_len, type, size;
+
+    if (RegOpenKeyExW( root, subkey, 0, KEY_READ, &key )) return row;
+    for (i = 0;; i++)
+    {
+        struct record_environment *rec;
+        WCHAR *value, *caption;
+
+        LONG ret;
+
+        name_len = ARRAY_SIZE(name);
+        size = 0;
+        ret = RegEnumValueW( key, i, name, &name_len, NULL, &type, NULL, &size );
+        if (ret == ERROR_MORE_DATA) continue; /* a name longer than any variable name we report */
+        if (ret != ERROR_SUCCESS) break;
+        if (type != REG_SZ && type != REG_EXPAND_SZ) continue;
+        if (size > 0x100000) continue; /* bound what one variable may cost */
+        if (!(value = heap_alloc( size + sizeof(WCHAR) ))) break;
+        name_len = ARRAY_SIZE(name);
+        if (RegEnumValueW( key, i, name, &name_len, NULL, &type, (BYTE *)value, &size ) != ERROR_SUCCESS)
+        {
+            heap_free( value );
+            continue;
+        }
+        value[size / sizeof(WCHAR)] = 0;
+        if (!resize_table( table, row + 1, sizeof(*rec) )) { heap_free( value ); break; }
+        if (!(caption = heap_alloc( (lstrlenW( user ) + lstrlenW( name ) + 2) * sizeof(WCHAR) )))
+        {
+            heap_free( value );
+            break;
+        }
+        swprintf( caption, L"%s\\%s", user, name );
+        rec = (struct record_environment *)table->data + row;
+        rec->caption        = caption;
+        rec->description    = heap_strdupW( caption );
+        rec->installdate    = NULL;
+        rec->name           = heap_strdupW( name );
+        rec->status         = L"OK";
+        rec->systemvariable = system ? -1 : 0;
+        rec->username       = heap_strdupW( user );
+        rec->variablevalue  = value;
+        if (!match_row( table, row, cond, status )) free_row_values( table, row );
+        else row++;
+    }
+    RegCloseKey( key );
+    return row;
+}
+
+static enum fill_status fill_environment( struct table *table, const struct expr *cond )
+{
+    enum fill_status status = FILL_STATUS_UNFILTERED;
+    WCHAR *user;
+    UINT row = 0;
+
+    row = add_environment_rows( table, cond, HKEY_LOCAL_MACHINE,
+                                L"SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment",
+                                L"<SYSTEM>", TRUE, row, &status );
+    if ((user = get_username()))
+    {
+        row = add_environment_rows( table, cond, HKEY_CURRENT_USER, L"Environment", user, FALSE, row, &status );
+        heap_free( user );
+    }
+    TRACE("created %u rows\n", row);
+    table->num_rows = row;
+    return status;
+}
+#endif
+
 static enum fill_status fill_keyboard( struct table *table, const struct expr *cond )
 {
     static const WCHAR deviceidW[] = L"ACPI\\PNP0303\\0";
@@ -5693,6 +5899,11 @@ static enum fill_status fill_operatingsystem( struct table *table, const struct 
     rec->systemdevice = L"\\Device\\HarddiskVolume1";
     rec->totalswapspacesize = 0;
     rec->windowsdirectory = get_windowsdirectory();
+#ifdef __REACTOS__
+    rec->reboot = os_reboot;
+    rec->shutdown = os_shutdown;
+    rec->win32shutdown = os_win32shutdown;
+#endif
     if (!match_row( table, row, cond, &status )) free_row_values( table, row );
     else row++;
 
@@ -5869,6 +6080,11 @@ static enum fill_status fill_service( struct table *table, const struct expr *co
         rec->resume_service = service_resume_service;
         rec->start_service  = service_start_service;
         rec->stop_service   = service_stop_service;
+#ifdef __REACTOS__
+        rec->change            = service_change;
+        rec->change_start_mode = service_change_start_mode;
+        rec->delete_service    = service_delete;
+#endif
         rec->caption = heap_strdupW( services[i].lpDisplayName );
         rec->checkpoint = status->dwCheckPoint;
         rec->creationclassname = L"Win32_Service";
@@ -6228,11 +6444,17 @@ static struct table builtin_classes[] =
     { class_diskdriveW, C(col_diskdrive), 0, 0, NULL, fill_diskdrive },
     { class_diskdrivetodiskpartitionW, C(col_diskdrivetodiskpartition), 0, 0, NULL, fill_diskdrivetodiskpartition },
     { class_diskpartitionW, C(col_diskpartition), 0, 0, NULL, fill_diskpartition },
+#ifdef __REACTOS__
+    { L"Win32_Environment", C(col_environment), 0, 0, NULL, fill_environment },
+#endif
     { class_displaycontrollerconfigW, C(col_displaycontrollerconfig), 0, 0, NULL, fill_displaycontrollerconfig },
     { class_ip4routetableW, C(col_ip4routetable), 0, 0, NULL, fill_ip4routetable },
     { L"Win32_Keyboard", C(col_keyboard), 0, 0, NULL, fill_keyboard },
     { class_logicaldiskW, C(col_logicaldisk), 0, 0, NULL, fill_logicaldisk },
+#ifndef __REACTOS__
+    /* CIM_LogicalDisk is the abstract superclass of Win32_LogicalDisk (schema.c) */
     { class_logicaldisk2W, C(col_logicaldisk), 0, 0, NULL, fill_logicaldisk },
+#endif
     { class_logicaldisktopartitionW, C(col_logicaldisktopartition), 0, 0, NULL, fill_logicaldisktopartition },
     { class_networkadapterW, C(col_networkadapter), 0, 0, NULL, fill_networkadapter },
     { class_networkadapterconfigW, C(col_networkadapterconfig), 0, 0, NULL, fill_networkadapterconfig },
@@ -6245,7 +6467,9 @@ static struct table builtin_classes[] =
     { class_printerW, C(col_printer), 0, 0, NULL, fill_printer },
     { class_processW, C(col_process), 0, 0, NULL, fill_process },
     { class_processorW, C(col_processor), 0, 0, NULL, fill_processor },
+#ifndef __REACTOS__
     { class_processor2W, C(col_processor), 0, 0, NULL, fill_processor },
+#endif
     { class_qualifiersW, C(col_qualifier), D(data_qualifier) },
     { class_quickfixengineeringW, C(col_quickfixengineering), D(data_quickfixengineering) },
     { class_serviceW, C(col_service), 0, 0, NULL, fill_service },
@@ -6270,5 +6494,8 @@ void init_table_list( void )
     UINT i;
 
     for (i = 0; i < ARRAY_SIZE(builtin_classes); i++) list_add_tail( &tables, &builtin_classes[i].entry );
+#ifdef __REACTOS__
+    init_schema_tables( &tables );
+#endif
     table_list = &tables;
 }

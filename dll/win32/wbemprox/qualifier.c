@@ -39,6 +39,9 @@ struct qualifier_set
     LONG refs;
     WCHAR *class;
     WCHAR *member;
+#ifdef __REACTOS__
+    BOOL method;
+#endif
 };
 
 static inline struct qualifier_set *impl_from_IWbemQualifierSet(
@@ -200,6 +203,35 @@ static HRESULT WINAPI qualifier_set_Get(
         FIXME("flags %08x not supported\n", lFlags);
         return E_NOTIMPL;
     }
+#ifdef __REACTOS__
+    {
+        /* a qualifier of the __QUALIFIERS table wins; else one derived from the schema (read/write/key,
+         * Static/Implemented, In/Out/ID) */
+        const WCHAR *names[8];
+        VARIANT values[8];
+        UINT i, count;
+        HRESULT hr;
+
+        if (!wszName) return WBEM_E_INVALID_PARAMETER;
+        if ((hr = get_qualifier_value( set->class, set->member, wszName, pVal, plFlavor )) == S_OK) return hr;
+        count = min( get_synth_qualifiers( set->class, set->member, set->method, names, values, ARRAY_SIZE(names) ),
+                     ARRAY_SIZE(names) );
+        for (i = 0; i < count; i++)
+        {
+            if (wcsicmp( names[i], wszName )) continue;
+            if (pVal) *pVal = values[i]; /* VT_BOOL / VT_I4: nothing to free */
+            if (plFlavor)
+            {
+                if (V_VT( &values[i] ) == VT_I4 || !wcsicmp( names[i], L"In" ) || !wcsicmp( names[i], L"Out" ))
+                    *plFlavor = WBEM_FLAVOR_FLAG_PROPAGATE_TO_INSTANCE | WBEM_FLAVOR_NOT_OVERRIDABLE |
+                                WBEM_FLAVOR_ORIGIN_PROPAGATED;
+                else *plFlavor = WBEM_FLAVOR_FLAG_PROPAGATE_TO_DERIVED_CLASS;
+            }
+            return S_OK;
+        }
+        return hr;
+    }
+#endif
     return get_qualifier_value( set->class, set->member, wszName, pVal, plFlavor );
 }
 
@@ -277,6 +309,27 @@ static HRESULT WINAPI qualifier_set_GetNames(
             IWbemClassObject_Release( obj );
         }
         IEnumWbemClassObject_Release( iter );
+        {
+            /* plus the qualifiers derived from the schema */
+            const WCHAR *snames[8];
+            VARIANT svalues[8];
+            UINT k, n = min( get_synth_qualifiers( set->class, set->member, set->method, snames, svalues,
+                                                   ARRAY_SIZE(snames) ), ARRAY_SIZE(snames) );
+            for (k = 0; k < n; k++)
+            {
+                ULONG m;
+                for (m = 0; m < count; m++) if (!wcsicmp( names[m], snames[k] )) break;
+                if (m < count) continue;
+                if (count == size)
+                {
+                    size = size ? size * 2 : 8;
+                    tmp = names ? heap_realloc( names, size * sizeof(*names) ) : heap_alloc( size * sizeof(*names) );
+                    if (!tmp) break;
+                    names = tmp;
+                }
+                if ((names[count] = SysAllocString( snames[k] ))) count++;
+            }
+        }
         if (!(sa = SafeArrayCreateVector( VT_BSTR, 0, count ))) hr = E_OUTOFMEMORY;
         else
         {
@@ -361,9 +414,24 @@ HRESULT WbemQualifierSet_create( const WCHAR *class, const WCHAR *member, LPVOID
         return E_OUTOFMEMORY;
     }
     set->refs = 1;
+#ifdef __REACTOS__
+    set->method = FALSE;
+#endif
 
     *ppObj = &set->IWbemQualifierSet_iface;
 
     TRACE("returning iface %p\n", *ppObj);
     return S_OK;
 }
+
+#ifdef __REACTOS__
+HRESULT WbemQualifierSet_create_method( const WCHAR *class, const WCHAR *method, LPVOID *ppObj )
+{
+    HRESULT hr;
+
+    if (!class || !method) return WBEM_E_INVALID_PARAMETER;
+    if ((hr = WbemQualifierSet_create( class, method, ppObj )) == S_OK)
+        impl_from_IWbemQualifierSet( *ppObj )->method = TRUE;
+    return hr;
+}
+#endif
