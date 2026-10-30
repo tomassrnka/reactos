@@ -134,15 +134,22 @@ BOOL FmScoopUsable(void)
     return FALSE;
 }
 
-/* cmd.exe /c ""<root>\shims\scoop.cmd" <verb> <bucket>/<app>" - scoop.cmd is Scoop's own
- * supported entry point. Every variable part is validated first (no quoting tricks). */
+/* The command line that runs "scoop <verb> <bucket>/<app>". Production: PowerShell 7 runs Scoop's own
+ * shim script directly (the shim's scoop.cmd goes through cmd.exe, whose batch exit codes are
+ * not reliable on nitro, and failures must not be mistaken for success). Test hook:
+ * FEATMGR_SCOOP_RUNNER = a .cmd that stands in for Scoop (used by tests\roundtrip.cmd).
+ * Every variable part is validated first (no quoting tricks). */
 BOOL FmScoopCommand(LPCWSTR verb, LPCWSTR bucket, LPCWSTR app, LPWSTR out, DWORD cch)
 {
-    WCHAR root[MAX_PATH];
+    WCHAR root[MAX_PATH], runner[MAX_PATH], pwsh[MAX_PATH];
     if (!FmScoopValidApp(app) || !FmScoopValidBucket(bucket) || !FmScoopRoot(root, MAX_PATH)) return FALSE;
     if (wcspbrk(root, L"\"%\r\n")) return FALSE;
-    return SUCCEEDED(StringCchPrintfW(out, cch, L"cmd.exe /c \"\"%s\\shims\\scoop.cmd\" %s %s/%s\"",
-                                      root, verb, bucket, app));
+    if (GetEnvironmentVariableW(L"FEATMGR_SCOOP_RUNNER", runner, MAX_PATH) && runner[0] && !wcspbrk(runner, L"\"%\r\n"))
+        return SUCCEEDED(StringCchPrintfW(out, cch, L"cmd.exe /c \"\"%s\" %s %s/%s\"", runner, verb, bucket, app));
+    if (!FmPwshPath(pwsh, MAX_PATH)) return FALSE;
+    return SUCCEEDED(StringCchPrintfW(out, cch,
+        L"\"%s\" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%s\\shims\\scoop.ps1\" %s %s/%s",
+        pwsh, root, verb, bucket, app));
 }
 
 /* featmgr's own environment is stale right after it installed PowerShell 7 / Scoop

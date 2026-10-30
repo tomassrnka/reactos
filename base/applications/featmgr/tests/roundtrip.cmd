@@ -306,6 +306,7 @@ rem root (FEATMGR_SCOOP_ROOT). The real thing is tests\scoop-live.cmd. FMT_FAT=1
 set FXS=%FX%\scoop-bucket
 set FSROOT=%O%\fakescoop
 set FEATMGR_SCOOP_ROOT=
+set FEATMGR_SCOOP_RUNNER=
 rd /s /q %SW% 2>nul
 rd /s /q %FSROOT% 2>nul
 %FM% /query scoop > %O%\q.txt 2>&1
@@ -418,6 +419,7 @@ copy /y %FX%\scoop-stub.cmd %FSROOT%\shims\scoop.cmd >nul
 copy /y %FXS%\fmsc-plain.json %FSROOT%\buckets\main\bucket\ >nul
 copy /y %FXS%\fmsc-nohash.json %FSROOT%\buckets\main\bucket\ >nul
 set FEATMGR_SCOOP_ROOT=%FSROOT%
+set FEATMGR_SCOOP_RUNNER=%FSROOT%\shims\scoop.cmd
 %FM% /scoop-buckets > %O%\b.txt 2>&1
 call :rc0 "150 /scoop-buckets rc0"
 type %O%\b.txt >> %LOG%
@@ -500,6 +502,7 @@ reg query HKLM\SOFTWARE\ReactOS\Nitro\OptionalFeatures\fmsc-fail >nul 2>&1
 call :rc1 "187 failed install leaves no record"
 rem the install of a feature that is available only with scoop present
 set FEATMGR_SCOOP_ROOT=
+set FEATMGR_SCOOP_RUNNER=
 goto :scoop_done
 
 :scoop_fat
@@ -537,6 +540,7 @@ call :rc1 "X5 nothing imported on x86"
 
 :scoop_done
 set FEATMGR_SCOOP_ROOT=
+set FEATMGR_SCOOP_RUNNER=
 rd /s /q %FSROOT% 2>nul
 rd /s /q %SW% 2>nul
 

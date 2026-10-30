@@ -1163,6 +1163,16 @@ static HRESULT BuildSoftwareCommands(const FM_FEATURE *f, LPWSTR inst, LPWSTR un
         WCHAR app[64], bucket[32];
         GetPrivateProfileStringW(L"Scoop", L"App", L"", app, ARRAYSIZE(app), f->ManifestPath);
         GetPrivateProfileStringW(L"Scoop", L"Bucket", L"", bucket, ARRAYSIZE(bucket), f->ManifestPath);
+        {
+            WCHAR pw[MAX_PATH], runner[MAX_PATH];
+            if (!GetEnvironmentVariableW(L"FEATMGR_SCOOP_RUNNER", runner, MAX_PATH)
+                && (!FmPwshPath(pw, MAX_PATH) || GetFileAttributesW(pw) == INVALID_FILE_ATTRIBUTES))
+            {
+                LOGF(log, L"error: PowerShell 7 is required to run Scoop but is not installed\n");
+                SetLastMsg(L"PowerShell 7 is required to run Scoop but is not installed. Install the 'powershell-7' feature first.");
+                return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+            }
+        }
         if (!FmScoopCommand(L"install", bucket, app, inst, cch)
             || !FmScoopCommand(L"uninstall", bucket, app, uninst, cch))
         {

@@ -94,6 +94,20 @@ find "scoop-featmgr-7z-payload" %O%\z7\out\in.txt >nul
 call :rc0 "L27 extracted content matches"
 rd /s /q %O%\z7 2>nul
 
+rem --- optional (SHOT=1, VM harness): the Optional Features GUI on the Software tab, for screenshots
+if not defined SHOT goto :noshot
+start "" %SystemRoot%\system32\optfeatures.exe /software /source:scoop/main
+ping -n 15 127.0.0.1 >nul
+echo SCOOPLIVE:SHOT1>COM2
+ping -n 20 127.0.0.1 >nul
+taskkill /f /im optfeatures.exe >nul 2>&1
+start "" %SystemRoot%\system32\optfeatures.exe /software
+ping -n 15 127.0.0.1 >nul
+echo SCOOPLIVE:SHOT2>COM2
+ping -n 20 127.0.0.1 >nul
+taskkill /f /im optfeatures.exe >nul 2>&1
+:noshot
+
 rem --- dependency protection, then uninstall in order
 %FM% /uninstall scoop > %O%\un-early.txt 2>&1
 call :rc1 "L28 /uninstall scoop refused while 7zip is installed"
