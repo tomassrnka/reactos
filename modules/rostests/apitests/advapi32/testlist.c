@@ -72,6 +72,7 @@ extern void func_RegWow64Volatile(void);
 extern void func_RegWow64SharedCreate(void);
 extern void func_RegWow64Aliases(void);
 extern void func_ServiceProcess(void);
+extern void func_ServiceStructLayout(void);
 
 const struct test winetest_testlist[] =
 {
@@ -144,6 +145,7 @@ const struct test winetest_testlist[] =
     { "SetNamedSecurityInfoInherit", func_SetNamedSecurityInfoInherit },
     { "SddlRights", func_SddlRights },
     { "ServiceProcess", func_ServiceProcess },
+    { "ServiceStructLayout", func_ServiceStructLayout },
     { 0, 0 }
 };
 
