@@ -71,9 +71,6 @@ VOID StartTestCORE17376(_In_ DWORD adReadBufferSize)
     if (hPipeReader == INVALID_HANDLE_VALUE)
         return;
 
-    hThreadReader = CreateThread(NULL, 0, PipeReader, hPipeReader, 0, NULL);
-    ok(hThreadReader != INVALID_HANDLE_VALUE, "CreateThread failed\n");
-
     hPipeWriter = CreateFileW(
         g_PipeName,
         GENERIC_READ | GENERIC_WRITE,
@@ -84,8 +81,16 @@ VOID StartTestCORE17376(_In_ DWORD adReadBufferSize)
         NULL);
     ok(hPipeWriter != INVALID_HANDLE_VALUE, "CreateFileW failed\n");
 
+    /* Connect before the reader starts: reading a server end that is still listening
+       fails with ERROR_PIPE_LISTENING, so the reader would race with the CreateFileW above */
+    hThreadReader = INVALID_HANDLE_VALUE;
     if (hPipeWriter != INVALID_HANDLE_VALUE)
     {
+        hThreadReader = CreateThread(NULL, 0, PipeReader, hPipeReader, 0, NULL);
+        ok(hThreadReader != NULL, "CreateThread failed\n");
+        if (hThreadReader == NULL)
+            hThreadReader = INVALID_HANDLE_VALUE;
+
         hThreadWriter = CreateThread(NULL, 0, PipeWriter, hPipeWriter, 0, NULL);
         ok(hThreadWriter != INVALID_HANDLE_VALUE, "CreateThread failed\n");
 
