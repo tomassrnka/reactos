@@ -2272,6 +2272,49 @@ OpenServiceW(SC_HANDLE hSCManager,
 }
 
 
+#ifdef SYSWOW64_GUEST
+/*
+ * The SCM (services.exe) is a native 64-bit process. RQueryServiceConfigA/W
+ * return its QUERY_SERVICE_CONFIG in the 64-bit layout, where every string
+ * member is 8 bytes wide (and holds an offset from the start of the buffer):
+ *
+ *   0 dwServiceType  4 dwStartType  8 dwErrorControl  16 lpBinaryPathName
+ *  24 lpLoadOrderGroup  32 dwTagId  40 lpDependencies  48 lpServiceStartName
+ *  56 lpDisplayName  (64 bytes)
+ *
+ * A 32-bit caller expects the 36-byte 32-bit layout. Rewrite the header in
+ * place; the strings stay where the SCM put them, so the offsets stay valid,
+ * and the 64-bit header is larger than the 32-bit one, so nothing overlaps.
+ */
+static VOID
+ScmWow64ServiceConfigTo32(LPBYTE lpBuffer)
+{
+    DWORD dwServiceType, dwStartType, dwErrorControl, dwTagId;
+    ULONG64 ullStrings[5];
+    LPQUERY_SERVICE_CONFIGW lpConfig = (LPQUERY_SERVICE_CONFIGW)lpBuffer;
+
+    RtlCopyMemory(&dwServiceType, lpBuffer + 0, sizeof(DWORD));
+    RtlCopyMemory(&dwStartType, lpBuffer + 4, sizeof(DWORD));
+    RtlCopyMemory(&dwErrorControl, lpBuffer + 8, sizeof(DWORD));
+    RtlCopyMemory(&ullStrings[0], lpBuffer + 16, sizeof(ULONG64));
+    RtlCopyMemory(&ullStrings[1], lpBuffer + 24, sizeof(ULONG64));
+    RtlCopyMemory(&dwTagId, lpBuffer + 32, sizeof(DWORD));
+    RtlCopyMemory(&ullStrings[2], lpBuffer + 40, sizeof(ULONG64));
+    RtlCopyMemory(&ullStrings[3], lpBuffer + 48, sizeof(ULONG64));
+    RtlCopyMemory(&ullStrings[4], lpBuffer + 56, sizeof(ULONG64));
+
+    lpConfig->dwServiceType = dwServiceType;
+    lpConfig->dwStartType = dwStartType;
+    lpConfig->dwErrorControl = dwErrorControl;
+    lpConfig->lpBinaryPathName = (LPWSTR)(ULONG_PTR)ullStrings[0];
+    lpConfig->lpLoadOrderGroup = (LPWSTR)(ULONG_PTR)ullStrings[1];
+    lpConfig->dwTagId = dwTagId;
+    lpConfig->lpDependencies = (LPWSTR)(ULONG_PTR)ullStrings[2];
+    lpConfig->lpServiceStartName = (LPWSTR)(ULONG_PTR)ullStrings[3];
+    lpConfig->lpDisplayName = (LPWSTR)(ULONG_PTR)ullStrings[4];
+}
+#endif
+
 /**********************************************************************
  *  QueryServiceConfigA
  *
@@ -2322,6 +2365,10 @@ QueryServiceConfigA(SC_HANDLE hService,
         SetLastError(dwError);
         return FALSE;
     }
+
+#ifdef SYSWOW64_GUEST
+    ScmWow64ServiceConfigTo32((LPBYTE)lpConfigPtr);
+#endif
 
     /* Adjust the pointers */
     if (lpConfigPtr->lpBinaryPathName)
@@ -2405,6 +2452,10 @@ QueryServiceConfigW(SC_HANDLE hService,
         SetLastError(dwError);
         return FALSE;
     }
+
+#ifdef SYSWOW64_GUEST
+    ScmWow64ServiceConfigTo32((LPBYTE)lpConfigPtr);
+#endif
 
     /* Adjust the pointers */
     if (lpConfigPtr->lpBinaryPathName)
