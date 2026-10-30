@@ -448,6 +448,21 @@ DWORD WINAPI NotifyUnicastIpAddressChange(ADDRESS_FAMILY Family, PVOID Callback,
   return register_notify(KIND_UNICAST, Family, Callback, CallerContext, InitialNotification, NotificationHandle);
 }
 
+/*
+ * Returns the unicast address table once it is stable, or ERROR_IO_PENDING and the table to the callback
+ * when it is not (an address still being configured). Addresses here have no tentative state: the table is
+ * always stable, so it is returned at once, with no notification handle and no callback.
+ */
+DWORD WINAPI NotifyStableUnicastIpAddressTable(ADDRESS_FAMILY Family, PMIB_UNICASTIPADDRESS_TABLE *Table,
+                                               PVOID Callback, PVOID CallerContext, HANDLE *NotificationHandle)
+{
+  if (!Table || !NotificationHandle)
+    return ERROR_INVALID_PARAMETER;
+
+  *NotificationHandle = NULL;
+  return GetUnicastIpAddressTable(Family, Table);
+}
+
 DWORD WINAPI NotifyRouteChange2(ADDRESS_FAMILY Family, PVOID Callback, PVOID CallerContext,
                                 BOOLEAN InitialNotification, HANDLE *NotificationHandle)
 {

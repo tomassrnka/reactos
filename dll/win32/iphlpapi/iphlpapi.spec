@@ -139,6 +139,7 @@
 @ stub IsLocalAddress
 @ stdcall -version=0x600+ NotifyIpInterfaceChange(long ptr ptr long ptr)
 @ stdcall -version=0x600+ NotifyRouteChange2(long ptr ptr long ptr)
+@ stdcall -version=0x600+ NotifyStableUnicastIpAddressTable(long ptr ptr ptr ptr)
 @ stdcall -version=0x600+ NotifyUnicastIpAddressChange(long ptr ptr long ptr)
 @ stub NTPTimeToNTFileTime
 @ stub NTTimeToNTPTime
