@@ -996,9 +996,9 @@ LdrpSetProtection(PVOID ViewBase,
  * An IL-only .NET assembly built for any CPU is a PE32 file. A 64-bit runtime (CoreCLR) loads it with LoadLibraryEx
  * and reads it as data, and Windows serves that: the loader rewrites the mapped headers to PE32+ (the machine stays
  * i386), and it neither relocates the image, nor snaps its imports (mscoree.dll), nor calls its x86 entry stub.
+ * The same goes for such an executable, which Windows starts as a 64-bit process (LdrpInitializeProcess).
  * Returns TRUE when the image was such an assembly and its headers are now PE32+.
  */
-static
 BOOLEAN
 LdrpCorFixupIlOnlyImage(
     _In_ PVOID ViewBase,

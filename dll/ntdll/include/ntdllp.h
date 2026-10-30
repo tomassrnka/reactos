@@ -99,6 +99,13 @@ LdrpSnapThunk(IN PVOID ExportBase,
               IN BOOLEAN Static,
               IN LPSTR DllName);
 
+#ifdef _WIN64
+BOOLEAN
+LdrpCorFixupIlOnlyImage(
+    _In_ PVOID ViewBase,
+    _In_ PIMAGE_NT_HEADERS NtHeaders);
+#endif
+
 NTSTATUS NTAPI
 LdrpWalkImportDescriptor(IN LPWSTR DllPath OPTIONAL,
                          IN PLDR_DATA_TABLE_ENTRY LdrEntry);

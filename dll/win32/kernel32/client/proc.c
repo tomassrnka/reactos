@@ -175,6 +175,23 @@ BasepGetMappedEntryPoint(IN HANDLE ProcessHandle,
     return (PUCHAR)ImageBase + EntryPoint;
 }
 
+/* The machine of the process an image starts: Windows starts an IL-only .NET image that can run natively and does
+ * not prefer 32 bits (AnyCPU) as a 64-bit process, although its image information still says i386 */
+static
+USHORT
+BasepGetProcessMachine(IN PSECTION_IMAGE_INFORMATION ImageInformation)
+{
+#ifdef _M_AMD64
+    if ((ImageInformation->Machine == IMAGE_FILE_MACHINE_I386) &&
+        ImageInformation->ComPlusNativeReady &&
+        !ImageInformation->ComPlusPrefer32bit)
+    {
+        return IMAGE_FILE_MACHINE_AMD64;
+    }
+#endif
+    return ImageInformation->Machine;
+}
+
 BOOLEAN
 WINAPI
 BasepIsImageVersionOk(IN ULONG ImageMajorVersion,
@@ -2752,7 +2769,7 @@ CreateProcessInternalW(IN HANDLE hUserToken,
     CLIENT_ID ClientId;
     ULONG NoWindow, StackSize, ErrorCode, Flags;
     SIZE_T RegionSize;
-    USHORT ImageMachine;
+    USHORT ImageMachine, ProcessMachine;
     ULONG ParameterFlags, PrivilegeValue, HardErrorMode;
 #ifndef _WIN64
     ULONG ErrorResponse;
@@ -4255,10 +4272,11 @@ StartScan:
     }
 
     /* Make sure the image was compiled for this processor */
-    if (((ImageInformation.Machine < SharedUserData->ImageNumberLow) ||
-         (ImageInformation.Machine > SharedUserData->ImageNumberHigh))
+    ProcessMachine = BasepGetProcessMachine(&ImageInformation);
+    if (((ProcessMachine < SharedUserData->ImageNumberLow) ||
+         (ProcessMachine > SharedUserData->ImageNumberHigh))
 #ifdef BUILD_WOW64_ENABLED
-        && (ImageInformation.Machine != IMAGE_FILE_MACHINE_I386)
+        && (ProcessMachine != IMAGE_FILE_MACHINE_I386)
 #endif
         )
     {
@@ -4967,7 +4985,7 @@ StartScan:
 #ifdef _WIN64
     CreateProcessMsg->PebAddressWow64 = 0;
 #ifdef BUILD_WOW64_ENABLED
-    if (ImageInformation.Machine == IMAGE_FILE_MACHINE_I386)
+    if (BasepGetProcessMachine(&ImageInformation) == IMAGE_FILE_MACHINE_I386)
     {
         ULONG_PTR Peb32 = 0;
         Status = NtQueryInformationProcess(ProcessHandle, ProcessWow64Information,
@@ -4987,7 +5005,7 @@ StartScan:
     RemotePeb = NULL;
 
     /* Now check what kind of architecture this image was made for */
-    switch (ImageInformation.Machine)
+    switch (BasepGetProcessMachine(&ImageInformation))
     {
         /* IA32, IA64 and AMD64 are supported in Server 2003 */
         case IMAGE_FILE_MACHINE_I386:
