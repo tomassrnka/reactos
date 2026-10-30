@@ -51,6 +51,7 @@ SysWOW64/crypt32.dll
 SysWOW64/cryptnet.dll
 SysWOW64/rsaenh.dll
 SysWOW64/mssip32.dll
+SysWOW64/msisip.dll
 SysWOW64/mscat32.dll
 SysWOW64/softpub.dll
 SysWOW64/dbghelp.dll

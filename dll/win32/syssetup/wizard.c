@@ -2394,7 +2394,7 @@ RegisterWow64Dlls(VOID)
     static const WCHAR *Dlls[] =
     {
         L"ole32.dll", L"oleaut32.dll", L"rsaenh.dll", L"wintrust.dll",
-        L"softpub.dll", L"mscat32.dll", L"cryptnet.dll", L"winhttp.dll", L"shell32.dll",
+        L"softpub.dll", L"mscat32.dll", L"msisip.dll", L"cryptnet.dll", L"winhttp.dll", L"shell32.dll",
         L"msxml3.dll",
         /* The rest of the shipped SysWOW64 COM set that setup registers for
          * the native view (OleControlDlls in syssetup.inf). Without these a
