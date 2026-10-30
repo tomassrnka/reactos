@@ -226,6 +226,16 @@ SysWOW64/dinput8.dll
 # tests) and by hid_winetest. It only needs kernel32 and msvcrt, so there is no import chain to add.
 SysWOW64/hid.dll
 
+# .NET host shim (mscoree.dll). Every .NET assembly built for AnyCPU/x86 imports it by name (the _CorDllMain stub);
+# the 32-bit PowerShell 7 / CoreCLR host fails to start without it ("mscoree.dll was not found"). Its imports
+# (dbghelp, shell32, shlwapi, ole32, advapi32, kernel32_vista, msvcrt) are all listed above.
+SysWOW64/mscoree.dll
+
+# 32-bit .NET (CoreCLR) P/Invokes: System.Net.Security / System.Net.Primitives call sspicli.dll (TLS, NTLM),
+# the PowerShell eventing assembly calls wevtapi.dll. Imports: secur32, user32, advapi32 (all listed above).
+SysWOW64/sspicli.dll
+SysWOW64/wevtapi.dll
+
 # Code-page data used by the guest kernel32 NLS loader.
 SysWOW64/c_037.nls
 SysWOW64/c_10000.nls
