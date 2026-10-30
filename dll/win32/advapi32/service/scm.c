@@ -978,6 +978,366 @@ DeleteService(SC_HANDLE hService)
 }
 
 
+#ifdef SYSWOW64_GUEST
+/*
+ * The SCM (services.exe) is a native 64-bit process, and the calls below return a structure, or an
+ * array of them, as raw bytes in the 64-bit layout. The pointer members are 8 bytes wide there and hold
+ * an offset from the start of the buffer, the strings follow the array:
+ *
+ *   ENUM_SERVICE_STATUS(_PROCESS): lpServiceName (0) lpDisplayName (8) SERVICE_STATUS(_PROCESS) (16)
+ *       48 bytes per element (56 with the process information), 36 and 44 in the 32-bit layout
+ *   QUERY_SERVICE_LOCK_STATUS:     fIsLocked (0) lpLockOwner (8) dwLockDuration (16), 24 bytes (12)
+ *   SERVICE_DESCRIPTION:           lpDescription (0), 8 bytes (4)
+ *   SERVICE_FAILURE_ACTIONS:       dwResetPeriod (0) lpRebootMsg (8) lpCommand (16) cActions (24)
+ *                                  lpsaActions (32), 40 bytes (20)
+ *
+ * A 32-bit caller gets the 32-bit layout, the pointers made absolute, and the sizes and the resume handle
+ * in terms of that layout, so that a buffer of the size that is reported is always enough.
+ */
+#define SCM64_ENUM_STATUS_SIZE          48
+#define SCM64_ENUM_STATUS_PROCESS_SIZE  56
+
+/* Smaller than the smallest entry (an element and two one-character names) in the 64-bit layout */
+#define SCM64_ENUM_PROBE_SIZE           47
+
+typedef struct _SCM_WOW64_ENUM
+{
+    SC_HANDLE hHandle;
+    BOOL bDependents;
+    BOOL bProcess;
+    BOOL bUnicode;
+    DWORD dwServiceType;
+    DWORD dwServiceState;
+    LPCVOID pszGroupName;
+} SCM_WOW64_ENUM;
+
+static DWORD
+ScmWow64EnumRpc(const SCM_WOW64_ENUM *pEnum,
+                LPBYTE lpBuffer,
+                DWORD cbBufSize,
+                LPDWORD pcbBytesNeeded,
+                LPDWORD lpServicesReturned,
+                LPDWORD lpResumeHandle)
+{
+    DWORD dwError;
+
+    RpcTryExcept
+    {
+        if (pEnum->bDependents)
+        {
+            if (pEnum->bUnicode)
+                dwError = REnumDependentServicesW((SC_RPC_HANDLE)pEnum->hHandle,
+                                                  pEnum->dwServiceState,
+                                                  lpBuffer,
+                                                  cbBufSize,
+                                                  pcbBytesNeeded,
+                                                  lpServicesReturned);
+            else
+                dwError = REnumDependentServicesA((SC_RPC_HANDLE)pEnum->hHandle,
+                                                  pEnum->dwServiceState,
+                                                  lpBuffer,
+                                                  cbBufSize,
+                                                  pcbBytesNeeded,
+                                                  lpServicesReturned);
+        }
+        else if (pEnum->bProcess)
+        {
+            if (pEnum->bUnicode)
+                dwError = REnumServicesStatusExW((SC_RPC_HANDLE)pEnum->hHandle,
+                                                 SC_ENUM_PROCESS_INFO,
+                                                 pEnum->dwServiceType,
+                                                 pEnum->dwServiceState,
+                                                 lpBuffer,
+                                                 cbBufSize,
+                                                 pcbBytesNeeded,
+                                                 lpServicesReturned,
+                                                 lpResumeHandle,
+                                                 (LPWSTR)pEnum->pszGroupName);
+            else
+                dwError = REnumServicesStatusExA((SC_RPC_HANDLE)pEnum->hHandle,
+                                                 SC_ENUM_PROCESS_INFO,
+                                                 pEnum->dwServiceType,
+                                                 pEnum->dwServiceState,
+                                                 lpBuffer,
+                                                 cbBufSize,
+                                                 pcbBytesNeeded,
+                                                 lpServicesReturned,
+                                                 lpResumeHandle,
+                                                 (LPSTR)pEnum->pszGroupName);
+        }
+        else
+        {
+            if (pEnum->bUnicode)
+                dwError = REnumServicesStatusW((SC_RPC_HANDLE)pEnum->hHandle,
+                                               pEnum->dwServiceType,
+                                               pEnum->dwServiceState,
+                                               lpBuffer,
+                                               cbBufSize,
+                                               pcbBytesNeeded,
+                                               lpServicesReturned,
+                                               lpResumeHandle);
+            else
+                dwError = REnumServicesStatusA((SC_RPC_HANDLE)pEnum->hHandle,
+                                               pEnum->dwServiceType,
+                                               pEnum->dwServiceState,
+                                               lpBuffer,
+                                               cbBufSize,
+                                               pcbBytesNeeded,
+                                               lpServicesReturned,
+                                               lpResumeHandle);
+        }
+    }
+    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+    {
+        dwError = ScmRpcStatusToWinError(RpcExceptionCode());
+    }
+    RpcEndExcept;
+
+    return dwError;
+}
+
+/* The number of characters of a string at an offset in the SCM's buffer, without the terminator */
+static BOOL
+ScmWow64StringLength(LPBYTE lpBase,
+                     DWORD cbBase,
+                     ULONG64 ullOffset,
+                     BOOL bUnicode,
+                     PDWORD pdwLength)
+{
+    DWORD dwLength = 0;
+
+    if (ullOffset >= cbBase)
+        return FALSE;
+
+    if (bUnicode)
+    {
+        PWCHAR pch = (PWCHAR)(lpBase + (ULONG)ullOffset);
+        DWORD dwMax = (cbBase - (ULONG)ullOffset) / sizeof(WCHAR);
+
+        while (dwLength < dwMax && pch[dwLength] != UNICODE_NULL)
+            dwLength++;
+        if (dwLength == dwMax)
+            return FALSE;
+    }
+    else
+    {
+        PCHAR pch = (PCHAR)(lpBase + (ULONG)ullOffset);
+        DWORD dwMax = cbBase - (ULONG)ullOffset;
+
+        while (dwLength < dwMax && pch[dwLength] != ANSI_NULL)
+            dwLength++;
+        if (dwLength == dwMax)
+            return FALSE;
+    }
+
+    *pdwLength = dwLength;
+    return TRUE;
+}
+
+/*
+ * EnumServicesStatusA/W, EnumServicesStatusExA/W and EnumDependentServicesA/W.
+ *
+ * What fits in a buffer, what is needed for the rest and where to resume depend on the size of the
+ * elements, which the SCM works out for its own layout. So take the whole remaining list from the SCM
+ * (the size comes from a first call that cannot return any element) and make the caller's buffer from it.
+ * The SCM sizes the strings in characters of the Unicode call for both the Unicode and the ANSI call, and
+ * so does the size reported here.
+ */
+static BOOL
+ScmWow64EnumStatus(const SCM_WOW64_ENUM *pEnum,
+                   LPBYTE lpServices,
+                   DWORD cbBufSize,
+                   LPDWORD pcbBytesNeeded,
+                   LPDWORD lpServicesReturned,
+                   LPDWORD lpResumeHandle)
+{
+    const DWORD dwSize64 = pEnum->bProcess ? SCM64_ENUM_STATUS_PROCESS_SIZE : SCM64_ENUM_STATUS_SIZE;
+    const DWORD dwSize32 = pEnum->bProcess ? sizeof(ENUM_SERVICE_STATUS_PROCESSW) : sizeof(ENUM_SERVICE_STATUSW);
+    const DWORD dwCharSize = pEnum->bUnicode ? sizeof(WCHAR) : sizeof(CHAR);
+    const DWORD dwResumeIn = lpResumeHandle ? *lpResumeHandle : 0;
+    BYTE Probe[SCM64_ENUM_STATUS_PROCESS_SIZE];
+    LPBYTE lpBuffer = NULL, lpEntry, lpString;
+    DWORD dwNeeded = 0, dwReturned = 0, dwResume, dwError, dwBufSize, dwTry, i;
+    DWORD dwTotal32 = 0, dwUsed32 = 0, dwUsed64 = 0, dwFit = 0;
+    BOOL bFits = TRUE, bMore;
+
+    if (pcbBytesNeeded == NULL || lpServicesReturned == NULL)
+    {
+        SetLastError(ERROR_INVALID_ADDRESS);
+        return FALSE;
+    }
+
+    /* How much is left; no element can be returned in this buffer */
+    RtlZeroMemory(Probe, sizeof(Probe));
+    dwResume = dwResumeIn;
+    dwError = ScmWow64EnumRpc(pEnum, Probe, SCM64_ENUM_PROBE_SIZE, &dwNeeded, &dwReturned,
+                              lpResumeHandle ? &dwResume : NULL);
+    if (dwError == ERROR_SUCCESS)
+    {
+        *pcbBytesNeeded = 0;
+        *lpServicesReturned = 0;
+        return TRUE;
+    }
+    if (dwError != ERROR_MORE_DATA)
+        goto Fail;
+
+    /* All of it. The dependents of a service are returned with 4 bytes less than they take up. */
+    for (dwTry = 0; ; dwTry++)
+    {
+        dwBufSize = (dwNeeded > 1024 * 256 - 64) ? 1024 * 256 : dwNeeded + 64;
+        lpBuffer = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dwBufSize);
+        if (lpBuffer == NULL)
+        {
+            dwError = ERROR_NOT_ENOUGH_MEMORY;
+            goto Fail;
+        }
+
+        dwResume = dwResumeIn;
+        dwReturned = 0;
+        dwError = ScmWow64EnumRpc(pEnum, lpBuffer, dwBufSize, &dwNeeded, &dwReturned,
+                                  lpResumeHandle ? &dwResume : NULL);
+        if (dwError == ERROR_SUCCESS || dwBufSize == 1024 * 256 || dwTry >= 3)
+            break;
+        if (dwError != ERROR_MORE_DATA)
+            goto Fail;
+
+        /* More services than a moment ago */
+        HeapFree(GetProcessHeap(), 0, lpBuffer);
+        lpBuffer = NULL;
+    }
+    if (dwError != ERROR_SUCCESS && dwError != ERROR_MORE_DATA)
+        goto Fail;
+
+    /* What of it fits the caller's buffer in the 32-bit layout */
+    for (i = 0; i < dwReturned; i++)
+    {
+        ULONG64 ullName, ullDisplay;
+        DWORD dwNameLength, dwDisplayLength, dwStrings;
+
+        RtlCopyMemory(&ullName, lpBuffer + i * dwSize64, sizeof(ULONG64));
+        RtlCopyMemory(&ullDisplay, lpBuffer + i * dwSize64 + sizeof(ULONG64), sizeof(ULONG64));
+        if (!ScmWow64StringLength(lpBuffer, dwBufSize, ullName, pEnum->bUnicode, &dwNameLength) ||
+            !ScmWow64StringLength(lpBuffer, dwBufSize, ullDisplay, pEnum->bUnicode, &dwDisplayLength))
+        {
+            dwError = ERROR_INVALID_DATA;
+            goto Fail;
+        }
+
+        dwStrings = (dwNameLength + dwDisplayLength + 2) * sizeof(WCHAR);
+        dwTotal32 += dwSize32 + dwStrings;
+        if (bFits && lpServices != NULL && dwUsed32 + dwSize32 + dwStrings <= cbBufSize)
+        {
+            dwUsed32 += dwSize32 + dwStrings;
+            dwUsed64 += dwSize64 + dwStrings;
+            dwFit++;
+        }
+        else
+        {
+            bFits = FALSE;
+        }
+    }
+
+    /* The dependents come all or none */
+    if (pEnum->bDependents && dwFit != dwReturned)
+        dwFit = 0;
+
+    lpEntry = lpServices;
+    lpString = lpServices + dwFit * dwSize32;
+    for (i = 0; i < dwFit; i++)
+    {
+        ULONG64 ullName, ullDisplay;
+        DWORD dwNameLength, dwDisplayLength;
+        LPBYTE lpSource = lpBuffer + i * dwSize64;
+        PVOID pName, pDisplay;
+
+        RtlCopyMemory(&ullName, lpSource, sizeof(ULONG64));
+        RtlCopyMemory(&ullDisplay, lpSource + sizeof(ULONG64), sizeof(ULONG64));
+        ScmWow64StringLength(lpBuffer, dwBufSize, ullName, pEnum->bUnicode, &dwNameLength);
+        ScmWow64StringLength(lpBuffer, dwBufSize, ullDisplay, pEnum->bUnicode, &dwDisplayLength);
+
+        pName = lpString;
+        RtlCopyMemory(lpString, lpBuffer + (ULONG)ullName, (dwNameLength + 1) * dwCharSize);
+        lpString += (dwNameLength + 1) * dwCharSize;
+        pDisplay = lpString;
+        RtlCopyMemory(lpString, lpBuffer + (ULONG)ullDisplay, (dwDisplayLength + 1) * dwCharSize);
+        lpString += (dwDisplayLength + 1) * dwCharSize;
+
+        /* Both kinds have the two pointers first, then the status (the 32-bit pointers are 4 bytes) */
+        RtlCopyMemory(lpEntry, &pName, sizeof(PVOID));
+        RtlCopyMemory(lpEntry + sizeof(PVOID), &pDisplay, sizeof(PVOID));
+        RtlCopyMemory(lpEntry + 2 * sizeof(PVOID),
+                      lpSource + 2 * sizeof(ULONG64),
+                      dwSize32 - 2 * sizeof(PVOID));
+        lpEntry += dwSize32;
+    }
+
+    *lpServicesReturned = dwFit;
+
+    bMore = (dwFit != dwReturned) || (dwError == ERROR_MORE_DATA);
+    if (!bMore)
+    {
+        *pcbBytesNeeded = 0;
+        if (lpResumeHandle)
+            *lpResumeHandle = 0;
+        HeapFree(GetProcessHeap(), 0, lpBuffer);
+        return TRUE;
+    }
+
+    /* What the SCM could not return in the buffer, in the sizes of the 64-bit layout, is left as it is */
+    *pcbBytesNeeded = dwTotal32;
+    if (dwError == ERROR_MORE_DATA)
+    {
+        DWORD dwTaken64 = 0;
+
+        for (i = 0; i < dwReturned; i++)
+        {
+            ULONG64 ullName, ullDisplay;
+            DWORD dwNameLength, dwDisplayLength;
+
+            RtlCopyMemory(&ullName, lpBuffer + i * dwSize64, sizeof(ULONG64));
+            RtlCopyMemory(&ullDisplay, lpBuffer + i * dwSize64 + sizeof(ULONG64), sizeof(ULONG64));
+            ScmWow64StringLength(lpBuffer, dwBufSize, ullName, pEnum->bUnicode, &dwNameLength);
+            ScmWow64StringLength(lpBuffer, dwBufSize, ullDisplay, pEnum->bUnicode, &dwDisplayLength);
+            dwTaken64 += dwSize64 + (dwNameLength + dwDisplayLength + 2) * sizeof(WCHAR);
+        }
+        if (dwNeeded > dwTaken64)
+            *pcbBytesNeeded += dwNeeded - dwTaken64;
+    }
+
+    if (lpResumeHandle)
+    {
+        if (dwFit == 0)
+        {
+            *lpResumeHandle = dwResumeIn;
+        }
+        else if (dwFit == dwReturned)
+        {
+            *lpResumeHandle = dwResume;
+        }
+        else
+        {
+            /* The resume handle after the last element that fit: the SCM stops there with exactly its size */
+            dwResume = dwResumeIn;
+            ScmWow64EnumRpc(pEnum, lpBuffer, dwUsed64, &dwNeeded, &dwReturned, &dwResume);
+            *lpResumeHandle = dwResume;
+        }
+    }
+
+    HeapFree(GetProcessHeap(), 0, lpBuffer);
+    SetLastError(ERROR_MORE_DATA);
+    return FALSE;
+
+Fail:
+    if (lpBuffer)
+        HeapFree(GetProcessHeap(), 0, lpBuffer);
+    /* What the SCM reported with the error: both are set to zero first thing */
+    *pcbBytesNeeded = dwNeeded;
+    *lpServicesReturned = dwReturned;
+    SetLastError(dwError);
+    return FALSE;
+}
+#endif
+
 /**********************************************************************
  *  EnumDependentServicesA
  *
@@ -1000,6 +1360,15 @@ EnumDependentServicesA(SC_HANDLE hService,
     TRACE("EnumDependentServicesA(%p %lu %p %lu %p %p)\n",
           hService, dwServiceState, lpServices, cbBufSize,
           pcbBytesNeeded, lpServicesReturned);
+
+#ifdef SYSWOW64_GUEST
+    {
+        SCM_WOW64_ENUM Enum = { hService, TRUE, FALSE, FALSE, 0, dwServiceState, NULL };
+
+        return ScmWow64EnumStatus(&Enum, (LPBYTE)lpServices, cbBufSize,
+                                  pcbBytesNeeded, lpServicesReturned, NULL);
+    }
+#endif
 
     if (lpServices == NULL || cbBufSize < sizeof(ENUM_SERVICE_STATUSA))
     {
@@ -1078,6 +1447,15 @@ EnumDependentServicesW(SC_HANDLE hService,
     TRACE("EnumDependentServicesW(%p %lu %p %lu %p %p)\n",
           hService, dwServiceState, lpServices, cbBufSize,
           pcbBytesNeeded, lpServicesReturned);
+
+#ifdef SYSWOW64_GUEST
+    {
+        SCM_WOW64_ENUM Enum = { hService, TRUE, FALSE, TRUE, 0, dwServiceState, NULL };
+
+        return ScmWow64EnumStatus(&Enum, (LPBYTE)lpServices, cbBufSize,
+                                  pcbBytesNeeded, lpServicesReturned, NULL);
+    }
+#endif
 
     if (lpServices == NULL || cbBufSize < sizeof(ENUM_SERVICE_STATUSW))
     {
@@ -1282,6 +1660,15 @@ EnumServicesStatusA(SC_HANDLE hSCManager,
         return FALSE;
     }
 
+#ifdef SYSWOW64_GUEST
+    {
+        SCM_WOW64_ENUM Enum = { hSCManager, FALSE, FALSE, FALSE, dwServiceType, dwServiceState, NULL };
+
+        return ScmWow64EnumStatus(&Enum, (LPBYTE)lpServices, cbBufSize,
+                                  pcbBytesNeeded, lpServicesReturned, lpResumeHandle);
+    }
+#endif
+
     if (lpServices == NULL || cbBufSize < sizeof(ENUM_SERVICE_STATUSA))
     {
         lpStatusPtr = &ServiceStatus;
@@ -1375,6 +1762,15 @@ EnumServicesStatusW(SC_HANDLE hSCManager,
         SetLastError(ERROR_INVALID_ADDRESS);
         return FALSE;
     }
+
+#ifdef SYSWOW64_GUEST
+    {
+        SCM_WOW64_ENUM Enum = { hSCManager, FALSE, FALSE, TRUE, dwServiceType, dwServiceState, NULL };
+
+        return ScmWow64EnumStatus(&Enum, (LPBYTE)lpServices, cbBufSize,
+                                  pcbBytesNeeded, lpServicesReturned, lpResumeHandle);
+    }
+#endif
 
     if (lpServices == NULL || cbBufSize < sizeof(ENUM_SERVICE_STATUSW))
     {
@@ -1478,6 +1874,15 @@ EnumServicesStatusExA(SC_HANDLE hSCManager,
         SetLastError(ERROR_INVALID_ADDRESS);
         return FALSE;
     }
+
+#ifdef SYSWOW64_GUEST
+    {
+        SCM_WOW64_ENUM Enum = { hSCManager, FALSE, TRUE, FALSE, dwServiceType, dwServiceState, pszGroupName };
+
+        return ScmWow64EnumStatus(&Enum, (LPBYTE)lpServices, cbBufSize,
+                                  pcbBytesNeeded, lpServicesReturned, lpResumeHandle);
+    }
+#endif
 
     if (lpServices == NULL || cbBufSize < sizeof(ENUM_SERVICE_STATUS_PROCESSA))
     {
@@ -1586,6 +1991,15 @@ EnumServicesStatusExW(SC_HANDLE hSCManager,
         SetLastError(ERROR_INVALID_ADDRESS);
         return FALSE;
     }
+
+#ifdef SYSWOW64_GUEST
+    {
+        SCM_WOW64_ENUM Enum = { hSCManager, FALSE, TRUE, TRUE, dwServiceType, dwServiceState, pszGroupName };
+
+        return ScmWow64EnumStatus(&Enum, (LPBYTE)lpServices, cbBufSize,
+                                  pcbBytesNeeded, lpServicesReturned, lpResumeHandle);
+    }
+#endif
 
     if (lpServices == NULL || cbBufSize < sizeof(ENUM_SERVICE_STATUS_PROCESSW))
     {
@@ -2489,6 +2903,199 @@ QueryServiceConfigW(SC_HANDLE hService,
 }
 
 
+#ifdef SYSWOW64_GUEST
+/*
+ * QueryServiceConfig2A/W for the levels with pointer members: SERVICE_DESCRIPTION and
+ * SERVICE_FAILURE_ACTIONS. The SCM fills a buffer in the 64-bit layout, which is larger by dwDelta bytes
+ * than the 32-bit header; give it that much more room than the caller has, and move what it returns,
+ * the strings and the actions that follow the header, down by dwDelta bytes.
+ * Called only after the info level is known to be one of the two.
+ */
+static BOOL
+ScmWow64QueryServiceConfig2(SC_HANDLE hService,
+                            DWORD dwInfoLevel,
+                            BOOL bUnicode,
+                            LPBYTE lpBuffer,
+                            DWORD cbBufSize,
+                            LPDWORD pcbBytesNeeded)
+{
+    DWORD dwHeader64, dwHeader32, dwDelta, dwBufSize, dwError;
+    LPBYTE lpTemp;
+    ULONG64 ullPointers[3];
+    DWORD dwFirst, dwSecond;
+    PVOID pPointers[3] = { NULL, NULL, NULL };
+    int i;
+
+    if (dwInfoLevel == SERVICE_CONFIG_DESCRIPTION)
+    {
+        dwHeader64 = 8;
+        dwHeader32 = 4;
+    }
+    else
+    {
+        dwHeader64 = 40;
+        dwHeader32 = 20;
+    }
+    dwDelta = dwHeader64 - dwHeader32;
+
+    if (lpBuffer == NULL)
+        cbBufSize = 0;
+
+    /* The request is bounded by 8 KB */
+    dwBufSize = (cbBufSize > 8 * 1024 - dwDelta) ? 8 * 1024 : cbBufSize + dwDelta;
+    lpTemp = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dwBufSize);
+    if (lpTemp == NULL)
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+
+    RpcTryExcept
+    {
+        if (bUnicode)
+            dwError = RQueryServiceConfig2W((SC_RPC_HANDLE)hService,
+                                            dwInfoLevel,
+                                            lpTemp,
+                                            dwBufSize,
+                                            pcbBytesNeeded);
+        else
+            dwError = RQueryServiceConfig2A((SC_RPC_HANDLE)hService,
+                                            dwInfoLevel,
+                                            lpTemp,
+                                            dwBufSize,
+                                            pcbBytesNeeded);
+    }
+    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+    {
+        dwError = ScmRpcStatusToWinError(RpcExceptionCode());
+    }
+    RpcEndExcept;
+
+    /* The size in the 32-bit layout, once the SCM has counted it (it does not on every success) */
+    if (pcbBytesNeeded != NULL && *pcbBytesNeeded >= dwHeader64 &&
+        (dwError == ERROR_SUCCESS || dwError == ERROR_INSUFFICIENT_BUFFER))
+        *pcbBytesNeeded -= dwDelta;
+
+    if (dwError != ERROR_SUCCESS)
+    {
+        HeapFree(GetProcessHeap(), 0, lpTemp);
+        TRACE("RQueryServiceConfig2%c() failed (Error %lu)\n", bUnicode ? 'W' : 'A', dwError);
+        SetLastError(dwError);
+        return FALSE;
+    }
+
+    /* The caller's buffer is dwDelta bytes shorter than the SCM's */
+    RtlCopyMemory(lpBuffer + dwHeader32, lpTemp + dwHeader64, dwBufSize - dwHeader64);
+
+    if (dwInfoLevel == SERVICE_CONFIG_DESCRIPTION)
+    {
+        RtlCopyMemory(&ullPointers[0], lpTemp, sizeof(ULONG64));
+        if (ullPointers[0] != 0)
+            pPointers[0] = lpBuffer + (ULONG)ullPointers[0] - dwDelta;
+        RtlCopyMemory(lpBuffer, &pPointers[0], sizeof(PVOID));
+    }
+    else
+    {
+        /* dwResetPeriod, lpRebootMsg, lpCommand, cActions, lpsaActions */
+        RtlCopyMemory(&dwFirst, lpTemp + 0, sizeof(DWORD));
+        RtlCopyMemory(&ullPointers[0], lpTemp + 8, sizeof(ULONG64));
+        RtlCopyMemory(&ullPointers[1], lpTemp + 16, sizeof(ULONG64));
+        RtlCopyMemory(&dwSecond, lpTemp + 24, sizeof(DWORD));
+        RtlCopyMemory(&ullPointers[2], lpTemp + 32, sizeof(ULONG64));
+
+        for (i = 0; i < 3; i++)
+        {
+            if (ullPointers[i] != 0)
+                pPointers[i] = lpBuffer + (ULONG)ullPointers[i] - dwDelta;
+        }
+
+        RtlCopyMemory(lpBuffer + 0, &dwFirst, sizeof(DWORD));
+        RtlCopyMemory(lpBuffer + 4, &pPointers[0], sizeof(PVOID));
+        RtlCopyMemory(lpBuffer + 8, &pPointers[1], sizeof(PVOID));
+        RtlCopyMemory(lpBuffer + 12, &dwSecond, sizeof(DWORD));
+        RtlCopyMemory(lpBuffer + 16, &pPointers[2], sizeof(PVOID));
+    }
+
+    HeapFree(GetProcessHeap(), 0, lpTemp);
+    return TRUE;
+}
+
+/*
+ * QueryServiceLockStatusA/W: the SCM's QUERY_SERVICE_LOCK_STATUS is dwDelta (12) bytes larger than the
+ * 32-bit one, the owner's name follows it.
+ */
+static BOOL
+ScmWow64QueryServiceLockStatus(SC_HANDLE hSCManager,
+                               BOOL bUnicode,
+                               LPBYTE lpLockStatus,
+                               DWORD cbBufSize,
+                               LPDWORD pcbBytesNeeded)
+{
+    const DWORD dwHeader64 = 24, dwHeader32 = 12, dwDelta = 12;
+    DWORD dwBufSize, dwError, dwLocked, dwDuration;
+    ULONG64 ullOwner;
+    PVOID pOwner = NULL;
+    LPBYTE lpTemp;
+
+    if (lpLockStatus == NULL)
+        cbBufSize = 0;
+
+    /* The request is bounded by 4 KB */
+    dwBufSize = (cbBufSize > 4 * 1024 - dwDelta) ? 4 * 1024 : cbBufSize + dwDelta;
+    lpTemp = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dwBufSize);
+    if (lpTemp == NULL)
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+
+    RpcTryExcept
+    {
+        if (bUnicode)
+            dwError = RQueryServiceLockStatusW((SC_RPC_HANDLE)hSCManager,
+                                               lpTemp,
+                                               dwBufSize,
+                                               pcbBytesNeeded);
+        else
+            dwError = RQueryServiceLockStatusA((SC_RPC_HANDLE)hSCManager,
+                                               lpTemp,
+                                               dwBufSize,
+                                               pcbBytesNeeded);
+    }
+    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+    {
+        dwError = ScmRpcStatusToWinError(RpcExceptionCode());
+    }
+    RpcEndExcept;
+
+    if (pcbBytesNeeded != NULL && *pcbBytesNeeded >= dwHeader64 &&
+        (dwError == ERROR_SUCCESS || dwError == ERROR_INSUFFICIENT_BUFFER))
+        *pcbBytesNeeded -= dwDelta;
+
+    if (dwError != ERROR_SUCCESS)
+    {
+        HeapFree(GetProcessHeap(), 0, lpTemp);
+        TRACE("RQueryServiceLockStatus%c() failed (Error %lu)\n", bUnicode ? 'W' : 'A', dwError);
+        SetLastError(dwError);
+        return FALSE;
+    }
+
+    RtlCopyMemory(&dwLocked, lpTemp + 0, sizeof(DWORD));
+    RtlCopyMemory(&ullOwner, lpTemp + 8, sizeof(ULONG64));
+    RtlCopyMemory(&dwDuration, lpTemp + 16, sizeof(DWORD));
+    if (ullOwner != 0)
+        pOwner = lpLockStatus + (ULONG)ullOwner - dwDelta;
+
+    RtlCopyMemory(lpLockStatus + dwHeader32, lpTemp + dwHeader64, dwBufSize - dwHeader64);
+    RtlCopyMemory(lpLockStatus + 0, &dwLocked, sizeof(DWORD));
+    RtlCopyMemory(lpLockStatus + 4, &pOwner, sizeof(PVOID));
+    RtlCopyMemory(lpLockStatus + 8, &dwDuration, sizeof(DWORD));
+
+    HeapFree(GetProcessHeap(), 0, lpTemp);
+    return TRUE;
+}
+#endif
+
 /**********************************************************************
  *  QueryServiceConfig2A
  *
@@ -2510,6 +3117,13 @@ QueryServiceConfig2A(SC_HANDLE hService,
 
     TRACE("QueryServiceConfig2A(%p %lu %p %lu %p)\n",
           hService, dwInfoLevel, lpBuffer, cbBufSize, pcbBytesNeeded);
+
+#ifdef SYSWOW64_GUEST
+    if (dwInfoLevel == SERVICE_CONFIG_DESCRIPTION ||
+        dwInfoLevel == SERVICE_CONFIG_FAILURE_ACTIONS)
+        return ScmWow64QueryServiceConfig2(hService, dwInfoLevel, FALSE,
+                                           lpBuffer, cbBufSize, pcbBytesNeeded);
+#endif
 
     lpTempBuffer = lpBuffer;
     dwBufferSize = cbBufSize;
@@ -2649,6 +3263,13 @@ QueryServiceConfig2W(SC_HANDLE hService,
     TRACE("QueryServiceConfig2W(%p %lu %p %lu %p)\n",
           hService, dwInfoLevel, lpBuffer, cbBufSize, pcbBytesNeeded);
 
+#ifdef SYSWOW64_GUEST
+    if (dwInfoLevel == SERVICE_CONFIG_DESCRIPTION ||
+        dwInfoLevel == SERVICE_CONFIG_FAILURE_ACTIONS)
+        return ScmWow64QueryServiceConfig2(hService, dwInfoLevel, TRUE,
+                                           lpBuffer, cbBufSize, pcbBytesNeeded);
+#endif
+
     lpTempBuffer = lpBuffer;
     dwBufferSize = cbBufSize;
 
@@ -2784,6 +3405,11 @@ QueryServiceLockStatusA(SC_HANDLE hSCManager,
     TRACE("QueryServiceLockStatusA(%p %p %lu %p)\n",
           hSCManager, lpLockStatus, cbBufSize, pcbBytesNeeded);
 
+#ifdef SYSWOW64_GUEST
+    return ScmWow64QueryServiceLockStatus(hSCManager, FALSE, (LPBYTE)lpLockStatus,
+                                          cbBufSize, pcbBytesNeeded);
+#endif
+
     if (lpLockStatus == NULL || cbBufSize < sizeof(QUERY_SERVICE_LOCK_STATUSA))
     {
         lpStatusPtr = &LockStatus;
@@ -2845,6 +3471,11 @@ QueryServiceLockStatusW(SC_HANDLE hSCManager,
 
     TRACE("QueryServiceLockStatusW(%p %p %lu %p)\n",
           hSCManager, lpLockStatus, cbBufSize, pcbBytesNeeded);
+
+#ifdef SYSWOW64_GUEST
+    return ScmWow64QueryServiceLockStatus(hSCManager, TRUE, (LPBYTE)lpLockStatus,
+                                          cbBufSize, pcbBytesNeeded);
+#endif
 
     if (lpLockStatus == NULL || cbBufSize < sizeof(QUERY_SERVICE_LOCK_STATUSW))
     {
