@@ -89,6 +89,7 @@ extern void func_GetOverlappedResultEx(void);
 extern void func_GetQueuedCompletionStatusEx(void);
 extern void func_GetSystemTimePrecise(void);
 extern void func_GetVolumeInformation(void);
+extern void func_HeapCreateExecute(void);
 extern void func_HandleList(void);
 extern void func_HeapWalk(void);
 extern void func_IdleProcessor(void);
@@ -265,6 +266,7 @@ const struct test winetest_testlist[] =
     { "GetQueuedCompletionStatusEx", func_GetQueuedCompletionStatusEx },
     { "GetSystemTimePrecise",        func_GetSystemTimePrecise },
     { "GetVolumeInformation",        func_GetVolumeInformation },
+    { "HeapCreateExecute",           func_HeapCreateExecute },
     { "HandleList",                  func_HandleList },
     { "HeapWalk",                    func_HeapWalk },
     { "IdleProcessor",               func_IdleProcessor },

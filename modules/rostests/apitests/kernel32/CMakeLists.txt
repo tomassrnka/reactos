@@ -87,6 +87,7 @@ list(APPEND SOURCE
     GetSystemTimePrecise.c
     GetVolumeInformation.c
     HandleList.c
+    HeapCreateExecute.c
     HeapWalk.c
     IdleProcessor.c
     InitOnce.c
