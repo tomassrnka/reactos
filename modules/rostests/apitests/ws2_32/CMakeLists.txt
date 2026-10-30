@@ -14,10 +14,14 @@ list(APPEND SOURCE
     GetHostNameW.c
     gethostname.c
     getnameinfo.c
+    getnameinfoserv.c
     getpeername.c
     getservbyname.c
     getservbyport.c
     getsockname.c
+    handleinherit.c
+    sendwhole.c
+    inheritedsocket.c
     helpers.c
     iocpskip.c
     ioctlsocket.c

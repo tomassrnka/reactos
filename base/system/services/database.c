@@ -18,6 +18,7 @@
 #include <userenv.h>
 #include <reason.h>
 #include <strsafe.h>
+#include <ntsecapi.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -360,6 +361,56 @@ done:
 }
 
 
+/*
+ * The password of a service's account is kept as the LSA secret _SC_<service name>. Read it here, in the
+ * service control manager that runs as SYSTEM and may: the logon must never take the name of a secret
+ * for a password, which would let any caller log on as the account. Without such a secret (the special
+ * accounts LocalService and NetworkService have none) the name is passed as an ordinary, meaningless
+ * password. Returns a heap string the caller zeroes and frees.
+ */
+static PWSTR
+ScmGetServicePassword(
+    _In_ PCWSTR pszServiceName,
+    _In_ BOOL bSpecialAccount)
+{
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    LSA_HANDLE PolicyHandle = NULL;
+    UNICODE_STRING SecretName;
+    PUNICODE_STRING PrivateData = NULL;
+    PWSTR pszPassword = NULL;
+    SIZE_T Length = wcslen(pszServiceName);
+
+    SecretName.Buffer = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (Length + 5) * sizeof(WCHAR));
+    if (SecretName.Buffer == NULL)
+        return NULL;
+    wcscpy(SecretName.Buffer, L"_SC_");
+    wcscat(SecretName.Buffer, pszServiceName);
+    SecretName.Length = (USHORT)((Length + 4) * sizeof(WCHAR));
+    SecretName.MaximumLength = SecretName.Length + sizeof(WCHAR);
+
+    RtlZeroMemory(&ObjectAttributes, sizeof(ObjectAttributes));
+    if (!bSpecialAccount &&
+        NT_SUCCESS(LsaOpenPolicy(NULL, &ObjectAttributes, POLICY_GET_PRIVATE_INFORMATION, &PolicyHandle)))
+    {
+        if (NT_SUCCESS(LsaRetrievePrivateData(PolicyHandle, &SecretName, &PrivateData)) && PrivateData)
+        {
+            pszPassword = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, PrivateData->Length + sizeof(WCHAR));
+            if (pszPassword)
+                RtlCopyMemory(pszPassword, PrivateData->Buffer, PrivateData->Length);
+            SecureZeroMemory(PrivateData->Buffer, PrivateData->Length);
+            LsaFreeMemory(PrivateData);
+        }
+        LsaClose(PolicyHandle);
+    }
+
+    if (pszPassword == NULL)
+        return SecretName.Buffer;   /* no secret: the name itself */
+
+    HeapFree(GetProcessHeap(), 0, SecretName.Buffer);
+    return pszPassword;
+}
+
+
 static
 DWORD
 ScmLogonService(
@@ -394,20 +445,17 @@ ScmLogonService(
         pszDomainName = NULL;
     }
 
-    /* Build the service 'password' */
-    pszPassword = HeapAlloc(GetProcessHeap(),
-                            HEAP_ZERO_MEMORY,
-                            (wcslen(pService->lpServiceName) + 5) * sizeof(WCHAR));
+    /* Get the password of the account: the LSA secret _SC_<service name>. The special accounts of
+     * NT AUTHORITY have none (and the LSA may not be up yet when they are started) */
+    pszPassword = ScmGetServicePassword(pService->lpServiceName,
+                                        pszDomainName != NULL && !_wcsicmp(pszDomainName, L"NT AUTHORITY"));
     if (pszPassword == NULL)
     {
         dwError = ERROR_NOT_ENOUGH_MEMORY;
         goto done;
     }
 
-    wcscpy(pszPassword, L"_SC_");
-    wcscat(pszPassword, pService->lpServiceName);
-
-    DPRINT("Domain: %S  User: %S  Password: %S\n", pszDomainName, pszUserName, pszPassword);
+    DPRINT("Domain: %S  User: %S\n", pszDomainName, pszUserName);
 
     /* Do the service logon */
     if (!LogonUserW(pszUserName,
@@ -451,7 +499,10 @@ ScmLogonService(
 
 done:
     if (pszPassword != NULL)
+    {
+        SecureZeroMemory(pszPassword, (wcslen(pszPassword) + 1) * sizeof(WCHAR));
         HeapFree(GetProcessHeap(), 0, pszPassword);
+    }
 
     if (ptr != NULL)
         *ptr = L'\\';

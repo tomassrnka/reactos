@@ -75,6 +75,14 @@ typedef struct _SOCKET_CONTEXT {
 	/* Plus Helper Data */
 } SOCKET_CONTEXT, *PSOCKET_CONTEXT;
 
+/* The AFD context of a socket: SOCKET_CONTEXT followed by the socket's WSAPROTOCOL_INFOW. A process that
+ * inherits the handle (a child of CreateProcess) rebuilds its socket from it, see MsafdAdoptInheritedSocket. */
+typedef struct _MSAFD_CONTEXT_BLOB
+{
+    SOCKET_CONTEXT Context;
+    WSAPROTOCOL_INFOW ProtocolInfo;
+} MSAFD_CONTEXT_BLOB, *PMSAFD_CONTEXT_BLOB;
+
 typedef struct _ASYNC_DATA {
 	PSOCKET_INFORMATION ParentSocket;
 	DWORD SequenceNumber;
@@ -89,12 +97,23 @@ typedef struct _MSAFD_INFO_APC_CONTEXT
     PAFD_INFO lpInfoData;
 } MSAFD_INFO_APC_CONTEXT, *PMSAFD_INFO_APC_CONTEXT;
 
+/* The rest of a stream send that AFD took in part (its send window is smaller than the buffer) */
+typedef struct _MSAFD_SEND_REST
+{
+    ULONG BufferCount;
+    ULONG Sent;       /* bytes of the whole request sent so far */
+    ULONG AfdFlags;
+    ULONG TdiFlags;
+    AFD_WSABUF Buffers[1]; /* the buffers not sent yet, BufferCount entries */
+} MSAFD_SEND_REST, *PMSAFD_SEND_REST;
+
 typedef struct _MSAFD_SEND_APC_CONTEXT
 {
     LPWSAOVERLAPPED lpOverlapped;
     LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine;
     PSOCKET_INFORMATION lpSocket;
     PTRANSPORT_ADDRESS lpRemoteAddress;
+    PMSAFD_SEND_REST lpRest; /* NULL: the send is complete when AFD completes it */
 } MSAFD_SEND_APC_CONTEXT, *PMSAFD_SEND_APC_CONTEXT;
 
 typedef struct _MSAFD_RECV_APC_CONTEXT

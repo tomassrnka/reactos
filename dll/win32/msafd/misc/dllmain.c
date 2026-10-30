@@ -187,6 +187,11 @@ WSPSocket(int AddressFamily,
         Socket->SharedDataHandle = UlongToHandle(lpProtocolInfo->dwServiceFlags3);
         Sock = UlongToHandle(lpProtocolInfo->dwServiceFlags4);
         Socket->Handle = (SOCKET)lpProtocolInfo->dwServiceFlags4;
+
+        /* The handle WSPDuplicateSocket made for this process is not inheritable;
+         * the socket made from it is, as on Windows, unless the caller opts out */
+        SetHandleInformation(Sock, HANDLE_FLAG_INHERIT,
+                             (dwFlags & WSA_FLAG_NO_HANDLE_INHERIT) ? 0 : HANDLE_FLAG_INHERIT);
     }
     else
     {
@@ -333,10 +338,11 @@ WSPSocket(int AddressFamily,
         }
     }
 
-    /* Set up Object Attributes */
+    /* Set up Object Attributes. Sockets are inheritable unless WSA_FLAG_NO_HANDLE_INHERIT is set */
     InitializeObjectAttributes (&Object,
                                 &DevName,
-                                OBJ_CASE_INSENSITIVE | OBJ_INHERIT,
+                                (dwFlags & WSA_FLAG_NO_HANDLE_INHERIT) ?
+                                    OBJ_CASE_INSENSITIVE : (OBJ_CASE_INSENSITIVE | OBJ_INHERIT),
                                 0,
                                 0);
 
@@ -687,6 +693,19 @@ MsafdWaitForRequest(
 #endif
 }
 
+/* TRUE if another handle (here, in a child process, or a duplicate) refers to the same endpoint */
+static
+BOOLEAN
+MsafdEndpointHasOtherHandles(
+    _In_ HANDLE Handle)
+{
+    OBJECT_BASIC_INFORMATION BasicInfo;
+    NTSTATUS Status;
+
+    Status = NtQueryObject(Handle, ObjectBasicInformation, &BasicInfo, sizeof(BasicInfo), NULL);
+    return NT_SUCCESS(Status) && BasicInfo.HandleCount > 1;
+}
+
 /*
  * FUNCTION: Closes an open socket
  * ARGUMENTS:
@@ -827,7 +846,12 @@ WSPCloseSocket(IN SOCKET Handle,
         }
     }
 
-    if (OldState == SocketConnected)
+    /*
+     * The endpoint belongs to every process that holds a handle to it: a child that inherited the socket
+     * (OpenSSH's sshd gives its connection to sshd-session and closes its own handle) must find the
+     * connection alive. Disconnect it only when this is the last handle; the close of that one does.
+     */
+    if (OldState == SocketConnected && !MsafdEndpointHasOtherHandles((HANDLE)Handle))
     {
         if (LingerWait <= 0)
         {
@@ -4267,8 +4291,9 @@ SetSocketInformation(PSOCKET_INFORMATION Socket,
     return MsafdReturnWithErrno(Status, NULL, 0, NULL);
 }
 
+static
 PSOCKET_INFORMATION
-GetSocketStructure(SOCKET Handle)
+MsafdFindSocket(SOCKET Handle)
 {
     PSOCKET_INFORMATION CurrentSocket;
 
@@ -4278,23 +4303,193 @@ GetSocketStructure(SOCKET Handle)
     while (CurrentSocket)
     {
         if (CurrentSocket->Handle == Handle)
-        {
-            LeaveCriticalSection(&SocketListLock);
-            return CurrentSocket;
-        }
+            break;
 
         CurrentSocket = CurrentSocket->NextSocket;
     }
 
     LeaveCriticalSection(&SocketListLock);
 
+    return CurrentSocket;
+}
+
+/* One AFD ioctl that fills Out, waiting for it to finish */
+static
+NTSTATUS
+MsafdAfdQuery(
+    _In_ HANDLE Handle,
+    _In_ ULONG IoControlCode,
+    _In_opt_ PVOID In,
+    _In_ ULONG InSize,
+    _Out_ PVOID Out,
+    _In_ ULONG OutSize)
+{
+    IO_STATUS_BLOCK IOSB;
+    HANDLE SockEvent;
+    NTSTATUS Status;
+
+    Status = NtCreateEvent(&SockEvent, EVENT_ALL_ACCESS, NULL, SynchronizationEvent, FALSE);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = NtDeviceIoControlFile(Handle, SockEvent, NULL, NULL, &IOSB, IoControlCode, In, InSize, Out, OutSize);
+    if (Status == STATUS_PENDING)
+    {
+        MsafdWaitForAlert(SockEvent);
+        Status = IOSB.Status;
+    }
+    NtClose(SockEvent);
+
+    return Status;
+}
+
+/*
+ * A socket handle this process did not create: the child of a process that passed the handle through
+ * CreateProcess (standard handle or handle list), as OpenSSH's sshd does with the connection. Rebuild the
+ * socket from the context the creating process stored in AFD (the socket's family, type, protocol, options,
+ * protocol info) and from what AFD knows now (the state of the endpoint). Returns the new entry of the
+ * socket list, or NULL when the handle is no socket of this provider.
+ */
+static
+PSOCKET_INFORMATION
+MsafdAdoptInheritedSocket(SOCKET Handle)
+{
+    FILE_FS_DEVICE_INFORMATION DeviceInfo;
+    IO_STATUS_BLOCK IOSB;
+    SOCK_SHARED_INFO KernelShared;
+    PMSAFD_CONTEXT_BLOB Blob = NULL;
+    PSOCKET_INFORMATION Socket = NULL, Existing;
+    UNICODE_STRING TransportName;
+    ULONG ContextSize = 0, AfdState;
+    INT AddressFamily, SocketType, Protocol;
+    NTSTATUS Status;
+
+    /* AFD's device is of the named pipe type here (Windows uses the network type): this keeps the ioctls
+     * away from files, disks and the other devices. A pipe answers the ioctl with an error. */
+    Status = NtQueryVolumeInformationFile((HANDLE)Handle, &IOSB, &DeviceInfo, sizeof(DeviceInfo), FileFsDeviceInformation);
+    if (!NT_SUCCESS(Status) ||
+        (DeviceInfo.DeviceType != FILE_DEVICE_NETWORK && DeviceInfo.DeviceType != FILE_DEVICE_NAMED_PIPE))
+        return NULL;
+
+    Status = MsafdAfdQuery((HANDLE)Handle, IOCTL_AFD_GET_CONTEXT_SIZE, NULL, 0, &ContextSize, sizeof(ContextSize));
+    if (!NT_SUCCESS(Status) || ContextSize != sizeof(*Blob))
+        return NULL;
+
+    Blob = HeapAlloc(GlobalHeap, 0, sizeof(*Blob));
+    if (!Blob)
+        return NULL;
+    Status = MsafdAfdQuery((HANDLE)Handle, IOCTL_AFD_GET_CONTEXT, NULL, 0, Blob, sizeof(*Blob));
+    if (!NT_SUCCESS(Status) ||
+        Blob->Context.SizeOfHelperData != sizeof(Blob->ProtocolInfo) ||
+        Blob->Context.SharedData.State == SocketClosed)
+        goto fail;
+
+    /* The state the endpoint has now. AFD answers a request of the size of the shared data with its own copy */
+    Status = MsafdAfdQuery((HANDLE)Handle, IOCTL_AFD_GET_CONTEXT, NULL, 0, &KernelShared, sizeof(KernelShared));
+    if (!NT_SUCCESS(Status))
+        goto fail;
+
+    Socket = HeapAlloc(GlobalHeap, HEAP_ZERO_MEMORY, sizeof(*Socket));
+    if (!Socket)
+        goto fail;
+    Socket->SharedData = HeapAlloc(GlobalHeap, 0, sizeof(*Socket->SharedData));
+    if (!Socket->SharedData)
+        goto fail;
+
+    *Socket->SharedData = Blob->Context.SharedData;
+    Socket->SharedData->RefCount = 1;
+    Socket->SharedDataHandle = INVALID_HANDLE_VALUE;
+
+    /* AFD's endpoint states: 0 created, 1 bound, 2 connecting, 3 connected, 4 listening */
+    AfdState = (ULONG)KernelShared.State & 0xffff;
+    switch (AfdState)
+    {
+        case 3:
+            Socket->SharedData->State = SocketConnected;
+            break;
+        case 0:
+            Socket->SharedData->State = SocketOpen;
+            break;
+        case 4:
+            Socket->SharedData->State = SocketBound;
+            Socket->SharedData->Listening = TRUE;
+            break;
+        default:
+            Socket->SharedData->State = Socket->SharedData->SocketType == SOCK_DGRAM ? SocketBoundUdp : SocketBound;
+            break;
+    }
+
+    AddressFamily = Socket->SharedData->AddressFamily;
+    SocketType = Socket->SharedData->SocketType;
+    Protocol = Socket->SharedData->Protocol;
+    if (SockGetTdiName(&AddressFamily,
+                       &SocketType,
+                       &Protocol,
+                       0,
+                       Socket->SharedData->CreateFlags,
+                       &TransportName,
+                       &Socket->HelperContext,
+                       &Socket->HelperData,
+                       &Socket->HelperEvents) != NO_ERROR)
+        goto fail;
+
+    Socket->Handle = Handle;
+    Socket->LocalAddress = &Socket->SharedData->WSLocalAddress;
+    Socket->RemoteAddress = &Socket->SharedData->WSRemoteAddress;
+    Socket->ProtocolInfo = Blob->ProtocolInfo;
+    HeapFree(GlobalHeap, 0, Blob);
+    Blob = NULL;
+
+    /* Another thread may have adopted the handle while this one worked */
+    EnterCriticalSection(&SocketListLock);
+    for (Existing = SocketListHead; Existing; Existing = Existing->NextSocket)
+    {
+        if (Existing->Handle == Handle)
+            break;
+    }
+    if (!Existing)
+    {
+        Socket->NextSocket = SocketListHead;
+        SocketListHead = Socket;
+    }
+    LeaveCriticalSection(&SocketListLock);
+
+    if (Existing)
+    {
+        HeapFree(GlobalHeap, 0, Socket->SharedData);
+        HeapFree(GlobalHeap, 0, Socket);
+        return Existing;
+    }
+
+    return Socket;
+
+fail:
+    if (Socket && Socket->SharedData)
+        HeapFree(GlobalHeap, 0, Socket->SharedData);
+    if (Socket)
+        HeapFree(GlobalHeap, 0, Socket);
+    if (Blob)
+        HeapFree(GlobalHeap, 0, Blob);
     return NULL;
+}
+
+PSOCKET_INFORMATION
+GetSocketStructure(SOCKET Handle)
+{
+    PSOCKET_INFORMATION CurrentSocket;
+
+    CurrentSocket = MsafdFindSocket(Handle);
+    if (CurrentSocket)
+        return CurrentSocket;
+
+    /* Not made by this process: a socket handle inherited from the parent */
+    return MsafdAdoptInheritedSocket(Handle);
 }
 
 int CreateContext(PSOCKET_INFORMATION Socket)
 {
     IO_STATUS_BLOCK     IOSB;
-    SOCKET_CONTEXT      ContextData;
+    MSAFD_CONTEXT_BLOB  ContextData;
     NTSTATUS            Status;
     HANDLE              SockEvent;
 
@@ -4308,14 +4503,16 @@ int CreateContext(PSOCKET_INFORMATION Socket)
         return SOCKET_ERROR;
 
     /* Create Context */
-    ContextData.SharedData = *Socket->SharedData;
-    ContextData.SizeOfHelperData = 0;
-    RtlCopyMemory (&ContextData.LocalAddress,
+    RtlZeroMemory(&ContextData, sizeof(ContextData));
+    ContextData.Context.SharedData = *Socket->SharedData;
+    ContextData.Context.SizeOfHelperData = sizeof(ContextData.ProtocolInfo);
+    RtlCopyMemory (&ContextData.Context.LocalAddress,
                    Socket->LocalAddress,
-                   Socket->SharedData->SizeOfLocalAddress);
-    RtlCopyMemory (&ContextData.RemoteAddress,
+                   min(Socket->SharedData->SizeOfLocalAddress, sizeof(SOCKADDR)));
+    RtlCopyMemory (&ContextData.Context.RemoteAddress,
                    Socket->RemoteAddress,
-                   Socket->SharedData->SizeOfRemoteAddress);
+                   min(Socket->SharedData->SizeOfRemoteAddress, sizeof(SOCKADDR)));
+    ContextData.ProtocolInfo = Socket->ProtocolInfo;
 
     /* Send IOCTL */
     Status = NtDeviceIoControlFile((HANDLE)Socket->Handle,

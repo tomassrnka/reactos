@@ -542,6 +542,28 @@ GetServiceNameForPort(IN LPWSTR pServiceBuffer,
                       IN WORD Port,
                       IN DWORD Flags)
 {
+    struct servent *Service;
+    INT Length;
+
+    /* Port is in network byte order. The name of the service, unless the number is asked for or the port has none */
+    if (!(Flags & NI_NUMERICSERV))
+    {
+        Service = getservbyport(Port, (Flags & NI_DGRAM) ? "udp" : "tcp");
+        if (Service && Service->s_name)
+        {
+            Length = MultiByteToWideChar(CP_ACP, 0, Service->s_name, -1, pServiceBuffer, ServiceBufferSize);
+            if (Length)
+                return ERROR_SUCCESS;
+        }
+    }
+
+    /* The port number, which has up to 5 digits and the terminator */
+    Port = (WORD)((Port >> 8) | ((Port & 0xff) << 8));
+    Length = (Port >= 10000) ? 5 : (Port >= 1000) ? 4 : (Port >= 100) ? 3 : (Port >= 10) ? 2 : 1;
+    if (ServiceBufferSize < (DWORD)Length + 1)
+        return ERROR_INSUFFICIENT_BUFFER;
+    _snwprintf(pServiceBuffer, ServiceBufferSize, L"%u", (UINT)Port);
+    pServiceBuffer[Length] = UNICODE_NULL;
     return ERROR_SUCCESS;
 }
 
@@ -1188,7 +1210,11 @@ getnameinfo(const struct sockaddr FAR *sa,
                                             hostlen,
                                             NULL,
                                             NULL);
-            if (!ErrorCode) goto Quickie;
+            if (!ErrorCode)
+            {
+                ErrorCode = GetLastError();
+                goto Quickie;
+            }
         }
 
         /* Check if we have a service pointer */
@@ -1203,7 +1229,11 @@ getnameinfo(const struct sockaddr FAR *sa,
                                             servlen,
                                             NULL,
                                             NULL);
-            if (!ErrorCode) goto Quickie;
+            if (!ErrorCode)
+            {
+                ErrorCode = GetLastError();
+                goto Quickie;
+            }
         }
 
         /* Return success */

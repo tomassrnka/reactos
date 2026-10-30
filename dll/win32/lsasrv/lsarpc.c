@@ -3682,7 +3682,8 @@ LsarRetrievePrivateData(
         goto done;
 
     /* Allocate a buffer for the encrypted current value */
-    EncCurrentValue = midl_user_allocate(sizeof(LSAPR_CR_CIPHER_VALUE) + CurrentValueLength);
+    /* The RPC server stub frees the structure and its buffer separately: allocate them separately */
+    EncCurrentValue = midl_user_allocate(sizeof(LSAPR_CR_CIPHER_VALUE));
     if (EncCurrentValue == NULL)
     {
         Status = STATUS_INSUFFICIENT_RESOURCES;
@@ -3692,7 +3693,14 @@ LsarRetrievePrivateData(
     /* FIXME: Encrypt the current value */
     EncCurrentValue->Length = (USHORT)(CurrentValueLength - sizeof(WCHAR));
     EncCurrentValue->MaximumLength = (USHORT)CurrentValueLength;
-    EncCurrentValue->Buffer = (PBYTE)(EncCurrentValue + 1);
+    EncCurrentValue->Buffer = midl_user_allocate(CurrentValueLength);
+    if (EncCurrentValue->Buffer == NULL)
+    {
+        midl_user_free(EncCurrentValue);
+        EncCurrentValue = NULL;
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto done;
+    }
     RtlCopyMemory(EncCurrentValue->Buffer,
                   CurrentValue,
                   CurrentValueLength);
@@ -3709,7 +3717,11 @@ done:
             *EncryptedData = NULL;
 
         if (EncCurrentValue != NULL)
+        {
+            if (EncCurrentValue->Buffer != NULL)
+                midl_user_free(EncCurrentValue->Buffer);
             midl_user_free(EncCurrentValue);
+        }
     }
 
     if (SecretObject != NULL)

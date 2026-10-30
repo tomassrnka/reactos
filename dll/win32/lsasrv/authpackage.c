@@ -904,6 +904,7 @@ LsapAddDefaultGroups(
                 break;
 
             case Network:
+            case NetworkCleartext:
                 SrcSid = LsapNetworkSid;
                 break;
 
@@ -1335,10 +1336,13 @@ LsapSetPrivileges(
         if (!NT_SUCCESS(Status))
             return Status;
 
-        for (i = 0; i < TokenInfo1->Groups->GroupCount; i++)
+        /* The rights of the groups of the token, and the ones granted to the user itself */
+        for (i = 0; i <= TokenInfo1->Groups->GroupCount; i++)
         {
             Status = LsarOpenAccount(PolicyHandle,
-                                     TokenInfo1->Groups->Groups[i].Sid,
+                                     (i < TokenInfo1->Groups->GroupCount) ?
+                                         TokenInfo1->Groups->Groups[i].Sid :
+                                         TokenInfo1->User.User.Sid,
                                      ACCOUNT_VIEW,
                                      &AccountHandle);
             if (!NT_SUCCESS(Status))
@@ -1655,7 +1659,7 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
         Status = NtCreateToken(&TokenHandle,
                                TOKEN_ALL_ACCESS,
                                &ObjectAttributes,
-                               (RequestMsg->LogonUser.Request.LogonType == Network) ? TokenImpersonation : TokenPrimary,
+                               (LogonType == Network || LogonType == NetworkCleartext) ? TokenImpersonation : TokenPrimary,
                                &RequestMsg->LogonUser.Reply.LogonId,
                                &TokenInfo1->ExpirationTime,
                                &TokenInfo1->User,
@@ -1684,7 +1688,8 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
 
     if (LogonType == Interactive ||
         LogonType == Batch ||
-        LogonType == Service)
+        LogonType == Service ||
+        LogonType == NetworkCleartext)
     {
         UserName = &((PMSV1_0_INTERACTIVE_LOGON)LocalAuthInfo)->UserName;
         LogonDomainName = &((PMSV1_0_INTERACTIVE_LOGON)LocalAuthInfo)->LogonDomainName;

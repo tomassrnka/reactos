@@ -19,10 +19,15 @@ extern void func_getaddrinfo(void);
 extern void func_GetHostNameW(void);
 extern void func_gethostname(void);
 extern void func_getnameinfo(void);
+extern void func_getnameinfoserv(void);
 extern void func_getpeername(void);
 extern void func_getservbyname(void);
 extern void func_getservbyport(void);
 extern void func_getsockname(void);
+extern void func_handleinherit(void);
+extern void func_sendwhole(void);
+extern void func_inheritedsocket(void);
+extern void func_inheritedsocketchild(void);
 extern void func_iocpskip(void);
 extern void func_ioctlsocket(void);
 extern void func_killpendingio(void);
@@ -76,10 +81,15 @@ const struct test winetest_testlist[] =
     { "GetHostNameW", func_GetHostNameW },
     { "gethostname", func_gethostname },
     { "getnameinfo", func_getnameinfo },
+    { "getnameinfoserv", func_getnameinfoserv },
     { "getpeername", func_getpeername },
     { "getservbyname", func_getservbyname },
     { "getservbyport", func_getservbyport },
     { "getsockname", func_getsockname },
+    { "handleinherit", func_handleinherit },
+    { "sendwhole", func_sendwhole },
+    { "inheritedsocket", func_inheritedsocket },
+    { "inheritedsocketchild", func_inheritedsocketchild },
     { "iocpskip", func_iocpskip },
     { "ioctlsocket", func_ioctlsocket },
     { "killpendingio", func_killpendingio },

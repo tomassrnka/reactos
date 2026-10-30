@@ -2182,7 +2182,11 @@ done:
     }
 
     if (EncryptedData != NULL)
+    {
+        if (EncryptedData->Buffer != NULL)
+            midl_user_free(EncryptedData->Buffer);
         midl_user_free(EncryptedData);
+    }
 
     return Status;
 }
@@ -2565,6 +2569,75 @@ done:
     if (EncryptedData != NULL)
         midl_user_free(EncryptedData);
 
+    return Status;
+}
+
+/*
+ * The SID-name mapping operations are not in the public SDK headers. They manage the virtual accounts
+ * (domain "VIRTUAL USERS") that OpenSSH and other services use for accounts without a SAM entry.
+ */
+typedef struct _LSAP_SID_NAME_MAPPING_OUTPUT
+{
+    ULONG ErrorCode; /* LSA_SID_NAME_MAPPING_OPERATION_ERROR */
+} LSAP_SID_NAME_MAPPING_OUTPUT, *PLSAP_SID_NAME_MAPPING_OUTPUT;
+
+#define LSAP_SID_NAME_MAPPING_NON_MAPPING_ERROR 1
+#define LSAP_SID_NAME_MAPPING_OP_ADD            0
+#define LSAP_SID_NAME_MAPPING_OP_REMOVE         1
+#define LSAP_SID_NAME_MAPPING_OP_ADD_MULTIPLE   2
+
+/*
+ * @implemented (the privilege check and reply shape only)
+ *
+ * There is no LSA virtual account table behind this yet. A caller without SeTcbPrivilege gets
+ * STATUS_PRIVILEGE_NOT_HELD, as on Windows; a caller with it gets STATUS_NOT_IMPLEMENTED. Either
+ * way an output block (freed with LsaFreeMemory) reports a non-mapping error.
+ */
+NTSTATUS
+WINAPI
+LsaManageSidNameMapping(
+    _In_ ULONG OperationType,
+    _In_ PVOID OperationInput,
+    _Outptr_ PLSAP_SID_NAME_MAPPING_OUTPUT *OperationOutput)
+{
+    PLSAP_SID_NAME_MAPPING_OUTPUT Output;
+    PRIVILEGE_SET Privileges;
+    HANDLE Token = NULL;
+    BOOL HasTcb = FALSE;
+    NTSTATUS Status;
+
+    TRACE("LsaManageSidNameMapping(%lu %p %p)\n", OperationType, OperationInput, OperationOutput);
+
+    if (OperationOutput == NULL)
+        return STATUS_INVALID_PARAMETER;
+    *OperationOutput = NULL;
+
+    if (OperationInput == NULL || OperationType > LSAP_SID_NAME_MAPPING_OP_ADD_MULTIPLE)
+        return STATUS_INVALID_PARAMETER;
+
+    Privileges.PrivilegeCount = 1;
+    Privileges.Control = PRIVILEGE_SET_ALL_NECESSARY;
+    Privileges.Privilege[0].Attributes = 0;
+    if (LookupPrivilegeValueW(NULL, SE_TCB_NAME, &Privileges.Privilege[0].Luid) &&
+        OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &Token) == FALSE &&
+        GetLastError() == ERROR_NO_TOKEN)
+    {
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &Token);
+    }
+    if (Token != NULL)
+    {
+        if (!PrivilegeCheck(Token, &Privileges, &HasTcb))
+            HasTcb = FALSE;
+        CloseHandle(Token);
+    }
+
+    Output = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*Output));
+    if (Output == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    Output->ErrorCode = LSAP_SID_NAME_MAPPING_NON_MAPPING_ERROR;
+    *OperationOutput = Output;
+
+    Status = HasTcb ? STATUS_NOT_IMPLEMENTED : STATUS_PRIVILEGE_NOT_HELD;
     return Status;
 }
 

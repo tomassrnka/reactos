@@ -1074,12 +1074,14 @@ BOOL WINAPI CryptStringToBinaryA(LPCSTR pszString,
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
-    /* Only the bottom byte contains valid types */
-    if (dwFlags & 0xfffffff0)
+    /* Only the bottom byte contains valid types, and CRYPT_STRING_STRICT. Windows 10 takes the strict
+     * flag with every decoder type; the decoders here are the lenient ones for all of them. */
+    if (dwFlags & 0xdffffff0)
     {
         SetLastError(ERROR_INVALID_DATA);
         return FALSE;
     }
+    dwFlags &= ~CRYPT_STRING_STRICT;
     switch (dwFlags)
     {
     case CRYPT_STRING_BASE64_ANY:
@@ -1292,12 +1294,14 @@ BOOL WINAPI CryptStringToBinaryW(LPCWSTR pszString,
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
-    /* Only the bottom byte contains valid types */
-    if (dwFlags & 0xfffffff0)
+    /* Only the bottom byte contains valid types, and CRYPT_STRING_STRICT. Windows 10 takes the strict
+     * flag with every decoder type; the decoders here are the lenient ones for all of them. */
+    if (dwFlags & 0xdffffff0)
     {
         SetLastError(ERROR_INVALID_DATA);
         return FALSE;
     }
+    dwFlags &= ~CRYPT_STRING_STRICT;
     switch (dwFlags)
     {
     case CRYPT_STRING_BASE64_ANY:

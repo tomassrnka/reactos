@@ -8,6 +8,8 @@ list(APPEND SOURCE
     RegWow64Review.c
     RestrictedSidsCopy.c
     CreateService.c
+    CreateProcessAsUserToken.c
+    CreateEnvironmentBlockProfile.c
     CloseTrace.c
     DuplicateTokenEx.c
     EnableTraceEx2.c
@@ -21,8 +23,13 @@ list(APPEND SOURCE
     HKEY_CLASSES_ROOT.c
     IsTextUnicode.c
     LockServiceDatabase.c
+    LookupAccountSidCaller.c
     LogonUser.c
+    LogonUserCleartext.c
+    LogonUserServiceSecret.c
+    LogonUserUserRights.c
     LsaLookupLeak.c
+    LsaManageSidNameMapping.c
     ProcessThreadLabel.c
     QueryServiceConfig.c
     QueryServiceConfig2.c
@@ -68,6 +75,6 @@ add_executable(advapi32_apitest
 
 target_link_libraries(advapi32_apitest wine ${PSEH_LIB})
 set_module_type(advapi32_apitest win32cui)
-add_importlibs(advapi32_apitest advapi32 iphlpapi ws2_32 netapi32 msvcrt kernel32 ntdll)
+add_importlibs(advapi32_apitest advapi32 iphlpapi ws2_32 netapi32 userenv msvcrt kernel32 ntdll)
 add_pch(advapi32_apitest precomp.h "${PCH_SKIP_SOURCE}")
 add_rostests_file(TARGET advapi32_apitest)

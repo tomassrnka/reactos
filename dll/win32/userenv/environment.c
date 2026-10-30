@@ -689,6 +689,8 @@ CreateEnvironmentBlock(OUT LPVOID *lpEnvironment,
             {
                 DPRINT1("Error: %lu\n", GetLastError());
                 RegCloseKey(hKey);
+                RtlDestroyEnvironment(*Environment);
+                *Environment = NULL;
                 return FALSE;
             }
 
@@ -704,17 +706,20 @@ CreateEnvironmentBlock(OUT LPVOID *lpEnvironment,
     if (hToken == NULL)
         return TRUE;
 
+    /*
+     * The hive of the user is loaded only while the user has a profile loaded. As on Windows, a token whose
+     * profile is not loaded still gets the environment: the system variables, USERNAME and USERDOMAIN, and
+     * the default user profile as USERPROFILE. (sshd of OpenSSH for Windows asks for it before any profile
+     * is loaded.)
+     */
     hKeyUser = GetCurrentUserKey(hToken);
     if (hKeyUser == NULL)
-    {
-        DPRINT1("GetCurrentUserKey() failed\n");
-        RtlDestroyEnvironment(*Environment);
-        return FALSE;
-    }
+        DPRINT1("GetCurrentUserKey() failed (error %lu), the user's profile is not loaded\n", GetLastError());
 
     /* Set 'USERPROFILE' variable */
     Length = ARRAYSIZE(Buffer);
-    if (GetUserProfileDirectoryW(hToken, Buffer, &Length))
+    if (GetUserProfileDirectoryW(hToken, Buffer, &Length) ||
+        (hKeyUser == NULL && (Length = ARRAYSIZE(Buffer), GetDefaultUserProfileDirectoryW(Buffer, &Length))))
     {
         DWORD MinLen = 2;
 
@@ -773,17 +778,20 @@ CreateEnvironmentBlock(OUT LPVOID *lpEnvironment,
             LocalFree(lpDomainName);
     }
 
-    /* Set user environment variables */
-    SetUserEnvironment(Environment,
-                       hKeyUser,
-                       L"Environment");
+    if (hKeyUser != NULL)
+    {
+        /* Set user environment variables */
+        SetUserEnvironment(Environment,
+                           hKeyUser,
+                           L"Environment");
 
-    /* Set user volatile environment variables */
-    SetUserEnvironment(Environment,
-                       hKeyUser,
-                       L"Volatile Environment");
+        /* Set user volatile environment variables */
+        SetUserEnvironment(Environment,
+                           hKeyUser,
+                           L"Volatile Environment");
 
-    RegCloseKey(hKeyUser);
+        RegCloseKey(hKeyUser);
+    }
 
     return TRUE;
 }

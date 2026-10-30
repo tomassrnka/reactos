@@ -1615,7 +1615,8 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
     /* Parameters validation */
     if (LogonType == Interactive ||
         LogonType == Batch ||
-        LogonType == Service)
+        LogonType == Service ||
+        LogonType == NetworkCleartext)
     {
         PMSV1_0_INTERACTIVE_LOGON LogonInfo;
         ULONG_PTR PtrOffset;
@@ -1821,7 +1822,8 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
         RtlReleaseResource(&LogonListResource);
     }
 
-    if (LogonType == Interactive || LogonType == Batch || LogonType == Service)
+    if (LogonType == Interactive || LogonType == Batch || LogonType == Service ||
+        LogonType == NetworkCleartext)
     {
         /* Build and fill the interactive profile buffer */
         Status = BuildInteractiveProfileBuffer(ClientRequest,

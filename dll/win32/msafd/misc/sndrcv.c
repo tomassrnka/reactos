@@ -200,6 +200,48 @@ MsafdRecvAPC(
     HeapFree(GlobalHeap, 0, ApcContext);
 }
 
+/*
+ * AFD takes a stream send into its send window and completes it with the bytes it took, at most the
+ * window (8 KB by default), while Windows completes a send of a connected stream socket only when all of it
+ * is sent. A caller of WSASend (OpenSSH's sshd) relies on that, so the rest is sent here. Only blocking
+ * stream sockets: a non-blocking one keeps the partial count, as on Windows.
+ */
+static
+BOOLEAN
+MsafdSendStreamWhole(
+    _In_ PSOCKET_INFORMATION Socket,
+    _In_ DWORD iFlags)
+{
+    return Socket->SharedData->SocketType == SOCK_STREAM &&
+           !Socket->SharedData->NonBlocking &&
+           !(iFlags & (MSG_OOB | MSG_PARTIAL));
+}
+
+/* The buffers of a send that are left after Sent bytes of the Total. Returns the new count. */
+static
+ULONG
+MsafdSendAdvance(
+    _Inout_ PAFD_WSABUF Buffers,
+    _In_ ULONG Count,
+    _In_ ULONG Skip,
+    _Out_ PAFD_WSABUF *First)
+{
+    ULONG i = 0;
+
+    while (i < Count && Skip >= Buffers[i].len)
+    {
+        Skip -= Buffers[i].len;
+        i++;
+    }
+    if (i < Count && Skip)
+    {
+        Buffers[i].buf += Skip;
+        Buffers[i].len -= Skip;
+    }
+    *First = Buffers + i;
+    return Count - i;
+}
+
 static
 VOID
 NTAPI
@@ -209,8 +251,53 @@ MsafdSendAPC(
     _In_ ULONG Reserved)
 {
     PMSAFD_SEND_APC_CONTEXT Context = ApcContext;
+    PMSAFD_SEND_REST Rest = Context->lpRest;
 
     TRACE("MsafdSendAPC(%p %lx %lx)\n", ApcContext, IoStatusBlock->Status, IoStatusBlock->Information);
+
+    if (Rest)
+    {
+        ULONG Done = (ULONG)IoStatusBlock->Information;
+        PAFD_WSABUF First;
+        AFD_SEND_INFO SendInfo;
+        ULONG Left;
+        NTSTATUS Status;
+
+        Rest->Sent += Done;
+        Left = MsafdSendAdvance(Rest->Buffers, Rest->BufferCount, Done, &First);
+        if (NT_SUCCESS(IoStatusBlock->Status) && Left != 0 && Done != 0)
+        {
+            /* Send what AFD did not take */
+            RtlZeroMemory(&SendInfo, sizeof(SendInfo));
+            SendInfo.BufferArray = First;
+            SendInfo.BufferCount = Left;
+            SendInfo.AfdFlags = Rest->AfdFlags;
+            SendInfo.TdiFlags = Rest->TdiFlags;
+            Rest->BufferCount = Left;
+            if (First != Rest->Buffers)
+                RtlMoveMemory(Rest->Buffers, First, Left * sizeof(AFD_WSABUF));
+            SendInfo.BufferArray = Rest->Buffers;
+
+            IoStatusBlock->Information = 0;
+            IoStatusBlock->Status = STATUS_PENDING;
+            Status = NtDeviceIoControlFile((HANDLE)Context->lpSocket->Handle,
+                                           NULL,
+                                           MsafdSendAPC,
+                                           Context,
+                                           IoStatusBlock,
+                                           IOCTL_AFD_SEND,
+                                           &SendInfo,
+                                           sizeof(SendInfo),
+                                           NULL,
+                                           0);
+            if (NT_SUCCESS(Status))
+                return; /* this routine runs again when AFD completes it */
+
+            /* The send failed: report it with what was sent before */
+            IoStatusBlock->Status = Status;
+        }
+        IoStatusBlock->Information = Rest->Sent;
+    }
 
     /* Re-enable Async Event */
     SockReenableAsyncSelectEvent(Context->lpSocket, FD_WRITE);
@@ -219,6 +306,8 @@ MsafdSendAPC(
         Context->lpCompletionRoutine(IoStatusBlock->Status, IoStatusBlock->Information, (LPWSAOVERLAPPED)IoStatusBlock, 0);
 
     /* Free IOCTL buffers */
+    if (Rest)
+        HeapFree(GlobalHeap, 0, Rest);
     HeapFree(GlobalHeap, 0, ApcContext);
 }
 
@@ -925,7 +1014,25 @@ WSPSend(SOCKET Handle,
             APCContext->lpOverlapped = lpOverlapped;
             APCContext->lpSocket = Socket;
             APCContext->lpRemoteAddress = NULL;
+            APCContext->lpRest = NULL;
             Event = NULL;
+
+            /* A stream send is sent whole: keep the buffers to send what AFD does not take */
+            if (dwBufferCount != 0 && MsafdSendStreamWhole(Socket, iFlags))
+            {
+                PMSAFD_SEND_REST Rest = HeapAlloc(GlobalHeap, 0,
+                    FIELD_OFFSET(MSAFD_SEND_REST, Buffers) + dwBufferCount * sizeof(AFD_WSABUF));
+                if (Rest)
+                {
+                    Rest->BufferCount = dwBufferCount;
+                    Rest->Sent = 0;
+                    Rest->AfdFlags = SendInfo.AfdFlags | AFD_OVERLAPPED;
+                    Rest->TdiFlags = SendInfo.TdiFlags;
+                    RtlCopyMemory(Rest->Buffers, lpBuffers, dwBufferCount * sizeof(AFD_WSABUF));
+                    APCContext->lpRest = Rest;
+                    SendInfo.BufferArray = Rest->Buffers;
+                }
+            }
         }
         else
         {
@@ -977,6 +1084,39 @@ WSPSend(SOCKET Handle,
         /* FIXME: Shouldn't wait infinitely for send... */
         MsafdWaitForAlert(SockEvent);
         Status = IOSB->Status;
+    }
+
+    /* A blocking stream send is sent whole: send what AFD did not take */
+    if (!lpOverlapped && NT_SUCCESS(Status) && Status != STATUS_PENDING &&
+        dwBufferCount != 0 && MsafdSendStreamWhole(Socket, iFlags))
+    {
+        PAFD_WSABUF Rest = HeapAlloc(GlobalHeap, 0, dwBufferCount * sizeof(AFD_WSABUF)), First;
+        ULONG Total = 0, Left;
+
+        if (Rest)
+        {
+            RtlCopyMemory(Rest, lpBuffers, dwBufferCount * sizeof(AFD_WSABUF));
+            Left = MsafdSendAdvance(Rest, dwBufferCount, (ULONG)IOSB->Information, &First);
+            Total = (ULONG)IOSB->Information;
+            while (Left != 0 && NT_SUCCESS(Status) && IOSB->Information != 0)
+            {
+                SendInfo.BufferArray = First;
+                SendInfo.BufferCount = Left;
+                IOSB->Information = 0;
+                IOSB->Status = STATUS_PENDING;
+                Status = NtDeviceIoControlFile((HANDLE)Handle, Event, NULL, NULL, IOSB, IOCTL_AFD_SEND,
+                                               &SendInfo, sizeof(SendInfo), NULL, 0);
+                if (Status == STATUS_PENDING)
+                {
+                    MsafdWaitForAlert(SockEvent);
+                    Status = IOSB->Status;
+                }
+                Total += (ULONG)IOSB->Information;
+                Left = MsafdSendAdvance(First, Left, (ULONG)IOSB->Information, &First);
+            }
+            IOSB->Information = Total;
+            HeapFree(GlobalHeap, 0, Rest);
+        }
     }
 
     NtClose(SockEvent);
@@ -1146,6 +1286,7 @@ WSPSendTo(SOCKET Handle,
             APCContext->lpOverlapped = lpOverlapped;
             APCContext->lpSocket = Socket;
             APCContext->lpRemoteAddress = RemoteAddress;
+            APCContext->lpRest = NULL;
             Event = NULL;
         }
         else
