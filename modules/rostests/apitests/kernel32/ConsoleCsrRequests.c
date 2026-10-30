@@ -1,0 +1,535 @@
+/*
+ * PROJECT:     ReactOS API tests
+ * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
+ * PURPOSE:     Test one call of each console request a console program makes, in a console of its own
+ * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
+ */
+
+#include "precomp.h"
+
+/*
+ * Every console request goes through CSR, and under WoW64 through a translation of the i386
+ * request into the native one. Each request is called once with an inline-sized and, where
+ * the request has one, a capture-buffer-sized transfer, and the effect is read back. The
+ * expectations are those of Windows 10, for both PE32 and PE32+ builds. The calls run in a
+ * child process with a new console, so the test does not depend on (or change) the console of
+ * the test runner.
+ */
+#define CHILD_TIMEOUT_MS 60000
+
+#ifndef VK_RETURN
+#define VK_RETURN 0x0D
+#endif
+
+/* Vista+ (CONSOLE_HISTORY_INFO) */
+typedef struct
+{
+    UINT cbSize;
+    UINT HistoryBufferSize;
+    UINT NumberOfHistoryBuffers;
+    DWORD dwFlags;
+} HISTORY_INFO;
+
+/* The child's standard handles are the report pipe: the console is reached by name */
+static HANDLE hOut, hIn, hFirst;
+
+static
+VOID
+WriteKeys(
+    _In_ PCSTR Keys)
+{
+    /* A key down and a key up record per character, written in batches */
+    while (*Keys)
+    {
+        INPUT_RECORD Records[32];
+        DWORD Count = 0, Written;
+
+        for (; *Keys && Count < _countof(Records); Keys++)
+        {
+            RtlZeroMemory(&Records[Count], sizeof(Records[Count]));
+            Records[Count].EventType = KEY_EVENT;
+            Records[Count].Event.KeyEvent.bKeyDown = TRUE;
+            Records[Count].Event.KeyEvent.wRepeatCount = 1;
+            Records[Count].Event.KeyEvent.wVirtualKeyCode =
+                (*Keys == '\r') ? VK_RETURN : (WORD)((*Keys >= 'a' && *Keys <= 'z') ? *Keys - 'a' + 'A' : *Keys);
+            Records[Count].Event.KeyEvent.uChar.UnicodeChar = (WCHAR)*Keys;
+            Count++;
+            Records[Count] = Records[Count - 1];
+            Records[Count].Event.KeyEvent.bKeyDown = FALSE;
+            Count++;
+        }
+        ok(WriteConsoleInputW(hIn, Records, Count, &Written), "WriteConsoleInputW failed with %lu\n", GetLastError());
+        ok(Written == Count, "WriteConsoleInputW wrote %lu of %lu records\n", Written, Count);
+    }
+}
+
+static
+VOID
+TestScreenBuffer(VOID)
+{
+    CONSOLE_SCREEN_BUFFER_INFO Info;
+    CONSOLE_CURSOR_INFO Cursor;
+    COORD Size = { 130, 200 }, Position = { 7, 12 }, Largest;
+    SMALL_RECT Window = { 0, 10, 39, 19 };
+    BOOL Success;
+
+    Success = SetConsoleScreenBufferSize(hOut, Size);
+    ok(Success, "SetConsoleScreenBufferSize failed with %lu\n", GetLastError());
+    ok(GetConsoleScreenBufferInfo(hOut, &Info), "GetConsoleScreenBufferInfo failed with %lu\n", GetLastError());
+    ok(Info.dwSize.X == 130 && Info.dwSize.Y == 200, "Buffer size %dx%d\n", Info.dwSize.X, Info.dwSize.Y);
+
+    Success = SetConsoleWindowInfo(hOut, TRUE, &Window);
+    ok(Success, "SetConsoleWindowInfo failed with %lu\n", GetLastError());
+    GetConsoleScreenBufferInfo(hOut, &Info);
+    ok(Info.srWindow.Left == 0 && Info.srWindow.Top == 10 && Info.srWindow.Right == 39 && Info.srWindow.Bottom == 19,
+       "Window %d,%d,%d,%d\n", Info.srWindow.Left, Info.srWindow.Top, Info.srWindow.Right, Info.srWindow.Bottom);
+
+    Largest = GetLargestConsoleWindowSize(hOut);
+    ok(Largest.X > 0 && Largest.Y > 0, "Largest window %dx%d, error %lu\n", Largest.X, Largest.Y, GetLastError());
+
+    Success = SetConsoleCursorPosition(hOut, Position);
+    ok(Success, "SetConsoleCursorPosition failed with %lu\n", GetLastError());
+    GetConsoleScreenBufferInfo(hOut, &Info);
+    ok(Info.dwCursorPosition.X == 7 && Info.dwCursorPosition.Y == 12, "Cursor at %d,%d\n",
+       Info.dwCursorPosition.X, Info.dwCursorPosition.Y);
+
+    Cursor.dwSize = 0;
+    ok(GetConsoleCursorInfo(hOut, &Cursor), "GetConsoleCursorInfo failed with %lu\n", GetLastError());
+    ok(Cursor.dwSize >= 1 && Cursor.dwSize <= 100, "Cursor size %lu\n", Cursor.dwSize);
+    Cursor.dwSize = 50;
+    Cursor.bVisible = FALSE;
+    ok(SetConsoleCursorInfo(hOut, &Cursor), "SetConsoleCursorInfo failed with %lu\n", GetLastError());
+    Cursor.dwSize = 0;
+    Cursor.bVisible = TRUE;
+    GetConsoleCursorInfo(hOut, &Cursor);
+    ok(Cursor.dwSize == 50 && !Cursor.bVisible, "Cursor size %lu, visible %d\n", Cursor.dwSize, Cursor.bVisible);
+
+    ok(SetConsoleTextAttribute(hOut, 0x1e), "SetConsoleTextAttribute failed with %lu\n", GetLastError());
+    GetConsoleScreenBufferInfo(hOut, &Info);
+    ok(Info.wAttributes == 0x1e, "Attributes 0x%x\n", Info.wAttributes);
+}
+
+static
+VOID
+TestOutputStrings(VOID)
+{
+    COORD Origin = { 0, 0 }, At;
+    CHAR Chars[160];
+    WCHAR WChars[130];
+    WORD Attributes[200];
+    DWORD Count, i;
+
+    ok(FillConsoleOutputCharacterA(hOut, 'x', 300, Origin, &Count) && Count == 300,
+       "FillConsoleOutputCharacterA: %lu, error %lu\n", Count, GetLastError());
+    ok(FillConsoleOutputCharacterW(hOut, L'y', 100, Origin, &Count) && Count == 100,
+       "FillConsoleOutputCharacterW: %lu, error %lu\n", Count, GetLastError());
+    ok(FillConsoleOutputAttribute(hOut, 0x2a, 150, Origin, &Count) && Count == 150,
+       "FillConsoleOutputAttribute: %lu, error %lu\n", Count, GetLastError());
+    At.X = 99; At.Y = 0;
+    ok(ReadConsoleOutputCharacterA(hOut, Chars, 2, At, &Count) && Count == 2 && Chars[0] == 'y' && Chars[1] == 'x',
+       "Filled cells '%.2s' (%lu)\n", Chars, Count);
+    ok(ReadConsoleOutputAttribute(hOut, Attributes, 1, At, &Count) && Attributes[0] == 0x2a,
+       "Filled attribute 0x%x\n", Attributes[0]);
+
+    /* 5 characters fit in the request; 150 bytes do not */
+    At.X = 0; At.Y = 1;
+    ok(WriteConsoleOutputCharacterA(hOut, "hello", 5, At, &Count) && Count == 5,
+       "WriteConsoleOutputCharacterA(5): %lu, error %lu\n", Count, GetLastError());
+    RtlFillMemory(Chars, 150, 'Q');
+    At.Y = 2;
+    ok(WriteConsoleOutputCharacterA(hOut, Chars, 150, At, &Count) && Count == 150,
+       "WriteConsoleOutputCharacterA(150): %lu, error %lu\n", Count, GetLastError());
+    At.Y = 4;
+    ok(WriteConsoleOutputCharacterW(hOut, L"world", 5, At, &Count) && Count == 5,
+       "WriteConsoleOutputCharacterW(5): %lu, error %lu\n", Count, GetLastError());
+    for (i = 0; i < 120; i++)
+        WChars[i] = L'a' + (WCHAR)(i % 26);
+    At.Y = 5;
+    ok(WriteConsoleOutputCharacterW(hOut, WChars, 120, At, &Count) && Count == 120,
+       "WriteConsoleOutputCharacterW(120): %lu, error %lu\n", Count, GetLastError());
+    for (i = 0; i < 200; i++)
+        Attributes[i] = (WORD)(i & 0xff);
+    At.Y = 7;
+    ok(WriteConsoleOutputAttribute(hOut, Attributes + 1, 3, At, &Count) && Count == 3,
+       "WriteConsoleOutputAttribute(3): %lu, error %lu\n", Count, GetLastError());
+    At.Y = 8;
+    ok(WriteConsoleOutputAttribute(hOut, Attributes, 200, At, &Count) && Count == 200,
+       "WriteConsoleOutputAttribute(200): %lu, error %lu\n", Count, GetLastError());
+
+    RtlZeroMemory(Chars, sizeof(Chars));
+    At.Y = 1;
+    ok(ReadConsoleOutputCharacterA(hOut, Chars, 5, At, &Count) && Count == 5 && !strcmp(Chars, "hello"),
+       "ReadConsoleOutputCharacterA(5): '%s' (%lu), error %lu\n", Chars, Count, GetLastError());
+    RtlZeroMemory(Chars, sizeof(Chars));
+    At.Y = 2;
+    ok(ReadConsoleOutputCharacterA(hOut, Chars, 150, At, &Count) && Count == 150 && strspn(Chars, "Q") == 150,
+       "ReadConsoleOutputCharacterA(150): %Iu Qs (%lu), error %lu\n", strspn(Chars, "Q"), Count, GetLastError());
+    RtlZeroMemory(WChars, sizeof(WChars));
+    At.Y = 4;
+    ok(ReadConsoleOutputCharacterW(hOut, WChars, 5, At, &Count) && Count == 5 && !wcscmp(WChars, L"world"),
+       "ReadConsoleOutputCharacterW(5): '%ls' (%lu), error %lu\n", WChars, Count, GetLastError());
+    RtlZeroMemory(WChars, sizeof(WChars));
+    At.Y = 5;
+    ok(ReadConsoleOutputCharacterW(hOut, WChars, 120, At, &Count) && Count == 120 &&
+       WChars[0] == L'a' && WChars[119] == L'p',
+       "ReadConsoleOutputCharacterW(120): '%lc'..'%lc' (%lu), error %lu\n", WChars[0], WChars[119], Count, GetLastError());
+    RtlZeroMemory(Attributes, sizeof(Attributes));
+    At.Y = 7;
+    ok(ReadConsoleOutputAttribute(hOut, Attributes, 3, At, &Count) && Count == 3 &&
+       Attributes[0] == 1 && Attributes[1] == 2 && Attributes[2] == 3,
+       "ReadConsoleOutputAttribute(3): %x %x %x (%lu), error %lu\n", Attributes[0], Attributes[1], Attributes[2],
+       Count, GetLastError());
+    RtlZeroMemory(Attributes, sizeof(Attributes));
+    At.Y = 8;
+    ok(ReadConsoleOutputAttribute(hOut, Attributes, 200, At, &Count) && Count == 200 &&
+       Attributes[150] == 150 && Attributes[199] == 199,
+       "ReadConsoleOutputAttribute(200): %x %x (%lu), error %lu\n", Attributes[150], Attributes[199],
+       Count, GetLastError());
+}
+
+static
+VOID
+TestOutputRegions(VOID)
+{
+    static CHAR_INFO Large[200 * 100];
+    CHAR_INFO Cells[30 * 4], One;
+    COORD BufferSize = { 30, 4 }, OneCell = { 1, 1 }, Origin = { 0, 0 }, Size = { 200, 100 }, At = { 199, 99 };
+    SMALL_RECT Region = { 2, 10, 31, 13 }, Scroll = { 0, 1, 9, 1 }, Clip = { 0, 0, 199, 99 };
+    CHAR_INFO Fill;
+    CHAR Chars[8] = "";
+    DWORD Count, i;
+
+    for (i = 0; i < _countof(Cells); i++)
+    {
+        Cells[i].Char.UnicodeChar = L'A' + (WCHAR)(i % 26);
+        Cells[i].Attributes = 0x4f;
+    }
+    ok(WriteConsoleOutputW(hOut, Cells, BufferSize, Origin, &Region), "WriteConsoleOutputW(30x4) failed with %lu\n",
+       GetLastError());
+    ok(Region.Left == 2 && Region.Top == 10 && Region.Right == 31 && Region.Bottom == 13,
+       "Written region %d,%d,%d,%d\n", Region.Left, Region.Top, Region.Right, Region.Bottom);
+    One.Char.AsciiChar = '#';
+    One.Attributes = 0x5e;
+    Region.Left = Region.Right = 5;
+    Region.Top = Region.Bottom = 15;
+    ok(WriteConsoleOutputA(hOut, &One, OneCell, Origin, &Region), "WriteConsoleOutputA(1x1) failed with %lu\n",
+       GetLastError());
+
+    RtlZeroMemory(Cells, sizeof(Cells));
+    Region.Left = 2; Region.Top = 10; Region.Right = 31; Region.Bottom = 13;
+    ok(ReadConsoleOutputW(hOut, Cells, BufferSize, Origin, &Region), "ReadConsoleOutputW(30x4) failed with %lu\n",
+       GetLastError());
+    ok(Region.Left == 2 && Region.Top == 10 && Region.Right == 31 && Region.Bottom == 13,
+       "Read region %d,%d,%d,%d\n", Region.Left, Region.Top, Region.Right, Region.Bottom);
+    ok(Cells[0].Char.UnicodeChar == L'A' && Cells[0].Attributes == 0x4f && Cells[119].Char.UnicodeChar == L'P',
+       "Read cells '%lc' 0x%x .. '%lc'\n", Cells[0].Char.UnicodeChar, Cells[0].Attributes, Cells[119].Char.UnicodeChar);
+    RtlZeroMemory(&One, sizeof(One));
+    Region.Left = Region.Right = 5;
+    Region.Top = Region.Bottom = 15;
+    ok(ReadConsoleOutputA(hOut, &One, OneCell, Origin, &Region), "ReadConsoleOutputA(1x1) failed with %lu\n",
+       GetLastError());
+    ok(One.Char.AsciiChar == '#' && One.Attributes == 0x5e, "Read cell '%c' 0x%x\n", One.Char.AsciiChar, One.Attributes);
+
+    /* 80000 bytes: more than a CSR capture buffer holds */
+    ok(SetConsoleScreenBufferSize(hOut, Size), "SetConsoleScreenBufferSize failed with %lu\n", GetLastError());
+    for (i = 0; i < _countof(Large); i++)
+    {
+        Large[i].Char.UnicodeChar = L'0' + (WCHAR)(i % 10);
+        Large[i].Attributes = 7;
+    }
+    Region.Left = 0; Region.Top = 0; Region.Right = 199; Region.Bottom = 99;
+    ok(WriteConsoleOutputW(hOut, Large, Size, Origin, &Region), "WriteConsoleOutputW(200x100) failed with %lu\n",
+       GetLastError());
+    ok(Region.Right == 199 && Region.Bottom == 99, "Written region %d,%d\n", Region.Right, Region.Bottom);
+    ok(ReadConsoleOutputCharacterA(hOut, Chars, 1, At, &Count) && Chars[0] == '9', "Last cell '%c'\n", Chars[0]);
+
+    Fill.Char.UnicodeChar = L'.';
+    Fill.Attributes = 7;
+    At.X = 0; At.Y = 20;
+    ok(ScrollConsoleScreenBufferW(hOut, &Scroll, &Clip, At, &Fill), "ScrollConsoleScreenBufferW failed with %lu\n",
+       GetLastError());
+    RtlZeroMemory(Chars, sizeof(Chars));
+    ReadConsoleOutputCharacterA(hOut, Chars, 5, At, &Count);
+    ok(!strcmp(Chars, "01234"), "Scrolled to '%s'\n", Chars);
+    Fill.Char.AsciiChar = ',';
+    At.Y = 21;
+    ok(ScrollConsoleScreenBufferA(hOut, &Scroll, NULL, At, &Fill), "ScrollConsoleScreenBufferA failed with %lu\n",
+       GetLastError());
+    At.X = 0; At.Y = 1;
+    ReadConsoleOutputCharacterA(hOut, Chars, 1, At, &Count);
+    ok(Chars[0] == ',', "Scroll source filled with '%c'\n", Chars[0]);
+}
+
+static
+VOID
+TestTitle(VOID)
+{
+    CHAR Title[64] = "";
+    WCHAR WTitle[64] = L"";
+
+    ok(SetConsoleTitleA("console csr title A"), "SetConsoleTitleA failed with %lu\n", GetLastError());
+    ok(GetConsoleTitleA(Title, sizeof(Title)) == 19 && !strcmp(Title, "console csr title A"),
+       "GetConsoleTitleA: '%s'\n", Title);
+    ok(SetConsoleTitleW(L"console csr title W"), "SetConsoleTitleW failed with %lu\n", GetLastError());
+    ok(GetConsoleTitleW(WTitle, _countof(WTitle)) == 19 && !wcscmp(WTitle, L"console csr title W"),
+       "GetConsoleTitleW: '%ls'\n", WTitle);
+}
+
+static
+VOID
+TestInput(VOID)
+{
+    INPUT_RECORD Records[16];
+    CHAR Chars[32] = "";
+    WCHAR WChars[200];
+    DWORD Count, Mode;
+
+    ok(FlushConsoleInputBuffer(hIn), "FlushConsoleInputBuffer failed with %lu\n", GetLastError());
+    ok(GetNumberOfConsoleInputEvents(hIn, &Count) && Count == 0, "%lu input events, error %lu\n", Count, GetLastError());
+    WriteKeys("ab"); /* 4 records fit in the request */
+    ok(GetNumberOfConsoleInputEvents(hIn, &Count) && Count == 4, "%lu input events\n", Count);
+    RtlZeroMemory(Records, sizeof(Records));
+    ok(PeekConsoleInputW(hIn, Records, 16, &Count) && Count == 4 && Records[0].Event.KeyEvent.uChar.UnicodeChar == L'a',
+       "PeekConsoleInputW: %lu, error %lu\n", Count, GetLastError());
+    RtlZeroMemory(Records, sizeof(Records));
+    ok(ReadConsoleInputW(hIn, Records, 16, &Count) && Count == 4 && Records[2].Event.KeyEvent.uChar.UnicodeChar == L'b',
+       "ReadConsoleInputW: %lu, error %lu\n", Count, GetLastError());
+    WriteKeys("abcd"); /* 8 records do not */
+    RtlZeroMemory(Records, sizeof(Records));
+    ok(ReadConsoleInputA(hIn, Records, 3, &Count) && Count == 3 && Records[0].Event.KeyEvent.uChar.AsciiChar == 'a',
+       "ReadConsoleInputA: %lu, error %lu\n", Count, GetLastError());
+    RtlZeroMemory(Records, sizeof(Records));
+    ok(ReadConsoleInputW(hIn, Records, 16, &Count) && Count == 5 && Records[4].Event.KeyEvent.uChar.UnicodeChar == L'd',
+       "ReadConsoleInputW: %lu, error %lu\n", Count, GetLastError());
+
+    GetConsoleMode(hIn, &Mode);
+    ok(SetConsoleMode(hIn, ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT), "SetConsoleMode failed with %lu\n", GetLastError());
+    FlushConsoleInputBuffer(hIn);
+    WriteKeys("hi\r");
+    ok(ReadConsoleA(hIn, Chars, 20, &Count, NULL) && Count == 4 && !memcmp(Chars, "hi\r\n", 4),
+       "ReadConsoleA: %lu '%.2s', error %lu\n", Count, Chars, GetLastError());
+    WriteKeys("0123456789012345678901234567890123456789012345678901234567890\r");
+    RtlZeroMemory(WChars, sizeof(WChars));
+    ok(ReadConsoleW(hIn, WChars, _countof(WChars), &Count, NULL) && Count == 63 &&
+       WChars[0] == L'0' && WChars[60] == L'0' && WChars[62] == L'\n',
+       "ReadConsoleW: %lu, error %lu\n", Count, GetLastError());
+    SetConsoleMode(hIn, Mode);
+    FlushConsoleInputBuffer(hIn);
+}
+
+static
+VOID
+TestHandles(VOID)
+{
+    HANDLE hDup = NULL;
+    DWORD Flags = 0xdead;
+
+    ok(SetConsoleActiveScreenBuffer(hOut), "SetConsoleActiveScreenBuffer failed with %lu\n", GetLastError());
+    ok(SetConsoleActiveScreenBuffer(hFirst), "SetConsoleActiveScreenBuffer failed with %lu\n", GetLastError());
+    ok(DuplicateHandle(GetCurrentProcess(), hOut, GetCurrentProcess(), &hDup, 0, FALSE, DUPLICATE_SAME_ACCESS),
+       "DuplicateHandle failed with %lu\n", GetLastError());
+    ok(GetHandleInformation(hDup, &Flags) && Flags == 0, "GetHandleInformation: 0x%lx, error %lu\n", Flags, GetLastError());
+    ok(SetHandleInformation(hDup, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT), "SetHandleInformation failed with %lu\n",
+       GetLastError());
+    Flags = 0;
+    GetHandleInformation(hDup, &Flags);
+    ok(Flags == HANDLE_FLAG_INHERIT, "Flags 0x%lx\n", Flags);
+    ok(CloseHandle(hDup), "CloseHandle failed with %lu\n", GetLastError());
+    SetLastError(0xdeadbeef);
+    ok(!CloseHandle(hDup) && GetLastError() == ERROR_INVALID_HANDLE, "Second CloseHandle: error %lu\n", GetLastError());
+}
+
+static
+VOID
+TestMisc(VOID)
+{
+    CONSOLE_FONT_INFO Font;
+    CONSOLE_SELECTION_INFO Selection;
+    HISTORY_INFO History = { sizeof(History) };
+    BOOL (WINAPI *pGetHistoryInfo)(HISTORY_INFO *);
+    BOOL (WINAPI *pSetHistoryInfo)(HISTORY_INFO *);
+    HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
+    DWORD Mode = 0xdead, Buttons;
+
+    ok(GetCurrentConsoleFont(hFirst, FALSE, &Font), "GetCurrentConsoleFont failed with %lu\n",
+       GetLastError());
+    ok(GetConsoleDisplayMode(&Mode) && Mode == 0, "GetConsoleDisplayMode: %lu, error %lu\n", Mode, GetLastError());
+    ok(GetNumberOfConsoleMouseButtons(&Buttons), "GetNumberOfConsoleMouseButtons failed with %lu\n", GetLastError());
+    Selection.dwFlags = 0xdead;
+    ok(GetConsoleSelectionInfo(&Selection) && Selection.dwFlags == 0, "GetConsoleSelectionInfo: 0x%lx, error %lu\n",
+       Selection.dwFlags, GetLastError());
+    pGetHistoryInfo = (PVOID)GetProcAddress(hKernel32, "GetConsoleHistoryInfo");
+    pSetHistoryInfo = (PVOID)GetProcAddress(hKernel32, "SetConsoleHistoryInfo");
+    if (!pGetHistoryInfo || !pSetHistoryInfo)
+    {
+        skip("No GetConsoleHistoryInfo/SetConsoleHistoryInfo\n");
+        return;
+    }
+    ok(pGetHistoryInfo(&History), "GetConsoleHistoryInfo failed with %lu\n", GetLastError());
+    ok(History.HistoryBufferSize != 0, "History buffer size %u\n", History.HistoryBufferSize);
+    ok(pSetHistoryInfo(&History), "SetConsoleHistoryInfo failed with %lu\n", GetLastError());
+}
+
+static
+VOID
+TestAliasesAndHistory(VOID)
+{
+    static const WCHAR Expected[] = L"csrx=echo alias\0csry=echo aliasW";
+    DWORD (WINAPI *pGetHistoryLength)(LPCWSTR);
+    BOOL (WINAPI *pSetNumberOfCommands)(DWORD, LPCWSTR);
+    HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
+    CHAR Target[64] = "";
+    WCHAR WTarget[64] = L"", Aliases[128];
+    DWORD Length;
+
+    ok(AddConsoleAliasA("csrx", "echo alias", "csrtest.exe"), "AddConsoleAliasA failed with %lu\n", GetLastError());
+    ok(AddConsoleAliasW(L"csry", L"echo aliasW", L"csrtest.exe"), "AddConsoleAliasW failed with %lu\n", GetLastError());
+    ok(GetConsoleAliasA("csrx", Target, sizeof(Target), "csrtest.exe") && !strcmp(Target, "echo alias"),
+       "GetConsoleAliasA: '%s', error %lu\n", Target, GetLastError());
+    ok(GetConsoleAliasW(L"csry", WTarget, sizeof(WTarget), L"csrtest.exe") && !wcscmp(WTarget, L"echo aliasW"),
+       "GetConsoleAliasW: '%ls', error %lu\n", WTarget, GetLastError());
+    Length = GetConsoleAliasesLengthW(L"csrtest.exe");
+    ok(Length == sizeof(Expected), "GetConsoleAliasesLengthW: %lu\n", Length);
+    RtlZeroMemory(Aliases, sizeof(Aliases));
+    Length = GetConsoleAliasesW(Aliases, sizeof(Aliases), L"csrtest.exe");
+    ok(Length == sizeof(Expected) && !memcmp(Aliases, Expected, sizeof(Expected)), "GetConsoleAliasesW: %lu '%ls'\n",
+       Length, Aliases);
+    Length = GetConsoleAliasExesLengthW();
+    ok(Length == sizeof(L"csrtest.exe"), "GetConsoleAliasExesLengthW: %lu\n", Length);
+    RtlZeroMemory(Aliases, sizeof(Aliases));
+    Length = GetConsoleAliasExesW(Aliases, sizeof(Aliases));
+    ok(Length == sizeof(L"csrtest.exe") && !wcscmp(Aliases, L"csrtest.exe"), "GetConsoleAliasExesW: %lu '%ls'\n",
+       Length, Aliases);
+    ok(GetConsoleAliasExesLengthA() == sizeof("csrtest.exe"), "GetConsoleAliasExesLengthA: %lu\n",
+       GetConsoleAliasExesLengthA());
+    ok(AddConsoleAliasA("csrx", NULL, "csrtest.exe"), "Removing an alias failed with %lu\n", GetLastError());
+    ok(AddConsoleAliasW(L"csry", NULL, L"csrtest.exe"), "Removing an alias failed with %lu\n", GetLastError());
+
+    /* Undocumented */
+    pGetHistoryLength = (PVOID)GetProcAddress(hKernel32, "GetConsoleCommandHistoryLengthW");
+    pSetNumberOfCommands = (PVOID)GetProcAddress(hKernel32, "SetConsoleNumberOfCommandsW");
+    if (pSetNumberOfCommands)
+        ok(pSetNumberOfCommands(50, L"csrtest.exe"), "SetConsoleNumberOfCommandsW failed with %lu\n", GetLastError());
+    if (pGetHistoryLength)
+    {
+        SetLastError(0xdeadbeef);
+        Length = pGetHistoryLength(L"csrtest.exe");
+        ok(Length == 0 && GetLastError() == 0xdeadbeef, "GetConsoleCommandHistoryLengthW: %lu, error %lu\n",
+           Length, GetLastError());
+    }
+}
+
+static
+VOID
+TestAllocConsole(VOID)
+{
+    CONSOLE_SCREEN_BUFFER_INFO Info;
+    HANDLE hNew;
+    DWORD Written;
+
+    ok(FreeConsole(), "FreeConsole failed with %lu\n", GetLastError());
+    ok(AllocConsole(), "AllocConsole failed with %lu\n", GetLastError());
+    hNew = CreateFileW(L"CONOUT$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                       OPEN_EXISTING, 0, NULL);
+    ok(hNew != INVALID_HANDLE_VALUE, "CONOUT$ of the new console failed with %lu\n", GetLastError());
+    ok(GetConsoleScreenBufferInfo(hNew, &Info), "GetConsoleScreenBufferInfo on the new console failed with %lu\n",
+       GetLastError());
+    ok(WriteConsoleA(hNew, "new console\n", 12, &Written, NULL) && Written == 12,
+       "WriteConsoleA on the new console failed with %lu\n", GetLastError());
+    CloseHandle(hNew);
+    ok(FreeConsole(), "FreeConsole failed with %lu\n", GetLastError());
+}
+
+static
+VOID
+RunChild(VOID)
+{
+    hIn = CreateFileW(L"CONIN$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                      OPEN_EXISTING, 0, NULL);
+    hFirst = CreateFileW(L"CONOUT$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                         OPEN_EXISTING, 0, NULL);
+    hOut = CreateConsoleScreenBuffer(GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                                     CONSOLE_TEXTMODE_BUFFER, NULL);
+    ok(hIn != INVALID_HANDLE_VALUE, "CONIN$ failed with %lu\n", GetLastError());
+    ok(hFirst != INVALID_HANDLE_VALUE, "CONOUT$ failed with %lu\n", GetLastError());
+    ok(hOut != INVALID_HANDLE_VALUE, "CreateConsoleScreenBuffer failed with %lu\n", GetLastError());
+    if (hIn == INVALID_HANDLE_VALUE || hFirst == INVALID_HANDLE_VALUE || hOut == INVALID_HANDLE_VALUE)
+        return;
+
+    TestScreenBuffer();
+    TestOutputStrings();
+    TestOutputRegions();
+    TestTitle();
+    TestInput();
+    TestHandles();
+    TestMisc();
+    TestAliasesAndHistory();
+
+    ok(CloseHandle(hOut), "CloseHandle(screen buffer) failed with %lu\n", GetLastError());
+    ok(CloseHandle(hIn), "CloseHandle(CONIN$) failed with %lu\n", GetLastError());
+    ok(CloseHandle(hFirst), "CloseHandle(CONOUT$) failed with %lu\n", GetLastError());
+    TestAllocConsole();
+}
+
+START_TEST(ConsoleCsrRequests)
+{
+    int argc;
+    char **argv;
+    WCHAR FileName[MAX_PATH];
+    WCHAR CommandLine[MAX_PATH + 40];
+    STARTUPINFOW StartupInfo;
+    PROCESS_INFORMATION ProcessInfo;
+    SECURITY_ATTRIBUTES Sa = { sizeof(Sa), NULL, TRUE };
+    HANDLE hRead, hWrite;
+    CHAR Output[4096];
+    DWORD Wait, Count;
+
+    argc = winetest_get_mainargs(&argv);
+    if (argc >= 3 && !strcmp(argv[2], "child"))
+    {
+        RunChild();
+        return;
+    }
+
+    if (!CreatePipe(&hRead, &hWrite, &Sa, 0x10000))
+    {
+        skip("CreatePipe failed with %lu\n", GetLastError());
+        return;
+    }
+    SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
+
+    GetModuleFileNameW(NULL, FileName, _countof(FileName));
+    StringCbPrintfW(CommandLine, sizeof(CommandLine), L"\"%ls\" ConsoleCsrRequests child", FileName);
+    RtlZeroMemory(&StartupInfo, sizeof(StartupInfo));
+    StartupInfo.cb = sizeof(StartupInfo);
+    StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    StartupInfo.hStdOutput = hWrite;
+    StartupInfo.hStdError = hWrite;
+    StartupInfo.hStdInput = INVALID_HANDLE_VALUE;
+    if (!CreateProcessW(FileName, CommandLine, NULL, NULL, TRUE, CREATE_NEW_CONSOLE, NULL, NULL,
+                        &StartupInfo, &ProcessInfo))
+    {
+        skip("CreateProcess failed with %lu\n", GetLastError());
+        CloseHandle(hWrite);
+        CloseHandle(hRead);
+        return;
+    }
+    CloseHandle(hWrite);
+    CloseHandle(ProcessInfo.hThread);
+
+    Wait = WaitForSingleObject(ProcessInfo.hProcess, CHILD_TIMEOUT_MS);
+    ok(Wait == WAIT_OBJECT_0, "The child process did not exit: %lu\n", Wait);
+    if (Wait != WAIT_OBJECT_0)
+        TerminateProcess(ProcessInfo.hProcess, 1);
+
+    /* The child's report (its failures and its summary line) */
+    while (ReadFile(hRead, Output, sizeof(Output) - 1, &Count, NULL) && Count)
+    {
+        Output[Count] = 0;
+        printf("%s", Output);
+    }
+    CloseHandle(hRead);
+    if (Wait == WAIT_OBJECT_0)
+        wait_child_process(ProcessInfo.hProcess);
+    CloseHandle(ProcessInfo.hProcess);
+}

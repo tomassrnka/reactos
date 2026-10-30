@@ -27,6 +27,7 @@ extern void func_CopyFile2Identity(void);
 extern void func_ConsoleBufferSwitch(void);
 extern void func_ConsoleCaret(void);
 extern void func_ConsoleCreateRace(void);
+extern void func_ConsoleCsrRequests(void);
 extern void func_ConsoleCtrlEventRace(void);
 extern void func_ConsoleDisplayMode(void);
 extern void func_ConsoleViewFollow(void);
@@ -203,6 +204,7 @@ const struct test winetest_testlist[] =
     { "ConsoleBufferSwitch",         func_ConsoleBufferSwitch },
     { "ConsoleCaret",                func_ConsoleCaret },
     { "ConsoleCreateRace",           func_ConsoleCreateRace },
+    { "ConsoleCsrRequests",          func_ConsoleCsrRequests },
     { "ConsoleCtrlEventRace",        func_ConsoleCtrlEventRace },
     { "ConsoleDisplayMode",          func_ConsoleDisplayMode },
     { "ConsoleViewFollow",           func_ConsoleViewFollow },
