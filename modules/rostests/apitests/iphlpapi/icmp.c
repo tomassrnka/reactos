@@ -239,11 +239,336 @@ test_IcmpSendEchoConcurrent(void)
         skip("The echo requests never overlapped\n");
 }
 
+/* IcmpSendEcho2, IcmpSendEcho2Ex and IcmpParseReplies.
+ * The functions are looked up at run time so that one binary runs on every system, whatever its headers declare. */
+typedef DWORD (WINAPI *PFN_SENDECHO2)(HANDLE, HANDLE, PVOID, PVOID, IPAddr, LPVOID, WORD,
+                                      PIP_OPTION_INFORMATION, LPVOID, DWORD, DWORD);
+typedef DWORD (WINAPI *PFN_SENDECHO2EX)(HANDLE, HANDLE, PVOID, PVOID, IPAddr, IPAddr, LPVOID, WORD,
+                                        PIP_OPTION_INFORMATION, LPVOID, DWORD, DWORD);
+typedef DWORD (WINAPI *PFN_PARSEREPLIES)(LPVOID, DWORD);
+
+static PFN_SENDECHO2 pIcmpSendEcho2;
+static PFN_SENDECHO2EX pIcmpSendEcho2Ex;
+static PFN_PARSEREPLIES pIcmpParseReplies;
+
+#define ECHO2_DATA_SIZE 32
+/* What the documentation asks for: a reply, the data, 8 bytes for an ICMP error and an IO_STATUS_BLOCK. */
+#define ECHO2_REPLY_SIZE (sizeof(ICMP_ECHO_REPLY) + ECHO2_DATA_SIZE + 8 + 2 * sizeof(PVOID))
+
+static
+void
+FillEchoData(UCHAR *Data, DWORD Size)
+{
+    DWORD i;
+
+    for (i = 0; i < Size; i++)
+        Data[i] = (UCHAR)('a' + i % 23);
+}
+
+/* One reply to a request for ECHO2_DATA_SIZE bytes (or none) sent to the loopback address */
+static
+void
+CheckLoopbackReply(const char *Name, UCHAR *Buffer, DWORD BufferSize, const UCHAR *Data, WORD DataSize)
+{
+    PICMP_ECHO_REPLY Reply = (PICMP_ECHO_REPLY)Buffer;
+
+    ok(Reply->Status == IP_SUCCESS, "%s: status %lu\n", Name, (DWORD)Reply->Status);
+    ok(Reply->Address == htonl(INADDR_LOOPBACK), "%s: from 0x%lx\n", Name, (DWORD)Reply->Address);
+    ok(Reply->DataSize == DataSize, "%s: %u data bytes, expected %u\n", Name, Reply->DataSize, DataSize);
+    ok(Reply->Reserved == 0, "%s: Reserved is %u\n", Name, Reply->Reserved);
+    ok(Reply->RoundTripTime < 5000, "%s: round trip time %lu\n", Name, (DWORD)Reply->RoundTripTime);
+    /* A reply always has a Data pointer inside the buffer, also with no data:
+     * .NET's Ping copies from it and rejects NULL. */
+    ok(Reply->Data != NULL, "%s: Data is NULL\n", Name);
+    if (Reply->Data)
+    {
+        ok((PUCHAR)Reply->Data >= Buffer + sizeof(ICMP_ECHO_REPLY) &&
+           (PUCHAR)Reply->Data + Reply->DataSize <= Buffer + BufferSize,
+           "%s: Data %p (%u bytes) is outside the %lu byte buffer at %p\n",
+           Name, Reply->Data, Reply->DataSize, BufferSize, Buffer);
+        if (Reply->DataSize == DataSize && DataSize != 0 &&
+            (PUCHAR)Reply->Data >= Buffer && (PUCHAR)Reply->Data + DataSize <= Buffer + BufferSize)
+            ok(!memcmp(Reply->Data, Data, DataSize), "%s: the data came back different\n", Name);
+    }
+    ok(Reply->Options.OptionsSize == 0, "%s: OptionsSize %u\n", Name, Reply->Options.OptionsSize);
+    ok(Reply->Options.Ttl != 0, "%s: Ttl is 0\n", Name);
+}
+
+static volatile LONG ApcCalls;
+static PVOID ApcContextSeen;
+static ULONG_PTR ApcStatusSeen;
+
+static
+VOID
+WINAPI
+EchoApc(PVOID Context, PVOID IoStatusBlock, ULONG Reserved)
+{
+    ApcContextSeen = Context;
+    ApcStatusSeen = IoStatusBlock ? *(ULONG_PTR *)IoStatusBlock : (ULONG_PTR)-1;
+    InterlockedIncrement(&ApcCalls);
+}
+
+static
+void
+test_IcmpSendEcho2(void)
+{
+    HANDLE hIcmp, hEvent, hEvent2;
+    UCHAR Data[ECHO2_DATA_SIZE];
+    static UCHAR Buffer[ECHO2_REPLY_SIZE + 64], Buffer2[ECHO2_REPLY_SIZE + 64];
+    static UCHAR BigData[1000], BigBuffer[sizeof(ICMP_ECHO_REPLY) + sizeof(BigData) + 8 + 2 * sizeof(PVOID)];
+    IP_OPTION_INFORMATION Options;
+    DWORD Ret, Wait, Error, Start, Elapsed;
+    IPAddr Loopback = htonl(INADDR_LOOPBACK);
+    LONG i;
+
+    if (!pIcmpSendEcho2 || !pIcmpParseReplies)
+    {
+        skip("IcmpSendEcho2 or IcmpParseReplies is not available\n");
+        return;
+    }
+
+    hIcmp = IcmpCreateFile();
+    if (hIcmp == INVALID_HANDLE_VALUE)
+    {
+        skip("IcmpCreateFile failed unexpectedly: %lu\n", GetLastError());
+        return;
+    }
+    FillEchoData(Data, sizeof(Data));
+
+    /* Synchronous, without options */
+    memset(Buffer, 0xCC, sizeof(Buffer));
+    SetLastError(0xDEADBEEF);
+    Ret = pIcmpSendEcho2(hIcmp, NULL, NULL, NULL, Loopback, Data, sizeof(Data), NULL, Buffer, ECHO2_REPLY_SIZE, 3000);
+    ok(Ret == 1, "IcmpSendEcho2 returned %lu, error %lu\n", Ret, GetLastError());
+    if (Ret == 1)
+        CheckLoopbackReply("sync", Buffer, ECHO2_REPLY_SIZE, Data, sizeof(Data));
+
+    /* One host answers once: with room for many replies the call still returns at the first one,
+     * not after the whole timeout (what made Ping.Send and Test-Connection take their full timeout) */
+    memset(Buffer, 0xCC, sizeof(Buffer));
+    Start = GetTickCount();
+    Ret = pIcmpSendEcho2(hIcmp, NULL, NULL, NULL, Loopback, Data, sizeof(Data), NULL, Buffer, sizeof(Buffer), 5000);
+    Elapsed = GetTickCount() - Start;
+    ok(Ret == 1, "IcmpSendEcho2 with a large buffer returned %lu, error %lu\n", Ret, GetLastError());
+    ok(Elapsed < 2500, "IcmpSendEcho2 took %lu ms for a reply from the loopback address\n", Elapsed);
+    if (Ret == 1)
+        CheckLoopbackReply("large", Buffer, sizeof(Buffer), Data, sizeof(Data));
+
+    /* Synchronous, with options: the TTL goes out, DF is allowed */
+    memset(&Options, 0, sizeof(Options));
+    Options.Ttl = 64;
+    Options.Flags = IP_FLAG_DF;
+    memset(Buffer, 0xCC, sizeof(Buffer));
+    SetLastError(0xDEADBEEF);
+    Ret = pIcmpSendEcho2(hIcmp, NULL, NULL, NULL, Loopback, Data, sizeof(Data), &Options, Buffer, ECHO2_REPLY_SIZE, 3000);
+    ok(Ret == 1, "IcmpSendEcho2 with options returned %lu, error %lu\n", Ret, GetLastError());
+    if (Ret == 1)
+        CheckLoopbackReply("options", Buffer, ECHO2_REPLY_SIZE, Data, sizeof(Data));
+
+    /* No data at all: this is what makes .NET's Test-Connection fail on a NULL Data pointer */
+    memset(Buffer, 0xCC, sizeof(Buffer));
+    SetLastError(0xDEADBEEF);
+    Ret = pIcmpSendEcho2(hIcmp, NULL, NULL, NULL, Loopback, NULL, 0, &Options, Buffer, sizeof(ICMP_ECHO_REPLY) + 8 + 2 * sizeof(PVOID), 3000);
+    ok(Ret == 1, "IcmpSendEcho2 without data returned %lu, error %lu\n", Ret, GetLastError());
+    if (Ret == 1)
+        CheckLoopbackReply("nodata", Buffer, sizeof(ICMP_ECHO_REPLY) + 8 + 2 * sizeof(PVOID), NULL, 0);
+
+    /* More data than fits in a packet buffer of a few bytes */
+    FillEchoData(BigData, sizeof(BigData));
+    memset(BigBuffer, 0xCC, sizeof(BigBuffer));
+    SetLastError(0xDEADBEEF);
+    Ret = pIcmpSendEcho2(hIcmp, NULL, NULL, NULL, Loopback, BigData, sizeof(BigData), NULL, BigBuffer, sizeof(BigBuffer), 3000);
+    ok(Ret == 1, "IcmpSendEcho2 with %u bytes returned %lu, error %lu\n", (unsigned)sizeof(BigData), Ret, GetLastError());
+    if (Ret == 1)
+        CheckLoopbackReply("big", BigBuffer, sizeof(BigBuffer), BigData, sizeof(BigData));
+
+    /* Buffer sizes: smaller than a reply is a bad parameter, too small for the data a general failure */
+    SetLastError(0xDEADBEEF);
+    Ret = pIcmpSendEcho2(hIcmp, NULL, NULL, NULL, Loopback, Data, sizeof(Data), NULL, Buffer, sizeof(ICMP_ECHO_REPLY) - 1, 3000);
+    ok(Ret == 0, "IcmpSendEcho2 with a tiny buffer returned %lu\n", Ret);
+    ok(GetLastError() == ERROR_INVALID_PARAMETER, "tiny buffer: error %lu\n", GetLastError());
+    SetLastError(0xDEADBEEF);
+    Ret = pIcmpSendEcho2(hIcmp, NULL, NULL, NULL, Loopback, Data, sizeof(Data), NULL, Buffer, sizeof(ICMP_ECHO_REPLY) + 8, 3000);
+    ok(Ret == 0, "IcmpSendEcho2 with a small buffer returned %lu\n", Ret);
+    ok(GetLastError() == IP_GENERAL_FAILURE, "small buffer: error %lu\n", GetLastError());
+
+    /* Bad arguments */
+    SetLastError(0xDEADBEEF);
+    Ret = pIcmpSendEcho2(hIcmp, NULL, NULL, NULL, Loopback, Data, sizeof(Data), NULL, NULL, ECHO2_REPLY_SIZE, 3000);
+    ok(Ret == 0, "IcmpSendEcho2 without a buffer returned %lu\n", Ret);
+    ok(GetLastError() == ERROR_INVALID_PARAMETER, "no buffer: error %lu\n", GetLastError());
+    SetLastError(0xDEADBEEF);
+    Ret = pIcmpSendEcho2(hIcmp, NULL, NULL, NULL, Loopback, Data, sizeof(Data), NULL, Buffer, ECHO2_REPLY_SIZE, 0);
+    ok(Ret == 0, "IcmpSendEcho2 with timeout 0 returned %lu\n", Ret);
+    ok(GetLastError() == ERROR_INVALID_PARAMETER, "timeout 0: error %lu\n", GetLastError());
+
+    /* IcmpParseReplies */
+    SetLastError(0xDEADBEEF);
+    Ret = pIcmpParseReplies(NULL, 0);
+    ok(Ret == 0, "IcmpParseReplies(NULL) returned %lu\n", Ret);
+    ok(GetLastError() == ERROR_GEN_FAILURE, "IcmpParseReplies(NULL): error %lu\n", GetLastError());
+
+    /* Event: the call returns 0 with ERROR_IO_PENDING, the event is signalled, IcmpParseReplies counts the reply once */
+    hEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
+    ok(hEvent != NULL, "CreateEvent failed: %lu\n", GetLastError());
+    memset(Buffer, 0xCC, sizeof(Buffer));
+    SetLastError(0xDEADBEEF);
+    Ret = pIcmpSendEcho2(hIcmp, hEvent, NULL, NULL, Loopback, Data, sizeof(Data), &Options, Buffer, ECHO2_REPLY_SIZE, 3000);
+    Error = GetLastError();
+    ok(Ret == 0, "IcmpSendEcho2 with an event returned %lu\n", Ret);
+    ok(Error == ERROR_IO_PENDING, "event: error %lu\n", Error);
+    Wait = WaitForSingleObject(hEvent, 5000);
+    ok(Wait == WAIT_OBJECT_0, "the event was not signalled: %lu\n", Wait);
+    if (Wait == WAIT_OBJECT_0)
+    {
+        Ret = pIcmpParseReplies(Buffer, ECHO2_REPLY_SIZE);
+        ok(Ret == 1, "IcmpParseReplies returned %lu\n", Ret);
+        if (Ret == 1)
+            CheckLoopbackReply("event", Buffer, ECHO2_REPLY_SIZE, Data, sizeof(Data));
+        SetLastError(0xDEADBEEF);
+        Ret = pIcmpParseReplies(Buffer, ECHO2_REPLY_SIZE);
+        ok(Ret == 0, "the second IcmpParseReplies returned %lu\n", Ret);
+    }
+
+    /* Two requests outstanding on one handle, each with its own event and buffer */
+    hEvent2 = CreateEventW(NULL, FALSE, FALSE, NULL);
+    memset(Buffer, 0xCC, sizeof(Buffer));
+    memset(Buffer2, 0xCC, sizeof(Buffer2));
+    Ret = pIcmpSendEcho2(hIcmp, hEvent, NULL, NULL, Loopback, Data, sizeof(Data), &Options, Buffer, ECHO2_REPLY_SIZE, 3000);
+    ok(Ret == 0 && GetLastError() == ERROR_IO_PENDING, "first request: %lu, error %lu\n", Ret, GetLastError());
+    Ret = pIcmpSendEcho2(hIcmp, hEvent2, NULL, NULL, Loopback, Data, sizeof(Data), &Options, Buffer2, ECHO2_REPLY_SIZE, 3000);
+    ok(Ret == 0 && GetLastError() == ERROR_IO_PENDING, "second request: %lu, error %lu\n", Ret, GetLastError());
+    Wait = WaitForSingleObject(hEvent, 5000);
+    ok(Wait == WAIT_OBJECT_0, "the first event was not signalled: %lu\n", Wait);
+    if (Wait == WAIT_OBJECT_0)
+    {
+        Ret = pIcmpParseReplies(Buffer, ECHO2_REPLY_SIZE);
+        ok(Ret == 1, "first IcmpParseReplies returned %lu\n", Ret);
+        if (Ret == 1)
+            CheckLoopbackReply("first", Buffer, ECHO2_REPLY_SIZE, Data, sizeof(Data));
+    }
+    Wait = WaitForSingleObject(hEvent2, 5000);
+    ok(Wait == WAIT_OBJECT_0, "the second event was not signalled: %lu\n", Wait);
+    if (Wait == WAIT_OBJECT_0)
+    {
+        Ret = pIcmpParseReplies(Buffer2, ECHO2_REPLY_SIZE);
+        ok(Ret == 1, "second IcmpParseReplies returned %lu\n", Ret);
+        if (Ret == 1)
+            CheckLoopbackReply("second", Buffer2, ECHO2_REPLY_SIZE, Data, sizeof(Data));
+    }
+    CloseHandle(hEvent2);
+    CloseHandle(hEvent);
+
+    /* APC: runs in an alertable wait of the calling thread with the context and the status block */
+    ApcCalls = 0;
+    ApcContextSeen = NULL;
+    memset(Buffer, 0xCC, sizeof(Buffer));
+    SetLastError(0xDEADBEEF);
+    Ret = pIcmpSendEcho2(hIcmp, NULL, (PVOID)EchoApc, (PVOID)(ULONG_PTR)0x1234, Loopback, Data, sizeof(Data), NULL,
+                         Buffer, ECHO2_REPLY_SIZE, 3000);
+    Error = GetLastError();
+    ok(Ret == 0, "IcmpSendEcho2 with an APC returned %lu\n", Ret);
+    ok(Error == ERROR_IO_PENDING, "APC: error %lu\n", Error);
+    for (i = 0; i < 50 && !ApcCalls; i++)
+        SleepEx(100, TRUE);
+    ok(ApcCalls == 1, "the APC ran %ld times\n", ApcCalls);
+    ok(ApcContextSeen == (PVOID)(ULONG_PTR)0x1234, "the APC got context %p\n", ApcContextSeen);
+    ok((NTSTATUS)ApcStatusSeen == 0, "the APC saw status 0x%lx\n", (ULONG)ApcStatusSeen);
+    if (ApcCalls == 1)
+    {
+        Ret = pIcmpParseReplies(Buffer, ECHO2_REPLY_SIZE);
+        ok(Ret == 1, "IcmpParseReplies after the APC returned %lu\n", Ret);
+        if (Ret == 1)
+            CheckLoopbackReply("apc", Buffer, ECHO2_REPLY_SIZE, Data, sizeof(Data));
+    }
+
+    IcmpCloseHandle(hIcmp);
+}
+
+static
+void
+test_IcmpSendEcho2Ex(void)
+{
+    HANDLE hIcmp, hEvent;
+    UCHAR Data[ECHO2_DATA_SIZE];
+    static UCHAR Buffer[ECHO2_REPLY_SIZE + 64];
+    IP_OPTION_INFORMATION Options;
+    DWORD Ret, Wait;
+    IPAddr Loopback = htonl(INADDR_LOOPBACK);
+
+    if (!pIcmpSendEcho2Ex || !pIcmpParseReplies)
+    {
+        skip("IcmpSendEcho2Ex is not available\n");
+        return;
+    }
+
+    hIcmp = IcmpCreateFile();
+    if (hIcmp == INVALID_HANDLE_VALUE)
+    {
+        skip("IcmpCreateFile failed unexpectedly: %lu\n", GetLastError());
+        return;
+    }
+    FillEchoData(Data, sizeof(Data));
+    memset(&Options, 0, sizeof(Options));
+    Options.Ttl = 64;
+
+    /* No source address, then the loopback address as the source */
+    memset(Buffer, 0xCC, sizeof(Buffer));
+    SetLastError(0xDEADBEEF);
+    Ret = pIcmpSendEcho2Ex(hIcmp, NULL, NULL, NULL, 0, Loopback, Data, sizeof(Data), &Options, Buffer, ECHO2_REPLY_SIZE, 3000);
+    ok(Ret == 1, "IcmpSendEcho2Ex without a source returned %lu, error %lu\n", Ret, GetLastError());
+    if (Ret == 1)
+        CheckLoopbackReply("ex-nosource", Buffer, ECHO2_REPLY_SIZE, Data, sizeof(Data));
+
+    memset(Buffer, 0xCC, sizeof(Buffer));
+    SetLastError(0xDEADBEEF);
+    Ret = pIcmpSendEcho2Ex(hIcmp, NULL, NULL, NULL, Loopback, Loopback, Data, sizeof(Data), &Options, Buffer, ECHO2_REPLY_SIZE, 3000);
+    ok(Ret == 1, "IcmpSendEcho2Ex from the loopback address returned %lu, error %lu\n", Ret, GetLastError());
+    if (Ret == 1)
+        CheckLoopbackReply("ex-loopback", Buffer, ECHO2_REPLY_SIZE, Data, sizeof(Data));
+
+    /* With an event */
+    hEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
+    memset(Buffer, 0xCC, sizeof(Buffer));
+    SetLastError(0xDEADBEEF);
+    Ret = pIcmpSendEcho2Ex(hIcmp, hEvent, NULL, NULL, Loopback, Loopback, Data, sizeof(Data), &Options, Buffer, ECHO2_REPLY_SIZE, 3000);
+    ok(Ret == 0 && GetLastError() == ERROR_IO_PENDING, "IcmpSendEcho2Ex with an event: %lu, error %lu\n", Ret, GetLastError());
+    Wait = WaitForSingleObject(hEvent, 5000);
+    ok(Wait == WAIT_OBJECT_0, "the event was not signalled: %lu\n", Wait);
+    if (Wait == WAIT_OBJECT_0)
+    {
+        Ret = pIcmpParseReplies(Buffer, ECHO2_REPLY_SIZE);
+        ok(Ret == 1, "IcmpParseReplies returned %lu\n", Ret);
+        if (Ret == 1)
+            CheckLoopbackReply("ex-event", Buffer, ECHO2_REPLY_SIZE, Data, sizeof(Data));
+    }
+    CloseHandle(hEvent);
+
+    /* A source address that no interface has: 192.0.2.1 is reserved for documentation */
+    memset(Buffer, 0xCC, sizeof(Buffer));
+    SetLastError(0xDEADBEEF);
+    Ret = pIcmpSendEcho2Ex(hIcmp, NULL, NULL, NULL, inet_addr("192.0.2.1"), Loopback, Data, sizeof(Data), &Options, Buffer, ECHO2_REPLY_SIZE, 3000);
+    ok(Ret == 0, "IcmpSendEcho2Ex from a foreign address returned %lu\n", Ret);
+    ok(GetLastError() == ERROR_INVALID_NETNAME, "foreign source: error %lu\n", GetLastError());
+
+    IcmpCloseHandle(hIcmp);
+}
+
 START_TEST(icmp)
 {
+    HMODULE hIphlpapi = GetModuleHandleW(L"iphlpapi.dll");
+
+    if (!hIphlpapi)
+        hIphlpapi = LoadLibraryW(L"iphlpapi.dll");
+    pIcmpSendEcho2 = (PFN_SENDECHO2)GetProcAddress(hIphlpapi, "IcmpSendEcho2");
+    pIcmpSendEcho2Ex = (PFN_SENDECHO2EX)GetProcAddress(hIphlpapi, "IcmpSendEcho2Ex");
+    pIcmpParseReplies = (PFN_PARSEREPLIES)GetProcAddress(hIphlpapi, "IcmpParseReplies");
+
     test_IcmpCreateFile();
     test_Icmp6CreateFile();
     test_IcmpCloseHandle();
     test_IcmpSendEcho();
     test_IcmpSendEchoConcurrent();
+    test_IcmpSendEcho2();
+    test_IcmpSendEcho2Ex();
 }

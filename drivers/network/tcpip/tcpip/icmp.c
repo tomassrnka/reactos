@@ -24,7 +24,105 @@ typedef struct _ICMP_PACKET_CONTEXT
     KTIMER TimeoutTimer;
     UINT16 Identifier;
     UINT16 Seq;
+    BOOLEAN Wow64;
+    BOOLEAN CompleteOnFirstReply;
 } ICMP_PACKET_CONTEXT, *PICMP_PACKET_CONTEXT;
+
+/*
+ * The reply is written straight into the caller's buffer, so a 32-bit
+ * process under WoW64 must get a 28-byte reply (ICMP_ECHO_REPLY_GUEST): its Data and OptionsData
+ * are 32-bit pointers and the options start 4 bytes earlier.
+ * Address, Status, RoundTripTime, DataSize and Reserved are at the same
+ * offsets in both layouts.
+ */
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+#define ICMP_SUPPORT_WOW64
+
+/* ICMP_ECHO_REPLY32 of the SDK headers is not 32 bits wide with GCC (POINTER_32 is empty there). */
+typedef struct _ICMP_ECHO_REPLY_GUEST
+{
+    ULONG Address;
+    ULONG Status;
+    ULONG RoundTripTime;
+    USHORT DataSize;
+    USHORT Reserved;
+    ULONG Data;
+    struct
+    {
+        UCHAR Ttl;
+        UCHAR Tos;
+        UCHAR Flags;
+        UCHAR OptionsSize;
+        ULONG OptionsData;
+    } Options;
+} ICMP_ECHO_REPLY_GUEST, *PICMP_ECHO_REPLY_GUEST;
+
+C_ASSERT(sizeof(ICMP_ECHO_REPLY_GUEST) == 28);
+#endif
+
+static
+UINT32
+IcmpReplySize(
+    _In_ BOOLEAN Wow64)
+{
+#ifdef ICMP_SUPPORT_WOW64
+    if (Wow64)
+        return sizeof(ICMP_ECHO_REPLY_GUEST);
+#endif
+    UNREFERENCED_PARAMETER(Wow64);
+    return sizeof(ICMP_ECHO_REPLY);
+}
+
+static
+VOID
+IcmpSetReplyData(
+    _In_ BOOLEAN Wow64,
+    _In_ PICMP_ECHO_REPLY Reply,
+    _In_ PUCHAR UserData,
+    _In_ UINT16 DataSize)
+{
+#ifdef ICMP_SUPPORT_WOW64
+    if (Wow64)
+    {
+        ((PICMP_ECHO_REPLY_GUEST)Reply)->Data = (ULONG)(ULONG_PTR)UserData;
+        ((PICMP_ECHO_REPLY_GUEST)Reply)->DataSize = DataSize;
+        return;
+    }
+#endif
+    UNREFERENCED_PARAMETER(Wow64);
+    Reply->Data = UserData;
+    Reply->DataSize = DataSize;
+}
+
+static
+VOID
+IcmpSetReplyOptions(
+    _In_ BOOLEAN Wow64,
+    _In_ PICMP_ECHO_REPLY Reply,
+    _In_ PIPv4_HEADER IpHeader,
+    _In_ PUCHAR UserOptions,
+    _In_ UINT8 OptionsSize)
+{
+#ifdef ICMP_SUPPORT_WOW64
+    if (Wow64)
+    {
+        PICMP_ECHO_REPLY_GUEST Reply32 = (PICMP_ECHO_REPLY_GUEST)Reply;
+
+        Reply32->Options.Ttl = IpHeader->Ttl;
+        Reply32->Options.Tos = IpHeader->Tos;
+        Reply32->Options.Flags = IpHeader->FlagsFragOfs >> 13;
+        Reply32->Options.OptionsSize = OptionsSize;
+        Reply32->Options.OptionsData = (ULONG)(ULONG_PTR)UserOptions;
+        return;
+    }
+#endif
+    UNREFERENCED_PARAMETER(Wow64);
+    Reply->Options.Ttl = IpHeader->Ttl;
+    Reply->Options.Tos = IpHeader->Tos;
+    Reply->Options.Flags = IpHeader->FlagsFragOfs >> 13;
+    Reply->Options.OptionsSize = OptionsSize;
+    Reply->Options.OptionsData = UserOptions;
+}
 
 static volatile INT16 IcmpSequence = 0;
 
@@ -161,11 +259,13 @@ EndRequestHandler(
     else
     {
         PICMP_ECHO_REPLY ReplyBuffer = (PICMP_ECHO_REPLY)Irp->AssociatedIrp.SystemBuffer;
-        RtlZeroMemory(ReplyBuffer, sizeof(*ReplyBuffer));
+        UINT32 ReplySize = IcmpReplySize(Context->Wow64);
+
+        RtlZeroMemory(ReplyBuffer, ReplySize);
         ReplyBuffer->Status = IP_REQ_TIMED_OUT;
 
         Irp->IoStatus.Status = STATUS_TIMEOUT;
-        Irp->IoStatus.Information = sizeof(*ReplyBuffer);
+        Irp->IoStatus.Information = ReplySize;
     }
 
     // for debugging
@@ -213,6 +313,7 @@ ReceiveDatagram(
 
     INT64 CurrentTime;
     UINT32 RoundTripTime;
+    UINT32 ReplySize;
     PICMP_ECHO_REPLY CurrentReply;
     PUCHAR CurrentUserBuffer;
 
@@ -232,38 +333,42 @@ ReceiveDatagram(
     RoundTripTime = (CurrentTime - Context->StartTicks) * 1000 / Context->TimerResolution.QuadPart;
     CurrentReply = (PICMP_ECHO_REPLY)Context->CurrentReply;
 
-    if (Context->RemainingSize >= sizeof(ICMP_ECHO_REPLY) && DataSize >= 0)
+    ReplySize = IcmpReplySize(Context->Wow64);
+
+    if (Context->RemainingSize < ReplySize)
     {
-        TI_DbgPrint(DEBUG_ICMP, ("RemainingSize: %u, RoundTripTime: %u\n", Context->RemainingSize, RoundTripTime));
-
-        memcpy(&CurrentReply->Address, SourceAddress, sizeof(CurrentReply->Address));
-        CurrentReply->Status = GetReplyStatus(IcmpHeader);
-        CurrentReply->RoundTripTime = RoundTripTime;
-        CurrentReply->Reserved = 0;
-        CurrentReply->Data = NULL;
-        CurrentReply->DataSize = 0;
-        CurrentReply->Options.Ttl = IpHeader->Ttl;
-        CurrentReply->Options.Tos = IpHeader->Tos;
-        CurrentReply->Options.Flags = IpHeader->FlagsFragOfs >> 13;
-        CurrentReply->Options.OptionsData = NULL;
-        CurrentReply->Options.OptionsSize = 0;
-
-        Context->RemainingSize -= sizeof(ICMP_ECHO_REPLY);
-        Context->CurrentReply += sizeof(ICMP_ECHO_REPLY);
+        /* No room for another reply: the request is about to finish. */
+        KeSetEvent(&Context->DatagramProcessedEvent, IO_NO_INCREMENT, FALSE);
+        return STATUS_SUCCESS;
     }
+
+    TI_DbgPrint(DEBUG_ICMP, ("RemainingSize: %u, RoundTripTime: %u\n", Context->RemainingSize, RoundTripTime));
+
+    memcpy(&CurrentReply->Address, SourceAddress, sizeof(CurrentReply->Address));
+    CurrentReply->Status = GetReplyStatus(IcmpHeader);
+    CurrentReply->RoundTripTime = RoundTripTime;
+    CurrentReply->Reserved = 0;
+
+    Context->RemainingSize -= ReplySize;
+    Context->CurrentReply += ReplySize;
 
     CurrentUserBuffer = (PUCHAR)Context->Irp->UserBuffer + (Context->CurrentReply - (PUCHAR)Context->Irp->AssociatedIrp.SystemBuffer);
 
-    if (DataSize > 0 && Context->RemainingSize > 0)
+    /* Data and OptionsData are never NULL in a reply that was received, as on Windows:
+     * a caller (.NET's Marshal.Copy) rejects a NULL pointer even for zero bytes.
+     * They point just past the reply until there is something to point at. */
+    IcmpSetReplyData(Context->Wow64, CurrentReply, CurrentUserBuffer, 0);
+    IcmpSetReplyOptions(Context->Wow64, CurrentReply, IpHeader, CurrentUserBuffer, 0);
+
+    /* Only an echo reply returns data; an error message quotes the request header, which Windows does not return. */
+    if (IcmpHeader->Type == ICMP_TYPE_ECHO_REPLY && DataSize > 0 && Context->RemainingSize > 0)
     {
         UINT32 _DataSize = min(Context->RemainingSize, DataSize);
 
         memcpy(Context->CurrentReply + Context->RemainingSize - _DataSize, DataBuffer, _DataSize);
-        CurrentReply->Data = CurrentUserBuffer + Context->RemainingSize - _DataSize;
-        CurrentReply->DataSize = _DataSize;
+        IcmpSetReplyData(Context->Wow64, CurrentReply, CurrentUserBuffer + Context->RemainingSize - _DataSize, (UINT16)_DataSize);
 
         Context->RemainingSize -= _DataSize;
-        // Context->ReplyBuffer += _DataSize;
     }
     else
     {
@@ -275,11 +380,10 @@ ReceiveDatagram(
         UINT32 _OptSize = min(Context->RemainingSize, OptionsLength);
 
         memcpy(Context->CurrentReply + Context->RemainingSize - _OptSize, Options, _OptSize);
-        CurrentReply->Options.OptionsData = CurrentUserBuffer + Context->RemainingSize - _OptSize;
-        CurrentReply->Options.OptionsSize = _OptSize;
+        IcmpSetReplyOptions(Context->Wow64, CurrentReply, IpHeader,
+                            CurrentUserBuffer + Context->RemainingSize - _OptSize, (UINT8)_OptSize);
 
         Context->RemainingSize -= _OptSize;
-        // Context->ReplyBuffer += _OptSize;
     }
     else
     {
@@ -288,7 +392,9 @@ ReceiveDatagram(
 
     Context->nReplies++;
 
-    if (Context->RemainingSize < sizeof(ICMP_ECHO_REPLY))
+    /* An echo to a single host is answered once: finish at the first reply, as Windows does,
+     * instead of holding the caller until the timeout (Ping.Send would take its whole timeout). */
+    if (Context->RemainingSize < ReplySize || Context->CompleteOnFirstReply)
     {
         TI_DbgPrint(DEBUG_ICMP, ("The space is over: %u\n", Context->RemainingSize));
 
@@ -340,11 +446,18 @@ DispEchoRequest(
     PICMP_PACKET_CONTEXT SendContext;
     LARGE_INTEGER RequestTimeout;
     UINT8 SavedTtl;
+    BOOLEAN Wow64;
 
     TI_DbgPrint(DEBUG_ICMP, ("About to send datagram, OutputBufferLength: %u, SystemBuffer: %p\n", OutputBufferLength, Irp->AssociatedIrp.SystemBuffer));
 
+#ifdef ICMP_SUPPORT_WOW64
+    Wow64 = IoIs32bitProcess(Irp);
+#else
+    Wow64 = FALSE;
+#endif
+
     // check buffers
-    if (OutputBufferLength < sizeof(ICMP_ECHO_REPLY) || InputBufferLength < sizeof(ICMP_ECHO_REQUEST))
+    if (OutputBufferLength < IcmpReplySize(Wow64) || InputBufferLength < sizeof(ICMP_ECHO_REQUEST))
     {
         return STATUS_INVALID_PARAMETER;
     }
@@ -387,7 +500,8 @@ DispEchoRequest(
     LocalAddressTa.TAAddressCount = 1;
     LocalAddressTa.Address[0].AddressLength = TDI_ADDRESS_LENGTH_IP;
     LocalAddressTa.Address[0].AddressType = TDI_ADDRESS_TYPE_IP;
-    LocalAddressTa.Address[0].Address[0].in_addr = 0;
+    /* IcmpSendEcho2Ex: send from this local address (0 lets the stack choose). */
+    LocalAddressTa.Address[0].Address[0].in_addr = Request->SourceAddress;
 
     Status = FileOpenAddress(&SendContext->TdiRequest, &LocalAddressTa, IPPROTO_ICMP, FALSE, NULL);
 
@@ -407,6 +521,10 @@ DispEchoRequest(
 
     KeQueryPerformanceCounter(&SendContext->TimerResolution);
     SendContext->Irp = Irp;
+    SendContext->Wow64 = Wow64;
+    /* Only a broadcast or multicast destination (or x.y.z.255) can have several answers worth waiting for. */
+    SendContext->CompleteOnFirstReply = ((Request->Address >> 24) != 0xFF) &&
+                                        ((Request->Address & 0xF0) != 0xE0);
     SendContext->CurrentReply = Irp->AssociatedIrp.SystemBuffer;
     SendContext->RemainingSize = OutputBufferLength;
     SendContext->nReplies = 0;
@@ -446,7 +564,8 @@ DispEchoRequest(
     ((PICMP_HEADER)Buffer)->Seq = SendContext->Seq;
     memcpy(Buffer + sizeof(ICMP_HEADER), (PUCHAR)Request + Request->DataOffset, Request->DataSize);
     ((PICMP_HEADER)Buffer)->Checksum = IPv4Checksum(Buffer, RequestSize, 0);
-    SavedTtl = Request->Ttl;
+    /* Without options (IcmpSendEcho with NULL RequestOptions) the TTL is the default, not 0. */
+    SavedTtl = Request->HasOptions ? Request->Ttl : 128;
 
     RtlZeroMemory(Irp->AssociatedIrp.SystemBuffer, OutputBufferLength);
 
