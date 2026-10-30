@@ -1253,8 +1253,18 @@ SkipCheck:
         }
         else
         {
-            /* We couldn't resolve the name, is this a static load? */
-            if (Static)
+            /*
+             * We couldn't resolve the name, is this a static load?
+             *
+             * Only a missing import of the process itself is fatal, so only
+             * then is the "Unable To Locate Component" error raised. Windows
+             * does not raise it when a DLL is loaded later (LoadLibrary) and
+             * one of its imports is missing: the load fails with
+             * STATUS_DLL_NOT_FOUND and the caller gets ERROR_MOD_NOT_FOUND.
+             * The error would block the loading thread until somebody
+             * closes the message box.
+             */
+            if (Static && LdrpInLdrInit)
             {
                 /*
                  * This is BAD! Static loads are CRITICAL. Bugcheck!
