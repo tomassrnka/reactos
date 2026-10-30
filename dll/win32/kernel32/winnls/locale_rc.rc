@@ -24,6 +24,45 @@
 
 #define LGRPID_RES_BASE 0x2000
 
+/* LCTYPEs added by Windows Vista and later, which winnls.h hides from the Windows Server 2003 resource compile */
+#ifndef LOCALE_ICONSTRUCTEDLOCALE
+#define LOCALE_ICONSTRUCTEDLOCALE 0x007d
+#endif
+#ifndef LOCALE_SCONSOLEFALLBACKNAME
+#define LOCALE_SCONSOLEFALLBACKNAME 0x006e
+#endif
+#ifndef LOCALE_SDURATION
+#define LOCALE_SDURATION 0x005d
+#endif
+#ifndef LOCALE_SENGLISHDISPLAYNAME
+#define LOCALE_SENGLISHDISPLAYNAME 0x0072
+#endif
+#ifndef LOCALE_SISO3166CTRYNAME2
+#define LOCALE_SISO3166CTRYNAME2 0x0068
+#endif
+#ifndef LOCALE_SISO639LANGNAME2
+#define LOCALE_SISO639LANGNAME2 0x0067
+#endif
+#ifndef LOCALE_SKEYBOARDSTOINSTALL
+#define LOCALE_SKEYBOARDSTOINSTALL 0x005e
+#endif
+#ifndef LOCALE_SLOCALIZEDLANGUAGENAME
+#define LOCALE_SLOCALIZEDLANGUAGENAME 0x006f
+#endif
+#ifndef LOCALE_SRELATIVELONGDATE
+#define LOCALE_SRELATIVELONGDATE 0x007c
+#endif
+#ifndef LOCALE_SSHORTESTAM
+#define LOCALE_SSHORTESTAM 0x007e
+#endif
+#ifndef LOCALE_SSHORTESTPM
+#define LOCALE_SSHORTESTPM 0x007f
+#endif
+#ifndef LOCALE_SSORTLOCALE
+#define LOCALE_SSORTLOCALE 0x007b
+#endif
+
+
 /* add languages in numerical order of main language (last two digits)
  * it is much easier to find the missing holes that way */
 
