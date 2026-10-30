@@ -701,7 +701,11 @@ WINAPI
 LsaFreeMemory(IN PVOID Buffer)
 {
     TRACE("LsaFreeMemory(%p)\n", Buffer);
-    return RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
+
+    /* RtlFreeHeap returns a BOOLEAN; Windows returns STATUS_SUCCESS (0), not TRUE (1) */
+    if (!RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer))
+        return STATUS_INVALID_PARAMETER;
+    return STATUS_SUCCESS;
 }
 
 
@@ -848,13 +852,60 @@ LsaGetUserName(OUT PUNICODE_STRING *UserName,
 
 
 /*
- * The RPC stub returns the referenced domain list as separate heap blocks: the header, the trust array, each
- * domain name and each SID. Windows returns one block (header, trust array, then names and SIDs), and callers rely
- * on it: .NET sizes the list for LsaFreeMemory as the distance from the header to the end of the trust array, and a
- * trust array below the header made that distance wrap past 4 GB (SafeBuffer, "numBytes" overflow) in 32-bit
- * processes, about one lookup in eight. Pack the list into one block; the old header is freed, the other pieces
- * stay as before (they were never freed by LsaFreeMemory either).
+ * The RPC client stub allocates every piece of an out parameter separately with midl_user_allocate (the process
+ * heap, zero filled; only a server points into the RPC buffer): for the referenced domain list the header, the trust
+ * array, each domain name and each SID, for the translated names and SIDs the array and each name buffer or SID.
+ * Windows returns each of these as ONE block (header or array first, then the data behind it) and callers rely on
+ * it: LsaFreeMemory frees one block, and .NET sizes the list for LsaFreeMemory as the distance from the header to
+ * the end of the trust array, which wrapped past 4 GB in 32-bit processes (SafeBuffer "numBytes" overflow, about one
+ * lookup in eight) when the trust array sat below the header.
+ *
+ * Each LsapPack function copies the pieces into one process heap block, frees the pieces and the old header with
+ * the stub's allocator, and returns the new block. If the new block cannot be allocated the list is returned as the
+ * stub made it (then LsaFreeMemory frees only the first block, as before).
  */
+#define LSAP_ALIGN(x)   (((ULONGLONG)(x) + sizeof(PVOID) - 1) & ~(ULONGLONG)(sizeof(PVOID) - 1))
+#define LSAP_MAX_PACK   0x7FFFFFFFULL
+
+/* The lookup returned data the caller owns: all, some or none of the entries mapped */
+static
+BOOLEAN
+LsapLookupReturnsData(
+    _In_ NTSTATUS Status)
+{
+    return (Status == STATUS_SUCCESS ||
+            Status == STATUS_SOME_NOT_MAPPED ||
+            Status == STATUS_NONE_MAPPED);
+}
+
+/* Free every piece of a list as the stub allocated it */
+static
+VOID
+LsapFreeRpcDomains(
+    _In_opt_ PLSA_REFERENCED_DOMAIN_LIST List)
+{
+    ULONG i;
+
+    if (List == NULL)
+        return;
+
+    if (List->Domains != NULL)
+    {
+        if (List->Entries <= 0x1000)
+        {
+            for (i = 0; i < List->Entries; i++)
+            {
+                if (List->Domains[i].Name.Buffer != NULL)
+                    MIDL_user_free(List->Domains[i].Name.Buffer);
+                if (List->Domains[i].Sid != NULL)
+                    MIDL_user_free(List->Domains[i].Sid);
+            }
+        }
+        MIDL_user_free(List->Domains);
+    }
+    MIDL_user_free(List);
+}
+
 static
 VOID
 LsapPackReferencedDomains(
@@ -862,29 +913,45 @@ LsapPackReferencedDomains(
 {
     PLSA_REFERENCED_DOMAIN_LIST Old = *ReferencedDomains, New;
     PLSA_TRUST_INFORMATION Trust;
-    SIZE_T Size, Align = sizeof(PVOID) - 1;
+    ULONGLONG Size;
     PUCHAR Cursor;
     ULONG i, SidLength;
 
-    if (Old == NULL || Old->Entries == 0 || Old->Entries > 0x1000 || Old->Domains == NULL)
+    if (Old == NULL)
         return;
 
-    Size = (sizeof(*Old) + Align) & ~Align;
-    Size += (SIZE_T)Old->Entries * sizeof(LSA_TRUST_INFORMATION);
+    if (Old->Entries == 0)
+    {
+        /* Nothing mapped: the stub still allocates an empty trust array; Windows returns the header alone */
+        if (Old->Domains != NULL)
+        {
+            MIDL_user_free(Old->Domains);
+            Old->Domains = NULL;
+        }
+        return;
+    }
+
+    if (Old->Entries > 0x1000 || Old->Domains == NULL)
+        return;
+
+    Size = LSAP_ALIGN(sizeof(*Old));
+    Size += (ULONGLONG)Old->Entries * sizeof(LSA_TRUST_INFORMATION);
     for (i = 0; i < Old->Entries; i++)
     {
-        Size = (Size + Align) & ~Align;
+        Size = LSAP_ALIGN(Size);
         Size += Old->Domains[i].Name.MaximumLength;
-        Size = (Size + Align) & ~Align;
+        Size = LSAP_ALIGN(Size);
         if (Old->Domains[i].Sid != NULL)
             Size += RtlLengthSid(Old->Domains[i].Sid);
     }
+    if (Size > LSAP_MAX_PACK)
+        return;
 
-    New = HeapAlloc(GetProcessHeap(), 0, Size);
+    New = HeapAlloc(GetProcessHeap(), 0, (SIZE_T)Size);
     if (New == NULL)
         return;
 
-    Cursor = (PUCHAR)New + ((sizeof(*Old) + Align) & ~Align);
+    Cursor = (PUCHAR)New + (SIZE_T)LSAP_ALIGN(sizeof(*Old));
     Trust = (PLSA_TRUST_INFORMATION)Cursor;
     New->Entries = Old->Entries;
     New->Domains = Trust;
@@ -893,15 +960,19 @@ LsapPackReferencedDomains(
     {
         Trust[i] = Old->Domains[i];
 
-        Cursor = (PUCHAR)(((ULONG_PTR)Cursor + Align) & ~Align);
+        Cursor = (PUCHAR)(ULONG_PTR)LSAP_ALIGN((ULONG_PTR)Cursor);
         if (Old->Domains[i].Name.Buffer != NULL && Old->Domains[i].Name.MaximumLength != 0)
         {
             RtlCopyMemory(Cursor, Old->Domains[i].Name.Buffer, Old->Domains[i].Name.MaximumLength);
             Trust[i].Name.Buffer = (PWSTR)Cursor;
             Cursor += Old->Domains[i].Name.MaximumLength;
         }
+        else
+        {
+            Trust[i].Name.Buffer = NULL;
+        }
 
-        Cursor = (PUCHAR)(((ULONG_PTR)Cursor + Align) & ~Align);
+        Cursor = (PUCHAR)(ULONG_PTR)LSAP_ALIGN((ULONG_PTR)Cursor);
         if (Old->Domains[i].Sid != NULL)
         {
             SidLength = RtlLengthSid(Old->Domains[i].Sid);
@@ -911,8 +982,141 @@ LsapPackReferencedDomains(
         }
     }
 
+    LsapFreeRpcDomains(Old);
     *ReferencedDomains = New;
-    HeapFree(GetProcessHeap(), 0, Old);
+}
+
+/* The translated names array with each name buffer behind it, as one block */
+static
+VOID
+LsapPackTranslatedNames(
+    _Inout_ PLSA_TRANSLATED_NAME *Names,
+    _In_ ULONG Count)
+{
+    PLSA_TRANSLATED_NAME Old = *Names, New;
+    ULONGLONG Size;
+    PUCHAR Cursor;
+    ULONG i;
+
+    if (Old == NULL || Count == 0 || Count > 0x100000)
+        return;
+
+    Size = LSAP_ALIGN((ULONGLONG)Count * sizeof(LSA_TRANSLATED_NAME));
+    for (i = 0; i < Count; i++)
+    {
+        if (Old[i].Name.Buffer != NULL)
+            Size += LSAP_ALIGN(Old[i].Name.MaximumLength);
+    }
+    if (Size > LSAP_MAX_PACK)
+        return;
+
+    New = HeapAlloc(GetProcessHeap(), 0, (SIZE_T)Size);
+    if (New == NULL)
+        return;
+
+    Cursor = (PUCHAR)New + (SIZE_T)LSAP_ALIGN((SIZE_T)Count * sizeof(LSA_TRANSLATED_NAME));
+    for (i = 0; i < Count; i++)
+    {
+        New[i] = Old[i];
+        if (Old[i].Name.Buffer != NULL)
+        {
+            RtlCopyMemory(Cursor, Old[i].Name.Buffer, Old[i].Name.MaximumLength);
+            New[i].Name.Buffer = (PWSTR)Cursor;
+            Cursor += (SIZE_T)LSAP_ALIGN(Old[i].Name.MaximumLength);
+            MIDL_user_free(Old[i].Name.Buffer);
+        }
+    }
+
+    MIDL_user_free(Old);
+    *Names = New;
+}
+
+static
+VOID
+LsapFreeRpcNames(
+    _In_opt_ PLSA_TRANSLATED_NAME Names,
+    _In_ ULONG Count)
+{
+    ULONG i;
+
+    if (Names == NULL)
+        return;
+    if (Count <= 0x100000)
+    {
+        for (i = 0; i < Count; i++)
+        {
+            if (Names[i].Name.Buffer != NULL)
+                MIDL_user_free(Names[i].Name.Buffer);
+        }
+    }
+    MIDL_user_free(Names);
+}
+
+/* The translated SIDs array with each SID behind it, as one block */
+static
+VOID
+LsapPackTranslatedSids2(
+    _Inout_ PLSA_TRANSLATED_SID2 *Sids,
+    _In_ ULONG Count)
+{
+    PLSA_TRANSLATED_SID2 Old = *Sids, New;
+    ULONGLONG Size;
+    PUCHAR Cursor;
+    ULONG i, SidLength;
+
+    if (Old == NULL || Count == 0 || Count > 0x100000)
+        return;
+
+    Size = LSAP_ALIGN((ULONGLONG)Count * sizeof(LSA_TRANSLATED_SID2));
+    for (i = 0; i < Count; i++)
+    {
+        if (Old[i].Sid != NULL)
+            Size += LSAP_ALIGN(RtlLengthSid(Old[i].Sid));
+    }
+    if (Size > LSAP_MAX_PACK)
+        return;
+
+    New = HeapAlloc(GetProcessHeap(), 0, (SIZE_T)Size);
+    if (New == NULL)
+        return;
+
+    Cursor = (PUCHAR)New + (SIZE_T)LSAP_ALIGN((SIZE_T)Count * sizeof(LSA_TRANSLATED_SID2));
+    for (i = 0; i < Count; i++)
+    {
+        New[i] = Old[i];
+        if (Old[i].Sid != NULL)
+        {
+            SidLength = RtlLengthSid(Old[i].Sid);
+            RtlCopyMemory(Cursor, Old[i].Sid, SidLength);
+            New[i].Sid = (PSID)Cursor;
+            Cursor += (SIZE_T)LSAP_ALIGN(SidLength);
+            MIDL_user_free(Old[i].Sid);
+        }
+    }
+
+    MIDL_user_free(Old);
+    *Sids = New;
+}
+
+static
+VOID
+LsapFreeRpcSids2(
+    _In_opt_ PLSA_TRANSLATED_SID2 Sids,
+    _In_ ULONG Count)
+{
+    ULONG i;
+
+    if (Sids == NULL)
+        return;
+    if (Count <= 0x100000)
+    {
+        for (i = 0; i < Count; i++)
+        {
+            if (Sids[i].Sid != NULL)
+                MIDL_user_free(Sids[i].Sid);
+        }
+    }
+    MIDL_user_free(Sids);
 }
 
 
@@ -953,8 +1157,20 @@ LsaLookupNames(IN LSA_HANDLE PolicyHandle,
                                  &MappedCount);
 
         *Sids = (PLSA_TRANSLATED_SID)TranslatedSids.Sids;
-        if (NT_SUCCESS(Status))
+        if (LsapLookupReturnsData(Status))
+        {
+            /* The SID array is one block already; only the domain list needs packing */
             LsapPackReferencedDomains(ReferencedDomains);
+        }
+        else
+        {
+            /* Nothing for the caller to free on a failure */
+            LsapFreeRpcDomains(*ReferencedDomains);
+            *ReferencedDomains = NULL;
+            if (*Sids != NULL)
+                MIDL_user_free(*Sids);
+            *Sids = NULL;
+        }
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -1009,8 +1225,19 @@ LsaLookupNames2(IN LSA_HANDLE PolicyHandle,
                                   2);
 
         *Sids = (PLSA_TRANSLATED_SID2)TranslatedSids.Sids;
-        if (NT_SUCCESS(Status))
+        if (LsapLookupReturnsData(Status))
+        {
             LsapPackReferencedDomains(ReferencedDomains);
+            LsapPackTranslatedSids2(Sids, TranslatedSids.Entries);
+        }
+        else
+        {
+            /* Nothing for the caller to free on a failure */
+            LsapFreeRpcDomains(*ReferencedDomains);
+            *ReferencedDomains = NULL;
+            LsapFreeRpcSids2(*Sids, TranslatedSids.Entries);
+            *Sids = NULL;
+        }
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -1175,8 +1402,19 @@ LsaLookupSids(IN LSA_HANDLE PolicyHandle,
                                 &MappedCount);
 
         *Names = (PLSA_TRANSLATED_NAME)TranslatedNames.Names;
-        if (NT_SUCCESS(Status))
+        if (LsapLookupReturnsData(Status))
+        {
             LsapPackReferencedDomains(ReferencedDomains);
+            LsapPackTranslatedNames(Names, TranslatedNames.Entries);
+        }
+        else
+        {
+            /* Nothing for the caller to free on a failure */
+            LsapFreeRpcDomains(*ReferencedDomains);
+            *ReferencedDomains = NULL;
+            LsapFreeRpcNames(*Names, TranslatedNames.Entries);
+            *Names = NULL;
+        }
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {

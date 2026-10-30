@@ -21,6 +21,7 @@ list(APPEND SOURCE
     IsTextUnicode.c
     LockServiceDatabase.c
     LogonUser.c
+    LsaLookupLeak.c
     ProcessThreadLabel.c
     QueryServiceConfig2.c
     RegConcurrentWrite.c
