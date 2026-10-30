@@ -17,6 +17,7 @@ list(APPEND SOURCE
     IocpCancelStatus.c
     ApplicationRestart.c
     AppModel.c
+    CalendarInfo.c
     ConsoleCP.c
     CopyFile2.c
     CopyFile2Identity.c

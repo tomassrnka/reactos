@@ -47,9 +47,24 @@ LCID WINAPI LocaleNameToLCID(_In_ LPCWSTR, _In_ DWORD);
 #define LOCALE_SSHORTESTDAYNAME6 101
 #define LOCALE_SSHORTESTDAYNAME7 102
 
+/* The headers hide these below WINVER 0x600 and this file redefines WINVER after including them */
+#ifndef CAL_SSHORTESTDAYNAME1
+#define CAL_SSHORTESTDAYNAME1 49
+#define CAL_SSHORTESTDAYNAME2 50
+#define CAL_SSHORTESTDAYNAME3 51
+#define CAL_SSHORTESTDAYNAME4 52
+#define CAL_SSHORTESTDAYNAME5 53
+#define CAL_SSHORTESTDAYNAME6 54
+#define CAL_SSHORTESTDAYNAME7 55
+#endif
+#ifndef CAL_SMONTHDAY
+#define CAL_SMONTHDAY 56
+#endif
+
 #define CRITICAL_SECTION RTL_CRITICAL_SECTION
 #define CRITICAL_SECTION_DEBUG RTL_CRITICAL_SECTION_DEBUG
-#define CALINFO_MAX_YEAR 2029
+/* Windows 10 default for TwoDigitYearMax of the Gregorian calendar (2029 up to Windows 8.1) */
+#define CALINFO_MAX_YEAR 2049
 
 #define IS_LCID_JAPANESE(lcid) PRIMARYLANGID(LANGIDFROMLCID(lcid)) == LANG_JAPANESE
 
@@ -2319,8 +2334,21 @@ int WINAPI GetCalendarInfoW(LCID Locale, CALID Calendar, CALTYPE CalType,
             }
         }
 #endif
-            FIXME("Unimplemented caltype %d\n", calinfo);
-	    return 0;
+            /* Gregorian calendars have no year offset range: Windows returns 0 */
+            if (CalType & CAL_RETURN_NUMBER)
+            {
+                *lpValue = 0;
+                return sizeof(DWORD) / sizeof(WCHAR);
+            }
+            if (!lpCalData) return 2;
+            if (cchData < 2)
+            {
+                SetLastError( ERROR_INSUFFICIENT_BUFFER );
+                return 0;
+            }
+            lpCalData[0] = L'0';
+            lpCalData[1] = 0;
+            return 2;
 	case CAL_SERASTRING:
 #ifdef __REACTOS__
         if (IS_LCID_JAPANESE(Locale) && Calendar == CAL_JAPAN)
@@ -2383,6 +2411,16 @@ int WINAPI GetCalendarInfoW(LCID Locale, CALID Calendar, CALTYPE CalType,
 	case CAL_SABBREVMONTHNAME12:
 	case CAL_SABBREVMONTHNAME13:
 	case CAL_SYEARMONTH:
+#if (WINVER >= 0x0600) /* ReactOS */
+	case CAL_SSHORTESTDAYNAME1:
+	case CAL_SSHORTESTDAYNAME2:
+	case CAL_SSHORTESTDAYNAME3:
+	case CAL_SSHORTESTDAYNAME4:
+	case CAL_SSHORTESTDAYNAME5:
+	case CAL_SSHORTESTDAYNAME6:
+	case CAL_SSHORTESTDAYNAME7:
+#endif
+	case CAL_SMONTHDAY:
             return GetLocaleInfoW(Locale, caltype_lctype_map[calinfo] | localeflags, lpCalData, cchData);
 	case CAL_ITWODIGITYEARMAX:
 #ifdef __REACTOS__
