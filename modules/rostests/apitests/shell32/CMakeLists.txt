@@ -5,6 +5,7 @@ list(APPEND SOURCE
     AddCommas.cpp
     AssocCreateElement.cpp
     CFSFolder.cpp
+    CFolderItems.cpp
     CFontsFolder.cpp
     CheckEscapes.cpp
     CIDLData.cpp
