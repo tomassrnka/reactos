@@ -57,8 +57,10 @@ find "Current Scoop version" %O%\ver.txt >nul
 call :rc0 "L13 scoop --version runs from cmd"
 
 rem --- import the main bucket
+echo TIMING import main start %time%>> %LOG%
 %FM% /import-scoop main > %O%\import.txt 2>&1
 call :rc0 "L14 featmgr /import-scoop main rc0"
+echo TIMING import main end %time%>> %LOG%
 find "imported" %O%\import.txt | find "Scoop app(s)" >nul
 call :rc0 "L15 import summary printed"
 type %O%\import.txt | find "imported" >> %LOG%
@@ -136,8 +138,10 @@ type %O%\bucket.txt >> %LOG%
 type %O%\b.txt >> %LOG%
 find "extras" %O%\b.txt >nul
 call :rc0 "E4 scoop bucket add extras done (listed)"
+echo TIMING import extras start %time%>> %LOG%
 %FM% /import-scoop extras > %O%\imp-x.txt 2>&1
 call :rc0 "E5 featmgr /import-scoop extras rc0"
+echo TIMING import extras end %time%>> %LOG%
 type %O%\imp-x.txt | find "imported" >> %LOG%
 echo TIMING list(main+extras) start %time%>> %LOG%
 %FM% /list /tier:software > %O%\l-all2.txt 2>&1

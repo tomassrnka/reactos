@@ -209,38 +209,169 @@ static WCHAR *ReadSection(LPCWSTR file, LPCWSTR section)
     }
 }
 
-/* Load the catalog fields of one manifest into *f (does not set State). */
-static BOOL LoadManifest(LPCWSTR path, FM_FEATURE *f)
+/* ---- manifest reading ---------------------------------------------------
+ * GetPrivateProfileString re-opens and re-parses the file on nearly every call (its cache
+ * holds a few files), which made enumerating a few thousand generated entries (a Scoop
+ * bucket) take tens of seconds. Generated entries (Catalog\Software) are therefore read
+ * once into memory and queried from there; hand-written image manifests keep the API. */
+
+typedef struct _INI { LPCWSTR path; WCHAR *mem; } INI;
+
+static WCHAR *IniLoadText(LPCWSTR path)
+{
+    HANDLE h;
+    DWORD sz, got = 0;
+    BYTE *b;
+    WCHAR *w = NULL;
+
+    h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+    sz = GetFileSize(h, NULL);
+    if (sz == INVALID_FILE_SIZE || sz < 2 || sz > 256 * 1024) { CloseHandle(h); return NULL; }
+    b = (BYTE *)HeapAlloc(GetProcessHeap(), 0, sz + 2);
+    if (!b) { CloseHandle(h); return NULL; }
+    if (!ReadFile(h, b, sz, &got, NULL) || got != sz) { HeapFree(GetProcessHeap(), 0, b); CloseHandle(h); return NULL; }
+    CloseHandle(h);
+    b[sz] = b[sz + 1] = 0;
+    if (b[0] == 0xFF && b[1] == 0xFE)                       /* UTF-16LE with BOM (what we generate) */
+    {
+        w = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, sz + 2);
+        if (w) { memcpy(w, b + 2, sz - 2); w[(sz - 2) / 2] = L'\0'; }
+    }
+    else
+    {
+        BYTE *src = b; int len = (int)sz;
+        UINT cp = CP_ACP;
+        if (sz >= 3 && b[0] == 0xEF && b[1] == 0xBB && b[2] == 0xBF) { src += 3; len -= 3; cp = CP_UTF8; }
+        w = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, ((size_t)len + 1) * sizeof(WCHAR));
+        if (w)
+        {
+            int n = MultiByteToWideChar(cp, 0, (LPCSTR)src, len, w, len);
+            w[n > 0 ? n : 0] = L'\0';
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, b);
+    return w;
+}
+
+/* key in [sec] of the in-memory text; same matching rules as GetPrivateProfileString (case
+ * insensitive, whitespace around the name and the value trimmed, ';' lines are comments). */
+static BOOL IniFind(const WCHAR *t, LPCWSTR sec, LPCWSTR key, LPWSTR out, DWORD cch)
+{
+    size_t secLen = wcslen(sec), keyLen = wcslen(key);
+    BOOL in = FALSE;
+
+    while (*t)
+    {
+        const WCHAR *ls = t, *le = t, *p;
+        while (*le && *le != L'\n') le++;
+        t = *le ? le + 1 : le;
+        while (le > ls && (le[-1] == L'\r' || le[-1] == L' ' || le[-1] == L'\t')) le--;
+        while (ls < le && (*ls == L' ' || *ls == L'\t' || *ls == 0xFEFF)) ls++;
+        if (ls >= le || *ls == L';') continue;
+        if (*ls == L'[')
+        {
+            const WCHAR *e = ls + 1;
+            while (e < le && *e != L']') e++;
+            in = ((size_t)(e - (ls + 1)) == secLen) && !_wcsnicmp(ls + 1, sec, secLen);
+            continue;
+        }
+        if (!in) continue;
+        p = ls;
+        while (p < le && *p != L'=') p++;
+        if (p >= le) continue;
+        {
+            const WCHAR *ke = p;
+            while (ke > ls && (ke[-1] == L' ' || ke[-1] == L'\t')) ke--;
+            if ((size_t)(ke - ls) != keyLen || _wcsnicmp(ls, key, keyLen)) continue;
+        }
+        p++;
+        while (p < le && (*p == L' ' || *p == L'\t')) p++;
+        if (cch)
+        {
+            size_t n = (size_t)(le - p);
+            if (n >= cch) n = cch - 1;
+            memcpy(out, p, n * sizeof(WCHAR));
+            out[n] = L'\0';
+        }
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static void IniOpen(INI *i, LPCWSTR path, BOOL fast)
+{
+    i->path = path;
+    i->mem = fast ? IniLoadText(path) : NULL;
+}
+
+static void IniClose(INI *i)
+{
+    if (i->mem) HeapFree(GetProcessHeap(), 0, i->mem);
+    i->mem = NULL;
+}
+
+static void IniGet(const INI *i, LPCWSTR sec, LPCWSTR key, LPCWSTR def, LPWSTR out, DWORD cch)
+{
+    if (i->mem)
+    {
+        if (!IniFind(i->mem, sec, key, out, cch)) StringCchCopyW(out, cch, def);
+        return;
+    }
+    GetPrivateProfileStringW(sec, key, def, out, cch, i->path);
+}
+
+/* One value of a generated manifest, read once from disk (used by the Scoop importer). */
+BOOL FmIniGetFast(LPCWSTR path, LPCWSTR sec, LPCWSTR key, LPWSTR out, DWORD cch)
+{
+    WCHAR *t = IniLoadText(path);
+    BOOL ok;
+    if (cch) out[0] = L'\0';
+    if (!t) return FALSE;
+    ok = IniFind(t, sec, key, out, cch);
+    HeapFree(GetProcessHeap(), 0, t);
+    return ok;
+}
+
+/* Load the catalog fields of one manifest into *f (does not set State). fast = read the file once. */
+static BOOL LoadManifestEx(LPCWSTR path, FM_FEATURE *f, BOOL fast)
 {
     WCHAR tmp[FM_MAX_DESC];
+    INI ini;
 
     ZeroMemory(f, sizeof(*f));
     StringCchCopyW(f->ManifestPath, MAX_PATH, path);
+    IniOpen(&ini, path, fast);
 
-    GetPrivateProfileStringW(L"Feature", L"Id", L"", f->Id, FM_MAX_ID, path);
-    if (!f->Id[0]) return FALSE;
-    GetPrivateProfileStringW(L"Feature", L"Name", f->Id, f->Name, FM_MAX_NAME, path);
-    GetPrivateProfileStringW(L"Feature", L"Description", L"", f->Description, FM_MAX_DESC, path);
-    GetPrivateProfileStringW(L"Feature", L"Version", L"1.0.0", f->Version, FM_MAX_VER, path);
-    GetPrivateProfileStringW(L"Feature", L"Dependencies", L"", f->Dependencies, FM_MAX_DEPS, path);
-    GetPrivateProfileStringW(L"Feature", L"Tier", L"os", tmp, FM_MAX_DESC, path);
+    IniGet(&ini, L"Feature", L"Id", L"", f->Id, FM_MAX_ID);
+    if (!f->Id[0]) { IniClose(&ini); return FALSE; }
+    IniGet(&ini, L"Feature", L"Name", f->Id, f->Name, FM_MAX_NAME);
+    IniGet(&ini, L"Feature", L"Description", L"", f->Description, FM_MAX_DESC);
+    IniGet(&ini, L"Feature", L"Version", L"1.0.0", f->Version, FM_MAX_VER);
+    IniGet(&ini, L"Feature", L"Dependencies", L"", f->Dependencies, FM_MAX_DEPS);
+    IniGet(&ini, L"Feature", L"Tier", L"os", tmp, FM_MAX_DESC);
     f->Tier = ParseTier(tmp);
-    f->Removable = GetPrivateProfileIntW(L"Feature", L"Removable", 1, path) != 0;
+    IniGet(&ini, L"Feature", L"Removable", L"1", tmp, 16);
+    f->Removable = _wtoi(tmp) != 0;
     /* [Install] Provider= selects the software-tier install path. A software-tier
      * manifest without it keeps the OS-tier mechanics ([Payload]/[Registry]/[Service]
      * applied from a staged payload), so older/hand-written manifests still work. */
     if (f->Tier == FM_TIER_SOFTWARE)
     {
-        GetPrivateProfileStringW(L"Install", L"Provider", L"", f->Provider, ARRAYSIZE(f->Provider), path);
+        IniGet(&ini, L"Install", L"Provider", L"", f->Provider, ARRAYSIZE(f->Provider));
+        IniGet(&ini, L"Install", L"DetectPath", L"", f->Detect, ARRAYSIZE(f->Detect));
         if (!_wcsicmp(f->Provider, L"scoop"))
         {
             WCHAR b[24];
-            GetPrivateProfileStringW(L"Scoop", L"Bucket", L"", b, ARRAYSIZE(b), path);
+            IniGet(&ini, L"Scoop", L"Bucket", L"", b, ARRAYSIZE(b));
+            IniGet(&ini, L"Scoop", L"App", L"", f->App, ARRAYSIZE(f->App));
             StringCchPrintfW(f->Source, ARRAYSIZE(f->Source), L"scoop/%s", b[0] ? b : L"?");
         }
         else
             StringCchCopyW(f->Source, ARRAYSIZE(f->Source), f->Provider[0] ? f->Provider : L"payload");
     }
+    IniClose(&ini);
     return TRUE;
 }
 
@@ -416,19 +547,16 @@ static void ReadStateExtras(FM_FEATURE *f)
  * and removals done outside featmgr (the scoop CLI) are seen. */
 static BOOL DetectPathFor(const FM_FEATURE *f, LPWSTR out, DWORD cch)
 {
-    WCHAR raw[MAX_PATH];
-    GetPrivateProfileStringW(L"Install", L"DetectPath", L"", raw, MAX_PATH, f->ManifestPath);
-    if (raw[0])
+    if (f->Detect[0])
     {
-        ExpandCmd(f->Id, raw, out, cch);
+        ExpandCmd(f->Id, f->Detect, out, cch);
         return TRUE;
     }
     if (!_wcsicmp(f->Provider, L"scoop"))
     {
-        WCHAR app[64], root[MAX_PATH];
-        GetPrivateProfileStringW(L"Scoop", L"App", L"", app, ARRAYSIZE(app), f->ManifestPath);
-        if (!FmScoopValidApp(app) || !FmScoopRoot(root, MAX_PATH)) return FALSE;
-        return SUCCEEDED(StringCchPrintfW(out, cch, L"%s\\apps\\%s\\current", root, app));
+        WCHAR root[MAX_PATH];
+        if (!FmScoopValidApp(f->App) || !FmScoopRoot(root, MAX_PATH)) return FALSE;
+        return SUCCEEDED(StringCchPrintfW(out, cch, L"%s\\apps\\%s\\current", root, f->App));
     }
     return FALSE;
 }
@@ -448,7 +576,7 @@ static void ResolveState(FM_FEATURE *f)
 /* ---- enumeration --------------------------------------------------------- */
 
 /* Append every valid manifest in dir (*.ini) to the growing array. */
-static void EnumDir(LPCWSTR dir, FM_FEATURE **parr, int *pcount, int *pcap)
+static void EnumDir(LPCWSTR dir, BOOL fast, FM_FEATURE **parr, int *pcount, int *pcap)
 {
     WCHAR glob[MAX_PATH], path[MAX_PATH];
     WIN32_FIND_DATAW fd;
@@ -462,7 +590,7 @@ static void EnumDir(LPCWSTR dir, FM_FEATURE **parr, int *pcount, int *pcap)
         FM_FEATURE f;
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
         StringCchPrintfW(path, MAX_PATH, L"%s\\%s", dir, fd.cFileName);
-        if (!LoadManifest(path, &f)) continue;
+        if (!LoadManifestEx(path, &f, fast)) continue;
         f.State = RawState(f.Id);
         ResolveState(&f);
         f.PayloadAvailable = PayloadPresent(&f);
@@ -492,9 +620,9 @@ int FmEnumFeatures(FM_FEATURE **outArr)
 
     *outArr = NULL;
     if (!FmGetCatalogDir(catDir, MAX_PATH)) return 0;
-    EnumDir(catDir, &arr, &count, &cap);
+    EnumDir(catDir, FALSE, &arr, &count, &cap);
     if (FmGetSoftwareCatalogDir(swDir, MAX_PATH))
-        EnumDir(swDir, &arr, &count, &cap);
+        EnumDir(swDir, TRUE, &arr, &count, &cap);
 
     *outArr = arr;
     return count;
@@ -518,7 +646,7 @@ static BOOL FindByName(LPCWSTR id, FM_FEATURE *out)
         if (!(k ? FmGetSoftwareCatalogDir(dir, MAX_PATH) : FmGetCatalogDir(dir, MAX_PATH))) continue;
         StringCchPrintfW(path, MAX_PATH, L"%s\\%s.ini", dir, id);
         if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) continue;
-        if (LoadManifest(path, out) && !_wcsicmp(out->Id, id))
+        if (LoadManifestEx(path, out, k == 1) && !_wcsicmp(out->Id, id))
         {
             out->State = RawState(out->Id);
             ResolveState(out);

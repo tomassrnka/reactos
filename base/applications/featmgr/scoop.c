@@ -497,7 +497,7 @@ static BOOL ChooseId(LPCWSTR bucket, LPCWSTR app, LPCWSTR catDir, LPCWSTR swDir,
         StringCchPrintfW(p, MAX_PATH, L"%s\\%s.ini", swDir, app);
         if (GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES)
         {
-            GetPrivateProfileStringW(L"Scoop", L"Bucket", L"", b, ARRAYSIZE(b), p);
+            FmIniGetFast(p, L"Scoop", L"Bucket", b, ARRAYSIZE(b));
             if (_wcsicmp(b, bucket)) clash = TRUE;
         }
     }
@@ -519,10 +519,8 @@ static void CleanBucket(LPCWSTR swDir, LPCWSTR bucket)
     do
     {
         StringCchPrintfW(f, MAX_PATH, L"%s\\%s", swDir, fd.cFileName);
-        GetPrivateProfileStringW(L"Install", L"Provider", L"", v, ARRAYSIZE(v), f);
-        if (_wcsicmp(v, L"scoop")) continue;
-        GetPrivateProfileStringW(L"Scoop", L"Bucket", L"", v, ARRAYSIZE(v), f);
-        if (!_wcsicmp(v, bucket)) DeleteFileW(f);
+        FmIniGetFast(f, L"Scoop", L"Bucket", v, ARRAYSIZE(v));
+        if (v[0] && !_wcsicmp(v, bucket)) DeleteFileW(f);
     } while (FindNextFileW(h, &fd));
     FindClose(h);
 }

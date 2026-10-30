@@ -53,6 +53,8 @@ typedef struct _FM_FEATURE
     BOOL    PendingReboot;       /* disabled but some component awaits reboot-delete */
     WCHAR   Provider[16];        /* software tier: [Install] Provider= "rapps" | "command" | "scoop"; "" for OS tier */
     WCHAR   Source[32];          /* software tier display source: "rapps", "command", "scoop/<bucket>"; "" for OS tier */
+    WCHAR   App[48];             /* Provider=scoop: [Scoop] App (the Scoop app name) */
+    WCHAR   Detect[128];         /* software tier: raw [Install] DetectPath (installed iff the path exists) */
 } FM_FEATURE;
 
 /* Catalog / layout helpers. featmgr root = %SystemRoot%\Featmgr */
@@ -129,6 +131,8 @@ BOOL   FmScoopCommand(LPCWSTR verb, LPCWSTR bucket, LPCWSTR app, LPWSTR out, DWO
 void   FmScoopPrepareEnv(void);
 BOOL   FmPwshPath(LPWSTR buf, DWORD cch);
 BOOL   FmVolumeIsNtfs(LPCWSTR path, LPWSTR fs, DWORD cchFs);
+
+BOOL   FmIniGetFast(LPCWSTR path, LPCWSTR sec, LPCWSTR key, LPWSTR out, DWORD cch);
 
 /* Shared manifest writer (rapps_import.c) */
 typedef struct _FM_OUTBUF { WCHAR *buf; size_t cap, len; BOOL fail; } FM_OUTBUF;
