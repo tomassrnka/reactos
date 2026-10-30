@@ -236,6 +236,30 @@ SysWOW64/mscoree.dll
 SysWOW64/sspicli.dll
 SysWOW64/wevtapi.dll
 
+# More 32-bit .NET P/Invoke targets (found by scanning the ModuleRef tables and strings of the PowerShell 7 win-x86
+# assemblies). Each is reached only from a rarely used API; without the i386 copy the first call throws DllNotFoundException.
+# Loading only; no functional claim beyond what each DLL implements. Every import chain is already listed above.
+#   System.Net.HttpListener -> httpapi; System.Data.Odbc/OleDb/SqlClient -> odbc32, xolehlp;
+#   System.DirectoryServices -> activeds, ntdsapi, netutils; System.Security.AccessControl/Principal -> authz;
+#   WPF -> mscms, windowscodecsext, dxva2, evr; Windows Forms -> hhctrl, mshtml; ReachFramework -> compstui;
+#   UIAutomation/WindowsBase -> loadperf; CoreCLR crash reporting -> faultrep.
+SysWOW64/httpapi.dll
+SysWOW64/authz.dll
+SysWOW64/netutils.dll
+SysWOW64/activeds.dll
+SysWOW64/ntdsapi.dll
+SysWOW64/odbc32.dll
+SysWOW64/xolehlp.dll
+SysWOW64/mscms.dll
+SysWOW64/windowscodecsext.dll
+SysWOW64/hhctrl.ocx
+SysWOW64/mshtml.dll
+SysWOW64/compstui.dll
+SysWOW64/loadperf.dll
+SysWOW64/faultrep.dll
+@0x600 SysWOW64/dxva2.dll
+@0x601 SysWOW64/evr.dll
+
 # Code-page data used by the guest kernel32 NLS loader.
 SysWOW64/c_037.nls
 SysWOW64/c_10000.nls
