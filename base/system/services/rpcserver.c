@@ -799,6 +799,7 @@ Int_EnumDependentServicesW(HKEY hServicesKey,
     DWORD dwCurrentServiceState = SERVICE_ACTIVE;
     DWORD dwDependServiceStrPtr = 0;
     DWORD dwRequiredSize = 0;
+    DWORD dwValueError;
 
     /* Get the number of service keys */
     dwError = RegQueryInfoKeyW(hServicesKey,
@@ -845,18 +846,18 @@ Int_EnumDependentServicesW(HKEY hServicesKey,
 
         dwSize = MAX_PATH * sizeof(WCHAR);
 
-        /* Check for the DependOnService Value */
-        dwError = RegQueryValueExW(hServiceEnumKey,
-                                   L"DependOnService",
-                                   NULL,
-                                   NULL,
-                                   (LPBYTE)lpszValueBuf,
-                                   &dwSize);
+        /* Check for the DependOnService Value; a service without it is not an error */
+        dwValueError = RegQueryValueExW(hServiceEnumKey,
+                                        L"DependOnService",
+                                        NULL,
+                                        NULL,
+                                        (LPBYTE)lpszValueBuf,
+                                        &dwSize);
 
         /* FIXME: Handle load order. */
 
         /* If the service found has a DependOnService value */
-        if (dwError == ERROR_SUCCESS)
+        if (dwValueError == ERROR_SUCCESS)
         {
             dwDependServiceStrPtr = 0;
 
@@ -868,12 +869,11 @@ Int_EnumDependentServicesW(HKEY hServicesKey,
                     /* Get the current enumed service pointer */
                     lpCurrentService = ScmGetServiceEntryByName(lpszNameBuf);
 
-                    /* Check for valid Service */
+                    /* A key of the registry that is not a service of the database cannot be running */
                     if (!lpCurrentService)
                     {
-                        /* This should never happen! */
-                        DPRINT("This should not happen at this point, report to Developer\n");
-                        return ERROR_NOT_FOUND;
+                        dwDependServiceStrPtr += (DWORD)(wcslen(lpszValueBuf + dwDependServiceStrPtr) + 1);
+                        continue;
                     }
 
                     /* Determine state the service is in */
@@ -916,10 +916,6 @@ Int_EnumDependentServicesW(HKEY hServicesKey,
 
                 dwDependServiceStrPtr += (DWORD)(wcslen(lpszValueBuf + dwDependServiceStrPtr) + 1);
             }
-        }
-        else if (*pcbBytesNeeded)
-        {
-            dwError = ERROR_SUCCESS;
         }
 
         RegCloseKey(hServiceEnumKey);
@@ -2804,9 +2800,9 @@ REnumDependentServicesW(
 
     lpService = hSvc->ServiceEntry;
 
-    /* Check access rights */
+    /* A service handle needs SERVICE_ENUMERATE_DEPENDENTS (SC_MANAGER_ENUMERATE_SERVICE is a manager right) */
     if (!RtlAreAllAccessesGranted(hSvc->Handle.DesiredAccess,
-                                  SC_MANAGER_ENUMERATE_SERVICE))
+                                  SERVICE_ENUMERATE_DEPENDENTS))
     {
         DPRINT("Insufficient access rights! 0x%lx\n",
                hSvc->Handle.DesiredAccess);
@@ -3842,9 +3838,9 @@ REnumDependentServicesA(
 
     lpService = hSvc->ServiceEntry;
 
-    /* Check access rights */
+    /* A service handle needs SERVICE_ENUMERATE_DEPENDENTS (SC_MANAGER_ENUMERATE_SERVICE is a manager right) */
     if (!RtlAreAllAccessesGranted(hSvc->Handle.DesiredAccess,
-                                  SC_MANAGER_ENUMERATE_SERVICE))
+                                  SERVICE_ENUMERATE_DEPENDENTS))
     {
         DPRINT("Insufficient access rights! 0x%lx\n",
                hSvc->Handle.DesiredAccess);
@@ -5081,13 +5077,70 @@ Done:
 }
 
 
-/* The levels of the service configuration the controller keeps: description, failure actions and their flag */
+/*
+ * The levels of the service configuration the controller keeps: description, failure actions,
+ * delayed automatic start, the failure actions flag, the service SID type and the preshutdown timeout
+ */
 static BOOL
 ScmIsSupportedConfigLevel(DWORD dwInfoLevel)
 {
     return dwInfoLevel == SERVICE_CONFIG_DESCRIPTION ||
            dwInfoLevel == SERVICE_CONFIG_FAILURE_ACTIONS ||
-           dwInfoLevel == SERVICE_CONFIG_FAILURE_ACTIONS_FLAG;
+           dwInfoLevel == SERVICE_CONFIG_DELAYED_AUTO_START_INFO ||
+           dwInfoLevel == SERVICE_CONFIG_FAILURE_ACTIONS_FLAG ||
+           dwInfoLevel == SERVICE_CONFIG_SERVICE_SID_INFO ||
+           dwInfoLevel == SERVICE_CONFIG_PRESHUTDOWN_INFO;
+}
+
+
+/* The levels whose data is a single DWORD kept in a registry value of the service key */
+static PCWSTR
+ScmGetDwordConfigValueName(DWORD dwInfoLevel,
+                           PDWORD pdwDefault)
+{
+    switch (dwInfoLevel)
+    {
+        case SERVICE_CONFIG_DELAYED_AUTO_START_INFO:
+            *pdwDefault = 0;
+            return L"DelayedAutostart";
+
+        case SERVICE_CONFIG_SERVICE_SID_INFO:
+            *pdwDefault = SERVICE_SID_TYPE_NONE;
+            return L"ServiceSidType";
+
+        case SERVICE_CONFIG_PRESHUTDOWN_INFO:
+            *pdwDefault = 10000; /* what Windows reports when the value is absent */
+            return L"PreshutdownTimeout";
+    }
+
+    return NULL;
+}
+
+
+static DWORD
+ScmQueryDwordConfig(HKEY hServiceKey,
+                    DWORD dwInfoLevel,
+                    LPBYTE lpBuffer,
+                    DWORD cbBufSize,
+                    LPBOUNDED_DWORD_8K pcbBytesNeeded)
+{
+    DWORD dwValue, dwSize = sizeof(dwValue), dwType;
+    PCWSTR pszName = ScmGetDwordConfigValueName(dwInfoLevel, &dwValue);
+
+    *pcbBytesNeeded = sizeof(DWORD);
+    if (cbBufSize < sizeof(DWORD))
+        return ERROR_INSUFFICIENT_BUFFER;
+
+    if (RegQueryValueExW(hServiceKey,
+                         pszName,
+                         NULL,
+                         &dwType,
+                         (LPBYTE)&dwValue,
+                         &dwSize) != ERROR_SUCCESS || dwType != REG_DWORD)
+        ScmGetDwordConfigValueName(dwInfoLevel, &dwValue);
+
+    *(PDWORD)lpBuffer = dwValue;
+    return ERROR_SUCCESS;
 }
 
 
@@ -5263,6 +5316,12 @@ RChangeServiceConfig2A(
 
     if (InfoW.dwInfoLevel == SERVICE_CONFIG_FAILURE_ACTIONS_FLAG)
         InfoW.psfaf = Info.psfaf;
+    else if (InfoW.dwInfoLevel == SERVICE_CONFIG_DELAYED_AUTO_START_INFO)
+        InfoW.psda = Info.psda;
+    else if (InfoW.dwInfoLevel == SERVICE_CONFIG_SERVICE_SID_INFO)
+        InfoW.pssid = Info.pssid;
+    else if (InfoW.dwInfoLevel == SERVICE_CONFIG_PRESHUTDOWN_INFO)
+        InfoW.psps = Info.psps;
 
     dwRet = RChangeServiceConfig2W(hService, InfoW);
 
@@ -5641,6 +5700,43 @@ RChangeServiceConfig2W(
                 lpService->bFailureOnNonCrash = (dwFlag != 0);
         }
     }
+    else if (Info.dwInfoLevel == SERVICE_CONFIG_DELAYED_AUTO_START_INFO ||
+             Info.dwInfoLevel == SERVICE_CONFIG_SERVICE_SID_INFO ||
+             Info.dwInfoLevel == SERVICE_CONFIG_PRESHUTDOWN_INFO)
+    {
+        DWORD dwValue, dwDefault;
+        PCWSTR pszName = ScmGetDwordConfigValueName(Info.dwInfoLevel, &dwDefault);
+
+        /* Without a structure there is nothing to change */
+        if (Info.psda != NULL)
+        {
+            if (Info.dwInfoLevel == SERVICE_CONFIG_DELAYED_AUTO_START_INFO)
+                dwValue = (DWORD)Info.psda->fDelayedAutoStart;
+            else if (Info.dwInfoLevel == SERVICE_CONFIG_SERVICE_SID_INFO)
+                dwValue = Info.pssid->dwServicesSidType;
+            else
+                dwValue = Info.psps->dwPreshutdownTimeout;
+
+            /* Windows accepts only FALSE and TRUE as the delayed start flag, and only the three SID types */
+            if ((Info.dwInfoLevel == SERVICE_CONFIG_DELAYED_AUTO_START_INFO && dwValue > 1) ||
+                (Info.dwInfoLevel == SERVICE_CONFIG_SERVICE_SID_INFO &&
+                 dwValue != SERVICE_SID_TYPE_NONE &&
+                 dwValue != SERVICE_SID_TYPE_UNRESTRICTED &&
+                 dwValue != SERVICE_SID_TYPE_RESTRICTED))
+            {
+                dwError = ERROR_INVALID_PARAMETER;
+            }
+            else
+            {
+                dwError = RegSetValueExW(hServiceKey,
+                                         pszName,
+                                         0,
+                                         REG_DWORD,
+                                         (LPBYTE)&dwValue,
+                                         sizeof(dwValue));
+            }
+        }
+    }
 
 done:
     if (hServiceKey != NULL)
@@ -5871,6 +5967,15 @@ RQueryServiceConfig2A(
         lpFlag->fFailureActionsOnNonCrashFailures = (dwFlag != 0);
         dwError = ERROR_SUCCESS;
     }
+    else
+    {
+        /* The remaining supported levels are a single DWORD, the same in both character sets */
+        dwError = ScmQueryDwordConfig(hServiceKey,
+                                      dwInfoLevel,
+                                      lpBuffer,
+                                      cbBufSize,
+                                      pcbBytesNeeded);
+    }
 
 done:
     /* Unlock the service database */
@@ -6089,6 +6194,15 @@ RQueryServiceConfig2W(
 
         lpFlag->fFailureActionsOnNonCrashFailures = (dwFlag != 0);
         dwError = ERROR_SUCCESS;
+    }
+    else
+    {
+        /* The remaining supported levels are a single DWORD, the same in both character sets */
+        dwError = ScmQueryDwordConfig(hServiceKey,
+                                      dwInfoLevel,
+                                      lpBuffer,
+                                      cbBufSize,
+                                      pcbBytesNeeded);
     }
 
 done:

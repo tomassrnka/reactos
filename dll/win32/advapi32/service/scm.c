@@ -268,13 +268,25 @@ ChangeServiceConfig2A(SC_HANDLE hService,
             Info.psfa = lpInfo;
             break;
 
+        case SERVICE_CONFIG_DELAYED_AUTO_START_INFO:
+            Info.psda = lpInfo;
+            break;
+
         case SERVICE_CONFIG_FAILURE_ACTIONS_FLAG:
             Info.psfaf = lpInfo;
             break;
 
+        case SERVICE_CONFIG_SERVICE_SID_INFO:
+            Info.pssid = lpInfo;
+            break;
+
+        case SERVICE_CONFIG_PRESHUTDOWN_INFO:
+            Info.psps = lpInfo;
+            break;
+
         default:
             WARN("Unknown info level 0x%lx\n", dwInfoLevel);
-            SetLastError(ERROR_INVALID_PARAMETER);
+            SetLastError(ERROR_INVALID_LEVEL);
             return FALSE;
     }
 
@@ -330,13 +342,25 @@ ChangeServiceConfig2W(SC_HANDLE hService,
             Info.psfa = lpInfo;
             break;
 
+        case SERVICE_CONFIG_DELAYED_AUTO_START_INFO:
+            Info.psda = lpInfo;
+            break;
+
         case SERVICE_CONFIG_FAILURE_ACTIONS_FLAG:
             Info.psfaf = lpInfo;
             break;
 
+        case SERVICE_CONFIG_SERVICE_SID_INFO:
+            Info.pssid = lpInfo;
+            break;
+
+        case SERVICE_CONFIG_PRESHUTDOWN_INFO:
+            Info.psps = lpInfo;
+            break;
+
         default:
             WARN("Unknown info level 0x%lx\n", dwInfoLevel);
-            SetLastError(ERROR_INVALID_PARAMETER);
+            SetLastError(ERROR_INVALID_LEVEL);
             return FALSE;
     }
 
@@ -2468,6 +2492,18 @@ QueryServiceConfig2A(SC_HANDLE hService,
             }
             break;
 
+        /* Delayed automatic start, service SID type and preshutdown timeout: a single DWORD */
+        case SERVICE_CONFIG_DELAYED_AUTO_START_INFO:
+        case SERVICE_CONFIG_SERVICE_SID_INFO:
+        case SERVICE_CONFIG_PRESHUTDOWN_INFO:
+            if ((lpBuffer == NULL) || (cbBufSize < sizeof(DWORD)))
+            {
+                lpTempBuffer = (LPBYTE)&ServiceFailureActions;
+                dwBufferSize = sizeof(DWORD);
+                bUseTempBuffer = TRUE;
+            }
+            break;
+
         default:
             WARN("Unknown info level 0x%lx\n", dwInfoLevel);
             SetLastError(ERROR_INVALID_LEVEL);
@@ -2590,6 +2626,18 @@ QueryServiceConfig2W(SC_HANDLE hService,
             {
                 lpTempBuffer = (LPBYTE)&ServiceFailureActions;
                 dwBufferSize = sizeof(SERVICE_FAILURE_ACTIONS_FLAG);
+                bUseTempBuffer = TRUE;
+            }
+            break;
+
+        /* Delayed automatic start, service SID type and preshutdown timeout: a single DWORD */
+        case SERVICE_CONFIG_DELAYED_AUTO_START_INFO:
+        case SERVICE_CONFIG_SERVICE_SID_INFO:
+        case SERVICE_CONFIG_PRESHUTDOWN_INFO:
+            if ((lpBuffer == NULL) || (cbBufSize < sizeof(DWORD)))
+            {
+                lpTempBuffer = (LPBYTE)&ServiceFailureActions;
+                dwBufferSize = sizeof(DWORD);
                 bUseTempBuffer = TRUE;
             }
             break;

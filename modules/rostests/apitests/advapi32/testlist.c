@@ -49,6 +49,7 @@ extern void func_TokenDefaultDacl(void);
 extern void func_TokenIntegrity(void);
 extern void func_TokenLogonSid(void);
 extern void func_ServiceArgs(void);
+extern void func_ServiceControllerQuery(void);
 extern void func_ServiceEnv(void);
 extern void func_ServiceFailureActions(void);
 extern void func_ServiceRecovery(void);
@@ -127,6 +128,7 @@ const struct test winetest_testlist[] =
     { "TokenIntegrity", func_TokenIntegrity },
     { "TokenLogonSid", func_TokenLogonSid },
     { "ServiceArgs", func_ServiceArgs },
+    { "ServiceControllerQuery", func_ServiceControllerQuery },
     { "ServiceEnv", func_ServiceEnv },
     { "ServiceFailureActions", func_ServiceFailureActions },
     { "ServiceRecovery", func_ServiceRecovery },
