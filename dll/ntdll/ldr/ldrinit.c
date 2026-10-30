@@ -3117,12 +3117,6 @@ LdrpInitializeProcess(IN PCONTEXT Context,
 
     }
 
-    if (IsDotNetImage)
-    {
-        /* FIXME */
-        DPRINT1("We don't support .NET applications yet\n");
-    }
-
     if (NtHeader->OptionalHeader.Subsystem == IMAGE_SUBSYSTEM_WINDOWS_GUI ||
         NtHeader->OptionalHeader.Subsystem == IMAGE_SUBSYSTEM_WINDOWS_CUI)
     {
@@ -3171,6 +3165,85 @@ LdrpInitializeProcess(IN PCONTEXT Context,
     else
 #endif
     ImportStatus = LdrpWalkImportDescriptor(LdrpDefaultPath.Buffer, LdrpImageEntry);
+
+    /* An IL-only .NET executable need not have a native entry point (PE32+ ones
+     * never do). As on Windows, such a process starts at mscoree!_CorExeMain. */
+    if (IsDotNetImage && NT_SUCCESS(ImportStatus)
+#ifdef BUILD_WOW64_ENABLED
+        && !IsWow64
+#endif
+        && !NtHeader->OptionalHeader.AddressOfEntryPoint)
+    {
+        PIMAGE_COR20_HEADER CorHeader;
+        ULONG CorHeaderSize;
+        BOOLEAN CorHeaderReadable = FALSE, IlOnly = FALSE;
+
+        CorHeader = RtlImageDirectoryEntryToData(Peb->ImageBaseAddress,
+                                                 TRUE,
+                                                 IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR,
+                                                 &CorHeaderSize);
+        if (CorHeader && CorHeaderSize >= sizeof(*CorHeader))
+        {
+            /* The descriptor is image data: its RVA may point at memory the
+             * section did not map, so read it guarded. */
+            _SEH2_TRY
+            {
+                IlOnly = !!(CorHeader->Flags & COMIMAGE_FLAGS_ILONLY);
+                CorHeaderReadable = TRUE;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                CorHeaderReadable = FALSE;
+            }
+            _SEH2_END;
+
+            if (!CorHeaderReadable)
+            {
+                DPRINT1("LDR: the COM descriptor of the .NET image is not mapped\n");
+                if (OptionsKey) NtClose(OptionsKey);
+                return STATUS_INVALID_IMAGE_FORMAT;
+            }
+        }
+
+        if (IlOnly)
+        {
+            /* Load mscoree.dll from the system directory only, as Windows does:
+             * the application directory must not be able to supply it. */
+            WCHAR MscoreePath[MAX_PATH];
+            UNICODE_STRING MscoreeString;
+            ANSI_STRING CorExeMainName = RTL_CONSTANT_STRING("_CorExeMain");
+            PVOID MscoreeBase, CorExeMain = NULL;
+
+            RtlInitEmptyUnicodeString(&MscoreeString, MscoreePath, sizeof(MscoreePath));
+            Status = RtlAppendUnicodeStringToString(&MscoreeString, &NtSystemRoot);
+            if (NT_SUCCESS(Status))
+            {
+#ifdef _M_IX86
+                if (NtCurrentTeb()->WOW32Reserved)
+                    Status = RtlAppendUnicodeToString(&MscoreeString, L"\\SysWOW64\\mscoree.dll");
+                else
+#endif
+                Status = RtlAppendUnicodeToString(&MscoreeString, L"\\System32\\mscoree.dll");
+            }
+            if (NT_SUCCESS(Status))
+                Status = LdrLoadDll(NULL, NULL, &MscoreeString, &MscoreeBase);
+            if (NT_SUCCESS(Status))
+                Status = LdrGetProcedureAddress(MscoreeBase, &CorExeMainName, 0, &CorExeMain);
+            if (!NT_SUCCESS(Status))
+            {
+                DPRINT1("LDR: cannot start the .NET image, mscoree!_CorExeMain: 0x%08lx\n", Status);
+                if (OptionsKey) NtClose(OptionsKey);
+                return Status;
+            }
+
+            LdrpImageEntry->EntryPoint = CorExeMain;
+#if defined(_M_AMD64)
+            Context->Rcx = (ULONG_PTR)CorExeMain;
+#elif defined(_M_IX86)
+            Context->Eax = (ULONG_PTR)CorExeMain;
+#endif
+        }
+    }
 
     /* Check if relocation is needed */
     if (
