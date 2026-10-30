@@ -167,6 +167,7 @@ list(APPEND SOURCE
     RtlInitializeSidEx.c
     RtlInitializeNtUserPfn.c
     RtlIsNameInExpression.c
+    RtlIsEcCode.c
     RtlIsNameLegalDOS8Dot3.c
     RtlLocale.c
     RtlMemIoResource.c
