@@ -1,7 +1,8 @@
 /*
  * PROJECT:     ReactOS API tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
- * PURPOSE:     Tests for FolderItems::_NewEnum (the IEnumVARIANT for-each walks)
+ * PURPOSE:     Tests for FolderItems::_NewEnum (the IEnumVARIANT for-each walks) and the
+ *              parameter names of the Shell.Application typelib
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -196,6 +197,60 @@ static void TestNewEnumDispatch(FolderItems *pItems)
     pDisp->Release();
 }
 
+/* The names of the parameters come from the typelib, and scripts print them (PowerShell's ToString) */
+static void TestParameterNames(IShellDispatch *pSD)
+{
+    static const struct
+    {
+        PCWSTR Method;
+        PCWSTR Names[6];
+    } Cases[] =
+    {
+        { L"AddToRecent", { L"AddToRecent", L"varFile", L"bstrCategory", NULL } },
+        { L"ControlPanelItem", { L"ControlPanelItem", L"bstrDir", NULL } },
+        { L"ShellExecute", { L"ShellExecute", L"File", L"vArgs", L"vDir", L"vOperation", L"vShow" } },
+        { L"ExplorerPolicy", { L"ExplorerPolicy", L"bstrPolicyName", NULL } },
+        { L"GetSetting", { L"GetSetting", L"lSetting", NULL } },
+        { L"IsRestricted", { L"IsRestricted", L"Group", L"Restriction", NULL } },
+        { L"ServiceStart", { L"ServiceStart", L"ServiceName", L"Persistent", NULL } },
+        { L"ShowBrowserBar", { L"ShowBrowserBar", L"bstrClsid", L"bShow", NULL } },
+    };
+    IDispatch *pDisp = NULL;
+    ITypeInfo *pTI = NULL;
+    HRESULT hr;
+    int i, n;
+
+    hr = pSD->QueryInterface(IID_IDispatch, (void **)&pDisp);
+    if (FAILED(hr))
+        return;
+    hr = pDisp->GetTypeInfo(0, LOCALE_USER_DEFAULT, &pTI);
+    ok_long(hr, S_OK);
+    if (pTI)
+    {
+        for (i = 0; i < (int)ARRAYSIZE(Cases); i++)
+        {
+            BSTR Names[6] = { 0 };
+            UINT Got = 0;
+            PWSTR Method = (PWSTR)Cases[i].Method;
+            MEMBERID Id;
+
+            hr = pTI->GetIDsOfNames(&Method, 1, &Id);
+            ok(hr == S_OK, "%ls: GetIDsOfNames 0x%08lx\n", Cases[i].Method, hr);
+            if (hr != S_OK)
+                continue;
+            hr = pTI->GetNames(Id, Names, 6, &Got);
+            ok(hr == S_OK, "%ls: GetNames 0x%08lx\n", Cases[i].Method, hr);
+            for (n = 0; hr == S_OK && n < (int)Got && Cases[i].Names[n]; n++)
+                ok(!lstrcmpW(Names[n], Cases[i].Names[n]), "%ls: name %d is \"%ls\", expected \"%ls\"\n",
+                   Cases[i].Method, n, Names[n], Cases[i].Names[n]);
+            for (n = 0; n < (int)Got; n++)
+                SysFreeString(Names[n]);
+        }
+        pTI->Release();
+    }
+    pDisp->Release();
+}
+
 START_TEST(CFolderItems)
 {
     IShellDispatch *pSD = NULL;
@@ -212,6 +267,8 @@ START_TEST(CFolderItems)
         CoUninitialize();
         return;
     }
+
+    TestParameterNames(pSD);
 
     MakeFiles();
     V_VT(&vDir) = VT_BSTR;

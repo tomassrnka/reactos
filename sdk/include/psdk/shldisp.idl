@@ -320,7 +320,7 @@ interface FolderItem2 : FolderItem
 {
     HRESULT InvokeVerbEx( [in, optional] VARIANT vVerb, [in, optional] VARIANT vArgs );
 
-    HRESULT ExtendedProperty( [in] BSTR sPropName, [out, retval] VARIANT *pvRet );
+    HRESULT ExtendedProperty( [in] BSTR bstrPropName, [out, retval] VARIANT *pvRet );
 }
 
 [
@@ -368,8 +368,8 @@ interface FolderItems : IDispatch
 ]
 interface FolderItems2 : FolderItems
 {
-    HRESULT InvokeVerbEx( [in, optional] VARIANT verb,
-        [in, optional] VARIANT args );
+    HRESULT InvokeVerbEx( [in, optional] VARIANT vVerb,
+        [in, optional] VARIANT vArgs );
 }
 
 /*****************************************************************************
@@ -500,7 +500,7 @@ interface IShellDispatch : IDispatch
 
     HRESULT RefreshMenu();
 
-    HRESULT ControlPanelItem( [in] BSTR szDir );
+    HRESULT ControlPanelItem( [in] BSTR bstrDir );
 }
 
 [
@@ -512,16 +512,16 @@ interface IShellDispatch : IDispatch
 ]
 interface IShellDispatch2 : IShellDispatch
 {
-    HRESULT IsRestricted([in] BSTR group, [in] BSTR restriction, [out, retval] long *value);
-    HRESULT ShellExecute([in] BSTR file, [in, optional] VARIANT args, [in, optional] VARIANT dir,
-        [in, optional] VARIANT op, [in, optional] VARIANT show);
+    HRESULT IsRestricted([in] BSTR Group, [in] BSTR Restriction, [out, retval] long *value);
+    HRESULT ShellExecute([in] BSTR File, [in, optional] VARIANT vArgs, [in, optional] VARIANT vDir,
+        [in, optional] VARIANT vOperation, [in, optional] VARIANT vShow);
     HRESULT FindPrinter([in, optional] BSTR name, [in, optional] BSTR location, [in, optional] BSTR model);
     HRESULT GetSystemInformation([in] BSTR name, [out, retval] VARIANT *ret);
-    HRESULT ServiceStart([in] BSTR service, [in] VARIANT persistent, [out, retval] VARIANT *ret);
-    HRESULT ServiceStop([in] BSTR service, [in] VARIANT persistent, [out, retval] VARIANT *ret);
-    HRESULT IsServiceRunning([in] BSTR service, [out, retval] VARIANT *running);
-    HRESULT CanStartStopService([in] BSTR service, [out, retval] VARIANT *ret);
-    HRESULT ShowBrowserBar([in] BSTR clsid, [in] VARIANT show, [out, retval] VARIANT *ret);
+    HRESULT ServiceStart([in] BSTR ServiceName, [in] VARIANT Persistent, [out, retval] VARIANT *ret);
+    HRESULT ServiceStop([in] BSTR ServiceName, [in] VARIANT Persistent, [out, retval] VARIANT *ret);
+    HRESULT IsServiceRunning([in] BSTR ServiceName, [out, retval] VARIANT *running);
+    HRESULT CanStartStopService([in] BSTR ServiceName, [out, retval] VARIANT *ret);
+    HRESULT ShowBrowserBar([in] BSTR bstrClsid, [in] VARIANT bShow, [out, retval] VARIANT *ret);
 }
 
 [
@@ -532,7 +532,7 @@ interface IShellDispatch2 : IShellDispatch
 ]
 interface IShellDispatch3 : IShellDispatch2
 {
-    HRESULT AddToRecent([in] VARIANT file, [in, optional] BSTR category);
+    HRESULT AddToRecent([in] VARIANT varFile, [in, optional] BSTR bstrCategory);
 }
 
 [
@@ -545,8 +545,8 @@ interface IShellDispatch4 : IShellDispatch3
 {
     HRESULT WindowsSecurity();
     HRESULT ToggleDesktop();
-    HRESULT ExplorerPolicy([in] BSTR policy, [out, retval] VARIANT *value);
-    HRESULT GetSetting([in] long setting, [out,retval] VARIANT_BOOL *result);
+    HRESULT ExplorerPolicy([in] BSTR bstrPolicyName, [out, retval] VARIANT *value);
+    HRESULT GetSetting([in] long lSetting, [out,retval] VARIANT_BOOL *result);
 }
 
 [
