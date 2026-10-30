@@ -742,6 +742,32 @@ static void test_method_scope(MI_Application *app)
     ok(result == MI_RESULT_FAILED, "GetOwnerSid on the class: %d\n", result);
     op.ft->Close(&op);
 
+    /* a static method returns its out-parameters */
+    {
+        MI_Instance *out = NULL;
+        MI_Value v;
+        MI_Type type;
+        MI_Uint32 flags;
+        memset(&op, 0, sizeof(op));
+        session.ft->Invoke(&session, 0, NULL, L"root/cimv2", L"Win32_Process", L"Create", NULL, NULL, NULL, &op);
+        result = pull_all(&op, &count, &out, &message);
+        trace("Invoke Create: result %d count %u out %p\n", result, count, out);
+        ok(result == MI_RESULT_OK, "Create: %d\n", result);
+        ok(count == 1 && out, "Create returned %u instances\n", count);
+        if (out)
+        {
+            UINT n = 0;
+            MI_Uint32 ec = 0;
+            out->ft->GetElementCount(out, &ec);
+            trace("out params: %u elements\n", ec);
+            ok(ec > 0, "no out-parameters\n");
+            ok(out->ft->GetElement(out, L"ReturnValue", &v, &type, &flags, NULL) == MI_RESULT_OK, "no ReturnValue\n");
+            (void)n;
+            out->ft->Delete(out);
+        }
+        op.ft->Close(&op);
+    }
+
     memset(&op, 0, sizeof(op));
     session.ft->EnumerateInstances(&session, 0, NULL, L"root/Interop", L"Win32_Process", MI_FALSE, NULL, &op);
     result = pull_all(&op, &count, NULL, &message);

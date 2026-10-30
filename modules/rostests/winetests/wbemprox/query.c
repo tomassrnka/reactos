@@ -2174,6 +2174,58 @@ static ULONG count_results( IEnumWbemClassObject *result )
     return total;
 }
 
+static BOOL has_name( SAFEARRAY *names, const WCHAR *name )
+{
+    LONG i, lower, upper;
+    BSTR str;
+    BOOL found = FALSE;
+
+    if (SafeArrayGetLBound( names, 1, &lower ) != S_OK || SafeArrayGetUBound( names, 1, &upper ) != S_OK) return FALSE;
+    for (i = lower; i <= upper; i++)
+        if (SafeArrayGetElement( names, &i, &str ) == S_OK)
+        {
+            if (!_wcsicmp( str, name )) found = TRUE;
+            SysFreeString( str );
+        }
+    return found;
+}
+
+/* the out-parameters of a method list their properties */
+static void test_out_params_names( IWbemServices *services )
+{
+    WCHAR path[64];
+    IWbemClassObject *out = NULL;
+    SAFEARRAY *names = NULL;
+    BSTR p, m;
+    HRESULT hr;
+
+    wsprintfW( path, L"Win32_Process.Handle=\"%u\"", GetCurrentProcessId() );
+    p = SysAllocString( path );
+    m = SysAllocString( L"GetOwnerSid" );
+    hr = IWbemServices_ExecMethod( services, p, m, 0, NULL, NULL, &out, NULL );
+    SysFreeString( p );
+    SysFreeString( m );
+    ok( hr == S_OK, "GetOwnerSid failed %08x\n", hr );
+    if (hr != S_OK) return;
+    {
+        VARIANT var;
+        VariantInit( &var );
+        hr = IWbemClassObject_Get( out, L"__CLASS", 0, &var, NULL, NULL );
+        ok( hr == S_OK && V_VT( &var ) == VT_BSTR && !wcscmp( V_BSTR( &var ), L"__PARAMETERS" ),
+            "__CLASS of the out-parameters: %08x %s\n", hr, V_VT( &var ) == VT_BSTR ? wine_dbgstr_w( V_BSTR( &var ) ) : "-" );
+        VariantClear( &var );
+    }
+    hr = IWbemClassObject_GetNames( out, NULL, WBEM_FLAG_NONSYSTEM_ONLY, NULL, &names );
+    ok( hr == S_OK, "GetNames failed %08x\n", hr );
+    if (hr == S_OK)
+    {
+        ok( has_name( names, L"ReturnValue" ), "no ReturnValue in the out-parameters\n" );
+        ok( has_name( names, L"Sid" ), "no Sid in the out-parameters\n" );
+        SafeArrayDestroy( names );
+    }
+    IWbemClassObject_Release( out );
+}
+
 /* methods run on instances, not on "the first instance of the class"; classes and namespaces as WMI has them;
  * namespace queries do not disturb each other; class-wide enumeration is bounded */
 static void test_method_paths( IWbemLocator *locator, IWbemServices *services )
@@ -2184,6 +2236,8 @@ static void test_method_paths( IWbemLocator *locator, IWbemServices *services )
     HANDLE threads[2];
     HRESULT hr;
     BSTR str;
+
+    test_out_params_names( services );
 
     /* a method of the instances needs an instance path */
     hr = exec_method_path( services, L"Win32_Service", L"PauseService" );
