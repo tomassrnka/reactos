@@ -28,6 +28,7 @@
 #include "japanese.h"   /* Japanese eras */
 
 #include "lcformat_private.h"
+#include "calendar_data.h"
 
 #define NDEBUG
 #include <debug.h>
@@ -57,6 +58,9 @@ LCID WINAPI LocaleNameToLCID(_In_ LPCWSTR, _In_ DWORD);
 #define CAL_SSHORTESTDAYNAME6 54
 #define CAL_SSHORTESTDAYNAME7 55
 #endif
+#ifndef CAL_SRELATIVELONGDATE
+#define CAL_SRELATIVELONGDATE 58
+#endif
 #ifndef CAL_SMONTHDAY
 #define CAL_SMONTHDAY 56
 #endif
@@ -70,6 +74,115 @@ LCID WINAPI LocaleNameToLCID(_In_ LPCWSTR, _In_ DWORD);
 #define CALINFO_MAX_YEAR 2049
 
 #define IS_LCID_JAPANESE(lcid) PRIMARYLANGID(LANGIDFROMLCID(lcid)) == LANG_JAPANESE
+
+/* Calendar data of the locales (calendar_data.c) */
+
+static const NLS_CAL_ROW *NLS_FindCalRow(const NLS_CAL_ROW *Rows, ULONG Count, DWORD Key)
+{
+    LONG Low = 0, High = (LONG)Count - 1;
+
+    while (Low <= High)
+    {
+        LONG Mid = (Low + High) / 2;
+
+        if (Rows[Mid].Key == Key)
+            return &Rows[Mid];
+        if (Rows[Mid].Key < Key)
+            Low = Mid + 1;
+        else
+            High = Mid - 1;
+    }
+    return NULL;
+}
+
+/* Pseudo calendars of the enumeration rows: the date formats of all calendars, the time formats */
+#define NLS_CAL_ALL_FORMATS 0xff
+#define NLS_CAL_TIME_FORMATS 0xfe
+
+#define NLS_CAL_KEY(Lcid, Cal, Type) \
+    (((DWORD)LANGIDFROMLCID(Lcid) << 16) | (((Cal) & 0xff) << 8) | ((Type) & 0xff))
+
+/* The string of a calendar type of a calendar in the data, or NULL */
+static const WCHAR *NLS_GetCalendarString(LCID Lcid, CALID Cal, CALTYPE Type)
+{
+    const NLS_CAL_ROW *Rows, *Row;
+    ULONG Count;
+
+    if (Cal > 0xff || Type > 0xff)
+        return NULL;
+    Rows = NlsCalRowTable(&Count);
+    Row = NLS_FindCalRow(Rows, Count, NLS_CAL_KEY(Lcid, Cal, Type));
+    return Row ? NlsCalPoolBase() + Row->Offset : NULL;
+}
+
+/* The NUL-separated list that EnumCalendarInfo hands out for a calendar type of a calendar, or NULL */
+static const WCHAR *NLS_GetCalendarEnumList(LCID Lcid, CALID Cal, CALTYPE Type)
+{
+    const NLS_CAL_ROW *Rows, *Row;
+    ULONG Count;
+
+    if (Cal > 0xff || Type > 0xff)
+        return NULL;
+    Rows = NlsCalEnumRowTable(&Count);
+    Row = NLS_FindCalRow(Rows, Count, NLS_CAL_KEY(Lcid, Cal, Type));
+    return Row ? NlsCalPoolBase() + Row->Offset : NULL;
+}
+
+static const NLS_CAL_LIST *NLS_GetCalendarList(LCID Lcid)
+{
+    const NLS_CAL_LIST *List;
+    ULONG Count, Low = 0, High;
+    WORD LangId = LANGIDFROMLCID(Lcid);
+
+    List = NlsCalListTable(&Count);
+    High = Count;
+    while (Low < High)
+    {
+        ULONG Mid = (Low + High) / 2;
+
+        if (List[Mid].LangId == LangId)
+            return &List[Mid];
+        if (List[Mid].LangId < LangId)
+            Low = Mid + 1;
+        else
+            High = Mid;
+    }
+    return NULL;
+}
+
+/* Hands a string out the way GetCalendarInfo does: the size query, the buffer check, the length with the NUL */
+static int NLS_ReturnCalendarString(const WCHAR *Value, LPWSTR lpCalData, int cchData)
+{
+    int Length = (int)wcslen(Value) + 1;
+
+    if (!lpCalData || !cchData)
+        return Length;
+    if (cchData < Length)
+    {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+    RtlCopyMemory(lpCalData, Value, Length * sizeof(WCHAR));
+    return Length;
+}
+
+static int NLS_ReturnCalendarNumber(DWORD Number, CALTYPE CalType, LPWSTR lpCalData, int cchData, LPDWORD lpValue)
+{
+    if (CalType & CAL_RETURN_NUMBER)
+    {
+        *lpValue = Number;
+        return sizeof(DWORD) / sizeof(WCHAR);
+    }
+    else
+    {
+        WCHAR Buffer[16];
+        static const WCHAR fmtW[] = {'%','u',0};
+
+        snprintfW(Buffer, ARRAY_SIZE(Buffer), fmtW, Number);
+        return NLS_ReturnCalendarString(Buffer, lpCalData, cchData);
+    }
+}
+
 
 #ifndef CAL_SABBREVERASTRING
     #define CAL_SABBREVERASTRING 0x00000039
@@ -1770,6 +1883,49 @@ BOOL NLS_EnumDateFormats(const struct enumdateformats_context *ctxt)
         return FALSE;
     }
 
+#ifdef __REACTOS__
+    /* Windows enumerates the formats of all calendars, each with its calendar; the locale data has one only */
+    {
+        const WCHAR *formats = NLS_GetCalendarEnumList(ctxt->lcid, NLS_CAL_ALL_FORMATS,
+                                                       lctype == LOCALE_SSHORTDATE ? CAL_SSHORTDATE :
+                                                       lctype == LOCALE_SLONGDATE ? CAL_SLONGDATE : CAL_SYEARMONTH);
+
+        if (formats)
+        {
+            for (; *formats; formats += wcslen(formats) + 1)
+            {
+                const WCHAR *text = formats + 1;
+                CALID entry_cal = formats[0];
+
+                if (!ctxt->unicode)
+                {
+                    if (!WideCharToMultiByte(CP_ACP, 0, text, -1, bufA, sizeof(bufA), NULL, NULL))
+                        return FALSE;
+                    text = (const WCHAR *)bufA;
+                }
+
+                switch (ctxt->type)
+                {
+                case CALLBACK_ENUMPROC:
+                    ret = ctxt->u.callback((WCHAR *)text);
+                    break;
+                case CALLBACK_ENUMPROCEX:
+                    ret = ctxt->u.callbackex((WCHAR *)text, entry_cal);
+                    break;
+                case CALLBACK_ENUMPROCEXEX:
+                    ret = ctxt->u.callbackexex((WCHAR *)text, entry_cal, ctxt->lParam);
+                    break;
+                default:
+                    ret = TRUE;
+                }
+                if (!ret)
+                    break;
+            }
+            return TRUE;
+        }
+    }
+#endif
+
     lctype |= ctxt->flags & LOCALE_USE_CP_ACP;
     if (ctxt->unicode)
         ret = GetLocaleInfoW(ctxt->lcid, lctype, bufW, ARRAY_SIZE(bufW));
@@ -1894,6 +2050,44 @@ BOOL NLS_EnumTimeFormats(struct enumtimeformats_context *ctxt)
         return FALSE;
     }
 
+#ifdef __REACTOS__
+    /* Windows has several time formats */
+    if (lctype == LOCALE_STIMEFORMAT)
+    {
+        const WCHAR *formats = NLS_GetCalendarEnumList(ctxt->lcid, NLS_CAL_TIME_FORMATS, 0);
+
+        if (formats)
+        {
+            for (; *formats; formats += wcslen(formats) + 1)
+            {
+                const WCHAR *text = formats;
+
+                if (!ctxt->unicode)
+                {
+                    if (!WideCharToMultiByte(CP_ACP, 0, text, -1, bufA, sizeof(bufA), NULL, NULL))
+                        return FALSE;
+                    text = (const WCHAR *)bufA;
+                }
+
+                switch (ctxt->type)
+                {
+                case CALLBACK_ENUMPROC:
+                    ret = ctxt->u.callback((WCHAR *)text);
+                    break;
+                case CALLBACK_ENUMPROCEX:
+                    ret = ctxt->u.callbackex((WCHAR *)text, ctxt->lParam);
+                    break;
+                default:
+                    ret = TRUE;
+                }
+                if (!ret)
+                    break;
+            }
+            return TRUE;
+        }
+    }
+#endif
+
     lctype |= ctxt->flags & LOCALE_USE_CP_ACP;
     if (ctxt->unicode)
         ret = GetLocaleInfoW(ctxt->lcid, lctype, bufW, ARRAY_SIZE(bufW));
@@ -1974,10 +2168,26 @@ BOOL WINAPI EnumTimeFormatsEx(TIMEFMT_ENUMPROCEX proc, const WCHAR *locale, DWOR
  * TODO
  *    The above note should be respected by GetCalendarInfoA.
  */
+static BOOL NLS_CallCalendarCallback(const struct enumcalendar_context *ctxt, WCHAR *buf, CALID calendar)
+{
+    switch (ctxt->type)
+    {
+    case CALLBACK_ENUMPROC:
+        return ctxt->u.callback(buf);
+    case CALLBACK_ENUMPROCEX:
+        return ctxt->u.callbackex(buf, calendar);
+    case CALLBACK_ENUMPROCEXEX:
+        return ctxt->u.callbackexex(buf, calendar, NULL, ctxt->lParam);
+    default:
+        return TRUE;
+    }
+}
+
 BOOL NLS_EnumCalendarInfo(const struct enumcalendar_context *ctxt)
 {
-  WCHAR *buf, *opt = NULL, *iter = NULL;
-  CALID calendar = ctxt->calendar;
+  WCHAR *buf, *opt = NULL, *iter;
+  CALID calendars[NLS_CAL_MAX + 16];
+  UINT numCalendars = 0, index;
   BOOL ret = FALSE;
   int bufSz = 200;		/* the size of the buffer */
 
@@ -1994,25 +2204,126 @@ BOOL NLS_EnumCalendarInfo(const struct enumcalendar_context *ctxt)
     return FALSE;
   }
 
-  if (calendar == ENUM_ALL_CALENDARS)
+  if (ctxt->calendar == ENUM_ALL_CALENDARS)
   {
-    int optSz = GetLocaleInfoW(ctxt->lcid, LOCALE_IOPTIONALCALENDAR, NULL, 0);
-    if (optSz > 1)
+    const NLS_CAL_LIST *list = NLS_GetCalendarList(ctxt->lcid);
+
+    if (list)
     {
-      opt = HeapAlloc(GetProcessHeap(), 0, optSz * sizeof(WCHAR));
-      if (opt == NULL)
+      /* The calendars of Windows 10, the default one first */
+      for (index = 0; index < list->Count && numCalendars < ARRAY_SIZE(calendars); index++)
+        calendars[numCalendars++] = list->Calendars[index];
+    }
+    else
+    {
+      int optSz = GetLocaleInfoW(ctxt->lcid, LOCALE_IOPTIONALCALENDAR, NULL, 0);
+
+      calendars[numCalendars++] = NLS_GetLocaleNumber(ctxt->lcid, LOCALE_ICALENDARTYPE);
+      if (optSz > 1)
       {
-        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        opt = HeapAlloc(GetProcessHeap(), 0, optSz * sizeof(WCHAR));
+        if (opt == NULL)
+        {
+          SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+          goto cleanup;
+        }
+        if (GetLocaleInfoW(ctxt->lcid, LOCALE_IOPTIONALCALENDAR, opt, optSz))
+        {
+          /* NUL-separated decimal numbers; 0 means none */
+          for (iter = opt; *iter && numCalendars < ARRAY_SIZE(calendars); )
+          {
+            CALID id = 0;
+            UINT known;
+
+            while ((*iter >= '0') && (*iter <= '9'))
+              id = id * 10 + *iter++ - '0';
+
+            if (*iter++ != 0)
+            {
+              SetLastError(ERROR_BADDB);
+              goto cleanup;
+            }
+
+            for (known = 0; known < numCalendars; known++)
+            {
+              if (calendars[known] == id)
+                break;
+            }
+            if (id && known == numCalendars)
+              calendars[numCalendars++] = id;
+          }
+        }
+      }
+    }
+  }
+  else
+    calendars[numCalendars++] = ctxt->calendar;
+
+  for (index = 0; index < numCalendars; index++)	/* loop through calendars */
+  {
+    CALID calendar = calendars[index];
+    const WCHAR *values = NULL;
+
+    if (!(ctxt->caltype & CAL_RETURN_NUMBER))
+      values = NLS_GetCalendarEnumList(ctxt->lcid, calendar, ctxt->caltype & 0xffff);
+
+    if (values)
+    {
+      /* Windows has several entries: the formats of a date, the eras of a calendar */
+      for (; *values; values += wcslen(values) + 1)
+      {
+        BOOL more;
+
+        if (ctxt->unicode)
+        {
+          more = NLS_CallCalendarCallback(ctxt, (WCHAR *)values, calendar);
+        }
+        else
+        {
+          char valueA[256];
+          int lenA = WideCharToMultiByte(CP_ACP, 0, values, -1, valueA, sizeof(valueA), NULL, NULL);
+
+          if (!lenA)
+          {
+            ret = FALSE;
+            goto cleanup;
+          }
+          more = NLS_CallCalendarCallback(ctxt, (WCHAR *)valueA, calendar);
+        }
+        if (!more)			/* the callback told to stop */
+        {
+          ret = TRUE;
+          goto cleanup;
+        }
+      }
+      ret = TRUE;
+      continue;
+    }
+
+    if (ctxt->caltype & CAL_RETURN_NUMBER)
+    {
+      /* Windows hands the number to the callback as text */
+      static const WCHAR fmtW[] = {'%','u',0};
+      WCHAR number[16];
+      DWORD value = 0;
+
+      if (!GetCalendarInfoW(ctxt->lcid, calendar, ctxt->caltype, NULL, 0, &value))
+      {
+        ret = FALSE;
         goto cleanup;
       }
-      if (GetLocaleInfoW(ctxt->lcid, LOCALE_IOPTIONALCALENDAR, opt, optSz))
-        iter = opt;
-    }
-    calendar = NLS_GetLocaleNumber(ctxt->lcid, LOCALE_ICALENDARTYPE);
-  }
+      snprintfW(number, ARRAY_SIZE(number), fmtW, value);
+      if (ctxt->unicode)
+        strcpyW(buf, number);
+      else
+        WideCharToMultiByte(CP_ACP, 0, number, -1, (CHAR *)buf, bufSz, NULL, NULL);
 
-  while (TRUE)			/* loop through calendars */
-  {
+      ret = TRUE;
+      if (!NLS_CallCalendarCallback(ctxt, buf, calendar))
+        break;
+      continue;
+    }
+
     do				/* loop until there's no error */
     {
       if (ctxt->caltype & CAL_RETURN_NUMBER)
@@ -2048,37 +2359,9 @@ BOOL NLS_EnumCalendarInfo(const struct enumcalendar_context *ctxt)
      * we must check for Ex, but we don't care about Unicode
      * because the buffer is already in the correct format.
      */
-    switch (ctxt->type)
-    {
-    case CALLBACK_ENUMPROC:
-      ret = ctxt->u.callback(buf);
-      break;
-    case CALLBACK_ENUMPROCEX:
-      ret = ctxt->u.callbackex(buf, calendar);
-      break;
-    case CALLBACK_ENUMPROCEXEX:
-      ret = ctxt->u.callbackexex(buf, calendar, NULL, ctxt->lParam);
-      break;
-    default:
-      ;
-    }
-
-    if (!ret) {			/* the callback told to stop */
+    if (!NLS_CallCalendarCallback(ctxt, buf, calendar))
+    {				/* the callback told to stop */
       ret = TRUE;
-      break;
-    }
-
-    if ((iter == NULL) || (*iter == 0))	/* no more calendars */
-      break;
-
-    calendar = 0;
-    while ((*iter >= '0') && (*iter <= '9'))
-      calendar = calendar * 10 + *iter++ - '0';
-
-    if (*iter++ != 0)
-    {
-      SetLastError(ERROR_BADDB);
-      ret = FALSE;
       break;
     }
   }
@@ -2221,6 +2504,7 @@ int WINAPI GetCalendarInfoW(LCID Locale, CALID Calendar, CALTYPE CalType,
         LOCALE_SSHORTESTDAYNAME7,
         LOCALE_SMONTHDAY,
         0, /* CAL_SABBREVERASTRING */
+        LOCALE_SRELATIVELONGDATE,
     };
     DWORD localeflags = 0;
     CALTYPE calinfo;
@@ -2257,6 +2541,37 @@ int WINAPI GetCalendarInfoW(LCID Locale, CALID Calendar, CALTYPE CalType,
 #endif
         localeflags |= LOCALE_RETURN_GENITIVE_NAMES;
 
+#ifdef __REACTOS__
+    /* The calendar data measured on Windows 10; the Japanese calendar below has its own era table */
+    if (!(IS_LCID_JAPANESE(Locale) && Calendar == CAL_JAPAN))
+    {
+        const WCHAR *Value;
+
+        if (calinfo == CAL_ICALINTVALUE)
+        {
+            /* Windows answers with the calendar itself when the locale supports it */
+            const NLS_CAL_LIST *List = NLS_GetCalendarList(Locale);
+
+            if (List && Calendar)
+            {
+                UINT Index;
+
+                for (Index = 0; Index < List->Count; Index++)
+                {
+                    if (List->Calendars[Index] == Calendar)
+                        return NLS_ReturnCalendarNumber(Calendar, CalType, lpCalData, cchData, lpValue);
+                }
+            }
+        }
+        else if ((Value = NLS_GetCalendarString(Locale, Calendar, calinfo)) != NULL)
+        {
+            if ((CalType & CAL_RETURN_NUMBER) && (calinfo == CAL_IYEAROFFSETRANGE || calinfo == CAL_ITWODIGITYEARMAX))
+                return NLS_ReturnCalendarNumber((DWORD)strtolW(Value, NULL, 10), CalType, lpCalData, cchData, lpValue);
+            return NLS_ReturnCalendarString(Value, lpCalData, cchData);
+        }
+    }
+#endif
+
     switch (calinfo) {
 	case CAL_ICALINTVALUE:
 #ifdef __REACTOS__
@@ -2292,6 +2607,13 @@ int WINAPI GetCalendarInfoW(LCID Locale, CALID Calendar, CALTYPE CalType,
         if (IS_LCID_JAPANESE(Locale) && Calendar == CAL_JAPAN)
         {
             // Wareki
+            if (!lpCalData || !cchData)
+                return 3;
+            if (cchData < 3)
+            {
+                SetLastError(ERROR_INSUFFICIENT_BUFFER);
+                return 0;
+            }
             lpCalData[0] = 0x548C;
             lpCalData[1] = 0x66A6;
             lpCalData[2] = 0;
@@ -2357,6 +2679,8 @@ int WINAPI GetCalendarInfoW(LCID Locale, CALID Calendar, CALTYPE CalType,
             PCJAPANESE_ERA pEra = JapaneseEra_Find(NULL);
             if (pEra)
             {
+                if (!lpCalData || !cchData)
+                    return strlenW(pEra->szEraName) + 1;
                 RtlStringCchCopyW(lpCalData, cchData, pEra->szEraName);
                 return strlenW(lpCalData) + 1;
             }
@@ -2420,6 +2744,7 @@ int WINAPI GetCalendarInfoW(LCID Locale, CALID Calendar, CALTYPE CalType,
 	case CAL_SSHORTESTDAYNAME6:
 	case CAL_SSHORTESTDAYNAME7:
 	case CAL_SMONTHDAY:
+	case CAL_SRELATIVELONGDATE:
             return GetLocaleInfoW(Locale, caltype_lctype_map[calinfo] | localeflags, lpCalData, cchData);
 	case CAL_ITWODIGITYEARMAX:
 #ifdef __REACTOS__
@@ -2473,6 +2798,8 @@ int WINAPI GetCalendarInfoW(LCID Locale, CALID Calendar, CALTYPE CalType,
             PCJAPANESE_ERA pEra = JapaneseEra_Find(NULL);
             if (pEra)
             {
+                if (!lpCalData || !cchData)
+                    return strlenW(pEra->szEraAbbrev) + 1;
                 RtlStringCchCopyW(lpCalData, cchData, pEra->szEraAbbrev);
                 return strlenW(lpCalData) + 1;
             }
