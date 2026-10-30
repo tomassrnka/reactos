@@ -37,6 +37,19 @@ PERESOURCE gpDeviceInfoListMutex = NULL;
 static DWORD LastInputTick = 0;
 static PKEVENT gDeviceListChangedEvent;
 
+/* Mouse metrics derived from the attached devices. They are cached here because
+ * InitMetrics() rebuilds the whole metrics table (display/winsta/sysparams
+ * changes) and must not forget about the mice found by ProcessDeviceChanges(). */
+static struct
+{
+    INT Present;
+    INT Buttons;
+    INT Wheel;
+#if (_WIN32_WINNT >= 0x0600)
+    INT HorizontalWheel;
+#endif
+} gMouseMetrics;
+
 /* FUNCTIONS *****************************************************************/
 
 /*
@@ -298,6 +311,22 @@ RITReadApc(
     StartReadInputDevice(DeviceInfo);
 }
 
+/*
+ * UserApplyMouseMetrics
+ *
+ * Copies the mouse metrics of the attached devices into the system metrics
+ */
+VOID
+UserApplyMouseMetrics(VOID)
+{
+    gpsi->aiSysMet[SM_MOUSEPRESENT] = gMouseMetrics.Present;
+    gpsi->aiSysMet[SM_CMOUSEBUTTONS] = gMouseMetrics.Buttons;
+    gpsi->aiSysMet[SM_MOUSEWHEELPRESENT] = gMouseMetrics.Wheel;
+#if (_WIN32_WINNT >= 0x0600)
+    gpsi->aiSysMet[SM_MOUSEHORIZONTALWHEELPRESENT] = gMouseMetrics.HorizontalWheel;
+#endif
+}
+
 static
 VOID
 ProcessDeviceChanges(
@@ -381,12 +410,13 @@ ProcessDeviceChanges(
     ReleaseDeviceInfoListMutex();
 
     /* Update metrics */
-    gpsi->aiSysMet[SM_MOUSEPRESENT] = NumberOfMice > 0 ? 1 : 0;
-    gpsi->aiSysMet[SM_CMOUSEBUTTONS] = MaxNumberOfButtons;
-    gpsi->aiSysMet[SM_MOUSEWHEELPRESENT] = HasMouseWheel ? 1 : 0;
+    gMouseMetrics.Present = NumberOfMice > 0 ? 1 : 0;
+    gMouseMetrics.Buttons = MaxNumberOfButtons;
+    gMouseMetrics.Wheel = HasMouseWheel ? 1 : 0;
 #if (_WIN32_WINNT >= 0x0600)
-    gpsi->aiSysMet[SM_MOUSEHORIZONTALWHEELPRESENT] = HasHorizontalMouseWheel ? 1 : 0;
+    gMouseMetrics.HorizontalWheel = HasHorizontalMouseWheel ? 1 : 0;
 #endif
+    UserApplyMouseMetrics();
     /* FIXME: show/hide cursor depending of mouse presence */
     TRACE("Mouse present %u, buttons %u, wheel %u\n",
           gpsi->aiSysMet[SM_MOUSEPRESENT],

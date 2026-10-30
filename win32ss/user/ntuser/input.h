@@ -105,6 +105,7 @@ VOID FASTCALL DoTheScreenSaver(VOID);
 /* Keyboard */
 CODE_SEG("INIT") NTSTATUS NTAPI InitKeyboardImpl(VOID);
 VOID NTAPI UserInitKeyboard(HANDLE hKeyboardDevice);
+VOID UserApplyMouseMetrics(VOID);
 PKL W32kGetDefaultKeyLayout(VOID);
 VOID NTAPI UserProcessKeyboardInput(PINPUT_DEVICE_INFO pDeviceInfo, PKEYBOARD_INPUT_DATA pKeyInput);
 BOOL NTAPI UserSendKeyboardInput(KEYBDINPUT *pKbdInput, BOOL bInjected);
