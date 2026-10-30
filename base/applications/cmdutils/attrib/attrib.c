@@ -10,10 +10,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#define WIN32_NO_STATUS
 #include <windef.h>
 #include <winbase.h>
 #include <wincon.h>
 #include <strsafe.h>
+#include <ndk/ntndk.h>
 
 #include <conutils.h>
 
@@ -59,6 +61,116 @@ ErrorMessage(
 }
 
 
+typedef struct _ATTRIBS_MASKS
+{
+    DWORD dwMask;
+    DWORD dwAttrib;
+    BOOL bLink;     // /L: act on the link itself instead of its target
+} ATTRIBS_MASKS, *PATTRIBS_MASKS;
+
+/**
+ * @brief   Retrieves the attributes to display or to modify.
+ *
+ * Like Windows, a symbolic link or junction is followed to its target
+ * unless /L was specified, in which case the link's own attributes are used.
+ * (GetFileAttributes would not do: it never follows the final component.)
+ **/
+static BOOL
+GetEntryAttributes(
+    _In_ PWIN32_FIND_DATAW pFindData,
+    _In_ PCWSTR pszFullName,
+    _In_ BOOL bLink,
+    _Out_ PDWORD pdwAttributes)
+{
+    DWORD dwAttributes = pFindData->dwFileAttributes;
+
+    if (!bLink && (dwAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+    {
+        /* GetFileAttributes does not follow the link: open its target */
+        BY_HANDLE_FILE_INFORMATION FileInfo;
+        HANDLE hFile = CreateFileW(pszFullName,
+                                   FILE_READ_ATTRIBUTES,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                   NULL,
+                                   OPEN_EXISTING,
+                                   FILE_FLAG_BACKUP_SEMANTICS,
+                                   NULL);
+        if (hFile == INVALID_HANDLE_VALUE)
+        {
+            ErrorMessage(GetLastError(), pszFullName);
+            return FALSE;
+        }
+        if (!GetFileInformationByHandle(hFile, &FileInfo))
+        {
+            ErrorMessage(GetLastError(), pszFullName);
+            CloseHandle(hFile);
+            return FALSE;
+        }
+        CloseHandle(hFile);
+        dwAttributes = FileInfo.dwFileAttributes;
+    }
+
+    *pdwAttributes = dwAttributes;
+    return TRUE;
+}
+
+/**
+ * @brief   Sets the attributes of a file, of the link itself
+ *          (bLink == TRUE) or of the target it points to.
+ **/
+static BOOL
+SetEntryAttributes(
+    _In_ PCWSTR pszFullName,
+    _In_ DWORD dwAttributes,
+    _In_ BOOL bLink)
+{
+    HANDLE hFile;
+    NTSTATUS Status;
+    IO_STATUS_BLOCK IoStatusBlock;
+    FILE_BASIC_INFORMATION BasicInfo;
+
+    hFile = CreateFileW(pszFullName,
+                        FILE_WRITE_ATTRIBUTES,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL,
+                        OPEN_EXISTING,
+                        FILE_FLAG_BACKUP_SEMANTICS |
+                        (bLink ? FILE_FLAG_OPEN_REPARSE_POINT : 0),
+                        NULL);
+    if ((hFile == INVALID_HANDLE_VALUE) && bLink &&
+        (GetLastError() == ERROR_INVALID_PARAMETER))
+    {
+        /* The file system doesn't support reparse points: there is no link */
+        hFile = CreateFileW(pszFullName,
+                            FILE_WRITE_ATTRIBUTES,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            NULL,
+                            OPEN_EXISTING,
+                            FILE_FLAG_BACKUP_SEMANTICS,
+                            NULL);
+    }
+    if (hFile == INVALID_HANDLE_VALUE)
+        return FALSE;
+
+    /* Only the attributes are set (zero times are left unchanged);
+     * zero attributes mean "no change", so force the normal attribute. */
+    RtlZeroMemory(&BasicInfo, sizeof(BasicInfo));
+    BasicInfo.FileAttributes = (dwAttributes & FILE_ATTRIBUTE_VALID_SET_FLAGS) |
+                               FILE_ATTRIBUTE_NORMAL;
+    Status = NtSetInformationFile(hFile,
+                                  &IoStatusBlock,
+                                  &BasicInfo,
+                                  sizeof(BasicInfo),
+                                  FileBasicInformation);
+    CloseHandle(hFile);
+    if (!NT_SUCCESS(Status))
+    {
+        SetLastError(RtlNtStatusToDosError(Status));
+        return FALSE;
+    }
+    return TRUE;
+}
+
 /**
  * @brief   Displays attributes for the given file.
  * @return  Always TRUE (success).
@@ -69,9 +181,11 @@ PrintAttributes(
     _In_ PCWSTR pszFullName,
     _Inout_opt_ PVOID Context)
 {
-    DWORD dwAttributes = pFindData->dwFileAttributes;
+    PATTRIBS_MASKS AttribsMasks = (PATTRIBS_MASKS)Context;
+    DWORD dwAttributes;
 
-    UNREFERENCED_PARAMETER(Context);
+    if (!GetEntryAttributes(pFindData, pszFullName, AttribsMasks->bLink, &dwAttributes))
+        return TRUE;
 
     ConPrintf(StdOut,
 #ifdef EXTENDED_ATTRIBUTES
@@ -91,12 +205,6 @@ PrintAttributes(
     return TRUE;
 }
 
-typedef struct _ATTRIBS_MASKS
-{
-    DWORD dwMask;
-    DWORD dwAttrib;
-} ATTRIBS_MASKS, *PATTRIBS_MASKS;
-
 /**
  * @brief   Changes attributes for the given file.
  * @return  TRUE if anything changed, FALSE otherwise.
@@ -110,8 +218,11 @@ ChangeAttributes(
     PATTRIBS_MASKS AttribsMasks = (PATTRIBS_MASKS)Context;
     DWORD dwAttributes;
 
-    dwAttributes = ((pFindData->dwFileAttributes & ~AttribsMasks->dwMask) | AttribsMasks->dwAttrib);
-    return SetFileAttributesW(pszFullName, dwAttributes);
+    if (!GetEntryAttributes(pFindData, pszFullName, AttribsMasks->bLink, &dwAttributes))
+        return FALSE;
+
+    dwAttributes = ((dwAttributes & ~AttribsMasks->dwMask) | AttribsMasks->dwAttrib);
+    return SetEntryAttributes(pszFullName, dwAttributes, AttribsMasks->bLink);
 }
 
 
@@ -279,7 +390,7 @@ AttribEnumFiles(
     EnumContext.FileName = pszFile;
     EnumContext.Flags    = fFlags;
     EnumContext.Callback = (AttribsMasks->dwMask == 0 ? PrintAttributes : ChangeAttributes);
-    EnumContext.Context  = (AttribsMasks->dwMask == 0 ? NULL : AttribsMasks);
+    EnumContext.Context  = AttribsMasks;
 
     /* Prepare the full file path buffer */
     EnumContext.cchBuffer = _countof(EnumContext.FullPathBuffer);
@@ -333,6 +444,8 @@ int wmain(int argc, WCHAR *argv[])
                 dwEnumFlags |= ENUM_RECURSE;
             else if (_wcsicmp(argv[i], L"/d") == 0)
                 dwEnumFlags |= ENUM_DIRECTORIES;
+            else if (_wcsicmp(argv[i], L"/l") == 0)
+                AttribsMasks.bLink = TRUE;
             else
             {
                 /* Unknown option */
