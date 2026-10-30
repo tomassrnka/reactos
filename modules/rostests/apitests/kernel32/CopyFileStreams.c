@@ -667,6 +667,60 @@ static void TestEas(void)
     Remove(Src);
 }
 
+/* A copy to the null device is data only: the file has streams and attributes, the device none */
+static void TestDevice(void)
+{
+    WCHAR Src[MAX_PATH], Dst[MAX_PATH];
+    BOOL Ret;
+
+    MakePath(Src, L"src");
+    MakeSource(Src);
+    ok(WriteStream(Src, L":Zone.Identifier", "[ZoneTransfer]", 14), "create a stream: %lu\n", GetLastError());
+    SetLastError(0xdeadbeef);
+    Ret = CopyFileW(Src, L"NUL", FALSE);
+    ok(Ret, "CopyFileW to NUL: %lu\n", GetLastError());
+    Ret = CopyFileW(Src, L"\\\\.\\NUL", FALSE);
+    ok(Ret, "CopyFileW to \\\\.\\NUL: %lu\n", GetLastError());
+    ok(StreamHolds(Src, L":s1", S1Data, SIZE_S1) && StreamHolds(Src, L":Zone.Identifier", "[ZoneTransfer]", 14), "the source was changed by the copy to NUL\n");
+
+    /* the errors of names that are not there: the source is looked at first */
+    MakePath(Dst, L"nosuchfile");
+    SetLastError(0xdeadbeef);
+    Ret = CopyFileW(Dst, L"", FALSE);
+    ok(!Ret && GetLastError() == ERROR_FILE_NOT_FOUND, "missing -> empty name: %d, %lu\n", Ret, GetLastError());
+    SetLastError(0xdeadbeef);
+    Ret = CopyFileW(Src, L"", FALSE);
+    ok(!Ret && GetLastError() == ERROR_PATH_NOT_FOUND, "file -> empty name: %d, %lu\n", Ret, GetLastError());
+    SetLastError(0xdeadbeef);
+    Ret = CopyFileW(L"", Dst, FALSE);
+    ok(!Ret && GetLastError() == ERROR_PATH_NOT_FOUND, "empty name -> file: %d, %lu\n", Ret, GetLastError());
+    SetLastError(0xdeadbeef);
+    Ret = CopyFileW(Dst, Src, FALSE);
+    ok(!Ret && GetLastError() == ERROR_FILE_NOT_FOUND, "missing -> file: %d, %lu\n", Ret, GetLastError());
+    ok(StreamHolds(Src, L":s1", S1Data, SIZE_S1) && StreamHolds(Src, L":s2", S2Data, SIZE_S2), "the source was changed by the failed copies\n");
+    Remove(Src);
+}
+
+/* The attributes of the source go to the file that holds the stream when the copy is to a stream (Windows 10) */
+static void TestStreamHost(void)
+{
+    WCHAR Src[MAX_PATH], Host[MAX_PATH], Dst[MAX_PATH];
+    BOOL Ret;
+
+    MakePath(Src, L"attrsrc");
+    MakePath(Host, L"host");
+    StringCbPrintfW(Dst, sizeof(Dst), L"%s:x", Host);
+    Remove(Host);
+    ok(WriteTo(Src, "aaa", 3, CREATE_ALWAYS), "create: %lu\n", GetLastError());
+    ok(SetFileAttributesW(Src, FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN), "SetFileAttributes: %lu\n", GetLastError());
+    Ret = CopyFileW(Src, Dst, FALSE);
+    ok(Ret, "CopyFileW to host:x: %lu\n", GetLastError());
+    ok(GetFileAttributesW(Host) == (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_ARCHIVE), "host attributes %#lx\n", GetFileAttributesW(Host));
+    ok(StreamHolds(Host, L":x", "aaa", 3), "the stream has not the data\n");
+    Remove(Host);
+    Remove(Src);
+}
+
 static void TestCopyFile2(void)
 {
     COPYFILE2_EXTENDED_PARAMETERS Params = { sizeof(Params) };
@@ -885,6 +939,47 @@ static void TestCommands(void)
     StringCbPrintfW(Path, sizeof(Path), L"%s\\inner", Sub2);
     ok(StreamHolds(Path, L":ids", Ids, 16), "xcopy /e: sub2\\inner:ids is wrong (%I64d)\n", SizeOfStream(Path, L":ids"));
 
+    /* the copy of a read-only directory is not read-only */
+    MakePath(Path, L"rodir");
+    CreateDirectoryW(Path, NULL);
+    StringCbPrintfW(Dst, sizeof(Dst), L"%s\\f.txt", Path);
+    ok(WriteTo(Dst, "f", 1, CREATE_ALWAYS), "create: %lu\n", GetLastError());
+    ok(SetFileAttributesW(Path, FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_DIRECTORY), "SetFileAttributes: %lu\n", GetLastError());
+    RunCmd(L"xcopy /e /i /q rodir rodir2");
+    MakePath(Dst, L"rodir2");
+    ok(Exists(Dst) && !(GetFileAttributesW(Dst) & FILE_ATTRIBUTE_READONLY), "the copy of a read-only directory has the attributes %#lx\n", GetFileAttributesW(Dst));
+    SetFileAttributesW(Path, FILE_ATTRIBUTE_DIRECTORY);
+    SetFileAttributesW(Dst, FILE_ATTRIBUTE_DIRECTORY);
+    RunCmd(L"rd /s /q rodir");
+    RunCmd(L"rd /s /q rodir2");
+
+    /* a junction in the source is followed: the copy has a directory of the files it leads to, no junction */
+    MakePath(Path, L"jtarget");
+    CreateDirectoryW(Path, NULL);
+    StringCbPrintfW(Dst, sizeof(Dst), L"%s\\t.txt", Path);
+    ok(WriteTo(Dst, "t", 1, CREATE_ALWAYS), "create: %lu\n", GetLastError());
+    MakePath(Path, L"jtree");
+    CreateDirectoryW(Path, NULL);
+    RunCmd(L"mklink /j jtree\\junc jtarget");
+    StringCbPrintfW(Dst, sizeof(Dst), L"%s\\junc", Path);
+    if (GetFileAttributesW(Dst) != INVALID_FILE_ATTRIBUTES && (GetFileAttributesW(Dst) & FILE_ATTRIBUTE_REPARSE_POINT))
+    {
+        RunCmd(L"xcopy /e /i /q jtree jtree2");
+        MakePath(Path, L"jtree2\\junc");
+        ok(Exists(Path) && !(GetFileAttributesW(Path) & FILE_ATTRIBUTE_REPARSE_POINT),
+           "xcopy of a junction: attributes %#lx\n", GetFileAttributesW(Path));
+        StringCbCatW(Path, sizeof(Path), L"\\t.txt");
+        ok(Exists(Path), "the files the junction leads to are not in the copy\n");
+    }
+    else
+    {
+        skip("The shell made no junction\n");
+    }
+    RunCmd(L"rmdir jtree\\junc");
+    RunCmd(L"rd /s /q jtree");
+    RunCmd(L"rd /s /q jtree2");
+    RunCmd(L"rd /s /q jtarget");
+
     /* clean up the tree */
     RunCmd(L"rd /s /q sub");
     RunCmd(L"rd /s /q sub2");
@@ -929,6 +1024,8 @@ START_TEST(CopyFileStreams)
     TestStreamNames();
     TestLockedStream();
     TestEas();
+    TestDevice();
+    TestStreamHost();
     TestCopyFile2();
     TestMove();
     TestOtherVolume();

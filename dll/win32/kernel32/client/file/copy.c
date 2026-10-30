@@ -232,7 +232,7 @@ BasepNameHasStream(
     return Colon != NULL;
 }
 
-/* Whether the volume of the file keeps named streams. A volume that cannot tell is taken to keep them. */
+/* Whether the volume of the file keeps named streams. A volume that cannot tell is taken to keep none. */
 static BOOL
 BasepVolumeHasStreams(
     HANDLE FileHandle)
@@ -246,9 +246,28 @@ BasepVolumeHasStreams(
     Status = NtQueryVolumeInformationFile(FileHandle, &IoStatusBlock, Info, sizeof(Buffer),
                                           FileFsAttributeInformation);
     if (!NT_SUCCESS(Status) && Status != STATUS_BUFFER_OVERFLOW)
-        return TRUE;
+        return FALSE;
 
     return (Info->FileSystemAttributes & FILE_NAMED_STREAMS) != 0;
+}
+
+/* Whether the file has named streams. A file system that cannot list them has none to remove. */
+static BOOL
+BasepHasNamedStreams(
+    HANDLE FileHandle)
+{
+    COPY2_STREAM *Streams = NULL;
+    PVOID Buffer = NULL;
+    ULONG Count = 0;
+
+    if (!NT_SUCCESS(Copy2QueryNamedStreams(FileHandle, &Streams, &Count, &Buffer)))
+        return FALSE;
+
+    if (Streams)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Streams);
+    if (Buffer)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
+    return Count != 0;
 }
 
 BOOL
@@ -276,13 +295,33 @@ BasepCopyFileExW(IN LPCWSTR lpExistingFileName,
     ULONG NamedCount = 0, i, ChunkSize, MaxChunk;
     DWORD StreamError;
     BOOL RC = FALSE;
-    BOOL DestIsStream, DestExisted, StreamFailed = FALSE;
+    BOOL DestIsStream, DestExisted, DestOnDisk, StreamFailed = FALSE;
     DWORD SystemError;
 
     RtlZeroMemory(&State, sizeof(State));
     State.ProgressRoutine = lpProgressRoutine;
     State.Data = lpData;
     State.Cancel = pbCancel;
+
+    if (lpExistingFileName == NULL || lpNewFileName == NULL)
+    {
+        SetLastError(ERROR_PATH_NOT_FOUND);
+        goto Quit;
+    }
+
+    /* The source is opened first: a name that is not there is reported before anything about the new one */
+    FileHandleSource = CreateFileW(lpExistingFileName,
+                                   GENERIC_READ,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                   NULL,
+                                   OPEN_EXISTING,
+                                   FILE_ATTRIBUTE_NORMAL|FILE_FLAG_NO_BUFFERING,
+                                   NULL);
+    if (INVALID_HANDLE_VALUE == FileHandleSource)
+    {
+        WARN("Error %lu during opening of source file\n", GetLastError());
+        goto Quit;
+    }
 
     /* The names are made absolute once, for the names of the streams */
     StreamError = Copy2FullPath(lpExistingFileName, &SourceFull);
@@ -291,7 +330,7 @@ BasepCopyFileExW(IN LPCWSTR lpExistingFileName,
     if (StreamError != ERROR_SUCCESS)
     {
         SetLastError(StreamError);
-        goto Quit;
+        goto CloseSource;
     }
 
     /* "file::$DATA" is the file; streams are named after "file" */
@@ -304,20 +343,7 @@ BasepCopyFileExW(IN LPCWSTR lpExistingFileName,
     if (BasepNameHasStream(SourceFull))
     {
         SetLastError(ERROR_INVALID_PARAMETER);
-        goto Quit;
-    }
-
-    FileHandleSource = CreateFileW(lpExistingFileName,
-                                   GENERIC_READ,
-                                   FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                   NULL,
-                                   OPEN_EXISTING,
-                                   FILE_ATTRIBUTE_NORMAL|FILE_FLAG_NO_BUFFERING,
-                                   NULL);
-    if (INVALID_HANDLE_VALUE == FileHandleSource)
-    {
-        WARN("Error %lu during opening of source file\n", GetLastError());
-        goto Quit;
+        goto CloseSource;
     }
 
     errCode = NtQueryInformationFile(FileHandleSource,
@@ -379,13 +405,15 @@ BasepCopyFileExW(IN LPCWSTR lpExistingFileName,
     if (!(dwCopyFlags & COPY_FILE_FAIL_IF_EXISTS) && DestExisted)
         SetLastError(ERROR_SUCCESS);
 
-    /* A volume that cannot keep streams gets the file without them. A file that was overwritten has only the
+    /* Only a file on a disk is given streams, attributes and extended attributes (a copy to NUL is just data). A
+       volume that cannot keep streams gets the file without them. A file that was overwritten has only the
        streams of its source. */
-    if (NamedCount != 0 && !BasepVolumeHasStreams(FileHandleDest))
+    DestOnDisk = (GetFileType(FileHandleDest) == FILE_TYPE_DISK);
+    if (!DestOnDisk || !BasepVolumeHasStreams(FileHandleDest))
     {
         NamedCount = 0;
     }
-    else if (DestExisted && !DestIsStream)
+    else if (DestExisted && !DestIsStream && BasepHasNamedStreams(FileHandleDest))
     {
         StreamError = Copy2RemoveStreams(FileHandleDest, DestFull, NULL, 0);
         if (StreamError != ERROR_SUCCESS)
@@ -465,6 +493,10 @@ BasepCopyFileExW(IN LPCWSTR lpExistingFileName,
     else if (!NT_SUCCESS(errCode))
     {
         BaseSetLastNTError(errCode);
+    }
+    else if (!DestOnDisk)
+    {
+        RC = TRUE;
     }
     else
     {

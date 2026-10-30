@@ -47,6 +47,22 @@ enum
     COPY_BINARY      = 0x100,   /* /B  */
 };
 
+static DWORD CALLBACK
+CopyProgress(
+    LARGE_INTEGER TotalFileSize,
+    LARGE_INTEGER TotalBytesTransferred,
+    LARGE_INTEGER StreamSize,
+    LARGE_INTEGER StreamBytesTransferred,
+    DWORD dwStreamNumber,
+    DWORD dwCallbackReason,
+    HANDLE hSourceFile,
+    HANDLE hDestinationFile,
+    LPVOID lpData)
+{
+    /* Ctrl+C or Ctrl+Break, as for the loop of reads and writes */
+    return CheckCtrlBreak (BREAK_INPUT) ? PROGRESS_CANCEL : PROGRESS_CONTINUE;
+}
+
 static BOOL
 IsDeviceName(LPCTSTR pszName)
 {
@@ -168,10 +184,14 @@ copy(TCHAR source[MAX_PATH],
 
     /* A plain copy of one file is left to CopyFileEx: it brings the alternate data streams and the extended
        attributes of the file along, which a loop of reads and writes does not. Devices (copy x con, copy con x)
-       and anything CopyFileEx cannot do go on in the loop below. */
+       and the copies that join or convert files go on in the loop below. */
     if (!append && !(lpdwFlags & COPY_ASCII) &&
         GetFileType (hFileSrc) == FILE_TYPE_DISK && !IsDeviceName (source) && !IsDeviceName (dest))
     {
+        BOOL bCopied;
+
+        CloseHandle (hFileSrc);
+
         if (IsExistingFile (dest))
         {
             TRACE ("SetFileAttributes (%s, FILE_ATTRIBUTE_NORMAL);\n", debugstr_aw(dest));
@@ -181,15 +201,21 @@ copy(TCHAR source[MAX_PATH],
             DeleteFile (dest);
         }
 
-        if (CopyFileEx (source, dest, NULL, NULL, NULL, 0))
+        /* Ctrl+C stops the copy (the routine cancels it), which deletes the partial file */
+        bCopied = CopyFileEx (source, dest, CopyProgress, NULL, NULL, 0);
+        if (!bCopied)
         {
-            CloseHandle (hFileSrc);
-
-            /* For MS-DOS backwards-compatibility, always remove the read-only attribute */
-            SetFileAttributes (dest, dwAttrib & ~FILE_ATTRIBUTE_READONLY);
-            goto FinishCopy;
+            if (GetLastError () == ERROR_REQUEST_ABORTED)
+                ConOutResPuts (STRING_COPY_ERROR3);
+            else
+                ErrorMessage (GetLastError (), NULL);
+            nErrorLevel = 1;
+            return 0;
         }
-        TRACE ("CopyFileEx failed with %lu, copying by hand\n", GetLastError ());
+
+        /* For MS-DOS backwards-compatibility, always remove the read-only attribute */
+        SetFileAttributes (dest, dwAttrib & ~FILE_ATTRIBUTE_READONLY);
+        goto FinishCopy;
     }
 
     if (!IsExistingFile (dest))

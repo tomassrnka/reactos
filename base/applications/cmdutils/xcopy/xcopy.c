@@ -224,11 +224,35 @@ static BOOL XCOPY_CreateDirectory(const WCHAR* path, const WCHAR* template_dir)
         /* A root, as "C:", is no template */
         if (!template_path[0] || template_path[lstrlenW(template_path) - 1] == ':')
             template_path[0] = 0;
+        else
+        {
+            /* A junction or a link is not a template: the copy would link back into the source, where Windows
+               copies what the link leads to */
+            DWORD attributes = GetFileAttributesW(template_path);
+            if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_REPARSE_POINT))
+                template_path[0] = 0;
+        }
     }
 
-    while (!((template_path && template_path[0] && CreateDirectoryExW(template_path, new_path, NULL)) ||
-             CreateDirectoryW(new_path,NULL)))
+    for (;;)
     {
+        BOOL made = FALSE;
+
+        if (template_path && template_path[0] && CreateDirectoryExW(template_path, new_path, NULL))
+        {
+            /* The copy of a read-only directory is not read-only (Windows 10) */
+            DWORD attributes = GetFileAttributesW(new_path);
+            if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_READONLY))
+                SetFileAttributesW(new_path, attributes & ~FILE_ATTRIBUTE_READONLY);
+            made = TRUE;
+        }
+        else
+        {
+            made = CreateDirectoryW(new_path,NULL);
+        }
+        if (made)
+            break;
+
         WCHAR *slash;
         DWORD last_error = GetLastError();
         if (last_error == ERROR_ALREADY_EXISTS)
