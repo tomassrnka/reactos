@@ -16,6 +16,7 @@ list(APPEND SOURCE
     iphlpapi_reactos.c
     iphlpapi_main.c
     luid.c
+    neighbor2.c
     media.c
     netio.c
     notify.c

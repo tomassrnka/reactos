@@ -16,6 +16,7 @@ extern void func_GetOwnerModuleFromUdpEntry(void);
 extern void func_icmp(void);
 extern void func_IpInterface(void);
 extern void func_IpTables2(void);
+extern void func_NeighborEntry2(void);
 extern void func_NotifyAddrChange(void);
 extern void func_NotifyChanges(void);
 extern void func_NotifyIpInterfaceChange(void);
@@ -39,6 +40,7 @@ const struct test winetest_testlist[] =
     { "icmp",                       func_icmp },
     { "IpInterface",               func_IpInterface },
     { "IpTables2",                  func_IpTables2 },
+    { "NeighborEntry2",             func_NeighborEntry2 },
     { "NotifyAddrChange",          func_NotifyAddrChange },
     { "NotifyChanges",              func_NotifyChanges },
     { "NotifyIpInterfaceChange",    func_NotifyIpInterfaceChange },
