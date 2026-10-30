@@ -192,6 +192,20 @@ SysWOW64/msftedit.dll
 @0x600 SysWOW64/opengl32.dll
 @0x600 SysWOW64/win32u.dll
 
+# Direct2D (d2d1.dll!D2D1CreateFactory, imported by the 32-bit WordCraft) and the import chain it
+# needs: d3d10_1 -> d3d10core/d3d10 -> d3dcompiler_39, plus d3dcompiler_47. dwrite, xmllite and
+# ole32 (d2d1 delay imports) are listed above. Loading only; no 32-bit display driver path is claimed.
+@0x600 SysWOW64/d2d1.dll
+@0x600 SysWOW64/d3d10_1.dll
+@0x600 SysWOW64/d3d10core.dll
+@0x600 SysWOW64/d3d10.dll
+@0x600 SysWOW64/d3dcompiler_39.dll
+@0x600 SysWOW64/d3dcompiler_47.dll
+
+# UI Automation client (uiautomationcore.dll: the 7 Uia* functions the 32-bit WordCraft imports).
+# Imports shlwapi, oleaut32, ole32, oleacc, combase and user32, all listed above.
+SysWOW64/uiautomationcore.dll
+
 # Runtime dependencies of common 32-bit apps (T136): Firefox 52 imports pdh (xul.dll) and
 # delay-loads msdmo; its ANGLE libGLESv2 imports d3d9; Winamp visualisers import ddraw and the
 # WMA encoder imports wmvcore. Each is loaded with an import chain that is listed here too.
