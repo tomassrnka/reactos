@@ -49,6 +49,53 @@ TestKeyAccess_(
     }
 }
 
+static
+VOID
+TestPerformanceDataKey(VOID)
+{
+    WCHAR Name[64];
+    WCHAR Class[16] = L"x";
+    DWORD cbName;
+    DWORD cbClass;
+    DWORD SubKeys, MaxSubKeyLen, MaxClassLen;
+    FILETIME LastWrite;
+    LONG ret;
+
+    /* The performance data key is not a real registry key, but it can be queried.
+     * The number and size of its values differ between Windows versions: do not check them. */
+    SubKeys = MaxSubKeyLen = MaxClassLen = 0x55555555;
+    ret = RegQueryInfoKeyW(HKEY_PERFORMANCE_DATA, NULL, NULL, NULL, &SubKeys, &MaxSubKeyLen, &MaxClassLen,
+                           NULL, NULL, NULL, NULL, &LastWrite);
+    ok(ret == NO_ERROR, "RegQueryInfoKeyW returned %ld\n", ret);
+    ok(SubKeys == 0, "SubKeys = %lu\n", SubKeys);
+    ok(MaxSubKeyLen == 0, "MaxSubKeyLen = %lu\n", MaxSubKeyLen);
+    ok(MaxClassLen == 0, "MaxClassLen = %lu\n", MaxClassLen);
+
+    SubKeys = 0x55555555;
+    ret = RegQueryInfoKeyA(HKEY_PERFORMANCE_DATA, NULL, NULL, NULL, &SubKeys, NULL, NULL,
+                           NULL, NULL, NULL, NULL, NULL);
+    ok(ret == NO_ERROR, "RegQueryInfoKeyA returned %ld\n", ret);
+    ok(SubKeys == 0, "SubKeys = %lu\n", SubKeys);
+
+    ret = RegQueryInfoKeyW(HKEY_PERFORMANCE_DATA, NULL, NULL, NULL, NULL, NULL, NULL,
+                           NULL, NULL, NULL, NULL, NULL);
+    ok(ret == NO_ERROR, "RegQueryInfoKeyW returned %ld\n", ret);
+
+    cbClass = ARRAYSIZE(Class);
+    ret = RegQueryInfoKeyW(HKEY_PERFORMANCE_DATA, Class, &cbClass, NULL, NULL, NULL, NULL,
+                           NULL, NULL, NULL, NULL, NULL);
+    ok(ret == NO_ERROR, "RegQueryInfoKeyW returned %ld\n", ret);
+    ok(cbClass == 0, "cbClass = %lu\n", cbClass);
+
+    cbName = ARRAYSIZE(Name);
+    ret = RegEnumKeyExW(HKEY_PERFORMANCE_DATA, 0, Name, &cbName, NULL, NULL, NULL, NULL);
+    ok(ret == ERROR_NO_MORE_ITEMS, "RegEnumKeyExW returned %ld\n", ret);
+
+    cbName = ARRAYSIZE(Name);
+    ret = RegEnumValueW(HKEY_PERFORMANCE_DATA, 100, Name, &cbName, NULL, NULL, NULL, NULL);
+    ok(ret == ERROR_NO_MORE_ITEMS, "RegEnumValueW returned %ld\n", ret);
+}
+
 START_TEST(RegQueryInfoKey)
 {
     /* 0 access just fails the open */
@@ -70,4 +117,5 @@ START_TEST(RegQueryInfoKey)
     /* But these return nothing */
     TestKeyAccess(KEY_ENUMERATE_SUB_KEYS,           ERROR_ACCESS_DENIED, FALSE);
     TestKeyAccess(KEY_NOTIFY,                       ERROR_ACCESS_DENIED, FALSE);
+    TestPerformanceDataKey();
 }
