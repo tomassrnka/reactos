@@ -303,6 +303,8 @@ INT Batch(LPTSTR fullname, LPTSTR firstword, LPTSTR param, PARSED_COMMAND *Cmd)
     HANDLE hFile = NULL;
     BOOLEAN bSameFn = FALSE;
     BOOLEAN bTopLevel;
+    /* A CALL has no parsed command: its result is the ERRORLEVEL the file leaves */
+    BOOLEAN bCall = (Cmd == NULL);
     BATCH_CONTEXT new;
     PFOR_CONTEXT saved_fc;
 
@@ -493,7 +495,13 @@ INT Batch(LPTSTR fullname, LPTSTR firstword, LPTSTR param, PARSED_COMMAND *Cmd)
     /* Restore the FOR variables */
     fc = saved_fc;
 
-    /* Always return the last command's return code */
+    /*
+     * Always return the last command's return code. But for a CALL, a last
+     * command that succeeds (ECHO, GOTO :EOF, EXIT /B without a number...)
+     * does not reset the ERRORLEVEL that an earlier command or EXIT /B n left.
+     */
+    if (bCall && ret == 0)
+        ret = nErrorLevel;
     TRACE("Batch: returns %d\n", ret);
     return ret;
 }

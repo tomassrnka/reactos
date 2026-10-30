@@ -2,6 +2,7 @@
 list(APPEND SOURCE
     cmd.c
     echoenc.c
+    exitb.c
     fc.c
     search.c
     pipe.c
