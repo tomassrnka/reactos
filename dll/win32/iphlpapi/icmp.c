@@ -204,6 +204,13 @@ IcmpCloseHandle(
 {
     NTSTATUS Status;
 
+    /* Windows rejects the two values that are never a handle with ERROR_INVALID_PARAMETER. */
+    if (IcmpHandle == NULL || IcmpHandle == INVALID_HANDLE_VALUE)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
     Status = NtClose(IcmpHandle);
     if (!NT_SUCCESS(Status))
     {
@@ -263,7 +270,10 @@ IcmpParseReplies(
     DWORD nReplies;
 
     if (ReplyBuffer == NULL || ReplySize == 0)
+    {
+        SetLastError(ERROR_GEN_FAILURE);
         return 0;
+    }
 
     // TODO: Handle ReplyBuffer having more than 1 ICMP_ECHO_REPLY.
 
@@ -280,13 +290,20 @@ IcmpParseReplies(
     return nReplies;
 }
 
+/*
+ * IcmpSendEcho2 and IcmpSendEcho2Ex. With an Event or an ApcRoutine the call
+ * returns 0 and GetLastError() is ERROR_IO_PENDING; the caller waits for the
+ * event (or runs the APC) and then reads the reply with IcmpParseReplies.
+ * Without them the call waits for the reply and returns the number of replies.
+ */
+static
 DWORD
-WINAPI
-IcmpSendEcho2(
+IcmpSendEcho2Common(
     _In_     HANDLE                 IcmpHandle,
     _In_opt_ HANDLE                 Event,
     _In_opt_ PIO_APC_ROUTINE        ApcRoutine,
     _In_opt_ PVOID                  ApcContext,
+    _In_     IPAddr                 SourceAddress,
     _In_     IPAddr                 DestinationAddress,
     _In_     LPVOID                 RequestData,
     _In_     WORD                   RequestSize,
@@ -296,15 +313,21 @@ IcmpSendEcho2(
     _In_     DWORD                  Timeout)
 {
     HANDLE hEvent;
+    IO_STATUS_BLOCK SyncIoStatusBlock;
     PIO_STATUS_BLOCK IoStatusBlock;
+    BOOL Async = (Event != NULL || ApcRoutine != NULL);
     PVOID InputBuffer;
     PICMP_ECHO_REQUEST Request;
+    ULONG InputBufferLength;
     DWORD nReplies;
     NTSTATUS Status;
 
-    if (ReplySize < sizeof(ICMP_ECHO_REPLY) + sizeof(IO_STATUS_BLOCK))
+    if (IcmpHandle == NULL || IcmpHandle == INVALID_HANDLE_VALUE ||
+        ReplyBuffer == NULL || ReplySize < sizeof(ICMP_ECHO_REPLY) ||
+        Timeout == 0 || Timeout == (DWORD)-1 ||
+        (RequestSize != 0 && RequestData == NULL))
     {
-        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        SetLastError(ERROR_INVALID_PARAMETER);
         return 0;
     }
 
@@ -314,12 +337,34 @@ IcmpSendEcho2(
         return 0;
     }
 
-    // IO_STATUS_BLOCK will be stored inside ReplyBuffer (in the end)
-    // that's because the function may return before device request ends
-    IoStatusBlock = (PIO_STATUS_BLOCK)((PUCHAR)ReplyBuffer + ReplySize - sizeof(IO_STATUS_BLOCK));
-    ReplySize -= sizeof(IO_STATUS_BLOCK);
+    if (Async)
+    {
+        // The call may return before the request ends, so the IO_STATUS_BLOCK
+        // lives inside ReplyBuffer (in the end).
+        if (ReplySize < sizeof(ICMP_ECHO_REPLY) + sizeof(IO_STATUS_BLOCK))
+        {
+            SetLastError(ERROR_INSUFFICIENT_BUFFER);
+            return 0;
+        }
 
-    InputBuffer = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, ReplySize);
+        IoStatusBlock = (PIO_STATUS_BLOCK)((PUCHAR)ReplyBuffer + ReplySize - sizeof(IO_STATUS_BLOCK));
+        ReplySize -= sizeof(IO_STATUS_BLOCK);
+    }
+    else
+    {
+        // Nothing outlives the call, so the reply keeps all of its buffer.
+        IoStatusBlock = &SyncIoStatusBlock;
+    }
+
+    // The request must fit whatever ReplySize is left (an event/APC call gave the
+    // IO_STATUS_BLOCK part of it away), as IcmpSendEcho does.
+    InputBufferLength = sizeof(ICMP_ECHO_REQUEST) + RequestSize;
+    if (RequestOptions != NULL)
+        InputBufferLength += RequestOptions->OptionsSize;
+    if (InputBufferLength < ReplySize)
+        InputBufferLength = ReplySize;
+
+    InputBuffer = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, InputBufferLength);
     if (InputBuffer == NULL)
     {
         SetLastError(ERROR_NOT_ENOUGH_MEMORY);
@@ -328,6 +373,7 @@ IcmpSendEcho2(
 
     Request = (PICMP_ECHO_REQUEST)InputBuffer;
     Request->Address = DestinationAddress;
+    Request->SourceAddress = SourceAddress;
     Request->Timeout = Timeout;
     Request->OptionsOffset = sizeof(ICMP_ECHO_REQUEST);
     Request->DataOffset = sizeof(ICMP_ECHO_REQUEST);
@@ -357,13 +403,18 @@ IcmpSendEcho2(
         CopyMemory((PUCHAR)InputBuffer + Request->DataOffset, RequestData, RequestSize);
     }
 
-    if (Event == NULL && ApcRoutine == NULL)
+    if (Async)
     {
-        hEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
+        hEvent = Event;
     }
     else
     {
-        hEvent = Event;
+        hEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
+        if (hEvent == NULL)
+        {
+            HeapFree(GetProcessHeap(), 0, InputBuffer);
+            return 0;
+        }
     }
 
     Status = NtDeviceIoControlFile(
@@ -374,12 +425,12 @@ IcmpSendEcho2(
         IoStatusBlock,
         IOCTL_ICMP_ECHO_REQUEST,
         InputBuffer,
-        ReplySize,
+        InputBufferLength,
         ReplyBuffer,
         ReplySize);         // TODO: Determine how Windows calculates OutputBufferLength.
 
     // If called asynchronously, return for the caller to handle.
-    if (Event != NULL || ApcRoutine != NULL)
+    if (Async)
     {
         SetLastError(RtlNtStatusToDosError(Status));
         HeapFree(GetProcessHeap(), 0, InputBuffer);
@@ -402,20 +453,62 @@ IcmpSendEcho2(
 
     if (!NT_SUCCESS(Status))
     {
-        SetLastError(RtlNtStatusToDosError(Status));
+        // A source address that is not on this machine.
+        if (SourceAddress != 0 && Status == STATUS_INVALID_ADDRESS)
+            SetLastError(ERROR_INVALID_NETNAME);
+        else
+            SetLastError(RtlNtStatusToDosError(Status));
         return 0;
-    }
-
-    Status = ((PICMP_ECHO_REPLY)ReplyBuffer)->Status;
-    if (Status != IP_SUCCESS)
-    {
-        SetLastError(Status);
     }
 
     nReplies = ((PICMP_ECHO_REPLY)ReplyBuffer)->Reserved;
     ((PICMP_ECHO_REPLY)ReplyBuffer)->Reserved = 0;
 
+    // The status of the reply is the error only when there is no reply to read
+    // (a timeout); an ICMP error message still counts as a reply.
+    if (nReplies == 0)
+        SetLastError(((PICMP_ECHO_REPLY)ReplyBuffer)->Status);
+
     return nReplies;
+}
+
+DWORD
+WINAPI
+IcmpSendEcho2(
+    _In_     HANDLE                 IcmpHandle,
+    _In_opt_ HANDLE                 Event,
+    _In_opt_ PIO_APC_ROUTINE        ApcRoutine,
+    _In_opt_ PVOID                  ApcContext,
+    _In_     IPAddr                 DestinationAddress,
+    _In_     LPVOID                 RequestData,
+    _In_     WORD                   RequestSize,
+    _In_opt_ PIP_OPTION_INFORMATION RequestOptions,
+    _Out_    LPVOID                 ReplyBuffer,
+    _In_     DWORD                  ReplySize,
+    _In_     DWORD                  Timeout)
+{
+    return IcmpSendEcho2Common(IcmpHandle, Event, ApcRoutine, ApcContext, 0, DestinationAddress,
+                               RequestData, RequestSize, RequestOptions, ReplyBuffer, ReplySize, Timeout);
+}
+
+DWORD
+WINAPI
+IcmpSendEcho2Ex(
+    _In_     HANDLE                 IcmpHandle,
+    _In_opt_ HANDLE                 Event,
+    _In_opt_ PIO_APC_ROUTINE        ApcRoutine,
+    _In_opt_ PVOID                  ApcContext,
+    _In_     IPAddr                 SourceAddress,
+    _In_     IPAddr                 DestinationAddress,
+    _In_     LPVOID                 RequestData,
+    _In_     WORD                   RequestSize,
+    _In_opt_ PIP_OPTION_INFORMATION RequestOptions,
+    _Out_    LPVOID                 ReplyBuffer,
+    _In_     DWORD                  ReplySize,
+    _In_     DWORD                  Timeout)
+{
+    return IcmpSendEcho2Common(IcmpHandle, Event, ApcRoutine, ApcContext, SourceAddress, DestinationAddress,
+                               RequestData, RequestSize, RequestOptions, ReplyBuffer, ReplySize, Timeout);
 }
 
 DWORD
@@ -539,14 +632,11 @@ IcmpSendEcho(
         return 0;
     }
 
-    Status = ((PICMP_ECHO_REPLY)ReplyBuffer)->Status;
-    if (Status != IP_SUCCESS)
-    {
-        SetLastError(Status);
-    }
-
     nReplies = ((PICMP_ECHO_REPLY)ReplyBuffer)->Reserved;
     ((PICMP_ECHO_REPLY)ReplyBuffer)->Reserved = 0;
+
+    if (nReplies == 0)
+        SetLastError(((PICMP_ECHO_REPLY)ReplyBuffer)->Status);
 
     return nReplies;
 }
