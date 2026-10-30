@@ -51,7 +51,8 @@ typedef struct _FM_FEATURE
     BOOL    PayloadAvailable;    /* every declared payload source present on disk */
     WCHAR   InstallDate[32];     /* UTC ISO-8601 of last enable, "" if never */
     BOOL    PendingReboot;       /* disabled but some component awaits reboot-delete */
-    WCHAR   Provider[16];        /* software tier: [Install] Provider= "rapps" | "command"; "" for OS tier */
+    WCHAR   Provider[16];        /* software tier: [Install] Provider= "rapps" | "command" | "scoop"; "" for OS tier */
+    WCHAR   Source[32];          /* software tier display source: "rapps", "command", "scoop/<bucket>"; "" for OS tier */
 } FM_FEATURE;
 
 /* Catalog / layout helpers. featmgr root = %SystemRoot%\Featmgr */
@@ -106,6 +107,41 @@ int     FmGetDependents(LPCWSTR id, LPWSTR buf, DWORD cch);
 #define FM_IMPORT_ANYARCH 0x1  /* accept the generic URLDownload on non-x86 (RAPPS ignores it there) */
 #define FM_IMPORT_CLEAN   0x2  /* first delete previously generated rapps-*.ini */
 int    FmImportRapps(LPCWSTR srcDir, DWORD flags, int *skipped, FILE *log);
+
+/* ---- Scoop (SCOOP-FEATMGR-01) ---------------------------------------------
+ * Provider=scoop entries are generated from a Scoop bucket on disk and executed by shelling
+ * out to "scoop install|uninstall <bucket>/<app>"; Scoop itself does downloads + hash checks. */
+#define FM_SCOOP_TRUST      0x1  /* allow a bucket that is not an official one (main, extras) */
+#define FM_SCOOP_CLEAN      0x2  /* first delete this bucket's previously generated entries */
+#define FM_SCOOP_UNVERIFIED 0x4  /* also import manifests that carry no hash */
+/* bucket NULL or "*": every official bucket that exists on disk. dirOverride: manifest directory
+ * (tests). limit > 0 caps the entries written per bucket. Returns entries written; <0 on error
+ * (-2: not supported on this architecture). */
+int    FmImportScoop(LPCWSTR bucket, LPCWSTR dirOverride, DWORD flags, int limit, int *skipped, FILE *log);
+int    FmScoopListBuckets(FILE *log);
+BOOL   FmScoopSupported(void);
+BOOL   FmScoopRoot(LPWSTR buf, DWORD cch);
+BOOL   FmScoopAppInstalled(LPCWSTR app);
+BOOL   FmScoopUsable(void);
+BOOL   FmScoopValidApp(LPCWSTR s);
+BOOL   FmScoopValidBucket(LPCWSTR s);
+BOOL   FmScoopCommand(LPCWSTR verb, LPCWSTR bucket, LPCWSTR app, LPWSTR out, DWORD cch);
+void   FmScoopPrepareEnv(void);
+BOOL   FmPwshPath(LPWSTR buf, DWORD cch);
+BOOL   FmVolumeIsNtfs(LPCWSTR path, LPWSTR fs, DWORD cchFs);
+
+/* Shared manifest writer (rapps_import.c) */
+typedef struct _FM_OUTBUF { WCHAR *buf; size_t cap, len; BOOL fail; } FM_OUTBUF;
+void   FmOutLine(FM_OUTBUF *o, LPCWSTR key, LPCWSTR val);   /* key "" => raw line */
+BOOL   FmWriteManifest(LPCWSTR path, const FM_OUTBUF *o);
+
+/* Last human-readable reason an operation failed (the engine's error text, plus the tail of
+ * the installer's / Scoop's own output). Valid after FmEnable/FmDisable/FmUninstall returns. */
+void   FmGetLastMessage(LPWSTR buf, DWORD cch);
+void   FmSetLastMessage(LPCWSTR fmt, ...);
+
+/* Same as FmGetDependents, over an already loaded array (no catalog rescan). */
+int    FmGetDependentsIn(const FM_FEATURE *arr, int n, LPCWSTR id, LPWSTR buf, DWORD cch);
 
 /* Stage a RAPPS-format entry that ships in the image into the RAPPS database as <pkg>
  * (see FmEnable: [Rapps] Entry=). */
