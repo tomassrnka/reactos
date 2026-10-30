@@ -46,6 +46,10 @@ struct schan_context
     schan_imp_session session;
     ULONG req_ctx_attr;
     const CERT_CONTEXT *cert;
+    /* ApplyControlToken: SCHANNEL_SHUTDOWN or SCHANNEL_ALERT, sent by the next InitializeSecurityContext */
+    DWORD control;
+    DWORD alert_type;
+    DWORD alert_number;
 };
 
 static struct schan_handle *schan_handle_table;
@@ -141,7 +145,7 @@ static void *schan_get_object(ULONG_PTR handle_idx, enum schan_handle_type type)
 static void read_config(void)
 {
     DWORD enabled = 0, default_disabled = 0;
-    HKEY protocols_key, key;
+    HKEY protocols_key = NULL, key;
     WCHAR subkey_name[64];
     unsigned i;
     DWORD res;
@@ -223,7 +227,11 @@ static void read_config(void)
         }
     }
 
-    RegCloseKey(protocols_key);
+    /* Only close a key that was opened: protocols_key is not set when the open fails (the Protocols key does not
+     * exist by default), and closing whatever value it holds closes an unrelated handle of the process (seen as
+     * Google Updater's thread handle going invalid, CHECK in PlatformThread::Join, under WoW64) */
+    if (protocols_key)
+        RegCloseKey(protocols_key);
 
     config_enabled_protocols = enabled & schan_imp_enabled_protocols();
     config_default_disabled_protocols = default_disabled;
@@ -349,7 +357,9 @@ static SECURITY_STATUS schan_CheckCreds(const SCHANNEL_CRED *schanCred)
     case SCHANNEL_CRED_VERSION:
         break;
     default:
-        return SEC_E_INTERNAL_ERROR;
+        /* Windows 10 answers versions 0-2 and 6+ with SEC_E_UNKNOWN_CREDENTIALS, older ones with
+         * SEC_E_INTERNAL_ERROR; version 5 (SCH_CREDENTIALS) is handled in schan_AcquireCredentialsV5 */
+        return SEC_E_UNKNOWN_CREDENTIALS;
     }
 
     if (schanCred->cCreds == 0)
@@ -377,13 +387,14 @@ static SECURITY_STATUS schan_CheckCreds(const SCHANNEL_CRED *schanCred)
     return st;
 }
 
+static SECURITY_STATUS schan_NewClientCredentials(DWORD flags, DWORD enabled_protocols,
+ PCredHandle phCredential, PTimeStamp ptsExpiry);
+
 static SECURITY_STATUS schan_AcquireClientCredentials(const SCHANNEL_CRED *schanCred,
  PCredHandle phCredential, PTimeStamp ptsExpiry)
 {
-    struct schan_credentials *creds;
     unsigned enabled_protocols;
-    ULONG_PTR handle;
-    SECURITY_STATUS st = SEC_E_OK;
+    SECURITY_STATUS st;
 
     TRACE("schanCred %p, phCredential %p, ptsExpiry %p\n", schanCred, phCredential, ptsExpiry);
 
@@ -392,8 +403,6 @@ static SECURITY_STATUS schan_AcquireClientCredentials(const SCHANNEL_CRED *schan
         st = schan_CheckCreds(schanCred);
         if (st != SEC_E_OK && st != SEC_E_NO_CREDENTIALS)
             return st;
-
-        st = SEC_E_OK;
     }
 
     read_config();
@@ -406,6 +415,16 @@ static SECURITY_STATUS schan_AcquireClientCredentials(const SCHANNEL_CRED *schan
         return SEC_E_NO_AUTHENTICATING_AUTHORITY;
     }
 
+    return schan_NewClientCredentials(schanCred ? schanCred->dwFlags : 0, enabled_protocols,
+                                      phCredential, ptsExpiry);
+}
+
+static SECURITY_STATUS schan_NewClientCredentials(DWORD flags, DWORD enabled_protocols,
+ PCredHandle phCredential, PTimeStamp ptsExpiry)
+{
+    struct schan_credentials *creds;
+    ULONG_PTR handle;
+
     /* For now, the only thing I'm interested in is the direction of the
      * connection, so just store it.
      */
@@ -416,7 +435,7 @@ static SECURITY_STATUS schan_AcquireClientCredentials(const SCHANNEL_CRED *schan
     if (handle == SCHAN_INVALID_HANDLE) goto fail;
 
     creds->credential_use = SECPKG_CRED_OUTBOUND;
-    creds->flags = schanCred ? schanCred->dwFlags : 0;
+    creds->flags = flags;
     if (!schan_imp_allocate_certificate_credentials(creds))
     {
         schan_free_handle(handle, SCHAN_HANDLE_CRED);
@@ -434,7 +453,7 @@ static SECURITY_STATUS schan_AcquireClientCredentials(const SCHANNEL_CRED *schan
         ptsExpiry->HighPart = 0;
     }
 
-    return st;
+    return SEC_E_OK;
 
 fail:
     HeapFree(GetProcessHeap(), 0, creds);
@@ -475,37 +494,152 @@ static SECURITY_STATUS schan_AcquireServerCredentials(const SCHANNEL_CRED *schan
     return st;
 }
 
-/* .NET 5+ and PowerShell 7 on Windows 10 1809+ pass SCH_CREDENTIALS (dwVersion 5) instead of
- * SCHANNEL_CRED. Translate the certificate/flag fields into an equivalent SCHANNEL_CRED and reuse the
- * existing v3/v4 path. The TLS_PARAMETERS protocol/crypto restrictions are not applied (the provider uses
- * the system-default protocols, as it already does for SCHANNEL_CRED.grbitEnabledProtocols == 0); this is
- * deliberately minimal and does not change the TLS session behaviour of the v3/v4 path. */
-static void schan_cred_from_v5(const SCH_CREDENTIALS *v5, SCHANNEL_CRED *out)
+/* SCH_CREDENTIALS (version 5) support */
+
+#define SCHAN_SERVER_PROTOCOLS (SP_PROT_PCT1_SERVER | SP_PROT_SSL2_SERVER | SP_PROT_SSL3_SERVER | SP_PROT_TLS1_0_SERVER | \
+                                SP_PROT_TLS1_1_SERVER | SP_PROT_TLS1_2_SERVER | SP_PROT_TLS1_3_SERVER)
+
+static BOOL schan_IsValidUnicodeString(const UNICODE_STRING *str)
 {
-    memset(out, 0, sizeof(*out));
-    out->dwVersion        = SCHANNEL_CRED_VERSION;
-    out->cCreds           = v5->cCreds;
-    out->paCred           = v5->paCred;
-    out->hRootStore       = v5->hRootStore;
-    out->cMappers         = v5->cMappers;
-    out->aphMappers       = v5->aphMappers;
-    out->dwSessionLifespan = v5->dwSessionLifespan;
-    out->dwFlags          = v5->dwFlags;
-    out->dwCredFormat     = v5->dwCredFormat;
+    return str->Length && str->Buffer;
+}
+
+/* Validates the TLS_PARAMETERS array the way Windows 10 does and returns the protocols it disables. */
+static SECURITY_STATUS schan_GetDisabledProtocols(const SCH_CREDENTIALS *cred, DWORD *disabled)
+{
+    DWORD i, j;
+
+    *disabled = 0;
+
+    if (cred->cTlsParameters > SCH_CRED_MAX_SUPPORTED_PARAMETERS ||
+        (cred->cTlsParameters && !cred->pTlsParameters))
+        return SEC_E_INVALID_PARAMETER;
+
+    for (i = 0; i < cred->cTlsParameters; i++)
+    {
+        const TLS_PARAMETERS *params = &cred->pTlsParameters[i];
+
+        TRACE("TLS_PARAMETERS[%u]: cAlpnIds %u, grbitDisabledProtocols %#x, cDisabledCrypto %u, dwFlags %#x\n",
+              i, params->cAlpnIds, params->grbitDisabledProtocols, params->cDisabledCrypto, params->dwFlags);
+
+        if (params->cAlpnIds > SCH_CRED_MAX_SUPPORTED_ALPN_IDS || (params->cAlpnIds && !params->rgstrAlpnIds))
+            return SEC_E_INVALID_PARAMETER;
+        for (j = 0; j < params->cAlpnIds; j++)
+        {
+            if (!schan_IsValidUnicodeString(&params->rgstrAlpnIds[j]))
+                return SEC_E_INVALID_PARAMETER;
+        }
+
+        if (params->cDisabledCrypto > SCH_CRED_MAX_SUPPORTED_CRYPTO_SETTINGS)
+            return SEC_E_INVALID_PARAMETER;
+        /* What Windows 10 returns for a count without an array */
+        if (params->cDisabledCrypto && !params->pDisabledCrypto)
+            return SEC_E_INTERNAL_ERROR;
+        for (j = 0; j < params->cDisabledCrypto; j++)
+        {
+            const CRYPTO_SETTINGS *crypto = &params->pDisabledCrypto[j];
+
+            if (!schan_IsValidUnicodeString(&crypto->strCngAlgId) ||
+                crypto->cChainingModes > SCH_CRED_MAX_SUPPORTED_CHAINING_MODES ||
+                (crypto->cChainingModes && !crypto->rgstrChainingModes) ||
+                (crypto->dwMaxBitLength && crypto->dwMinBitLength > crypto->dwMaxBitLength))
+                return SEC_E_INVALID_PARAMETER;
+
+            /* Windows accepts any algorithm name and usage here, so does this provider; the
+             * settings are not enforced (the cipher suite list is mbedTLS's default one). */
+            FIXME("ignoring disabled crypto setting: usage %d, algorithm %s\n", crypto->eAlgorithmUsage,
+                  debugstr_wn(crypto->strCngAlgId.Buffer, crypto->strCngAlgId.Length / sizeof(WCHAR)));
+        }
+
+        /* Windows ignores optional entries (even ones it could honour), and an entry scoped to
+         * ALPN ids only applies once one of those is negotiated, which this provider never does. */
+        if ((params->dwFlags & TLS_PARAMS_OPTIONAL) || params->cAlpnIds)
+            continue;
+
+        *disabled |= params->grbitDisabledProtocols;
+    }
+
+    return SEC_E_OK;
+}
+
+static SECURITY_STATUS schan_NewServerCredentials(DWORD flags, DWORD enabled_protocols, PCredHandle phCredential)
+{
+    struct schan_credentials *creds;
+    ULONG_PTR handle;
+
+    creds = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*creds));
+    if (!creds) return SEC_E_INSUFFICIENT_MEMORY;
+    creds->credential_use = SECPKG_CRED_INBOUND;
+    creds->flags = flags;
+    creds->enabled_protocols = enabled_protocols;
+
+    handle = schan_alloc_handle(creds, SCHAN_HANDLE_CRED);
+    if (handle == SCHAN_INVALID_HANDLE)
+    {
+        HeapFree(GetProcessHeap(), 0, creds);
+        return SEC_E_INTERNAL_ERROR;
+    }
+
+    phCredential->dwLower = handle;
+    phCredential->dwUpper = 0;
+    return SEC_E_OK;
+}
+
+static SECURITY_STATUS schan_AcquireCredentialsV5(ULONG fCredentialUse, const SCH_CREDENTIALS *cred,
+ PCredHandle phCredential, PTimeStamp ptsExpiry)
+{
+    SECURITY_STATUS st;
+    DWORD disabled, enabled;
+
+    TRACE("SCH_CREDENTIALS: dwCredFormat %u, cCreds %u, hRootStore %p, cMappers %u, dwSessionLifespan %u, "
+          "dwFlags %#x, cTlsParameters %u\n", cred->dwCredFormat, cred->cCreds, cred->hRootStore, cred->cMappers,
+          cred->dwSessionLifespan, cred->dwFlags, cred->cTlsParameters);
+
+    st = schan_GetDisabledProtocols(cred, &disabled);
+    if (st != SEC_E_OK)
+        return st;
+
+    /* Like Windows, a count without an array means no certificate. A certificate needs its private key. */
+    if (cred->cCreds && cred->paCred)
+    {
+        DWORD keySpec;
+        HCRYPTPROV csp;
+        BOOL freeCSP;
+
+        if (cred->cCreds > 1)
+            return SEC_E_UNKNOWN_CREDENTIALS;
+        if (!CryptAcquireCertificatePrivateKey(cred->paCred[0], 0, NULL, &csp, &keySpec, &freeCSP))
+            return SEC_E_NO_CREDENTIALS;
+        if (freeCSP)
+            CryptReleaseContext(csp, 0);
+    }
+
+    read_config();
+    if (fCredentialUse == SECPKG_CRED_OUTBOUND)
+    {
+        /* An empty disabled mask means the system defaults, as with SCHANNEL_CRED */
+        enabled = config_enabled_protocols & ~config_default_disabled_protocols & ~disabled;
+        if (!enabled)
+            return SEC_E_ALGORITHM_MISMATCH;
+        return schan_NewClientCredentials(cred->dwFlags, enabled, phCredential, ptsExpiry);
+    }
+
+    /* Inbound: a credential without a certificate is accepted, as on Windows Vista and later */
+    enabled = schan_imp_enabled_protocols() & SCHAN_SERVER_PROTOCOLS & ~disabled;
+    if (!enabled)
+        return SEC_E_ALGORITHM_MISMATCH;
+    return schan_NewServerCredentials(cred->dwFlags, enabled, phCredential);
 }
 
 static SECURITY_STATUS schan_AcquireCredentialsHandle(ULONG fCredentialUse,
  const SCHANNEL_CRED *schanCred, PCredHandle phCredential, PTimeStamp ptsExpiry)
 {
     SECURITY_STATUS ret;
-    SCHANNEL_CRED v5_translated;
 
-    /* SCHANNEL_CRED and SCH_CREDENTIALS both begin with dwVersion */
+    /* SCHANNEL_CRED and SCH_CREDENTIALS both start with dwVersion */
     if (schanCred && schanCred->dwVersion == SCH_CREDENTIALS_VERSION)
-    {
-        schan_cred_from_v5((const SCH_CREDENTIALS *)schanCred, &v5_translated);
-        schanCred = &v5_translated;
-    }
+        return schan_AcquireCredentialsV5(fCredentialUse, (const SCH_CREDENTIALS *)schanCred,
+                                          phCredential, ptsExpiry);
 
     if (fCredentialUse == SECPKG_CRED_OUTBOUND)
         ret = schan_AcquireClientCredentials(schanCred, phCredential,
@@ -792,6 +926,114 @@ static void dump_buffer_desc(SecBufferDesc *desc)
     }
 }
 
+static ULONG schan_ContextAttributes(ULONG req)
+{
+    /* TLS always provides these and Windows always reports them, requested or not (curl, i.e. git, insists on them) */
+    ULONG attr = ISC_RET_REPLAY_DETECT | ISC_RET_SEQUENCE_DETECT | ISC_RET_CONFIDENTIALITY | ISC_RET_STREAM;
+
+    /* Reported when requested */
+    if (req & ISC_REQ_ALLOCATE_MEMORY)
+        attr |= ISC_RET_ALLOCATED_MEMORY;
+    if (req & ISC_REQ_EXTENDED_ERROR)
+        attr |= ISC_RET_EXTENDED_ERROR;
+    if (req & ISC_REQ_USE_SUPPLIED_CREDS)
+        attr |= ISC_RET_USED_SUPPLIED_CREDS;
+    if (req & ISC_REQ_MUTUAL_AUTH)
+        attr |= ISC_RET_MUTUAL_AUTH;
+    /* Windows reports the flag for the context request only, not for SCH_CRED_MANUAL_CRED_VALIDATION */
+    if (req & ISC_REQ_MANUAL_CRED_VALIDATION)
+        attr |= ISC_RET_MANUAL_CRED_VALIDATION;
+    return attr;
+}
+
+/* Writes the alert record that ApplyControlToken asked for into the output token */
+static SECURITY_STATUS schan_SendControlToken(struct schan_context *ctx, ULONG fContextReq, PSecBufferDesc pOutput,
+                                              ULONG *pfContextAttr)
+{
+    struct schan_transport transport;
+    SECURITY_STATUS ret;
+    int idx;
+
+    /* The alert record goes to the output token */
+    if (!pOutput || !pfContextAttr)
+        return SEC_E_INVALID_PARAMETER;
+
+    ctx->req_ctx_attr = fContextReq;
+    *pfContextAttr = schan_ContextAttributes(fContextReq);
+
+    /* Like Windows 10, the context stays usable afterwards: EncryptMessage still works after close_notify or a
+     * fatal alert, and another SCHANNEL_SHUTDOWN sends another close_notify. Ending the connection is the caller's
+     * business. */
+    transport.ctx = ctx;
+    init_schan_buffers(&transport.in, NULL, NULL);
+    init_schan_buffers(&transport.out, pOutput, schan_init_sec_ctx_get_next_output_buffer);
+    schan_imp_set_session_transport(ctx->session, &transport);
+
+    if (ctx->control == SCHANNEL_SHUTDOWN)
+        ret = schan_imp_send_alert(ctx->session, TLS1_ALERT_WARNING, TLS1_ALERT_CLOSE_NOTIFY);
+    else
+        ret = schan_imp_send_alert(ctx->session, ctx->alert_type, ctx->alert_number);
+
+    /* Keep the request when the record did not fit, so that the caller can retry with a larger buffer */
+    if (ret != SEC_E_BUFFER_TOO_SMALL)
+        ctx->control = 0;
+
+    if (transport.out.current_buffer_idx != -1)
+        pOutput->pBuffers[transport.out.current_buffer_idx].cbBuffer = transport.out.offset;
+    else if ((idx = schan_find_sec_buffer_idx(pOutput, 0, SECBUFFER_TOKEN)) != -1)
+        pOutput->pBuffers[idx].cbBuffer = 0;
+
+    return ret;
+}
+
+/***********************************************************************
+ *              ApplyControlToken
+ */
+static SECURITY_STATUS SEC_ENTRY schan_ApplyControlToken(PCtxtHandle context_handle, PSecBufferDesc input)
+{
+    struct schan_context *ctx;
+    SecBuffer *buffer;
+    DWORD type;
+
+    TRACE("context_handle %p, input %p\n", context_handle, input);
+
+    if (!context_handle) return SEC_E_INVALID_HANDLE;
+    ctx = schan_get_object(context_handle->dwLower, SCHAN_HANDLE_CTX);
+    if (!ctx) return SEC_E_INVALID_HANDLE;
+
+    if (!input || input->cBuffers != 1 || !input->pBuffers)
+        return SEC_E_INVALID_TOKEN;
+    buffer = &input->pBuffers[0];
+    if (buffer->BufferType != SECBUFFER_TOKEN || buffer->cbBuffer < sizeof(DWORD) || !buffer->pvBuffer)
+        return SEC_E_INVALID_TOKEN;
+
+    type = *(DWORD *)buffer->pvBuffer;
+    switch (type)
+    {
+        case SCHANNEL_SHUTDOWN:
+            ctx->control = SCHANNEL_SHUTDOWN;
+            return SEC_E_OK;
+
+        case SCHANNEL_ALERT:
+        {
+            const SCHANNEL_ALERT_TOKEN *alert = buffer->pvBuffer;
+
+            if (buffer->cbBuffer < sizeof(*alert) ||
+                (alert->dwAlertType != TLS1_ALERT_WARNING && alert->dwAlertType != TLS1_ALERT_FATAL) ||
+                alert->dwAlertNumber > 255)
+                return SEC_E_INVALID_TOKEN;
+            ctx->control = SCHANNEL_ALERT;
+            ctx->alert_type = alert->dwAlertType;
+            ctx->alert_number = alert->dwAlertNumber;
+            return SEC_E_OK;
+        }
+
+        default:
+            FIXME("unsupported control token %u\n", type);
+            return SEC_E_UNSUPPORTED_FUNCTION;
+    }
+}
+
 /***********************************************************************
  *              InitializeSecurityContextW
  */
@@ -834,6 +1076,7 @@ SECURITY_STATUS SEC_ENTRY schan_InitializeSecurityContextW(
         if (!ctx) return SEC_E_INSUFFICIENT_MEMORY;
 
         ctx->cert = NULL;
+        ctx->control = 0;
         handle = schan_alloc_handle(ctx, SCHAN_HANDLE_CTX);
         if (handle == SCHAN_INVALID_HANDLE)
         {
@@ -872,6 +1115,13 @@ SECURITY_STATUS SEC_ENTRY schan_InitializeSecurityContextW(
         SecBuffer *buffer;
         int idx;
 
+        ctx = schan_get_object(phContext->dwLower, SCHAN_HANDLE_CTX);
+        if (!ctx) return SEC_E_INVALID_HANDLE;
+
+        /* A token from ApplyControlToken is answered with the alert record, whatever the input */
+        if (ctx->control)
+            return schan_SendControlToken(ctx, fContextReq, pOutput, pfContextAttr);
+
         if (!pInput)
             return SEC_E_INCOMPLETE_MESSAGE;
 
@@ -902,8 +1152,6 @@ SECURITY_STATUS SEC_ENTRY schan_InitializeSecurityContextW(
         }
 
         TRACE("Using expected_size %lu.\n", expected_size);
-
-        ctx = schan_get_object(phContext->dwLower, SCHAN_HANDLE_CTX);
     }
 
     ctx->req_ctx_attr = fContextReq;
@@ -939,21 +1187,7 @@ SECURITY_STATUS SEC_ENTRY schan_InitializeSecurityContextW(
             pOutput->pBuffers[idx].cbBuffer = 0;
     }
 
-    /* TLS always provides these and Windows always reports them, requested or not
-     * (curl, i.e. git for Windows, refuses the context otherwise: "failed to setup sequence detection") */
-    *pfContextAttr = ISC_RET_REPLAY_DETECT | ISC_RET_SEQUENCE_DETECT | ISC_RET_CONFIDENTIALITY | ISC_RET_STREAM;
-    /* Reported when requested */
-    if (ctx->req_ctx_attr & ISC_REQ_ALLOCATE_MEMORY)
-        *pfContextAttr |= ISC_RET_ALLOCATED_MEMORY;
-    if (ctx->req_ctx_attr & ISC_REQ_EXTENDED_ERROR)
-        *pfContextAttr |= ISC_RET_EXTENDED_ERROR;
-    if (ctx->req_ctx_attr & ISC_REQ_USE_SUPPLIED_CREDS)
-        *pfContextAttr |= ISC_RET_USED_SUPPLIED_CREDS;
-    if (ctx->req_ctx_attr & ISC_REQ_MUTUAL_AUTH)
-        *pfContextAttr |= ISC_RET_MUTUAL_AUTH;
-    /* Windows reports the flag for the context request only, not for SCH_CRED_MANUAL_CRED_VALIDATION */
-    if (ctx->req_ctx_attr & ISC_REQ_MANUAL_CRED_VALIDATION)
-        *pfContextAttr |= ISC_RET_MANUAL_CRED_VALIDATION;
+    *pfContextAttr = schan_ContextAttributes(ctx->req_ctx_attr);
 
     return ret;
 }
@@ -1160,6 +1394,7 @@ static SECURITY_STATUS SEC_ENTRY schan_EncryptMessage(PCtxtHandle context_handle
 
     if (!context_handle) return SEC_E_INVALID_HANDLE;
     ctx = schan_get_object(context_handle->dwLower, SCHAN_HANDLE_CTX);
+    if (!ctx) return SEC_E_INVALID_HANDLE;
 
     dump_buffer_desc(message);
 
@@ -1392,7 +1627,7 @@ SecurityFunctionTableA schanTableA = {
     NULL, /* AcceptSecurityContext */
     NULL, /* CompleteAuthToken */
     schan_DeleteSecurityContext,
-    NULL, /* ApplyControlToken */
+    schan_ApplyControlToken,
     schan_QueryContextAttributesA,
     NULL, /* ImpersonateSecurityContext */
     NULL, /* RevertSecurityContext */
@@ -1423,7 +1658,7 @@ SecurityFunctionTableW schanTableW = {
     NULL, /* AcceptSecurityContext */
     NULL, /* CompleteAuthToken */
     schan_DeleteSecurityContext,
-    NULL, /* ApplyControlToken */
+    schan_ApplyControlToken,
     schan_QueryContextAttributesW,
     NULL, /* ImpersonateSecurityContext */
     NULL, /* RevertSecurityContext */
