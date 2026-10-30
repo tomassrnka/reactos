@@ -20,14 +20,17 @@ NTSTATUS
 NTAPI
 RtlGetVersion(OUT PRTL_OSVERSIONINFOW lpVersionInformation);
 
+#define VER_CONDITION_MASK_TOUCHED 0x8000000000000000ULL
+
 /* FUNCTIONS ****************************************************************/
 
 static UCHAR
 RtlpVerGetCondition(IN ULONGLONG ConditionMask,
                     IN ULONG TypeMask);
 
+/* Windows compares the version numbers as signed values */
 static BOOLEAN
-RtlpVerCompare(ULONG left, ULONG right, UCHAR Condition)
+RtlpVerCompare(LONG left, LONG right, UCHAR Condition)
 {
     switch (Condition)
     {
@@ -77,7 +80,8 @@ RtlVerifyVersionInfo(IN PRTL_OSVERSIONINFOEXW VersionInfo,
         return Status;
     }
 
-    if (!TypeMask || !ConditionMask)
+    /* An empty condition mask is valid: the missing conditions never match */
+    if (!TypeMask)
     {
         return STATUS_INVALID_PARAMETER;
     }
@@ -197,22 +201,24 @@ RtlVerifyVersionInfo(IN PRTL_OSVERSIONINFOEXW VersionInfo,
             {
                 return STATUS_REVISION_MISMATCH;
             }
+        }
 
-            if (DoNextCheck && (TypeMask & VER_SERVICEPACKMINOR))
+        /* The service pack minor version is checked on its own, whether or
+         * not the service pack major version is part of the type mask. */
+        if (DoNextCheck && (TypeMask & VER_SERVICEPACKMINOR))
+        {
+            if (Condition == VER_EQUAL)
             {
-                if (Condition == VER_EQUAL)
-                {
-                    Condition = RtlpVerGetCondition(ConditionMask, VER_SERVICEPACKMINOR);
-                }
+                Condition = RtlpVerGetCondition(ConditionMask, VER_SERVICEPACKMINOR);
+            }
 
-                Comparison = RtlpVerCompare(Version.wServicePackMinor,
-                                            VersionInfo->wServicePackMinor,
-                                            Condition);
+            Comparison = RtlpVerCompare(Version.wServicePackMinor,
+                                        VersionInfo->wServicePackMinor,
+                                        Condition);
 
-                if (!Comparison)
-                {
-                    return STATUS_REVISION_MISMATCH;
-                }
+            if (!Comparison)
+            {
+                return STATUS_REVISION_MISMATCH;
             }
         }
     }
@@ -265,13 +271,11 @@ VerSetConditionMask(IN ULONGLONG ConditionMask,
 {
     ULONGLONG ullCondMask;
 
+    /* Windows returns an empty mask when there is nothing to set */
     if (TypeMask == 0)
-        return ConditionMask;
+        return 0;
 
     Condition &= VER_CONDITION_MASK;
-
-    if (Condition == 0)
-        return ConditionMask;
 
     ullCondMask = Condition;
     if (TypeMask & VER_PRODUCT_TYPE)
@@ -291,7 +295,8 @@ VerSetConditionMask(IN ULONGLONG ConditionMask,
     else if (TypeMask & VER_MINORVERSION)
         ConditionMask |= ullCondMask << (0 * VER_NUM_BITS_PER_CONDITION_MASK);
 
-    return ConditionMask;
+    /* Windows also flags every mask it has touched, even for an empty condition */
+    return ConditionMask | VER_CONDITION_MASK_TOUCHED;
 }
 
 /* EOF */
