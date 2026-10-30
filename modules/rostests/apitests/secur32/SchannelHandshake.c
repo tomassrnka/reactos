@@ -680,6 +680,117 @@ static BOOL TestServer(PCSTR Host, PCSTR Port, PCWSTR Target, DWORD Flags, DWORD
     return TRUE;
 }
 
+/*
+ * ApplyControlToken, then an output buffer that is too small for the alert record: the request is kept
+ * (SEC_E_BUFFER_TOO_SMALL), and the retry delivers the rest of the same record, not a second alert.
+ * Offline: the alert goes out in the clear right after the ClientHello.
+ */
+static void TestControlTokenSmallBuffer(void)
+{
+    SCH_CREDENTIALS Cred;
+    TLS_PARAMETERS Params;
+    CredHandle CredHandle;
+    CtxtHandle Ctx;
+    TimeStamp Expiry;
+    SecBuffer Out, Buf;
+    SecBufferDesc OutDesc, Desc;
+    SCHANNEL_ALERT_TOKEN Token;
+    ULONG Attr = 0, Total = 0;
+    SECURITY_STATUS Status;
+    BYTE Small[3], Large[64], Record[128] = {0};
+    ULONG Length;
+
+    InitCred(&Cred, &Params, SCH_CRED_MANUAL_CRED_VALIDATION | SCH_CRED_NO_DEFAULT_CREDS, 0);
+    Status = AcquireCredentialsHandleW(NULL, (SEC_WCHAR *)UNISP_NAME_W, SECPKG_CRED_OUTBOUND, NULL, &Cred, NULL, NULL,
+                                       &CredHandle, &Expiry);
+    ok(Status == SEC_E_OK, "AcquireCredentialsHandle returned 0x%08lx\n", Status);
+    if (Status != SEC_E_OK)
+        return;
+
+    Out.BufferType = SECBUFFER_TOKEN;
+    Out.cbBuffer = 0;
+    Out.pvBuffer = NULL;
+    OutDesc.ulVersion = SECBUFFER_VERSION;
+    OutDesc.cBuffers = 1;
+    OutDesc.pBuffers = &Out;
+    Status = InitializeSecurityContextW(&CredHandle, NULL, (SEC_WCHAR *)SNI_HOST, REQ_FLAGS, 0, 0, NULL, 0, &Ctx,
+                                        &OutDesc, &Attr, &Expiry);
+    ok(Status == SEC_I_CONTINUE_NEEDED, "InitializeSecurityContext returned 0x%08lx\n", Status);
+    if (Status != SEC_I_CONTINUE_NEEDED)
+    {
+        FreeCredentialsHandle(&CredHandle);
+        return;
+    }
+    if (Out.pvBuffer)
+        FreeContextBuffer(Out.pvBuffer);
+
+    Token.dwTokenType = SCHANNEL_ALERT;
+    Token.dwAlertType = TLS1_ALERT_FATAL;
+    Token.dwAlertNumber = TLS1_ALERT_HANDSHAKE_FAILURE;
+    Buf.BufferType = SECBUFFER_TOKEN;
+    Buf.cbBuffer = sizeof(Token);
+    Buf.pvBuffer = &Token;
+    Desc.ulVersion = SECBUFFER_VERSION;
+    Desc.cBuffers = 1;
+    Desc.pBuffers = &Buf;
+    Status = ApplyControlToken(&Ctx, &Desc);
+    ok(Status == SEC_E_OK, "ApplyControlToken returned 0x%08lx\n", Status);
+
+    /* A caller buffer of its own, smaller than the 7 byte record */
+    Out.cbBuffer = sizeof(Small);
+    Out.pvBuffer = Small;
+    Status = InitializeSecurityContextW(&CredHandle, &Ctx, (SEC_WCHAR *)SNI_HOST, REQ_FLAGS & ~ISC_REQ_ALLOCATE_MEMORY,
+                                        0, 0, NULL, 0, &Ctx, &OutDesc, &Attr, &Expiry);
+    ok(Status == SEC_E_BUFFER_TOO_SMALL, "too small buffer: InitializeSecurityContext returned 0x%08lx\n", Status);
+    if (Status == SEC_E_BUFFER_TOO_SMALL && !is_reactos())
+    {
+        /* Windows 10 returns the size it needs, delivers nothing and drops the request */
+        Out.cbBuffer = sizeof(Large);
+        Out.pvBuffer = Large;
+        Status = InitializeSecurityContextW(&CredHandle, &Ctx, (SEC_WCHAR *)SNI_HOST,
+                                            REQ_FLAGS & ~ISC_REQ_ALLOCATE_MEMORY, 0, 0, NULL, 0, &Ctx, &OutDesc, &Attr,
+                                            &Expiry);
+        ok(Status == SEC_E_INCOMPLETE_MESSAGE, "retry: InitializeSecurityContext returned 0x%08lx\n", Status);
+    }
+    else if (Status == SEC_E_BUFFER_TOO_SMALL)
+    {
+        /* This provider keeps the request and delivers what fits, the retry continues the same record. The old
+         * retry built the alert again, which queued a second record behind the first. */
+        ok(Out.cbBuffer <= sizeof(Small), "too small buffer: %lu bytes\n", Out.cbBuffer);
+        Total = Out.cbBuffer <= sizeof(Small) ? Out.cbBuffer : 0;
+        memcpy(Record, Small, Total);
+
+        Out.cbBuffer = sizeof(Large);
+        Out.pvBuffer = Large;
+        Status = InitializeSecurityContextW(&CredHandle, &Ctx, (SEC_WCHAR *)SNI_HOST,
+                                            REQ_FLAGS & ~ISC_REQ_ALLOCATE_MEMORY, 0, 0, NULL, 0, &Ctx, &OutDesc, &Attr,
+                                            &Expiry);
+        ok(Status == SEC_E_OK, "retry: InitializeSecurityContext returned 0x%08lx\n", Status);
+        ok(Total + Out.cbBuffer <= sizeof(Record), "retry: %lu bytes\n", Out.cbBuffer);
+        if (Total + Out.cbBuffer <= sizeof(Record))
+        {
+            memcpy(Record + Total, Large, Out.cbBuffer);
+            Total += Out.cbBuffer;
+        }
+
+        /* Exactly one alert record in what the two calls returned: the 7 byte plaintext record */
+        Length = Total > 4 ? 5 + ((Record[3] << 8) | Record[4]) : 0;
+        ok(Total == 7 && Length == Total && Record[0] == 0x15 && Record[5] == TLS1_ALERT_FATAL &&
+           Record[6] == TLS1_ALERT_HANDSHAKE_FAILURE, "%lu bytes in total, record length %lu, %02x %02x %02x %02x %02x\n",
+           Total, Length, Record[0], Record[1], Record[2], Record[5], Record[6]);
+    }
+
+    /* Nothing pending any more */
+    Out.cbBuffer = sizeof(Large);
+    Out.pvBuffer = Large;
+    Status = InitializeSecurityContextW(&CredHandle, &Ctx, (SEC_WCHAR *)SNI_HOST, REQ_FLAGS & ~ISC_REQ_ALLOCATE_MEMORY,
+                                        0, 0, NULL, 0, &Ctx, &OutDesc, &Attr, &Expiry);
+    ok(Status == SEC_E_INCOMPLETE_MESSAGE, "after the alert: InitializeSecurityContext returned 0x%08lx\n", Status);
+
+    DeleteSecurityContext(&Ctx);
+    FreeCredentialsHandle(&CredHandle);
+}
+
 /* ApplyControlToken: the next InitializeSecurityContext returns the (encrypted) alert record */
 static void TestControlToken(DWORD Type)
 {
@@ -859,6 +970,12 @@ START_TEST(SchannelHandshake)
     TestClientHello("TLS 1.2 disabled", SP_PROT_TLS1_2, 0x0302);
     TestClientHello("TLS 1.0 only", ~(DWORD)SP_PROT_TLS1_0, 0x0301);
     TestClientHello("TLS 1.0 and 1.1 disabled", SP_PROT_TLS1_0 | SP_PROT_TLS1_1, 0x0303);
+    /* Server bits do not apply to an outbound credential (Windows 10 22H2: the ClientHello is the default one) */
+    TestClientHello("TLS 1.2 server bit disabled", SP_PROT_TLS1_2_SERVER, 0x0303);
+    TestClientHello("TLS 1.1 server bit disabled", SP_PROT_TLS1_1_SERVER, 0x0303);
+    TestClientHello("all server bits disabled", SP_PROT_SSL3_SERVER | SP_PROT_TLS1_0_SERVER | SP_PROT_TLS1_1_SERVER |
+                    SP_PROT_TLS1_2_SERVER | SP_PROT_TLS1_3_SERVER, 0x0303);
+    TestControlTokenSmallBuffer();
     TestReturnedAttributes();
     TestNoSniForAddress(L"192.0.2.1");
     TestNoSniForAddress(L"2001:db8::1");

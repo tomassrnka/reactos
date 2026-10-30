@@ -206,6 +206,11 @@ static void TestProtocolMapping(void)
     ExpectProtocols(SECPKG_CRED_OUTBOUND, &Cred, DefaultClientProtocols & ~SP_PROT_TLS1_2_CLIENT, "v5 TLS 1.2 client disabled");
     Params[0].grbitDisabledProtocols = SP_PROT_TLS1_2_SERVER;
     ExpectProtocols(SECPKG_CRED_OUTBOUND, &Cred, DefaultClientProtocols, "v5 TLS 1.2 server disabled");
+    Params[0].grbitDisabledProtocols = SERVER_PROTOCOLS;
+    ExpectProtocols(SECPKG_CRED_OUTBOUND, &Cred, DefaultClientProtocols, "v5 all server bits disabled");
+    /* the server bits do not count as a client protocol that stays enabled (Windows 10 22H2) */
+    Params[0].grbitDisabledProtocols = ~(DWORD)SP_PROT_TLS1_2_SERVER;
+    ExpectStatus(SECPKG_CRED_OUTBOUND, &Cred, SEC_E_ALGORITHM_MISMATCH, "v5 all but TLS 1.2 server disabled");
 
     /* Disabling everything that is enabled leaves nothing; a protocol off by default cannot be enabled */
     Params[0].grbitDisabledProtocols = 0xffffffff;
