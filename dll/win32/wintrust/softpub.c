@@ -377,6 +377,156 @@ done:
 }
 
 
+/* Digest of the PE image (everything except the checksum, the certificate table entry and the
+ * certificate table), as the embedded signature records it. Returns a malloc()ed buffer. */
+static BYTE *SOFTPUB_ComputePEHash(HANDLE file, ALG_ID alg_id, DWORD *size)
+{
+    HCRYPTPROV prov;
+    HCRYPTHASH hash = 0;
+    BYTE *value = NULL;
+    DWORD length = sizeof(*size);
+
+    if (!CryptAcquireContextW(&prov, NULL, MS_ENH_RSA_AES_PROV_W, PROV_RSA_AES, CRYPT_VERIFYCONTEXT))
+        return NULL;
+    if (CryptCreateHash(prov, alg_id, 0, 0, &hash))
+    {
+        if (SOFTPUB_HashPEFile(file, hash) &&
+            CryptGetHashParam(hash, HP_HASHSIZE, (BYTE *)size, &length, 0) &&
+            (value = malloc(*size)) &&
+            !CryptGetHashParam(hash, HP_HASHVAL, value, size, 0))
+        {
+            free(value);
+            value = NULL;
+        }
+        CryptDestroyHash(hash);
+    }
+    CryptReleaseContext(prov, 0);
+    return value;
+}
+
+/* Digest recorded in the embedded signature of a file whose image still matches it. */
+static BYTE *SOFTPUB_GetEmbeddedDigest(LPCWSTR path, DWORD *size, ALG_ID *alg_id)
+{
+    SIP_DISPATCH_INFO sip;
+    SIP_SUBJECTINFO info;
+    SPC_INDIRECT_DATA_CONTENT *indirect = NULL;
+    HCRYPTMSG msg = NULL;
+    HANDLE file;
+    GUID subject;
+    DWORD encoding = 0, msg_size = 0, oid_size, content_size, indirect_size;
+    BYTE *msg_buf = NULL, *content = NULL, *digest = NULL, *actual;
+    char *oid = NULL;
+    ALG_ID alg;
+
+    file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                       NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE)
+        return NULL;
+
+    memset(&sip, 0, sizeof(sip));
+    sip.cbSize = sizeof(sip);
+    if (!CryptSIPRetrieveSubjectGuid(path, file, &subject) || !CryptSIPLoad(&subject, 0, &sip))
+        goto done;
+
+    memset(&info, 0, sizeof(info));
+    info.cbSize = sizeof(info);
+    info.pgSubjectType = &subject;
+    info.hFile = file;
+    info.pwsFileName = path;
+    if (!sip.pfGet(&info, &encoding, 0, &msg_size, NULL) || !(msg_buf = malloc(msg_size)) ||
+        !sip.pfGet(&info, &encoding, 0, &msg_size, msg_buf))
+        goto done;
+
+    if (!(msg = CryptMsgOpenToDecode(encoding, 0, 0, 0, NULL, NULL)) ||
+        !CryptMsgUpdate(msg, msg_buf, msg_size, TRUE))
+        goto done;
+    if (!CryptMsgGetParam(msg, CMSG_INNER_CONTENT_TYPE_PARAM, 0, NULL, &oid_size) ||
+        !(oid = malloc(oid_size)) ||
+        !CryptMsgGetParam(msg, CMSG_INNER_CONTENT_TYPE_PARAM, 0, oid, &oid_size))
+        goto done;
+    if (!CryptMsgGetParam(msg, CMSG_CONTENT_PARAM, 0, NULL, &content_size) ||
+        !(content = malloc(content_size)) ||
+        !CryptMsgGetParam(msg, CMSG_CONTENT_PARAM, 0, content, &content_size))
+        goto done;
+    if (!CryptDecodeObject(encoding, oid, content, content_size, 0, NULL, &indirect_size) ||
+        !(indirect = malloc(indirect_size)) ||
+        !CryptDecodeObject(encoding, oid, content, content_size, 0, indirect, &indirect_size))
+        goto done;
+
+    /* The digest must be of this very image; only PE images can be hashed here */
+    if (((ULONG_PTR)indirect->Data.pszObjId >> 16) == 0 ||
+        strcmp(indirect->Data.pszObjId, SPC_PE_IMAGE_DATA_OBJID))
+        goto done;
+    if (!(alg = CertOIDToAlgId(indirect->DigestAlgorithm.pszObjId)))
+        goto done;
+    if (!(actual = SOFTPUB_ComputePEHash(file, alg, size)))
+        goto done;
+    if (*size == indirect->Digest.cbData && !memcmp(actual, indirect->Digest.pbData, *size))
+    {
+        digest = actual;
+        *alg_id = alg;
+    }
+    else
+        free(actual);
+
+done:
+    free(indirect);
+    free(content);
+    free(oid);
+    free(msg_buf);
+    if (msg)
+        CryptMsgClose(msg);
+    CloseHandle(file);
+    return digest;
+}
+
+/***********************************************************************
+ *      WTHelperGetFileHash  (WINTRUST.@)
+ *
+ * Undocumented. PowerShell's getfilesiginforedist.dll imports it; with the export missing the
+ * loader raised its modal "Entry Point Not Found" hard error, which nobody can answer in a
+ * console session, so the 32-bit pwsh blocked the first time the Security module was used
+ * (Get-Acl, Get-ExecutionPolicy, Import-Module Microsoft.PowerShell.Security).
+ *
+ * Behaviour of Windows 10 22H2, probed with a 32-bit program: six stdcall arguments; for a file
+ * with an embedded signature whose digest matches the image it returns 0 and the signature's
+ * digest (SHA-256: 32 bytes, *pAlgId -1); a NULL pbHash only reports the size; a short buffer
+ * gives ERROR_MORE_DATA and the needed size; everything else (no embedded signature, catalog
+ * signed only, modified image, missing file, NULL name) returns TRUST_E_NOSIGNATURE.
+ * Which ALG_ID is reported for MD5/SHA-1 digests was not probed.
+ */
+HRESULT WINAPI WTHelperGetFileHash(LPCWSTR path, DWORD flags, PVOID reserved,
+                                   BYTE *hash, DWORD *size, ALG_ID *alg_id)
+{
+    ALG_ID alg = 0;
+    DWORD digest_size = 0;
+    BYTE *digest;
+    HRESULT hr;
+
+    TRACE("(%s %#lx %p %p %p %p)\n", debugstr_w(path), flags, reserved, hash, size, alg_id);
+
+    if (!path || !size || !(digest = SOFTPUB_GetEmbeddedDigest(path, &digest_size, &alg)))
+    {
+        if (size)
+            *size = 0;
+        return TRUST_E_NOSIGNATURE;
+    }
+
+    if (alg_id)
+        *alg_id = (alg == CALG_MD5 || alg == CALG_SHA1) ? alg : (ALG_ID)-1;
+    if (hash && *size < digest_size)
+        hr = ERROR_MORE_DATA;
+    else
+    {
+        if (hash)
+            memcpy(hash, digest, digest_size);
+        hr = S_OK;
+    }
+    *size = digest_size;
+    free(digest);
+    return hr;
+}
+
 static DWORD SOFTPUB_CreateStoreFromMessage(CRYPT_PROVIDER_DATA *data)
 {
     DWORD err = ERROR_SUCCESS;

@@ -31,13 +31,15 @@ add_wow64_apitest(kernel32
     Wow64ThreadApc Wow64ThreadLifetime Wow64ThreadExitProcess Wow64Threads QueueUserAPC
     GetCurrentDirectory GetEnvironmentVariable GetDriveType GetCPInfo
     IsDBCSLeadByteEx lstrlen Wow64Environment Wow64ProgramFiles Wow64EnvironmentBlock Wow64SystemDlls DynamicTls HandleList JobObject JobList
-    Wow64Console ProcThreadMitigation RegisterWait QueueUserWorkItem)
+    Wow64Console ProcThreadMitigation RegisterWait QueueUserWorkItem ResolveDelayLoadedAPI)
 add_wow64_apitest(ntdll StackOverflowDispatch
     Wow64Continue Wow64SystemRangeStart Wow64QueryVirtualMemory Wow64PowerInformation Wow64QueryInformationProcess Wow64FailedOpenHandle NtOpenKey NtOpenKeyEx NtQueryKey NtQueryValueKey
     RtlDetermineDosPathNameType RtlUnicodeStringToAnsiString StackOverflow StackOverflowThread StackDeepRecursion SystemCallStubs
     Wow64SystemProcessInformation)
 add_wow64_apitest(advapi32
-    ServiceArgs SetSecurityInfoKey RegCreateKeyEx RegOpenKeyExW RegQueryValueExW RegEnumValueW RegWow64 RegWow64Unicode RegWow64Views RegWow64SharedCreate RegWow64Matrix RegWow64LongName RegWow64SharedLongName RegWow64Volatile RegWow64Aliases TokenLogonSid RestrictedSidsCopy TokenDefaultDacl LogonUser LsaLogonSession NetUserChangePassword)
+    ServiceArgs SetSecurityInfoKey RegCreateKeyEx RegOpenKeyExW RegQueryValueExW RegEnumValueW RegWow64 RegWow64Unicode RegWow64Views RegWow64SharedCreate RegWow64Matrix RegWow64LongName RegWow64SharedLongName RegWow64Volatile RegWow64Aliases TokenLogonSid RestrictedSidsCopy TokenDefaultDacl LogonUser LsaLogonSession NetUserChangePassword
+    GetSecurityInfoSequence)
+add_wow64_apitest(wintrust WTHelperGetFileHash)
 
 target_sources(advapi32_wow64_apitest PRIVATE ../advapi32/RegWow64Review.c)
 # LogonUser creates its test user through the SAM

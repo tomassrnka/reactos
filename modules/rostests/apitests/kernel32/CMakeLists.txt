@@ -133,6 +133,7 @@ list(APPEND SOURCE
     RaiseFailFastException.c
     ReadFile.c
     RegisterWait.c
+    ResolveDelayLoadedAPI.c
     ResolveLocaleName.c
     SetComputerNameExW.c
     SetConsoleWindowInfo.c

@@ -16,6 +16,7 @@ list(APPEND SOURCE
     EventRegister.c
     EventProvider.c
     EventSetInformation.c
+    GetSecurityInfoSequence.c
     Hash.c
     HKEY_CLASSES_ROOT.c
     IsTextUnicode.c

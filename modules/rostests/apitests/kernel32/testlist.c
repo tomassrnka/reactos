@@ -135,6 +135,7 @@ extern void func_QueueUserAPC(void);
 extern void func_QueueUserWorkItem(void);
 extern void func_RaiseFailFastException(void);
 extern void func_RegisterWait(void);
+extern void func_ResolveDelayLoadedAPI(void);
 extern void func_ResolveLocaleName(void);
 extern void func_SetComputerNameExW(void);
 extern void func_SetConsoleWindowInfo(void);
@@ -306,6 +307,7 @@ const struct test winetest_testlist[] =
     { "QueueUserWorkItem",           func_QueueUserWorkItem },
     { "RaiseFailFastException",      func_RaiseFailFastException },
     { "RegisterWait",                func_RegisterWait },
+    { "ResolveDelayLoadedAPI",       func_ResolveDelayLoadedAPI },
     { "ResolveLocaleName",           func_ResolveLocaleName },
     { "SetComputerNameExW",          func_SetComputerNameExW },
     { "SetConsoleWindowInfo",        func_SetConsoleWindowInfo },
