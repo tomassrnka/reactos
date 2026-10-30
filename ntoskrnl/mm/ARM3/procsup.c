@@ -83,10 +83,14 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
 
     if (Process->SectionBaseAddress != NULL)
     {
-        PIMAGE_NT_HEADERS NtHeader = RtlImageNtHeader(Process->SectionBaseAddress);
+        SECTION_IMAGE_INFORMATION ImageInformation;
 
-        if (NtHeader != NULL && NtHeader->FileHeader.Machine == IMAGE_FILE_MACHINE_I386 &&
-            NtHeader->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC)
+        /* A 32-bit image runs under WOW64 (the section accepts only PE32 headers for it), except an IL-only .NET
+           image that can run natively and does not prefer 32 bits: Windows starts it as a 64-bit process, and the
+           loader rewrites its headers to PE32+ */
+        if (NT_SUCCESS(MmGetProcessImageInformation(Process, &ImageInformation)) &&
+            ImageInformation.Machine == IMAGE_FILE_MACHINE_I386 &&
+            !(ImageInformation.ComPlusNativeReady && !ImageInformation.ComPlusPrefer32bit))
         {
             IsWow64 = TRUE;
         }

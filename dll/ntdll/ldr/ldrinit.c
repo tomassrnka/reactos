@@ -2554,6 +2554,9 @@ LdrpInitializeProcess(IN PCONTEXT Context,
     IMAGE_NT_HEADERS NativeHeader;
     BOOLEAN IsWow64 = FALSE;
 #endif
+#ifdef _WIN64
+    BOOLEAN IsAnyCpuImage = FALSE;
+#endif
     LPWSTR NtDllName = NULL;
     NTSTATUS Status, ImportStatus;
     NLSTABLEINFO NlsTable;
@@ -2589,6 +2592,37 @@ LdrpInitializeProcess(IN PCONTEXT Context,
 
     /* Get the NT Headers */
     NtHeader = RtlImageNtHeader(Peb->ImageBaseAddress);
+
+#ifdef _WIN64
+    /* A PE32 image in a process that the kernel did not start under WOW64 is an AnyCPU .NET executable (IL-only,
+     * neither requiring nor preferring 32 bits). As Windows does, rewrite its headers to PE32+ as for such a DLL:
+     * it is not relocated, its PE32 imports are not snapped, and instead of its x86 entry stub the process starts
+     * at mscoree!_CorExeMain. */
+    if (NtHeader->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC)
+    {
+        ULONG_PTR Wow64Peb = 0;
+
+        Status = NtQueryInformationProcess(NtCurrentProcess(),
+                                           ProcessWow64Information,
+                                           &Wow64Peb,
+                                           sizeof(Wow64Peb),
+                                           NULL);
+        if (NT_SUCCESS(Status) && !Wow64Peb)
+        {
+            if (!LdrpCorFixupIlOnlyImage(Peb->ImageBaseAddress, NtHeader))
+            {
+                DPRINT1("LDR: %wZ is a 32-bit image in a 64-bit process\n", &ImagePathName);
+                return STATUS_INVALID_IMAGE_FORMAT;
+            }
+            if (ShowSnaps)
+            {
+                DPRINT1("LDR: %wZ is an AnyCPU .NET image, its headers are now PE32+\n", &ImagePathName);
+            }
+            IsAnyCpuImage = TRUE;
+            NtHeader = RtlImageNtHeader(Peb->ImageBaseAddress);
+        }
+    }
+#endif
 
 #ifdef BUILD_WOW64_ENABLED
     IsWow64 = NtHeader->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC;
@@ -3164,15 +3198,25 @@ LdrpInitializeProcess(IN PCONTEXT Context,
     if (IsWow64) ImportStatus = STATUS_SUCCESS;
     else
 #endif
+#ifdef _WIN64
+    /* Its import tables are PE32 ones, for the x86 entry stub */
+    if (IsAnyCpuImage) ImportStatus = STATUS_SUCCESS;
+    else
+#endif
     ImportStatus = LdrpWalkImportDescriptor(LdrpDefaultPath.Buffer, LdrpImageEntry);
 
     /* An IL-only .NET executable need not have a native entry point (PE32+ ones
-     * never do). As on Windows, such a process starts at mscoree!_CorExeMain. */
+     * never do), and an AnyCPU one has only an x86 stub. As on Windows, such a
+     * process starts at mscoree!_CorExeMain. */
     if (IsDotNetImage && NT_SUCCESS(ImportStatus)
 #ifdef BUILD_WOW64_ENABLED
         && !IsWow64
 #endif
-        && !NtHeader->OptionalHeader.AddressOfEntryPoint)
+        && (!NtHeader->OptionalHeader.AddressOfEntryPoint
+#ifdef _WIN64
+            || IsAnyCpuImage
+#endif
+           ))
     {
         PIMAGE_COR20_HEADER CorHeader;
         ULONG CorHeaderSize;
@@ -3253,10 +3297,14 @@ LdrpInitializeProcess(IN PCONTEXT Context,
         }
     }
 
-    /* Check if relocation is needed */
+    /* Check if relocation is needed. Windows leaves an AnyCPU image where the
+     * kernel mapped it, unrelocated: its only fixup is in the x86 stub */
     if (
 #ifdef BUILD_WOW64_ENABLED
         !IsWow64 &&
+#endif
+#ifdef _WIN64
+        !IsAnyCpuImage &&
 #endif
         Peb->ImageBaseAddress != (PVOID)NtHeader->OptionalHeader.ImageBase)
     {

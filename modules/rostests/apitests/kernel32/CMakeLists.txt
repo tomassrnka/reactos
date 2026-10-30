@@ -39,6 +39,7 @@ list(APPEND SOURCE
     CreateFileDirectory.c
     CreateRemoteThreadEx.c
     CreateProcess.c
+    CreateProcessILOnly.c
     CreateProcessRace.c
     CreateProcessStdHandles.c
     CreateWaitableTimerEx.c
