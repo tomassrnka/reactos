@@ -8,12 +8,16 @@
 #define STANDALONE
 #include <apitest.h>
 
+extern void func_AcquireCredentialsHandleVersions(void);
 extern void func_LsaLogonContext(void);
+extern void func_SchannelHandshake(void);
 extern void func_SchannelServerCert(void);
 
 const struct test winetest_testlist[] =
 {
+    { "AcquireCredentialsHandleVersions", func_AcquireCredentialsHandleVersions },
     { "LsaLogonContext", func_LsaLogonContext },
+    { "SchannelHandshake", func_SchannelHandshake },
     { "SchannelServerCert", func_SchannelServerCert },
 
     { 0, 0 }

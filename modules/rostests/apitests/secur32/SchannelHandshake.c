@@ -229,6 +229,116 @@ static void TestReturnedAttributes(void)
     FreeCredentialsHandle(&CredHandle);
 }
 
+/* First cipher suite of the ClientHello that is valid with TLS 1.0-1.2 and a plain RSA certificate */
+static USHORT PickCipherSuite(const BYTE *Data, ULONG Size)
+{
+    static const USHORT Wanted[] = { 0xc013, 0xc014, 0x002f, 0x0035 };
+    ULONG Pos, Count, i, j;
+
+    if (Size < 5 + 4 + 2 + 32 + 1)
+        return 0;
+    Pos = 11 + 32;
+    Pos += 1 + Data[Pos];
+    if (Pos + 2 > Size)
+        return 0;
+    Count = ((Data[Pos] << 8) | Data[Pos + 1]) / 2;
+    Pos += 2;
+    for (j = 0; j < ARRAYSIZE(Wanted); j++)
+    {
+        for (i = 0; i < Count && Pos + 2 * i + 1 < Size; i++)
+        {
+            if (((Data[Pos + 2 * i] << 8) | Data[Pos + 2 * i + 1]) == Wanted[j])
+                return Wanted[j];
+        }
+    }
+    return 0;
+}
+
+/* The server answers the ClientHello with a ServerHello for Version. A version the credential does not
+ * enable must be refused even when it lies between two enabled ones (TLS 1.0 and 1.2 on, TLS 1.1 off);
+ * an enabled one lets the handshake go on (more input needed). Offline: the ServerHello is made here. */
+static void TestServerHelloVersion(PCSTR Name, DWORD Disabled, USHORT Version, BOOL Refused)
+{
+    SCH_CREDENTIALS Cred;
+    TLS_PARAMETERS Params;
+    CredHandle CredHandle;
+    CtxtHandle Ctx;
+    TimeStamp Expiry;
+    SecBuffer Out, In[2];
+    SecBufferDesc OutDesc, InDesc;
+    BYTE Hello[5 + 4 + 38];
+    ULONG Attr, i;
+    USHORT Suite;
+    SECURITY_STATUS Status;
+
+    InitCred(&Cred, &Params, SCH_CRED_MANUAL_CRED_VALIDATION | SCH_CRED_NO_DEFAULT_CREDS, Disabled);
+    Status = AcquireCredentialsHandleW(NULL, (SEC_WCHAR *)UNISP_NAME_W, SECPKG_CRED_OUTBOUND, NULL, &Cred, NULL, NULL,
+                                       &CredHandle, &Expiry);
+    ok(Status == SEC_E_OK, "%s: AcquireCredentialsHandle returned 0x%08lx\n", Name, Status);
+    if (Status != SEC_E_OK)
+        return;
+
+    Out.BufferType = SECBUFFER_TOKEN;
+    Out.cbBuffer = 0;
+    Out.pvBuffer = NULL;
+    OutDesc.ulVersion = SECBUFFER_VERSION;
+    OutDesc.cBuffers = 1;
+    OutDesc.pBuffers = &Out;
+    Status = InitializeSecurityContextW(&CredHandle, NULL, (SEC_WCHAR *)SNI_HOST, REQ_FLAGS, 0, 0, NULL, 0, &Ctx,
+                                        &OutDesc, &Attr, &Expiry);
+    ok(Status == SEC_I_CONTINUE_NEEDED, "%s: InitializeSecurityContext returned 0x%08lx\n", Name, Status);
+    if (Status != SEC_I_CONTINUE_NEEDED)
+    {
+        FreeCredentialsHandle(&CredHandle);
+        return;
+    }
+    Suite = PickCipherSuite(Out.pvBuffer, Out.cbBuffer);
+    ok(Suite != 0, "%s: no usable cipher suite in the ClientHello\n", Name);
+    if (Out.pvBuffer)
+        FreeContextBuffer(Out.pvBuffer);
+    if (!Suite)
+    {
+        DeleteSecurityContext(&Ctx);
+        FreeCredentialsHandle(&CredHandle);
+        return;
+    }
+
+    /* record header, handshake header, version, random, empty session id, suite, null compression */
+    Hello[0] = 0x16; Hello[1] = 3; Hello[2] = Version & 0xff; Hello[3] = 0; Hello[4] = 4 + 38;
+    Hello[5] = 0x02; Hello[6] = 0; Hello[7] = 0; Hello[8] = 38;
+    Hello[9] = Version >> 8; Hello[10] = Version & 0xff;
+    for (i = 0; i < 32; i++)
+        Hello[11 + i] = (BYTE)(0x40 + i);
+    Hello[43] = 0;
+    Hello[44] = Suite >> 8; Hello[45] = Suite & 0xff;
+    Hello[46] = 0;
+
+    In[0].BufferType = SECBUFFER_TOKEN;
+    In[0].cbBuffer = sizeof(Hello);
+    In[0].pvBuffer = Hello;
+    In[1].BufferType = SECBUFFER_EMPTY;
+    In[1].cbBuffer = 0;
+    In[1].pvBuffer = NULL;
+    InDesc.ulVersion = SECBUFFER_VERSION;
+    InDesc.cBuffers = 2;
+    InDesc.pBuffers = In;
+    Out.BufferType = SECBUFFER_TOKEN;
+    Out.cbBuffer = 0;
+    Out.pvBuffer = NULL;
+    Status = InitializeSecurityContextW(&CredHandle, &Ctx, (SEC_WCHAR *)SNI_HOST, REQ_FLAGS, 0, 0, &InDesc, 0, NULL,
+                                        &OutDesc, &Attr, &Expiry);
+    trace("%s: ServerHello 0x%04x suite 0x%04x -> 0x%08lx\n", Name, Version, Suite, Status);
+    if (Refused)
+        ok(Status == SEC_E_ALGORITHM_MISMATCH, "%s: version 0x%04x accepted (0x%08lx)\n", Name, Version, Status);
+    else
+        ok(Status == SEC_I_CONTINUE_NEEDED || Status == SEC_E_INCOMPLETE_MESSAGE,
+           "%s: version 0x%04x refused (0x%08lx)\n", Name, Version, Status);
+    if (Out.pvBuffer)
+        FreeContextBuffer(Out.pvBuffer);
+    DeleteSecurityContext(&Ctx);
+    FreeCredentialsHandle(&CredHandle);
+}
+
 typedef struct _CONNECTION
 {
     SOCKET Socket;
@@ -254,6 +364,32 @@ static BOOL SendAll(SOCKET Socket, const void *Data, ULONG Size)
     return TRUE;
 }
 
+/* Non-blocking connect with a timeout, so an unreachable host cannot stall the test */
+static BOOL ConnectSocket(SOCKET Socket, const struct sockaddr *Address, int AddressLength, DWORD TimeoutMs)
+{
+    u_long NonBlocking = 1;
+    struct timeval Timeout;
+    fd_set Write, Error;
+    int SoError = 0, Length = sizeof(SoError);
+
+    if (ioctlsocket(Socket, FIONBIO, &NonBlocking))
+        return FALSE;
+    if (connect(Socket, Address, AddressLength) && WSAGetLastError() != WSAEWOULDBLOCK)
+        return FALSE;
+    FD_ZERO(&Write);
+    FD_SET(Socket, &Write);
+    FD_ZERO(&Error);
+    FD_SET(Socket, &Error);
+    Timeout.tv_sec = TimeoutMs / 1000;
+    Timeout.tv_usec = (TimeoutMs % 1000) * 1000;
+    if (select(0, NULL, &Write, &Error, &Timeout) != 1 || !FD_ISSET(Socket, &Write))
+        return FALSE;
+    if (getsockopt(Socket, SOL_SOCKET, SO_ERROR, (char *)&SoError, &Length) || SoError)
+        return FALSE;
+    NonBlocking = 0;
+    return !ioctlsocket(Socket, FIONBIO, &NonBlocking);
+}
+
 static BOOL Connect(CONNECTION *Conn, PCSTR Host, PCSTR Port)
 {
     struct addrinfo Hints, *Result = NULL;
@@ -267,8 +403,13 @@ static BOOL Connect(CONNECTION *Conn, PCSTR Host, PCSTR Port)
     if (getaddrinfo(Host, Port, &Hints, &Result) || !Result)
         return FALSE;
     Conn->Socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (Conn->Socket == INVALID_SOCKET)
+    {
+        freeaddrinfo(Result);
+        return FALSE;
+    }
     setsockopt(Conn->Socket, SOL_SOCKET, SO_RCVTIMEO, (char *)&Timeout, sizeof(Timeout));
-    if (connect(Conn->Socket, Result->ai_addr, (int)Result->ai_addrlen))
+    if (!ConnectSocket(Conn->Socket, Result->ai_addr, (int)Result->ai_addrlen, 10000))
     {
         closesocket(Conn->Socket);
         Conn->Socket = INVALID_SOCKET;
@@ -622,6 +763,14 @@ static void TestControlToken(DWORD Type)
     Disconnect(&Conn);
 }
 
+static BOOL EnvEnabled(PCSTR Name)
+{
+    char Value[8];
+    DWORD Length = GetEnvironmentVariableA(Name, Value, sizeof(Value));
+
+    return Length && Length < sizeof(Value) && strcmp(Value, "0");
+}
+
 static void TestOnline(void)
 {
     const DWORD Manual = SCH_CRED_MANUAL_CRED_VALIDATION | SCH_CRED_NO_DEFAULT_CREDS | SCH_USE_STRONG_CRYPTO;
@@ -639,6 +788,13 @@ static void TestOnline(void)
 
     /* schannel validates the server itself without the manual flag */
     TestServer("github.com", "443", L"github.com", 0, 0, SEC_E_OK, 0, FALSE);
+
+    /* Third-party test endpoints, which come and go: opt-in */
+    if (!EnvEnabled("SCHANNEL_APITEST_BADSSL"))
+    {
+        skip("badssl.com checks: set SCHANNEL_APITEST_BADSSL=1\n");
+        return;
+    }
     if (TestServer("self-signed.badssl.com", "443", L"self-signed.badssl.com", 0, 0, SEC_E_UNTRUSTED_ROOT, 0, FALSE))
     {
         TestServer("expired.badssl.com", "443", L"expired.badssl.com", 0, 0, SEC_E_CERT_EXPIRED, 0, FALSE);
@@ -664,8 +820,18 @@ START_TEST(SchannelHandshake)
     TestReturnedAttributes();
     TestNoSniForAddress(L"192.0.2.1");
     TestNoSniForAddress(L"2001:db8::1");
+    /* The ServerHello version against the credential's protocols */
+    TestServerHelloVersion("TLS 1.1 enabled", 0, 0x0302, FALSE);
+    TestServerHelloVersion("TLS 1.1 between enabled 1.0 and 1.2", SP_PROT_TLS1_1, 0x0302, TRUE);
+    TestServerHelloVersion("TLS 1.0 below the enabled range", SP_PROT_TLS1_0, 0x0301, TRUE);
+    TestServerHelloVersion("TLS 1.2 enabled", SP_PROT_TLS1_1, 0x0303, FALSE);
 
-    /* Online: skipped without internet access */
+    /* Online: real servers, opt-in (SCHANNEL_APITEST_ONLINE=1) so that runs without internet stay deterministic */
+    if (!EnvEnabled("SCHANNEL_APITEST_ONLINE"))
+    {
+        skip("online handshakes: set SCHANNEL_APITEST_ONLINE=1\n");
+        return;
+    }
     if (WSAStartup(MAKEWORD(2, 2), &WsaData))
     {
         skip("WSAStartup failed\n");
