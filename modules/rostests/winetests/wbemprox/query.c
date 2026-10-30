@@ -1805,6 +1805,191 @@ static HRESULT run_query( IWbemServices *services, const WCHAR *str, IEnumWbemCl
     return hr;
 }
 
+/* the HRESULT of a semisynchronous query: from ExecQuery or, as WMI defers it, from the first Next */
+static HRESULT query_result( IWbemServices *services, const WCHAR *str, UINT *count )
+{
+    IEnumWbemClassObject *result = NULL;
+    IWbemClassObject *obj;
+    ULONG n;
+    HRESULT hr;
+
+    *count = 0;
+    hr = run_query( services, str, &result );
+    while (hr == S_OK)
+    {
+        obj = NULL;
+        n = 0;
+        hr = IEnumWbemClassObject_Next( result, 10000, 1, &obj, &n );
+        if (obj) IWbemClassObject_Release( obj );
+        if (!n)
+        {
+            if (hr == WBEM_S_FALSE) hr = S_OK;
+            break;
+        }
+        (*count)++;
+    }
+    if (result) IEnumWbemClassObject_Release( result );
+    return hr;
+}
+
+/* the objects of a query, with the class and genus each one has */
+static UINT query_classes( IWbemServices *services, const WCHAR *str, const WCHAR *class, LONG genus, UINT *matches )
+{
+    IEnumWbemClassObject *result;
+    IWbemClassObject *obj;
+    UINT count = 0;
+    VARIANT var;
+    ULONG n;
+    HRESULT hr;
+
+    *matches = 0;
+    hr = run_query( services, str, &result );
+    ok( hr == S_OK, "%s failed: %08x\n", wine_dbgstr_w(str), hr );
+    if (hr != S_OK) return 0;
+    for (;;)
+    {
+        BOOL match = FALSE;
+
+        n = 0;
+        IEnumWbemClassObject_Next( result, 10000, 1, &obj, &n );
+        if (!n) break;
+        count++;
+        VariantInit( &var );
+        if (IWbemClassObject_Get( obj, L"__CLASS", 0, &var, NULL, NULL ) == S_OK && V_VT( &var ) == VT_BSTR)
+            match = !lstrcmpiW( V_BSTR( &var ), class );
+        VariantClear( &var );
+        if (match && IWbemClassObject_Get( obj, L"__GENUS", 0, &var, NULL, NULL ) == S_OK)
+        {
+            ok( V_VT( &var ) == VT_I4 && V_I4( &var ) == genus, "%s: %s genus %d\n", wine_dbgstr_w(str),
+                wine_dbgstr_w(class), V_I4( &var ) );
+            (*matches)++;
+        }
+        VariantClear( &var );
+        IWbemClassObject_Release( obj );
+    }
+    IEnumWbemClassObject_Release( result );
+    return count;
+}
+
+/* ASSOCIATORS OF and REFERENCES OF with their keywords, as Windows answers them */
+static void test_associations( IWbemServices *services )
+{
+    WCHAR query[256], proc[64];
+    IEnumWbemClassObject *result;
+    IWbemClassObject *obj;
+    UINT count, matches;
+    VARIANT var;
+    ULONG n;
+    HRESULT hr;
+
+    wsprintfW( proc, L"{Win32_Process.Handle=\"%u\"}", GetCurrentProcessId() );
+
+    /* the schema: what the PowerShell completer asks for */
+    count = query_classes( services, L"ASSOCIATORS OF {Win32_Process} WHERE SchemaOnly", L"Win32_ComputerSystem",
+                           WBEM_GENUS_CLASS, &matches );
+    ok( count >= 1 && matches == 1, "schema: %u objects, %u computer system classes\n", count, matches );
+    count = query_classes( services, L"ASSOCIATORS OF {Win32_Process} WHERE SchemaOnly ResultClass=CIM_System",
+                           L"Win32_ComputerSystem", WBEM_GENUS_CLASS, &matches );
+    ok( count == 1 && matches == 1, "schema by base class: %u objects, %u matches\n", count, matches );
+    count = query_classes( services, L"ASSOCIATORS OF {Win32_Process} WHERE SchemaOnly Role=GroupComponent",
+                           L"Win32_ComputerSystem", WBEM_GENUS_CLASS, &matches );
+    ok( count == 0, "schema by the wrong role: %u objects\n", count );
+    count = query_classes( services, L"REFERENCES OF {Win32_Process} WHERE SchemaOnly", L"Win32_SystemProcesses",
+                           WBEM_GENUS_CLASS, &matches );
+    ok( count >= 1 && matches == 1, "reference schema: %u objects, %u matches\n", count, matches );
+    count = query_classes( services, L"ASSOCIATORS OF {Win32_BaseService} WHERE SchemaOnly Role=Antecedent",
+                           L"Win32_BaseService", WBEM_GENUS_CLASS, &matches );
+    ok( count == 1 && matches == 1, "self association: %u objects, %u matches\n", count, matches );
+    hr = query_result( services, L"ASSOCIATORS OF {Win32_NoSuchClassAtAll} WHERE SchemaOnly", &count );
+    ok( hr == WBEM_E_NOT_FOUND, "schema of an unknown class: %08x\n", hr );
+    hr = query_result( services, L"ASSOCIATORS OF {Win32_Process}", &count );
+    ok( hr == S_OK && !count, "class without SchemaOnly: %08x, %u objects\n", hr, count );
+
+    /* an instance */
+    wsprintfW( query, L"ASSOCIATORS OF %s WHERE ResultClass=Win32_ComputerSystem", proc );
+    count = query_classes( services, query, L"Win32_ComputerSystem", WBEM_GENUS_INSTANCE, &matches );
+    ok( count == 1 && matches == 1, "computer system: %u objects, %u matches\n", count, matches );
+    wsprintfW( query, L"ASSOCIATORS OF %s WHERE AssocClass=CIM_Component ResultRole=GroupComponent", proc );
+    count = query_classes( services, query, L"Win32_ComputerSystem", WBEM_GENUS_INSTANCE, &matches );
+    ok( count == 1 && matches == 1, "by base association: %u objects, %u matches\n", count, matches );
+    wsprintfW( query, L"ASSOCIATORS OF %s WHERE Role=GroupComponent", proc );
+    hr = query_result( services, query, &count );
+    ok( hr == S_OK && !count, "wrong role: %08x, %u objects\n", hr, count );
+    wsprintfW( query, L"ASSOCIATORS OF %s WHERE ResultClass=Win32_NoSuchClassAtAll", proc );
+    hr = query_result( services, query, &count );
+    ok( hr == S_OK && !count, "unknown result class: %08x, %u objects\n", hr, count );
+    wsprintfW( query, L"ASSOCIATORS OF %s WHERE ClassDefsOnly", proc );
+    count = query_classes( services, query, L"Win32_ComputerSystem", WBEM_GENUS_CLASS, &matches );
+    ok( count >= 1 && matches == 1, "class definitions: %u objects, %u matches\n", count, matches );
+
+    /* the association instance */
+    wsprintfW( query, L"REFERENCES OF %s WHERE ResultClass=Win32_SystemProcesses", proc );
+    hr = run_query( services, query, &result );
+    ok( hr == S_OK, "references failed: %08x\n", hr );
+    if (hr == S_OK)
+    {
+        WCHAR handle[32];
+
+        count = 0;
+        wsprintfW( handle, L"Win32_Process.Handle=\"%u\"", GetCurrentProcessId() );
+        for (;;)
+        {
+            n = 0;
+            IEnumWbemClassObject_Next( result, 10000, 1, &obj, &n );
+            if (!n) break;
+            count++;
+            VariantInit( &var );
+            hr = IWbemClassObject_Get( obj, L"PartComponent", 0, &var, NULL, NULL );
+            ok( hr == S_OK && V_VT( &var ) == VT_BSTR, "PartComponent: %08x %u\n", hr, V_VT( &var ) );
+            if (hr == S_OK && V_VT( &var ) == VT_BSTR)
+                ok( wcsstr( V_BSTR( &var ), handle ) != NULL, "PartComponent %s\n", wine_dbgstr_w(V_BSTR( &var )) );
+            VariantClear( &var );
+            hr = IWbemClassObject_Get( obj, L"GroupComponent", 0, &var, NULL, NULL );
+            ok( hr == S_OK && V_VT( &var ) == VT_BSTR, "GroupComponent: %08x %u\n", hr, V_VT( &var ) );
+            if (hr == S_OK && V_VT( &var ) == VT_BSTR)
+                ok( wcsstr( V_BSTR( &var ), L":Win32_ComputerSystem.Name=\"" ) != NULL, "GroupComponent %s\n",
+                    wine_dbgstr_w(V_BSTR( &var )) );
+            VariantClear( &var );
+            IWbemClassObject_Release( obj );
+        }
+        ok( count == 1, "got %u references\n", count );
+        IEnumWbemClassObject_Release( result );
+    }
+    wsprintfW( query, L"REFERENCES OF %s WHERE Role=GroupComponent", proc );
+    hr = query_result( services, query, &count );
+    ok( hr == S_OK && !count, "references by the wrong role: %08x, %u objects\n", hr, count );
+    count = query_classes( services, L"SELECT * FROM Win32_SystemProcesses", L"Win32_SystemProcesses",
+                           WBEM_GENUS_INSTANCE, &matches );
+    ok( count > 1 && matches == count, "%u Win32_SystemProcesses, %u matches\n", count, matches );
+
+    /* errors */
+    hr = query_result( services, L"ASSOCIATORS OF {Win32_Process.Handle=\"4294967290\"}", &count );
+    ok( hr == WBEM_E_NOT_FOUND, "missing instance: %08x\n", hr );
+    hr = query_result( services, L"REFERENCES OF {Win32_Process.Handle=\"4294967290\"}", &count );
+    ok( hr == WBEM_E_NOT_FOUND, "missing instance references: %08x\n", hr );
+    hr = query_result( services, L"ASSOCIATORS OF {Win32_NoSuchClassAtAll.Handle=\"1\"}", &count );
+    ok( hr == WBEM_E_INVALID_CLASS, "unknown class: %08x\n", hr );
+    wsprintfW( query, L"ASSOCIATORS OF {Win32_Process.Handle=\"%u\",Name=\"x\"}", GetCurrentProcessId() );
+    hr = query_result( services, query, &count );
+    ok( hr == WBEM_E_INVALID_OBJECT_PATH, "extra key: %08x\n", hr );
+    wsprintfW( query, L"ASSOCIATORS OF %s WHERE SchemaOnly", proc );
+    hr = query_result( services, query, &count );
+    ok( hr == WBEM_E_INVALID_QUERY, "SchemaOnly of an instance: %08x\n", hr );
+    wsprintfW( query, L"ASSOCIATORS OF %s WHERE ClassDefsOnly ResultClass=Win32_ComputerSystem", proc );
+    hr = query_result( services, query, &count );
+    ok( hr == WBEM_E_INVALID_QUERY, "ClassDefsOnly with ResultClass: %08x\n", hr );
+    wsprintfW( query, L"ASSOCIATORS OF %s WHERE NoSuchKeyword=1", proc );
+    hr = query_result( services, query, &count );
+    ok( hr == WBEM_E_INVALID_QUERY, "unknown keyword: %08x\n", hr );
+    wsprintfW( query, L"ASSOCIATORS OF %s WHERE ResultClass", proc );
+    hr = query_result( services, query, &count );
+    ok( hr == WBEM_E_INVALID_QUERY, "keyword without a value: %08x\n", hr );
+    hr = query_result( services, L"ASSOCIATORS OF {Win32_Process} WHERE ClassDefsOnly", &count );
+    ok( hr == WBEM_E_INVALID_QUERY, "ClassDefsOnly of a class: %08x\n", hr );
+    hr = query_result( services, L"ASSOCIATORS OF {Win32_Process=@} WHERE SchemaOnly", &count );
+    ok( hr == WBEM_E_INVALID_OBJECT_PATH, "singleton path of a class with keys: %08x\n", hr );
+}
+
 /* class hierarchy, class enumeration and the method qualifiers, as Windows reports them */
 static void test_schema( IWbemLocator *locator, IWbemServices *services )
 {
@@ -2379,6 +2564,7 @@ START_TEST(query)
     test_Win32_Environment( services );
     test_schema( locator, services );
     test_method_paths( locator, services );
+    test_associations( services );
 
     SysFreeString( path );
     IWbemServices_Release( services );

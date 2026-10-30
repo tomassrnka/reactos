@@ -820,6 +820,236 @@ static void MI_CALL verify_instance(MI_Operation *op, void *context, const MI_In
     if (!more) SetEvent(ctx->done);
 }
 
+/* pull every instance; count them and those of a class */
+static MI_Result pull_instance_classes(MI_Operation *op, const MI_Char *class_name, UINT *count, UINT *matches)
+{
+    const MI_Instance *inst, *details;
+    const MI_Char *message, *name;
+    MI_Boolean more = MI_TRUE;
+    MI_Result result = MI_RESULT_FAILED;
+    UINT guard = 0;
+
+    *count = *matches = 0;
+    while (more && guard++ < 100000)
+    {
+        inst = NULL;
+        if (op->ft->GetInstance(op, &inst, &more, &result, &message, &details) != MI_RESULT_OK) break;
+        if (!inst) continue;
+        (*count)++;
+        name = NULL;
+        if (inst->ft->GetClassName(inst, &name) == MI_RESULT_OK && name && !_wcsicmp(name, class_name)) (*matches)++;
+    }
+    return result;
+}
+
+static void test_associations(MI_Application *app)
+{
+    MI_Session session = MI_SESSION_NULL;
+    MI_Operation op = MI_OPERATION_NULL;
+    MI_Instance *proc = NULL, *first = NULL, *keys = NULL;
+    const MI_Char *name;
+    WCHAR query[128], pid[16];
+    UINT count, matches, n;
+    MI_Result res;
+    MI_Value v;
+    MI_Type type;
+    MI_Uint32 flags;
+
+    res = app->ft->NewSession(app, NULL, NULL, NULL, NULL, NULL, &session);
+    ok(res == MI_RESULT_OK, "NewSession returned %d\n", res);
+    if (res) return;
+
+    _snwprintf(query, ARRAYSIZE(query) - 1, L"SELECT * FROM Win32_Process WHERE ProcessId = %lu", GetCurrentProcessId());
+    query[ARRAYSIZE(query) - 1] = 0;
+    _snwprintf(pid, ARRAYSIZE(pid) - 1, L"%lu", GetCurrentProcessId());
+    pid[ARRAYSIZE(pid) - 1] = 0;
+    session.ft->QueryInstances(&session, 0, NULL, L"root\\cimv2", L"WQL", query, NULL, &op);
+    res = pull_all(&op, &count, &proc, NULL);
+    ok(res == MI_RESULT_OK && count == 1 && proc, "own process: result %d count %u\n", res, count);
+    op.ft->Close(&op);
+    if (!proc) goto done;
+
+    /* Get-CimAssociatedInstance -ResultClassName Win32_ComputerSystem */
+    memset(&op, 0, sizeof(op));
+    session.ft->AssociatorInstances(&session, 0, NULL, L"root\\cimv2", proc, NULL, L"Win32_ComputerSystem", NULL, NULL,
+                                    MI_FALSE, NULL, &op);
+    ok(op.ft != NULL, "no operation ft\n");
+    res = pull_all(&op, &count, &first, NULL);
+    ok(res == MI_RESULT_OK, "associators result %d\n", res);
+    ok(count == 1, "got %u computer systems\n", count);
+    op.ft->Close(&op);
+    if (first)
+    {
+        name = NULL;
+        ok(first->ft->GetClassName(first, &name) == MI_RESULT_OK && name && !_wcsicmp(name, L"Win32_ComputerSystem"),
+           "class %ls\n", name);
+        res = first->ft->GetElement(first, L"Name", &v, &type, &flags, NULL);
+        ok(res == MI_RESULT_OK && type == MI_STRING && v.string && v.string[0], "Name: %d type %d\n", res, type);
+        ok(res == MI_RESULT_OK && (flags & MI_FLAG_KEY), "Name flags %#x\n", flags);
+        res = first->ft->GetElement(first, L"NumberOfLogicalProcessors", &v, &type, NULL, NULL);
+        ok(res == MI_RESULT_OK && type == MI_UINT32 && v.uint32 >= 1, "NumberOfLogicalProcessors: %d type %d\n", res, type);
+        first->ft->Delete(first);
+        first = NULL;
+    }
+
+    /* the association class and both roles */
+    memset(&op, 0, sizeof(op));
+    session.ft->AssociatorInstances(&session, 0, NULL, L"root\\cimv2", proc, L"Win32_SystemProcesses", NULL,
+                                    L"PartComponent", L"GroupComponent", MI_FALSE, NULL, &op);
+    res = pull_instance_classes(&op, L"Win32_ComputerSystem", &count, &matches);
+    ok(res == MI_RESULT_OK && count == 1 && matches == 1, "by association: result %d count %u matches %u\n", res, count, matches);
+    op.ft->Close(&op);
+
+    /* an abstract association class covers its subclasses */
+    memset(&op, 0, sizeof(op));
+    session.ft->AssociatorInstances(&session, 0, NULL, L"root\\cimv2", proc, L"CIM_Component", L"CIM_System", NULL, NULL,
+                                    MI_FALSE, NULL, &op);
+    res = pull_instance_classes(&op, L"Win32_ComputerSystem", &count, &matches);
+    ok(res == MI_RESULT_OK && count == 1 && matches == 1, "by base classes: result %d count %u matches %u\n", res, count, matches);
+    op.ft->Close(&op);
+
+    /* the process is the part, never the group */
+    memset(&op, 0, sizeof(op));
+    session.ft->AssociatorInstances(&session, 0, NULL, L"root\\cimv2", proc, NULL, NULL, L"GroupComponent", NULL,
+                                    MI_FALSE, NULL, &op);
+    res = pull_all(&op, &count, NULL, NULL);
+    ok(res == MI_RESULT_OK && count == 0, "wrong role: result %d count %u\n", res, count);
+    op.ft->Close(&op);
+
+    /* an unknown result class is no error */
+    memset(&op, 0, sizeof(op));
+    session.ft->AssociatorInstances(&session, 0, NULL, L"root\\cimv2", proc, NULL, L"Win32_NoSuchClassAtAll", NULL, NULL,
+                                    MI_FALSE, NULL, &op);
+    res = pull_all(&op, &count, NULL, NULL);
+    ok(res == MI_RESULT_OK && count == 0, "unknown result class: result %d count %u\n", res, count);
+    op.ft->Close(&op);
+
+    /* keys only */
+    memset(&op, 0, sizeof(op));
+    session.ft->AssociatorInstances(&session, 0, NULL, L"root\\cimv2", proc, NULL, L"Win32_ComputerSystem", NULL, NULL,
+                                    MI_TRUE, NULL, &op);
+    res = pull_all(&op, &count, &first, NULL);
+    ok(res == MI_RESULT_OK && count == 1, "keys only: result %d count %u\n", res, count);
+    op.ft->Close(&op);
+    if (first)
+    {
+        MI_Result count_res;
+        n = 0;
+        count_res = first->ft->GetElementCount(first, &n);
+        res = first->ft->GetElement(first, L"Name", &v, &type, NULL, NULL);
+        ok(res == MI_RESULT_OK && type == MI_STRING, "keys only Name: %d type %d\n", res, type);
+        /* Windows keeps the other properties, NULL; without them is as good for a client */
+        flags = 0;
+        res = first->ft->GetElement(first, L"NumberOfLogicalProcessors", &v, &type, &flags, NULL);
+        ok(count_res == MI_RESULT_OK && n >= 1, "keys only: GetElementCount %d, %u properties\n", count_res, n);
+        ok(res == MI_RESULT_NO_SUCH_PROPERTY || (res == MI_RESULT_OK && (flags & MI_FLAG_NULL)),
+           "keys only: NumberOfLogicalProcessors %d flags %#x\n", res, flags);
+        first->ft->Delete(first);
+        first = NULL;
+    }
+
+    /* the association instance */
+    memset(&op, 0, sizeof(op));
+    session.ft->ReferenceInstances(&session, 0, NULL, L"root\\cimv2", proc, L"Win32_SystemProcesses", NULL, MI_FALSE,
+                                   NULL, &op);
+    ok(op.ft != NULL, "no operation ft\n");
+    res = pull_all(&op, &count, &first, NULL);
+    ok(res == MI_RESULT_OK && count == 1, "references: result %d count %u\n", res, count);
+    op.ft->Close(&op);
+    if (first)
+    {
+        name = NULL;
+        ok(first->ft->GetClassName(first, &name) == MI_RESULT_OK && name && !_wcsicmp(name, L"Win32_SystemProcesses"),
+           "class %ls\n", name);
+        res = first->ft->GetElement(first, L"PartComponent", &v, &type, NULL, NULL);
+        ok(res == MI_RESULT_OK && type == MI_REFERENCE && v.reference, "PartComponent: %d type %d\n", res, type);
+        if (res == MI_RESULT_OK && type == MI_REFERENCE && v.reference)
+        {
+            MI_Value h;
+            MI_Type htype;
+            name = NULL;
+            ok(v.reference->ft->GetClassName(v.reference, &name) == MI_RESULT_OK && name &&
+               !_wcsicmp(name, L"Win32_Process"), "PartComponent class %ls\n", name);
+            res = v.reference->ft->GetElement(v.reference, L"Handle", &h, &htype, NULL, NULL);
+            ok(res == MI_RESULT_OK && htype == MI_STRING && h.string && !wcscmp(h.string, pid),
+               "PartComponent Handle %d %ls\n", res, res == MI_RESULT_OK && htype == MI_STRING ? h.string : L"");
+        }
+        res = first->ft->GetElement(first, L"GroupComponent", &v, &type, NULL, NULL);
+        ok(res == MI_RESULT_OK && type == MI_REFERENCE && v.reference, "GroupComponent: %d type %d\n", res, type);
+        if (res == MI_RESULT_OK && type == MI_REFERENCE && v.reference)
+        {
+            name = NULL;
+            ok(v.reference->ft->GetClassName(v.reference, &name) == MI_RESULT_OK && name &&
+               !_wcsicmp(name, L"Win32_ComputerSystem"), "GroupComponent class %ls\n", name);
+        }
+        first->ft->Delete(first);
+        first = NULL;
+    }
+
+    memset(&op, 0, sizeof(op));
+    session.ft->ReferenceInstances(&session, 0, NULL, L"root\\cimv2", proc, NULL, L"GroupComponent", MI_FALSE, NULL, &op);
+    res = pull_all(&op, &count, NULL, NULL);
+    ok(res == MI_RESULT_OK && count == 0, "references by the wrong role: result %d count %u\n", res, count);
+    op.ft->Close(&op);
+
+    /* an instance that does not exist */
+    res = app->ft->NewInstance(app, L"Win32_Process", NULL, &keys);
+    ok(res == MI_RESULT_OK, "NewInstance returned %d\n", res);
+    if (keys)
+    {
+        v.string = (MI_Char *)L"4294967290";
+        res = keys->ft->AddElement(keys, L"Handle", &v, MI_STRING, MI_FLAG_KEY);
+        ok(res == MI_RESULT_OK, "AddElement returned %d\n", res);
+        memset(&op, 0, sizeof(op));
+        session.ft->AssociatorInstances(&session, 0, NULL, L"root\\cimv2", keys, NULL, NULL, NULL, NULL, MI_FALSE, NULL, &op);
+        res = pull_all(&op, &count, NULL, NULL);
+        ok(res == MI_RESULT_NOT_FOUND && count == 0, "missing instance: result %d count %u\n", res, count);
+        op.ft->Close(&op);
+        memset(&op, 0, sizeof(op));
+        session.ft->ReferenceInstances(&session, 0, NULL, L"root\\cimv2", keys, NULL, NULL, MI_FALSE, NULL, &op);
+        res = pull_all(&op, &count, NULL, NULL);
+        ok(res == MI_RESULT_NOT_FOUND && count == 0, "missing instance references: result %d count %u\n", res, count);
+        op.ft->Close(&op);
+        keys->ft->Delete(keys);
+    }
+
+    /* no instance */
+    memset(&op, 0, sizeof(op));
+    session.ft->AssociatorInstances(&session, 0, NULL, L"root\\cimv2", NULL, NULL, NULL, NULL, NULL, MI_FALSE, NULL, &op);
+    ok(op.ft != NULL, "no operation ft for a NULL instance\n");
+    if (op.ft)
+    {
+        const MI_Instance *inst = NULL, *details = NULL;
+        const MI_Char *message = NULL;
+        MI_Boolean more = MI_TRUE;
+        MI_Result result = MI_RESULT_OK;
+
+        res = op.ft->GetInstance(&op, &inst, &more, &result, &message, &details);
+        ok(res == MI_RESULT_OK && !inst && !more, "NULL instance: GetInstance %d inst %p more %d\n", res, inst, more);
+        ok(result == MI_RESULT_INVALID_PARAMETER, "NULL instance: result %d\n", result);
+        op.ft->Close(&op);
+    }
+
+    /* what the PowerShell completer asks for Get-CimAssociatedInstance -ResultClassName */
+    memset(&op, 0, sizeof(op));
+    session.ft->QueryInstances(&session, 0, NULL, L"root\\cimv2", L"WQL", L"associators of {Win32_Process} WHERE SchemaOnly",
+                               NULL, &op);
+    res = pull_instance_classes(&op, L"Win32_ComputerSystem", &count, &matches);
+    ok(res == MI_RESULT_OK && count >= 1 && matches == 1, "schema: result %d count %u matches %u\n", res, count, matches);
+    op.ft->Close(&op);
+
+    memset(&op, 0, sizeof(op));
+    session.ft->QueryInstances(&session, 0, NULL, L"root\\cimv2", L"WQL", L"references of {Win32_Process} WHERE SchemaOnly",
+                               NULL, &op);
+    res = pull_instance_classes(&op, L"Win32_SystemProcesses", &count, &matches);
+    ok(res == MI_RESULT_OK && count >= 1 && matches == 1, "reference schema: result %d count %u matches %u\n", res, count, matches);
+    op.ft->Close(&op);
+
+done:
+    if (proc) proc->ft->Delete(proc);
+    session.ft->Close(&session, NULL, NULL);
+}
+
 static void test_filtered_enumeration(MI_Application *app)
 {
     MI_Session session = MI_SESSION_NULL;
@@ -1339,6 +1569,7 @@ START_TEST(mi)
     test_session(&app, NULL);
     test_session(&app, L"WMIDCOM");
     test_filtered_enumeration(&app);
+    test_associations(&app);
     test_schema(&app);
     test_method_scope(&app);
     test_concurrent_enumeration(&app);
