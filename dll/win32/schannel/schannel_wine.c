@@ -939,9 +939,18 @@ SECURITY_STATUS SEC_ENTRY schan_InitializeSecurityContextW(
             pOutput->pBuffers[idx].cbBuffer = 0;
     }
 
-    *pfContextAttr = 0;
+    /* TLS always provides these and Windows always reports them, requested or not
+     * (curl, i.e. git for Windows, refuses the context otherwise: "failed to setup sequence detection") */
+    *pfContextAttr = ISC_RET_REPLAY_DETECT | ISC_RET_SEQUENCE_DETECT | ISC_RET_CONFIDENTIALITY | ISC_RET_STREAM;
+    /* Reported when requested */
     if (ctx->req_ctx_attr & ISC_REQ_ALLOCATE_MEMORY)
         *pfContextAttr |= ISC_RET_ALLOCATED_MEMORY;
+    if (ctx->req_ctx_attr & ISC_REQ_EXTENDED_ERROR)
+        *pfContextAttr |= ISC_RET_EXTENDED_ERROR;
+    if (ctx->req_ctx_attr & ISC_REQ_USE_SUPPLIED_CREDS)
+        *pfContextAttr |= ISC_RET_USED_SUPPLIED_CREDS;
+    if (ctx->req_ctx_attr & ISC_REQ_MUTUAL_AUTH)
+        *pfContextAttr |= ISC_RET_MUTUAL_AUTH;
     /* Windows reports the flag for the context request only, not for SCH_CRED_MANUAL_CRED_VALIDATION */
     if (ctx->req_ctx_attr & ISC_REQ_MANUAL_CRED_VALIDATION)
         *pfContextAttr |= ISC_RET_MANUAL_CRED_VALIDATION;
@@ -1045,6 +1054,18 @@ SECURITY_STATUS SEC_ENTRY schan_QueryContextAttributesW(
             SecPkgContext_ConnectionInfo *info = buffer;
             return schan_imp_get_connection_info(ctx->session, info);
         }
+        case SECPKG_ATTR_APPLICATION_PROTOCOL:
+        {
+            SecPkgContext_ApplicationProtocol *protocol = buffer;
+
+            if (!ctx) return SEC_E_INVALID_HANDLE;
+            /* This provider does not offer ALPN, so nothing is ever negotiated; Windows answers the same
+             * way when the server declines ALPN (curl, i.e. git, fails the connection on an error here) */
+            memset(protocol, 0, sizeof(*protocol));
+            protocol->ProtoNegoStatus = SecApplicationProtocolNegotiationStatus_None;
+            protocol->ProtoNegoExt = SecApplicationProtocolNegotiationExt_None;
+            return SEC_E_OK;
+        }
 
         default:
             FIXME("Unhandled attribute %#x\n", attribute);
@@ -1066,6 +1087,8 @@ SECURITY_STATUS SEC_ENTRY schan_QueryContextAttributesA(
         case SECPKG_ATTR_REMOTE_CERT_CONTEXT:
             return schan_QueryContextAttributesW(context_handle, attribute, buffer);
         case SECPKG_ATTR_CONNECTION_INFO:
+            return schan_QueryContextAttributesW(context_handle, attribute, buffer);
+        case SECPKG_ATTR_APPLICATION_PROTOCOL:
             return schan_QueryContextAttributesW(context_handle, attribute, buffer);
 
         default:
