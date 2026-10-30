@@ -251,6 +251,66 @@ MiRemoveNode(IN PMMADDRESS_NODE Node,
              IN PMM_AVL_TABLE Table);
 
 
+#if (_MI_PAGING_LEVELS == 4)
+/*
+ * RosMm memory areas in system space (Cc's VACB views, MmMapViewInSystemSpace)
+ * take the first free gap of the kernel address space, above KUSER_SHARED_DATA.
+ * Their page tables are made on demand by the page fault handler when
+ * MmCreateVirtualMapping writes a PTE, but only under a valid page directory
+ * pointer (PPE), and nothing but the loader's KUSER_SHARED_DATA mapping makes
+ * one there: once views went past the first 1 GB of that range, which plenty
+ * of RAM makes Cc do, the next mapping took bugcheck 0x50. Make the PPEs an
+ * area needs valid when it is created, as paged pool expansion does for its
+ * page tables. The page directories stay for good, like those of the pools.
+ */
+static
+BOOLEAN
+MiMakeSystemPpesValid(
+    _In_ PVOID Address,
+    _In_ ULONG_PTR Length)
+{
+    PMMPDE PointerPpe, LastPpe;
+    MMPDE TempPpe;
+    PFN_NUMBER PageFrameIndex;
+    KIRQL OldIrql;
+
+    PointerPpe = MiAddressToPpe(Address);
+    LastPpe = MiAddressToPpe((PVOID)((ULONG_PTR)Address + Length - 1));
+    for (; PointerPpe <= LastPpe; PointerPpe++)
+    {
+        if (PointerPpe->u.Hard.Valid) continue;
+
+        /* All PXEs of system space exist (MiInitializePageTable) */
+        ASSERT(MiAddressToPte(PointerPpe)->u.Hard.Valid);
+
+        OldIrql = MiAcquirePfnLock();
+        if (!PointerPpe->u.Hard.Valid)
+        {
+            /* Like other kernel page allocations, fail instead of taking page 0 */
+            if (MiGetFreeOrZeroedPageCount() == 0)
+            {
+                MiReleasePfnLock(OldIrql);
+                DPRINT1("No page for the page directory of system VA %p\n", MiPpeToAddress(PointerPpe));
+                return FALSE;
+            }
+
+            MI_SET_USAGE(MI_USAGE_PAGE_DIRECTORY);
+            MI_SET_PROCESS2("Kernel");
+            PageFrameIndex = MiRemoveZeroPage(MI_GET_NEXT_COLOR());
+            MiInitializePfnForOtherProcess(PageFrameIndex,
+                                           (PMMPTE)PointerPpe,
+                                           PFN_FROM_PTE(MiAddressToPte(PointerPpe)));
+            TempPpe = ValidKernelPde;
+            TempPpe.u.Hard.PageFrameNumber = PageFrameIndex;
+            MI_WRITE_VALID_PDE(PointerPpe, TempPpe);
+        }
+        MiReleasePfnLock(OldIrql);
+    }
+
+    return TRUE;
+}
+#endif
+
 /**
  * @name MmFreeMemoryArea
  *
@@ -437,6 +497,8 @@ MmCreateMemoryArea(PMMSUPPORT AddressSpace,
     ULONG_PTR tmpLength;
     PMEMORY_AREA MemoryArea;
     ULONG_PTR EndingAddress;
+    /* Restored on failure: callers such as CcRosCreateVacb retry with the same pointer */
+    PVOID OriginalBaseAddress = *BaseAddress;
 
     DPRINT("MmCreateMemoryArea(Type 0x%lx, BaseAddress %p, "
            "*BaseAddress %p, Length %p, AllocationFlags %x, "
@@ -487,8 +549,20 @@ MmCreateMemoryArea(PMMSUPPORT AddressSpace,
         {
             DPRINT("No suitable gap\n");
             if (!(Type & MEMORY_AREA_STATIC)) ExFreePoolWithTag(MemoryArea, TAG_MAREA);
+            *BaseAddress = OriginalBaseAddress;
             return STATUS_NO_MEMORY;
         }
+
+#if (_MI_PAGING_LEVELS == 4)
+        if (!MmGetAddressSpaceOwner(AddressSpace) &&
+            (MemoryArea->Type != MEMORY_AREA_OWNED_BY_ARM3) &&
+            !MiMakeSystemPpesValid(*BaseAddress, tmpLength))
+        {
+            if (!(Type & MEMORY_AREA_STATIC)) ExFreePoolWithTag(MemoryArea, TAG_MAREA);
+            *BaseAddress = OriginalBaseAddress;
+            return STATUS_NO_MEMORY;
+        }
+#endif
 
         MemoryArea->VadNode.StartingVpn = (ULONG_PTR)*BaseAddress >> PAGE_SHIFT;
         MemoryArea->VadNode.EndingVpn = ((ULONG_PTR)*BaseAddress + tmpLength - 1) >> PAGE_SHIFT;
@@ -504,6 +578,7 @@ MmCreateMemoryArea(PMMSUPPORT AddressSpace,
         {
             ASSERT(FALSE);
             if (!(Type & MEMORY_AREA_STATIC)) ExFreePoolWithTag(MemoryArea, TAG_MAREA);
+            *BaseAddress = OriginalBaseAddress;
             return STATUS_ACCESS_VIOLATION;
         }
 
@@ -512,6 +587,7 @@ MmCreateMemoryArea(PMMSUPPORT AddressSpace,
         {
             DPRINT("Memory area for user mode address space exceeds MmSystemRangeStart\n");
             if (!(Type & MEMORY_AREA_STATIC)) ExFreePoolWithTag(MemoryArea, TAG_MAREA);
+            *BaseAddress = OriginalBaseAddress;
             return STATUS_ACCESS_VIOLATION;
         }
 
@@ -522,8 +598,19 @@ MmCreateMemoryArea(PMMSUPPORT AddressSpace,
             {
                 DPRINT("Memory area already occupied\n");
                 if (!(Type & MEMORY_AREA_STATIC)) ExFreePoolWithTag(MemoryArea, TAG_MAREA);
+                *BaseAddress = OriginalBaseAddress;
                 return STATUS_CONFLICTING_ADDRESSES;
             }
+
+#if (_MI_PAGING_LEVELS == 4)
+            if (!MmGetAddressSpaceOwner(AddressSpace) &&
+                !MiMakeSystemPpesValid(*BaseAddress, tmpLength))
+            {
+                if (!(Type & MEMORY_AREA_STATIC)) ExFreePoolWithTag(MemoryArea, TAG_MAREA);
+                *BaseAddress = OriginalBaseAddress;
+                return STATUS_NO_MEMORY;
+            }
+#endif
         }
 
         MemoryArea->VadNode.StartingVpn = (ULONG_PTR)*BaseAddress >> PAGE_SHIFT;
