@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     cmd.c
+    color.c
     echoenc.c
     exitb.c
     fc.c
