@@ -101,6 +101,7 @@ list(APPEND SOURCE
     LoadLibraryExW.c
     LoadLibraryILOnly.c
     LoadLibraryMachine.c
+    LoadLibraryMissingImport.c
     LocalDumps.c
     CrashDialog.c
     LocaleNameToLCID.c
