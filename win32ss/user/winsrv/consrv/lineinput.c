@@ -34,6 +34,22 @@ ConvertInputUnicodeToAnsi(PCONSRV_CONSOLE Console,
 
 /* PRIVATE FUNCTIONS **********************************************************/
 
+/*
+ * Echo of the line being read: plain text even if the buffer interprets
+ * virtual terminal sequences, since the line editing below computes the
+ * cursor position from the characters written.
+ */
+static VOID
+LineInputEcho(PCONSRV_CONSOLE Console,
+              PTEXTMODE_SCREEN_BUFFER Buffer,
+              PWCHAR Text,
+              ULONG Length)
+{
+    Buffer->Vt.Echo = TRUE;
+    TermWriteStream(Console, Buffer, Text, Length, TRUE);
+    Buffer->Vt.Echo = FALSE;
+}
+
 static VOID
 LineInputSetPos(PCONSRV_CONSOLE Console,
                 UINT Pos)
@@ -86,14 +102,13 @@ LineInputEdit(PCONSRV_CONSOLE Console,
     {
         if (Pos < NewSize)
         {
-            TermWriteStream(Console, ActiveBuffer,
-                            &Console->LineBuffer[Pos],
-                            NewSize - Pos,
-                            TRUE);
+            LineInputEcho(Console, ActiveBuffer,
+                          &Console->LineBuffer[Pos],
+                          NewSize - Pos);
         }
         for (i = NewSize; i < Console->LineSize; ++i)
         {
-            TermWriteStream(Console, ActiveBuffer, L" ", 1, TRUE);
+            LineInputEcho(Console, ActiveBuffer, L" ", 1);
         }
         Console->LinePos = i;
     }
@@ -417,7 +432,7 @@ LineInputKeyDown(PCONSRV_CONSOLE Console,
         if ((GetType(Console->ActiveBuffer) == TEXTMODE_BUFFER) &&
             (GetConsoleInputBufferMode(Console) & ENABLE_ECHO_INPUT))
         {
-            TermWriteStream(Console, (PTEXTMODE_SCREEN_BUFFER)(Console->ActiveBuffer), L"\r", 1, TRUE);
+            LineInputEcho(Console, (PTEXTMODE_SCREEN_BUFFER)(Console->ActiveBuffer), L"\r", 1);
         }
 
         /*
@@ -432,7 +447,7 @@ LineInputKeyDown(PCONSRV_CONSOLE Console,
             if ((GetType(Console->ActiveBuffer) == TEXTMODE_BUFFER) &&
                 (GetConsoleInputBufferMode(Console) & ENABLE_ECHO_INPUT))
             {
-                TermWriteStream(Console, (PTEXTMODE_SCREEN_BUFFER)(Console->ActiveBuffer), L"\n", 1, TRUE);
+                LineInputEcho(Console, (PTEXTMODE_SCREEN_BUFFER)(Console->ActiveBuffer), L"\n", 1);
             }
         }
         Console->LineComplete = TRUE;

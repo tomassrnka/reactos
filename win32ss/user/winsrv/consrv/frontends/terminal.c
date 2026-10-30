@@ -499,12 +499,28 @@ ConioNextLine(PTEXTMODE_SCREEN_BUFFER Buff, PSMALL_RECT UpdateRect, PUINT Scroll
     UpdateRect->Bottom = Buff->CursorPosition.Y;
 }
 
-static NTSTATUS
-ConioWriteConsole(PFRONTEND FrontEnd,
-                  PTEXTMODE_SCREEN_BUFFER Buff,
-                  PWCHAR Buffer,
-                  DWORD Length,
-                  BOOL Attrib)
+/* A line feed in virtual terminal mode: inside the scrolling region it scrolls the region */
+static VOID
+ConioVtNextLine(PTEXTMODE_SCREEN_BUFFER Buff, PSMALL_RECT UpdateRect, PUINT ScrolledLines)
+{
+    if (!ConioVtLineFeedInRegion(Buff, UpdateRect))
+        ConioNextLine(Buff, UpdateRect, ScrolledLines);
+}
+
+/*
+ * Write characters to the buffer and show them. Vt is TRUE for the text of
+ * a buffer in virtual terminal mode (the escape sequences are already taken
+ * out by ConioVtWriteConsole, see vt.c): the cursor stays in the last column
+ * until the next character wraps it, the output always wraps, backspace and
+ * tab only move the cursor, and the DEC special graphics set is translated.
+ */
+NTSTATUS
+ConioWriteText(PFRONTEND FrontEnd,
+               PTEXTMODE_SCREEN_BUFFER Buff,
+               PWCHAR Buffer,
+               DWORD Length,
+               BOOL Attrib,
+               BOOLEAN Vt)
 {
     PCONSRV_CONSOLE Console = FrontEnd->Console;
 
@@ -516,6 +532,8 @@ ConioWriteConsole(PFRONTEND FrontEnd,
     UINT ScrolledLines;
     BOOLEAN bFullwidth;
     BOOLEAN bCJK = Console->IsCJK;
+    BOOLEAN bWrap = (Vt || (Buff->Mode & ENABLE_WRAP_AT_EOL_OUTPUT));
+    WCHAR Char;
 
     /* If nothing to write, bail out now */
     if (Length == 0)
@@ -530,13 +548,76 @@ ConioWriteConsole(PFRONTEND FrontEnd,
     UpdateRect.Bottom = Buff->CursorPosition.Y;
     ScrolledLines = 0;
 
+    /* Plain text after a character written in the last column in virtual terminal mode (echo): wrap first */
+    if (!Vt && Buff->Vt.DelayedWrap)
+    {
+        if (Buff->Vt.DelayedWrapPos.X == Buff->CursorPosition.X &&
+            Buff->Vt.DelayedWrapPos.Y == Buff->CursorPosition.Y)
+        {
+            Buff->CursorPosition.X = 0;
+            CursorStartX = Buff->CursorPosition.X;
+            ConioNextLine(Buff, &UpdateRect, &ScrolledLines);
+        }
+        Buff->Vt.DelayedWrap = FALSE;
+    }
+
     for (i = 0; i < Length; i++)
     {
+        Char = Buffer[i];
+
+        if (Vt)
+        {
+            switch (Char)
+            {
+            case L'\r':
+                Buff->Vt.DelayedWrap = FALSE;
+                Buff->CursorPosition.X = 0;
+                continue;
+
+            case L'\n':
+                Buff->Vt.DelayedWrap = FALSE;
+                if (!(Buff->Mode & DISABLE_NEWLINE_AUTO_RETURN))
+                    Buff->CursorPosition.X = 0;
+                ConioVtNextLine(Buff, &UpdateRect, &ScrolledLines);
+                continue;
+
+            case L'\b':
+                /* Moves the cursor back on the same line, without erasing */
+                Buff->Vt.DelayedWrap = FALSE;
+                if (Buff->CursorPosition.X > 0)
+                    Buff->CursorPosition.X--;
+                continue;
+
+            case L'\t':
+                /* Moves the cursor to the next tab stop, at most to the last column */
+                Buff->Vt.DelayedWrap = FALSE;
+                Buff->CursorPosition.X = min((Buff->CursorPosition.X + TAB_WIDTH) & ~(TAB_WIDTH - 1),
+                                             Buff->ScreenBufferSize.X - 1);
+                continue;
+
+            case L'\a':
+                FrontEnd->Vtbl->RingBell(FrontEnd);
+                continue;
+            }
+
+            /* A character after one written in the last column wraps first */
+            if (Buff->Vt.DelayedWrap &&
+                Buff->Vt.DelayedWrapPos.X == Buff->CursorPosition.X &&
+                Buff->Vt.DelayedWrapPos.Y == Buff->CursorPosition.Y)
+            {
+                Buff->CursorPosition.X = 0;
+                ConioVtNextLine(Buff, &UpdateRect, &ScrolledLines);
+            }
+            Buff->Vt.DelayedWrap = FALSE;
+
+            Char = ConioVtTranslateChar(Buff, Char);
+            Buff->Vt.LastChar = Char;
+        }
         /*
          * If we are in processed mode, interpret special characters and
          * display them correctly. Otherwise, just put them into the buffer.
          */
-        if (Buff->Mode & ENABLE_PROCESSED_OUTPUT)
+        else if (Buff->Mode & ENABLE_PROCESSED_OUTPUT)
         {
             /* --- CR --- */
             if (Buffer[i] == L'\r')
@@ -550,8 +631,12 @@ ConioWriteConsole(PFRONTEND FrontEnd,
             /* --- LF --- */
             else if (Buffer[i] == L'\n')
             {
-                Buff->CursorPosition.X = 0; // TODO: Make this behaviour optional!
-                CursorStartX = Buff->CursorPosition.X;
+                /* The line feed also returns the carriage, unless DISABLE_NEWLINE_AUTO_RETURN is set */
+                if (!(Buff->Mode & DISABLE_NEWLINE_AUTO_RETURN))
+                {
+                    Buff->CursorPosition.X = 0;
+                    CursorStartX = Buff->CursorPosition.X;
+                }
                 ConioNextLine(Buff, &UpdateRect, &ScrolledLines);
                 continue;
             }
@@ -704,7 +789,7 @@ ConioWriteConsole(PFRONTEND FrontEnd,
         UpdateRect.Right = max(UpdateRect.Right, Buff->CursorPosition.X);
 
         /* For Chinese, Japanese and Korean */
-        bFullwidth = (bCJK && IS_FULL_WIDTH(Buffer[i]));
+        bFullwidth = (bCJK && IS_FULL_WIDTH(Char));
 
         /* Check whether we can insert the full-width character */
         if (bFullwidth)
@@ -712,12 +797,15 @@ ConioWriteConsole(PFRONTEND FrontEnd,
             /* It spans two cells and should all fit on the current line */
             if (Buff->CursorPosition.X >= Buff->ScreenBufferSize.X - 1)
             {
-                if (Buff->Mode & ENABLE_WRAP_AT_EOL_OUTPUT)
+                if (bWrap)
                 {
                     /* Wrapping mode: Go to next line */
                     Buff->CursorPosition.X = 0;
                     CursorStartX = Buff->CursorPosition.X;
-                    ConioNextLine(Buff, &UpdateRect, &ScrolledLines);
+                    if (Vt)
+                        ConioVtNextLine(Buff, &UpdateRect, &ScrolledLines);
+                    else
+                        ConioNextLine(Buff, &UpdateRect, &ScrolledLines);
                 }
                 else
                 {
@@ -768,7 +856,7 @@ ConioWriteConsole(PFRONTEND FrontEnd,
             ASSERT(Buff->CursorPosition.X < Buff->ScreenBufferSize.X - 1);
 
             /* Set the leading byte */
-            Ptr->Char.UnicodeChar = Buffer[i];
+            Ptr->Char.UnicodeChar = Char;
             if (Attrib)
                 Ptr->Attributes = Buff->ScreenDefaultAttrib;
             Ptr->Attributes &= ~COMMON_LVB_SBCSDBCS;
@@ -787,10 +875,19 @@ ConioWriteConsole(PFRONTEND FrontEnd,
         }
         else
         {
-            Ptr->Char.UnicodeChar = Buffer[i];
+            Ptr->Char.UnicodeChar = Char;
             if (Attrib)
                 Ptr->Attributes = Buff->ScreenDefaultAttrib;
             Ptr->Attributes &= ~COMMON_LVB_SBCSDBCS;
+        }
+
+        if (Vt && Buff->CursorPosition.X >= Buff->ScreenBufferSize.X - 1)
+        {
+            /* The cursor stays in the last column; the next character wraps */
+            Buff->CursorPosition.X = Buff->ScreenBufferSize.X - 1;
+            Buff->Vt.DelayedWrap = TRUE;
+            Buff->Vt.DelayedWrapPos = Buff->CursorPosition;
+            continue;
         }
 
         ++Ptr;
@@ -851,6 +948,10 @@ ConioWriteConsole(PFRONTEND FrontEnd,
                                       OldCursor.Y);
     }
 
+    /* The view of a buffer that is not shown follows its cursor too (only the frontend moves the active one) */
+    if (Vt && (PCONSOLE_SCREEN_BUFFER)Buff != Console->ActiveBuffer)
+        ConioVtFollowCursor(Buff);
+
     return STATUS_SUCCESS;
 }
 
@@ -864,11 +965,12 @@ ConSrvTermWriteStream(IN OUT PTERMINAL This,
                       BOOL Attrib)
 {
     PFRONTEND FrontEnd = This->Context;
-    return ConioWriteConsole(FrontEnd,
-                             Buff,
-                             Buffer,
-                             Length,
-                             Attrib);
+
+    /* Virtual terminal sequences are interpreted in processed output mode only, not in the line input echo */
+    if (CONSOLE_VT_ACTIVE(Buff) && !Buff->Vt.Echo)
+        return ConioVtWriteConsole(FrontEnd, Buff, Buffer, Length, Attrib);
+
+    return ConioWriteText(FrontEnd, Buff, Buffer, Length, Attrib, FALSE);
 }
 
 /************ Line discipline ***************/

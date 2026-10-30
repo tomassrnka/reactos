@@ -27,6 +27,7 @@ list(APPEND SOURCE
     ConsoleCtrlEventRace.c
     ConsoleDisplayMode.c
     ConsoleViewFollow.c
+    ConsoleVirtualTerminal.c
     ConsoleWriteLatency.c
     CopyFile2.c
     CopyFile2Identity.c

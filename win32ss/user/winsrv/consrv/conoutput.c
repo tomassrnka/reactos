@@ -295,6 +295,14 @@ CON_API(SrvCreateConsoleScreenBuffer,
     if (!NT_SUCCESS(Status))
         return Status;
 
+    /* The virtual terminal default colors are those of the console, not the current ones */
+    if (GetType(Buff) == TEXTMODE_BUFFER &&
+        Console->ActiveBuffer && GetType(Console->ActiveBuffer) == TEXTMODE_BUFFER)
+    {
+        ((PTEXTMODE_SCREEN_BUFFER)Buff)->Vt.DefaultAttrib =
+            ((PTEXTMODE_SCREEN_BUFFER)Console->ActiveBuffer)->Vt.DefaultAttrib;
+    }
+
     /* Insert the new handle inside the process handles table */
     RtlEnterCriticalSection(&ProcessData->HandleTableLock);
 
