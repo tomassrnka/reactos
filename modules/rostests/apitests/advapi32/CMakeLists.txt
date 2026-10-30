@@ -26,6 +26,7 @@ list(APPEND SOURCE
     LookupAccountSidCaller.c
     LogonUser.c
     LogonUserCleartext.c
+    LogonUserUserRights.c
     LsaLookupLeak.c
     LsaManageSidNameMapping.c
     ProcessThreadLabel.c
