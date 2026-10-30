@@ -273,6 +273,42 @@ static BOOLEAN GuestSpan(ULONG Address, ULONG64 Size)
     return (ULONG64)Address + Size <= (ULONG64)Wow64HighestUserAddress + 1;
 }
 
+/* A handle output of a failed call becomes NULL. Windows' WoW64 layer stores NULL whatever the
+ * native service left in its output (measured on Windows 10 22H2 for the open and create services,
+ * NtDuplicateObject, the token services and NtCreateThread; the native 64-bit services often leave
+ * the variable alone). 32-bit code that closes an unchecked handle after a failed open would
+ * otherwise close whatever the variable held, possibly a live handle of the process. The address
+ * was probed before the call; the store is still checked against the guest range and guarded, so
+ * a page the guest released meanwhile only loses the NULL and never changes the status. */
+static VOID StoreNullHandle32(ULONG Address)
+{
+    if (!Address || !GuestSpan(Address, sizeof(ULONG))) return;
+    _SEH2_TRY
+    {
+        *(volatile ULONG *)PTR32(Address) = 0;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+    }
+    _SEH2_END;
+}
+
+/* Hand the handle a native call created to the guest, or NULL when the call failed. A fault while
+ * storing a created handle leaves it in Cleanup, so Wow64SystemService closes it. */
+static NTSTATUS ReturnHandle32(ULONG Address, NTSTATUS Status, WOW64_CLEANUP *Cleanup)
+{
+    if (NT_SUCCESS(Status))
+    {
+        *(ULONG *)PTR32(Address) = HandleToUlong(Cleanup->Handle);
+        Cleanup->Handle = NULL;
+        return Status;
+    }
+    /* Failed native calls do not transfer handle ownership */
+    Cleanup->Handle = NULL;
+    StoreNullHandle32(Address);
+    return Status;
+}
+
 /*
  * IOCTL_AFD_GET_CONTEXT of a 32-bit msafd. AFD answers with its own SOCK_SHARED_INFO
  * (the one it keeps the socket state in) only when the output buffer has exactly the
@@ -715,9 +751,7 @@ static NTSTATUS FilterToken32(ULONG *a, WOW64_CLEANUP *Cleanup)
     Restrict = GroupsFrom32(a[4], RestrictCount, &Next);
     if (Restrict == (PTOKEN_GROUPS)-1) return STATUS_ACCESS_VIOLATION;
     Status = NtFilterToken(HANDLE32(a[0]), a[1], Disable, PTR32(a[3]), Restrict, &Cleanup->Handle);
-    if (NT_SUCCESS(Status)) *(ULONG *)PTR32(a[5]) = HandleToUlong(Cleanup->Handle);
-    Cleanup->Handle = NULL;
-    return Status;
+    return ReturnHandle32(a[5], Status, Cleanup);
 }
 
 static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
@@ -743,9 +777,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
     Status = Wow64RedirectFile(&Attributes, &Name, &Cleanup->Buffer); \
     if (!NT_SUCCESS(Status)) return Status; } while (0)
 #define PROBE(i) ProbeOutput(a[i], sizeof(ULONG))
-#define RETURN_HANDLE_AT(i) do { \
-    if (NT_SUCCESS(Status)) U(i) = HandleToUlong(Cleanup->Handle); \
-    Cleanup->Handle = NULL; return Status; } while (0)
+#define RETURN_HANDLE_AT(i) return ReturnHandle32(a[i], Status, Cleanup)
 #define RETURN_HANDLE() RETURN_HANDLE_AT(0)
 #define UNSUPPORTED(Kind, Value) return Wow64Unsupported(Number, WOW64_UNSUPPORTED_##Kind, Value, &Cleanup->Reported)
     if (Number == WOW64_SERVICE_CSR) return Wow64CsrDispatch(a[0], P(1), &Cleanup->Reported);
@@ -815,6 +847,8 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
                 Cleanup->Handle = NULL;
             }
         }
+        /* The dispatcher closes the duplicate and aborts the thread; the guest sees NULL */
+        if (!NT_SUCCESS(Status)) StoreNullHandle32(a[0]);
         return Status;
     }
     case W64_NtGetContextThread:
