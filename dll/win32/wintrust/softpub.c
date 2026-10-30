@@ -821,8 +821,9 @@ static CMSG_SIGNER_INFO *WINTRUST_GetSigner(CRYPT_PROVIDER_DATA *data,
  *    value;
  *  - the time stamping authority's certificate chains to a trusted root, was
  *    valid at the time stamp and may sign time stamps (extended key usage
- *    id-kp-timeStamping);
- *  - it does not claim a time in the future.
+ *    id-kp-timeStamping).
+ * The time stamp may name a time in the future: like Windows, neither the signersn ,  0 addtest.py afdfix.py appcopy.log appsoak-view archive-2026-10-18 b5 bk-amd64-Debug.log bk-i386-Debug.log bundles C:\harness\out.txt claude-setup.cmd cmdcol cmdexit-probe COM2rnshutdown CommandLine conntest.c cp demofinal-dl demofinal-out dnfile-0.18.0-py3-none-any.whl drainE-work drainN-probe fakebrowser.c featmgmt3 featmgmt4-shots featmgmt-cpl-shots featmgmt-staging ffhang-tools ffipc-shots ffp ffshots fmps7 fmps7dl fork-records gate gen gfx-lane lane-ff128 m10.png m11.png m12.png m1.png m2.png m3.png m4.png m5.png m6.png m7.png m8.png m9.png MdlAddress, memory-snapshot mm mm-patch mm-test.tgz na.png nmifu-scratch nul nulrnset pefile-2024.8.26-py3-none-any.whl pnp-scratch PollState probes ProcessParameters- pstfs pstut pswmi-ref pswmi-work qin.py README.md s10.png s11c.png s11.png s12c.png s12.png s1.png s2.png s3.png s45.png s4.png s5.png s6c.png s6.png s7.png s8c.png s8.png s9.png scratch scratch-t139 session-2026-10-18 session-2026-10-18-iexplore-gecko.md shots skills stage sub-scratch t01-bundle t102-shots t104edit t107 t121-patch2.py t121-patch3.py t121-patch.py t121-test.c t133-apply-fix.py t133-build-4config.sh t133-commit-msg.txt t133-repro-run.sh t133-suite-run.sh t134_patch.py t147.sh t40screen.png t50 t66 t73 t77-commits.txt t80-commit-msg.txt t80-patch.py thrgrow-tmp tmp tmp-dllinit transcripts vkl vmrun.sh winfsp-a with wmifix work work-notes wowpinv-tools wowwpf-evidence chain nor the time stamping authoritys is then checked against the current
+ * time, only as of the time stamp.
  * Otherwise it is ignored and the signature is validated at the current time,
  * where an expired certificate fails. */
 #ifndef szOID_RFC3161_counterSign
@@ -1076,14 +1077,6 @@ static BOOL WINTRUST_CheckMessageDigest(const CRYPT_ATTRIBUTES *attrs, const cha
     return ret;
 }
 
-static BOOL WINTRUST_NotInFuture(const FILETIME *time)
-{
-    FILETIME now;
-
-    GetSystemTimeAsFileTime(&now);
-    return CompareFileTime(time, &now) <= 0;
-}
-
 /* A time stamping authority's certificate: it names id-kp-timeStamping, and its
  * chain, built as of the time stamp, ends in a trusted root with no error and
  * allows that usage throughout. */
@@ -1225,7 +1218,7 @@ static BOOL WINTRUST_VerifyCounterSigner(const CRYPT_PROVIDER_DATA *data,
     if (!WINTRUST_CheckMessageDigest(&counter->AuthAttrs, counter->HashAlgorithm.pszObjId, TRUE,
      signerInfo->EncryptedHash.pbData, signerInfo->EncryptedHash.cbData))
         return FALSE;
-    if (!WINTRUST_GetTimeFromCounterSigner(counter, time) || !WINTRUST_NotInFuture(time))
+    if (!WINTRUST_GetTimeFromCounterSigner(counter, time))
         return FALSE;
 
     id.Issuer = counter->SignerId.IssuerSerialNumber.Issuer;
@@ -1315,7 +1308,6 @@ static BOOL WINTRUST_VerifyRFC3161Token(const CRYPT_ATTR_BLOB *token,
      primary->EncryptedHash.cbData, hash, &hashLen) ||
      info.imprintLen != hashLen || memcmp(info.imprint, hash, hashLen))
         goto done;
-    if (!WINTRUST_NotInFuture(&info.genTime)) goto done;
 
     /* the signer: signed attributes that hold the digest of the TSTInfo */
     if (!CryptMsgGetParam(msg, CMSG_SIGNER_INFO_PARAM, 0, NULL, &size) ||
