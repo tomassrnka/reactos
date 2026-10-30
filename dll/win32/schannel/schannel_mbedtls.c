@@ -96,6 +96,8 @@ typedef struct
     DWORD                    cred_flags;
     BOOL                     manual_validation;
     BOOL                     cert_checked;
+    DWORD                    enabled_protocols;
+    BOOL                     version_checked;
 } MBEDTLS_SESSION, *PMBEDTLS_SESSION;
 
 /* custom `net_recv` callback adapter, mbedTLS uses it in mbedtls_ssl_read for
@@ -201,6 +203,59 @@ DWORD schan_imp_enabled_protocols(void)
         ;
 }
 
+/* SP_PROT_* (client | server) bits of each mbedTLS minor version, lowest first */
+static const struct
+{
+    int minor;
+    DWORD protocols;
+} schan_protocol_versions[] =
+{
+    { MBEDTLS_SSL_MINOR_VERSION_0, SP_PROT_SSL3 },
+    { MBEDTLS_SSL_MINOR_VERSION_1, SP_PROT_TLS1_0 },
+    { MBEDTLS_SSL_MINOR_VERSION_2, SP_PROT_TLS1_1 },
+    { MBEDTLS_SSL_MINOR_VERSION_3, SP_PROT_TLS1_2 },
+};
+
+/* Limits the session to the credential's protocols; schan_imp_handshake rejects a version inside the range that
+ * the credential does not enable (e.g. TLS 1.1 with only TLS 1.0 and 1.2 enabled) */
+static void schan_imp_set_session_protocols(MBEDTLS_SESSION *s, DWORD enabled)
+{
+    unsigned int i;
+    int min = -1, max = -1;
+
+    s->enabled_protocols = enabled;
+    for (i = 0; i < sizeof(schan_protocol_versions) / sizeof(schan_protocol_versions[0]); i++)
+    {
+        if (!(enabled & schan_protocol_versions[i].protocols))
+            continue;
+        if (min < 0)
+            min = schan_protocol_versions[i].minor;
+        max = schan_protocol_versions[i].minor;
+    }
+
+    /* Credentials without any mbedTLS protocol are refused by AcquireCredentialsHandle; keep the defaults otherwise */
+    if (min < 0)
+        return;
+
+    TRACE("MBEDTLS protocol versions 3.%d-3.%d (enabled %#x)\n", min, max, enabled);
+    mbedtls_ssl_conf_min_version(&s->conf, MBEDTLS_SSL_MAJOR_VERSION_3, min);
+    mbedtls_ssl_conf_max_version(&s->conf, MBEDTLS_SSL_MAJOR_VERSION_3, max);
+}
+
+static BOOL schan_imp_version_enabled(const MBEDTLS_SESSION *s)
+{
+    unsigned int i;
+
+    if (!s->enabled_protocols)
+        return TRUE;
+    for (i = 0; i < sizeof(schan_protocol_versions) / sizeof(schan_protocol_versions[0]); i++)
+    {
+        if (schan_protocol_versions[i].minor == s->ssl.minor_ver)
+            return (s->enabled_protocols & schan_protocol_versions[i].protocols) != 0;
+    }
+    return FALSE;
+}
+
 static void schan_imp_debug(void *ctx, int level, const char *file, int line, const char *str)
 {
     WARN("MBEDTLS schan_imp_debug: %s:%04d: %s\n", file, line, str);
@@ -248,6 +303,8 @@ BOOL schan_imp_create_session(schan_imp_session *session, schan_credentials *cre
 
     TRACE("MBEDTLS set dbg\n");
     mbedtls_ssl_conf_dbg(&s->conf, schan_imp_debug, stdout);
+
+    schan_imp_set_session_protocols(s, cred->enabled_protocols);
 
     TRACE("MBEDTLS setup\n");
     mbedtls_ssl_setup(&s->ssl, &s->conf);
@@ -495,6 +552,18 @@ SECURITY_STATUS schan_imp_handshake(schan_imp_session session)
     /* Step through the handshake so the server certificate is checked before the client answers it */
     while (s->ssl.state != MBEDTLS_SSL_HANDSHAKE_OVER)
     {
+        /* The negotiated version is known once the ServerHello is parsed */
+        if (!s->version_checked && s->conf.endpoint == MBEDTLS_SSL_IS_CLIENT &&
+            s->ssl.state > MBEDTLS_SSL_SERVER_HELLO)
+        {
+            if (!schan_imp_version_enabled(s))
+            {
+                WARN("MBEDTLS server chose disabled protocol 3.%d\n", s->ssl.minor_ver);
+                return SEC_E_ALGORITHM_MISMATCH;
+            }
+            s->version_checked = TRUE;
+        }
+
         if (!s->cert_checked && s->conf.endpoint == MBEDTLS_SSL_IS_CLIENT &&
             s->ssl.state > MBEDTLS_SSL_SERVER_CERTIFICATE)
         {
@@ -876,10 +945,11 @@ SECURITY_STATUS schan_imp_send(schan_imp_session session, const void *buffer,
     MBEDTLS_SESSION *s = (MBEDTLS_SESSION *)session;
     int ret;
 
-    /* Fail-closed: a client context whose server certificate was never validated must not be
-       advanced to a completed handshake through the data path; mbedtls_ssl_write would otherwise
+    /* Fail-closed: a client context whose server certificate (or protocol version) was never validated
+       must not be advanced to a completed handshake through the data path; mbedtls_ssl_write would otherwise
        finish the handshake without re-entering schan_validate_server_chain */
-    if (s->conf.endpoint == MBEDTLS_SSL_IS_CLIENT && !s->manual_validation && !s->cert_checked)
+    if (s->conf.endpoint == MBEDTLS_SSL_IS_CLIENT &&
+        (!s->version_checked || (!s->manual_validation && !s->cert_checked)))
         return SEC_E_CONTEXT_EXPIRED;
 
     ret = mbedtls_ssl_write(&s->ssl, (unsigned char *)buffer, *length);
@@ -922,10 +992,11 @@ SECURITY_STATUS schan_imp_recv(schan_imp_session session, void *buffer,
     PMBEDTLS_SESSION s = (PMBEDTLS_SESSION)session;
     int ret;
 
-    /* Fail-closed: a client context whose server certificate was never validated must not be
-       advanced to a completed handshake through the data path; mbedtls_ssl_read would otherwise
+    /* Fail-closed: a client context whose server certificate (or protocol version) was never validated
+       must not be advanced to a completed handshake through the data path; mbedtls_ssl_read would otherwise
        finish the handshake without re-entering schan_validate_server_chain */
-    if (s->conf.endpoint == MBEDTLS_SSL_IS_CLIENT && !s->manual_validation && !s->cert_checked)
+    if (s->conf.endpoint == MBEDTLS_SSL_IS_CLIENT &&
+        (!s->version_checked || (!s->manual_validation && !s->cert_checked)))
         return SEC_E_CONTEXT_EXPIRED;
 
     TRACE("MBEDTLS schan_imp_recv: (%p, %p, %p/%lu)\n", s, buffer, length, *length);
