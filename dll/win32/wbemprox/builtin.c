@@ -5485,7 +5485,7 @@ static enum fill_status fill_pagefileusage( struct table *table, const struct ex
     struct pagefile_information *info, *entry;
     struct record_pagefileusage *rec;
     enum fill_status status = FILL_STATUS_UNFILTERED;
-    ULONG size = 4096, offset = 0;
+    ULONG size = 4096, offset = 0, retlen = 0;
     UINT row = 0, rec_offset = 0;
     SYSTEM_INFO si;
     NTSTATUS ret;
@@ -5494,13 +5494,14 @@ static enum fill_status fill_pagefileusage( struct table *table, const struct ex
     for (;;)
     {
         if (!(info = heap_alloc( size ))) return FILL_STATUS_FAILED;
-        ret = NtQuerySystemInformation( (SYSTEM_INFORMATION_CLASS)18 /* SystemPageFileInformation */, info, size, NULL );
+        ret = NtQuerySystemInformation( (SYSTEM_INFORMATION_CLASS)18 /* SystemPageFileInformation */, info, size, &retlen );
         if (ret != STATUS_INFO_LENGTH_MISMATCH) break;
         heap_free( info );
         size *= 2;
     }
-    if (ret)
+    if (ret || !retlen)
     {
+        /* no paging file: Windows returns success and no entry */
         heap_free( info );
         table->num_rows = 0;
         return FILL_STATUS_UNFILTERED;

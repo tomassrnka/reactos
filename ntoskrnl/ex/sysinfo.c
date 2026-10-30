@@ -1548,26 +1548,7 @@ QSI_DEF(SystemObjectInformation)
 /* Class 18 -  Information */
 QSI_DEF(SystemPageFileInformation)
 {
-    UNICODE_STRING FileName; /* FIXME */
-    SYSTEM_PAGEFILE_INFORMATION *Spfi = (SYSTEM_PAGEFILE_INFORMATION *) Buffer;
-
-    if (Size < sizeof(SYSTEM_PAGEFILE_INFORMATION))
-    {
-        * ReqSize = sizeof(SYSTEM_PAGEFILE_INFORMATION);
-        return STATUS_INFO_LENGTH_MISMATCH;
-    }
-
-    RtlInitUnicodeString(&FileName, NULL); /* FIXME */
-
-    /* FIXME */
-    Spfi->NextEntryOffset = 0;
-
-    Spfi->TotalSize = MiFreeSwapPages + MiUsedSwapPages;
-    Spfi->TotalInUse = MiUsedSwapPages;
-    Spfi->PeakUsage = MiUsedSwapPages; /* FIXME */
-    Spfi->PageFileName = FileName;
-    *ReqSize = sizeof(SYSTEM_PAGEFILE_INFORMATION);
-    return STATUS_SUCCESS;
+    return MmQueryPagingFileInformation((PSYSTEM_PAGEFILE_INFORMATION)Buffer, Size, ReqSize);
 }
 
 /* Class 19 - Vdm Instemul Information */

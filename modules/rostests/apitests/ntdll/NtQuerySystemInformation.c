@@ -332,6 +332,111 @@ Test_FaultReleasesProcessLock(void)
     VirtualFree(Buffer, 0, MEM_RELEASE);
 }
 
+static
+void
+Test_PageFileInformation(void)
+{
+    PSYSTEM_PAGEFILE_INFORMATION Entry;
+    UCHAR Buffer[4096];
+    NTSTATUS Status;
+    ULONG Length, Offset, Entries = 0;
+    BOOL IsWow64 = FALSE;
+    WCHAR Path[MAX_PATH];
+    SYSTEM_INFO si;
+
+    GetSystemInfo(&si);
+    IsWow64Process(GetCurrentProcess(), &IsWow64);
+
+    /* A buffer smaller than one entry fails (the required length is not defined by Windows for WoW64) */
+    Length = 0xdeadbeef;
+    Status = NtQuerySystemInformation(SystemPageFileInformation, Buffer, 0, &Length);
+    ok_hex(Status, STATUS_INFO_LENGTH_MISMATCH);
+
+    RtlFillMemory(Buffer, sizeof(Buffer), 0xcd);
+    Length = 0;
+    Status = NtQuerySystemInformation(SystemPageFileInformation, Buffer, sizeof(Buffer), &Length);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+    if (Length == 0)
+    {
+        skip("No paging file\n");
+        return;
+    }
+    ok(Length >= sizeof(*Entry), "Length = %lu\n", Length);
+
+    /* One entry per paging file, each followed by its NT name */
+    for (Offset = 0; ; )
+    {
+        PWCHAR Name;
+        SIZE_T NameChars;
+
+        ok(Offset + sizeof(*Entry) <= Length, "entry at %lu beyond Length %lu\n", Offset, Length);
+        if (Offset + sizeof(*Entry) > Length)
+            break;
+        Entry = (PSYSTEM_PAGEFILE_INFORMATION)(Buffer + Offset);
+        Entries++;
+
+        ok(Entry->TotalSize > 0, "TotalSize = %lu\n", Entry->TotalSize);
+        ok(Entry->TotalInUse <= Entry->TotalSize, "TotalInUse %lu > TotalSize %lu\n", Entry->TotalInUse, Entry->TotalSize);
+        ok(Entry->PeakUsage >= Entry->TotalInUse, "PeakUsage %lu < TotalInUse %lu\n", Entry->PeakUsage, Entry->TotalInUse);
+        ok(Entry->PeakUsage <= Entry->TotalSize, "PeakUsage %lu > TotalSize %lu\n", Entry->PeakUsage, Entry->TotalSize);
+
+        ok(Entry->PageFileName.Length != 0, "empty paging file name\n");
+        ok_int(Entry->PageFileName.MaximumLength, Entry->PageFileName.Length + sizeof(WCHAR));
+        Name = Entry->PageFileName.Buffer;
+        ok((PUCHAR)Name >= (PUCHAR)(Entry + 1), "name %p before the end of the entry %p\n", Name, Entry + 1);
+        ok((PUCHAR)Name + Entry->PageFileName.MaximumLength <= Buffer + Length,
+           "name %p +%u beyond Length %lu\n", Name, Entry->PageFileName.MaximumLength, Length);
+        if ((PUCHAR)Name >= (PUCHAR)(Entry + 1) &&
+            (PUCHAR)Name + Entry->PageFileName.MaximumLength <= Buffer + Length)
+        {
+            NameChars = Entry->PageFileName.Length / sizeof(WCHAR);
+            ok(Name[NameChars] == UNICODE_NULL, "name is not terminated\n");
+            ok(NameChars > 4 && !_wcsnicmp(Name, L"\\??\\", 4), "name %.*ls is not an NT DOS path\n", (int)NameChars, Name);
+            ok(NameChars > 8 && !_wcsnicmp(Name + NameChars - 4, L".sys", 4), "name %.*ls does not end in .sys\n", (int)NameChars, Name);
+            if (NameChars > 4 && NameChars < MAX_PATH + 4)
+            {
+                WIN32_FIND_DATAW FindData;
+                HANDLE Find;
+
+                /* The file is in use: GetFileAttributes fails with a sharing violation, enumeration works */
+                wcsncpy(Path, Name + 4, NameChars - 4);
+                Path[NameChars - 4] = UNICODE_NULL;
+                Find = FindFirstFileW(Path, &FindData);
+                ok(Find != INVALID_HANDLE_VALUE, "%ls does not exist (error %lu)\n", Path, GetLastError());
+                if (Find != INVALID_HANDLE_VALUE)
+                {
+                    ULONGLONG FileSize = ((ULONGLONG)FindData.nFileSizeHigh << 32) | FindData.nFileSizeLow;
+
+                    /* TotalSize is the size of the file in pages (the file may be growing) */
+                    ok(FileSize >= (ULONGLONG)Entry->TotalSize * si.dwPageSize,
+                       "%ls: file size %I64u, TotalSize %lu pages\n", Path, FileSize, Entry->TotalSize);
+                    FindClose(Find);
+                }
+            }
+        }
+
+        if (Entry->NextEntryOffset == 0)
+            break;
+        ok(Entry->NextEntryOffset >= sizeof(*Entry), "NextEntryOffset %lu\n", Entry->NextEntryOffset);
+        if (Entry->NextEntryOffset < sizeof(*Entry))
+            break;
+        Offset += Entry->NextEntryOffset;
+    }
+    ok(Entries >= 1, "Entries = %lu\n", Entries);
+
+    /* One byte short of everything fails and reports the full length */
+    if (!IsWow64)
+    {
+        ULONG Full = Length, Reported = 0;
+
+        Status = NtQuerySystemInformation(SystemPageFileInformation, Buffer, Full - 1, &Reported);
+        ok_hex(Status, STATUS_INFO_LENGTH_MISMATCH);
+        ok_dec(Reported, Full);
+    }
+}
+
 START_TEST(NtQuerySystemInformation)
 {
     NTSTATUS Status;
@@ -343,6 +448,7 @@ START_TEST(NtQuerySystemInformation)
     ok_hex(Status, STATUS_INVALID_INFO_CLASS);
 
     Test_ThreadStackLimits();
+    Test_PageFileInformation();
     Test_ProcessImageNames();
     Test_FaultReleasesProcessLock();
 }

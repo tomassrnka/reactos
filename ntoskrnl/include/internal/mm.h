@@ -524,6 +524,7 @@ typedef struct _MMPAGING_FILE
     PFN_NUMBER MinimumSize;
     PFN_NUMBER FreeSpace;
     PFN_NUMBER CurrentUsage;
+    PFN_NUMBER PeakUsage;
     PFILE_OBJECT FileObject;
     UNICODE_STRING PageFileName;
     PRTL_BITMAP Bitmap;
@@ -534,6 +535,13 @@ typedef struct _MMPAGING_FILE
 MMPAGING_FILE, *PMMPAGING_FILE;
 
 extern PMMPAGING_FILE MmPagingFile[MAX_PAGING_FILES];
+
+NTSTATUS
+NTAPI
+MmQueryPagingFileInformation(
+    _Out_writes_bytes_opt_(Size) PSYSTEM_PAGEFILE_INFORMATION Buffer,
+    _In_ ULONG Size,
+    _Out_ PULONG ReqSize);
 
 BOOLEAN
 NTAPI

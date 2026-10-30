@@ -342,6 +342,82 @@ MmFreeSwapPage(SWAPENTRY Entry)
     KeReleaseGuardedMutex(&MmPageFileCreationLock);
 }
 
+/*
+ * Fill SYSTEM_PAGEFILE_INFORMATION entries for SystemPageFileInformation. As
+ * on Windows there is one entry per paging file, each followed by its
+ * NUL-terminated NT name (\??\C:\pagefile.sys); the sizes are in pages.
+ */
+NTSTATUS
+NTAPI
+MmQueryPagingFileInformation(
+    _Out_writes_bytes_opt_(Size) PSYSTEM_PAGEFILE_INFORMATION Buffer,
+    _In_ ULONG Size,
+    _Out_ PULONG ReqSize)
+{
+    PSYSTEM_PAGEFILE_INFORMATION Entry, Previous = NULL;
+    ULONG i, Needed = 0, EntrySize;
+    PMMPAGING_FILE PagingFile;
+    PWCHAR Name;
+
+    PAGED_CODE();
+
+    if (Size < sizeof(SYSTEM_PAGEFILE_INFORMATION))
+    {
+        *ReqSize = sizeof(SYSTEM_PAGEFILE_INFORMATION);
+        return STATUS_INFO_LENGTH_MISMATCH;
+    }
+
+    KeAcquireGuardedMutex(&MmPageFileCreationLock);
+
+    for (i = 0; i < MAX_PAGING_FILES; i++)
+    {
+        PagingFile = MmPagingFile[i];
+        if (PagingFile == NULL)
+            continue;
+        Needed += ALIGN_UP_BY(sizeof(SYSTEM_PAGEFILE_INFORMATION) +
+                              PagingFile->PageFileName.Length + sizeof(WCHAR),
+                              sizeof(PVOID));
+    }
+
+    *ReqSize = Needed;
+    if (Size < Needed)
+    {
+        KeReleaseGuardedMutex(&MmPageFileCreationLock);
+        return STATUS_INFO_LENGTH_MISMATCH;
+    }
+
+    Entry = Buffer;
+    for (i = 0; i < MAX_PAGING_FILES; i++)
+    {
+        PagingFile = MmPagingFile[i];
+        if (PagingFile == NULL)
+            continue;
+
+        EntrySize = ALIGN_UP_BY(sizeof(SYSTEM_PAGEFILE_INFORMATION) +
+                                PagingFile->PageFileName.Length + sizeof(WCHAR),
+                                sizeof(PVOID));
+        Name = (PWCHAR)(Entry + 1);
+        RtlCopyMemory(Name, PagingFile->PageFileName.Buffer, PagingFile->PageFileName.Length);
+        Name[PagingFile->PageFileName.Length / sizeof(WCHAR)] = UNICODE_NULL;
+
+        Entry->NextEntryOffset = 0;
+        Entry->TotalSize = (ULONG)PagingFile->Size;
+        Entry->TotalInUse = (ULONG)PagingFile->CurrentUsage;
+        Entry->PeakUsage = (ULONG)PagingFile->PeakUsage;
+        Entry->PageFileName.Length = PagingFile->PageFileName.Length;
+        Entry->PageFileName.MaximumLength = PagingFile->PageFileName.Length + sizeof(WCHAR);
+        Entry->PageFileName.Buffer = Name;
+
+        if (Previous != NULL)
+            Previous->NextEntryOffset = (ULONG)((PUCHAR)Entry - (PUCHAR)Previous);
+        Previous = Entry;
+        Entry = (PSYSTEM_PAGEFILE_INFORMATION)((PUCHAR)Entry + EntrySize);
+    }
+
+    KeReleaseGuardedMutex(&MmPageFileCreationLock);
+    return STATUS_SUCCESS;
+}
+
 /* Write and read back one page of the paging file: proves the file system can do paging I/O there */
 static
 NTSTATUS
@@ -646,6 +722,8 @@ MmAllocSwapPage(VOID)
             }
             MmPagingFile[i]->FreeSpace--;
             MmPagingFile[i]->CurrentUsage++;
+            if (MmPagingFile[i]->CurrentUsage > MmPagingFile[i]->PeakUsage)
+                MmPagingFile[i]->PeakUsage = MmPagingFile[i]->CurrentUsage;
             MiUsedSwapPages++;
             MiFreeSwapPages--;
 
