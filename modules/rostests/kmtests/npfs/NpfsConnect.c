@@ -28,6 +28,15 @@
                       OUT_QUOTA, OUT_QUOTA,                     \
                       State)
 
+/* The server end is closed: it no longer counts as a current instance (Windows 10) */
+#define CheckClientServerClosed(ClientHandle, State)            \
+    NpCheckClientPipe(ClientHandle,                             \
+                      BYTE_STREAM, QUEUE, BYTE_STREAM, DUPLEX,  \
+                      MAX_INSTANCES, 0,                         \
+                      IN_QUOTA, 0,                              \
+                      OUT_QUOTA, OUT_QUOTA,                     \
+                      State)
+
 static
 VOID
 ConnectPipe(
@@ -225,7 +234,7 @@ TestConnect(
     /* Close server */
     Status = ObCloseHandle(ServerHandle, KernelMode);
     ok_eq_hex(Status, STATUS_SUCCESS);
-    CheckClient(ClientHandle, FILE_PIPE_CLOSING_STATE);
+    CheckClientServerClosed(ClientHandle, FILE_PIPE_CLOSING_STATE);
 
     /* Close client */
     if (ClientHandle)
