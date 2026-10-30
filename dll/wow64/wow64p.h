@@ -65,7 +65,7 @@ ULONG_PTR Wow64ZeroBits(ULONG ZeroBits);
 
 NTSTATUS Wow64CopyString(WOW64_STRING *To, const UNICODE_STRING *From);
 NTSTATUS Wow64CsrDispatch(ULONG Operation, ULONG *Arguments, BOOLEAN *Reported);
-VOID Wow64CsrThreadStart(PCONTEXT Context);
+BOOLEAN Wow64CsrThreadStart(PCONTEXT Context, ULONG *Routine, ULONG *Parameter);
 NTSTATUS Wow64LpcConnect(ULONG Number, const ULONG *Arguments, HANDLE *Handle, BOOLEAN *Reported);
 NTSTATUS Wow64LpcRequest(ULONG Number, ULONG Handle, ULONG Request, ULONG Reply, BOOLEAN *Reported);
 VOID Wow64LpcForget(ULONG Handle);

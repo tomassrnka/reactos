@@ -131,8 +131,15 @@ static NTSTATUS CopyBaseData(VOID)
     return STATUS_SUCCESS;
 }
 
-/* Until guest callbacks are implemented, never register a PE32 address as
- * a native thread entry point in CSRSS. */
+/* The control routine the guest's kernel32 registered with the console server
+ * (CTRL_C, CTRL_BREAK, CTRL_CLOSE, logoff, shutdown) at connect, AllocConsole or
+ * AttachConsole, whichever came last. The server starts it as a native thread,
+ * so it is given ConsoleControl instead: a thread started there enters this
+ * guest routine on a new guest stack (Wow64CsrThreadStart). No other guest
+ * address can be entered this way, and the parameter is the server's ULONG. */
+static LONG GuestCtrlRoutine;
+
+/* Without a guest routine, end the process as the default handler does */
 static DWORD WINAPI ConsoleControl(PVOID Parameter)
 {
     UNREFERENCED_PARAMETER(Parameter);
@@ -140,7 +147,10 @@ static DWORD WINAPI ConsoleControl(PVOID Parameter)
     return 0;
 }
 
-/* Started as a thread (Wow64CsrThreadStart), which has no caller to return to */
+/* The property sheet routine receives a section whose CONSOLE_STATE_INFO layout
+ * depends on the pointer size, and the server never starts the IME routine:
+ * neither is started in the guest. Started as a thread (Wow64CsrThreadStart),
+ * which has no caller to return to. */
 static DWORD WINAPI UnsupportedConsoleCallback(PVOID Parameter)
 {
     UNREFERENCED_PARAMETER(Parameter);
@@ -149,18 +159,36 @@ static DWORD WINAPI UnsupportedConsoleCallback(PVOID Parameter)
     return ERROR_NOT_SUPPORTED;
 }
 
-/* The console server delivers control events (Ctrl+C, Ctrl+Break, close) with CreateRemoteThread,
- * whose initial context enters the server's own kernel32 BaseThreadStartup with the routine in
- * RCX and the parameter in RDX. Native kernel32 is not loaded in a WoW64 process, so that thunk
- * is not mapped: a thread starting one of the routines registered above enters it directly
- * instead, with the stack pointer aligned as after a call and room for the home space. Neither
- * routine returns. Other native threads are left alone. */
-VOID Wow64CsrThreadStart(PCONTEXT Context)
+/* The native routine registered with the server for a guest control routine.
+ * A guest that registers none gets no control events, as natively. */
+static LPTHREAD_START_ROUTINE RegisterCtrlRoutine(ULONG Routine)
 {
-    if (Context->Rcx != (ULONG_PTR)ConsoleControl && Context->Rcx != (ULONG_PTR)UnsupportedConsoleCallback) return;
+    if (!Routine) return NULL;
+    InterlockedExchange(&GuestCtrlRoutine, (LONG)Routine);
+    return ConsoleControl;
+}
+
+/* The console server delivers control events with CreateRemoteThread, whose initial context
+ * enters the server's own kernel32 BaseThreadStartup with the routine in RCX and the parameter
+ * in RDX. Native kernel32 is not loaded in a WoW64 process, so that thunk is not mapped. A
+ * thread starting ConsoleControl once the guest has registered its control routine returns
+ * TRUE with that routine and the event: the caller runs it as a guest thread. Otherwise a
+ * thread starting one of the routines registered above enters it directly instead, with the
+ * stack pointer aligned as after a call and room for the home space; neither returns. Other
+ * native threads are left alone. */
+BOOLEAN Wow64CsrThreadStart(PCONTEXT Context, ULONG *Routine, ULONG *Parameter)
+{
+    if (Context->Rcx == (ULONG_PTR)ConsoleControl)
+    {
+        *Routine = (ULONG)InterlockedCompareExchange(&GuestCtrlRoutine, 0, 0);
+        *Parameter = (ULONG)Context->Rdx;
+        if (*Routine) return TRUE;
+    }
+    else if (Context->Rcx != (ULONG_PTR)UnsupportedConsoleCallback) return FALSE;
     Context->Rip = Context->Rcx;
     Context->Rcx = Context->Rdx;
     Context->Rsp = ((Context->Rsp & ~(ULONG_PTR)15) - 0x30) - sizeof(ULONG_PTR);
+    return FALSE;
 }
 
 /* Guest CONSOLE_START_INFO to native, shared by the console connect and ConsolepAttach. The
@@ -210,7 +238,7 @@ static NTSTATUS Connect(ULONG *a, BOOLEAN *Reported)
         ConsoleStartToNative(&To.ConsoleStartInfo, &From->ConsoleStartInfo);
         To.IsConsoleApp = From->IsConsoleApp;
         To.IsWindowVisible = From->IsWindowVisible;
-        To.CtrlRoutine = ConsoleControl;
+        To.CtrlRoutine = RegisterCtrlRoutine(From->CtrlRoutine);
         To.PropRoutine = To.ImeRoutine = UnsupportedConsoleCallback;
         To.TitleLength = From->TitleLength;
         To.DesktopLength = From->DesktopLength;
@@ -778,7 +806,7 @@ static NTSTATUS AllocConsole32(WOW64_CONSOLE_ALLOCCONSOLE *Guest)
     CsrCaptureMessageBuffer(Capture, CurDir, CurDirLength, (PVOID *)&Alloc->CurDir);
     Alloc->AppNameLength = AppNameLength;
     CsrCaptureMessageBuffer(Capture, AppName, AppNameLength, (PVOID *)&Alloc->AppName);
-    Alloc->CtrlRoutine = ConsoleControl;
+    Alloc->CtrlRoutine = RegisterCtrlRoutine(Guest->CtrlRoutine);
     Alloc->PropRoutine = UnsupportedConsoleCallback;
     Status = CsrClientCallServer((PCSR_API_MESSAGE)&Message, Capture,
                                  CSR_CREATE_API_NUMBER(CONSRV_SERVERDLL_INDEX, ConsolepAlloc), sizeof(*Alloc));
@@ -1008,7 +1036,7 @@ static NTSTATUS Call(ULONG *a, BOOLEAN *Reported)
         Capture = CsrAllocateCaptureBuffer(1, sizeof(NativeStart));
         if (!Capture) return STATUS_NO_MEMORY;
         Attach->ProcessId = Guest->ProcessId; /* ATTACH_PARENT_PROCESS (-1) stays -1 */
-        Attach->CtrlRoutine = ConsoleControl;
+        Attach->CtrlRoutine = RegisterCtrlRoutine(Guest->CtrlRoutine);
         Attach->PropRoutine = UnsupportedConsoleCallback;
         CsrCaptureMessageBuffer(Capture, &NativeStart, sizeof(NativeStart), (PVOID *)&Attach->ConsoleStartInfo);
         Status = CsrClientCallServer((PCSR_API_MESSAGE)&Message, Capture, Api, sizeof(*Attach));
