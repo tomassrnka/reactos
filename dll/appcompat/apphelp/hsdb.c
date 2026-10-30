@@ -150,6 +150,42 @@ static BOOL SdbpIsFileAttributeTag(TAG tag)
     return FALSE;
 }
 
+/*
+ * A string the database stores for a file attribute is compared without regard to case. ReactOS also reads a '*' in it
+ * as "any characters" (Windows takes it literally), so that one entry can describe a family of files whose version
+ * resources differ in a part of a string, such as "Microsoft .NET Framework* Setup".
+ */
+static BOOL SdbpMatchStringAttr(PCWSTR Pattern, PCWSTR Value)
+{
+    PCWSTR Star = NULL, Mark = NULL;
+
+    while (*Value)
+    {
+        if (*Pattern == L'*')
+        {
+            Star = Pattern++;
+            Mark = Value;
+        }
+        else if (RtlUpcaseUnicodeChar(*Pattern) == RtlUpcaseUnicodeChar(*Value))
+        {
+            Pattern++;
+            Value++;
+        }
+        else if (Star)
+        {
+            Pattern = Star + 1;
+            Value = ++Mark;
+        }
+        else
+        {
+            return FALSE;
+        }
+    }
+    while (*Pattern == L'*')
+        Pattern++;
+    return *Pattern == UNICODE_NULL;
+}
+
 /* Given a 'MATCHING_FILE' tag and an ATTRINFO array,
    check all tags defined in the MATCHING_FILE against the ATTRINFO */
 static BOOL SdbpMatchFileAttributes(PDB pdb, TAGID matching_file, PATTRINFO attribs, DWORD attr_count)
@@ -198,7 +234,7 @@ static BOOL SdbpMatchFileAttributes(PDB pdb, TAGID matching_file, PATTRINFO attr
                     break;
                 case TAG_TYPE_STRINGREF:
                     lpval = SdbGetStringTagPtr(pdb, child);
-                    if (!lpval || _wcsicmp(attr->lpattr, lpval))
+                    if (!lpval || !SdbpMatchStringAttr(lpval, attr->lpattr))
                         return FALSE;
                     break;
                 case TAG_TYPE_QWORD:

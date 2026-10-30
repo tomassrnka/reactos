@@ -73,8 +73,8 @@ static DWORD run_probe(PCWSTR Name)
     return run_path(Path);
 }
 
-/* The database matches a program by its file name as well: run a copy of the probe that is named firefox.exe */
-static DWORD run_as_firefox(PCWSTR Name)
+/* The database matches a program by its file name as well: run a copy of the probe that has the name of the program */
+static DWORD run_as_name(PCWSTR Name, PCWSTR AsName)
 {
     WCHAR Source[MAX_PATH], Dir[MAX_PATH], Target[MAX_PATH];
     DWORD Code = 0xdeadbeef;
@@ -83,8 +83,8 @@ static DWORD run_as_firefox(PCWSTR Name)
         return Code;
     if (wcslen(Dir) + 32 >= ARRAYSIZE(Dir))
         return Code;
-    swprintf(Dir + wcslen(Dir), 32, L"appshim_ff%lu", GetCurrentProcessId());
-    swprintf(Target, ARRAYSIZE(Target), L"%ls\\firefox.exe", Dir);
+    swprintf(Dir + wcslen(Dir), 32, L"appshim_as%lu", GetCurrentProcessId());
+    swprintf(Target, ARRAYSIZE(Target), L"%ls\\%ls", Dir, AsName);
 
     CreateDirectoryW(Dir, NULL);
     if (!CopyFileW(Source, Target, FALSE))
@@ -127,11 +127,39 @@ START_TEST(sysmain)
      */
     if (is_reactos())
     {
-        Code = run_as_firefox(L"appshim_sysmain_firefox158.exe");
+        Code = run_as_name(L"appshim_sysmain_firefox158.exe", L"firefox.exe");
         ok(Code == PROBE_ALL, "Firefox 158 sees 0x%lx of the checks, expected 0x%x\n", Code, PROBE_ALL);
-        Code = run_as_firefox(L"appshim_sysmain_firefox115.exe");
+        Code = run_as_name(L"appshim_sysmain_firefox115.exe", L"firefox.exe");
         ok(Code == 0, "Firefox 115 sees 0x%lx of the checks, expected none\n", Code);
     }
     else
         skip("The real version shows through on Windows\n");
+
+    /*
+     * The Microsoft .NET Framework 4.5 to 4.8 installers need Windows 7 SP1 to take their normal path (on the Windows 10
+     * answer they treat the Framework as part of the system), so the entries for them give these programs the Windows 7
+     * SP1 answer without any layer chosen: the outer installer, and the Setup.exe and SetupUtility.exe it starts (the
+     * entries for these two name the file as well, so the probes run as copies with these names). Programs that only
+     * look like them must keep the real answer: the Framework's own tools (same company and product), the same strings
+     * from another company, the 4.0 installer, and the Setup.exe attributes under another file name.
+     */
+    if (is_reactos() && real_windows_is_1809())
+    {
+        Code = run_probe(L"appshim_sysmain_netfx48.exe");
+        ok(Code == 0, "The .NET Framework 4.8 installer sees 0x%lx of the checks, expected none (Windows 7 SP1)\n", Code);
+        Code = run_as_name(L"appshim_sysmain_netfx48_setup.exe", L"Setup.exe");
+        ok(Code == 0, "The Setup.exe of the .NET Framework 4.8 installer sees 0x%lx of the checks, expected none\n", Code);
+        Code = run_as_name(L"appshim_sysmain_netfx48_util.exe", L"SetupUtility.exe");
+        ok(Code == 0, "The SetupUtility.exe of the .NET Framework 4.8 installer sees 0x%lx of the checks, expected none\n", Code);
+        Code = run_probe(L"appshim_sysmain_netfx48_setup.exe");
+        ok(Code == PROBE_ALL, "The Setup.exe attributes under another file name see 0x%lx of the checks, expected 0x%x (the real version)\n", Code, PROBE_ALL);
+        Code = run_probe(L"appshim_sysmain_netfx40.exe");
+        ok(Code == PROBE_ALL, "The .NET Framework 4.0 installer sees 0x%lx of the checks, expected 0x%x (the real version)\n", Code, PROBE_ALL);
+        Code = run_probe(L"appshim_sysmain_netfx_tool.exe");
+        ok(Code == PROBE_ALL, "csc.exe of the .NET Framework sees 0x%lx of the checks, expected 0x%x (the real version)\n", Code, PROBE_ALL);
+        Code = run_probe(L"appshim_sysmain_netfx_other.exe");
+        ok(Code == PROBE_ALL, "The installer strings with another company see 0x%lx of the checks, expected 0x%x (the real version)\n", Code, PROBE_ALL);
+    }
+    else
+        skip("The .NET Framework installer entries are checked where the system answer is Windows 10\n");
 }

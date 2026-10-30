@@ -1,0 +1,34 @@
+/*
+ * The version resource of a .NET Framework setup program or of a look-alike, from the NF_* macros of the .rc file that
+ * includes this one (see the database entries for the Microsoft .NET Framework 4.5 to 4.8 installers in sysmain.xml)
+ */
+#include <windef.h>
+#include <winuser.h>
+#include <winver.h>
+
+1 VERSIONINFO
+FILEVERSION NF_VERSION
+PRODUCTVERSION NF_VERSION
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", NF_COMPANY
+            VALUE "FileDescription", NF_DESCRIPTION
+            VALUE "FileVersion", NF_VERSION_STRING
+            VALUE "InternalName", NF_INTERNAL_NAME
+            VALUE "OriginalFilename", NF_ORIGINAL_NAME
+            VALUE "ProductName", NF_PRODUCT
+            VALUE "ProductVersion", NF_VERSION_STRING
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END
+
+1 24 "sysmain_probe.manifest"

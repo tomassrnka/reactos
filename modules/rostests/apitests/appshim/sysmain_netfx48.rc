@@ -1,0 +1,9 @@
+/* The outer installer of .NET Framework 4.8 (ndp48-x86-x64-allos-enu.exe): the database entry for the 4.5 to 4.8 installers matches */
+#define NF_VERSION 4,8,4115,0
+#define NF_VERSION_STRING "4.8.04115.00"
+#define NF_COMPANY "Microsoft Corporation"
+#define NF_DESCRIPTION "Microsoft .NET Framework 4.8 Setup"
+#define NF_INTERNAL_NAME "NDP48-x86-x64-AllOS-ENU.exe"
+#define NF_ORIGINAL_NAME "NDP48-x86-x64-AllOS-ENU.exe"
+#define NF_PRODUCT "Microsoft .NET Framework 4.8"
+#include "sysmain_netfx.rc.in"

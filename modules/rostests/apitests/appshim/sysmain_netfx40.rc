@@ -1,0 +1,9 @@
+/* The outer installer of .NET Framework 4.0 (dotNetFx40_Full_x86_x64.exe): older than the entries, not matched */
+#define NF_VERSION 4,0,30319,1
+#define NF_VERSION_STRING "4.0.30319.01"
+#define NF_COMPANY "Microsoft Corporation"
+#define NF_DESCRIPTION "Microsoft .NET Framework 4 Setup"
+#define NF_INTERNAL_NAME "dotNetFx40_Full_x86_x64.exe"
+#define NF_ORIGINAL_NAME "dotNetFx40_Full_x86_x64.exe"
+#define NF_PRODUCT "Microsoft .NET Framework 4"
+#include "sysmain_netfx.rc.in"

@@ -1,0 +1,21 @@
+[Section]
+Name = .NET 4.8 wrong hash
+Version = 4.8.4115
+License = Freeware
+LicenseType = 2
+Description = Microsoft's .NET Framework 4.8 (offline installer). Test fixture with a wrong SHA-256.
+Category = 7
+URLSite = https://dotnet.microsoft.com/download/dotnet-framework/net48
+Publisher = Microsoft Corporation
+Scope = Machine
+SilentParameters = /q /norestart
+
+[Section.x86]
+URLDownload = https://download.microsoft.com/download/f/3/a/f3a6af84-da23-40a5-8d1c-49cc10c8e76f/NDP48-x86-x64-AllOS-ENU.exe
+SHA256 = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+SizeBytes = 121346568
+
+[Section.amd64]
+URLDownload = https://download.microsoft.com/download/f/3/a/f3a6af84-da23-40a5-8d1c-49cc10c8e76f/NDP48-x86-x64-AllOS-ENU.exe
+SHA256 = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+SizeBytes = 121346568

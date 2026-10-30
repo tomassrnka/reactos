@@ -596,6 +596,56 @@
             <LAYER NAME="WIN10VERSIONDEFAULT" />
         </EXE>
 
+        <!--
+            Microsoft .NET Framework 4.5 to 4.8 installers (offline and web). They read the system as Windows 10 and treat the
+            Framework as part of it ("already installed" or "does not apply to this OS") instead of installing it; as Windows 7
+            SP1 they take the normal installation path (measured with 4.8, ndp48-x86-x64-allos-enu.exe: install, Release
+            528049). The full WIN7SP1 layer is the one that was measured. Three programs take part, each with its own entry
+            because the database applies a layer to one process only:
+              - the installer the user starts (any file name: NDP48-..., dotNetFx45_..., ndp48-web.exe), whose version resource
+                says "Microsoft .NET Framework 4.x Setup";
+              - Setup.exe, which the installer extracts and starts (internal name Setup.exe, original name SetupUI.exe);
+              - SetupUtility.exe, which Setup.exe starts.
+            Only these match: the company must be Microsoft Corporation, and the product, description and internal name must
+            be the setup's. The Framework's own programs (csc.exe, mscorsvw.exe, ...) have the same company and product name
+            but another description and original name, so they do not get the layer. 4.0 (product version 4.0.30319.1) ends
+            before the range. A layer the user or the environment chooses still comes first and wins.
+            "*" in a value stands for any characters (ReactOS reading of the database, see apphelp).
+        -->
+        <EXE NAME="*" APP_NAME=".NET Framework 4.5 to 4.8 installer" VENDOR="Microsoft">
+            <MATCHING_FILE NAME="*">
+                <COMPANY_NAME>Microsoft Corporation</COMPANY_NAME>
+                <PRODUCT_NAME>*.NET Framework*</PRODUCT_NAME>
+                <FILE_DESCRIPTION>Microsoft .NET Framework* Setup</FILE_DESCRIPTION>
+                <BIN_PRODUCT_VERSION>4.5.0.0</BIN_PRODUCT_VERSION>
+                <UPTO_BIN_PRODUCT_VERSION>4.65535.65535.65535</UPTO_BIN_PRODUCT_VERSION>
+            </MATCHING_FILE>
+            <LAYER NAME="WIN7SP1" />
+        </EXE>
+        <EXE NAME="Setup.exe" APP_NAME=".NET Framework 4.5 to 4.8 Setup.exe" VENDOR="Microsoft">
+            <MATCHING_FILE NAME="*">
+                <COMPANY_NAME>Microsoft Corporation</COMPANY_NAME>
+                <PRODUCT_NAME>*.NET Framework*</PRODUCT_NAME>
+                <INTERNAL_NAME>Setup.exe</INTERNAL_NAME>
+                <ORIGINAL_FILENAME>SetupUI.exe</ORIGINAL_FILENAME>
+                <BIN_PRODUCT_VERSION>11.0.0.0</BIN_PRODUCT_VERSION>
+                <UPTO_BIN_PRODUCT_VERSION>14.65535.65535.65535</UPTO_BIN_PRODUCT_VERSION>
+            </MATCHING_FILE>
+            <LAYER NAME="WIN7SP1" />
+        </EXE>
+        <EXE NAME="SetupUtility.exe" APP_NAME=".NET Framework 4.5 to 4.8 SetupUtility.exe" VENDOR="Microsoft">
+            <MATCHING_FILE NAME="*">
+                <COMPANY_NAME>Microsoft Corporation</COMPANY_NAME>
+                <PRODUCT_NAME>*.NET Framework*</PRODUCT_NAME>
+                <FILE_DESCRIPTION>Microsoft .NET Framework* Setup</FILE_DESCRIPTION>
+                <INTERNAL_NAME>SetupUtility.exe</INTERNAL_NAME>
+                <ORIGINAL_FILENAME>SetupUtility.exe</ORIGINAL_FILENAME>
+                <BIN_PRODUCT_VERSION>4.5.0.0</BIN_PRODUCT_VERSION>
+                <UPTO_BIN_PRODUCT_VERSION>14.65535.65535.65535</UPTO_BIN_PRODUCT_VERSION>
+            </MATCHING_FILE>
+            <LAYER NAME="WIN7SP1" />
+        </EXE>
+
         <!-- LibreOffice 24.8 and later need Windows 10 (documented; the installer is an MSI, see the layers on msiexec.exe) -->
         <EXE NAME="soffice.exe" APP_NAME="LibreOffice 24.8 and later" VENDOR="The Document Foundation">
             <MATCHING_FILE NAME="*">

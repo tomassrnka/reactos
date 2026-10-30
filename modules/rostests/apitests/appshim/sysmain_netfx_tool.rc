@@ -1,0 +1,9 @@
+/* csc.exe of .NET Framework 4.8: a program of the Framework itself, not an installer, not matched */
+#define NF_VERSION 4,8,4084,0
+#define NF_VERSION_STRING "4.8.4084.0 built by: NET48REL1"
+#define NF_COMPANY "Microsoft Corporation"
+#define NF_DESCRIPTION "Visual C# Command Line Compiler"
+#define NF_INTERNAL_NAME "csc.exe"
+#define NF_ORIGINAL_NAME "csc.exe"
+#define NF_PRODUCT "Microsoft\256 .NET Framework"
+#include "sysmain_netfx.rc.in"

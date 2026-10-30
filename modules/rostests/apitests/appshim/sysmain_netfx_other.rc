@@ -1,0 +1,9 @@
+/* The attributes of the .NET Framework 4.8 installer with another company: not matched */
+#define NF_VERSION 4,8,4115,0
+#define NF_VERSION_STRING "4.8.04115.00"
+#define NF_COMPANY "Not Microsoft Corporation"
+#define NF_DESCRIPTION "Microsoft .NET Framework 4.8 Setup"
+#define NF_INTERNAL_NAME "NDP48-x86-x64-AllOS-ENU.exe"
+#define NF_ORIGINAL_NAME "NDP48-x86-x64-AllOS-ENU.exe"
+#define NF_PRODUCT "Microsoft .NET Framework 4.8"
+#include "sysmain_netfx.rc.in"
