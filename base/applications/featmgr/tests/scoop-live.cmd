@@ -72,6 +72,12 @@ call :rc0 "L17 7zip manifest carries a hash"
 find "git " %O%\l.txt >nul
 call :rc0 "L18 git is listed too"
 call :st 7zip NotInstalled "L19 7zip NotInstalled"
+echo TIMING list(main bucket) start %time%>> %LOG%
+%FM% /list /tier:software > %O%\l-all.txt 2>&1
+echo TIMING list end %time%>> %LOG%
+echo TIMING query 7zip start %time%>> %LOG%
+%FM% /query 7zip > %O%\q2.txt 2>&1
+echo TIMING query end %time%>> %LOG%
 
 rem --- install 7zip through featmgr, then run it
 %FM% /install 7zip > %O%\install-7zip.txt 2>&1
@@ -133,6 +139,12 @@ call :rc0 "E4 scoop bucket add extras done (listed)"
 %FM% /import-scoop extras > %O%\imp-x.txt 2>&1
 call :rc0 "E5 featmgr /import-scoop extras rc0"
 type %O%\imp-x.txt | find "imported" >> %LOG%
+echo TIMING list(main+extras) start %time%>> %LOG%
+%FM% /list /tier:software > %O%\l-all2.txt 2>&1
+echo TIMING list end %time%>> %LOG%
+echo TIMING query 7zip start %time%>> %LOG%
+%FM% /query 7zip > %O%\q2.txt 2>&1
+echo TIMING query end %time%>> %LOG%
 %FM% /list /tier:software /source:scoop/extras > %O%\l.txt 2>&1
 find "feature(s)" %O%\l.txt >> %LOG%
 %FM% /uninstall git >> %LOG% 2>&1
