@@ -46,6 +46,12 @@ INT CommandColor(LPTSTR rest)
     /* No parameter: Set the default colors */
     if (rest[0] == _T('\0'))
     {
+        /* No default colour is known (e.g. "cmd /C" without /T: or DefaultColor) */
+        if (wDefColor == 0)
+        {
+            nErrorLevel = 1;
+            return 1;
+        }
         ConSetScreenColor(ConStreamGetOSHandle(StdOut), wDefColor, TRUE);
         return 0;
     }

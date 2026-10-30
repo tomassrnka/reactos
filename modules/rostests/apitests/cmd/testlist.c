@@ -3,6 +3,7 @@
 
 extern void func_attrib(void);
 extern void func_cd(void);
+extern void func_color(void);
 extern void func_echo(void);
 extern void func_echoenc(void);
 extern void func_exit(void);
@@ -19,6 +20,7 @@ const struct test winetest_testlist[] =
 {
     { "attrib", func_attrib },
     { "cd", func_cd },
+    { "color", func_color },
     { "echo", func_echo },
     { "echoenc", func_echoenc },
     { "exit", func_exit },
