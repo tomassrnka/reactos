@@ -117,6 +117,7 @@ extern void func_LoadLibraryMissingImport(void);
 extern void func_LocalDumps(void);
 extern void func_CrashDialog(void);
 extern void func_LocaleNameToLCID(void);
+extern void func_LocaleTable(void);
 extern void func_LocalTimeZone(void);
 extern void func_lstrcpynW(void);
 extern void func_lstrlen(void);
@@ -300,6 +301,7 @@ const struct test winetest_testlist[] =
     { "LocalDumps",                  func_LocalDumps },
     { "CrashDialog",                 func_CrashDialog },
     { "LocaleNameToLCID",            func_LocaleNameToLCID },
+    { "LocaleTable",                 func_LocaleTable },
     { "LocalTimeZone",               func_LocalTimeZone },
     { "lstrcpynW",                   func_lstrcpynW },
     { "lstrlen",                     func_lstrlen },
