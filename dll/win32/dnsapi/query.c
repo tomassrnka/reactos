@@ -577,75 +577,80 @@ CHAR
 }
 
 
-/* This function is far from perfect but it works enough */
+/*
+ * Is Name the name of this machine (host name or host name + DNS domain, with or without the root
+ * label's trailing dot)? Windows answers such a query itself, without asking a DNS server: with the
+ * addresses the machine has, or with the loopback address when it has none (no adapter up, DHCP not
+ * answered yet). Returns the address (network order) or 0 when Name is not the machine's name.
+ */
 IP4_ADDRESS
 CheckForCurrentHostname(CONST CHAR * Name, PFIXED_INFO network_info)
 {
-    PCHAR TempName;
-    DWORD AdapterAddressesSize, Status;
+    CHAR LocalName[sizeof(network_info->HostName) + sizeof(network_info->DomainName) + 2];
+    CHAR Query[sizeof(LocalName)];
+    DWORD AdapterAddressesSize = 0;
     IP4_ADDRESS ret = 0, Address;
     PIP_ADAPTER_ADDRESSES Addresses = NULL, pip;
-    BOOL Found = FALSE;
+    PIP_ADAPTER_UNICAST_ADDRESS pua;
+    size_t Len;
 
-    if (network_info->DomainName[0])
-    {
-        size_t StringLength;
-        size_t TempSize = 2;
-        StringCchLengthA(network_info->HostName, sizeof(network_info->HostName), &StringLength);
-        TempSize += StringLength;
-        StringCchLengthA(network_info->DomainName, sizeof(network_info->DomainName), &StringLength);
-        TempSize += StringLength;
-        TempName = RtlAllocateHeap(RtlGetProcessHeap(), 0, TempSize);
-        StringCchCopyA(TempName, TempSize, network_info->HostName);
-        StringCchCatA(TempName, TempSize, ".");
-        StringCchCatA(TempName, TempSize, network_info->DomainName);
-    }
-    else
-    {
-        TempName = RtlAllocateHeap(RtlGetProcessHeap(), 0, 1);
-        TempName[0] = 0;
-    }
-    Found = !_stricmp(Name, network_info->HostName) || !_stricmp(Name, TempName);
-    RtlFreeHeap(RtlGetProcessHeap(), 0, TempName);
-    if (!Found)
-    {
+    /* The name without the trailing dot */
+    if (FAILED(StringCchCopyA(Query, sizeof(Query), Name)))
         return 0;
+    Len = strlen(Query);
+    if (Len > 1 && Query[Len - 1] == '.')
+        Query[Len - 1] = '\0';
+
+    /* The host name alone, or qualified with the DNS domain */
+    if (_stricmp(Query, network_info->HostName) != 0)
+    {
+        if (!network_info->DomainName[0])
+            return 0;
+        StringCchCopyA(LocalName, sizeof(LocalName), network_info->HostName);
+        StringCchCatA(LocalName, sizeof(LocalName), ".");
+        StringCchCatA(LocalName, sizeof(LocalName), network_info->DomainName);
+        if (_stricmp(Query, LocalName) != 0)
+            return 0;
     }
-    /* get adapter info */
-    AdapterAddressesSize = 0;
+
+    /* Take the first address of the first adapter that has a usable one */
     GetAdaptersAddresses(AF_INET,
                          GAA_FLAG_SKIP_FRIENDLY_NAME | GAA_FLAG_SKIP_DNS_SERVER |
                          GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST,
                          NULL,
-                         Addresses,
+                         NULL,
                          &AdapterAddressesSize);
-    if (!AdapterAddressesSize)
+    if (AdapterAddressesSize)
     {
-        return 0;
+        Addresses = RtlAllocateHeap(RtlGetProcessHeap(), 0, AdapterAddressesSize);
+        if (Addresses && GetAdaptersAddresses(AF_INET,
+                                              GAA_FLAG_SKIP_FRIENDLY_NAME | GAA_FLAG_SKIP_DNS_SERVER |
+                                              GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST,
+                                              NULL,
+                                              Addresses,
+                                              &AdapterAddressesSize) == ERROR_SUCCESS)
+        {
+            for (pip = Addresses; pip != NULL && ret == 0; pip = pip->Next)
+            {
+                for (pua = pip->FirstUnicastAddress; pua != NULL; pua = pua->Next)
+                {
+                    if (!pua->Address.lpSockaddr || pua->Address.lpSockaddr->sa_family != AF_INET)
+                        continue;
+                    Address = ((LPSOCKADDR_IN)pua->Address.lpSockaddr)->sin_addr.S_un.S_addr;
+                    if (Address != 0 && Address != htonl(INADDR_LOOPBACK))
+                    {
+                        ret = Address;
+                        break;
+                    }
+                }
+            }
+        }
+        if (Addresses)
+            RtlFreeHeap(RtlGetProcessHeap(), 0, Addresses);
     }
-    Addresses = RtlAllocateHeap(RtlGetProcessHeap(), 0, AdapterAddressesSize);
-    Status = GetAdaptersAddresses(AF_INET,
-                                  GAA_FLAG_SKIP_FRIENDLY_NAME | GAA_FLAG_SKIP_DNS_SERVER |
-                                  GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST,
-                                  NULL,
-                                  Addresses,
-                                  &AdapterAddressesSize);
-    if (Status)
-    {
-        RtlFreeHeap(RtlGetProcessHeap(), 0, Addresses);
-        return 0;
-    }
-    for (pip = Addresses; pip != NULL; pip = pip->Next) {
-        Address = ((LPSOCKADDR_IN)pip->FirstUnicastAddress->Address.lpSockaddr)->sin_addr.S_un.S_addr;
-        if (Address != ntohl(INADDR_LOOPBACK))
-            break;
-    }
-    if (Address && Address != ntohl(INADDR_LOOPBACK))
-    {
-        ret = Address;
-    }
-    RtlFreeHeap(RtlGetProcessHeap(), 0, Addresses);
-    return ret;
+
+    /* Nothing but loopback (or 0.0.0.0): the machine is still reachable at itself */
+    return ret ? ret : htonl(INADDR_LOOPBACK);
 }
 
 

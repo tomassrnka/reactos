@@ -28,6 +28,7 @@ list(APPEND SOURCE
     nonblocking.c
     nostartup.c
     open_osfhandle.c
+    OwnHostname.c
     rcvbuf.c
     recv.c
     WSARecvMsg.c
