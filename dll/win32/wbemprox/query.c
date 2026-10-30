@@ -90,6 +90,70 @@ void destroy_view( struct view *view )
     heap_free( view );
 }
 
+#ifdef __REACTOS__
+/* Match one pattern element (a literal, "_" or a "[...]" set) against a character. WQL string comparison
+   is case-insensitive, and so are the characters and ranges of a set. */
+static BOOL like_elem( const WCHAR *p, WCHAR ch, const WCHAR **next )
+{
+    const WCHAR *q;
+    WCHAR c[3] = { ch, towlower( ch ), towupper( ch ) };
+    BOOL negate = FALSE, found = FALSE;
+    UINT i;
+
+    if (*p == '_')
+    {
+        *next = p + 1;
+        return TRUE;
+    }
+    if (*p == '[')
+    {
+        const WCHAR *set = p + 1;
+
+        if (*set == '^') { negate = TRUE; set++; }
+        /* the first character of a set is always taken literally, so "[]" is not an empty set */
+        for (q = set; *q && (q == set || *q != ']'); q++);
+        if (*q == ']')
+        {
+            for (p = set; p < q; p++)
+            {
+                if (p + 2 < q && p[1] == '-')
+                {
+                    for (i = 0; i < 3; i++) if (c[i] >= p[0] && c[i] <= p[2]) found = TRUE;
+                    p += 2;
+                }
+                else for (i = 0; i < 3; i++) if (c[i] == p[0]) found = TRUE;
+            }
+            *next = q + 1;
+            return found != negate;
+        }
+        /* no closing bracket, '[' is a literal */
+    }
+    *next = p + 1;
+    return towlower( *p ) == towlower( ch );
+}
+
+static BOOL eval_like( const WCHAR *lstr, const WCHAR *rstr )
+{
+    const WCHAR *p = lstr, *q = rstr, *star = NULL, *mark = NULL, *next;
+
+    for (;;)
+    {
+        while (*q == '%') { star = ++q; mark = p; }
+        if (!*p) return !*q;
+        if (*q && like_elem( q, *p, &next ))
+        {
+            p++;
+            q = next;
+        }
+        else if (star)
+        {
+            q = star;
+            p = ++mark;
+        }
+        else return FALSE;
+    }
+}
+#else
 static BOOL eval_like( const WCHAR *lstr, const WCHAR *rstr )
 {
     const WCHAR *p = lstr, *q = rstr;
@@ -107,6 +171,14 @@ static BOOL eval_like( const WCHAR *lstr, const WCHAR *rstr )
     }
     return TRUE;
 }
+#endif
+
+#ifdef __REACTOS__
+/* WQL compares strings without regard to case */
+#define wql_strcmp wcsicmp
+#else
+#define wql_strcmp wcscmp
+#endif
 
 static HRESULT eval_strcmp( UINT op, const WCHAR *lstr, const WCHAR *rstr, LONGLONG *val )
 {
@@ -118,22 +190,22 @@ static HRESULT eval_strcmp( UINT op, const WCHAR *lstr, const WCHAR *rstr, LONGL
     switch (op)
     {
     case OP_EQ:
-        *val = !wcscmp( lstr, rstr );
+        *val = !wql_strcmp( lstr, rstr );
         break;
     case OP_GT:
-        *val = wcscmp( lstr, rstr ) > 0;
+        *val = wql_strcmp( lstr, rstr ) > 0;
         break;
     case OP_LT:
-        *val = wcscmp( lstr, rstr ) < 0;
+        *val = wql_strcmp( lstr, rstr ) < 0;
         break;
     case OP_LE:
-        *val = wcscmp( lstr, rstr ) <= 0;
+        *val = wql_strcmp( lstr, rstr ) <= 0;
         break;
     case OP_GE:
-        *val = wcscmp( lstr, rstr ) >= 0;
+        *val = wql_strcmp( lstr, rstr ) >= 0;
         break;
     case OP_NE:
-        *val = wcscmp( lstr, rstr );
+        *val = wql_strcmp( lstr, rstr ) != 0;
         break;
     case OP_LIKE:
         *val = eval_like( lstr, rstr );
