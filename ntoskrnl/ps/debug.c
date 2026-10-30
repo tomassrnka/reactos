@@ -123,6 +123,9 @@ PsGetContextThread(IN PETHREAD Thread,
     GET_SET_CTX_CONTEXT GetSetContext;
     ULONG Size = 0, Flags = 0;
     NTSTATUS Status;
+#ifdef _M_AMD64
+    KI_XSTATE_CONTEXT XState;
+#endif
 
     /* Enter SEH */
     _SEH2_TRY
@@ -164,6 +167,19 @@ PsGetContextThread(IN PETHREAD Thread,
     RtlZeroMemory(&GetSetContext.Context, Size);
     GetSetContext.Context.ContextFlags = Flags;
     GetSetContext.Mode = PreviousMode;
+
+#ifdef _M_AMD64
+    /* Capture the extended state part of the caller's context. Without extended state the flag is ignored. */
+    GetSetContext.XState = NULL;
+    if ((Flags & CONTEXT_XSTATE) == CONTEXT_XSTATE)
+    {
+        Status = KiCaptureXStateContext(ThreadContext, PreviousMode, TRUE, &XState);
+        if (NT_SUCCESS(Status))
+            GetSetContext.XState = &XState;
+        else if (Status != STATUS_NOT_SUPPORTED)
+            return Status;
+    }
+#endif
 
     /* Check if we're running in the same thread */
     if (Thread == PsGetCurrentThread())
@@ -229,6 +245,15 @@ PsGetContextThread(IN PETHREAD Thread,
     }
     _SEH2_END;
 
+#ifdef _M_AMD64
+    if (GetSetContext.XState)
+    {
+        if (NT_SUCCESS(Status))
+            Status = KiCopyOutXStateContext(&XState);
+        KiFreeXStateContext(&XState);
+    }
+#endif
+
     /* Return status */
     return Status;
 }
@@ -245,6 +270,9 @@ PsSetContextThread(IN PETHREAD Thread,
     GET_SET_CTX_CONTEXT GetSetContext;
     ULONG Size = 0, Flags = 0;
     NTSTATUS Status;
+#ifdef _M_AMD64
+    KI_XSTATE_CONTEXT XState;
+#endif
 
     /* Enter SEH */
     _SEH2_TRY
@@ -288,6 +316,19 @@ PsSetContextThread(IN PETHREAD Thread,
     /* Set the flags and previous mode */
     GetSetContext.Context.ContextFlags = Flags;
     GetSetContext.Mode = PreviousMode;
+
+#ifdef _M_AMD64
+    /* Capture the extended state part of the caller's context. Without extended state the flag is ignored. */
+    GetSetContext.XState = NULL;
+    if ((Flags & CONTEXT_XSTATE) == CONTEXT_XSTATE)
+    {
+        Status = KiCaptureXStateContext(ThreadContext, PreviousMode, FALSE, &XState);
+        if (NT_SUCCESS(Status))
+            GetSetContext.XState = &XState;
+        else if (Status != STATUS_NOT_SUPPORTED)
+            return Status;
+    }
+#endif
 
     /* Check if we're running in the same thread */
     if (Thread == PsGetCurrentThread())
@@ -340,6 +381,11 @@ PsSetContextThread(IN PETHREAD Thread,
                                            NULL);
         }
     }
+
+#ifdef _M_AMD64
+    if (GetSetContext.XState)
+        KiFreeXStateContext(&XState);
+#endif
 
     /* Return status */
     return Status;
