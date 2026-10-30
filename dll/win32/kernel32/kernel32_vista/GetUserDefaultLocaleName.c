@@ -41,5 +41,6 @@ GetUserDefaultLocaleName(
         return 0;
     }
 
-    return LocaleNameString.Length / sizeof(WCHAR);
+    /* Windows counts the terminating NUL */
+    return LocaleNameString.Length / sizeof(WCHAR) + 1;
 }

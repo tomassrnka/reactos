@@ -114,6 +114,7 @@ list(APPEND SOURCE
     LocalDumps.c
     CrashDialog.c
     LocaleNameToLCID.c
+    LocaleTable.c
     LocalTimeZone.c
     lstrcpynW.c
     lstrlen.c

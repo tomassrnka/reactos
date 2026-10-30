@@ -27,6 +27,16 @@ LCID
 BasepSpecialNeutralLcidToSpecific(
     _In_ LCID Lcid);
 
+/* The locale Windows picks for a neutral LCID (0 if it is not neutral) */
+LCID
+BasepNeutralLcidToSpecific(
+    _In_ LCID Lcid);
+
+/* The locale name a script-tagged alias stands for ("zh-Hant-TW" is "zh-TW"), or NULL */
+PCWSTR
+BasepLocaleNameAlias(
+    _In_ PCWSTR Name);
+
 #define MAX_PROCESS_UI_LANGUAGES 5
 
 ULONG
