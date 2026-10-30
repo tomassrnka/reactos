@@ -1258,8 +1258,7 @@ FindNLSStringEx(
     UNREFERENCED_PARAMETER(lpVersionInformation);
     UNREFERENCED_PARAMETER(lpReserved);
     UNREFERENCED_PARAMETER(sortHandle);
-    if (!lpStringSource || !cchSource || cchSource < -1 ||
-        !lpStringValue || !cchValue || cchValue < -1)
+    if (!lpStringSource || cchSource < -1 || !lpStringValue || cchValue < -1)
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return -1;
@@ -1277,11 +1276,30 @@ FindNLSStringEx(
     if (cchSource == -1) cchSource = lstrlenW(lpStringSource);
     if (cchValue == -1) cchValue = lstrlenW(lpStringValue);
 
+    CompareFlags = dwFindNLSStringFlags & ~FindFlags;
+
+    /*
+     * Zero lengths are no error (measured on Windows 10 22H2), once the flags have passed. An empty value matches
+     * at the start, or at the end of the source for FIND_FROMEND and FIND_ENDSWITH, with a found length of 0, and
+     * it wins over an empty source; it leaves the last error alone. An empty source finds nothing, with no error.
+     */
+    if (!cchSource || !cchValue)
+    {
+        if (!CompareStringEx(lpLocaleName, CompareFlags, L"", 0, L"", 0, NULL, NULL, 0))
+            return -1;
+        if (!cchValue)
+        {
+            if (pcchFound) *pcchFound = 0;
+            return dwFindNLSStringFlags & (FIND_FROMEND | FIND_ENDSWITH) ? cchSource : 0;
+        }
+        SetLastError(ERROR_SUCCESS);
+        return -1;
+    }
+
     SetLastError(ERROR_SUCCESS);
     cchSource -= cchValue;
     if (cchSource < 0) return -1;
 
-    CompareFlags = dwFindNLSStringFlags & ~FindFlags;
     count = dwFindNLSStringFlags & (FIND_FROMSTART | FIND_FROMEND) ? cchSource + 1 : 1;
     offset = dwFindNLSStringFlags & (FIND_FROMSTART | FIND_STARTSWITH) ? 0 : cchSource;
     inc = dwFindNLSStringFlags & (FIND_FROMSTART | FIND_STARTSWITH) ? 1 : -1;
