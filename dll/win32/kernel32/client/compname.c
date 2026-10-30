@@ -217,12 +217,12 @@ GetComputerNameExW(COMPUTER_NAME_FORMAT NameType,
                    LPWSTR lpBuffer,
                    LPDWORD nSize)
 {
-    UNICODE_STRING ResultString;
+    UNICODE_STRING HostPart;
     UNICODE_STRING DomainPart;
     RTL_QUERY_REGISTRY_TABLE QueryTable[2];
     NTSTATUS Status;
     BOOL ret = TRUE;
-    DWORD HostSize;
+    DWORD HostSize, DomainSize;
 
     if ((nSize == NULL) ||
         (lpBuffer == NULL && *nSize > 0))
@@ -266,14 +266,25 @@ GetComputerNameExW(COMPUTER_NAME_FORMAT NameType,
                                                nSize);
 
         case ComputerNameDnsFullyQualified:
-            ResultString.Length = 0;
-            ResultString.MaximumLength = (USHORT)*nSize * sizeof(WCHAR);
-            ResultString.Buffer = lpBuffer;
-
             RtlZeroMemory(QueryTable, sizeof(QueryTable));
-            RtlInitUnicodeString(&DomainPart, NULL);
-
+            RtlInitUnicodeString(&HostPart, NULL);
             QueryTable[0].Name = L"HostName";
+            QueryTable[0].Flags = RTL_QUERY_REGISTRY_DIRECT;
+            QueryTable[0].EntryContext = &HostPart;
+
+            Status = RtlQueryRegistryValues(RTL_REGISTRY_ABSOLUTE,
+                                            L"\\Registry\\Machine\\System"
+                                            L"\\CurrentControlSet\\Services\\Tcpip"
+                                            L"\\Parameters",
+                                            QueryTable,
+                                            NULL,
+                                            NULL);
+            if (!NT_SUCCESS(Status))
+                return FALSE;
+
+            /* The domain is optional: without one the name is the host name alone, no trailing dot */
+            RtlInitUnicodeString(&DomainPart, NULL);
+            QueryTable[0].Name = L"Domain";
             QueryTable[0].Flags = RTL_QUERY_REGISTRY_DIRECT;
             QueryTable[0].EntryContext = &DomainPart;
 
@@ -284,49 +295,41 @@ GetComputerNameExW(COMPUTER_NAME_FORMAT NameType,
                                             QueryTable,
                                             NULL,
                                             NULL);
-
-            if (NT_SUCCESS(Status))
-            {
-                Status = RtlAppendUnicodeStringToString(&ResultString, &DomainPart);
-                HostSize = DomainPart.Length;
-
-                if (!NT_SUCCESS(Status))
-                {
-                    ret = FALSE;
-                }
-
-                RtlAppendUnicodeToString(&ResultString, L".");
-                RtlFreeUnicodeString(&DomainPart);
-
+            if (!NT_SUCCESS(Status))
                 RtlInitUnicodeString(&DomainPart, NULL);
-                QueryTable[0].Name = L"Domain";
-                QueryTable[0].Flags = RTL_QUERY_REGISTRY_DIRECT;
-                QueryTable[0].EntryContext = &DomainPart;
 
-                Status = RtlQueryRegistryValues(RTL_REGISTRY_ABSOLUTE,
-                                                L"\\Registry\\Machine\\System"
-                                                L"\\CurrentControlSet\\Services\\Tcpip"
-                                                L"\\Parameters",
-                                                QueryTable,
-                                                NULL,
-                                                NULL);
+            HostSize = HostPart.Length / sizeof(WCHAR);
+            DomainSize = DomainPart.Length / sizeof(WCHAR);
 
-                if (NT_SUCCESS(Status))
-                {
-                    Status = RtlAppendUnicodeStringToString(&ResultString, &DomainPart);
-                    if ((!NT_SUCCESS(Status)) || (!ret))
-                    {
-                        *nSize = HostSize + DomainPart.Length;
-                        SetLastError(ERROR_MORE_DATA);
-                        RtlFreeUnicodeString(&DomainPart);
-                        return FALSE;
-                    }
-                    RtlFreeUnicodeString(&DomainPart);
-                    *nSize = ResultString.Length / sizeof(WCHAR) - 1;
-                    return TRUE;
-                }
+            /*
+             * Windows sizes the buffer for "host.domain" and its terminator even when there is no
+             * domain (and then leaves the dot out): too small means an empty string and the size needed.
+             */
+            if (lpBuffer == NULL || *nSize < HostSize + 1 + DomainSize + 1)
+            {
+                if (lpBuffer != NULL && *nSize > 0)
+                    lpBuffer[0] = UNICODE_NULL;
+                *nSize = HostSize + 1 + DomainSize + 1;
+                SetLastError(ERROR_MORE_DATA);
+                ret = FALSE;
             }
-            return FALSE;
+            else
+            {
+                RtlCopyMemory(lpBuffer, HostPart.Buffer, HostPart.Length);
+                if (DomainSize)
+                {
+                    lpBuffer[HostSize] = L'.';
+                    RtlCopyMemory(&lpBuffer[HostSize + 1], DomainPart.Buffer, DomainPart.Length);
+                    HostSize += 1 + DomainSize;
+                }
+                lpBuffer[HostSize] = UNICODE_NULL;
+                *nSize = HostSize;
+                ret = TRUE;
+            }
+
+            RtlFreeUnicodeString(&HostPart);
+            RtlFreeUnicodeString(&DomainPart);
+            return ret;
 
         case ComputerNameDnsHostname:
             return GetComputerNameFromRegistry(L"\\Registry\\Machine\\System\\CurrentControlSet"

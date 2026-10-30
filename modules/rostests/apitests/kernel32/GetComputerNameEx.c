@@ -188,6 +188,75 @@ TestGetComputerNameEx(
 }
 
 static
+VOID
+TestFullyQualified(VOID)
+{
+    WCHAR Host[128], Domain[128], Expected[260], BufferW[260];
+    CHAR BufferA[260];
+    DWORD HostLen, DomainLen, ExpectedLen, Needed, Size, Error;
+    BOOL Ret;
+
+    Size = RTL_NUMBER_OF(Host);
+    Ret = GetComputerNameExW(ComputerNameDnsHostname, Host, &Size);
+    ok(Ret == TRUE, "GetComputerNameExW(ComputerNameDnsHostname) returned %d\n", Ret);
+    Size = RTL_NUMBER_OF(Domain);
+    Ret = Ret && GetComputerNameExW(ComputerNameDnsDomain, Domain, &Size);
+    if (!Ret)
+    {
+        skip("Failed to get the host and domain names\n");
+        return;
+    }
+    HostLen = lstrlenW(Host);
+    DomainLen = lstrlenW(Domain);
+
+    /* host.domain, or the host name alone (no trailing dot) when there is no domain */
+    lstrcpyW(Expected, Host);
+    if (DomainLen)
+    {
+        lstrcatW(Expected, L".");
+        lstrcatW(Expected, Domain);
+    }
+    ExpectedLen = lstrlenW(Expected);
+
+    /* Windows asks for room for the dot and the domain even when there is none */
+    Needed = HostLen + 1 + DomainLen + 1;
+
+    Size = 0;
+    SetLastError(0xdeadbeef);
+    Ret = GetComputerNameExW(ComputerNameDnsFullyQualified, NULL, &Size);
+    Error = GetLastError();
+    ok(Ret == FALSE, "GetComputerNameExW returned %d\n", Ret);
+    ok(Error == ERROR_MORE_DATA, "GetComputerNameExW returned error %lu\n", Error);
+    ok(Size == Needed, "Got Size %lu, expected %lu\n", Size, Needed);
+
+    RtlFillMemory(BufferW, sizeof(BufferW), 0x55);
+    Size = Needed - 1;
+    SetLastError(0xdeadbeef);
+    Ret = GetComputerNameExW(ComputerNameDnsFullyQualified, BufferW, &Size);
+    Error = GetLastError();
+    ok(Ret == FALSE, "GetComputerNameExW returned %d\n", Ret);
+    ok(Error == ERROR_MORE_DATA, "GetComputerNameExW returned error %lu\n", Error);
+    ok(Size == Needed, "Got Size %lu, expected %lu\n", Size, Needed);
+
+    RtlFillMemory(BufferW, sizeof(BufferW), 0x55);
+    Size = Needed;
+    Ret = GetComputerNameExW(ComputerNameDnsFullyQualified, BufferW, &Size);
+    ok(Ret == TRUE, "GetComputerNameExW returned %d\n", Ret);
+    ok(Size == ExpectedLen, "Got Size %lu, expected %lu\n", Size, ExpectedLen);
+    ok(!lstrcmpW(BufferW, Expected), "'%ls' != '%ls'\n", BufferW, Expected);
+    ok(BufferW[ExpectedLen] == 0, "BufferW[ExpectedLen] = 0x%x\n", BufferW[ExpectedLen]);
+    ok(ExpectedLen == 0 || BufferW[ExpectedLen - 1] != L'.', "Trailing dot in '%ls'\n", BufferW);
+
+    RtlFillMemory(BufferA, sizeof(BufferA), 0x55);
+    Size = Needed;
+    Ret = GetComputerNameExA(ComputerNameDnsFullyQualified, BufferA, &Size);
+    ok(Ret == TRUE, "GetComputerNameExA returned %d\n", Ret);
+    ok(Size == ExpectedLen, "Got Size %lu, expected %lu\n", Size, ExpectedLen);
+    ok(BufferA[ExpectedLen] == 0, "BufferA[ExpectedLen] = 0x%x\n", BufferA[ExpectedLen]);
+    ok(ExpectedLen == 0 || BufferA[ExpectedLen - 1] != '.', "Trailing dot in '%s'\n", BufferA);
+}
+
+static
 LSTATUS
 ReadRegistryValue(PCHAR ValueName, PCHAR Value)
 {
@@ -586,7 +655,8 @@ START_TEST(GetComputerNameEx)
     TestGetComputerNameEx(ComputerNameNetBIOS);
     TestGetComputerNameEx(ComputerNameDnsHostname);
     TestGetComputerNameEx(ComputerNameDnsDomain);
-    //TestGetComputerNameEx(ComputerNameDnsFullyQualified);
+    /* The generic test does not apply: Windows sizes the buffer for a trailing dot it does not return */
+    TestFullyQualified();
     TestGetComputerNameEx(ComputerNamePhysicalNetBIOS);
     TestGetComputerNameEx(ComputerNamePhysicalDnsHostname);
     TestGetComputerNameEx(ComputerNamePhysicalDnsDomain);

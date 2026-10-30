@@ -19,6 +19,7 @@ list(APPEND SOURCE
     NotifyChanges.c
     NotifyIpInterfaceChange.c
     NotifyRouteChange2.c
+    NotifyStableUnicastIpAddressTable.c
     SendARP.c
     TcpUdpTableRows.c
     testlist.c)

@@ -355,6 +355,59 @@ QueryDNS(IN LPCSTR NodeName,
     }
 }
 
+/*
+ * Reverse lookup of an address that belongs to this machine (loopback, or one of its own addresses):
+ * Windows answers with the machine's name without asking DNS. Returns TRUE and fills the name if so.
+ */
+static
+BOOLEAN
+LookupLocalNodeByAddr(IN LPWSTR pNodeBuffer,
+                      IN DWORD NodeBufferSize,
+                      IN BOOLEAN OnlyNodeName,
+                      IN PIN_ADDR Ip4Addr,
+                      IN BOOLEAN Loopback)
+{
+    WCHAR Name[256];
+    DWORD Size;
+    BOOLEAN IsLocal = Loopback;
+    CHAR HostName[256];
+    PHOSTENT Hostent;
+    PCHAR *Addresses;
+
+    if (Ip4Addr->S_un.S_un_b.s_b1 == 127)
+        IsLocal = TRUE;
+
+    if (!IsLocal)
+    {
+        /* One of the addresses our own name resolves to? */
+        if (gethostname(HostName, sizeof(HostName)) != NO_ERROR)
+            return FALSE;
+        Hostent = gethostbyname(HostName);
+        if (!Hostent || Hostent->h_addrtype != AF_INET || Hostent->h_length != sizeof(IN_ADDR))
+            return FALSE;
+        for (Addresses = Hostent->h_addr_list; *Addresses; Addresses++)
+        {
+            if (((PIN_ADDR)*Addresses)->s_addr == Ip4Addr->s_addr)
+            {
+                IsLocal = TRUE;
+                break;
+            }
+        }
+        if (!IsLocal)
+            return FALSE;
+    }
+
+    Size = RTL_NUMBER_OF(Name);
+    if (!GetComputerNameExW(OnlyNodeName ? ComputerNameDnsHostname : ComputerNameDnsFullyQualified,
+                            Name,
+                            &Size))
+        return FALSE;
+    if (wcslen(Name) + 1 > NodeBufferSize)
+        return FALSE;
+    wcscpy(pNodeBuffer, Name);
+    return TRUE;
+}
+
 static
 INT
 WINAPI
@@ -371,7 +424,8 @@ LookupNodeByAddr(IN LPWSTR pNodeBuffer,
     WSAQUERYSETW Restrictions, Reply;
     DWORD BufferLength;
     INT ErrorCode;
-    HANDLE LookupHandle;
+    HANDLE LookupHandle = NULL;
+    BOOLEAN Loopback = FALSE;
 
     /* Validate the address */
     if (!Addr) return WSAEFAULT;
@@ -382,6 +436,7 @@ LookupNodeByAddr(IN LPWSTR pNodeBuffer,
         /* Check the address size for this type */
         if (AddrSize != sizeof(IN6_ADDR)) return WSAEFAULT;
         Ip4Addr = (PIN_ADDR)&((PIN6_ADDR)Addr)->u.Byte[12];
+        Loopback = IN6_IS_ADDR_LOOPBACK((PIN6_ADDR)Addr);
     }
     else if (AddressFamily == AF_INET)
     {
@@ -392,6 +447,13 @@ LookupNodeByAddr(IN LPWSTR pNodeBuffer,
     {
         /* Address family not supported */
         return WSAEAFNOSUPPORT;
+    }
+
+    /* An address of this machine is named by the machine itself */
+    if ((Loopback || AddressFamily == AF_INET || IN6_IS_ADDR_V4MAPPED(Addr)) &&
+        LookupLocalNodeByAddr(pNodeBuffer, NodeBufferSize, OnlyNodeName, Ip4Addr, Loopback))
+    {
+        return ERROR_SUCCESS;
     }
 
     /* Check if this is a mapped V4 IPv6 or pure IPv4 */
@@ -415,6 +477,8 @@ LookupNodeByAddr(IN LPWSTR pNodeBuffer,
     ErrorCode = WSALookupServiceBeginW(&Restrictions,
                                        LUP_RETURN_NAME,
                                        &LookupHandle);
+    if (ErrorCode != ERROR_SUCCESS)
+        ErrorCode = WSAGetLastError();
     if (ErrorCode == ERROR_SUCCESS)
     {
         /* Lookup successful, now get the data */
@@ -423,6 +487,8 @@ LookupNodeByAddr(IN LPWSTR pNodeBuffer,
                                           0,
                                           &BufferLength,
                                           &Restrictions);
+        if (ErrorCode != ERROR_SUCCESS)
+            ErrorCode = WSAGetLastError();
         if (ErrorCode == ERROR_SUCCESS)
         {
             /* Now check if we have a name back */
@@ -456,11 +522,10 @@ LookupNodeByAddr(IN LPWSTR pNodeBuffer,
             }
         }
     }
-    else if (ErrorCode == WSASERVICE_NOT_FOUND)
-    {
-        /* Normalize the error code */
+
+    /* Normalize the error code of a lookup that found nothing */
+    if (ErrorCode == WSASERVICE_NOT_FOUND || ErrorCode == WSANO_DATA)
         ErrorCode = WSAHOST_NOT_FOUND;
-    }
 
     /* Finish the lookup if one was in progress */
     if (LookupHandle) WSALookupServiceEnd(LookupHandle);
