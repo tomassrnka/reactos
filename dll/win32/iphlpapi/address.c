@@ -352,6 +352,8 @@ GetAdaptersAddresses(
     ULONG AdaptersCount = 0;
     ULONG i;
     ULONG TotalSize = 0, RemainingSize, BufferSize;
+    PULONG AdapterIndexes = NULL;
+    ULONG AdapterIndexCount = 0;
     BYTE* Ptr = (BYTE*)pAdapterAddresses;
     DWORD MIN_SIZE = 15 * 1024;
     PIP_ADAPTER_ADDRESSES PreviousAA = NULL;
@@ -411,6 +413,14 @@ GetAdaptersAddresses(
         return RtlNtStatusToDosError(Status);
     }
 
+    /* The indexes of the adapters, to tell which gateways belong to one */
+    AdapterIndexes = HeapAlloc(GetProcessHeap(), 0, (InterfacesCount + 1) * sizeof(ULONG));
+    if (!AdapterIndexes)
+    {
+        Status = STATUS_NO_MEMORY;
+        goto Error;
+    }
+
     /* Let's see if we got any adapter. */
     for (i = 0; i < InterfacesCount; i++)
     {
@@ -435,6 +445,8 @@ GetAdaptersAddresses(
             Status = GetInterfaceEntry(TcpFile, InterfacesList[i], Entry);
             if (!NT_SUCCESS(Status))
                 goto Error;
+
+            AdapterIndexes[AdapterIndexCount++] = Entry->if_index;
 
             TRACE("Got entity %*s, index %u.\n",
                 Entry->if_descrlen, &Entry->if_descr[0], Entry->if_index);
@@ -855,13 +867,16 @@ GetAdaptersAddresses(
         /* Uh? Not even localhost ?! */
         ERR("No Adapters found!\n");
         *pOutBufLen = 0;
+        HeapFree(GetProcessHeap(), 0, AdapterIndexes);
+        HeapFree(GetProcessHeap(), 0, InterfacesList);
+        NtClose(TcpFile);
         return ERROR_NO_DATA;
     }
 
     /* See if we have anything to add */
     // FIXME: Anycast and multicast
     if ((Flags & (GAA_FLAG_SKIP_UNICAST | GAA_FLAG_INCLUDE_PREFIX)) == GAA_FLAG_SKIP_UNICAST)
-        goto Success;
+        goto Gateways;
 
     /* Now fill in the addresses */
     for (i = 0; i < InterfacesCount; i++)
@@ -993,8 +1008,76 @@ GetAdaptersAddresses(
         }
     }
 
-Success:
+Gateways:
+    /* The gateways of an adapter are the next hops of the default routes of its interface */
+    if (Flags & GAA_FLAG_INCLUDE_GATEWAYS)
+    {
+        RouteTable *Routes = getRouteTable();
+        ULONG Route, Index;
+
+        for (Route = 0; Routes && Route < Routes->numRoutes; Route++)
+        {
+            RouteEntry *Entry = &Routes->routes[Route];
+            ULONG Size = sizeof(IP_ADAPTER_GATEWAY_ADDRESS_LH) + sizeof(SOCKADDR_IN);
+            PIP_ADAPTER_ADDRESSES CurrentAA = NULL;
+            PIP_ADAPTER_GATEWAY_ADDRESS_LH Gateway, *Link;
+            BOOLEAN Duplicate = FALSE;
+
+            /* Only a default route that leaves through a router is a gateway */
+            if (Entry->dest != 0 || Entry->mask != 0 || Entry->gateway == 0)
+                continue;
+
+            /* ... of an interface that is an adapter */
+            for (Index = 0; Index < AdapterIndexCount && AdapterIndexes[Index] != Entry->ifIndex; Index++)
+                ;
+            if (Index == AdapterIndexCount)
+                continue;
+
+            for (CurrentAA = pAdapterAddresses; CurrentAA; CurrentAA = CurrentAA->Next)
+            {
+                if (CurrentAA->Length && CurrentAA->IfIndex == Entry->ifIndex)
+                    break;
+            }
+
+            /* One entry per gateway, even when more than one route leads to it */
+            Link = CurrentAA ? &((PIP_ADAPTER_ADDRESSES_LH)CurrentAA)->FirstGatewayAddress : NULL;
+            while (Link && *Link)
+            {
+                if (((LPSOCKADDR_IN)(*Link)->Address.lpSockaddr)->sin_addr.S_un.S_addr == Entry->gateway)
+                    Duplicate = TRUE;
+                Link = &(*Link)->Next;
+            }
+            if (Duplicate)
+                continue;
+
+            if (CurrentAA && (RemainingSize >= Size))
+            {
+                Gateway = (PIP_ADAPTER_GATEWAY_ADDRESS_LH)Ptr;
+
+                Gateway->Length = sizeof(IP_ADAPTER_GATEWAY_ADDRESS_LH);
+                Gateway->Next = NULL;
+                Gateway->Address.lpSockaddr = (LPSOCKADDR)(Gateway + 1);
+                Gateway->Address.iSockaddrLength = sizeof(SOCKADDR_IN);
+                ((LPSOCKADDR_IN)Gateway->Address.lpSockaddr)->sin_family = AF_INET;
+                ((LPSOCKADDR_IN)Gateway->Address.lpSockaddr)->sin_port = 0;
+                ((LPSOCKADDR_IN)Gateway->Address.lpSockaddr)->sin_addr.S_un.S_addr = Entry->gateway;
+
+                /* In the order of the routes: at the end of the list of the adapter */
+                *Link = Gateway;
+
+                Ptr += Size;
+                RemainingSize -= Size;
+            }
+
+            TotalSize += Size;
+        }
+
+        if (Routes)
+            HeapFree(GetProcessHeap(), 0, Routes);
+    }
+
     /* We're done */
+    HeapFree(GetProcessHeap(), 0, AdapterIndexes);
     HeapFree(GetProcessHeap(), 0, InterfacesList);
     NtClose(TcpFile);
     *pOutBufLen = TotalSize;
@@ -1006,6 +1089,7 @@ Success:
 Error:
     ERR("Failed! Status 0x%08x\n", Status);
     *pOutBufLen = 0;
+    HeapFree(GetProcessHeap(), 0, AdapterIndexes);
     HeapFree(GetProcessHeap(), 0, InterfacesList);
     NtClose(TcpFile);
     return RtlNtStatusToDosError(Status);
