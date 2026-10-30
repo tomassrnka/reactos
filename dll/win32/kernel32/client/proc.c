@@ -680,6 +680,13 @@ BasePushProcessParameters(IN ULONG ParameterFlags,
     /* Clear the current directory handle if not inheriting */
     if (!InheritHandles) ProcessParameters->CurrentDirectory.Handle = NULL;
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    /* RtlCreateProcessParameters copies the native flags. A guest creator's
+     * own, such as Ctrl+C ignored with SetConsoleCtrlHandler(NULL, TRUE), are
+     * in its parameters: the child inherits those. */
+    ProcessParameters->ConsoleFlags = Peb->ProcessParameters->ConsoleFlags;
+#endif
+
     /* Check if the user passed in an environment */
     if (lpEnvironment)
     {

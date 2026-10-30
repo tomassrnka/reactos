@@ -27,6 +27,7 @@ list(APPEND SOURCE
     ConsoleCreateRace.c
     ConsoleCsrRequests.c
     ConsoleCtrlEventRace.c
+    ConsoleCtrlHandler.c
     ConsoleDisplayMode.c
     ConsoleViewFollow.c
     ConsoleVirtualTerminal.c

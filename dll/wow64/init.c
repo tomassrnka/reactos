@@ -304,7 +304,7 @@ static NTSTATUS MapNtdll(PVOID *Base)
     return Status;
 }
 
-static PVOID Wow64Ntdll32, Wow64Loader32, Wow64Gate;
+static PVOID Wow64Ntdll32, Wow64Loader32, Wow64Gate, Wow64ExitThread32;
 /* Only the native loader's process initializer may build the guest process.
  * Publish all shared pointers together, including on weakly ordered hosts. */
 static LONG Wow64ProcessReady;
@@ -328,6 +328,44 @@ VOID Wow64InitializeTeb(TEB32 *Teb32, const TEB *Teb, PTEB RemoteTeb, const INIT
     Teb32->StaticUnicodeString.MaximumLength = sizeof(Teb32->StaticUnicodeBuffer);
 }
 
+/* A native thread the console server started for a control event (Wow64CsrThreadStart)
+ * becomes a guest thread, as kernel32's CreateRemoteThread would start it natively: a guest
+ * stack sized from the image, TEB32, and a context that enters Routine(Parameter) through
+ * the guest loader's thread initialization. The routine (kernel32's control dispatcher)
+ * ends the thread itself; should it return, it returns into RtlExitUserThread. */
+static NTSTATUS CsrGuestThread(ULONG Routine, ULONG Parameter, WOW64_CONTEXT *GuestContext)
+{
+    PTEB Teb = NtCurrentTeb();
+    INITIAL_TEB Stack;
+    ULONG *Frame;
+    ULONG_PTR StartAddress = Routine;
+    NTSTATUS Status;
+
+    if (!Wow64ExitThread32) return STATUS_ENTRYPOINT_NOT_FOUND;
+    Status = CreateGuestStack(&Stack);
+    if (!NT_SUCCESS(Status)) return Status;
+    Wow64InitializeTeb(WOW64_TEB32(Teb), Teb, Teb, &Stack);
+    NtSetInformationThread(NtCurrentThread(), ThreadQuerySetWin32StartAddress,
+                           &StartAddress, sizeof(StartAddress));
+    /* The return address, the parameter, then RtlExitUserThread's own frame */
+    Frame = (ULONG *)((ULONG_PTR)Stack.StackBase - 4 * sizeof(ULONG));
+    Frame[0] = PtrToUlong(Wow64ExitThread32);
+    Frame[1] = Parameter;
+    Frame[2] = 0;
+    Frame[3] = 0;
+    RtlZeroMemory(GuestContext, sizeof(*GuestContext));
+    GuestContext->ContextFlags = WOW64_CONTEXT_FULL | WOW64_CONTEXT_EXTENDED_REGISTERS;
+    GuestContext->Eip = Routine;
+    GuestContext->Esp = PtrToUlong(Frame);
+    GuestContext->EFlags = 0x202;
+    GuestContext->SegCs = 0x23;
+    GuestContext->SegSs = GuestContext->SegDs = GuestContext->SegEs = 0x2b;
+    GuestContext->SegFs = 0x53;
+    *(USHORT *)(GuestContext->ExtendedRegisters) = 0x27f;
+    *(ULONG *)(GuestContext->ExtendedRegisters + 24) = 0x1f80;
+    return STATUS_SUCCESS;
+}
+
 VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context, BOOLEAN ProcessStartup)
 {
     PPEB Peb = NtCurrentPeb();
@@ -339,22 +377,33 @@ VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context, BOOLEAN ProcessStartup)
     INITIAL_TEB Stack;
     ANSI_STRING Name = RTL_CONSTANT_STRING("LdrInitializeWow64");
     NTSTATUS Status;
-    WOW64_CONTEXT *GuestContext = NULL;
+    WOW64_CONTEXT *GuestContext = NULL, CsrContext;
     BOOLEAN CallbackReady = FALSE;
 
     if (!ProcessStartup)
     {
         LARGE_INTEGER Delay;
-        /* Native helper threads never initialize or enter the guest loader. */
-        if (Context->Rdx != WOW64_THREAD_START_MARKER)
-        {
-            Wow64CsrThreadStart(Context);
+        ULONG Routine, Parameter;
+        /* Native helper threads never initialize or enter the guest loader,
+         * except the console server's control event threads. */
+        if (Context->Rdx != WOW64_THREAD_START_MARKER &&
+            !Wow64CsrThreadStart(Context, &Routine, &Parameter))
             return;
-        }
         Delay.QuadPart = -10000;
         while (!InterlockedCompareExchange(&Wow64ProcessReady, 0, 0))
             NtDelayExecution(FALSE, &Delay);
-        GuestContext = (WOW64_CONTEXT *)(ULONG_PTR)Context->Rcx;
+        if (Context->Rdx != WOW64_THREAD_START_MARKER)
+        {
+            /* The server ignores a failed control thread: end only this one */
+            Status = CsrGuestThread(Routine, Parameter, &CsrContext);
+            if (!NT_SUCCESS(Status))
+            {
+                DbgPrint("WoW64: cannot start the console control routine: %08lx\n", Status);
+                for (;;) NtTerminateThread(NtCurrentThread(), Status);
+            }
+            GuestContext = &CsrContext;
+        }
+        else GuestContext = (WOW64_CONTEXT *)(ULONG_PTR)Context->Rcx;
         if (!GuestContext) { Status = STATUS_INVALID_PARAMETER; goto Failed; }
         Ntdll32 = Wow64Ntdll32;
         Entry = Wow64Loader32;
@@ -394,6 +443,9 @@ VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context, BOOLEAN ProcessStartup)
             if (!strcmp((PCHAR)Ntdll32 + Names[i], "KiUserApcDispatcher") &&
                 Ordinals[i] < Exports->NumberOfFunctions)
                 Wow64ApcDispatcher = (PUCHAR)Ntdll32 + Functions[Ordinals[i]];
+            if (!strcmp((PCHAR)Ntdll32 + Names[i], "RtlExitUserThread") &&
+                Ordinals[i] < Exports->NumberOfFunctions)
+                Wow64ExitThread32 = (PUCHAR)Ntdll32 + Functions[Ordinals[i]];
             if (!strcmp((PCHAR)Ntdll32 + Names[i], "KiUserExceptionDispatcher") &&
                 Ordinals[i] < Exports->NumberOfFunctions)
                 Wow64ExceptionDispatcher = (PUCHAR)Ntdll32 + Functions[Ordinals[i]];
