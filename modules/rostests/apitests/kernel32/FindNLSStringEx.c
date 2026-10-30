@@ -44,6 +44,20 @@ static void CheckError(LPCWSTR Source, INT SourceLength, LPCWSTR Value, INT Valu
     ok(Found == PENDING_FOUND, "line %d: found was written (%d)\n", Line, Found);
 }
 
+/* The last error is only compared when ExpectedError is not 0xdeadbeef, which means "left alone" */
+static void CheckZero(DWORD Flags, LPCWSTR Source, INT SourceLength, LPCWSTR Value, INT ValueLength,
+                      INT Expected, INT ExpectedFound, DWORD ExpectedError, int Line)
+{
+    INT Result, Found = PENDING_FOUND;
+
+    SetLastError(0xdeadbeef);
+    Result = pFindNLSStringEx(L"en-US", Flags, Source, SourceLength, Value, ValueLength, &Found, NULL, NULL, 0);
+    ok(Result == Expected, "line %d: flags 0x%lx: got %d, expected %d\n", Line, Flags, Result, Expected);
+    ok(Found == ExpectedFound, "line %d: flags 0x%lx: found %d, expected %d\n", Line, Flags, Found, ExpectedFound);
+    ok(GetLastError() == ExpectedError, "line %d: flags 0x%lx: error %lu, expected %lu\n", Line, Flags,
+       GetLastError(), ExpectedError);
+}
+
 START_TEST(FindNLSStringEx)
 {
     pFindNLSStringEx = (PVOID)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "FindNLSStringEx");
@@ -110,5 +124,59 @@ START_TEST(FindNLSStringEx)
         ok(pFindNLSStringEx(L"en-US", FIND_FROMSTART, L"abc", -1, L"c", -1, &Found, NULL, (LPVOID)1, 0) == 2,
            "with a reserved pointer\n");
         ok(Found == 1, "found %d\n", Found);
+    }
+
+    /*
+     * Zero lengths are no error (measured on Windows 10 22H2). An empty source finds nothing and sets the error to 0;
+     * an empty value, even with an empty source, is found with a length of 0 at the start, or at the end of the source
+     * for FROMEND and ENDSWITH, and leaves the last error alone.
+     */
+    {
+        static const DWORD Directions[] = { 0, FIND_FROMSTART, FIND_FROMEND, FIND_STARTSWITH, FIND_ENDSWITH,
+                                            FIND_FROMSTART | NORM_IGNORECASE, FIND_ENDSWITH | NORM_IGNORECASE };
+        INT i, EndOfSource;
+        INT Found;
+
+        for (i = 0; i < (INT)_countof(Directions); i++)
+        {
+            DWORD Flags = Directions[i];
+            BOOL AtEnd = (Flags & (FIND_FROMEND | FIND_ENDSWITH)) != 0;
+
+            CheckZero(Flags, L"abc", 0, L"abc", -1, -1, PENDING_FOUND, 0, __LINE__);
+            CheckZero(Flags, L"abc", 0, L"abc", 3, -1, PENDING_FOUND, 0, __LINE__);
+            CheckZero(Flags, L"", -1, L"abc", -1, -1, PENDING_FOUND, 0, __LINE__);
+            CheckZero(Flags, L"abc", -1, L"abc", 0, AtEnd ? 3 : 0, 0, 0xdeadbeef, __LINE__);
+            CheckZero(Flags, L"abc", -1, L"", -1, AtEnd ? 3 : 0, 0, 0xdeadbeef, __LINE__);
+            CheckZero(Flags, L"abc", 3, L"abc", 0, AtEnd ? 3 : 0, 0, 0xdeadbeef, __LINE__);
+            CheckZero(Flags, L"abc", 2, L"abc", 0, AtEnd ? 2 : 0, 0, 0xdeadbeef, __LINE__);
+            CheckZero(Flags, L"abc", 0, L"abc", 0, 0, 0, 0xdeadbeef, __LINE__);
+            CheckZero(Flags, L"", -1, L"", -1, 0, 0, 0xdeadbeef, __LINE__);
+
+            /* Bad arguments still win over the zero lengths */
+            CheckZero(Flags, L"abc", 0, NULL, -1, -1, PENDING_FOUND, ERROR_INVALID_PARAMETER, __LINE__);
+            CheckZero(Flags, NULL, 0, L"abc", -1, -1, PENDING_FOUND, ERROR_INVALID_PARAMETER, __LINE__);
+            CheckZero(Flags, L"abc", -1, NULL, 0, -1, PENDING_FOUND, ERROR_INVALID_PARAMETER, __LINE__);
+            CheckZero(Flags, L"abc", 0, L"abc", -2, -1, PENDING_FOUND, ERROR_INVALID_PARAMETER, __LINE__);
+            CheckZero(Flags, L"abc", -2, L"abc", 0, -1, PENDING_FOUND, ERROR_INVALID_PARAMETER, __LINE__);
+        }
+
+        /* Bad flags win over the zero lengths too, with either one empty */
+        CheckZero(FIND_FROMSTART | FIND_FROMEND, L"abc", 0, L"abc", -1, -1, PENDING_FOUND, ERROR_INVALID_FLAGS, __LINE__);
+        CheckZero(FIND_FROMSTART | FIND_FROMEND, L"abc", -1, L"abc", 0, -1, PENDING_FOUND, ERROR_INVALID_FLAGS, __LINE__);
+        CheckZero(FIND_FROMSTART | FIND_FROMEND, L"abc", 0, L"abc", 0, -1, PENDING_FOUND, ERROR_INVALID_FLAGS, __LINE__);
+        CheckZero(FIND_FROMSTART | 0x80000000, L"abc", 0, L"abc", -1, -1, PENDING_FOUND, ERROR_INVALID_FLAGS, __LINE__);
+        CheckZero(FIND_FROMSTART | 0x80000000, L"abc", -1, L"abc", 0, -1, PENDING_FOUND, ERROR_INVALID_FLAGS, __LINE__);
+
+        /* The found length is optional */
+        SetLastError(0xdeadbeef);
+        EndOfSource = pFindNLSStringEx(L"en-US", FIND_FROMEND, L"abc", -1, L"", -1, NULL, NULL, NULL, 0);
+        ok(EndOfSource == 3, "NULL found, empty value: got %d\n", EndOfSource);
+        EndOfSource = pFindNLSStringEx(L"en-US", FIND_FROMSTART, L"", -1, L"abc", -1, NULL, NULL, NULL, 0);
+        ok(EndOfSource == -1, "NULL found, empty source: got %d\n", EndOfSource);
+
+        /* A previous found length is overwritten with 0 by an empty value */
+        Found = 7;
+        ok(pFindNLSStringEx(L"en-US", FIND_FROMSTART, L"abc", -1, L"", -1, &Found, NULL, NULL, 0) == 0, "empty value\n");
+        ok(Found == 0, "found %d\n", Found);
     }
 }
