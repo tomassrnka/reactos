@@ -485,7 +485,7 @@ IntVideoPortFindAdapter(
                                       NULL);
     if (NT_SUCCESS(Status))
     {
-        ConfigInfo.SystemMemorySize = SystemBasicInfo.NumberOfPhysicalPages *
+        ConfigInfo.SystemMemorySize = (ULONGLONG)SystemBasicInfo.NumberOfPhysicalPages *
                                       SystemBasicInfo.PageSize;
     }
 

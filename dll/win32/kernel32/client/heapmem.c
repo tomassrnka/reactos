@@ -1344,18 +1344,28 @@ GlobalMemoryStatusEx(LPMEMORYSTATUSEX lpBuffer)
         return FALSE;
     }
 
-    /* Calculate memory load */
-    lpBuffer->dwMemoryLoad = ((DWORD)(BaseStaticServerData->SysInfo.NumberOfPhysicalPages -
-                                      PerformanceInfo.AvailablePages) * 100) /
-                                      BaseStaticServerData->SysInfo.NumberOfPhysicalPages;
+    /* Calculate memory load, as a percentage in 0..100 (in 64 bits: pages * 100
+     * overflows 32 bits above 160 GB) */
+    if (PerformanceInfo.AvailablePages >= BaseStaticServerData->SysInfo.NumberOfPhysicalPages)
+    {
+        lpBuffer->dwMemoryLoad = 0;
+    }
+    else
+    {
+        ULONGLONG MemoryLoad = ((ULONGLONG)(BaseStaticServerData->SysInfo.NumberOfPhysicalPages -
+                                            PerformanceInfo.AvailablePages) * 100) /
+                               BaseStaticServerData->SysInfo.NumberOfPhysicalPages;
+        lpBuffer->dwMemoryLoad = (DWORD)min(MemoryLoad, 100);
+    }
 
-    /* Save physical memory */
-    PhysicalMemory = BaseStaticServerData->SysInfo.NumberOfPhysicalPages *
+    /* Save physical memory. Both factors are ULONGs: multiply in 64 bits, or
+     * anything above 4 GB wraps (8 GB of RAM was reported as 3 GB) */
+    PhysicalMemory = (ULONGLONG)BaseStaticServerData->SysInfo.NumberOfPhysicalPages *
                      BaseStaticServerData->SysInfo.PageSize;
     lpBuffer->ullTotalPhys = PhysicalMemory;
 
     /* Now save available physical memory */
-    PhysicalMemory = PerformanceInfo.AvailablePages *
+    PhysicalMemory = (ULONGLONG)PerformanceInfo.AvailablePages *
                      BaseStaticServerData->SysInfo.PageSize;
     lpBuffer->ullAvailPhys = PhysicalMemory;
 
