@@ -836,9 +836,15 @@ CreateProcessAsUserCommon(
             goto Quit;
         }
 
-        if (Type != TokenPrimary)
+        /*
+         * Windows takes an impersonation token as well (the token a logon with
+         * LOGON32_LOGON_NETWORK_CLEARTEXT returns, as OpenSSH's sshd passes it) when its level
+         * is impersonation or above, and makes the primary token of the process from it. A
+         * lower level fails below, in the duplication.
+         */
+        if (Type != TokenPrimary && Type != TokenImpersonation)
         {
-            ERR("Wrong token type for token 0x%p, expected TokenPrimary, got %ld\n", hToken, Type);
+            ERR("Wrong token type for token 0x%p, expected a primary or impersonation token, got %ld\n", hToken, Type);
             Status = STATUS_BAD_TOKEN_TYPE;
             Success = FALSE;
             goto Quit;

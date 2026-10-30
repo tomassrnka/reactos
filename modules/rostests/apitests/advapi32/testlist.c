@@ -7,6 +7,7 @@ extern void func_BuildSecurityDescriptor(void);
 extern void func_NamedPipeSD(void);
 extern void func_ConvertStringSidToSid(void);
 extern void func_CreateService(void);
+extern void func_CreateProcessAsUserToken(void);
 extern void func_CreateEnvironmentBlockProfile(void);
 extern void func_CloseTrace(void);
 extern void func_DuplicateTokenEx(void);
@@ -94,6 +95,7 @@ const struct test winetest_testlist[] =
     { "RegWow64Volatile", func_RegWow64Volatile },
     { "RegWow64Aliases", func_RegWow64Aliases },
     { "CreateService", func_CreateService },
+    { "CreateProcessAsUserToken", func_CreateProcessAsUserToken },
     { "CreateEnvironmentBlockProfile", func_CreateEnvironmentBlockProfile },
     { "CloseTrace", func_CloseTrace },
     { "DuplicateTokenEx", func_DuplicateTokenEx },

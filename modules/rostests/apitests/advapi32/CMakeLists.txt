@@ -8,6 +8,7 @@ list(APPEND SOURCE
     RegWow64Review.c
     RestrictedSidsCopy.c
     CreateService.c
+    CreateProcessAsUserToken.c
     CreateEnvironmentBlockProfile.c
     CloseTrace.c
     DuplicateTokenEx.c
