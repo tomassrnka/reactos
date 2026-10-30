@@ -294,6 +294,7 @@ NpSetClosingPipeState(IN PNP_CCB Ccb,
 
             NpDeleteCcb(Ccb, List);
             if (!Fcb->CurrentInstances) NpDeleteFcb(Fcb, List);
+            else if (!Fcb->ServerOpenCount) NpRemoveFcbName(Fcb, List);
             break;
 
         case FILE_PIPE_CLOSING_STATE:
@@ -333,6 +334,7 @@ NpSetClosingPipeState(IN PNP_CCB Ccb,
 
             NpDeleteCcb(Ccb, List);
             if (!Fcb->CurrentInstances) NpDeleteFcb(Fcb, List);
+            else if (!Fcb->ServerOpenCount) NpRemoveFcbName(Fcb, List);
             break;
 
         case FILE_PIPE_CONNECTED_STATE:
@@ -379,6 +381,9 @@ NpSetClosingPipeState(IN PNP_CCB Ccb,
             }
 
             if (EventBuffer) KeSetEvent(EventBuffer->Event, IO_NO_INCREMENT, FALSE);
+
+            /* The server end is gone but the client keeps this CCB alive */
+            if (!Fcb->ServerOpenCount) NpRemoveFcbName(Fcb, List);
             break;
 
         default:

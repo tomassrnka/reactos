@@ -69,12 +69,16 @@ NpDeleteFcb(IN PNP_FCB Fcb,
     Dcb = Fcb->ParentDcb;
     if (Fcb->CurrentInstances) NpBugCheck(0, 0, 0);
 
-    NpCancelWaiter(&NpVcb->WaitQueue,
-                   &Fcb->FullName,
-                   STATUS_OBJECT_NAME_NOT_FOUND,
-                   ListEntry);
+    /* A name that was already removed may belong to a newer FCB by now */
+    if (!Fcb->NameRemoved)
+    {
+        NpCancelWaiter(&NpVcb->WaitQueue,
+                       &Fcb->FullName,
+                       STATUS_OBJECT_NAME_NOT_FOUND,
+                       ListEntry);
 
-    RemoveEntryList(&Fcb->DcbEntry);
+        RemoveEntryList(&Fcb->DcbEntry);
+    }
 
     if (Fcb->SecurityDescriptor)
     {
@@ -84,11 +88,48 @@ NpDeleteFcb(IN PNP_FCB Fcb,
     /* Unnamed pipes are not in the prefix table and have no name buffer */
     if (Fcb->FullName.Buffer)
     {
-        RtlRemoveUnicodePrefix(&NpVcb->PrefixTable, &Fcb->PrefixTableEntry);
+        if (!Fcb->NameRemoved)
+        {
+            RtlRemoveUnicodePrefix(&NpVcb->PrefixTable, &Fcb->PrefixTableEntry);
+        }
         ExFreePool(Fcb->FullName.Buffer);
     }
     ExFreePool(Fcb);
     NpCheckForNotify(Dcb, TRUE, ListEntry);
+}
+
+/*
+ * The last server handle of a pipe is gone but client ends are still open, so
+ * CCBs (and with them the FCB) must stay alive until those clients close.
+ * Take the name out of the namespace now: a later CreateNamedPipe of the same
+ * name then creates a new FCB, with its own MaximumInstances, as Windows does,
+ * and nothing can look this FCB up any more.  NpDeleteFcb frees it when the
+ * last CCB goes away.
+ */
+VOID
+NTAPI
+NpRemoveFcbName(IN PNP_FCB Fcb,
+                IN PLIST_ENTRY ListEntry)
+{
+    PAGED_CODE();
+
+    ASSERT(Fcb->ServerOpenCount == 0);
+    ASSERT(Fcb->CurrentInstances != 0);
+
+    /* Unnamed pipes have no name; and do it only once */
+    if (Fcb->NameRemoved || !Fcb->FullName.Buffer) return;
+
+    NpCancelWaiter(&NpVcb->WaitQueue,
+                   &Fcb->FullName,
+                   STATUS_OBJECT_NAME_NOT_FOUND,
+                   ListEntry);
+
+    RtlRemoveUnicodePrefix(&NpVcb->PrefixTable, &Fcb->PrefixTableEntry);
+    RemoveEntryList(&Fcb->DcbEntry);
+    InitializeListHead(&Fcb->DcbEntry);
+    Fcb->NameRemoved = TRUE;
+
+    NpCheckForNotify(Fcb->ParentDcb, TRUE, ListEntry);
 }
 
 VOID

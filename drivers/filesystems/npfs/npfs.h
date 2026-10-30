@@ -192,9 +192,15 @@ typedef struct _NP_ROOT_DCB_CCB
 typedef struct _NP_CB_HEADER
 {
     NODE_TYPE_CODE NodeType;
+    /* FCB: the name was removed from the namespace (the last server handle was
+       closed while client ends are still open); lives in existing padding */
+    BOOLEAN NameRemoved;
     LIST_ENTRY DcbEntry;
     PVOID ParentDcb;
+    /* Number of CCBs (any state) that reference this FCB: it frees the FCB */
     ULONG CurrentInstances;
+    /* Number of open server handles: what MaximumInstances is checked against
+       and what is reported as the current instance count */
     ULONG ServerOpenCount;
     PSECURITY_DESCRIPTOR SecurityDescriptor;
 } NP_CB_HEADER, *PNP_CB_HEADER;
@@ -476,6 +482,11 @@ VOID
 NTAPI
 NpDeleteFcb(IN PNP_FCB Fcb,
             IN PLIST_ENTRY ListEntry);
+
+VOID
+NTAPI
+NpRemoveFcbName(IN PNP_FCB Fcb,
+                IN PLIST_ENTRY ListEntry);
 
 NTSTATUS
 NTAPI

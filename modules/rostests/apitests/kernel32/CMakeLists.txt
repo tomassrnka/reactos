@@ -112,6 +112,7 @@ list(APPEND SOURCE
     MappedFileGrowth.c
     MappedViewEvict.c
     MultiByteToWideChar.c
+    NamedPipeInstanceReuse.c
     PerformanceCounter.c
     Pipes.c
     PipeSqos.c
