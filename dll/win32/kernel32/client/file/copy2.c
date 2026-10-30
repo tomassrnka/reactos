@@ -384,6 +384,15 @@ Copy2CompareHandles(
     return Copy2Unknown;
 }
 
+/* Whether two open files are, or cannot be told from being, the same file */
+BOOL
+Copy2MaybeSameFile(
+    _In_ HANDLE First,
+    _In_ HANDLE Second)
+{
+    return Copy2CompareHandles(First, Second) != Copy2Different;
+}
+
 /* NAMES AND STREAMS ********************************************************/
 
 /*

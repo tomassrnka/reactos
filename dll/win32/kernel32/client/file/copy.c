@@ -295,7 +295,7 @@ BasepCopyFileExW(IN LPCWSTR lpExistingFileName,
     ULONG NamedCount = 0, i, ChunkSize, MaxChunk;
     DWORD StreamError;
     BOOL RC = FALSE;
-    BOOL DestIsStream, DestExisted, DestOnDisk, StreamFailed = FALSE;
+    BOOL DestIsStream, DestExisted, DestOnDisk, DestTouched, StreamFailed = FALSE;
     DWORD SystemError;
 
     RtlZeroMemory(&State, sizeof(State));
@@ -387,12 +387,16 @@ BasepCopyFileExW(IN LPCWSTR lpExistingFileName,
         goto CloseSource;
     }
 
-    /* The new file is made with the attributes of the source but the read-only one, which is set at the end */
+    /*
+     * The new file is made with the attributes of the source but the read-only one, which is set at the end. A
+     * file that is there is opened as it is and cut down only when it is known not to be the source (a copy of
+     * a file onto itself, by whatever name, is a sharing violation and leaves it alone, as in Windows).
+     */
     FileHandleDest = CreateFileW(lpNewFileName,
                                  GENERIC_WRITE | FILE_READ_ATTRIBUTES,
                                  FILE_SHARE_WRITE,
                                  NULL,
-                                 (dwCopyFlags & COPY_FILE_FAIL_IF_EXISTS) ? CREATE_NEW : CREATE_ALWAYS,
+                                 (dwCopyFlags & COPY_FILE_FAIL_IF_EXISTS) ? CREATE_NEW : OPEN_ALWAYS,
                                  FileBasic.FileAttributes & ~FILE_ATTRIBUTE_READONLY,
                                  NULL);
     if (INVALID_HANDLE_VALUE == FileHandleDest)
@@ -402,13 +406,43 @@ BasepCopyFileExW(IN LPCWSTR lpExistingFileName,
     }
 
     DestExisted = (GetLastError() == ERROR_ALREADY_EXISTS);
+    DestOnDisk = (GetFileType(FileHandleDest) == FILE_TYPE_DISK);
+    DestTouched = !DestExisted;
+
+    if (DestExisted && DestOnDisk)
+    {
+        FILE_BASIC_INFORMATION DestBasic;
+
+        if (Copy2MaybeSameFile(FileHandleSource, FileHandleDest))
+        {
+            SetLastError(ERROR_SHARING_VIOLATION);
+            goto CloseDest;
+        }
+
+        /* What CREATE_ALWAYS does with a file that is there: a hidden or system one has to be asked for as such */
+        errCode = NtQueryInformationFile(FileHandleDest, &IoStatusBlock, &DestBasic, sizeof(DestBasic),
+                                         FileBasicInformation);
+        if (NT_SUCCESS(errCode) &&
+            (DestBasic.FileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM) & ~FileBasic.FileAttributes))
+        {
+            SetLastError(ERROR_ACCESS_DENIED);
+            goto CloseDest;
+        }
+
+        DestTouched = TRUE;
+        errCode = Copy2SetLength(FileHandleDest, 0);
+        if (!NT_SUCCESS(errCode))
+        {
+            BaseSetLastNTError(errCode);
+            goto CloseDest;
+        }
+    }
     if (!(dwCopyFlags & COPY_FILE_FAIL_IF_EXISTS) && DestExisted)
         SetLastError(ERROR_SUCCESS);
 
     /* Only a file on a disk is given streams, attributes and extended attributes (a copy to NUL is just data). A
        volume that cannot keep streams gets the file without them. A file that was overwritten has only the
        streams of its source. */
-    DestOnDisk = (GetFileType(FileHandleDest) == FILE_TYPE_DISK);
     if (!DestOnDisk || !BasepVolumeHasStreams(FileHandleDest))
     {
         NamedCount = 0;
@@ -520,7 +554,7 @@ BasepCopyFileExW(IN LPCWSTR lpExistingFileName,
 
 CloseDest:
     NtClose(FileHandleDest);
-    if (! RC && ! State.KeepDest)
+    if (! RC && ! State.KeepDest && DestTouched)
     {
         SystemError = GetLastError();
         SetFileAttributesW(lpNewFileName, FILE_ATTRIBUTE_NORMAL);

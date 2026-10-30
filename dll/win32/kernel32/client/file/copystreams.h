@@ -55,6 +55,11 @@ Copy2RemoveStreams(
     _In_opt_ const COPY2_STREAM *Keep,
     _In_ ULONG KeepCount);
 
+BOOL
+Copy2MaybeSameFile(
+    _In_ HANDLE First,
+    _In_ HANDLE Second);
+
 VOID
 Copy2CopyEas(
     _In_ HANDLE Source,

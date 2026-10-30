@@ -721,6 +721,55 @@ static void TestStreamHost(void)
     Remove(Src);
 }
 
+static DWORD RunCmd(PCWSTR Arguments);
+
+/* A file copied onto itself, under another spelling of its name, is a sharing violation and stays as it is */
+static void TestSameFile(void)
+{
+    WCHAR Src[MAX_PATH], Upper[MAX_PATH], Dotted[MAX_PATH], Sub[MAX_PATH], Name[MAX_PATH];
+    const WCHAR *Names[3];
+    BOOL Ret;
+    int i;
+
+    MakePath(Src, L"same.txt");
+    MakePath(Upper, L"SAME.TXT");
+    MakePath(Sub, L"samesub");
+    CreateDirectoryW(Sub, NULL);
+    StringCbPrintfW(Dotted, sizeof(Dotted), L"%s\\..\\same.txt", Sub);
+    Names[0] = Src;
+    Names[1] = Upper;
+    Names[2] = Dotted;
+
+    ok(WriteTo(Src, "original content", 16, CREATE_ALWAYS), "create: %lu\n", GetLastError());
+    ok(WriteStream(Src, L":s1", "stream", 6), "create :s1: %lu\n", GetLastError());
+    for (i = 0; i < 3; i++)
+    {
+        SetLastError(0xdeadbeef);
+        Ret = CopyFileW(Src, Names[i], FALSE);
+        ok(!Ret && GetLastError() == ERROR_SHARING_VIOLATION, "CopyFileW onto itself, spelling %d: %d, %lu\n", i, Ret, GetLastError());
+        ok(StreamHolds(Src, L"", "original content", 16) && StreamHolds(Src, L":s1", "stream", 6),
+           "the file was changed by a copy onto itself, spelling %d\n", i);
+        SetLastError(0xdeadbeef);
+        Ret = CopyFileW(Src, Names[i], TRUE);
+        ok(!Ret && GetLastError() == ERROR_FILE_EXISTS, "CopyFileW(TRUE) onto itself, spelling %d: %d, %lu\n", i, Ret, GetLastError());
+        ok(StreamHolds(Src, L"", "original content", 16), "the file was changed by a copy onto itself, spelling %d\n", i);
+    }
+
+    /* the commands refuse, with an error level, and leave the file */
+    ok(RunCmd(L"copy same.txt SAME.TXT") != 0, "cmd copy onto itself: error level 0\n");
+    ok(StreamHolds(Src, L"", "original content", 16) && StreamHolds(Src, L":s1", "stream", 6), "cmd copy onto itself changed the file\n");
+    ok(RunCmd(L"copy same.txt .\\same.txt") != 0, "cmd copy onto itself: error level 0\n");
+    ok(StreamHolds(Src, L"", "original content", 16) && StreamHolds(Src, L":s1", "stream", 6), "cmd copy onto itself changed the file\n");
+    ok(RunCmd(L"copy /y same.txt samesub\\..\\SAME.TXT") != 0, "cmd copy onto itself: error level 0\n");
+    ok(StreamHolds(Src, L"", "original content", 16) && StreamHolds(Src, L":s1", "stream", 6), "cmd copy onto itself changed the file\n");
+    ok(RunCmd(L"xcopy /y same.txt SAME.TXT") != 0, "xcopy onto itself: error level 0\n");
+    ok(StreamHolds(Src, L"", "original content", 16) && StreamHolds(Src, L":s1", "stream", 6), "xcopy onto itself changed the file\n");
+
+    (void)Name;
+    Remove(Src);
+    RemoveDirectoryW(Sub);
+}
+
 static void TestCopyFile2(void)
 {
     COPYFILE2_EXTENDED_PARAMETERS Params = { sizeof(Params) };
@@ -815,6 +864,13 @@ static void TestOtherVolume(void)
         ok(!List[0], "streams '%ls' on a volume that keeps none\n", List);
         ok(CallCount >= 2 && Calls[0].Number == 1, "%d calls\n", CallCount);
     }
+
+    /* and over the copy that is there */
+    Ret = CopyFileExW(Src, Dst, NULL, NULL, NULL, 0);
+    ok(Ret, "CopyFileExW over the copy on %ls: %lu\n", Other, GetLastError());
+    ok(StreamHolds(Dst, L"", DefaultData, 5), "the default stream is wrong after the overwrite\n");
+    if (Flags & FILE_NAMED_STREAMS)
+        CheckFullCopy("overwrite on another volume", Dst);
     Remove(Dst);
 
     ResetCalls(0, 0);
@@ -1025,6 +1081,7 @@ START_TEST(CopyFileStreams)
     TestLockedStream();
     TestEas();
     TestDevice();
+    TestSameFile();
     TestStreamHost();
     TestCopyFile2();
     TestMove();

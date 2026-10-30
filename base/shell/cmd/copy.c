@@ -63,6 +63,36 @@ CopyProgress(
     return CheckCtrlBreak (BREAK_INPUT) ? PROGRESS_CANCEL : PROGRESS_CONTINUE;
 }
 
+/* Whether two names are the same file, by the volume and the index of the file, not by how they are spelled */
+static BOOL
+IsSameFile(LPCTSTR pszFirst, LPCTSTR pszSecond)
+{
+    BY_HANDLE_FILE_INFORMATION First, Second;
+    HANDLE hFirst, hSecond;
+    BOOL bSame = FALSE;
+
+    hFirst = CreateFile (pszFirst, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                         OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (hFirst == INVALID_HANDLE_VALUE)
+        return FALSE;
+
+    hSecond = CreateFile (pszSecond, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                          OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (hSecond != INVALID_HANDLE_VALUE)
+    {
+        if (GetFileInformationByHandle (hFirst, &First) && GetFileInformationByHandle (hSecond, &Second) &&
+            First.dwVolumeSerialNumber == Second.dwVolumeSerialNumber &&
+            (First.nFileIndexHigh || First.nFileIndexLow) &&
+            First.nFileIndexHigh == Second.nFileIndexHigh && First.nFileIndexLow == Second.nFileIndexLow)
+        {
+            bSame = TRUE;
+        }
+        CloseHandle (hSecond);
+    }
+    CloseHandle (hFirst);
+    return bSame;
+}
+
 static BOOL
 IsDeviceName(LPCTSTR pszName)
 {
@@ -190,8 +220,8 @@ copy(TCHAR source[MAX_PATH],
     {
         BOOL bCopied;
 
-        CloseHandle (hFileSrc);
-
+        /* The source stays open until the copy is done: if the destination is the source under another name,
+           the delete fails and nothing is lost */
         if (IsExistingFile (dest))
         {
             TRACE ("SetFileAttributes (%s, FILE_ATTRIBUTE_NORMAL);\n", debugstr_aw(dest));
@@ -203,6 +233,7 @@ copy(TCHAR source[MAX_PATH],
 
         /* Ctrl+C stops the copy (the routine cancels it), which deletes the partial file */
         bCopied = CopyFileEx (source, dest, CopyProgress, NULL, NULL, 0);
+        CloseHandle (hFileSrc);
         if (!bCopied)
         {
             if (GetLastError () == ERROR_REQUEST_ABORTED)
@@ -896,7 +927,7 @@ INT cmd_copy(LPTSTR param)
             _tcscat (tmpSrcPath, findBuffer.cFileName);
 
             /* Check to see if the file is the same file */
-            if (!bTouch && !_tcscmp(tmpSrcPath, tmpDestPath))
+            if (!bTouch && (!_tcscmp(tmpSrcPath, tmpDestPath) || IsSameFile(tmpSrcPath, tmpDestPath)))
             {
                 ConOutResPrintf(STRING_COPY_ERROR2);
 
@@ -943,7 +974,8 @@ INT cmd_copy(LPTSTR param)
     if (arg != NULL)
         freep(arg);
 
-    return 0;
+    /* The error level is also the exit code of "cmd /c copy" */
+    return nErrorLevel;
 }
 
 #endif /* INCLUDE_CMD_COPY */
