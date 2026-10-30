@@ -1491,6 +1491,12 @@ VOID
 RtlpRestoreContextInternal(
     _In_ PCONTEXT ContextRecord);
 
+PVOID
+RtlpCallConsolidateCallback(
+    _In_ PCONTEXT ContextRecord,
+    _In_ PVOID (*Callback)(PEXCEPTION_RECORD),
+    _In_ PEXCEPTION_RECORD ExceptionRecord);
+
 VOID
 RtlRestoreContext(
     _In_ PCONTEXT ContextRecord,
@@ -1502,8 +1508,13 @@ RtlRestoreContext(
             (ExceptionRecord->NumberParameters >= 1))
         {
             PVOID (*Consolidate)(EXCEPTION_RECORD*) = (PVOID)ExceptionRecord->ExceptionInformation[0];
-            // FIXME: This should be called through an asm wrapper to allow handling recursive unwinding
-            ContextRecord->Rip = (ULONG64)Consolidate(ExceptionRecord);
+
+            /* Call the callback on a frame that unwinds to the target context,
+               so that an exception or unwind started by the callback (a C++
+               rethrow from a catch block) does not walk the unwound frames */
+            ContextRecord->Rip = (ULONG64)RtlpCallConsolidateCallback(ContextRecord,
+                                                                      Consolidate,
+                                                                      ExceptionRecord);
         }
         else if ((ExceptionRecord->ExceptionCode == STATUS_LONGJUMP) &&
                  (ExceptionRecord->NumberParameters >= 1))
