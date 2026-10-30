@@ -30,6 +30,50 @@ $InstallerUrl    = "https://raw.githubusercontent.com/ScoopInstaller/Install/$In
 function Say($m) { Write-Output ("scoop-install: " + $m) }
 function Die($m) { Write-Output ("scoop-install: ERROR: " + $m); exit 1 }
 
+function New-ScoopAcl($isDir) {
+    $fs = [System.Security.AccessControl.FileSystemRights]
+    $allow = [System.Security.AccessControl.AccessControlType]::Allow
+    $none = [System.Security.AccessControl.PropagationFlags]::None
+    if ($isDir) {
+        $sec = New-Object System.Security.AccessControl.DirectorySecurity
+        $inh = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'
+    } else {
+        $sec = New-Object System.Security.AccessControl.FileSecurity
+        $inh = [System.Security.AccessControl.InheritanceFlags]::None
+    }
+    $sec.SetAccessRuleProtection($true, $false)                # nothing inherited from the parent
+    foreach ($g in @(@('S-1-5-18', $fs::FullControl), @('S-1-5-32-544', $fs::FullControl),
+                     @('S-1-5-32-545', $fs::ReadAndExecute), @('S-1-5-11', $fs::ReadAndExecute))) {
+        $sid = New-Object System.Security.Principal.SecurityIdentifier($g[0])
+        $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, $g[1], $inh, $none, $allow)))
+    }
+    return $sec
+}
+
+function Lock-ScoopRoot($dir) {
+    # The shims dir is on the MACHINE PATH, so a user who could write into it could plant a program that
+    # administrators then run. Folders created under C:\ normally inherit "Authenticated Users: Modify".
+    # Cut that inheritance and grant SYSTEM and Administrators full control, Users and Authenticated Users
+    # read and execute only (well-known SIDs: independent of the display language). Measured on nitro: an
+    # ACL set on the root is NOT pushed down to the files that already exist, so every existing item gets
+    # the ACL explicitly (junctions are not followed); items created later inherit from their parent.
+    # Best effort: where the file system cannot hold or apply ACLs, say so and carry on.
+    try {
+        Set-Acl -LiteralPath $dir -AclObject (New-ScoopAcl $true)
+        $n = 0; $bad = 0
+        Get-ChildItem -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue |
+            Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } |
+            ForEach-Object {
+                try { Set-Acl -LiteralPath $_.FullName -AclObject (New-ScoopAcl $_.PSIsContainer); $n++ } catch { $bad++ }
+            }
+        $back = Get-Acl -LiteralPath $dir
+        Say ("ACL on ${dir}: inheritance " + $(if ($back.AreAccessRulesProtected) { 'off' } else { 'STILL ON' }) + "; $n existing items locked, $bad failed")
+        foreach ($a in $back.Access) { Say ("  " + $a.IdentityReference + " " + $a.FileSystemRights + " " + $a.AccessControlType) }
+    } catch {
+        Say ("WARNING: could not restrict the ACL of ${dir}: " + $_.Exception.Message)
+    }
+}
+
 try {
     if (-not $Root) {
         $Root = [Environment]::GetEnvironmentVariable('SCOOP', 'Machine')
@@ -83,6 +127,7 @@ try {
     if (-not (($mp -split ';') -contains $shims)) {
         [Environment]::SetEnvironmentVariable('Path', ($shims + ';' + $mp), 'Machine')
     }
+    Lock-ScoopRoot $Root
     Say "Scoop is installed in $Root"
     exit 0
 } catch {

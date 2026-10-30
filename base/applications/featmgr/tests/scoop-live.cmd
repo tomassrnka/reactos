@@ -49,6 +49,15 @@ reg query "%ENVKEY%" /v SCOOP | find "C:\scoop" >nul
 call :rc0 "L11 machine SCOOP variable set"
 reg query "%ENVKEY%" /v Path | find "C:\scoop\shims" >nul
 call :rc0 "L12 machine PATH has C:\scoop\shims"
+findstr /c:"scoop-install: ACL on" /c:"WARNING" %O%\install-scoop.txt >> %LOG%
+find "inheritance off" %O%\install-scoop.txt >nul
+call :rc0 "L12a C:\scoop ACL: inheritance from C:\ disabled (see ACL lines above)"
+"%PSDIR%\pwsh.exe" -NoProfile -Command "foreach($p in 'C:\scoop','C:\scoop\shims','C:\scoop\shims\scoop.cmd','C:\scoop\apps\scoop\current\bin\scoop.ps1'){ '{0}: protected={1}' -f $p,(Get-Acl $p).AreAccessRulesProtected; foreach($a in (Get-Acl $p).Access){ '   {0} {1} inherited={2}' -f $a.IdentityReference,$a.FileSystemRights,$a.IsInherited } }" > %O%\acl.txt 2>&1
+type %O%\acl.txt >> %LOG%
+find "BUILTIN\Users" %O%\acl.txt | find "Modify" >nul
+call :rc1 "L12b Users have no Modify/Write on C:\scoop"
+find "Authenticated Users" %O%\acl.txt | find "Modify" >nul
+call :rc1 "L12c Authenticated Users have no Modify on C:\scoop"
 set SCOOP=%SROOT%
 set PATH=%SROOT%\shims;%PSDIR%;%PATH%
 call scoop --version > %O%\ver.txt 2>&1
@@ -101,6 +110,16 @@ call :rc0 "L26 7z e (extract) rc0"
 find "scoop-featmgr-7z-payload" %O%\z7\out\in.txt >nul
 call :rc0 "L27 extracted content matches"
 rd /s /q %O%\z7 2>nul
+
+rem --- ACLs of what Scoop created after the lock-down (new items must not be writable by users either)
+"%PSDIR%\pwsh.exe" -NoProfile -Command "foreach($p in 'C:\scoop\shims\7z.exe','C:\scoop\apps\7zip','C:\scoop\apps\7zip\current\7z.exe'){ '{0}:' -f $p; foreach($a in (Get-Acl $p).Access){ '   {0} {1}' -f $a.IdentityReference,$a.FileSystemRights } }" > %O%\acl2.txt 2>&1
+type %O%\acl2.txt >> %LOG%
+find "Authenticated Users" %O%\acl2.txt | find "Modify" >nul
+call :rc1 "L27a items created later: Authenticated Users have no Modify"
+rem informational: does nitro enforce a file ACL at all? (Deny read to Administrators, then read as admin)
+"%PSDIR%\pwsh.exe" -NoProfile -Command "$f='C:\aclprobe.txt'; 'x' | Set-Content $f; $s=New-Object System.Security.AccessControl.FileSecurity; $s.SetAccessRuleProtection($true,$false); $a=[System.Security.AccessControl.FileSystemAccessRule]; $adm=New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544'); $sys=New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18'); $s.AddAccessRule((New-Object $a($adm,'ReadData','Deny'))); $s.AddAccessRule((New-Object $a($sys,'FullControl','Allow'))); Set-Acl $f $s; try { Get-Content $f -ErrorAction Stop | Out-Null; 'ACL-ENFORCEMENT: NOT enforced (admin read a file with Deny ReadData for Administrators)' } catch { 'ACL-ENFORCEMENT: enforced (' + $_.Exception.GetType().Name + ')' }; Remove-Item $f -Force -ErrorAction SilentlyContinue" > %O%\aclenf.txt 2>&1
+type %O%\aclenf.txt >> %LOG%
+del /f /q C:\aclprobe.txt >nul 2>&1
 
 rem --- optional (SHOT=1, VM harness): the Optional Features GUI on the Software tab, for screenshots
 if not defined SHOT goto :noshot
