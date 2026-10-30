@@ -126,6 +126,7 @@ SysWOW64/regedit.exe
 SysWOW64/regsvr32.exe
 SysWOW64/cmd.exe
 SysWOW64/robocopy.exe
+SysWOW64/icacls.exe
 SysWOW64/msiexec.exe
 
 # COM surrogate: combase starts dllhost.exe /Processid:{CLSID} for DllSurrogate AppIDs, and a 32-bit

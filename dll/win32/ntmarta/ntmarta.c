@@ -1026,12 +1026,15 @@ AccpOpenNamedObject(LPWSTR pObjectName,
                                        NULL,
                                        NULL);
 
+            /* Security queries and updates do no I/O on the handle and, as on Windows, apply to a junction or
+               symbolic link itself. Asking for SYNCHRONIZE would make an
+               explicit deny of SYNCHRONIZE (which icacls /deny W produces) lock the owner out of the DACL. */
             Status = NtOpenFile(Handle,
-                                DesiredAccess | SYNCHRONIZE,
+                                DesiredAccess,
                                 &ObjectAttributes,
                                 &IoStatusBlock,
                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                FILE_SYNCHRONOUS_IO_NONALERT);
+                                FILE_OPEN_REPARSE_POINT);
 
             RtlFreeHeap(RtlGetProcessHeap(),
                         0,
