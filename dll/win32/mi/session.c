@@ -16,6 +16,10 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(mi);
 
+#ifndef WBEM_FLAG_DEEP
+#define WBEM_FLAG_DEEP 0
+#endif
+
 #define MI_SESSION_MAGIC 0x53534d49 /* "IMSS" */
 #define MI_OPERATION_MAGIC 0x504f4d49 /* "IMOP" */
 
@@ -616,6 +620,14 @@ done:
     SafeArrayDestroy(names);
 }
 
+static BOOL qualifier_is_true(const struct mi_qualifier_set *set, const WCHAR *name)
+{
+    UINT i;
+    for (i = 0; i < set->count; i++)
+        if (!_wcsicmp(set->items[i].name, name)) return set->items[i].type == MI_BOOLEAN && set->items[i].value.boolean;
+    return FALSE;
+}
+
 /* properties of a signature object (method parameters) or class */
 static void read_properties(IWbemClassObject *obj, struct mi_property **props, UINT *count, BOOL with_qualifiers,
                             MI_Uint32 base_flags, const WCHAR *skip)
@@ -656,7 +668,8 @@ static void read_properties(IWbemClassObject *obj, struct mi_property **props, U
                 IWbemQualifierSet_Release(qs);
             }
             if (key) p->flags |= MI_FLAG_KEY;
-            if (readonly) p->flags |= MI_FLAG_READONLY;
+            /* Windows: read-only unless the property also has the write qualifier */
+            if (readonly && !qualifier_is_true(&p->quals, L"write")) p->flags |= MI_FLAG_READONLY;
         }
         (*count)++;
         VariantClear(&var);
@@ -762,7 +775,20 @@ static void read_methods(IWbemClassObject *obj, struct mi_class_data *cls)
     IWbemClassObject_EndMethodEnumeration(obj);
 }
 
-static struct mi_class_data *convert_class(IWbemClassObject *obj, const WCHAR *ns, const WCHAR *server)
+/* the class objects an operation has read, by name; the cache owns one reference to each */
+struct class_cache
+{
+    UINT count, size;
+    struct mi_class_data **items;
+};
+
+#define MAX_CLASS_DEPTH 16
+
+static struct mi_class_data *get_class_data(struct class_cache *cache, IWbemServices *services, const WCHAR *name,
+                                            const WCHAR *ns, const WCHAR *server, UINT depth);
+
+static struct mi_class_data *convert_class(IWbemClassObject *obj, const WCHAR *ns, const WCHAR *server,
+                                           IWbemServices *services, struct class_cache *cache, UINT depth)
 {
     struct mi_class_data *cls;
     BSTR name, parent;
@@ -784,7 +810,64 @@ static struct mi_class_data *convert_class(IWbemClassObject *obj, const WCHAR *n
     }
     read_properties(obj, &cls->props, &cls->count, TRUE, MI_FLAG_PROPERTY, NULL);
     read_methods(obj, cls);
+    /* the superclass chain (MI_Class_GetParentClass, CimClass.CimSuperClass), bounded */
+    if (cls->parent && services && cache && depth < MAX_CLASS_DEPTH)
+        cls->parent_data = get_class_data(cache, services, cls->parent, ns, server, depth + 1);
     class_data_finish(cls);
+    return cls;
+}
+
+static BOOL cache_add(struct class_cache *cache, struct mi_class_data *cls)
+{
+    if (cache->count == cache->size)
+    {
+        UINT size = cache->size ? cache->size * 2 : 16;
+        struct mi_class_data **tmp = mi_alloc(size * sizeof(*tmp));
+        if (!tmp) return FALSE;
+        if (cache->count) memcpy(tmp, cache->items, cache->count * sizeof(*tmp));
+        mi_free(cache->items);
+        cache->items = tmp;
+        cache->size = size;
+    }
+    cache->items[cache->count++] = cls;
+    return TRUE;
+}
+
+static void cache_free(struct class_cache *cache)
+{
+    UINT i;
+    for (i = 0; i < cache->count; i++) class_data_release(cache->items[i]);
+    mi_free(cache->items);
+    memset(cache, 0, sizeof(*cache));
+}
+
+/* a new reference to the class data of name (from the cache, else read from WMI and cached) */
+static struct mi_class_data *get_class_data(struct class_cache *cache, IWbemServices *services, const WCHAR *name,
+                                            const WCHAR *ns, const WCHAR *server, UINT depth)
+{
+    IWbemClassObject *obj = NULL;
+    struct mi_class_data *cls = NULL;
+    BSTR bname;
+    UINT i;
+
+    for (i = 0; i < cache->count; i++)
+    {
+        if (_wcsicmp(cache->items[i]->name, name)) continue;
+        InterlockedIncrement(&cache->items[i]->refs);
+        return cache->items[i];
+    }
+    if (!(bname = SysAllocString(name))) return NULL;
+    if (SUCCEEDED(IWbemServices_GetObject(services, bname, 0, NULL, &obj, NULL)) && obj)
+    {
+        cls = convert_class(obj, ns, server, services, cache, depth);
+        IWbemClassObject_Release(obj);
+    }
+    SysFreeString(bname);
+    if (cls)
+    {
+        InterlockedIncrement(&cls->refs);
+        if (!cache_add(cache, cls)) InterlockedDecrement(&cls->refs);
+    }
     return cls;
 }
 
@@ -1175,33 +1258,19 @@ static BOOL wmi_lock(struct mi_operation *op)
     return TRUE;
 }
 
-/* one class object per class name for the instances of an operation */
-struct class_cache
-{
-    UINT count;
-    struct mi_class_data *items[16];
-};
-
+/* one class object per class name for the instances of an operation: a pointer the cache keeps alive
+ * (NULL when the class could not be read or cached) */
 static struct mi_class_data *cached_class(struct class_cache *cache, IWbemServices *services, const WCHAR *name,
                                           const WCHAR *ns, const WCHAR *server)
 {
-    IWbemClassObject *obj = NULL;
-    struct mi_class_data *cls = NULL;
-    BSTR bname;
+    struct mi_class_data *cls = get_class_data(cache, services, name, ns, server, 0);
+    BOOL cached = FALSE;
     UINT i;
 
-    for (i = 0; i < cache->count; i++)
-        if (!_wcsicmp(cache->items[i]->name, name)) return cache->items[i];
-    if (cache->count == ARRAYSIZE(cache->items)) return NULL;
-    bname = SysAllocString(name);
-    if (SUCCEEDED(IWbemServices_GetObject(services, bname, 0, NULL, &obj, NULL)) && obj)
-    {
-        cls = convert_class(obj, ns, server);
-        IWbemClassObject_Release(obj);
-    }
-    SysFreeString(bname);
-    if (cls) cache->items[cache->count++] = cls;
-    return cls;
+    if (!cls) return NULL;
+    for (i = 0; i < cache->count; i++) if (cache->items[i] == cls) cached = TRUE;
+    class_data_release(cls);
+    return cached ? cls : NULL;
 }
 
 /* attach the class and the schema flags to an already converted instance and add it to the result.
@@ -1301,7 +1370,100 @@ static void run_enum(struct mi_operation *op, IWbemServices *services, IEnumWbem
     }
     mi_free(list);
     op_complete(op, result, final_hr, message);
-    for (i = 0; i < cache.count; i++) class_data_release(cache.items[i]);
+    cache_free(&cache);
+}
+
+/* MI_Session_EnumerateClasses: every class derived from class_name (all classes when NULL) */
+static void run_enum_classes(struct mi_operation *op, IWbemServices *services, const WCHAR *server)
+{
+    IEnumWbemClassObject *enumerator = NULL;
+    struct class_cache cache;
+    IWbemClassObject *obj;
+    BSTR super = NULL;
+    HRESULT hr;
+    ULONG got;
+    BOOL oom = FALSE;
+
+    memset(&cache, 0, sizeof(cache));
+    if (op->class_name && !(super = SysAllocString(op->class_name)))
+    {
+        op_complete(op, MI_RESULT_SERVER_LIMITS_EXCEEDED, E_OUTOFMEMORY, NULL);
+        return;
+    }
+    hr = IWbemServices_CreateClassEnum(services, super, WBEM_FLAG_DEEP | WBEM_FLAG_FORWARD_ONLY, NULL, &enumerator);
+    SysFreeString(super);
+    if (FAILED(hr))
+    {
+        op_complete(op, hresult_to_mi(hr), hr, NULL);
+        return;
+    }
+    set_blanket((IUnknown *)enumerator);
+    for (;;)
+    {
+        struct mi_class_data *data = NULL;
+        MI_Class *cls;
+
+        if (op_cancelled(op))
+        {
+            IEnumWbemClassObject_Release(enumerator);
+            cache_free(&cache);
+            op_complete(op, MI_RESULT_FAILED, 0, L"The operation was cancelled");
+            return;
+        }
+        obj = NULL;
+        got = 0;
+        hr = IEnumWbemClassObject_Next(enumerator, WBEM_INFINITE, 1, &obj, &got);
+        if (FAILED(hr) || !got || !obj) break;
+        if (op->keys_only)
+        {
+            /* classNamesOnly: the name and the superclass name */
+            BSTR name = get_string_prop(obj, L"__CLASS"), parent = get_string_prop(obj, L"__SUPERCLASS");
+            if (name && (data = class_data_create(name, op->nameSpace, server)))
+            {
+                if (parent && parent[0]) data->parent = mi_strdup(parent);
+                class_data_finish(data);
+            }
+            SysFreeString(name);
+            SysFreeString(parent);
+        }
+        else data = convert_class(obj, op->nameSpace, server, services, &cache, 0);
+        IWbemClassObject_Release(obj);
+        if (!data) continue;
+        cls = class_create(data);
+        class_data_release(data);
+        /* a class that cannot be stored must not end the enumeration as a short, successful one */
+        if (!cls || !op_add_result(op, NULL, cls)) { oom = TRUE; break; }
+    }
+    IEnumWbemClassObject_Release(enumerator);
+    cache_free(&cache);
+    if (oom)
+    {
+        op_complete(op, MI_RESULT_SERVER_LIMITS_EXCEEDED, E_OUTOFMEMORY, NULL);
+        return;
+    }
+    op_complete(op, FAILED(hr) ? hresult_to_mi(hr) : MI_RESULT_OK, FAILED(hr) ? hr : 0, NULL);
+}
+
+static BOOL method_exists(IWbemClassObject *cls, const WCHAR *method)
+{
+    BSTR name;
+    IWbemClassObject *in, *out;
+    BOOL found = FALSE;
+
+    if (FAILED(IWbemClassObject_BeginMethodEnumeration(cls, 0))) return TRUE; /* cannot tell: let WMI decide */
+    for (;;)
+    {
+        name = NULL;
+        in = out = NULL;
+        if (IWbemClassObject_NextMethod(cls, 0, &name, &in, &out) != S_OK || !name) break;
+        if (!_wcsicmp(name, method)) found = TRUE;
+        if (in) IWbemClassObject_Release(in);
+        if (out) IWbemClassObject_Release(out);
+        SysFreeString(name);
+        if (found) break;
+    }
+    IWbemClassObject_EndMethodEnumeration(cls);
+    return found;
 }
 
 static void run_invoke(struct mi_operation *op, IWbemServices *services, const WCHAR *server)
@@ -1321,7 +1483,15 @@ static void run_invoke(struct mi_operation *op, IWbemServices *services, const W
     hr = IWbemServices_GetObject(services, class_name, 0, NULL, &cls, NULL);
     if (FAILED(hr)) { op_complete(op, hresult_to_mi(hr), hr, NULL); goto done; }
     hr = IWbemClassObject_GetMethod(cls, method, 0, &in_sig, &out_sig);
-    if (FAILED(hr)) { op_complete(op, MI_RESULT_METHOD_NOT_FOUND, hr, NULL); goto done; }
+    if (FAILED(hr) || !method_exists(cls, method))
+    {
+        /* as WMI reports it: Not found, HRESULT 0x80041002 */
+        WCHAR msg[160];
+        _snwprintf(msg, ARRAYSIZE(msg) - 1, L"Method \"%.100s\" not found", op->method);
+        msg[ARRAYSIZE(msg) - 1] = 0;
+        op_complete(op, MI_RESULT_NOT_FOUND, WBEM_E_NOT_FOUND, msg);
+        goto done;
+    }
     if (in_sig && op->params && op->params->count)
     {
         if (FAILED(hr = IWbemClassObject_SpawnInstance(in_sig, 0, &in))) { op_complete(op, hresult_to_mi(hr), hr, NULL); goto done; }
@@ -1415,7 +1585,7 @@ static void run_operation(struct mi_operation *op)
             struct class_cache cache;
             memset(&cache, 0, sizeof(cache));
             finalize_instance(op, services, &cache, convert_object(obj, op->nameSpace, server, TRUE), server);
-            if (cache.count) class_data_release(cache.items[0]);
+            cache_free(&cache);
             op_complete(op, MI_RESULT_OK, 0, NULL);
         }
         break;
@@ -1426,12 +1596,22 @@ static void run_operation(struct mi_operation *op)
         if (FAILED(hr)) op_complete(op, hresult_to_mi(hr), hr, NULL);
         else
         {
-            struct mi_class_data *data = convert_class(obj, op->nameSpace, server);
-            MI_Class *cls = data ? class_create(data) : NULL;
+            struct class_cache cache;
+            struct mi_class_data *data;
+            MI_Class *cls;
+
+            memset(&cache, 0, sizeof(cache));
+            data = convert_class(obj, op->nameSpace, server, services, &cache, 0);
+            cls = data ? class_create(data) : NULL;
             class_data_release(data);
+            cache_free(&cache);
             if (cls) op_add_result(op, NULL, cls);
             op_complete(op, cls ? MI_RESULT_OK : MI_RESULT_FAILED, 0, NULL);
         }
+        break;
+
+    case OP_ENUMERATE_CLASSES:
+        run_enum_classes(op, services, server);
         break;
 
     case OP_INVOKE:
@@ -2013,8 +2193,21 @@ static void MI_CALL session_EnumerateClasses(MI_Session *session, MI_Uint32 flag
                                              const MI_Char *ns, const MI_Char *class_name, MI_Boolean names_only,
                                              MI_OperationCallbacks *callbacks, MI_Operation *operation)
 {
-    FIXME("%p %s: EnumerateClasses not supported\n", session, debugstr_w(class_name));
-    op_fail(get_session(session), flags, callbacks, operation, MI_RESULT_NOT_SUPPORTED, OP_ENUMERATE_CLASSES);
+    struct mi_session *s = get_session(session);
+    struct mi_operation *op;
+
+    TRACE("%p %#x %p %s %s %d %p %p\n", session, flags, options, debugstr_w(ns), debugstr_w(class_name), names_only,
+          callbacks, operation);
+    if (!operation) return;
+    if (!s || !check_options(options))
+    {
+        op_fail(s, flags, callbacks, operation, MI_RESULT_INVALID_PARAMETER, OP_ENUMERATE_CLASSES);
+        return;
+    }
+    if (!(op = op_create(s, flags, ns, callbacks, operation, OP_ENUMERATE_CLASSES))) return;
+    if (class_name && class_name[0]) op->class_name = mi_strdup(class_name);
+    op->keys_only = names_only;
+    op_start(op);
 }
 
 static void MI_CALL session_TestConnection(MI_Session *session, MI_Uint32 flags, MI_OperationCallbacks *callbacks,

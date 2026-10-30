@@ -105,6 +105,7 @@ struct mi_class_data
     WCHAR *nameSpace;
     WCHAR *server;
     WCHAR *parent;
+    struct mi_class_data *parent_data;  /* the superclass, when it could be read */
     struct mi_qualifier_set quals;
     UINT count;
     struct mi_property *props;

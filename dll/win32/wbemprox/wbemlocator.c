@@ -131,20 +131,37 @@ static HRESULT parse_resource( const WCHAR *resource, WCHAR **server, WCHAR **na
     p = q;
     while (*q && *q != '\\' && *q != '/') q++;
     len = q - p;
+#ifdef __REACTOS__
+    if (len != ARRAY_SIZE( rootW ) || _wcsnicmp( rootW, p, len )) goto done;
+#else
     if (len >= ARRAY_SIZE( rootW ) && _wcsnicmp( rootW, p, len )) goto done;
+#endif
     if (!*q)
     {
         hr = S_OK;
         goto done;
     }
     q++;
+#ifdef __REACTOS__
+    {
+        enum wbm_namespace ns;
+        (void)cimv2W; (void)defaultW;
+        if (!parse_namespace( q, &ns )) goto done;
+        len = lstrlenW( q );
+    }
+#else
     len = lstrlenW( q );
     if (wcsicmp( q, cimv2W ) && wcsicmp( q, defaultW ))
         goto done;
+#endif
     if (!(*namespace = heap_alloc( (len + 1) * sizeof(WCHAR) ))) hr = E_OUTOFMEMORY;
     else
     {
+#ifdef __REACTOS__
+        memcpy( *namespace, q, len * sizeof(WCHAR) );
+#else
         memcpy( *namespace, p, len * sizeof(WCHAR) );
+#endif
         (*namespace)[len] = 0;
         hr = S_OK;
     }
@@ -197,6 +214,9 @@ static HRESULT WINAPI wbem_locator_ConnectServer(
     heap_free( server );
     if (SUCCEEDED( hr ))
         return WBEM_NO_ERROR;
+#ifdef __REACTOS__
+    if (hr == WBEM_E_INVALID_NAMESPACE) return hr;
+#endif
 
     return WBEM_E_FAILED;
 }

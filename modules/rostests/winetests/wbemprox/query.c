@@ -1795,6 +1795,534 @@ static void test_Win32_QuickFixEngineering( IWbemServices *services )
     SysFreeString( wql );
 }
 
+/* a query whose results the test reads itself (exec_query above consumes a forward-only enumerator) */
+static HRESULT run_query( IWbemServices *services, const WCHAR *str, IEnumWbemClassObject **result )
+{
+    BSTR wql = SysAllocString( wqlW ), query = SysAllocString( str );
+    HRESULT hr = IWbemServices_ExecQuery( services, wql, query, WBEM_FLAG_RETURN_IMMEDIATELY, NULL, result );
+    SysFreeString( wql );
+    SysFreeString( query );
+    return hr;
+}
+
+/* class hierarchy, class enumeration and the method qualifiers, as Windows reports them */
+static void test_schema( IWbemLocator *locator, IWbemServices *services )
+{
+    IWbemClassObject *obj = NULL, *obj2;
+    IEnumWbemClassObject *result;
+    IWbemQualifierSet *qs;
+    IWbemServices *ns;
+    VARIANT var;
+    CIMTYPE type;
+    ULONG count, total;
+    BOOL found;
+    HRESULT hr;
+    BSTR str;
+
+    /* the class object of Win32_Process: superclass, derivation, genus */
+    str = SysAllocString( L"Win32_Process" );
+    hr = IWbemServices_GetObject( services, str, 0, NULL, &obj, NULL );
+    SysFreeString( str );
+    ok( hr == S_OK, "GetObject(Win32_Process) failed %08x\n", hr );
+    if (hr != S_OK) return;
+    VariantInit( &var );
+    hr = IWbemClassObject_Get( obj, L"__SUPERCLASS", 0, &var, &type, NULL );
+    ok( hr == S_OK && V_VT( &var ) == VT_BSTR && !wcscmp( V_BSTR( &var ), L"CIM_Process" ),
+        "__SUPERCLASS %08x %u %s\n", hr, V_VT( &var ), V_VT( &var ) == VT_BSTR ? wine_dbgstr_w(V_BSTR( &var )) : "" );
+    VariantClear( &var );
+    hr = IWbemClassObject_Get( obj, L"__DYNASTY", 0, &var, &type, NULL );
+    ok( hr == S_OK && V_VT( &var ) == VT_BSTR && !wcscmp( V_BSTR( &var ), L"CIM_ManagedSystemElement" ),
+        "__DYNASTY %08x %u\n", hr, V_VT( &var ) );
+    VariantClear( &var );
+    hr = IWbemClassObject_Get( obj, L"__DERIVATION", 0, &var, &type, NULL );
+    ok( hr == S_OK && V_VT( &var ) == (VT_BSTR|VT_ARRAY), "__DERIVATION %08x %u\n", hr, V_VT( &var ) );
+    ok( type == (CIM_STRING|CIM_FLAG_ARRAY), "__DERIVATION type %#x\n", type );
+    if (hr == S_OK && V_VT( &var ) == (VT_BSTR|VT_ARRAY))
+    {
+        LONG i = 0, ub = -1;
+        BSTR first = NULL;
+        SafeArrayGetUBound( V_ARRAY( &var ), 1, &ub );
+        ok( ub == 2, "__DERIVATION has %d elements\n", ub + 1 );
+        SafeArrayGetElement( V_ARRAY( &var ), &i, &first );
+        ok( first && !wcscmp( first, L"CIM_Process" ), "__DERIVATION[0] %s\n", wine_dbgstr_w(first) );
+        SysFreeString( first );
+    }
+    VariantClear( &var );
+    hr = IWbemClassObject_Get( obj, L"__GENUS", 0, &var, &type, NULL );
+    ok( hr == S_OK && V_VT( &var ) == VT_I4 && V_I4( &var ) == WBEM_GENUS_CLASS, "__GENUS %08x %d\n", hr, V_I4( &var ) );
+    VariantClear( &var );
+
+    /* method and parameter qualifiers */
+    qs = NULL;
+    hr = IWbemClassObject_GetMethodQualifierSet( obj, L"Create", &qs );
+    ok( hr == S_OK, "GetMethodQualifierSet(Create) failed %08x\n", hr );
+    if (qs)
+    {
+        hr = IWbemQualifierSet_Get( qs, L"Static", 0, &var, NULL );
+        ok( hr == S_OK && V_VT( &var ) == VT_BOOL && V_BOOL( &var ), "Static %08x %u\n", hr, V_VT( &var ) );
+        VariantClear( &var );
+        IWbemQualifierSet_Release( qs );
+    }
+    obj2 = NULL;
+    hr = IWbemClassObject_GetMethod( obj, L"Create", 0, &obj2, NULL );
+    ok( hr == S_OK && obj2, "GetMethod(Create) failed %08x\n", hr );
+    if (obj2)
+    {
+        qs = NULL;
+        hr = IWbemClassObject_GetPropertyQualifierSet( obj2, L"CommandLine", &qs );
+        ok( hr == S_OK, "GetPropertyQualifierSet(CommandLine) failed %08x\n", hr );
+        if (qs)
+        {
+            hr = IWbemQualifierSet_Get( qs, L"In", 0, &var, NULL );
+            ok( hr == S_OK && V_VT( &var ) == VT_BOOL && V_BOOL( &var ), "In %08x %u\n", hr, V_VT( &var ) );
+            VariantClear( &var );
+            IWbemQualifierSet_Release( qs );
+        }
+        IWbemClassObject_Release( obj2 );
+    }
+    /* a read-only and a key property */
+    qs = NULL;
+    hr = IWbemClassObject_GetPropertyQualifierSet( obj, L"Handle", &qs );
+    ok( hr == S_OK, "GetPropertyQualifierSet(Handle) failed %08x\n", hr );
+    if (qs)
+    {
+        hr = IWbemQualifierSet_Get( qs, L"key", 0, &var, NULL );
+        ok( hr == S_OK && V_VT( &var ) == VT_BOOL && V_BOOL( &var ), "key %08x %u\n", hr, V_VT( &var ) );
+        VariantClear( &var );
+        hr = IWbemQualifierSet_Get( qs, L"read", 0, &var, NULL );
+        ok( hr == S_OK && V_VT( &var ) == VT_BOOL && V_BOOL( &var ), "read %08x %u\n", hr, V_VT( &var ) );
+        VariantClear( &var );
+        IWbemQualifierSet_Release( qs );
+    }
+    IWbemClassObject_Release( obj );
+
+    /* a query on a base class returns the instances of its subclasses */
+    hr = run_query( services, L"SELECT * FROM CIM_ComputerSystem", &result );
+    ok( hr == S_OK, "query failed %08x\n", hr );
+    if (hr == S_OK)
+    {
+        total = 0;
+        found = FALSE;
+        for (;;)
+        {
+            obj = NULL;
+            IEnumWbemClassObject_Next( result, 10000, 1, &obj, &count );
+            if (!count) break;
+            total++;
+            if (IWbemClassObject_Get( obj, L"__CLASS", 0, &var, NULL, NULL ) == S_OK && V_VT( &var ) == VT_BSTR &&
+                !wcscmp( V_BSTR( &var ), L"Win32_ComputerSystem" )) found = TRUE;
+            VariantClear( &var );
+            IWbemClassObject_Release( obj );
+        }
+        ok( total == 1 && found, "got %u computer systems, Win32_ComputerSystem %d\n", total, found );
+        IEnumWbemClassObject_Release( result );
+    }
+
+    /* class enumeration */
+    result = NULL;
+    hr = IWbemServices_CreateClassEnum( services, NULL, WBEM_FLAG_FORWARD_ONLY, NULL, &result );
+    ok( hr == S_OK, "CreateClassEnum failed %08x\n", hr );
+    if (result)
+    {
+        total = 0;
+        found = FALSE;
+        for (;;)
+        {
+            obj = NULL;
+            IEnumWbemClassObject_Next( result, 10000, 1, &obj, &count );
+            if (!count) break;
+            total++;
+            if (IWbemClassObject_Get( obj, L"__CLASS", 0, &var, NULL, NULL ) == S_OK && V_VT( &var ) == VT_BSTR &&
+                !wcscmp( V_BSTR( &var ), L"Win32_OperatingSystem" )) found = TRUE;
+            VariantClear( &var );
+            IWbemClassObject_Release( obj );
+        }
+        ok( total > 20 && found, "got %u classes, Win32_OperatingSystem %d\n", total, found );
+        IEnumWbemClassObject_Release( result );
+    }
+    result = NULL;
+    str = SysAllocString( L"CIM_Process" );
+    hr = IWbemServices_CreateClassEnum( services, str, 1 /* WBEM_FLAG_SHALLOW */ | WBEM_FLAG_FORWARD_ONLY, NULL, &result );
+    SysFreeString( str );
+    ok( hr == S_OK, "CreateClassEnum(CIM_Process) failed %08x\n", hr );
+    if (result)
+    {
+        found = FALSE;
+        for (;;)
+        {
+            obj = NULL;
+            IEnumWbemClassObject_Next( result, 10000, 1, &obj, &count );
+            if (!count) break;
+            if (IWbemClassObject_Get( obj, L"__CLASS", 0, &var, NULL, NULL ) == S_OK && V_VT( &var ) == VT_BSTR &&
+                !wcscmp( V_BSTR( &var ), L"Win32_Process" )) found = TRUE;
+            VariantClear( &var );
+            IWbemClassObject_Release( obj );
+        }
+        ok( found, "no Win32_Process under CIM_Process\n" );
+        IEnumWbemClassObject_Release( result );
+    }
+    str = SysAllocString( L"NoSuchClass_pswmi" );
+    hr = IWbemServices_CreateClassEnum( services, str, 0, NULL, &result );
+    SysFreeString( str );
+    ok( hr == WBEM_E_INVALID_CLASS, "CreateClassEnum(unknown) returned %08x\n", hr );
+
+    /* the root namespace lists CIMV2 and Interop; Interop has the ms_409 child */
+    str = SysAllocString( L"ROOT" );
+    hr = IWbemLocator_ConnectServer( locator, str, NULL, NULL, NULL, 0, NULL, NULL, &ns );
+    SysFreeString( str );
+    ok( hr == S_OK, "ConnectServer(ROOT) failed %08x\n", hr );
+    if (hr == S_OK)
+    {
+        hr = run_query( ns, L"SELECT * FROM __NAMESPACE", &result );
+        ok( hr == S_OK, "query failed %08x\n", hr );
+        if (hr == S_OK)
+        {
+            BOOL cimv2 = FALSE, interop = FALSE;
+                for (;;)
+            {
+                obj = NULL;
+                IEnumWbemClassObject_Next( result, 10000, 1, &obj, &count );
+                if (!count) break;
+                if (IWbemClassObject_Get( obj, L"Name", 0, &var, NULL, NULL ) == S_OK && V_VT( &var ) == VT_BSTR)
+                {
+                    if (!_wcsicmp( V_BSTR( &var ), L"CIMV2" )) cimv2 = TRUE;
+                    if (!_wcsicmp( V_BSTR( &var ), L"Interop" )) interop = TRUE;
+                }
+                VariantClear( &var );
+                IWbemClassObject_Release( obj );
+            }
+            ok( cimv2 && interop, "CIMV2 %d Interop %d\n", cimv2, interop );
+            IEnumWbemClassObject_Release( result );
+        }
+        /* classes of root\cimv2 are not in root */
+        hr = run_query( ns, L"SELECT * FROM Win32_OperatingSystem", &result );
+        if (hr == S_OK)
+        {
+            obj = NULL;
+            hr = IEnumWbemClassObject_Next( result, 10000, 1, &obj, &count );
+            ok( hr == WBEM_E_INVALID_CLASS, "Win32_OperatingSystem in ROOT: %08x\n", hr );
+            if (obj) IWbemClassObject_Release( obj );
+            IEnumWbemClassObject_Release( result );
+        }
+        else ok( hr == WBEM_E_INVALID_CLASS, "Win32_OperatingSystem in ROOT: %08x\n", hr );
+        IWbemServices_Release( ns );
+    }
+    str = SysAllocString( L"ROOT\\Interop" );
+    hr = IWbemLocator_ConnectServer( locator, str, NULL, NULL, NULL, 0, NULL, NULL, &ns );
+    SysFreeString( str );
+    ok( hr == S_OK, "ConnectServer(ROOT\\Interop) failed %08x\n", hr );
+    if (hr == S_OK)
+    {
+        obj = NULL;
+        str = SysAllocString( L"CIM_RegisteredProfile" );
+        hr = IWbemServices_GetObject( ns, str, 0, NULL, &obj, NULL );
+        SysFreeString( str );
+        ok( hr == S_OK, "GetObject(CIM_RegisteredProfile) failed %08x\n", hr );
+        if (obj) IWbemClassObject_Release( obj );
+        IWbemServices_Release( ns );
+    }
+}
+
+static void test_Win32_Environment( IWbemServices *services )
+{
+    IEnumWbemClassObject *result;
+    IWbemClassObject *obj;
+    ULONG count, total = 0, system = 0;
+    VARIANT var;
+    CIMTYPE type;
+    HRESULT hr;
+
+    hr = run_query( services, L"SELECT * FROM Win32_Environment", &result );
+    ok( hr == S_OK, "query failed %08x\n", hr );
+    if (hr != S_OK) return;
+    for (;;)
+    {
+        obj = NULL;
+        IEnumWbemClassObject_Next( result, 10000, 1, &obj, &count );
+        if (!count) break;
+        total++;
+        hr = IWbemClassObject_Get( obj, L"SystemVariable", 0, &var, &type, NULL );
+        ok( hr == S_OK && V_VT( &var ) == VT_BOOL && type == CIM_BOOLEAN, "SystemVariable %08x %u\n", hr, V_VT( &var ) );
+        if (V_VT( &var ) == VT_BOOL && V_BOOL( &var ))
+        {
+            system++;
+            VariantClear( &var );
+            hr = IWbemClassObject_Get( obj, L"UserName", 0, &var, &type, NULL );
+            ok( hr == S_OK && V_VT( &var ) == VT_BSTR && !wcscmp( V_BSTR( &var ), L"<SYSTEM>" ), "UserName %08x\n", hr );
+        }
+        VariantClear( &var );
+        hr = IWbemClassObject_Get( obj, L"VariableValue", 0, &var, &type, NULL );
+        ok( hr == S_OK && type == CIM_STRING, "VariableValue %08x %u\n", hr, type );
+        VariantClear( &var );
+        IWbemClassObject_Release( obj );
+    }
+    ok( system > 0, "no system variables (%u)\n", total );
+    IEnumWbemClassObject_Release( result );
+}
+
+static HRESULT exec_method_path( IWbemServices *services, const WCHAR *path, const WCHAR *method )
+{
+    BSTR p = SysAllocString( path ), m = SysAllocString( method );
+    IWbemClassObject *out = NULL;
+    HRESULT hr = IWbemServices_ExecMethod( services, p, m, 0, NULL, NULL, &out, NULL );
+
+    if (out) IWbemClassObject_Release( out );
+    SysFreeString( p );
+    SysFreeString( m );
+    return hr;
+}
+
+/* a query of a class the namespace does not have fails with WBEM_E_INVALID_CLASS, when it is run or when the
+ * first result is read */
+static void query_invalid_class( IWbemServices *services, const WCHAR *query, const char *what )
+{
+    IEnumWbemClassObject *result;
+    IWbemClassObject *obj = NULL;
+    ULONG count = 0;
+    HRESULT hr = run_query( services, query, &result );
+
+    if (hr == S_OK)
+    {
+        hr = IEnumWbemClassObject_Next( result, 10000, 1, &obj, &count );
+        if (obj) IWbemClassObject_Release( obj );
+        IEnumWbemClassObject_Release( result );
+    }
+    ok( hr == WBEM_E_INVALID_CLASS, "%s: got %08x\n", what, hr );
+}
+
+struct ns_thread
+{
+    const WCHAR *ns;
+    int mismatches, runs;
+};
+
+static void names_of( IEnumWbemClassObject *result, WCHAR *buf, UINT len )
+{
+    IWbemClassObject *obj;
+    ULONG count;
+    VARIANT var;
+    UINT n = 0;
+
+    buf[0] = 0;
+    for (;;)
+    {
+        obj = NULL;
+        count = 0;
+        IEnumWbemClassObject_Next( result, 10000, 1, &obj, &count );
+        if (!count) break;
+        VariantInit( &var );
+        if (IWbemClassObject_Get( obj, L"Name", 0, &var, NULL, NULL ) == S_OK && V_VT( &var ) == VT_BSTR &&
+            n + SysStringLen( V_BSTR( &var ) ) + 2 < len)
+        {
+            lstrcpyW( buf + n, V_BSTR( &var ) );
+            n += SysStringLen( V_BSTR( &var ) );
+            buf[n++] = '|';
+            buf[n] = 0;
+        }
+        VariantClear( &var );
+        IWbemClassObject_Release( obj );
+    }
+}
+
+static DWORD CALLBACK ns_thread_proc( void *arg )
+{
+    struct ns_thread *t = arg;
+    IWbemLocator *locator;
+    IWbemServices *ns;
+    IEnumWbemClassObject *result;
+    WCHAR first[512], cur[512];
+    BSTR str = SysAllocString( t->ns );
+    int i;
+
+    CoInitialize( NULL );
+    if (CoCreateInstance( &CLSID_WbemLocator, NULL, CLSCTX_INPROC_SERVER, &IID_IWbemLocator, (void **)&locator ) != S_OK)
+        goto done;
+    if (IWbemLocator_ConnectServer( locator, str, NULL, NULL, NULL, 0, NULL, NULL, &ns ) != S_OK) goto done2;
+    first[0] = 0;
+    for (i = 0; i < 300; i++)
+    {
+        if (run_query( ns, L"SELECT * FROM __NAMESPACE", &result ) != S_OK) { t->mismatches++; continue; }
+        names_of( result, cur, ARRAY_SIZE(cur) );
+        IEnumWbemClassObject_Release( result );
+        if (!i) lstrcpyW( first, cur );
+        else if (wcscmp( first, cur )) t->mismatches++;
+        t->runs++;
+    }
+    IWbemServices_Release( ns );
+done2:
+    IWbemLocator_Release( locator );
+done:
+    SysFreeString( str );
+    CoUninitialize();
+    return 0;
+}
+
+static ULONG count_results( IEnumWbemClassObject *result )
+{
+    ULONG count, total = 0;
+    IWbemClassObject *obj;
+
+    for (;;)
+    {
+        obj = NULL;
+        count = 0;
+        IEnumWbemClassObject_Next( result, 60000, 1, &obj, &count );
+        if (!count) break;
+        IWbemClassObject_Release( obj );
+        total++;
+    }
+    return total;
+}
+
+static BOOL has_name( SAFEARRAY *names, const WCHAR *name )
+{
+    LONG i, lower, upper;
+    BSTR str;
+    BOOL found = FALSE;
+
+    if (SafeArrayGetLBound( names, 1, &lower ) != S_OK || SafeArrayGetUBound( names, 1, &upper ) != S_OK) return FALSE;
+    for (i = lower; i <= upper; i++)
+        if (SafeArrayGetElement( names, &i, &str ) == S_OK)
+        {
+            if (!_wcsicmp( str, name )) found = TRUE;
+            SysFreeString( str );
+        }
+    return found;
+}
+
+/* the out-parameters of a method list their properties */
+static void test_out_params_names( IWbemServices *services )
+{
+    WCHAR path[64];
+    IWbemClassObject *out = NULL;
+    SAFEARRAY *names = NULL;
+    BSTR p, m;
+    HRESULT hr;
+
+    wsprintfW( path, L"Win32_Process.Handle=\"%u\"", GetCurrentProcessId() );
+    p = SysAllocString( path );
+    m = SysAllocString( L"GetOwnerSid" );
+    hr = IWbemServices_ExecMethod( services, p, m, 0, NULL, NULL, &out, NULL );
+    SysFreeString( p );
+    SysFreeString( m );
+    ok( hr == S_OK, "GetOwnerSid failed %08x\n", hr );
+    if (hr != S_OK) return;
+    {
+        VARIANT var;
+        VariantInit( &var );
+        hr = IWbemClassObject_Get( out, L"__CLASS", 0, &var, NULL, NULL );
+        ok( hr == S_OK && V_VT( &var ) == VT_BSTR && !wcscmp( V_BSTR( &var ), L"__PARAMETERS" ),
+            "__CLASS of the out-parameters: %08x %s\n", hr, V_VT( &var ) == VT_BSTR ? wine_dbgstr_w( V_BSTR( &var ) ) : "-" );
+        VariantClear( &var );
+    }
+    hr = IWbemClassObject_GetNames( out, NULL, WBEM_FLAG_NONSYSTEM_ONLY, NULL, &names );
+    ok( hr == S_OK, "GetNames failed %08x\n", hr );
+    if (hr == S_OK)
+    {
+        ok( has_name( names, L"ReturnValue" ), "no ReturnValue in the out-parameters\n" );
+        ok( has_name( names, L"Sid" ), "no Sid in the out-parameters\n" );
+        SafeArrayDestroy( names );
+    }
+    IWbemClassObject_Release( out );
+}
+
+/* methods run on instances, not on "the first instance of the class"; classes and namespaces as WMI has them;
+ * namespace queries do not disturb each other; class-wide enumeration is bounded */
+static void test_method_paths( IWbemLocator *locator, IWbemServices *services )
+{
+    IEnumWbemClassObject *result;
+    IWbemServices *ns;
+    struct ns_thread t1 = { L"ROOT" }, t2 = { L"ROOT\\Interop" };
+    HANDLE threads[2];
+    HRESULT hr;
+    BSTR str;
+
+    test_out_params_names( services );
+
+    /* a method of the instances needs an instance path */
+    hr = exec_method_path( services, L"Win32_Service", L"PauseService" );
+    ok( hr == WBEM_E_INVALID_METHOD_PARAMETERS, "PauseService on the class: %08x\n", hr );
+    hr = exec_method_path( services, L"Win32_Service", L"ChangeStartMode" );
+    ok( hr == WBEM_E_INVALID_METHOD_PARAMETERS, "ChangeStartMode on the class: %08x\n", hr );
+    hr = exec_method_path( services, L"Win32_Process", L"GetOwnerSid" );
+    ok( hr == WBEM_E_INVALID_METHOD_PARAMETERS, "GetOwnerSid on the class: %08x\n", hr );
+    hr = exec_method_path( services, L"Win32_Process", L"SetPriority" );
+    ok( hr == WBEM_E_INVALID_METHOD_PARAMETERS, "SetPriority on the class: %08x\n", hr );
+    hr = exec_method_path( services, L"Win32_Process", L"Terminate" );
+    ok( hr == WBEM_E_INVALID_METHOD_PARAMETERS, "Terminate on the class: %08x\n", hr );
+    hr = exec_method_path( services, L"Win32_Process", L"GetOwner" );
+    ok( hr == WBEM_E_INVALID_METHOD_PARAMETERS, "GetOwner on the class: %08x\n", hr );
+
+    /* an instance that is not there, an empty key */
+    hr = exec_method_path( services, L"Win32_Service.Name=\"NoSuchSvc_pswfix\"", L"PauseService" );
+    trace( "PauseService on a missing service: %08x\n", hr );
+    ok( hr == WBEM_E_NOT_FOUND, "PauseService on a missing service: %08x\n", hr );
+    hr = exec_method_path( services, L"Win32_Service.Name=\"\"", L"PauseService" );
+    trace( "PauseService with an empty key: %08x\n", hr );
+    /* Windows: WBEM_E_PROVIDER_FAILURE for an empty service name, WBEM_E_NOT_FOUND for an empty process key */
+    ok( hr == WBEM_E_NOT_FOUND || hr == WBEM_E_INVALID_OBJECT_PATH || hr == WBEM_E_PROVIDER_FAILURE,
+        "PauseService with an empty key: %08x\n", hr );
+    hr = exec_method_path( services, L"Win32_Process.Handle=\"\"", L"GetOwnerSid" );
+    trace( "GetOwnerSid with an empty key: %08x\n", hr );
+    ok( hr == WBEM_E_NOT_FOUND || hr == WBEM_E_INVALID_OBJECT_PATH, "GetOwnerSid with an empty key: %08x\n", hr );
+    hr = exec_method_path( services, L"Win32_Process.Handle=\"999999\"", L"GetOwnerSid" );
+    trace( "GetOwnerSid on a missing process: %08x\n", hr );
+    ok( hr == WBEM_E_NOT_FOUND, "GetOwnerSid on a missing process: %08x\n", hr );
+    hr = exec_method_path( services, L"Win32_Process.Handle=\"999999\"", L"Terminate" );
+    ok( hr == WBEM_E_NOT_FOUND, "Terminate on a missing process: %08x\n", hr );
+
+    /* a class the namespace does not have */
+    query_invalid_class( services, L"SELECT * FROM NoSuchClass_pswfix", "unknown class" );
+    str = SysAllocString( L"ROOT\\Interop" );
+    hr = IWbemLocator_ConnectServer( locator, str, NULL, NULL, NULL, 0, NULL, NULL, &ns );
+    SysFreeString( str );
+    ok( hr == S_OK, "ConnectServer(ROOT\\Interop) failed %08x\n", hr );
+    if (hr == S_OK)
+    {
+        query_invalid_class( ns, L"SELECT * FROM Win32_Process", "Win32_Process in Interop" );
+        query_invalid_class( ns, L"SELECT * FROM Win32_OperatingSystem", "Win32_OperatingSystem in Interop" );
+        hr = exec_method_path( ns, L"Win32_Process", L"GetOwnerSid" );
+        ok( hr == WBEM_E_NOT_FOUND, "GetOwnerSid in Interop: %08x\n", hr );
+        IWbemServices_Release( ns );
+    }
+
+    /* __NAMESPACE in two namespaces at once */
+    threads[0] = CreateThread( NULL, 0, ns_thread_proc, &t1, 0, NULL );
+    threads[1] = CreateThread( NULL, 0, ns_thread_proc, &t2, 0, NULL );
+    WaitForMultipleObjects( 2, threads, TRUE, 120000 );
+    CloseHandle( threads[0] );
+    CloseHandle( threads[1] );
+    ok( t1.runs && t2.runs, "namespace threads did not run: %d %d\n", t1.runs, t2.runs );
+    ok( !t1.mismatches && !t2.mismatches, "namespace results changed under concurrency: %d %d\n",
+        t1.mismatches, t2.mismatches );
+
+    /* Windows walks every drive for these and takes minutes: only this provider promises to be bounded */
+    if (is_reactos())
+    {
+        static const WCHAR *queries[] =
+        {
+            L"SELECT * FROM CIM_LogicalFile", L"SELECT * FROM CIM_LogicalElement",
+            L"SELECT * FROM CIM_ManagedSystemElement"
+        };
+        UINT i;
+
+        for (i = 0; i < ARRAY_SIZE(queries); i++)
+        {
+            DWORD start = GetTickCount();
+            ULONG total;
+
+            hr = run_query( services, queries[i], &result );
+            ok( hr == S_OK, "%s: %08x\n", wine_dbgstr_w( queries[i] ), hr );
+            if (hr != S_OK) continue;
+            total = count_results( result );
+            IEnumWbemClassObject_Release( result );
+            trace( "%s: %u rows in %u ms\n", wine_dbgstr_w( queries[i] ), total, GetTickCount() - start );
+            ok( GetTickCount() - start < 120000, "%s took %u ms\n", wine_dbgstr_w( queries[i] ), GetTickCount() - start );
+            ok( total <= 262144 + 64, "%s returned %u rows\n", wine_dbgstr_w( queries[i] ), total );
+        }
+    }
+}
+
 START_TEST(query)
 {
     static const WCHAR cimv2W[] = {'R','O','O','T','\\','C','I','M','V','2',0};
@@ -1848,6 +2376,9 @@ START_TEST(query)
     test_Win32_SystemEnclosure( services );
     test_Win32_VideoController( services );
     test_Win32_WinSAT( services );
+    test_Win32_Environment( services );
+    test_schema( locator, services );
+    test_method_paths( locator, services );
 
     SysFreeString( path );
     IWbemServices_Release( services );

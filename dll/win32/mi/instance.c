@@ -196,6 +196,7 @@ void class_data_finish(struct mi_class_data *cls)
 
     cls->decl.name = cls->name;
     cls->decl.superClass = cls->parent;
+    cls->decl.superClassDecl = cls->parent_data ? &cls->parent_data->decl : NULL;
     cls->decl.numMethods = 0;
     if (!cls->count) return;
     cls->prop_decls = mi_alloc(cls->count * sizeof(*cls->prop_decls));
@@ -242,6 +243,7 @@ void class_data_release(struct mi_class_data *cls)
     mi_free(cls->nameSpace);
     mi_free(cls->server);
     mi_free(cls->parent);
+    class_data_release(cls->parent_data);
     mi_free(cls);
 }
 
@@ -276,13 +278,13 @@ static MI_Result MI_CALL qualset_GetQualifierAt(const MI_QualifierSet *self, MI_
 {
     const struct mi_qualifier_set *set = get_qualifier_set(self);
     const struct mi_qualifier *q;
-    if (!set || !name || !type || !flags || !value) return MI_RESULT_INVALID_PARAMETER;
+    if (!set) return MI_RESULT_INVALID_PARAMETER;
     if (index >= set->count) return MI_RESULT_NOT_FOUND;
     q = &set->items[index];
-    *name = q->name;
-    *type = q->type;
-    *flags = q->flags;
-    *value = q->value;
+    if (name) *name = q->name;
+    if (type) *type = q->type;
+    if (flags) *flags = q->flags;
+    if (value) *value = q->value;
     return MI_RESULT_OK;
 }
 
@@ -291,13 +293,13 @@ static MI_Result MI_CALL qualset_GetQualifier(const MI_QualifierSet *self, const
 {
     const struct mi_qualifier_set *set = get_qualifier_set(self);
     UINT i;
-    if (!set || !name || !type || !flags || !value) return MI_RESULT_INVALID_PARAMETER;
+    if (!set || !name) return MI_RESULT_INVALID_PARAMETER;
     for (i = 0; i < set->count; i++)
     {
         if (_wcsicmp(set->items[i].name, name)) continue;
-        *type = set->items[i].type;
-        *flags = set->items[i].flags;
-        *value = set->items[i].value;
+        if (type) *type = set->items[i].type;
+        if (flags) *flags = set->items[i].flags;
+        if (value) *value = set->items[i].value;
         if (index) *index = i;
         return MI_RESULT_OK;
     }
@@ -344,10 +346,10 @@ static MI_Result MI_CALL paramset_GetParameterAt(const MI_ParameterSet *self, MI
                                                  MI_Type *type, MI_Char **refclass, MI_QualifierSet *quals)
 {
     const struct mi_method *m = get_method(self);
-    if (!m || !name || !type) return MI_RESULT_INVALID_PARAMETER;
+    if (!m) return MI_RESULT_INVALID_PARAMETER;
     if (index >= m->count) return MI_RESULT_NOT_FOUND;
-    *name = m->params[index].name;
-    *type = m->params[index].type;
+    if (name) *name = m->params[index].name;
+    if (type) *type = m->params[index].type;
     if (refclass) *refclass = m->params[index].refclass;
     fill_qualifier_set(quals, &m->params[index].quals);
     return MI_RESULT_OK;
@@ -358,11 +360,11 @@ static MI_Result MI_CALL paramset_GetParameter(const MI_ParameterSet *self, cons
 {
     const struct mi_method *m = get_method(self);
     UINT i;
-    if (!m || !name || !type) return MI_RESULT_INVALID_PARAMETER;
+    if (!m || !name) return MI_RESULT_INVALID_PARAMETER;
     for (i = 0; i < m->count; i++)
     {
         if (_wcsicmp(m->params[i].name, name)) continue;
-        *type = m->params[i].type;
+        if (type) *type = m->params[i].type;
         if (refclass) *refclass = m->params[i].refclass;
         fill_qualifier_set(quals, &m->params[i].quals);
         if (index) *index = i;
@@ -477,9 +479,10 @@ static MI_Result MI_CALL class_GetElementAt(const MI_Class *self, MI_Uint32 inde
                                             MI_QualifierSet *quals, MI_Uint32 *flags)
 {
     struct mi_class_data *c = get_class(self);
-    if (!c || !name) return MI_RESULT_INVALID_PARAMETER;
+    /* every output is optional: MI.NET reads one attribute of a property at a time */
+    if (!c) return MI_RESULT_INVALID_PARAMETER;
     if (index >= c->count) return MI_RESULT_NOT_FOUND;
-    *name = c->props[index].name;
+    if (name) *name = c->props[index].name;
     return_property(&c->props[index], value, exists, type, refclass, quals, flags);
     return MI_RESULT_OK;
 }
@@ -515,9 +518,9 @@ static MI_Result MI_CALL class_GetMethodAt(const MI_Class *self, MI_Uint32 index
                                            MI_QualifierSet *quals, MI_ParameterSet *params)
 {
     struct mi_class_data *c = get_class(self);
-    if (!c || !name) return MI_RESULT_INVALID_PARAMETER;
+    if (!c) return MI_RESULT_INVALID_PARAMETER;
     if (index >= c->method_count) return MI_RESULT_METHOD_NOT_FOUND;
-    *name = c->methods[index].name;
+    if (name) *name = c->methods[index].name;
     return_method(&c->methods[index], quals, params);
     return MI_RESULT_OK;
 }
@@ -552,8 +555,12 @@ static MI_Result MI_CALL class_GetParentClass(const MI_Class *self, MI_Class **p
     struct mi_class_data *c = get_class(self);
     if (!c || !parent) return MI_RESULT_INVALID_PARAMETER;
     *parent = NULL;
-    /* wbemprox classes are flat: no parent class object to return */
-    return MI_RESULT_INVALID_SUPERCLASS;
+    if (!c->parent) return MI_RESULT_INVALID_SUPERCLASS;
+    /* the superclass is read with the class (session.c); a class whose superclass could not be read
+     * reports the name only */
+    if (!c->parent_data) return MI_RESULT_INVALID_SUPERCLASS;
+    if (!(*parent = class_create(c->parent_data))) return MI_RESULT_SERVER_LIMITS_EXCEEDED;
+    return MI_RESULT_OK;
 }
 
 static MI_Result MI_CALL class_Delete(MI_Class *self)
@@ -1042,7 +1049,9 @@ struct mi_instance *make_error_instance(MI_Result result, HRESULT hr, const WCHA
     instance_add(inst, L"ErrorType", &v, MI_UINT16, 0);
     v.string = (MI_Char *)message;
     instance_add(inst, L"Message", &v, MI_STRING, 0);
-    _snwprintf(buf, ARRAYSIZE(buf) - 1, L"%u", (unsigned)result);
+    /* MI clients (CimCmdlets) take this as the error id: "HRESULT 0x80041002" for a WMI failure */
+    if (hr) _snwprintf(buf, ARRAYSIZE(buf) - 1, L"HRESULT 0x%08lx", (unsigned long)hr);
+    else _snwprintf(buf, ARRAYSIZE(buf) - 1, L"%u", (unsigned)result);
     buf[ARRAYSIZE(buf) - 1] = 0;
     v.string = buf;
     instance_add(inst, L"MessageID", &v, MI_STRING, 0);

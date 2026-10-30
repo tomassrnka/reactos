@@ -164,6 +164,19 @@ enum view_type
     VIEW_TYPE_ASSOCIATORS,
 };
 
+#ifdef __REACTOS__
+/* the namespaces this provider serves */
+enum wbm_namespace
+{
+    WBEMPROX_NAMESPACE_ROOT,
+    WBEMPROX_NAMESPACE_CIMV2,
+    WBEMPROX_NAMESPACE_DEFAULT,
+    WBEMPROX_NAMESPACE_INTEROP,
+    WBEMPROX_NAMESPACE_INTEROP_MS409,
+    WBEMPROX_NAMESPACE_LAST
+};
+#endif
+
 struct view
 {
     enum view_type type;
@@ -175,6 +188,10 @@ struct view
     struct table **table;
     UINT result_count;
     UINT *result;
+#ifdef __REACTOS__
+    enum wbm_namespace ns;
+    UINT *result_table;                     /* SELECT over a class and its subclasses: table of each result */
+#endif
 };
 
 struct query
@@ -183,6 +200,14 @@ struct query
     struct view *view;
     struct list mem;
 };
+
+#ifdef __REACTOS__
+/* a key property of an instance a method runs on must be a non-empty string */
+static inline BOOL is_valid_key_string( const VARIANT *v )
+{
+    return V_VT( v ) == VT_BSTR && V_BSTR( v ) && V_BSTR( v )[0];
+}
+#endif
 
 struct path
 {
@@ -247,6 +272,29 @@ void set_variant( VARTYPE, LONGLONG, void *, VARIANT * ) DECLSPEC_HIDDEN;
 HRESULT create_signature( const WCHAR *, const WCHAR *, enum param_direction,
                           IWbemClassObject ** ) DECLSPEC_HIDDEN;
 
+#ifdef __REACTOS__
+/* schema.c: class hierarchy, namespaces and property order of the Windows schema */
+HRESULT exec_query_ns( enum wbm_namespace, const WCHAR *, IEnumWbemClassObject ** ) DECLSPEC_HIDDEN;
+HRESULT get_object_ns( enum wbm_namespace, const WCHAR *, IWbemClassObject ** ) DECLSPEC_HIDDEN;
+HRESULT create_class_enum( enum wbm_namespace, const WCHAR *, LONG, IEnumWbemClassObject ** ) DECLSPEC_HIDDEN;
+HRESULT create_class_view_object( enum wbm_namespace, const WCHAR *, IWbemClassObject ** ) DECLSPEC_HIDDEN;
+const WCHAR *get_enum_class_name( IEnumWbemClassObject *, UINT ) DECLSPEC_HIDDEN;
+HRESULT EnumWbemClassObjectArray_create( IWbemClassObject **, UINT, IEnumWbemClassObject ** ) DECLSPEC_HIDDEN;
+HRESULT resolve_view_namespace( struct view *, enum wbm_namespace ) DECLSPEC_HIDDEN;
+BOOL parse_namespace( const WCHAR *, enum wbm_namespace * ) DECLSPEC_HIDDEN;
+const WCHAR *get_namespace_path( enum wbm_namespace ) DECLSPEC_HIDDEN;
+void init_schema_tables( struct list * ) DECLSPEC_HIDDEN;
+const WCHAR *get_superclass( const WCHAR * ) DECLSPEC_HIDDEN;
+BOOL is_subclass( const WCHAR *, const WCHAR * ) DECLSPEC_HIDDEN;
+BOOL is_table_visible( const WCHAR *, enum wbm_namespace ) DECLSPEC_HIDDEN;
+BOOL is_namespace_table( const struct table * ) DECLSPEC_HIDDEN;
+BOOL is_class_method( const WCHAR *, const WCHAR * ) DECLSPEC_HIDDEN;
+void get_column_order( const struct table *, UINT * ) DECLSPEC_HIDDEN;
+SAFEARRAY *get_derivation( const WCHAR * ) DECLSPEC_HIDDEN;
+UINT get_synth_qualifiers( const WCHAR *, const WCHAR *, BOOL, const WCHAR **, VARIANT *, UINT ) DECLSPEC_HIDDEN;
+BOOL get_param_info( const WCHAR *, const WCHAR *, int *, UINT * ) DECLSPEC_HIDDEN;
+HRESULT WbemQualifierSet_create_method( const WCHAR *, const WCHAR *, LPVOID * ) DECLSPEC_HIDDEN;
+#endif
 HRESULT WbemLocator_create(LPVOID *) DECLSPEC_HIDDEN;
 HRESULT WbemServices_create(const WCHAR *, LPVOID *) DECLSPEC_HIDDEN;
 HRESULT create_class_object(const WCHAR *, IEnumWbemClassObject *, UINT,
@@ -255,6 +303,22 @@ HRESULT EnumWbemClassObject_create(struct query *, LPVOID *) DECLSPEC_HIDDEN;
 HRESULT WbemQualifierSet_create(const WCHAR *, const WCHAR *, LPVOID *) DECLSPEC_HIDDEN;
 
 HRESULT process_get_owner(IWbemClassObject *, IWbemClassObject *, IWbemClassObject **) DECLSPEC_HIDDEN;
+#ifdef __REACTOS__
+HRESULT process_create(IWbemClassObject *, IWbemClassObject *, IWbemClassObject **) DECLSPEC_HIDDEN;
+HRESULT process_terminate(IWbemClassObject *, IWbemClassObject *, IWbemClassObject **) DECLSPEC_HIDDEN;
+HRESULT process_get_owner_sid(IWbemClassObject *, IWbemClassObject *, IWbemClassObject **) DECLSPEC_HIDDEN;
+HRESULT process_set_priority(IWbemClassObject *, IWbemClassObject *, IWbemClassObject **) DECLSPEC_HIDDEN;
+HRESULT process_attach_debugger(IWbemClassObject *, IWbemClassObject *, IWbemClassObject **) DECLSPEC_HIDDEN;
+HRESULT os_reboot(IWbemClassObject *, IWbemClassObject *, IWbemClassObject **) DECLSPEC_HIDDEN;
+HRESULT os_shutdown(IWbemClassObject *, IWbemClassObject *, IWbemClassObject **) DECLSPEC_HIDDEN;
+HRESULT os_win32shutdown(IWbemClassObject *, IWbemClassObject *, IWbemClassObject **) DECLSPEC_HIDDEN;
+HRESULT service_change(IWbemClassObject *, IWbemClassObject *, IWbemClassObject **) DECLSPEC_HIDDEN;
+HRESULT service_change_start_mode(IWbemClassObject *, IWbemClassObject *, IWbemClassObject **) DECLSPEC_HIDDEN;
+HRESULT service_delete(IWbemClassObject *, IWbemClassObject *, IWbemClassObject **) DECLSPEC_HIDDEN;
+/* method helpers (process.c) */
+HRESULT method_begin( const WCHAR *, const WCHAR *, IWbemClassObject **, IWbemClassObject ** ) DECLSPEC_HIDDEN;
+HRESULT method_end( HRESULT, IWbemClassObject *, IWbemClassObject *, UINT, IWbemClassObject ** ) DECLSPEC_HIDDEN;
+#endif
 HRESULT reg_create_key(IWbemClassObject *, IWbemClassObject *, IWbemClassObject **) DECLSPEC_HIDDEN;
 HRESULT reg_enum_key(IWbemClassObject *, IWbemClassObject *, IWbemClassObject **) DECLSPEC_HIDDEN;
 HRESULT reg_enum_values(IWbemClassObject *, IWbemClassObject *, IWbemClassObject **) DECLSPEC_HIDDEN;

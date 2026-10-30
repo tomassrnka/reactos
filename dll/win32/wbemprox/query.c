@@ -47,6 +47,9 @@ HRESULT create_view( enum view_type type, const WCHAR *path, const struct keywor
     struct view *view = heap_alloc_zero( sizeof(*view) );
 
     if (!view) return E_OUTOFMEMORY;
+#ifdef __REACTOS__
+    view->ns = WBEMPROX_NAMESPACE_CIMV2;
+#endif
 
     switch (type)
     {
@@ -87,6 +90,9 @@ void destroy_view( struct view *view )
     for (i = 0; i < view->table_count; i++) release_table( view->table[i] );
     heap_free( view->table );
     heap_free( view->result );
+#ifdef __REACTOS__
+    heap_free( view->result_table );
+#endif
     heap_free( view );
 }
 
@@ -525,11 +531,19 @@ static BSTR build_servername(void)
     return SysAllocString( server );
 }
 
+#ifdef __REACTOS__
+static BSTR build_namespace_ns( enum wbm_namespace ns )
+{
+    return SysAllocString( get_namespace_path( ns ) );
+}
+#define build_namespace() build_namespace_ns( WBEMPROX_NAMESPACE_CIMV2 )
+#else
 static BSTR build_namespace(void)
 {
     static const WCHAR cimv2W[] = {'R','O','O','T','\\','C','I','M','V','2',0};
     return SysAllocString( cimv2W );
 }
+#endif
 
 static WCHAR *build_canonical_path( const WCHAR *relpath )
 {
@@ -697,6 +711,15 @@ done:
 #ifdef __REACTOS__
 static HRESULT exec_select_view_locked( struct view *view );
 
+/* the most rows of a SELECT over a class and its subclasses */
+#define MAX_SUBCLASS_ROWS 262144
+
+static BOOL is_disk_walk_table( const struct table *table )
+{
+    return !wcsicmp( table->name, L"CIM_DataFile" ) || !wcsicmp( table->name, L"Win32_Directory" ) ||
+           !wcsicmp( table->name, L"CIM_Directory" );
+}
+
 static HRESULT exec_select_view( struct view *view )
 {
     HRESULT hr;
@@ -707,9 +730,74 @@ static HRESULT exec_select_view( struct view *view )
 }
 
 static HRESULT exec_select_view_locked( struct view *view )
+{
+    UINT i, j = 0, len = 0, k;
+
+    if (!view->table_count) return S_OK;
+
+    /* the class itself first, then the subclasses resolve_view_namespace added */
+    for (k = 0; k < view->table_count; k++)
+    {
+        struct table *table = view->table[k];
+        enum fill_status status = FILL_STATUS_UNFILTERED;
+
+        /* an enumeration of a class and its subclasses must not start the walk of every fixed drive
+         * the file and directory providers do when nothing narrows them down, nor grow without bound */
+        if (k && !view->cond && is_disk_walk_table( table )) continue;
+        if (k && j >= MAX_SUBCLASS_ROWS)
+        {
+            WARN( "enumeration capped at %u rows\n", MAX_SUBCLASS_ROWS );
+            break;
+        }
+        if (table->fill)
+        {
+            clear_table( table );
+            status = table->fill( table, view->cond );
+        }
+        if (status == FILL_STATUS_FAILED)
+        {
+            if (!k) return WBEM_E_FAILED;
+            continue;
+        }
+        for (i = 0; i < table->num_rows; i++)
+        {
+            HRESULT hr;
+            LONGLONG val = 0;
+            UINT type;
+
+            if (j >= len)
+            {
+                UINT *tmp, *tmp2 = NULL;
+                len = len ? len * 2 : 16;
+                if (!(tmp = heap_realloc( view->result, len * sizeof(UINT) ))) return E_OUTOFMEMORY;
+                view->result = tmp;
+                if (view->table_count > 1)
+                {
+                    if (!(tmp2 = heap_realloc( view->result_table, len * sizeof(UINT) ))) return E_OUTOFMEMORY;
+                    view->result_table = tmp2;
+                }
+            }
+            if (status == FILL_STATUS_FILTERED) val = 1;
+            else if ((hr = eval_cond( table, i, view->cond, &val, &type )) != S_OK)
+            {
+                /* a subclass that lacks a property of the condition matches nothing */
+                if (!k) return hr;
+                break;
+            }
+            if (val)
+            {
+                if (k && j >= MAX_SUBCLASS_ROWS) break;
+                if (view->result_table) view->result_table[j] = k;
+                view->result[j++] = i;
+            }
+        }
+        view->result_count = j;
+    }
+    view->result_count = j;
+    return S_OK;
+}
 #else
 static HRESULT exec_select_view( struct view *view )
-#endif
 {
     UINT i, j = 0, len;
     enum fill_status status = FILL_STATUS_UNFILTERED;
@@ -750,6 +838,8 @@ static HRESULT exec_select_view( struct view *view )
     view->result_count = j;
     return S_OK;
 }
+
+#endif
 
 HRESULT execute_view( struct view *view )
 {
@@ -798,7 +888,16 @@ void release_query( struct query *query )
     if (!InterlockedDecrement( &query->refs )) free_query( query );
 }
 
+#ifdef __REACTOS__
 HRESULT exec_query( const WCHAR *str, IEnumWbemClassObject **result )
+{
+    return exec_query_ns( WBEMPROX_NAMESPACE_CIMV2, str, result );
+}
+
+HRESULT exec_query_ns( enum wbm_namespace ns, const WCHAR *str, IEnumWbemClassObject **result )
+#else
+HRESULT exec_query( const WCHAR *str, IEnumWbemClassObject **result )
+#endif
 {
     HRESULT hr;
     struct query *query;
@@ -807,6 +906,10 @@ HRESULT exec_query( const WCHAR *str, IEnumWbemClassObject **result )
     if (!(query = create_query())) return E_OUTOFMEMORY;
     hr = parse_query( str, &query->view, &query->mem );
     if (hr != S_OK) goto done;
+#ifdef __REACTOS__
+    hr = resolve_view_namespace( query->view, ns );
+    if (hr != S_OK) goto done;
+#endif
     hr = execute_view( query->view );
     if (hr != S_OK) goto done;
     hr = EnumWbemClassObject_create( query, (void **)result );
@@ -927,7 +1030,11 @@ static BSTR build_path( const struct view *view, UINT table_index, UINT result_i
     if (view->proplist) return NULL;
 
     if (!(server = build_servername())) return NULL;
+#ifdef __REACTOS__
+    if (!(namespace = build_namespace_ns( view->ns ))) goto done;
+#else
     if (!(namespace = build_namespace())) goto done;
+#endif
     if (!(relpath = build_relpath( view, table_index, result_index, name ))) goto done;
 
     len = lstrlenW( fmtW ) + SysStringLen( server ) + SysStringLen( namespace ) + SysStringLen( relpath );
@@ -997,17 +1104,60 @@ static HRESULT get_system_propval( const struct view *view, UINT table_index, UI
         if (ret)
         {
             V_VT( ret ) = VT_I4;
+#ifdef __REACTOS__
+            /* a class object reads no row */
+            V_I4( ret ) = (!view->result_count && !view->cond) ? WBEM_GENUS_CLASS : WBEM_GENUS_INSTANCE;
+#else
             V_I4( ret ) = WBEM_GENUS_INSTANCE; /* FIXME */
+#endif
         }
         if (type) *type = CIM_SINT32;
         return S_OK;
     }
+#ifdef __REACTOS__
+    if (!wcsicmp( name, L"__SUPERCLASS" ) || !wcsicmp( name, L"__DYNASTY" ))
+    {
+        const WCHAR *class = view->table[table_index]->name, *super = get_superclass( class ), *top = class;
+        UINT depth = 0;
+
+        if (!wcsicmp( name, L"__DYNASTY" ))
+        {
+            while ((super = get_superclass( top )) && depth++ < 32) top = super;
+            super = top;
+        }
+        if (ret)
+        {
+            if (super)
+            {
+                V_VT( ret ) = VT_BSTR;
+                V_BSTR( ret ) = SysAllocString( super );
+            }
+            else V_VT( ret ) = VT_NULL;
+        }
+        if (type) *type = CIM_STRING;
+        return S_OK;
+    }
+    if (!wcsicmp( name, L"__DERIVATION" ))
+    {
+        if (ret)
+        {
+            V_VT( ret ) = VT_BSTR | VT_ARRAY;
+            if (!(V_ARRAY( ret ) = get_derivation( view->table[table_index]->name ))) V_VT( ret ) = VT_NULL;
+        }
+        if (type) *type = CIM_STRING | CIM_FLAG_ARRAY;
+        return S_OK;
+    }
+#endif
     else if (!wcsicmp( name, namespaceW ))
     {
         if (ret)
         {
             V_VT( ret ) = VT_BSTR;
+#ifdef __REACTOS__
+            V_BSTR( ret ) = view->proplist ? NULL : build_namespace_ns( view->ns );
+#else
             V_BSTR( ret ) = view->proplist ? NULL : build_namespace();
+#endif
         }
         if (type) *type = CIM_STRING;
         return S_OK;
@@ -1171,6 +1321,9 @@ static HRESULT map_view_index( const struct view *view, UINT index, UINT *table_
     {
     case VIEW_TYPE_SELECT:
         *table_index = 0;
+#ifdef __REACTOS__
+        if (view->result_table && index < view->result_count) *table_index = view->result_table[index];
+#endif
         *result_index = index;
         break;
 
@@ -1190,6 +1343,9 @@ struct table *get_view_table( const struct view *view, UINT index )
     switch (view->type)
     {
     case VIEW_TYPE_SELECT:
+#ifdef __REACTOS__
+        if (view->result_table && index < view->result_count) return view->table[view->result_table[index]];
+#endif
         return view->table[0];
 
     case VIEW_TYPE_ASSOCIATORS:
@@ -1504,6 +1660,44 @@ HRESULT get_properties( const struct view *view, UINT index, LONG flags, SAFEARR
     if (!(sa = SafeArrayCreateVector( VT_BSTR, 0, num_props ))) return E_OUTOFMEMORY;
 
     table = view->table[table_index];
+#ifdef __REACTOS__
+    {
+        /* in the order Windows reports the properties of the class */
+        UINT *order, n;
+        if (!(order = heap_alloc( (table->num_cols + 1) * sizeof(*order) )))
+        {
+            SafeArrayDestroy( sa );
+            return E_OUTOFMEMORY;
+        }
+        get_column_order( table, order );
+        for (n = 0, j = 0; n < table->num_cols; n++)
+        {
+            BOOL is_system;
+
+            i = order[n];
+            if (is_method( table, i )) continue;
+            if (!is_result_prop( view, table->columns[i].name )) continue;
+
+            is_system = is_system_prop( table->columns[i].name );
+            if ((flags & WBEM_FLAG_NONSYSTEM_ONLY) && is_system) continue;
+            else if ((flags & WBEM_FLAG_SYSTEM_ONLY) && !is_system) continue;
+
+            str = SysAllocString( table->columns[i].name );
+            if (!str || SafeArrayPutElement( sa, &j, str ) != S_OK)
+            {
+                SysFreeString( str );
+                SafeArrayDestroy( sa );
+                heap_free( order );
+                return E_OUTOFMEMORY;
+            }
+            SysFreeString( str );
+            j++;
+        }
+        heap_free( order );
+        *props = sa;
+        return S_OK;
+    }
+#endif
     for (i = 0, j = 0; i < table->num_cols; i++)
     {
         BOOL is_system;

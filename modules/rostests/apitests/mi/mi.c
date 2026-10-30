@@ -465,6 +465,320 @@ static MI_Result query_checked(MI_Session *session, const WCHAR *query, const WC
     return result;
 }
 
+/* pull every class of an operation; returns the final result, the count and whether `want` was seen */
+static MI_Result pull_classes(MI_Operation *op, UINT *count, const MI_Char *want, BOOL *seen,
+                              const MI_Instance **details_out, MI_Class **want_copy)
+{
+    const MI_Class *cls;
+    MI_Boolean more = MI_TRUE;
+    MI_Result result = MI_RESULT_FAILED, res;
+    const MI_Char *message, *name;
+    const MI_Instance *details;
+    UINT guard = 0;
+
+    *count = 0;
+    if (seen) *seen = FALSE;
+    if (want_copy) *want_copy = NULL;
+    while (more && guard++ < 100000)
+    {
+        cls = NULL;
+        details = NULL;
+        res = op->ft->GetClass(op, &cls, &more, &result, &message, &details);
+        ok(res == MI_RESULT_OK, "GetClass returned %d\n", res);
+        if (res != MI_RESULT_OK) break;
+        if (cls)
+        {
+            (*count)++;
+            name = NULL;
+            if (want && cls->ft->GetClassName(cls, &name) == MI_RESULT_OK && name && !_wcsicmp(name, want))
+            {
+                if (seen) *seen = TRUE;
+                if (want_copy && !*want_copy) cls->ft->Clone(cls, want_copy);
+            }
+        }
+        if (!more && details_out) *details_out = details;
+    }
+    return result;
+}
+
+static BOOL has_qualifier(const MI_QualifierSet *qs, const MI_Char *name)
+{
+    MI_Type type = 0;
+    MI_Uint32 flags = 0, index = 0;
+    MI_Value value;
+    /* Windows insists on the index output */
+    return qs->ft && qs->ft->GetQualifier(qs, name, &type, &flags, &value, &index) == MI_RESULT_OK &&
+           type == MI_BOOLEAN && value.boolean;
+}
+
+/* class hierarchy, class enumeration, namespaces, method and parameter qualifiers, error ids */
+static void test_schema(MI_Application *app)
+{
+    MI_Session session = MI_SESSION_NULL;
+    MI_Operation op = MI_OPERATION_NULL;
+    MI_Instance *ext = NULL, *first = NULL;
+    MI_Class *cls = NULL, *parent = NULL, *grand = NULL;
+    const MI_Instance *details = NULL;
+    const MI_Char *name;
+    MI_QualifierSet qs;
+    MI_ParameterSet ps;
+    MI_Value v;
+    MI_Type type;
+    MI_Boolean more;
+    MI_Result res, result;
+    const MI_Char *message;
+    const MI_Class *c;
+    UINT count, i;
+    BOOL seen;
+
+    res = app->ft->NewSession(app, NULL, NULL, NULL, NULL, &ext, &session);
+    ok(res == MI_RESULT_OK, "NewSession returned %d\n", res);
+    if (res) return;
+
+    /* every class of root/cimv2, names only. On Windows a session keeps these name-only classes and
+     * serves them to later operations, so this runs in a session of its own. */
+    {
+        MI_Session names_session = MI_SESSION_NULL;
+        res = app->ft->NewSession(app, NULL, NULL, NULL, NULL, &ext, &names_session);
+        ok(res == MI_RESULT_OK, "NewSession returned %d\n", res);
+        if (!res)
+        {
+            names_session.ft->EnumerateClasses(&names_session, 0, NULL, L"root/cimv2", NULL, MI_TRUE, NULL, &op);
+            res = pull_classes(&op, &count, L"Win32_Process", &seen, NULL, NULL);
+            ok(res == MI_RESULT_OK, "EnumerateClasses result %d\n", res);
+            ok(count > 20, "got %u classes\n", count);
+            ok(seen, "no Win32_Process\n");
+            op.ft->Close(&op);
+            names_session.ft->Close(&names_session, NULL, NULL);
+        }
+    }
+
+    /* the subclasses of CIM_Process, full classes */
+    memset(&op, 0, sizeof(op));
+    session.ft->EnumerateClasses(&session, 0, NULL, L"root/cimv2", L"CIM_Process", MI_FALSE, NULL, &op);
+    res = pull_classes(&op, &count, L"Win32_Process", &seen, NULL, NULL);
+    ok(res == MI_RESULT_OK, "EnumerateClasses(CIM_Process) result %d\n", res);
+    ok(count >= 1 && seen, "got %u subclasses of CIM_Process, Win32_Process %d\n", count, seen);
+    op.ft->Close(&op);
+
+    /* the superclass chain Win32_Process > CIM_Process > CIM_LogicalElement */
+    memset(&op, 0, sizeof(op));
+    session.ft->GetClass(&session, 0, NULL, L"root/cimv2", L"Win32_Process", NULL, &op);
+    res = pull_classes(&op, &count, L"Win32_Process", &seen, NULL, &cls);
+    ok(res == MI_RESULT_OK && cls, "GetClass(Win32_Process) result %d\n", res);
+    op.ft->Close(&op);
+    if (cls)
+    {
+        /* every output of GetElementAt is optional (MI.NET reads one attribute at a time) */
+        type = 0;
+        res = cls->ft->GetElementAt(cls, 0, NULL, NULL, NULL, &type, NULL, NULL, NULL);
+        ok(res == MI_RESULT_OK, "GetElementAt(NULL name) returned %d\n", res);
+        ok(type == MI_STRING, "first property type %d\n", type);
+        name = NULL;
+        res = cls->ft->GetElementAt(cls, 0, &name, NULL, NULL, NULL, NULL, NULL, NULL);
+        ok(res == MI_RESULT_OK && name && !wcscmp(name, L"Caption"), "first property %d %ls\n", res, name);
+
+        /* Create is static, its CommandLine an In parameter */
+        memset(&qs, 0, sizeof(qs));
+        memset(&ps, 0, sizeof(ps));
+        res = cls->ft->GetMethod(cls, L"Create", &qs, &ps, &i);
+        ok(res == MI_RESULT_OK, "GetMethod(Create) returned %d\n", res);
+        if (!res)
+        {
+            ok(has_qualifier(&qs, L"Static"), "Create is not Static\n");
+            memset(&qs, 0, sizeof(qs));
+            res = ps.ft->GetParameter(&ps, L"CommandLine", &type, NULL, &qs, &i);
+            ok(res == MI_RESULT_OK && type == MI_STRING, "GetParameter(CommandLine) %d type %d\n", res, type);
+            if (!res) ok(has_qualifier(&qs, L"In"), "CommandLine is not In\n");
+        }
+        memset(&qs, 0, sizeof(qs));
+        res = cls->ft->GetMethod(cls, L"Terminate", &qs, &ps, &i);
+        ok(res == MI_RESULT_OK, "GetMethod(Terminate) returned %d\n", res);
+        if (!res) ok(!has_qualifier(&qs, L"Static"), "Terminate is Static\n");
+        name = NULL;
+        res = cls->ft->GetParentClassName(cls, &name);
+        ok(res == MI_RESULT_OK && name && !wcscmp(name, L"CIM_Process"), "GetParentClassName %d %ls\n", res, name);
+        res = cls->ft->GetParentClass(cls, &parent);
+        ok(res == MI_RESULT_OK && parent, "GetParentClass returned %d\n", res);
+        if (parent)
+        {
+            name = NULL;
+            parent->ft->GetClassName(parent, &name);
+            ok(name && !wcscmp(name, L"CIM_Process"), "parent %ls\n", name);
+            res = parent->ft->GetParentClass(parent, &grand);
+            ok(res == MI_RESULT_OK && grand, "GetParentClass(CIM_Process) returned %d\n", res);
+            if (grand)
+            {
+                name = NULL;
+                grand->ft->GetClassName(grand, &name);
+                ok(name && !wcscmp(name, L"CIM_LogicalElement"), "grandparent %ls\n", name);
+                grand->ft->Delete(grand);
+            }
+            parent->ft->Delete(parent);
+        }
+
+        cls->ft->Delete(cls);
+    }
+
+    /* an unknown class: Not found, error id "HRESULT 0x80041002" */
+    memset(&op, 0, sizeof(op));
+    session.ft->GetClass(&session, 0, NULL, L"root/cimv2", L"NoSuchClass_pswmi", NULL, &op);
+    res = pull_classes(&op, &count, NULL, NULL, &details, NULL);
+    ok(res == MI_RESULT_NOT_FOUND, "GetClass(unknown) result %d\n", res);
+    ok(details != NULL, "no error details\n");
+    if (details)
+    {
+        res = details->ft->GetElement(details, L"MessageID", &v, &type, NULL, NULL);
+        ok(res == MI_RESULT_OK && type == MI_STRING && v.string && !wcscmp(v.string, L"HRESULT 0x80041002"),
+           "MessageID %d %ls\n", res, res ? L"" : v.string);
+        res = details->ft->GetElement(details, L"error_Code", &v, &type, NULL, NULL);
+        ok(res == MI_RESULT_OK && type == MI_UINT32 && v.uint32 == 0x80041002, "error_Code %d %#x\n", res, v.uint32);
+    }
+    op.ft->Close(&op);
+
+    /* an unknown namespace */
+    memset(&op, 0, sizeof(op));
+    session.ft->GetClass(&session, 0, NULL, L"pswmi_badnamespace", L"Win32_Process", NULL, &op);
+    res = pull_classes(&op, &count, NULL, NULL, &details, NULL);
+    ok(res == MI_RESULT_INVALID_NAMESPACE, "GetClass(bad namespace) result %d\n", res);
+    if (details)
+    {
+        res = details->ft->GetElement(details, L"MessageID", &v, &type, NULL, NULL);
+        ok(res == MI_RESULT_OK && type == MI_STRING && v.string && !wcscmp(v.string, L"HRESULT 0x8004100e"),
+           "MessageID %d %ls\n", res, res ? L"" : v.string);
+    }
+    op.ft->Close(&op);
+
+    /* deep enumeration of a base class returns the instances of its subclasses */
+    memset(&op, 0, sizeof(op));
+    session.ft->EnumerateInstances(&session, 0, NULL, L"root/cimv2", L"CIM_ComputerSystem", MI_FALSE, NULL, &op);
+    res = pull_all(&op, &count, &first, NULL);
+    ok(res == MI_RESULT_OK, "EnumerateInstances(CIM_ComputerSystem) result %d\n", res);
+    ok(count == 1, "got %u computer systems\n", count);
+    op.ft->Close(&op);
+    if (first)
+    {
+        name = NULL;
+        first->ft->GetClassName(first, &name);
+        ok(name && !wcscmp(name, L"Win32_ComputerSystem"), "class %ls\n", name);
+        first->ft->Delete(first);
+    }
+
+    /* namespaces: root has CIMV2 and Interop, root/Interop has ms_409 */
+    for (i = 0; i < 2; i++)
+    {
+        static const MI_Char *const ns[] = { L"root", L"root/Interop" };
+        static const MI_Char *const child[] = { L"CIMV2", L"ms_409" };
+        const MI_Instance *inst;
+        BOOL found = FALSE, found2 = FALSE;
+
+        memset(&op, 0, sizeof(op));
+        session.ft->EnumerateInstances(&session, 0, NULL, ns[i], L"__NAMESPACE", MI_FALSE, NULL, &op);
+        more = MI_TRUE;
+        count = 0;
+        while (more && count < 1000)
+        {
+            inst = NULL;
+            res = op.ft->GetInstance(&op, &inst, &more, &result, &message, &details);
+            if (res) break;
+            if (!inst) continue;
+            count++;
+            if (inst->ft->GetElement(inst, L"Name", &v, &type, NULL, NULL) == MI_RESULT_OK && type == MI_STRING &&
+                v.string)
+            {
+                if (!_wcsicmp(v.string, child[i])) found = TRUE;
+                if (!i && !_wcsicmp(v.string, L"Interop")) found2 = TRUE;
+            }
+        }
+        ok(res == MI_RESULT_OK && result == MI_RESULT_OK, "__NAMESPACE in %ls: %d %d\n", ns[i], res, result);
+        ok(found, "no %ls namespace in %ls (%u)\n", child[i], ns[i], count);
+        if (!i) ok(found2, "no Interop namespace in root\n");
+        op.ft->Close(&op);
+    }
+
+    /* a class of root/Interop, with its superclass */
+    memset(&op, 0, sizeof(op));
+    session.ft->GetClass(&session, 0, NULL, L"root/Interop", L"Win32_PowerSupplyProfile", NULL, &op);
+    more = MI_TRUE;
+    c = NULL;
+    res = op.ft->GetClass(&op, &c, &more, &result, &message, &details);
+    ok(res == MI_RESULT_OK && c, "GetClass(Win32_PowerSupplyProfile) %d %d\n", res, result);
+    if (c)
+    {
+        name = NULL;
+        c->ft->GetParentClassName(c, &name);
+        ok(name && !wcscmp(name, L"CIM_RegisteredProfile"), "parent %ls\n", name);
+    }
+    op.ft->Close(&op);
+
+    session.ft->Close(&session, NULL, NULL);
+}
+
+/* a method of the instances does not run on "the first instance of the class"; a class a namespace does not
+ * have is an invalid class */
+static void test_method_scope(MI_Application *app)
+{
+    MI_Session session = MI_SESSION_NULL;
+    MI_Operation op = MI_OPERATION_NULL;
+    MI_Instance *ext = NULL;
+    MI_Result res, result;
+    const MI_Char *message = NULL;
+    UINT count;
+
+    res = app->ft->NewSession(app, NULL, NULL, NULL, NULL, &ext, &session);
+    ok(res == MI_RESULT_OK, "NewSession returned %d\n", res);
+    if (res) return;
+
+    memset(&op, 0, sizeof(op));
+    session.ft->Invoke(&session, 0, NULL, L"root/cimv2", L"Win32_Service", L"ChangeStartMode", NULL, NULL, NULL, &op);
+    result = pull_all(&op, &count, NULL, &message);
+    trace("Invoke ChangeStartMode on the class: %d (%ls)\n", result, message);
+    ok(result == MI_RESULT_FAILED, "ChangeStartMode on the class: %d\n", result);
+    op.ft->Close(&op);
+
+    memset(&op, 0, sizeof(op));
+    session.ft->Invoke(&session, 0, NULL, L"root/cimv2", L"Win32_Process", L"GetOwnerSid", NULL, NULL, NULL, &op);
+    result = pull_all(&op, &count, NULL, &message);
+    ok(result == MI_RESULT_FAILED, "GetOwnerSid on the class: %d\n", result);
+    op.ft->Close(&op);
+
+    /* a static method returns its out-parameters */
+    {
+        MI_Instance *out = NULL;
+        MI_Value v;
+        MI_Type type;
+        MI_Uint32 flags;
+        memset(&op, 0, sizeof(op));
+        session.ft->Invoke(&session, 0, NULL, L"root/cimv2", L"Win32_Process", L"Create", NULL, NULL, NULL, &op);
+        result = pull_all(&op, &count, &out, &message);
+        trace("Invoke Create: result %d count %u out %p\n", result, count, out);
+        ok(result == MI_RESULT_OK, "Create: %d\n", result);
+        ok(count == 1 && out, "Create returned %u instances\n", count);
+        if (out)
+        {
+            UINT n = 0;
+            MI_Uint32 ec = 0;
+            out->ft->GetElementCount(out, &ec);
+            trace("out params: %u elements\n", ec);
+            ok(ec > 0, "no out-parameters\n");
+            ok(out->ft->GetElement(out, L"ReturnValue", &v, &type, &flags, NULL) == MI_RESULT_OK, "no ReturnValue\n");
+            (void)n;
+            out->ft->Delete(out);
+        }
+        op.ft->Close(&op);
+    }
+
+    memset(&op, 0, sizeof(op));
+    session.ft->EnumerateInstances(&session, 0, NULL, L"root/Interop", L"Win32_Process", MI_FALSE, NULL, &op);
+    result = pull_all(&op, &count, NULL, &message);
+    trace("Win32_Process in root/Interop: %d (%ls)\n", result, message);
+    ok(result == MI_RESULT_INVALID_CLASS, "Win32_Process in root/Interop: %d\n", result);
+    ok(!count, "%u instances\n", count);
+    op.ft->Close(&op);
+
+    session.ft->Close(&session, NULL, NULL);
+}
+
 static void own_exe_name(WCHAR *name, DWORD size)
 {
     WCHAR path[MAX_PATH], *p;
@@ -1025,6 +1339,8 @@ START_TEST(mi)
     test_session(&app, NULL);
     test_session(&app, L"WMIDCOM");
     test_filtered_enumeration(&app);
+    test_schema(&app);
+    test_method_scope(&app);
     test_concurrent_enumeration(&app);
     test_callback_lifetime(&app);
     test_remote(&app);
