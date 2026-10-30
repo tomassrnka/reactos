@@ -8,6 +8,7 @@
 /* INCLUDES *****************************************************************/
 
 #include <k32.h>
+#include "copystreams.h"
 
 /* DEFINES ******************************************************************/
 
@@ -27,13 +28,6 @@
 #define COPY2_NAME_CHARS        520
 
 /* TYPES ********************************************************************/
-
-typedef struct _COPY2_STREAM
-{
-    PWSTR Name;                 /* ":name", the unnamed stream is not in the list */
-    ULONGLONG Size;
-    HANDLE Source;              /* opened before the first callback, so that a callback cannot swap the file */
-} COPY2_STREAM;
 
 typedef struct _COPY2_STATE
 {
@@ -171,7 +165,7 @@ Copy2NotifyError(
     Copy2Notify(State, &Message, Stream, TRUE);
 }
 
-static NTSTATUS
+NTSTATUS
 Copy2SetLength(
     _In_ HANDLE File,
     _In_ ULONGLONG Length)
@@ -183,7 +177,7 @@ Copy2SetLength(
     return NtSetInformationFile(File, &IoStatusBlock, &EndOfFile, sizeof(EndOfFile), FileEndOfFileInformation);
 }
 
-static NTSTATUS
+NTSTATUS
 Copy2DeleteByHandle(
     _In_ HANDLE File)
 {
@@ -390,13 +384,22 @@ Copy2CompareHandles(
     return Copy2Unknown;
 }
 
+/* Whether two open files are, or cannot be told from being, the same file */
+BOOL
+Copy2MaybeSameFile(
+    _In_ HANDLE First,
+    _In_ HANDLE Second)
+{
+    return Copy2CompareHandles(First, Second) != Copy2Different;
+}
+
 /* NAMES AND STREAMS ********************************************************/
 
 /*
  * A name made absolute once, so that a callback that changes the current directory cannot move the copy or its
  * cleanup. An extended name is used as it is. *Path is a heap block; the result is a Win32 error.
  */
-static DWORD
+DWORD
 Copy2FullPath(
     _In_ PCWSTR Name,
     _Out_ PWSTR *Path)
@@ -468,7 +471,7 @@ Copy2StreamPath(
  * Lists the named data streams of a file (the unnamed one is not in the list). A file system that has no streams
  * gives an empty list; any other failure is returned.
  */
-static NTSTATUS
+NTSTATUS
 Copy2QueryNamedStreams(
     _In_ HANDLE File,
     _Out_ COPY2_STREAM **Streams,
@@ -575,7 +578,7 @@ Copy2QueryNamedStreams(
  * for: a name that points to another file by now is refused. A stream that this call made on another file is
  * deleted again (Access has to include DELETE for that).
  */
-static HANDLE
+HANDLE
 Copy2OpenStream(
     _In_ PCWSTR FileName,
     _In_ PCWSTR StreamName,
@@ -583,6 +586,7 @@ Copy2OpenStream(
     _In_ DWORD Share,
     _In_ DWORD Disposition,
     _In_ HANDLE Owner,
+    _In_ DWORD Flags,
     _Out_ PDWORD Error,
     _Out_opt_ PBOOL Existed)
 {
@@ -600,7 +604,7 @@ Copy2OpenStream(
         return INVALID_HANDLE_VALUE;
     }
 
-    Stream = CreateFileW(Path, Access, Share, NULL, Disposition, FILE_ATTRIBUTE_NORMAL, NULL);
+    Stream = CreateFileW(Path, Access, Share, NULL, Disposition, FILE_ATTRIBUTE_NORMAL | Flags, NULL);
     Made = (Stream != INVALID_HANDLE_VALUE && Disposition != OPEN_EXISTING && GetLastError() != ERROR_ALREADY_EXISTS);
     if (Existed && Stream != INVALID_HANDLE_VALUE)
         *Existed = !Made;
@@ -628,7 +632,7 @@ Copy2OpenStream(
 /* Removes the named streams of the destination that an overwritten file had: Windows gives the copy only the
    streams of the source. Streams whose names are in Keep stay (a resumed copy goes on in them). The result is a
    Win32 error. */
-static DWORD
+DWORD
 Copy2RemoveStreams(
     _In_ HANDLE Dest,
     _In_ PCWSTR DestName,
@@ -658,7 +662,7 @@ Copy2RemoveStreams(
             continue;
 
         Stream = Copy2OpenStream(DestName, Old[i].Name, DELETE | FILE_READ_ATTRIBUTES, COPY2_SHARE_ALL,
-                                 OPEN_EXISTING, Dest, &Error, NULL);
+                                 OPEN_EXISTING, Dest, 0, &Error, NULL);
         if (Stream == INVALID_HANDLE_VALUE)
             break;
 
@@ -695,6 +699,45 @@ Copy2RemoveStreams(
         }
     }
     return Error;
+}
+
+/*
+ * Gives the new file the extended attributes of the source, as Windows does. They are a bonus: a file system that
+ * has none, or refuses them, is not a reason to fail a copy of the data.
+ */
+VOID
+Copy2CopyEas(
+    _In_ HANDLE Source,
+    _In_ HANDLE Dest)
+{
+    IO_STATUS_BLOCK IoStatusBlock;
+    PVOID Buffer;
+    ULONG Size = 0x1000;
+    NTSTATUS Status;
+
+    for (;;)
+    {
+        Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, Size);
+        if (!Buffer)
+            return;
+
+        Status = NtQueryEaFile(Source, &IoStatusBlock, Buffer, Size, FALSE, NULL, 0, NULL, TRUE);
+        if (Status != STATUS_BUFFER_OVERFLOW && Status != STATUS_BUFFER_TOO_SMALL)
+            break;
+
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
+        Size *= 2;
+        if (Size > 0x100000)
+            return;
+    }
+
+    if (NT_SUCCESS(Status) && IoStatusBlock.Information)
+    {
+        IO_STATUS_BLOCK SetStatusBlock;
+
+        NtSetEaFile(Dest, &SetStatusBlock, Buffer, (ULONG)IoStatusBlock.Information);
+    }
+    RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
 }
 
 /* Opens the new file for writing, with the right to delete it when the handles of others allow that: a file whose
@@ -1205,7 +1248,7 @@ CopyFile2(
     for (i = 0; i < NamedCount; i++)
     {
         NamedStreams[i].Source = Copy2OpenStream(SourceName, NamedStreams[i].Name, GENERIC_READ, COPY2_SHARE_ALL,
-                                                 OPEN_EXISTING, Source, &StreamError, NULL);
+                                                 OPEN_EXISTING, Source, 0, &StreamError, NULL);
         if (NamedStreams[i].Source == INVALID_HANDLE_VALUE)
         {
             Result = HRESULT_FROM_WIN32(StreamError);
@@ -1307,7 +1350,7 @@ CopyFile2(
         PWSTR DestStreamPath;
 
         DestStream = Copy2OpenStream(DestName, NamedStreams[i].Name, GENERIC_WRITE | DELETE | FILE_READ_ATTRIBUTES,
-                                     FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_ALWAYS, Dest, &StreamError, &StreamExisted);
+                                     FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_ALWAYS, Dest, 0, &StreamError, &StreamExisted);
         if (DestStream == INVALID_HANDLE_VALUE)
         {
             Result = HRESULT_FROM_WIN32(StreamError);
@@ -1338,6 +1381,9 @@ CopyFile2(
         Result = Copy2Stream(&State, i + 2, NamedStreams[i].Source, DestStream, NamedStreams[i].Size, Offset, Valid, Buffer);
         CloseHandle(DestStream);
     }
+
+    if (SUCCEEDED(Result))
+        Copy2CopyEas(Source, Dest);
 
     if (SUCCEEDED(Result))
     {

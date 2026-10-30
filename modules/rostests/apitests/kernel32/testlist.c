@@ -24,6 +24,7 @@ extern void func_CalendarInfo(void);
 extern void func_ConsoleCP(void);
 extern void func_CopyFile2(void);
 extern void func_CopyFile2Identity(void);
+extern void func_CopyFileStreams(void);
 extern void func_ConsoleBufferSwitch(void);
 extern void func_ConsoleCaret(void);
 extern void func_ConsoleCreateRace(void);
@@ -201,6 +202,7 @@ const struct test winetest_testlist[] =
     { "ConsoleCP",                   func_ConsoleCP },
     { "CopyFile2",                   func_CopyFile2 },
     { "CopyFile2Identity",           func_CopyFile2Identity },
+    { "CopyFileStreams",             func_CopyFileStreams },
     { "ConsoleBufferSwitch",         func_ConsoleBufferSwitch },
     { "ConsoleCaret",                func_ConsoleCaret },
     { "ConsoleCreateRace",           func_ConsoleCreateRace },

@@ -47,6 +47,63 @@ enum
     COPY_BINARY      = 0x100,   /* /B  */
 };
 
+static DWORD CALLBACK
+CopyProgress(
+    LARGE_INTEGER TotalFileSize,
+    LARGE_INTEGER TotalBytesTransferred,
+    LARGE_INTEGER StreamSize,
+    LARGE_INTEGER StreamBytesTransferred,
+    DWORD dwStreamNumber,
+    DWORD dwCallbackReason,
+    HANDLE hSourceFile,
+    HANDLE hDestinationFile,
+    LPVOID lpData)
+{
+    /* Ctrl+C or Ctrl+Break, as for the loop of reads and writes */
+    return CheckCtrlBreak (BREAK_INPUT) ? PROGRESS_CANCEL : PROGRESS_CONTINUE;
+}
+
+/* Whether two names are the same file, by the volume and the index of the file, not by how they are spelled */
+static BOOL
+IsSameFile(LPCTSTR pszFirst, LPCTSTR pszSecond)
+{
+    BY_HANDLE_FILE_INFORMATION First, Second;
+    HANDLE hFirst, hSecond;
+    BOOL bSame = FALSE;
+
+    hFirst = CreateFile (pszFirst, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                         OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (hFirst == INVALID_HANDLE_VALUE)
+        return FALSE;
+
+    hSecond = CreateFile (pszSecond, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                          OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (hSecond != INVALID_HANDLE_VALUE)
+    {
+        if (GetFileInformationByHandle (hFirst, &First) && GetFileInformationByHandle (hSecond, &Second) &&
+            First.dwVolumeSerialNumber == Second.dwVolumeSerialNumber &&
+            (First.nFileIndexHigh || First.nFileIndexLow) &&
+            First.nFileIndexHigh == Second.nFileIndexHigh && First.nFileIndexLow == Second.nFileIndexLow)
+        {
+            bSame = TRUE;
+        }
+        CloseHandle (hSecond);
+    }
+    CloseHandle (hFirst);
+    return bSame;
+}
+
+static BOOL
+IsDeviceName(LPCTSTR pszName)
+{
+    TCHAR szFull[MAX_PATH];
+    DWORD dwLength = GetFullPathName (pszName, MAX_PATH, szFull, NULL);
+
+    /* A name like CON or NUL comes out as \\.\CON */
+    return dwLength != 0 && dwLength < MAX_PATH &&
+           szFull[0] == _T('\\') && szFull[1] == _T('\\') && szFull[2] == _T('.') && szFull[3] == _T('\\');
+}
+
 INT
 copy(TCHAR source[MAX_PATH],
      TCHAR dest[MAX_PATH],
@@ -155,6 +212,43 @@ copy(TCHAR source[MAX_PATH],
     }
 
 
+    /* A plain copy of one file is left to CopyFileEx: it brings the alternate data streams and the extended
+       attributes of the file along, which a loop of reads and writes does not. Devices (copy x con, copy con x)
+       and the copies that join or convert files go on in the loop below. */
+    if (!append && !(lpdwFlags & COPY_ASCII) &&
+        GetFileType (hFileSrc) == FILE_TYPE_DISK && !IsDeviceName (source) && !IsDeviceName (dest))
+    {
+        BOOL bCopied;
+
+        /* The source stays open until the copy is done: if the destination is the source under another name,
+           the delete fails and nothing is lost */
+        if (IsExistingFile (dest))
+        {
+            TRACE ("SetFileAttributes (%s, FILE_ATTRIBUTE_NORMAL);\n", debugstr_aw(dest));
+            SetFileAttributes (dest, FILE_ATTRIBUTE_NORMAL);
+
+            TRACE ("DeleteFile (%s);\n", debugstr_aw(dest));
+            DeleteFile (dest);
+        }
+
+        /* Ctrl+C stops the copy (the routine cancels it), which deletes the partial file */
+        bCopied = CopyFileEx (source, dest, CopyProgress, NULL, NULL, 0);
+        CloseHandle (hFileSrc);
+        if (!bCopied)
+        {
+            if (GetLastError () == ERROR_REQUEST_ABORTED)
+                ConOutResPuts (STRING_COPY_ERROR3);
+            else
+                ErrorMessage (GetLastError (), NULL);
+            nErrorLevel = 1;
+            return 0;
+        }
+
+        /* For MS-DOS backwards-compatibility, always remove the read-only attribute */
+        SetFileAttributes (dest, dwAttrib & ~FILE_ATTRIBUTE_READONLY);
+        goto FinishCopy;
+    }
+
     if (!IsExistingFile (dest))
     {
         TRACE ("opening/creating\n");
@@ -261,6 +355,7 @@ copy(TCHAR source[MAX_PATH],
     /* For MS-DOS backwards-compatibility, always remove the read-only attribute */
     SetFileAttributes (dest, dwAttrib & ~FILE_ATTRIBUTE_READONLY);
 
+FinishCopy:
     /* Now finish off the copy if needed with CopyFileEx */
     if (lpdwFlags & COPY_RESTART)
     {
@@ -832,7 +927,7 @@ INT cmd_copy(LPTSTR param)
             _tcscat (tmpSrcPath, findBuffer.cFileName);
 
             /* Check to see if the file is the same file */
-            if (!bTouch && !_tcscmp(tmpSrcPath, tmpDestPath))
+            if (!bTouch && (!_tcscmp(tmpSrcPath, tmpDestPath) || IsSameFile(tmpSrcPath, tmpDestPath)))
             {
                 ConOutResPrintf(STRING_COPY_ERROR2);
 
@@ -879,7 +974,8 @@ INT cmd_copy(LPTSTR param)
     if (arg != NULL)
         freep(arg);
 
-    return 0;
+    /* The error level is also the exit code of "cmd /c copy" */
+    return nErrorLevel;
 }
 
 #endif /* INCLUDE_CMD_COPY */

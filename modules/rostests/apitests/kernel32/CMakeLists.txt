@@ -21,6 +21,7 @@ list(APPEND SOURCE
     ConsoleCP.c
     CopyFile2.c
     CopyFile2Identity.c
+    CopyFileStreams.c
     ConsoleBufferSwitch.c
     ConsoleCaret.c
     ConsoleCreateRace.c
