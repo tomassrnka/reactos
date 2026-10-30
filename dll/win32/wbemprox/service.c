@@ -47,6 +47,23 @@ static UINT map_error( DWORD error )
     case ERROR_SERVICE_NOT_ACTIVE:         return 6;
     case ERROR_SERVICE_REQUEST_TIMEOUT:    return 7;
     case ERROR_SERVICE_ALREADY_RUNNING:    return 10;
+#ifdef __REACTOS__
+    /* the other Win32_Service method return values */
+    case ERROR_PATH_NOT_FOUND:             return 9;
+    case ERROR_SERVICE_DATABASE_LOCKED:    return 11;
+    case ERROR_SERVICE_DEPENDENCY_DELETED: return 12;
+    case ERROR_SERVICE_DEPENDENCY_FAIL:    return 13;
+    case ERROR_SERVICE_DISABLED:           return 14;
+    case ERROR_SERVICE_LOGON_FAILED:       return 15;
+    case ERROR_SERVICE_MARKED_FOR_DELETE:  return 16;
+    case ERROR_SERVICE_NO_THREAD:          return 17;
+    case ERROR_CIRCULAR_DEPENDENCY:        return 18;
+    case ERROR_DUPLICATE_SERVICE_NAME:     return 19;
+    case ERROR_INVALID_NAME:               return 20;
+    case ERROR_INVALID_PARAMETER:          return 21;
+    case ERROR_INVALID_SERVICE_ACCOUNT:    return 22;
+    case ERROR_SERVICE_EXISTS:             return 23;
+#endif
     default:
         WARN("unknown error %u\n", error);
         break;
@@ -89,6 +106,13 @@ HRESULT service_pause_service( IWbemClassObject *obj, IWbemClassObject *in, IWbe
 
     hr = IWbemClassObject_Get( obj, prop_nameW, 0, &name, NULL, NULL );
     if (hr != S_OK) return hr;
+#ifdef __REACTOS__
+    if (!is_valid_key_string( &name ))
+    {
+        VariantClear( &name );
+        return WBEM_E_INVALID_METHOD_PARAMETERS;
+    }
+#endif
 
     hr = create_signature( class_serviceW, method_pauseserviceW, PARAM_OUT, &sig );
     if (hr != S_OK)
@@ -134,6 +158,13 @@ HRESULT service_resume_service( IWbemClassObject *obj, IWbemClassObject *in, IWb
 
     hr = IWbemClassObject_Get( obj, prop_nameW, 0, &name, NULL, NULL );
     if (hr != S_OK) return hr;
+#ifdef __REACTOS__
+    if (!is_valid_key_string( &name ))
+    {
+        VariantClear( &name );
+        return WBEM_E_INVALID_METHOD_PARAMETERS;
+    }
+#endif
 
     hr = create_signature( class_serviceW, method_resumeserviceW, PARAM_OUT, &sig );
     if (hr != S_OK)
@@ -203,6 +234,13 @@ HRESULT service_start_service( IWbemClassObject *obj, IWbemClassObject *in, IWbe
 
     hr = IWbemClassObject_Get( obj, prop_nameW, 0, &name, NULL, NULL );
     if (hr != S_OK) return hr;
+#ifdef __REACTOS__
+    if (!is_valid_key_string( &name ))
+    {
+        VariantClear( &name );
+        return WBEM_E_INVALID_METHOD_PARAMETERS;
+    }
+#endif
 
     hr = create_signature( class_serviceW, method_startserviceW, PARAM_OUT, &sig );
     if (hr != S_OK)
@@ -248,6 +286,13 @@ HRESULT service_stop_service( IWbemClassObject *obj, IWbemClassObject *in, IWbem
 
     hr = IWbemClassObject_Get( obj, prop_nameW, 0, &name, NULL, NULL );
     if (hr != S_OK) return hr;
+#ifdef __REACTOS__
+    if (!is_valid_key_string( &name ))
+    {
+        VariantClear( &name );
+        return WBEM_E_INVALID_METHOD_PARAMETERS;
+    }
+#endif
 
     hr = create_signature( class_serviceW, method_stopserviceW, PARAM_OUT, &sig );
     if (hr != S_OK)
@@ -380,7 +425,7 @@ static SC_HANDLE open_service_object( IWbemClassObject *obj, DWORD access, SC_HA
 
     *manager = NULL;
     VariantInit( &name );
-    if (IWbemClassObject_Get( obj, prop_nameW, 0, &name, NULL, NULL ) != S_OK || V_VT( &name ) != VT_BSTR)
+    if (IWbemClassObject_Get( obj, prop_nameW, 0, &name, NULL, NULL ) != S_OK || !is_valid_key_string( &name ))
     {
         *error = 8;
         VariantClear( &name );

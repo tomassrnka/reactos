@@ -711,6 +711,15 @@ done:
 #ifdef __REACTOS__
 static HRESULT exec_select_view_locked( struct view *view );
 
+/* the most rows of a SELECT over a class and its subclasses */
+#define MAX_SUBCLASS_ROWS 262144
+
+static BOOL is_disk_walk_table( const struct table *table )
+{
+    return !wcsicmp( table->name, L"CIM_DataFile" ) || !wcsicmp( table->name, L"Win32_Directory" ) ||
+           !wcsicmp( table->name, L"CIM_Directory" );
+}
+
 static HRESULT exec_select_view( struct view *view )
 {
     HRESULT hr;
@@ -732,8 +741,15 @@ static HRESULT exec_select_view_locked( struct view *view )
         struct table *table = view->table[k];
         enum fill_status status = FILL_STATUS_UNFILTERED;
 
-        if (is_namespace_table( table )) status = fill_namespace_table( table, view->cond, view->ns );
-        else if (table->fill)
+        /* an enumeration of a class and its subclasses must not start the walk of every fixed drive
+         * the file and directory providers do when nothing narrows them down, nor grow without bound */
+        if (k && !view->cond && is_disk_walk_table( table )) continue;
+        if (k && j >= MAX_SUBCLASS_ROWS)
+        {
+            WARN( "enumeration capped at %u rows\n", MAX_SUBCLASS_ROWS );
+            break;
+        }
+        if (table->fill)
         {
             clear_table( table );
             status = table->fill( table, view->cond );
@@ -770,6 +786,7 @@ static HRESULT exec_select_view_locked( struct view *view )
             }
             if (val)
             {
+                if (k && j >= MAX_SUBCLASS_ROWS) break;
                 if (view->result_table) view->result_table[j] = k;
                 view->result[j++] = i;
             }

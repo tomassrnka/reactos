@@ -35,6 +35,10 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(wbemprox);
 
+#ifdef __REACTOS__
+static HRESULT get_object_pid( IWbemClassObject *obj, DWORD *pid );
+#endif
+
 static HRESULT get_owner( VARIANT *user, VARIANT *domain, VARIANT *retval )
 {
     DWORD len;
@@ -74,6 +78,12 @@ HRESULT process_get_owner( IWbemClassObject *obj, IWbemClassObject *in, IWbemCla
 
     TRACE("%p, %p, %p\n", obj, in, out);
 
+#ifdef __REACTOS__
+    {
+        DWORD pid;
+        if ((hr = get_object_pid( obj, &pid )) != S_OK) return hr;
+    }
+#endif
     hr = create_signature( class_processW, method_getownerW, PARAM_OUT, &sig );
     if (hr != S_OK) return hr;
 
@@ -200,16 +210,18 @@ static BOOL get_param_int( IWbemClassObject *in, const WCHAR *name, LONG *value 
     return ret;
 }
 
-static DWORD get_object_pid( IWbemClassObject *obj )
+/* the key of the instance a method runs on: no pid (or 0, the idle process) means the instance is not one a
+ * method can act on */
+static HRESULT get_object_pid( IWbemClassObject *obj, DWORD *pid )
 {
     VARIANT var;
-    DWORD pid = 0;
 
+    *pid = 0;
     VariantInit( &var );
     if (IWbemClassObject_Get( obj, L"ProcessId", 0, &var, NULL, NULL ) == S_OK && V_VT( &var ) == VT_I4)
-        pid = V_I4( &var );
+        *pid = V_I4( &var );
     VariantClear( &var );
-    return pid;
+    return *pid ? S_OK : WBEM_E_INVALID_METHOD_PARAMETERS;
 }
 
 /* static Win32_Process.Create: the process runs as the caller (this provider runs in the caller's process) */
@@ -256,14 +268,16 @@ HRESULT process_terminate( IWbemClassObject *obj, IWbemClassObject *in, IWbemCla
     IWbemClassObject *out_params;
     LONG reason = 0;
     HANDLE process;
+    DWORD pid;
     UINT retval;
     HRESULT hr;
 
     TRACE("%p, %p, %p\n", obj, in, out);
 
+    if ((hr = get_object_pid( obj, &pid )) != S_OK) return hr;
     if ((hr = method_begin( class_processW, L"Terminate", out, &out_params )) != S_OK) return hr;
     get_param_int( in, L"Reason", &reason );
-    if (!(process = OpenProcess( PROCESS_TERMINATE, FALSE, get_object_pid( obj ) )))
+    if (!(process = OpenProcess( PROCESS_TERMINATE, FALSE, pid )))
         retval = map_process_error( GetLastError() );
     else
     {
@@ -279,18 +293,26 @@ HRESULT process_get_owner_sid( IWbemClassObject *obj, IWbemClassObject *in, IWbe
     HANDLE process, token = NULL;
     TOKEN_USER *user = NULL;
     WCHAR *sid = NULL;
-    DWORD size = 0;
+    DWORD size = 0, pid;
     UINT retval = 8;
     HRESULT hr;
 
     TRACE("%p, %p, %p\n", obj, in, out);
 
+    if ((hr = get_object_pid( obj, &pid )) != S_OK) return hr;
     if ((hr = method_begin( class_processW, L"GetOwnerSid", out, &out_params )) != S_OK) return hr;
-    if (!(process = OpenProcess( PROCESS_QUERY_INFORMATION, FALSE, get_object_pid( obj ) )))
+    /* the least access first; this kernel wants PROCESS_QUERY_INFORMATION to open the token */
+    if (!(process = OpenProcess( PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid )))
         retval = map_process_error( GetLastError() );
     else
     {
-        if (!OpenProcessToken( process, TOKEN_QUERY, &token )) retval = map_process_error( GetLastError() );
+        if (!OpenProcessToken( process, TOKEN_QUERY, &token ) && GetLastError() == ERROR_ACCESS_DENIED)
+        {
+            CloseHandle( process );
+            if (!(process = OpenProcess( PROCESS_QUERY_INFORMATION, FALSE, pid ))) token = NULL;
+            else OpenProcessToken( process, TOKEN_QUERY, &token );
+        }
+        if (!token) retval = map_process_error( GetLastError() );
         else
         {
             GetTokenInformation( token, TokenUser, NULL, 0, &size );
@@ -299,7 +321,7 @@ HRESULT process_get_owner_sid( IWbemClassObject *obj, IWbemClassObject *in, IWbe
                 retval = 0;
             CloseHandle( token );
         }
-        CloseHandle( process );
+        if (process) CloseHandle( process );
     }
     if (!retval && out_params)
     {
@@ -319,15 +341,17 @@ HRESULT process_set_priority( IWbemClassObject *obj, IWbemClassObject *in, IWbem
     IWbemClassObject *out_params;
     LONG priority;
     HANDLE process;
+    DWORD pid;
     UINT retval = 21;
     HRESULT hr;
 
     TRACE("%p, %p, %p\n", obj, in, out);
 
+    if ((hr = get_object_pid( obj, &pid )) != S_OK) return hr;
     if ((hr = method_begin( class_processW, L"SetPriority", out, &out_params )) != S_OK) return hr;
     if (get_param_int( in, L"Priority", &priority ))
     {
-        if (!(process = OpenProcess( PROCESS_SET_INFORMATION, FALSE, get_object_pid( obj ) )))
+        if (!(process = OpenProcess( PROCESS_SET_INFORMATION, FALSE, pid )))
             retval = map_process_error( GetLastError() );
         else
         {
@@ -385,9 +409,10 @@ HRESULT os_win32shutdown( IWbemClassObject *obj, IWbemClassObject *in, IWbemClas
 
     TRACE("%p, %p, %p\n", obj, in, out);
 
-    if (!get_param_int( in, L"Flags", &flags ) || (flags & ~0x0f))
+    if (!get_param_int( in, L"Flags", &flags ) || (flags & ~0x0f) || ((flags & ~4) != 0 && (flags & ~4) != 1 &&
+        (flags & ~4) != 2 && (flags & ~4) != 8))
     {
-        /* 0 log off, 1 shut down, 2 reboot, 8 power off; 4 = force */
+        /* 0 log off, 1 shut down, 2 reboot, 8 power off; 4 = force: one action only (1|2 is not a request) */
         if ((hr = method_begin( L"Win32_OperatingSystem", L"Win32Shutdown", out, &out_params )) != S_OK) return hr;
         return method_end( hr, obj, out_params, ERROR_INVALID_PARAMETER, out );
     }

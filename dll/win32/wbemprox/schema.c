@@ -117,35 +117,38 @@ struct record_namespace
     const WCHAR *name;
 };
 
-static struct table namespace_table = { L"__NAMESPACE", ARRAY_SIZE(col_namespace), col_namespace };
+/* One table per namespace: the rows never change, and a view keeps the table of its own namespace, so
+ * queries in different namespaces cannot disturb each other. ns_tables[WBEMPROX_NAMESPACE_ROOT] is the
+ * one in the table list. */
+static struct record_namespace ns_rows[WBEMPROX_NAMESPACE_LAST][WBEMPROX_NAMESPACE_LAST];
+static struct table ns_tables[WBEMPROX_NAMESPACE_LAST];
 
 BOOL is_namespace_table( const struct table *table )
 {
-    return table == &namespace_table;
+    return table >= &ns_tables[0] && table < &ns_tables[WBEMPROX_NAMESPACE_LAST];
 }
 
-enum fill_status fill_namespace_table( struct table *table, const struct expr *cond, enum wbm_namespace ns )
+static void init_namespace_tables( void )
 {
-    /* the names are constants: the rows live in a static buffer that is rewritten on every fill (under
-     * the table lock), so nothing is ever allocated or freed for this table */
-    static struct record_namespace rows[WBEMPROX_NAMESPACE_LAST];
-    UINT i, row = 0;
+    UINT ns, i, row;
 
-    for (i = 0; i < WBEMPROX_NAMESPACE_LAST; i++)
+    for (ns = 0; ns < WBEMPROX_NAMESPACE_LAST; ns++)
     {
-        if (namespaces[i].parent != ns) continue;
-        rows[row++].name = namespaces[i].name;
+        for (i = 0, row = 0; i < WBEMPROX_NAMESPACE_LAST; i++)
+            if (namespaces[i].parent == ns) ns_rows[ns][row++].name = namespaces[i].name;
+        ns_tables[ns].name = L"__NAMESPACE";
+        ns_tables[ns].num_cols = ARRAY_SIZE(col_namespace);
+        ns_tables[ns].columns = col_namespace;
+        ns_tables[ns].data = (BYTE *)ns_rows[ns];
+        ns_tables[ns].num_rows = row;
+        ns_tables[ns].num_rows_allocated = WBEMPROX_NAMESPACE_LAST;
     }
-    table->data = (BYTE *)rows;
-    table->num_rows = row;
-    table->num_rows_allocated = WBEMPROX_NAMESPACE_LAST;
-    (void)cond;
-    return FILL_STATUS_UNFILTERED;
 }
 
 /* the class list */
 
 static struct table abstract_tables[ARRAY_SIZE(schema_classes)];
+static BOOL has_subclasses[ARRAY_SIZE(schema_classes)];
 
 void init_schema_tables( struct list *list )
 {
@@ -159,7 +162,17 @@ void init_schema_tables( struct list *list )
         abstract_tables[i].columns = schema_classes[i].columns;
         list_add_tail( list, &abstract_tables[i].entry );
     }
-    list_add_tail( list, &namespace_table.entry );
+    init_namespace_tables();
+    list_add_tail( list, &ns_tables[WBEMPROX_NAMESPACE_ROOT].entry );
+
+    /* leaf classes are the common case of a SELECT: know them without walking the table list */
+    for (i = 0; i < ARRAY_SIZE(schema_classes); i++)
+    {
+        UINT j;
+        for (j = 0; j < ARRAY_SIZE(schema_classes) && !has_subclasses[i]; j++)
+            if (schema_classes[j].superclass && !wcsicmp( schema_classes[j].superclass, schema_classes[i].name ))
+                has_subclasses[i] = TRUE;
+    }
 }
 
 static const struct schema_class *find_schema_class( const WCHAR *name )
@@ -265,6 +278,19 @@ static_methods[] =
     { L"Win32_Process", L"Create" },
     { L"Win32_Service", L"Create" },
 };
+
+/* methods that run on the class, not on an instance of it: the Static ones, and the registry and security
+ * providers, whose classes have no instances of their own */
+BOOL is_class_method( const WCHAR *classname, const WCHAR *method )
+{
+    UINT i;
+
+    if (!wcsicmp( classname, L"StdRegProv" ) || !wcsicmp( classname, L"__SystemSecurity" )) return TRUE;
+    for (i = 0; i < ARRAY_SIZE(static_methods); i++)
+        if (!wcsicmp( static_methods[i].class, classname ) && !wcsicmp( static_methods[i].method, method ))
+            return TRUE;
+    return FALSE;
+}
 
 UINT get_synth_qualifiers( const WCHAR *classname, const WCHAR *member, BOOL method, const WCHAR **names,
                            VARIANT *values, UINT max )
@@ -418,6 +444,19 @@ HRESULT create_class_enum( enum wbm_namespace ns, const WCHAR *superclass, LONG 
     return hr;
 }
 
+/* can a class have subclasses at all */
+static BOOL class_has_subclasses( const WCHAR *name )
+{
+    const struct schema_class *class = find_schema_class( name );
+    UINT i;
+
+    if (class) return has_subclasses[class - schema_classes];
+    /* not in the schema: a subclass could still name it as its superclass */
+    for (i = 0; i < ARRAY_SIZE(schema_classes); i++)
+        if (schema_classes[i].superclass && !wcsicmp( schema_classes[i].superclass, name )) return TRUE;
+    return FALSE;
+}
+
 /* a SELECT over a class sees the class and, as WMI does, the instances of every subclass */
 HRESULT resolve_view_namespace( struct view *view, enum wbm_namespace ns )
 {
@@ -429,10 +468,23 @@ HRESULT resolve_view_namespace( struct view *view, enum wbm_namespace ns )
     base = view->table[0];
     if (!is_table_visible( base->name, ns ))
     {
+        /* as on Windows, a class the namespace does not have is an error, not an empty result */
         release_table( base );
+        view->table[0] = NULL;
         view->table_count = 0;
+        return WBEM_E_INVALID_CLASS;
+    }
+    if (is_namespace_table( base ))
+    {
+        if (base != &ns_tables[ns])
+        {
+            release_table( base );
+            view->table[0] = addref_table( &ns_tables[ns] );
+        }
         return S_OK;
     }
+    if (!class_has_subclasses( base->name )) return S_OK;
+
     lock_tables();
     LIST_FOR_EACH_ENTRY( table, table_list, struct table, entry )
     {

@@ -201,6 +201,14 @@ struct query
     struct list mem;
 };
 
+#ifdef __REACTOS__
+/* a key property of an instance a method runs on must be a non-empty string */
+static inline BOOL is_valid_key_string( const VARIANT *v )
+{
+    return V_VT( v ) == VT_BSTR && V_BSTR( v ) && V_BSTR( v )[0];
+}
+#endif
+
 struct path
 {
     WCHAR *class;
@@ -280,7 +288,7 @@ const WCHAR *get_superclass( const WCHAR * ) DECLSPEC_HIDDEN;
 BOOL is_subclass( const WCHAR *, const WCHAR * ) DECLSPEC_HIDDEN;
 BOOL is_table_visible( const WCHAR *, enum wbm_namespace ) DECLSPEC_HIDDEN;
 BOOL is_namespace_table( const struct table * ) DECLSPEC_HIDDEN;
-enum fill_status fill_namespace_table( struct table *, const struct expr *, enum wbm_namespace ) DECLSPEC_HIDDEN;
+BOOL is_class_method( const WCHAR *, const WCHAR * ) DECLSPEC_HIDDEN;
 void get_column_order( const struct table *, UINT * ) DECLSPEC_HIDDEN;
 SAFEARRAY *get_derivation( const WCHAR * ) DECLSPEC_HIDDEN;
 UINT get_synth_qualifiers( const WCHAR *, const WCHAR *, BOOL, const WCHAR **, VARIANT *, UINT ) DECLSPEC_HIDDEN;

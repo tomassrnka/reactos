@@ -629,7 +629,8 @@ static HRESULT record_set_value_converted( struct record *record, UINT index, VA
     switch (type)
     {
     case CIM_BOOLEAN: vt = VT_BOOL; break;
-    case CIM_SINT8: case CIM_UINT8: case CIM_SINT16: case CIM_UINT16: case CIM_SINT32: case CIM_UINT32: vt = VT_I4; break;
+    case CIM_SINT8: case CIM_UINT8: case CIM_SINT16: case CIM_UINT16: case CIM_SINT32: vt = VT_I4; break;
+    case CIM_UINT32: vt = VT_UI4; break; /* 0x80000000 and up do not fit VT_I4 */
     case CIM_STRING: case CIM_DATETIME: case CIM_REFERENCE: vt = VT_BSTR; break;
     default: return record_set_value( record, index, var );
     }
@@ -643,6 +644,9 @@ static HRESULT record_set_value_converted( struct record *record, UINT index, VA
     case CIM_STRING: case CIM_DATETIME: case CIM_REFERENCE:
         heap_free( record->fields[index].u.sval );
         record->fields[index].u.sval = heap_strdupW( V_BSTR( &tmp ) );
+        break;
+    case CIM_UINT32:
+        record->fields[index].u.ival = V_UI4( &tmp );
         break;
     default:
         record->fields[index].u.ival = V_I4( &tmp );

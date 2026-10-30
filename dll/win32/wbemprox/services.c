@@ -959,9 +959,10 @@ static HRESULT WINAPI wbem_services_ExecMethod(
     IWbemClassObject *obj = NULL;
     struct query *query = NULL;
     struct path *path;
-    WCHAR *str;
+    WCHAR *str = NULL;
     class_method *func;
     struct table *table;
+    UINT column;
     HRESULT hr;
 
     TRACE("%p, %s, %s, %08x, %p, %p, %p, %p\n", iface, debugstr_w(strObjectPath),
@@ -970,6 +971,29 @@ static HRESULT WINAPI wbem_services_ExecMethod(
     if (lFlags) FIXME("flags %08x not supported\n", lFlags);
 
     if ((hr = parse_path( strObjectPath, &path )) != S_OK) return hr;
+#ifdef __REACTOS__
+    {
+        /* the class must be visible in this namespace and have the method; a method that acts on an
+         * instance needs an instance path: the class alone never means "the first instance" */
+        struct wbem_services *services = impl_from_IWbemServices( iface );
+
+        hr = S_OK;
+        if (!(table = grab_table( path->class )) || !is_table_visible( table->name, services->ns ))
+        {
+            if (table) release_table( table );
+            hr = WBEM_E_NOT_FOUND; /* what Windows returns for a class path the namespace does not have */
+            goto done;
+        }
+        /* the method is a column of the table: its function sits in a row, which a provider fills only
+         * when the query runs */
+        if (!strMethodName || get_column_index( table, strMethodName, &column ) != S_OK || !is_method( table, column ))
+            hr = WBEM_E_INVALID_METHOD;
+        if (hr == S_OK && !path->filter && !is_class_method( table->name, strMethodName ))
+            hr = WBEM_E_INVALID_METHOD_PARAMETERS;
+        release_table( table );
+        if (hr != S_OK) goto done;
+    }
+#endif
     if (!(str = query_from_path( path )))
     {
         hr = E_OUTOFMEMORY;
@@ -985,6 +1009,15 @@ static HRESULT WINAPI wbem_services_ExecMethod(
 
     hr = execute_view( query->view );
     if (hr != S_OK) goto done;
+
+#ifdef __REACTOS__
+    /* an instance path names one instance */
+    if (path->filter && query->view->result_count != 1)
+    {
+        hr = query->view->result_count ? WBEM_E_INVALID_OBJECT_PATH : WBEM_E_NOT_FOUND;
+        goto done;
+    }
+#endif
 
     hr = EnumWbemClassObject_create( query, (void **)&result );
     if (hr != S_OK) goto done;
