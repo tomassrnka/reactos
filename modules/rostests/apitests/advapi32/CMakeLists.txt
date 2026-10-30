@@ -6,6 +6,7 @@ list(APPEND SOURCE
     ConvertStringSidToSid.c
     RegWow64.c
     RegWow64Review.c
+    RegWow64RelativeView.c
     RestrictedSidsCopy.c
     CreateService.c
     CreateProcessAsUserToken.c

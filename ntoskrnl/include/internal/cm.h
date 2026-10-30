@@ -241,6 +241,10 @@ typedef struct _CM_KEY_BODY
 
     /* ReactOS specific -- boolean flag to avoid recursive locking of the KCB */
     BOOLEAN KcbLocked;
+
+    /* ReactOS specific -- the WoW64 view (KEY_WOW64_32KEY, KEY_WOW64_64KEY or 0)
+     * the key was opened in. A relative open that names no view uses it. */
+    ULONG Wow64View;
 } CM_KEY_BODY, *PCM_KEY_BODY;
 
 //

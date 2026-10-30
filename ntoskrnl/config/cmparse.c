@@ -2048,6 +2048,10 @@ CmpRedirectWow64Key(PCM_KEY_BODY Root, PUNICODE_STRING CompleteName,
 
     if (!Context || Context->Wow64Reparsed)
         return STATUS_SUCCESS;
+    /* A relative open that names no view stays in the view the parent handle
+     * was opened in, whatever kind of process asks. Names from the root have
+     * no parent: their caller (the WoW64 thunk) chooses the default. */
+    if (!Context->Wow64Flags) Context->Wow64Flags = Root->Wow64View;
     CmpLockRegistry();
     CmpAcquireKcbLockShared(Kcb);
     if (Kcb->Delete)
@@ -2194,9 +2198,9 @@ CmpRedirectWow64Key(PCM_KEY_BODY Root, PUNICODE_STRING CompleteName,
 }
 #endif
 
-NTSTATUS
+static NTSTATUS
 NTAPI
-CmpParseKey(IN PVOID ParseObject,
+CmpParseKeyWorker(IN PVOID ParseObject,
             IN PVOID ObjectType,
             IN OUT PACCESS_STATE AccessState,
             IN KPROCESSOR_MODE AccessMode,
@@ -2678,5 +2682,35 @@ Quickie:
 
     /* Unlock the registry */
     CmpUnlockRegistry();
+    return Status;
+}
+
+NTSTATUS
+NTAPI
+CmpParseKey(IN PVOID ParseObject,
+            IN PVOID ObjectType,
+            IN OUT PACCESS_STATE AccessState,
+            IN KPROCESSOR_MODE AccessMode,
+            IN ULONG Attributes,
+            IN OUT PUNICODE_STRING CompleteName,
+            IN OUT PUNICODE_STRING RemainingName,
+            IN OUT PVOID Context OPTIONAL,
+            IN PSECURITY_QUALITY_OF_SERVICE SecurityQos OPTIONAL,
+            OUT PVOID *Object)
+{
+    NTSTATUS Status;
+
+    Status = CmpParseKeyWorker(ParseObject, ObjectType, AccessState, AccessMode, Attributes,
+                               CompleteName, RemainingName, Context, SecurityQos, Object);
+#ifdef BUILD_WOW64_ENABLED
+    /* Remember the view of every key that was opened or created, for the
+     * relative opens that start from its handle. The view was settled
+     * before the reparse; the context keeps it across the restart. */
+    if (Status == STATUS_SUCCESS && *Object)
+    {
+        PCM_PARSE_CONTEXT ParseContext = Context;
+        ((PCM_KEY_BODY)*Object)->Wow64View = ParseContext ? ParseContext->Wow64Flags : 0;
+    }
+#endif
     return Status;
 }

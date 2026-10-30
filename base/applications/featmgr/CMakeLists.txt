@@ -52,10 +52,6 @@ add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/dotnet-framework-4.8.ini
             DESTINATION reactos/Featmgr/Catalog FOR all)
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/dotnet-framework-4.8.txt
             DESTINATION reactos/Featmgr/Catalog FOR all)
-if(ARCH STREQUAL "amd64")
-    add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/dotnet-framework-4.8-uninstall.cmd
-                DESTINATION reactos/Featmgr/Catalog FOR all)
-endif()
 
 # --- Scoop (SCOOP-FEATMGR-01): software-tier entry + its install/uninstall scripts (amd64 only: it needs
 # PowerShell 7, which has no x86 build yet; on i386 the feature is not in the catalog and
