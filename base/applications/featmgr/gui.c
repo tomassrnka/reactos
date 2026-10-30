@@ -41,6 +41,7 @@ static HWND g_hTab, g_hList, g_hDesc, g_hInstr;
 static HWND g_hInstall, g_hEnable, g_hDisable, g_hUninstall, g_hImport, g_hImportSc;
 static HWND g_hSource, g_hSrcLabel;
 static WCHAR g_srcFilter[32];     /* Software tab source filter ("" = all sources) */
+static BOOL g_startSoftware;      /* command line /software: open on the Software tab */
 static HWND g_hOK, g_hCancel, g_hApply, g_hRefresh, g_hClose;
 static HFONT g_hFont = NULL;
 static FM_FEATURE *g_arr = NULL;
@@ -797,6 +798,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
             g_hwndMain = hwnd;
             FillList();
+            if (g_startSoftware)
+            {
+                g_tier = FM_TIER_SOFTWARE;
+                TabCtrl_SetCurSel(g_hTab, 1);
+                Populate(NULL);
+            }
             LayoutButtons(hwnd);
             return 0;
         }
@@ -883,7 +890,22 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmd, int nShow)
     INITCOMMONCONTROLSEX icc;
 
     UNREFERENCED_PARAMETER(hPrev);
-    UNREFERENCED_PARAMETER(lpCmd);
+
+    /* optfeatures /software [/source:<source>] : open on the Software tab, optionally filtered */
+    if (lpCmd && wcsstr(lpCmd, L"/software")) g_startSoftware = TRUE;
+    if (lpCmd)
+    {
+        LPCWSTR sp = wcsstr(lpCmd, L"/source:");
+        if (sp)
+        {
+            size_t n = wcscspn(sp + 8, L" \t");
+            if (n && n < ARRAYSIZE(g_srcFilter))
+            {
+                wcsncpy(g_srcFilter, sp + 8, n);
+                g_srcFilter[n] = L'\0';
+            }
+        }
+    }
 
     icc.dwSize = sizeof(icc);
     icc.dwICC = ICC_LISTVIEW_CLASSES | ICC_TAB_CLASSES | ICC_STANDARD_CLASSES;
