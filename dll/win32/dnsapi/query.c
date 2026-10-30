@@ -654,6 +654,124 @@ CheckForCurrentHostname(CONST CHAR * Name, PFIXED_INFO network_info)
 }
 
 
+/*
+ * PTR query: Name is a reverse name (like 8.8.8.8.in-addr.arpa); every PTR record in the answer is returned.
+ * The name servers of the machine are asked, recursively.
+ */
+static
+DNS_STATUS
+QueryPtr(LPCWSTR Name,
+         DWORD Options,
+         PDNS_RECORD *QueryResultSet)
+{
+    adns_state astate;
+    adns_answer *answer;
+    int adns_error;
+    PFIXED_INFO network_info;
+    ULONG network_info_blen = 0;
+    PIP_ADDR_STRING pip;
+    struct in_addr addr;
+    CHAR AnsiName[MAX_PATH];
+    DNS_STATUS Status;
+    PDNS_RECORDW Record, Last = NULL;
+    int i, Len;
+
+    if ((Options & DNS_QUERY_NO_WIRE_QUERY) != 0)
+        return ERROR_FILE_NOT_FOUND;
+
+    /* The name without the root label's dot */
+    Len = WideCharToMultiByte(CP_ACP, 0, Name, -1, AnsiName, sizeof(AnsiName), NULL, NULL);
+    if (Len == 0)
+        return ERROR_INVALID_NAME;
+    Len--;
+    if (Len > 1 && AnsiName[Len - 1] == '.')
+        AnsiName[Len - 1] = '\0';
+
+    GetNetworkParams(NULL, &network_info_blen);
+    network_info = (PFIXED_INFO)RtlAllocateHeap(RtlGetProcessHeap(), 0, network_info_blen);
+    if (network_info == NULL)
+        return ERROR_OUTOFMEMORY;
+    Status = GetNetworkParams(network_info, &network_info_blen);
+    if (Status != ERROR_SUCCESS)
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, network_info);
+        return Status;
+    }
+
+    adns_error = adns_init(&astate, adns_if_noenv | adns_if_noerrprint | adns_if_noserverwarn, 0);
+    if (adns_error != adns_s_ok)
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, network_info);
+        return DnsIntTranslateAdnsToDNS_STATUS(adns_error);
+    }
+    for (pip = &(network_info->DnsServerList); pip; pip = pip->Next)
+    {
+        addr.s_addr = inet_addr(pip->IpAddress.String);
+        if ((addr.s_addr != INADDR_ANY) && (addr.s_addr != INADDR_NONE))
+            adns_addserver(astate, addr);
+    }
+    RtlFreeHeap(RtlGetProcessHeap(), 0, network_info);
+
+    if (!adns_numservers(astate))
+    {
+        adns_finish(astate);
+        return ERROR_FILE_NOT_FOUND;
+    }
+
+    /* The name is complete: no search list */
+    adns_error = adns_synchronous(astate, AnsiName, adns_r_ptr_raw, 0, &answer);
+    if (adns_error != adns_s_ok || answer == NULL)
+    {
+        adns_finish(astate);
+        return adns_error != adns_s_ok ? DnsIntTranslateAdnsToDNS_STATUS(adns_error) : ERROR_OUTOFMEMORY;
+    }
+
+    if (answer->status == adns_s_nxdomain)
+        Status = DNS_ERROR_RCODE_NAME_ERROR;
+    else if (answer->status == adns_s_nodata)
+        Status = DNS_INFO_NO_RECORDS;
+    else if (answer->status != adns_s_ok || answer->nrrs <= 0)
+        Status = DNS_ERROR_RCODE_SERVER_FAILURE;
+    else
+        Status = ERROR_SUCCESS;
+
+    for (i = 0; Status == ERROR_SUCCESS && i < answer->nrrs; i++)
+    {
+        Record = (PDNS_RECORDW)RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DNS_RECORD));
+        if (Record == NULL)
+        {
+            Status = ERROR_OUTOFMEMORY;
+            break;
+        }
+        if (Last)
+            Last->pNext = Record;
+        else
+            *QueryResultSet = (PDNS_RECORD)Record;
+        Last = Record;
+
+        Record->wType = DNS_TYPE_PTR;
+        Record->wDataLength = sizeof(DNS_PTR_DATA);
+        Record->Flags.S.Section = DnsSectionAnswer;
+        Record->Flags.S.CharSet = DnsCharSetUnicode;
+        Record->pName = xstrsave(Name);
+        Record->Data.PTR.pNameHost = (PWSTR)DnsCToW(answer->rrs.str[i]);
+        if (Record->pName == NULL || Record->Data.PTR.pNameHost == NULL)
+            Status = ERROR_OUTOFMEMORY;
+    }
+
+    free(answer);
+    adns_finish(astate);
+
+    if (Status != ERROR_SUCCESS && *QueryResultSet)
+    {
+        DnsIntFreeRecordList(*QueryResultSet);
+        *QueryResultSet = NULL;
+    }
+
+    return Status;
+}
+
+
 DNS_STATUS
 WINAPI
 Query_Main(LPCWSTR Name,
@@ -884,6 +1002,9 @@ Query_Main(LPCWSTR Name,
         RtlFreeHeap(RtlGetProcessHeap(), 0, AnsiName);
         RtlFreeHeap(RtlGetProcessHeap(), 0, CurrentName);
         return ERROR_FILE_NOT_FOUND;
+
+    case DNS_TYPE_PTR:
+        return QueryPtr(Name, Options, QueryResultSet);
 
     default:
         return ERROR_OUTOFMEMORY; /* XXX arty: find a better error code. */

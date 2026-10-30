@@ -316,7 +316,12 @@ typedef struct {
 } DNS_PTR_DATAA, *PDNS_PTR_DATAA;
 
 typedef struct {
+#if defined(__midl) || defined(__WIDL__)
+  /* the host name is a string, not a pointer to one character, when marshalled (dnsrslvr RPC) */
+  [string] LPWSTR pNameHost;
+#else
   LPWSTR pNameHost;
+#endif
 } DNS_PTR_DATAW, *PDNS_PTR_DATAW;
 
 typedef struct {
