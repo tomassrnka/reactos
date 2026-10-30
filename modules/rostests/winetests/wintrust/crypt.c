@@ -118,6 +118,17 @@ static CRYPTCATATTRIBUTE * (WINAPI * pCryptCATEnumerateCatAttr)(HANDLE, CRYPTCAT
 static CRYPTCATMEMBER * (WINAPI * pCryptCATEnumerateMember)(HANDLE, CRYPTCATMEMBER *);
 static CRYPTCATATTRIBUTE * (WINAPI * pCryptCATEnumerateAttr)(HANDLE, CRYPTCATMEMBER *, CRYPTCATATTRIBUTE *);
 static BOOL (WINAPI * pCryptCATClose)(HANDLE);
+static CRYPTCATATTRIBUTE * (WINAPI * pCryptCATPutCatAttrInfo)(HANDLE, WCHAR *, DWORD, DWORD, BYTE *);
+static CRYPTCATATTRIBUTE * (WINAPI * pCryptCATPutAttrInfo)(HANDLE, CRYPTCATMEMBER *, WCHAR *, DWORD, DWORD, BYTE *);
+static CRYPTCATMEMBER * (WINAPI * pCryptCATPutMemberInfo)(HANDLE, WCHAR *, WCHAR *, GUID *, DWORD, DWORD, BYTE *);
+static BOOL (WINAPI * pCryptCATPersistStore)(HANDLE);
+static CRYPTCATSTORE * (WINAPI * pCryptCATStoreFromHandle)(HANDLE);
+static CRYPTCATATTRIBUTE * (WINAPI * pCryptCATGetCatAttrInfo)(HANDLE, LPWSTR);
+static CRYPTCATATTRIBUTE * (WINAPI * pCryptCATGetAttrInfo)(HANDLE, CRYPTCATMEMBER *, LPWSTR);
+static CRYPTCATMEMBER * (WINAPI * pCryptCATGetMemberInfo)(HANDLE, LPWSTR);
+static CRYPTCATATTRIBUTE * (WINAPI * pCryptCATCDFEnumAttributesWithCDFTag)(CRYPTCATCDF *, LPWSTR, CRYPTCATMEMBER *,
+                                                                           CRYPTCATATTRIBUTE *,
+                                                                           PFN_CDF_PARSE_ERROR_CALLBACK);
 static pCryptSIPGetSignedDataMsg pGetSignedDataMsg;
 static pCryptSIPPutSignedDataMsg pPutSignedDataMsg;
 
@@ -149,6 +160,15 @@ static void InitFunctionPtrs(void)
     WINTRUST_GET_PROC(CryptCATEnumerateMember)
     WINTRUST_GET_PROC(CryptCATEnumerateAttr)
     WINTRUST_GET_PROC(CryptCATClose)
+    WINTRUST_GET_PROC(CryptCATPutCatAttrInfo)
+    WINTRUST_GET_PROC(CryptCATPutAttrInfo)
+    WINTRUST_GET_PROC(CryptCATPutMemberInfo)
+    WINTRUST_GET_PROC(CryptCATPersistStore)
+    WINTRUST_GET_PROC(CryptCATStoreFromHandle)
+    WINTRUST_GET_PROC(CryptCATGetCatAttrInfo)
+    WINTRUST_GET_PROC(CryptCATGetAttrInfo)
+    WINTRUST_GET_PROC(CryptCATGetMemberInfo)
+    WINTRUST_GET_PROC(CryptCATCDFEnumAttributesWithCDFTag)
 
 #undef WINTRUST_GET_PROC
 
@@ -1292,6 +1312,261 @@ static void test_cdf_parsing(void)
     ok(DeleteFileA(catfileA), "Expected a catalog file to be created\n");
 }
 
+
+static BYTE test_value[] = {0xa2, 0x02, 0x80, 0x00};
+static BYTE test_params[] = {0x05, 0x00};
+static BYTE test_digest[] = {0xed,0xd6,0x9c,0x9c,0xb2,0xfc,0xaa,0x03,0xe8,0xd3,0x20,0xf6,0xab,0x28,0xc3,0xff,
+                             0xbd,0x07,0x36,0xf5};
+
+static void test_catalog_put(void)
+{
+    static const GUID flat_subject = {0xde351a42,0x8e59,0x11d0,{0x8c,0x47,0x00,0xc0,0x4f,0xc2,0x95,0xee}};
+    const BYTE *digest = test_digest;
+    SIP_INDIRECT_DATA indirect;
+    WCHAR filename[MAX_PATH], temp_path[MAX_PATH], tag1[] = L"membertag", name1[] = L"CatName",
+          mname[] = L"FilePath", mvalue[] = L"dir\\file.txt", missing[] = L"nonexistent", mfile[] = L"file.txt";
+    CRYPTCATATTRIBUTE *attr, *cattr;
+    CRYPTCATMEMBER *member, *m2;
+    CRYPTCATSTORE *store;
+    HANDLE cat;
+    BOOL ret;
+    int count;
+
+    if (!pCryptCATPutMemberInfo || !pCryptCATPersistStore)
+    {
+        win_skip("CryptCATPutMemberInfo is not available\n");
+        return;
+    }
+
+    memset(&indirect, 0, sizeof(indirect));
+    indirect.Data.pszObjId = (char *)"1.3.6.1.4.1.311.2.1.25";
+    indirect.Data.Value.cbData = sizeof(test_value);
+    indirect.Data.Value.pbData = test_value;
+    indirect.DigestAlgorithm.pszObjId = (char *)"1.3.14.3.2.26";
+    indirect.DigestAlgorithm.Parameters.cbData = sizeof(test_params);
+    indirect.DigestAlgorithm.Parameters.pbData = test_params;
+    indirect.Digest.cbData = sizeof(test_digest);
+    indirect.Digest.pbData = test_digest;
+
+    GetTempPathW(ARRAY_SIZE(temp_path), temp_path);
+    GetTempFileNameW(temp_path, L"cat", 0, filename);
+
+    cat = pCryptCATOpen(filename, CRYPTCAT_OPEN_CREATENEW, 0, CRYPTCAT_VERSION_1, 0);
+    ok(cat != INVALID_HANDLE_VALUE, "CryptCATOpen failed %lu\n", GetLastError());
+
+    SetLastError(0xdeadbeef);
+    attr = pCryptCATPutCatAttrInfo(cat, name1, CRYPTCAT_ATTR_AUTHENTICATED | CRYPTCAT_ATTR_NAMEASCII |
+                                   CRYPTCAT_ATTR_DATAASCII, sizeof(L"catvalue"), (BYTE *)L"catvalue");
+    ok(attr != NULL, "CryptCATPutCatAttrInfo failed %lu\n", GetLastError());
+    if (!attr) { pCryptCATClose(cat); DeleteFileW(filename); return; }
+    ok(attr->cbStruct == sizeof(*attr), "got %lu\n", attr->cbStruct);
+    ok(!lstrcmpW(attr->pwszReferenceTag, name1), "got %s\n", wine_dbgstr_w(attr->pwszReferenceTag));
+    ok(attr->cbValue == sizeof(L"catvalue"), "got %lu\n", attr->cbValue);
+    ok(!memcmp(attr->pbValue, L"catvalue", sizeof(L"catvalue")), "wrong value\n");
+
+    SetLastError(0xdeadbeef);
+    member = pCryptCATPutMemberInfo(cat, mfile, tag1, (GUID *)&flat_subject, 0x200, sizeof(indirect),
+                                    (BYTE *)&indirect);
+    ok(member != NULL, "CryptCATPutMemberInfo failed %lu\n", GetLastError());
+    if (!member) { pCryptCATClose(cat); DeleteFileW(filename); return; }
+    ok(member->cbStruct == sizeof(*member), "got %lu\n", member->cbStruct);
+    ok(!lstrcmpW(member->pwszReferenceTag, tag1), "got %s\n", wine_dbgstr_w(member->pwszReferenceTag));
+    ok(IsEqualGUID(&member->gSubjectType, &flat_subject), "got %s\n", wine_dbgstr_guid(&member->gSubjectType));
+    ok(member->dwCertVersion == 0x200, "got %#lx\n", member->dwCertVersion);
+    ok(member->pIndirectData != NULL, "no indirect data\n");
+    ok(member->pIndirectData->Digest.cbData == sizeof(test_digest) &&
+       !memcmp(member->pIndirectData->Digest.pbData, digest, sizeof(test_digest)), "wrong digest\n");
+
+    attr = pCryptCATPutAttrInfo(cat, member, mname, CRYPTCAT_ATTR_AUTHENTICATED | CRYPTCAT_ATTR_NAMEASCII |
+                                CRYPTCAT_ATTR_DATAASCII, sizeof(mvalue), (BYTE *)mvalue);
+    ok(attr != NULL, "CryptCATPutAttrInfo failed %lu\n", GetLastError());
+
+    SetLastError(0xdeadbeef);
+    attr = pCryptCATPutAttrInfo(NULL, member, mname, 0x10010001, sizeof(mvalue), (BYTE *)mvalue);
+    ok(!attr, "expected failure\n");
+    ok(GetLastError() == ERROR_INVALID_PARAMETER, "got error %lu\n", GetLastError());
+
+    ret = pCryptCATPersistStore(cat);
+    ok(ret, "CryptCATPersistStore failed %lu\n", GetLastError());
+    ret = pCryptCATClose(cat);
+    ok(ret, "CryptCATClose failed %lu\n", GetLastError());
+
+    cat = pCryptCATOpen(filename, CRYPTCAT_OPEN_EXISTING, 0, 0, 0);
+    ok(cat != INVALID_HANDLE_VALUE, "CryptCATOpen failed %lu\n", GetLastError());
+
+    if (pCryptCATStoreFromHandle)
+    {
+        store = pCryptCATStoreFromHandle(cat);
+        ok(store != NULL, "CryptCATStoreFromHandle failed %lu\n", GetLastError());
+        ok(store->cbStruct == sizeof(*store), "got %lu\n", store->cbStruct);
+        ok(store->dwPublicVersion == CRYPTCAT_VERSION_1, "got %#lx\n", store->dwPublicVersion);
+    }
+
+    count = 0;
+    member = NULL;
+    while ((member = pCryptCATEnumerateMember(cat, member)))
+    {
+        ok(!lstrcmpW(member->pwszReferenceTag, tag1), "got %s\n", wine_dbgstr_w(member->pwszReferenceTag));
+        ok(IsEqualGUID(&member->gSubjectType, &flat_subject), "got %s\n", wine_dbgstr_guid(&member->gSubjectType));
+        ok(member->dwCertVersion == 0x200, "got %#lx\n", member->dwCertVersion);
+        ok(member->pIndirectData->Digest.cbData == sizeof(test_digest) &&
+           !memcmp(member->pIndirectData->Digest.pbData, digest, sizeof(test_digest)), "wrong digest\n");
+
+        attr = pCryptCATEnumerateAttr(cat, member, NULL);
+        ok(attr != NULL, "CryptCATEnumerateAttr failed %lu\n", GetLastError());
+        if (attr)
+        {
+            ok(!lstrcmpW(attr->pwszReferenceTag, mname), "got %s\n", wine_dbgstr_w(attr->pwszReferenceTag));
+            ok(attr->cbValue == sizeof(mvalue) && !memcmp(attr->pbValue, mvalue, sizeof(mvalue)),
+               "wrong attribute value\n");
+            ok(!pCryptCATEnumerateAttr(cat, member, attr), "expected one attribute\n");
+        }
+        count++;
+    }
+    ok(count == 1, "got %d members\n", count);
+
+    m2 = pCryptCATGetMemberInfo(cat, tag1);
+    ok(m2 != NULL, "CryptCATGetMemberInfo failed %lu\n", GetLastError());
+    SetLastError(0xdeadbeef);
+    m2 = pCryptCATGetMemberInfo(cat, missing);
+    ok(!m2, "expected failure\n");
+
+    count = 0;
+    cattr = NULL;
+    while ((cattr = pCryptCATEnumerateCatAttr(cat, cattr)))
+    {
+        ok(!lstrcmpW(cattr->pwszReferenceTag, name1), "got %s\n", wine_dbgstr_w(cattr->pwszReferenceTag));
+        count++;
+    }
+    ok(count == 1, "got %d catalog attributes\n", count);
+
+    cattr = pCryptCATGetCatAttrInfo(cat, name1);
+    ok(cattr != NULL, "CryptCATGetCatAttrInfo failed %lu\n", GetLastError());
+    SetLastError(0xdeadbeef);
+    cattr = pCryptCATGetCatAttrInfo(cat, missing);
+    ok(!cattr, "expected failure\n");
+    ok(GetLastError() == CRYPT_E_NOT_FOUND, "got error %#lx\n", GetLastError());
+
+    member = pCryptCATGetMemberInfo(cat, tag1);
+    attr = pCryptCATGetAttrInfo(cat, member, mname);
+    ok(attr != NULL, "CryptCATGetAttrInfo failed %lu\n", GetLastError());
+    SetLastError(0xdeadbeef);
+    attr = pCryptCATGetAttrInfo(cat, member, missing);
+    ok(!attr, "expected failure\n");
+    ok(GetLastError() == CRYPT_E_NOT_FOUND, "got error %#lx\n", GetLastError());
+
+    ret = pCryptCATClose(cat);
+    ok(ret, "CryptCATClose failed %lu\n", GetLastError());
+    DeleteFileW(filename);
+}
+
+static void test_catalog_v2(void)
+{
+    static const char cdf[] =
+        "[CatalogHeader]\r\n"
+        "Name=winetest2.cat\r\n"
+        "ResultDir=.\\\r\n"
+        "CatalogVersion=2\r\n"
+        "HashAlgorithms=SHA256\r\n"
+        "CATATTR1=0x10010001:ZeroSize:empty.txt\r\n"
+        "[CatalogFiles]\r\n"
+        "<HASH>.\\winetest2.cdf=.\\winetest2.cdf\r\n"
+        "<HASH>.\\winetest2.cdfATTR1=0x10010001:FilePath:sub\\winetest2.cdf\r\n";
+    static WCHAR cdffileW[] = L"winetest2.cdf";
+    static WCHAR catfileW[] = L"winetest2.cat";
+    CRYPTCATATTRIBUTE *attr;
+    CRYPTCATMEMBER *member;
+    CRYPTCATCDF *catcdf;
+    CRYPTCATSTORE *store;
+    WCHAR *tag;
+    HANDLE cat;
+    BOOL ret;
+    int sha1 = 0, sha256 = 0, count;
+
+    if (!pCryptCATCDFEnumAttributesWithCDFTag || !pCryptCATStoreFromHandle)
+    {
+        win_skip("CryptCATCDFEnumAttributesWithCDFTag is not available\n");
+        return;
+    }
+
+    create_cdf_file("winetest2.cdf", cdf);
+
+    catcdf = pCryptCATCDFOpen(cdffileW, NULL);
+    ok(catcdf != NULL, "CryptCATCDFOpen failed %lu\n", GetLastError());
+    if (!catcdf)
+    {
+        DeleteFileA("winetest2.cdf");
+        return;
+    }
+
+    attr = NULL;
+    count = 0;
+    while ((attr = pCryptCATCDFEnumCatAttributes(catcdf, attr, NULL))) count++;
+    ok(count == 1, "got %d attributes\n", count);
+
+    member = NULL;
+    tag = NULL;
+    count = 0;
+    while ((tag = pCryptCATCDFEnumMembersByCDFTagEx(catcdf, tag, NULL, &member, FALSE, NULL)))
+    {
+        ok(!lstrcmpW(tag, L"<HASH>.\\winetest2.cdf"), "got %s\n", wine_dbgstr_w(tag));
+        attr = NULL;
+        while ((attr = pCryptCATCDFEnumAttributesWithCDFTag(catcdf, tag, member, attr, NULL)))
+            ok(!lstrcmpW(attr->pwszReferenceTag, L"FilePath"), "got %s\n", wine_dbgstr_w(attr->pwszReferenceTag));
+        count++;
+    }
+    ok(count == 1, "got %d members\n", count);
+
+    ret = pCryptCATCDFClose(catcdf);
+    ok(ret, "CryptCATCDFClose failed %lu\n", GetLastError());
+
+    cat = pCryptCATOpen(catfileW, CRYPTCAT_OPEN_EXISTING, 0, 0, 0);
+    ok(cat != INVALID_HANDLE_VALUE, "CryptCATOpen failed %lu\n", GetLastError());
+
+    store = pCryptCATStoreFromHandle(cat);
+    ok(store != NULL, "CryptCATStoreFromHandle failed %lu\n", GetLastError());
+    ok(store->dwPublicVersion == CRYPTCAT_VERSION_2, "got %#lx\n", store->dwPublicVersion);
+
+    count = 0;
+    attr = NULL;
+    while ((attr = pCryptCATEnumerateCatAttr(cat, attr)))
+    {
+        ok(!lstrcmpW(attr->pwszReferenceTag, L"ZeroSize"), "got %s\n", wine_dbgstr_w(attr->pwszReferenceTag));
+        count++;
+    }
+    ok(count == 1, "got %d catalog attributes\n", count);
+
+    /* version 2 catalogs list each file twice, with its SHA-256 and with its SHA-1 digest */
+    member = NULL;
+    while ((member = pCryptCATEnumerateMember(cat, member)))
+    {
+        ok(member->pIndirectData != NULL, "no indirect data\n");
+        if (!strcmp(member->pIndirectData->DigestAlgorithm.pszObjId, "1.3.14.3.2.26"))
+        {
+            ok(member->pIndirectData->Digest.cbData == 20, "got %lu\n", member->pIndirectData->Digest.cbData);
+            ok(lstrlenW(member->pwszReferenceTag) == 40, "got %s\n", wine_dbgstr_w(member->pwszReferenceTag));
+            sha1++;
+        }
+        else
+        {
+            ok(!strcmp(member->pIndirectData->DigestAlgorithm.pszObjId, "2.16.840.1.101.3.4.2.1"),
+               "got %s\n", member->pIndirectData->DigestAlgorithm.pszObjId);
+            ok(member->pIndirectData->Digest.cbData == 32, "got %lu\n", member->pIndirectData->Digest.cbData);
+            ok(lstrlenW(member->pwszReferenceTag) == 64, "got %s\n", wine_dbgstr_w(member->pwszReferenceTag));
+            sha256++;
+        }
+        attr = pCryptCATEnumerateAttr(cat, member, NULL);
+        ok(attr != NULL, "CryptCATEnumerateAttr failed %lu\n", GetLastError());
+        if (attr) ok(!lstrcmpW(attr->pwszReferenceTag, L"FilePath"), "got %s\n", wine_dbgstr_w(attr->pwszReferenceTag));
+    }
+    ok(sha1 == 1 && sha256 == 1, "got %d SHA-1 and %d SHA-256 members\n", sha1, sha256);
+
+    ret = pCryptCATClose(cat);
+    ok(ret, "CryptCATClose failed %lu\n", GetLastError());
+    DeleteFileA("winetest2.cat");
+    DeleteFileA("winetest2.cdf");
+}
+
 static const struct
 {
     WORD e_magic;      /* 00: MZ Header signature */
@@ -1481,6 +1756,8 @@ START_TEST(crypt)
     test_cdf_parsing();
     /* Create a catalog file out of our own catalog definition file */
     test_create_catalog_file();
+    test_catalog_put();
+    test_catalog_v2();
     test_CryptCATAdminAddRemoveCatalog();
     test_sip();
 }
