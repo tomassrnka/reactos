@@ -812,10 +812,11 @@ ConDrvWriteConsole(IN PCONSOLE Console,
     {
         if (NT_SUCCESS(Status))
         {
+            /* An ANSI string can convert to fewer characters (DBCS, UTF-8) */
             Status = TermWriteStream(Console,
                                      ScreenBuffer,
                                      Buffer,
-                                     NumCharsToWrite,
+                                     Unicode ? NumCharsToWrite : Length,
                                      TRUE);
             if (NT_SUCCESS(Status))
             {
