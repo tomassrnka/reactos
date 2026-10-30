@@ -437,6 +437,112 @@ Test_PageFileInformation(void)
     }
 }
 
+typedef struct _PAGEFILE_RACE
+{
+    PVOID Buffer;
+    ULONG Size;
+    volatile LONG Stop;
+    volatile LONG Calls;
+    volatile LONG Faults;
+    volatile LONG Bad;
+} PAGEFILE_RACE;
+
+static
+DWORD
+WINAPI
+PageFileQueryThread(
+    _In_ PVOID Context)
+{
+    PAGEFILE_RACE *Race = Context;
+    ULONG Length;
+    NTSTATUS Status;
+
+    while (!Race->Stop)
+    {
+        Status = NtQuerySystemInformation(SystemPageFileInformation, Race->Buffer, Race->Size, &Length);
+        InterlockedIncrement(&Race->Calls);
+        if (Status == STATUS_ACCESS_VIOLATION)
+            InterlockedIncrement(&Race->Faults);
+        else if (!NT_SUCCESS(Status) && Status != STATUS_INFO_LENGTH_MISMATCH)
+            InterlockedIncrement(&Race->Bad);
+    }
+    return 0;
+}
+
+static
+void
+Test_PageFileBufferFaults(void)
+{
+    PAGEFILE_RACE Race;
+    HANDLE Thread, Section;
+    PVOID View;
+    NTSTATUS Status;
+    ULONG Length = 0, Iter;
+    DWORD Wait;
+    UCHAR Small[4096];
+
+    Status = NtQuerySystemInformation(SystemPageFileInformation, Small, sizeof(Small), &Length);
+    if (!NT_SUCCESS(Status) || Length == 0)
+    {
+        skip("No paging file information (0x%lx)\n", Status);
+        return;
+    }
+
+    /* Another thread decommits the buffer while it is being filled: faults must be reported, not hang or bugcheck */
+    RtlZeroMemory(&Race, sizeof(Race));
+    Race.Size = 0x10000;
+    Race.Buffer = VirtualAlloc(NULL, Race.Size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    ok(Race.Buffer != NULL, "VirtualAlloc failed\n");
+    if (Race.Buffer)
+    {
+        Thread = CreateThread(NULL, 0, PageFileQueryThread, &Race, 0, NULL);
+        ok(Thread != NULL, "CreateThread failed\n");
+        if (Thread)
+        {
+            for (Iter = 0; Iter < 20000; Iter++)
+            {
+                VirtualFree(Race.Buffer, Race.Size, MEM_DECOMMIT);
+                VirtualAlloc(Race.Buffer, Race.Size, MEM_COMMIT, PAGE_READWRITE);
+            }
+            InterlockedExchange(&Race.Stop, 1);
+            Wait = WaitForSingleObject(Thread, 30000);
+            ok_dec(Wait, WAIT_OBJECT_0);
+            if (Wait != WAIT_OBJECT_0)
+                TerminateThread(Thread, 0);
+            CloseHandle(Thread);
+            ok(Race.Calls > 0, "no query completed\n");
+            ok(Race.Bad == 0, "%ld queries failed with an unexpected status\n", Race.Bad);
+        }
+        VirtualFree(Race.Buffer, 0, MEM_RELEASE);
+    }
+
+    /* The system still answers (a leaked lock would hang or bugcheck here) */
+    Length = 0;
+    Status = NtQuerySystemInformation(SystemPageFileInformation, Small, sizeof(Small), &Length);
+    ok_hex(Status, STATUS_SUCCESS);
+
+    /* A view of a paging file backed section: its pages may be swapped in while the buffer is written */
+    Section = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, 0x100000, NULL);
+    ok(Section != NULL, "CreateFileMappingW failed %lu\n", GetLastError());
+    if (Section)
+    {
+        View = MapViewOfFile(Section, FILE_MAP_WRITE, 0, 0, 0);
+        ok(View != NULL, "MapViewOfFile failed %lu\n", GetLastError());
+        if (View)
+        {
+            RtlFillMemory(View, 0x100000, 0xab);
+            SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
+            Length = 0;
+            Status = NtQuerySystemInformation(SystemPageFileInformation, View, 0x100000, &Length);
+            ok_hex(Status, STATUS_SUCCESS);
+            if (NT_SUCCESS(Status))
+                ok(((PSYSTEM_PAGEFILE_INFORMATION)View)->TotalSize != 0, "TotalSize is 0\n");
+            UnmapViewOfFile(View);
+        }
+        CloseHandle(Section);
+    }
+}
+
 START_TEST(NtQuerySystemInformation)
 {
     NTSTATUS Status;
@@ -449,6 +555,7 @@ START_TEST(NtQuerySystemInformation)
 
     Test_ThreadStackLimits();
     Test_PageFileInformation();
+    Test_PageFileBufferFaults();
     Test_ProcessImageNames();
     Test_FaultReleasesProcessLock();
 }

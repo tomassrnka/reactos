@@ -346,7 +346,22 @@ MmFreeSwapPage(SWAPENTRY Entry)
  * Fill SYSTEM_PAGEFILE_INFORMATION entries for SystemPageFileInformation. As
  * on Windows there is one entry per paging file, each followed by its
  * NUL-terminated NT name (\??\C:\pagefile.sys); the sizes are in pages.
+ *
+ * The image is built in a pool buffer under the paging file lock and copied to
+ * the caller's buffer after the lock is released: a fault on the caller's
+ * buffer (decommitted by another thread, or a view of a paging file backed
+ * section whose swap-in takes the lock again) must not happen with the lock held.
  */
+static
+ULONG
+MiPagingFileEntrySize(
+    _In_ PMMPAGING_FILE PagingFile)
+{
+    return ALIGN_UP_BY(sizeof(SYSTEM_PAGEFILE_INFORMATION) +
+                       PagingFile->PageFileName.Length + sizeof(WCHAR),
+                       sizeof(PVOID));
+}
+
 NTSTATUS
 NTAPI
 MmQueryPagingFileInformation(
@@ -354,8 +369,8 @@ MmQueryPagingFileInformation(
     _In_ ULONG Size,
     _Out_ PULONG ReqSize)
 {
-    PSYSTEM_PAGEFILE_INFORMATION Entry, Previous = NULL;
-    ULONG i, Needed = 0, EntrySize;
+    PSYSTEM_PAGEFILE_INFORMATION Entry, Previous, Image = NULL;
+    ULONG i, Needed, ImageSize = 0, Tries;
     PMMPAGING_FILE PagingFile;
     PWCHAR Name;
 
@@ -367,35 +382,48 @@ MmQueryPagingFileInformation(
         return STATUS_INFO_LENGTH_MISMATCH;
     }
 
-    KeAcquireGuardedMutex(&MmPageFileCreationLock);
-
-    for (i = 0; i < MAX_PAGING_FILES; i++)
+    for (Tries = 0; ; Tries++)
     {
-        PagingFile = MmPagingFile[i];
-        if (PagingFile == NULL)
-            continue;
-        Needed += ALIGN_UP_BY(sizeof(SYSTEM_PAGEFILE_INFORMATION) +
-                              PagingFile->PageFileName.Length + sizeof(WCHAR),
-                              sizeof(PVOID));
-    }
+        KeAcquireGuardedMutex(&MmPageFileCreationLock);
 
-    *ReqSize = Needed;
-    if (Size < Needed)
-    {
+        Needed = 0;
+        for (i = 0; i < MAX_PAGING_FILES; i++)
+        {
+            if (MmPagingFile[i] != NULL)
+                Needed += MiPagingFileEntrySize(MmPagingFile[i]);
+        }
+
+        if (Needed > Size)
+        {
+            KeReleaseGuardedMutex(&MmPageFileCreationLock);
+            if (Image != NULL)
+                ExFreePoolWithTag(Image, TAG_MM);
+            *ReqSize = Needed;
+            return STATUS_INFO_LENGTH_MISMATCH;
+        }
+
+        if (Needed == 0 || (Image != NULL && Needed <= ImageSize))
+            break;
+
+        /* A paging file appeared meanwhile or the first pass: allocate outside of the lock */
         KeReleaseGuardedMutex(&MmPageFileCreationLock);
-        return STATUS_INFO_LENGTH_MISMATCH;
+        if (Image != NULL)
+            ExFreePoolWithTag(Image, TAG_MM);
+        Image = ExAllocatePoolWithTag(PagedPool, Needed, TAG_MM);
+        if (Image == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+        ImageSize = Needed;
     }
 
-    Entry = Buffer;
+    /* The lock is held; the image has room for every entry */
+    Entry = Image;
+    Previous = NULL;
     for (i = 0; i < MAX_PAGING_FILES; i++)
     {
         PagingFile = MmPagingFile[i];
         if (PagingFile == NULL)
             continue;
 
-        EntrySize = ALIGN_UP_BY(sizeof(SYSTEM_PAGEFILE_INFORMATION) +
-                                PagingFile->PageFileName.Length + sizeof(WCHAR),
-                                sizeof(PVOID));
         Name = (PWCHAR)(Entry + 1);
         RtlCopyMemory(Name, PagingFile->PageFileName.Buffer, PagingFile->PageFileName.Length);
         Name[PagingFile->PageFileName.Length / sizeof(WCHAR)] = UNICODE_NULL;
@@ -406,15 +434,30 @@ MmQueryPagingFileInformation(
         Entry->PeakUsage = (ULONG)PagingFile->PeakUsage;
         Entry->PageFileName.Length = PagingFile->PageFileName.Length;
         Entry->PageFileName.MaximumLength = PagingFile->PageFileName.Length + sizeof(WCHAR);
-        Entry->PageFileName.Buffer = Name;
+        /* The name as the caller's buffer will see it */
+        Entry->PageFileName.Buffer = (PWCHAR)((PUCHAR)Buffer + ((PUCHAR)Name - (PUCHAR)Image));
 
         if (Previous != NULL)
             Previous->NextEntryOffset = (ULONG)((PUCHAR)Entry - (PUCHAR)Previous);
         Previous = Entry;
-        Entry = (PSYSTEM_PAGEFILE_INFORMATION)((PUCHAR)Entry + EntrySize);
+        Entry = (PSYSTEM_PAGEFILE_INFORMATION)((PUCHAR)Entry + MiPagingFileEntrySize(PagingFile));
     }
-
     KeReleaseGuardedMutex(&MmPageFileCreationLock);
+
+    *ReqSize = Needed;
+    if (Image != NULL)
+    {
+        /* May fault; the exception unwinds in the caller with nothing held but the image */
+        _SEH2_TRY
+        {
+            RtlCopyMemory(Buffer, Image, Needed);
+        }
+        _SEH2_FINALLY
+        {
+            ExFreePoolWithTag(Image, TAG_MM);
+        }
+        _SEH2_END;
+    }
     return STATUS_SUCCESS;
 }
 

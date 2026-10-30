@@ -2349,12 +2349,26 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
                 Status = NtQuerySystemInformation(a[0], Native, NativeNeeded, &NativeNeeded);
                 if (Status != STATUS_INFO_LENGTH_MISMATCH || Tries >= 8) break;
             }
+            if (Status == STATUS_INFO_LENGTH_MISMATCH)
+            {
+                /* Paging files kept appearing: report a size that covers the native one */
+                if (a[3]) U(3) = NativeNeeded;
+                return Status;
+            }
             if (!NT_SUCCESS(Status)) return Status;
+            /* Validate the native list (entries and names inside the returned length) */
             for (Offset = 0; NativeNeeded >= sizeof(*Native); )
             {
                 SYSTEM_PAGEFILE_INFORMATION *N = (SYSTEM_PAGEFILE_INFORMATION *)((PUCHAR)Native + Offset);
+                PUCHAR NameEnd;
+                if (Offset > NativeNeeded || NativeNeeded - Offset < sizeof(*N)) return STATUS_INFO_LENGTH_MISMATCH;
+                NameEnd = (PUCHAR)N->PageFileName.Buffer + N->PageFileName.Length;
+                if ((PUCHAR)N->PageFileName.Buffer < (PUCHAR)(N + 1) || NameEnd < (PUCHAR)N->PageFileName.Buffer ||
+                    NameEnd > (PUCHAR)Native + NativeNeeded)
+                    return STATUS_INFO_LENGTH_MISMATCH;
                 GuestNeeded += ALIGN_UP_BY(sizeof(WOW64_SPFI) + N->PageFileName.Length + sizeof(WCHAR), sizeof(ULONG));
                 if (!N->NextEntryOffset) break;
+                if (N->NextEntryOffset < sizeof(*N)) return STATUS_INFO_LENGTH_MISMATCH;
                 Offset += N->NextEntryOffset;
             }
             if (a[3]) U(3) = GuestNeeded;
