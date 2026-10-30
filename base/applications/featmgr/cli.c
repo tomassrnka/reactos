@@ -28,7 +28,7 @@ static void Usage(void)
 {
     Out(L"featmgr - ReactOS-Nitro Optional Features manager (FEATMGMT-01)\n\n");
     Out(L"Usage:\n");
-    Out(L"  featmgr /list [/state:<Enabled|Disabled|NotInstalled>] [/tier:<os|software>]\n");
+    Out(L"  featmgr /list [/state:<Enabled|Disabled|NotInstalled>] [/tier:<os|software>] [/source:<src>]\n");
     Out(L"                               list catalog features + state (optionally filtered)\n");
     Out(L"  featmgr /state   <id>        print just the state word (scripting)\n");
     Out(L"  featmgr /query   <id>        show one feature in detail\n");
@@ -41,6 +41,14 @@ static void Usage(void)
     Out(L"  featmgr /import-rapps [<appdb-dir>] [/clean] [/anyarch]\n");
     Out(L"                               convert the RAPPS database (default %%LOCALAPPDATA%%\\RApps\\appdb)\n");
     Out(L"                               into Tier=software catalog entries (Catalog\\Software)\n");
+    Out(L"  featmgr /import-scoop [main|extras|<bucket> /trust] [/dir:<manifest-dir>] [/clean] [/limit:N]\n");
+    Out(L"                       [/unverified]\n");
+    Out(L"                               convert Scoop bucket manifests (read from the buckets Scoop already\n");
+    Out(L"                               has) into Tier=software entries; no bucket = every official bucket\n");
+    Out(L"                               present. Install/uninstall then run 'scoop install|uninstall'.\n");
+    Out(L"                               /trust = explicit consent for a bucket that is not main/extras;\n");
+    Out(L"                               /unverified = also import manifests without a hash\n");
+    Out(L"  featmgr /scoop-buckets       list the buckets Scoop has (and whether featmgr treats them as official)\n");
     Out(L"  featmgr /help                this text\n");
 }
 
@@ -49,6 +57,7 @@ static int DoList(int argc, WCHAR **argv)
     FM_FEATURE *arr;
     int n, i, shown = 0, a;
     int fState = -1, fTier = -1;
+    LPCWSTR fSource = NULL;
 
     for (a = 2; a < argc; a++)
     {
@@ -67,6 +76,8 @@ static int DoList(int argc, WCHAR **argv)
             else if (!_wcsicmp(v, L"software")) fTier = FM_TIER_SOFTWARE;
             else { Out(L"error: bad tier filter '%s'\n", v); return 2; }
         }
+        else if (!_wcsnicmp(argv[a], L"/source:", 8))
+            fSource = argv[a] + 8;       /* "scoop" matches scoop/main and scoop/extras */
         else { Out(L"error: unknown /list option '%s'\n", argv[a]); return 2; }
     }
     n = FmEnumFeatures(&arr);
@@ -78,6 +89,7 @@ static int DoList(int argc, WCHAR **argv)
         WCHAR state[32];
         if (fState >= 0 && (int)arr[i].State != fState) continue;
         if (fTier >= 0 && (int)arr[i].Tier != fTier) continue;
+        if (fSource && _wcsnicmp(arr[i].Source, fSource, wcslen(fSource))) continue;
         shown++;
         _snwprintf(state, 31, L"%s%s", FmStateStr(arr[i].State),
                    arr[i].PayloadAvailable ? L"" : L"*");
@@ -119,6 +131,15 @@ static int DoQuery(LPCWSTR id)
                                     L"License", L"Publisher", L"URLSite" };
         int i;
         if (f.Provider[0]) Out(L"Provider:     %s\n", f.Provider);
+        if (f.Source[0]) Out(L"Source:       %s\n", f.Source);
+        {
+            static const WCHAR *sk[] = { L"App", L"Bucket", L"Homepage", L"License", L"Verified" };
+            for (i = 0; i < 5; i++)
+            {
+                GetPrivateProfileStringW(L"Scoop", sk[i], L"", v, 512, f.ManifestPath);
+                if (v[0]) Out(L"Scoop.%s: %s\n", sk[i], v);
+            }
+        }
         GetPrivateProfileStringW(L"Rapps", L"Pkg", L"", v, 512, f.ManifestPath);
         if (v[0]) Out(L"Rapps.Pkg:    %s\n", v);
         GetPrivateProfileStringW(L"Rapps", L"Category", L"", v, 512, f.ManifestPath);
@@ -146,6 +167,27 @@ static int DoImportRapps(int argc, WCHAR **argv)
         else { Out(L"error: unknown /import-rapps option '%s'\n", argv[a]); return 2; }
     }
     n = FmImportRapps(dir, fl, &skipped, stdout);
+    return n < 0 ? 3 : 0;
+}
+
+static int DoImportScoop(int argc, WCHAR **argv)
+{
+    LPCWSTR bucket = NULL, dir = NULL;
+    DWORD fl = 0;
+    int a, n, skipped = 0, limit = 0;
+
+    for (a = 2; a < argc; a++)
+    {
+        if (!_wcsicmp(argv[a], L"/clean")) fl |= FM_SCOOP_CLEAN;
+        else if (!_wcsicmp(argv[a], L"/trust")) fl |= FM_SCOOP_TRUST;
+        else if (!_wcsicmp(argv[a], L"/unverified")) fl |= FM_SCOOP_UNVERIFIED;
+        else if (!_wcsnicmp(argv[a], L"/dir:", 5)) dir = argv[a] + 5;
+        else if (!_wcsnicmp(argv[a], L"/limit:", 7)) limit = _wtoi(argv[a] + 7);
+        else if (argv[a][0] != L'/' && !bucket) bucket = argv[a];
+        else { Out(L"error: unknown /import-scoop option '%s'\n", argv[a]); return 2; }
+    }
+    if (dir && !bucket) { Out(L"error: /dir needs a bucket name\n"); return 2; }
+    n = FmImportScoop(bucket, dir, fl, limit, &skipped, stdout);
     return n < 0 ? 3 : 0;
 }
 
@@ -178,6 +220,12 @@ int wmain(int argc, WCHAR **argv)
 
     if (!_wcsicmp(cmd, L"/import-rapps") || !_wcsicmp(cmd, L"import-rapps"))
         return DoImportRapps(argc, argv);
+
+    if (!_wcsicmp(cmd, L"/import-scoop") || !_wcsicmp(cmd, L"import-scoop"))
+        return DoImportScoop(argc, argv);
+
+    if (!_wcsicmp(cmd, L"/scoop-buckets") || !_wcsicmp(cmd, L"scoop-buckets"))
+        return FmScoopListBuckets(stdout) < 0 ? 3 : 0;
 
     if (argc < 3) { Out(L"error: missing feature id\n\n"); Usage(); return 2; }
 

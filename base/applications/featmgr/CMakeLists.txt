@@ -4,13 +4,13 @@ project(featmgr)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
 # --- CLI frontend (automation): featmgr /list /query /enable /disable ---
-add_executable(featmgr cli.c engine.c rapps_import.c featmgr.rc)
+add_executable(featmgr cli.c engine.c rapps_import.c scoop.c featmgr.rc)
 set_module_type(featmgr win32cui UNICODE)
 add_importlibs(featmgr advapi32 shlwapi shell32 user32 msvcrt kernel32 ntdll)
 add_cd_file(TARGET featmgr DESTINATION reactos/system32 FOR all)
 
 # --- GUI applet: "Optional Features" (Turn features on/off) ---
-add_executable(optfeatures gui.c engine.c rapps_import.c optfeatures.rc)
+add_executable(optfeatures gui.c engine.c rapps_import.c scoop.c optfeatures.rc)
 set_module_type(optfeatures win32gui UNICODE)
 add_importlibs(optfeatures advapi32 shlwapi shell32 comctl32 user32 gdi32 msvcrt kernel32 ntdll)
 add_cd_file(TARGET optfeatures DESTINATION reactos/system32 FOR all)
@@ -42,5 +42,18 @@ if(ARCH STREQUAL "amd64")
     add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/powershell-7.ini
                 DESTINATION reactos/Featmgr/Catalog FOR all)
     add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/powershell-7.txt
+                DESTINATION reactos/Featmgr/Catalog FOR all)
+endif()
+
+# --- Scoop (SCOOP-FEATMGR-01): software-tier entry + its install/uninstall scripts (amd64 only: it needs
+# PowerShell 7, which has no x86 build yet; on i386 the feature is not in the catalog and
+# "featmgr /import-scoop" refuses). Only the manifest and two small scripts ship; the Scoop installer is
+# downloaded at install time (pinned commit + SHA-256 checked in scoop-install.ps1) and never bundled.
+if(ARCH STREQUAL "amd64")
+    add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/scoop.ini
+                DESTINATION reactos/Featmgr/Catalog FOR all)
+    add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/scoop-install.ps1
+                DESTINATION reactos/Featmgr/Catalog FOR all)
+    add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/scoop-uninstall.ps1
                 DESTINATION reactos/Featmgr/Catalog FOR all)
 endif()

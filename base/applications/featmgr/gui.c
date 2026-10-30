@@ -28,6 +28,9 @@
 #define IDC_APPLY      1012
 #define IDC_INSTR      1013
 #define IDC_IMPORT     1014
+#define IDC_IMPORTSC   1015
+#define IDC_SOURCE     1016
+#define IDC_SRCLABEL   1017
 
 /* A long software-tier install (download + run installer) must not run on the UI
  * thread or the dialog freezes. The op runs on a worker thread that posts this
@@ -35,7 +38,10 @@
 #define WM_APP_OPDONE  (WM_APP + 1)
 
 static HWND g_hTab, g_hList, g_hDesc, g_hInstr;
-static HWND g_hInstall, g_hEnable, g_hDisable, g_hUninstall, g_hImport;
+static HWND g_hInstall, g_hEnable, g_hDisable, g_hUninstall, g_hImport, g_hImportSc;
+static HWND g_hSource, g_hSrcLabel;
+static WCHAR g_srcFilter[32];     /* Software tab source filter ("" = all sources) */
+static BOOL g_startSoftware;      /* command line /software: open on the Software tab */
 static HWND g_hOK, g_hCancel, g_hApply, g_hRefresh, g_hClose;
 static HFONT g_hFont = NULL;
 static FM_FEATURE *g_arr = NULL;
@@ -63,7 +69,7 @@ static DWORD RemoveGuard(const FM_FEATURE *f, LPWSTR dep, DWORD cch)
 {
     if (cch) dep[0] = L'\0';
     if (!f->Removable) return ERROR_ACCESS_DENIED;
-    if (FmGetDependents(f->Id, dep, cch)) return ERROR_DEPENDENT_SERVICES_RUNNING;
+    if (FmGetDependentsIn(g_arr, g_count, f->Id, dep, cch)) return ERROR_DEPENDENT_SERVICES_RUNNING;
     return 0;
 }
 
@@ -117,6 +123,7 @@ static void Populate(LPCWSTR keepId)
     {
         WCHAR buf[FM_MAX_DEPS * 2 + 64];
         if ((g_arr[i].Tier == FM_TIER_SOFTWARE ? 1 : 0) != g_tier) continue;
+        if (!os && g_srcFilter[0] && _wcsicmp(g_arr[i].Source, g_srcFilter)) continue;
 
         ZeroMemory(&it, sizeof(it));
         it.mask = LVIF_TEXT | LVIF_PARAM;
@@ -130,21 +137,20 @@ static void Populate(LPCWSTR keepId)
         ListView_SetItemText(g_hList, row, 1, buf);
         ListView_SetItemText(g_hList, row, 2, g_arr[i].Version);
         ListView_SetItemText(g_hList, row, 3, g_arr[i].InstallDate);
+        ListView_SetItemText(g_hList, row, 4, g_arr[i].Source);
 
         buf[0] = L'\0';
-        if (!os && g_arr[i].Provider[0])
-            StringCchPrintfW(buf, ARRAYSIZE(buf), L"Source: %s", g_arr[i].Provider);
-        else if (!g_arr[i].Removable)
+        if (!g_arr[i].Removable)
             StringCchCatW(buf, ARRAYSIZE(buf), L"Base component");
         else if (g_arr[i].State != FM_STATE_NOT_INSTALLED)
         {
             WCHAR dep[FM_MAX_DEPS * 2];
-            if (FmGetDependents(g_arr[i].Id, dep, ARRAYSIZE(dep)))
+            if (FmGetDependentsIn(g_arr, g_count, g_arr[i].Id, dep, ARRAYSIZE(dep)))
                 StringCchPrintfW(buf, ARRAYSIZE(buf), L"Required by: %s", dep);
         }
         if (g_arr[i].PendingReboot)
             StringCchCatW(buf, ARRAYSIZE(buf), buf[0] ? L"; Reboot pending" : L"Reboot pending");
-        ListView_SetItemText(g_hList, row, 4, buf);
+        ListView_SetItemText(g_hList, row, 5, buf);
 
         if (os)
             ListView_SetCheckState(g_hList, row, g_arr[i].State == FM_STATE_ENABLED);
@@ -159,6 +165,29 @@ static void Populate(LPCWSTR keepId)
     UpdateButtons();
 }
 
+/* Source dropdown: "All sources" + every distinct software source in the catalog (rapps,
+ * command, scoop/main, scoop/extras ...), so buckets are listed as they appear. */
+static void RebuildSources(void)
+{
+    int i, j, sel = 0, n = 0;
+    WCHAR seen[32][32];
+
+    SendMessageW(g_hSource, CB_RESETCONTENT, 0, 0);
+    SendMessageW(g_hSource, CB_ADDSTRING, 0, (LPARAM)L"All sources");
+    for (i = 0; i < g_count; i++)
+    {
+        BOOL dup = FALSE;
+        if (g_arr[i].Tier != FM_TIER_SOFTWARE || !g_arr[i].Source[0]) continue;
+        for (j = 0; j < n; j++) if (!_wcsicmp(seen[j], g_arr[i].Source)) { dup = TRUE; break; }
+        if (dup || n >= 32) continue;
+        StringCchCopyW(seen[n++], 32, g_arr[i].Source);
+        SendMessageW(g_hSource, CB_ADDSTRING, 0, (LPARAM)g_arr[i].Source);
+        if (g_srcFilter[0] && !_wcsicmp(g_srcFilter, g_arr[i].Source)) sel = n;
+    }
+    if (g_srcFilter[0] && !sel) g_srcFilter[0] = L'\0';   /* that source is gone */
+    SendMessageW(g_hSource, CB_SETCURSEL, sel, 0);
+}
+
 static void FillList(void)
 {
     WCHAR keep[FM_MAX_ID];
@@ -169,6 +198,7 @@ static void FillList(void)
     if (g_arr) { FmFree(g_arr); g_arr = NULL; }
     g_count = FmEnumFeatures(&g_arr);
     UpdateTabLabels();
+    RebuildSources();
     Populate(keep);
 }
 
@@ -192,6 +222,15 @@ static void UpdateButtons(void)
         canUninstall = f->State != FM_STATE_NOT_INSTALLED && !guard;
 
         StringCchPrintfW(text, ARRAYSIZE(text), L"%s", f->Description);
+        if (!_wcsicmp(f->Provider, L"scoop"))
+        {
+            WCHAR v[300];
+            StringCchPrintfW(text + wcslen(text), ARRAYSIZE(text) - wcslen(text), L"\r\nSource: %s", f->Source);
+            GetPrivateProfileStringW(L"Scoop", L"Homepage", L"", v, ARRAYSIZE(v), f->ManifestPath);
+            if (v[0]) StringCchPrintfW(text + wcslen(text), ARRAYSIZE(text) - wcslen(text), L"   Homepage: %s", v);
+            GetPrivateProfileStringW(L"Scoop", L"License", L"", v, ARRAYSIZE(v), f->ManifestPath);
+            if (v[0]) StringCchPrintfW(text + wcslen(text), ARRAYSIZE(text) - wcslen(text), L"   License: %s", v);
+        }
         if (f->InstallDate[0])
             StringCchPrintfW(text + wcslen(text), ARRAYSIZE(text) - wcslen(text),
                              L"\r\nInstalled: %s", f->InstallDate);
@@ -230,6 +269,8 @@ static void UpdateButtons(void)
 typedef enum { ACT_INSTALL, ACT_ENABLE, ACT_DISABLE, ACT_UNINSTALL } ACTION;
 
 #define OP_IMPORT 100   /* OPCTX.op value for the "Import from RAPPS" action */
+#define OP_IMPORT_SCOOP 101
+
 
 /* Work item handed to the background thread. Carries its own copies of the id /
  * name so the UI may free + reload g_arr while the op runs. */
@@ -253,6 +294,8 @@ static void SetBusy(HWND hwnd, BOOL busy)
     EnableWindow(g_hDisable, !busy);
     EnableWindow(g_hUninstall, !busy);
     EnableWindow(g_hImport, !busy);
+    EnableWindow(g_hImportSc, !busy);
+    EnableWindow(g_hSource, !busy);
     EnableWindow(g_hRefresh, !busy);
     EnableWindow(g_hClose, !busy);
     EnableWindow(g_hOK, !busy);
@@ -278,6 +321,11 @@ static DWORD WINAPI OpThreadProc(LPVOID param)
         case ACT_UNINSTALL: c->hr = FmUninstall(c->id, NULL); break;
         case OP_IMPORT:
             c->importWritten = FmImportRapps(NULL, 0, &c->importSkipped, NULL);
+            c->hr = (c->importWritten < 0) ? E_FAIL : S_OK;
+            break;
+        case OP_IMPORT_SCOOP:
+            FmSetLastMessage(L"");
+            c->importWritten = FmImportScoop(NULL, NULL, 0, 0, &c->importSkipped, NULL);
             c->hr = (c->importWritten < 0) ? E_FAIL : S_OK;
             break;
         default:            c->hr = E_FAIL; break;
@@ -314,7 +362,9 @@ static void DoAction(HWND hwnd, ACTION act)
         WCHAR msg[768];
         StringCchPrintfW(msg, ARRAYSIZE(msg),
             L"Uninstall '%s'?\n\nIt will be turned off and its record removed; "
-            L"it returns to Not installed.", g_arr[i].Name);
+            L"it returns to Not installed.%s", g_arr[i].Name,
+            !_wcsicmp(g_arr[i].Id, L"scoop") ?
+                L"\n\nThis also removes Scoop's apps and their persisted data (C:\\scoop)." : L"");
         if (MessageBoxW(hwnd, msg, L"Optional Features", MB_YESNO | MB_ICONQUESTION) != IDYES)
             return;
     }
@@ -338,10 +388,21 @@ static void DoImport(HWND hwnd)
     StartOp(hwnd, c);
 }
 
+/* "Import Scoop": official buckets that Scoop already has on disk -> Software tab entries. */
+static void DoImportScoop(HWND hwnd)
+{
+    OPCTX *c;
+    if (g_busy) return;
+    c = (OPCTX *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*c));
+    if (!c) return;
+    c->op = OP_IMPORT_SCOOP;
+    StartOp(hwnd, c);
+}
+
 /* UI-thread completion handler for a background op (WM_APP_OPDONE). */
 static void OnOpDone(HWND hwnd, OPCTX *c)
 {
-    WCHAR msg[768];
+    WCHAR msg[2400];
     UINT icon = MB_ICONINFORMATION;
     LPCWSTR caption = L"Optional Features";
 
@@ -360,6 +421,23 @@ static void OnOpDone(HWND hwnd, OPCTX *c)
             StringCchCopyW(msg, ARRAYSIZE(msg),
                 L"Could not import the RAPPS catalog. The online catalog could not be "
                 L"downloaded: check the network connection (or run RAPPS once), then try again.");
+            icon = MB_ICONWARNING;
+        }
+    }
+    else if (c->op == OP_IMPORT_SCOOP)
+    {
+        caption = L"Import Scoop";
+        if (SUCCEEDED(c->hr))
+            StringCchPrintfW(msg, ARRAYSIZE(msg),
+                L"Imported %d Scoop app(s) into the Software tab (%d skipped: no download for "
+                L"this machine, or no hash to verify it against). Install runs 'scoop install'; "
+                L"Scoop checks every download against its manifest hash.", c->importWritten, c->importSkipped);
+        else
+        {
+            WCHAR why[1024];
+            FmGetLastMessage(why, ARRAYSIZE(why));
+            StringCchPrintfW(msg, ARRAYSIZE(msg), L"Could not import Scoop apps.\n\n%s",
+                             why[0] ? why : L"Scoop is not installed. Select the 'scoop' entry and click Install first.");
             icon = MB_ICONWARNING;
         }
     }
@@ -393,9 +471,14 @@ static void OnOpDone(HWND hwnd, OPCTX *c)
         }
         else
         {
-            StringCchPrintfW(msg, ARRAYSIZE(msg), L"Operation failed (0x%08lx).\n\n"
-                             L"For a software item the download or installer may have failed; "
-                             L"for a deferred OS feature the payload is not staged on this system yet.", hr);
+            WCHAR why[1024];
+            FmGetLastMessage(why, ARRAYSIZE(why));
+            if (why[0])
+                StringCchPrintfW(msg, ARRAYSIZE(msg), L"'%s': operation failed (0x%08lx).\n\n%s", c->name, hr, why);
+            else
+                StringCchPrintfW(msg, ARRAYSIZE(msg), L"Operation failed (0x%08lx).\n\n"
+                                 L"For a software item the download or installer may have failed; "
+                                 L"for a deferred OS feature the payload is not staged on this system yet.", hr);
             icon = MB_ICONWARNING;
         }
     }
@@ -577,6 +660,9 @@ static void LayoutButtons(HWND hwnd)
     ShowWindow(g_hDisable,  os ? SW_HIDE : SW_SHOW);
     ShowWindow(g_hClose,    os ? SW_HIDE : SW_SHOW);
     ShowWindow(g_hImport,   os ? SW_HIDE : SW_SHOW);
+    ShowWindow(g_hImportSc, os ? SW_HIDE : SW_SHOW);
+    ShowWindow(g_hSource,   os ? SW_HIDE : SW_SHOW);
+    ShowWindow(g_hSrcLabel, os ? SW_HIDE : SW_SHOW);
 
     if (os)
     {
@@ -588,11 +674,13 @@ static void LayoutButtons(HWND hwnd)
     }
     else
     {
+        bw = 80; gap = 4;       /* seven verbs in one row */
         MoveWindow(g_hInstall,   12,                    y, bw, bh, TRUE);
         MoveWindow(g_hEnable,    12 + (bw + gap),       y, bw, bh, TRUE);
         MoveWindow(g_hDisable,   12 + 2 * (bw + gap),   y, bw, bh, TRUE);
         MoveWindow(g_hUninstall, 12 + 3 * (bw + gap),   y, bw, bh, TRUE);
         MoveWindow(g_hImport,    12 + 4 * (bw + gap),   y, bw, bh, TRUE);
+        MoveWindow(g_hImportSc,  12 + 5 * (bw + gap),   y, bw, bh, TRUE);
         MoveWindow(g_hClose,  right - bw,               y, bw, bh, TRUE);
         MoveWindow(g_hRefresh, right - 2 * bw - gap,    y, bw, bh, TRUE);
     }
@@ -644,11 +732,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
             ZeroMemory(&col, sizeof(col));
             col.mask = LVCF_TEXT | LVCF_WIDTH;
-            col.pszText = (LPWSTR)L"Feature";   col.cx = 215; ListView_InsertColumn(g_hList, 0, &col);
-            col.pszText = (LPWSTR)L"State";     col.cx = 145; ListView_InsertColumn(g_hList, 1, &col);
-            col.pszText = (LPWSTR)L"Version";   col.cx = 60;  ListView_InsertColumn(g_hList, 2, &col);
-            col.pszText = (LPWSTR)L"Installed (UTC)"; col.cx = 135; ListView_InsertColumn(g_hList, 3, &col);
-            col.pszText = (LPWSTR)L"Notes";     col.cx = 110; ListView_InsertColumn(g_hList, 4, &col);
+            col.pszText = (LPWSTR)L"Feature";   col.cx = 175; ListView_InsertColumn(g_hList, 0, &col);
+            col.pszText = (LPWSTR)L"State";     col.cx = 110; ListView_InsertColumn(g_hList, 1, &col);
+            col.pszText = (LPWSTR)L"Version";   col.cx = 62;  ListView_InsertColumn(g_hList, 2, &col);
+            col.pszText = (LPWSTR)L"Installed (UTC)"; col.cx = 120; ListView_InsertColumn(g_hList, 3, &col);
+            col.pszText = (LPWSTR)L"Source";    col.cx = 90;  ListView_InsertColumn(g_hList, 4, &col);
+            col.pszText = (LPWSTR)L"Notes";     col.cx = 130; ListView_InsertColumn(g_hList, 5, &col);
 
             g_hDesc = CreateWindowExW(WS_EX_CLIENTEDGE, L"STATIC",
                 L"Select a feature to see its description.",
@@ -689,6 +778,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 WS_CHILD | WS_TABSTOP, 0, 0, 90, 26, hwnd,
                 (HMENU)(INT_PTR)IDC_IMPORT, NULL, NULL);
 
+            /* Software-tier: Scoop import + the source filter (rapps / command / scoop buckets). */
+            g_hImportSc = CreateWindowExW(0, L"BUTTON", L"Import &Scoop",
+                WS_CHILD | WS_TABSTOP, 0, 0, 90, 26, hwnd,
+                (HMENU)(INT_PTR)IDC_IMPORTSC, NULL, NULL);
+            g_hSrcLabel = CreateWindowExW(0, L"STATIC", L"Source:",
+                WS_CHILD, 452, 69, 44, 18, hwnd, (HMENU)(INT_PTR)IDC_SRCLABEL, NULL, NULL);
+            g_hSource = CreateWindowExW(0, L"COMBOBOX", L"",
+                WS_CHILD | WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST,
+                498, 65, 222, 200, hwnd, (HMENU)(INT_PTR)IDC_SOURCE, NULL, NULL);
+            SetWindowPos(g_hSource, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+
             {
                 HWND c;
                 for (c = GetWindow(hwnd, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT))
@@ -698,6 +798,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
             g_hwndMain = hwnd;
             FillList();
+            if (g_startSoftware)
+            {
+                g_tier = FM_TIER_SOFTWARE;
+                TabCtrl_SetCurSel(g_hTab, 1);
+                Populate(NULL);
+            }
             LayoutButtons(hwnd);
             return 0;
         }
@@ -730,6 +836,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 UpdateButtons();
             return 0;
         }
+
         case WM_COMMAND:
             if (g_busy) return 0;   /* a background op is running; ignore new commands */
             switch (LOWORD(wp))
@@ -739,6 +846,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 case IDC_DISABLE:   DoAction(hwnd, ACT_DISABLE);   break;
                 case IDC_UNINSTALL: DoAction(hwnd, ACT_UNINSTALL); break;
                 case IDC_IMPORT:    DoImport(hwnd); break;
+                case IDC_IMPORTSC:  DoImportScoop(hwnd); break;
+                case IDC_SOURCE:
+                    if (HIWORD(wp) == CBN_SELCHANGE)
+                    {
+                        int sel = (int)SendMessageW(g_hSource, CB_GETCURSEL, 0, 0);
+                        g_srcFilter[0] = L'\0';
+                        if (sel > 0)
+                            SendMessageW(g_hSource, CB_GETLBTEXT, sel, (LPARAM)g_srcFilter);
+                        Populate(NULL);
+                    }
+                    break;
                 case IDC_REFRESH:   FillList(); break;
                 case IDC_OK:        CommitOs(hwnd, TRUE); break;
                 case IDC_APPLY:     CommitOs(hwnd, FALSE); break;
@@ -772,7 +890,22 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmd, int nShow)
     INITCOMMONCONTROLSEX icc;
 
     UNREFERENCED_PARAMETER(hPrev);
-    UNREFERENCED_PARAMETER(lpCmd);
+
+    /* optfeatures /software [/source:<source>] : open on the Software tab, optionally filtered */
+    if (lpCmd && wcsstr(lpCmd, L"/software")) g_startSoftware = TRUE;
+    if (lpCmd)
+    {
+        LPCWSTR sp = wcsstr(lpCmd, L"/source:");
+        if (sp)
+        {
+            size_t n = wcscspn(sp + 8, L" \t");
+            if (n && n < ARRAYSIZE(g_srcFilter))
+            {
+                wcsncpy(g_srcFilter, sp + 8, n);
+                g_srcFilter[n] = L'\0';
+            }
+        }
+    }
 
     icc.dwSize = sizeof(icc);
     icc.dwICC = ICC_LISTVIEW_CLASSES | ICC_TAB_CLASSES | ICC_STANDARD_CLASSES;

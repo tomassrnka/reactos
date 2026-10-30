@@ -1,0 +1,16 @@
+{
+    "version": "5.0",
+    "description": "Hooks, nested objects and braces inside strings must not confuse the reader",
+    "homepage": "https://example.invalid/fmsc-deep",
+    "license": "GPL-3.0-only",
+    "url": "https://example.invalid/fmsc-deep.zip",
+    "hash": "3333333333333333333333333333333333333333333333333333333333333333",
+    "pre_install": [
+        "if ($true) { Write-Host \"a } ] { [ brace\" }",
+        "$x = @{ a = 1; b = @(1,2,3) }"
+    ],
+    "checkver": { "github": "https://example.invalid/fmsc-deep", "regex": "v([\\d.]+)" },
+    "autoupdate": { "architecture": { "64bit": { "url": "https://example.invalid/$version/x.zip" } } },
+    "persist": ["data", ["cfg.ini", "settings.ini"]],
+    "notes": ["multi", "line \\ \" notes"]
+}

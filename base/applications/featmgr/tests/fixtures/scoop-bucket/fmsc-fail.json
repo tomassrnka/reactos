@@ -1,0 +1,8 @@
+{
+    "version": "6.0",
+    "description": "Install of this app fails inside the stub scoop (exit code 7 and a hash message)",
+    "homepage": "https://example.invalid/fmsc-fail",
+    "license": "MIT",
+    "url": "https://example.invalid/fmsc-fail.zip",
+    "hash": "4444444444444444444444444444444444444444444444444444444444444444"
+}

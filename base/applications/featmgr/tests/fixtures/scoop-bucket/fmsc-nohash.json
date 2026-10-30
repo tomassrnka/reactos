@@ -1,0 +1,7 @@
+{
+    "version": "nightly",
+    "description": "Manifest with a url but no hash: Scoop could not verify it",
+    "homepage": "https://example.invalid/fmsc-nohash",
+    "license": "Freeware",
+    "url": "https://example.invalid/fmsc-nohash.zip"
+}

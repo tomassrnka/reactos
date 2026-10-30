@@ -1,0 +1,14 @@
+{
+    "version": "4.1",
+    "description": "url and hash given as arrays",
+    "homepage": "https://example.invalid/fmsc-arr",
+    "license": "BSD-3-Clause",
+    "url": [
+        "https://example.invalid/fmsc-arr-1.zip",
+        "https://example.invalid/fmsc-arr-2.zip"
+    ],
+    "hash": [
+        "1111111111111111111111111111111111111111111111111111111111111111",
+        "2222222222222222222222222222222222222222222222222222222222222222"
+    ]
+}

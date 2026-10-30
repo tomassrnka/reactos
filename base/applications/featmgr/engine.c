@@ -16,6 +16,27 @@ static const WCHAR STATE_KEY[] =
 
 #define LOGF(log, ...) do { if (log) { fwprintf((log), __VA_ARGS__); fflush(log); } } while (0)
 
+/* Last failure reason, for callers with no log stream (the GUI). Overwritten by every failure;
+ * cleared when a top-level FmEnable/FmDisableEx/FmUninstallEx starts. */
+static WCHAR g_LastMsg[2048];
+static int   g_OpDepth;
+
+void FmSetLastMessage(LPCWSTR fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    _vsnwprintf(g_LastMsg, ARRAYSIZE(g_LastMsg) - 1, fmt, ap);
+    va_end(ap);
+    g_LastMsg[ARRAYSIZE(g_LastMsg) - 1] = L'\0';
+}
+
+void FmGetLastMessage(LPWSTR buf, DWORD cch)
+{
+    if (cch) StringCchCopyW(buf, cch, g_LastMsg);
+}
+
+#define SetLastMsg FmSetLastMessage
+
 /* ---- layout helpers ------------------------------------------------------ */
 
 BOOL FmGetRootDir(LPWSTR buf, DWORD cch)
@@ -77,7 +98,7 @@ static LONG OpenStateKey(LPCWSTR id, BOOL create, REGSAM sam, HKEY *out)
     return RegOpenKeyExW(HKEY_LOCAL_MACHINE, sub, 0, sam, out);
 }
 
-FM_STATE FmGetState(LPCWSTR id)
+static FM_STATE RawState(LPCWSTR id)
 {
     HKEY k;
     WCHAR v[32];
@@ -188,28 +209,169 @@ static WCHAR *ReadSection(LPCWSTR file, LPCWSTR section)
     }
 }
 
-/* Load the catalog fields of one manifest into *f (does not set State). */
-static BOOL LoadManifest(LPCWSTR path, FM_FEATURE *f)
+/* ---- manifest reading ---------------------------------------------------
+ * GetPrivateProfileString re-opens and re-parses the file on nearly every call (its cache
+ * holds a few files), which made enumerating a few thousand generated entries (a Scoop
+ * bucket) take tens of seconds. Generated entries (Catalog\Software) are therefore read
+ * once into memory and queried from there; hand-written image manifests keep the API. */
+
+typedef struct _INI { LPCWSTR path; WCHAR *mem; } INI;
+
+static WCHAR *IniLoadText(LPCWSTR path)
+{
+    HANDLE h;
+    DWORD sz, got = 0;
+    BYTE *b;
+    WCHAR *w = NULL;
+
+    h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+    sz = GetFileSize(h, NULL);
+    if (sz == INVALID_FILE_SIZE || sz < 2 || sz > 256 * 1024) { CloseHandle(h); return NULL; }
+    b = (BYTE *)HeapAlloc(GetProcessHeap(), 0, sz + 2);
+    if (!b) { CloseHandle(h); return NULL; }
+    if (!ReadFile(h, b, sz, &got, NULL) || got != sz) { HeapFree(GetProcessHeap(), 0, b); CloseHandle(h); return NULL; }
+    CloseHandle(h);
+    b[sz] = b[sz + 1] = 0;
+    if (b[0] == 0xFF && b[1] == 0xFE)                       /* UTF-16LE with BOM (what we generate) */
+    {
+        w = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, sz + 2);
+        if (w) { memcpy(w, b + 2, sz - 2); w[(sz - 2) / 2] = L'\0'; }
+    }
+    else
+    {
+        BYTE *src = b; int len = (int)sz;
+        UINT cp = CP_ACP;
+        if (sz >= 3 && b[0] == 0xEF && b[1] == 0xBB && b[2] == 0xBF) { src += 3; len -= 3; cp = CP_UTF8; }
+        w = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, ((size_t)len + 1) * sizeof(WCHAR));
+        if (w)
+        {
+            int n = MultiByteToWideChar(cp, 0, (LPCSTR)src, len, w, len);
+            w[n > 0 ? n : 0] = L'\0';
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, b);
+    return w;
+}
+
+/* key in [sec] of the in-memory text; same matching rules as GetPrivateProfileString (case
+ * insensitive, whitespace around the name and the value trimmed, ';' lines are comments). */
+static BOOL IniFind(const WCHAR *t, LPCWSTR sec, LPCWSTR key, LPWSTR out, DWORD cch)
+{
+    size_t secLen = wcslen(sec), keyLen = wcslen(key);
+    BOOL in = FALSE;
+
+    while (*t)
+    {
+        const WCHAR *ls = t, *le = t, *p;
+        while (*le && *le != L'\n') le++;
+        t = *le ? le + 1 : le;
+        while (le > ls && (le[-1] == L'\r' || le[-1] == L' ' || le[-1] == L'\t')) le--;
+        while (ls < le && (*ls == L' ' || *ls == L'\t' || *ls == 0xFEFF)) ls++;
+        if (ls >= le || *ls == L';') continue;
+        if (*ls == L'[')
+        {
+            const WCHAR *e = ls + 1;
+            while (e < le && *e != L']') e++;
+            in = ((size_t)(e - (ls + 1)) == secLen) && !_wcsnicmp(ls + 1, sec, secLen);
+            continue;
+        }
+        if (!in) continue;
+        p = ls;
+        while (p < le && *p != L'=') p++;
+        if (p >= le) continue;
+        {
+            const WCHAR *ke = p;
+            while (ke > ls && (ke[-1] == L' ' || ke[-1] == L'\t')) ke--;
+            if ((size_t)(ke - ls) != keyLen || _wcsnicmp(ls, key, keyLen)) continue;
+        }
+        p++;
+        while (p < le && (*p == L' ' || *p == L'\t')) p++;
+        if (cch)
+        {
+            size_t n = (size_t)(le - p);
+            if (n >= cch) n = cch - 1;
+            memcpy(out, p, n * sizeof(WCHAR));
+            out[n] = L'\0';
+        }
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static void IniOpen(INI *i, LPCWSTR path, BOOL fast)
+{
+    i->path = path;
+    i->mem = fast ? IniLoadText(path) : NULL;
+}
+
+static void IniClose(INI *i)
+{
+    if (i->mem) HeapFree(GetProcessHeap(), 0, i->mem);
+    i->mem = NULL;
+}
+
+static void IniGet(const INI *i, LPCWSTR sec, LPCWSTR key, LPCWSTR def, LPWSTR out, DWORD cch)
+{
+    if (i->mem)
+    {
+        if (!IniFind(i->mem, sec, key, out, cch)) StringCchCopyW(out, cch, def);
+        return;
+    }
+    GetPrivateProfileStringW(sec, key, def, out, cch, i->path);
+}
+
+/* One value of a generated manifest, read once from disk (used by the Scoop importer). */
+BOOL FmIniGetFast(LPCWSTR path, LPCWSTR sec, LPCWSTR key, LPWSTR out, DWORD cch)
+{
+    WCHAR *t = IniLoadText(path);
+    BOOL ok;
+    if (cch) out[0] = L'\0';
+    if (!t) return FALSE;
+    ok = IniFind(t, sec, key, out, cch);
+    HeapFree(GetProcessHeap(), 0, t);
+    return ok;
+}
+
+/* Load the catalog fields of one manifest into *f (does not set State). fast = read the file once. */
+static BOOL LoadManifestEx(LPCWSTR path, FM_FEATURE *f, BOOL fast)
 {
     WCHAR tmp[FM_MAX_DESC];
+    INI ini;
 
     ZeroMemory(f, sizeof(*f));
     StringCchCopyW(f->ManifestPath, MAX_PATH, path);
+    IniOpen(&ini, path, fast);
 
-    GetPrivateProfileStringW(L"Feature", L"Id", L"", f->Id, FM_MAX_ID, path);
-    if (!f->Id[0]) return FALSE;
-    GetPrivateProfileStringW(L"Feature", L"Name", f->Id, f->Name, FM_MAX_NAME, path);
-    GetPrivateProfileStringW(L"Feature", L"Description", L"", f->Description, FM_MAX_DESC, path);
-    GetPrivateProfileStringW(L"Feature", L"Version", L"1.0.0", f->Version, FM_MAX_VER, path);
-    GetPrivateProfileStringW(L"Feature", L"Dependencies", L"", f->Dependencies, FM_MAX_DEPS, path);
-    GetPrivateProfileStringW(L"Feature", L"Tier", L"os", tmp, FM_MAX_DESC, path);
+    IniGet(&ini, L"Feature", L"Id", L"", f->Id, FM_MAX_ID);
+    if (!f->Id[0]) { IniClose(&ini); return FALSE; }
+    IniGet(&ini, L"Feature", L"Name", f->Id, f->Name, FM_MAX_NAME);
+    IniGet(&ini, L"Feature", L"Description", L"", f->Description, FM_MAX_DESC);
+    IniGet(&ini, L"Feature", L"Version", L"1.0.0", f->Version, FM_MAX_VER);
+    IniGet(&ini, L"Feature", L"Dependencies", L"", f->Dependencies, FM_MAX_DEPS);
+    IniGet(&ini, L"Feature", L"Tier", L"os", tmp, FM_MAX_DESC);
     f->Tier = ParseTier(tmp);
-    f->Removable = GetPrivateProfileIntW(L"Feature", L"Removable", 1, path) != 0;
+    IniGet(&ini, L"Feature", L"Removable", L"1", tmp, 16);
+    f->Removable = _wtoi(tmp) != 0;
     /* [Install] Provider= selects the software-tier install path. A software-tier
      * manifest without it keeps the OS-tier mechanics ([Payload]/[Registry]/[Service]
      * applied from a staged payload), so older/hand-written manifests still work. */
     if (f->Tier == FM_TIER_SOFTWARE)
-        GetPrivateProfileStringW(L"Install", L"Provider", L"", f->Provider, ARRAYSIZE(f->Provider), path);
+    {
+        IniGet(&ini, L"Install", L"Provider", L"", f->Provider, ARRAYSIZE(f->Provider));
+        IniGet(&ini, L"Install", L"DetectPath", L"", f->Detect, ARRAYSIZE(f->Detect));
+        if (!_wcsicmp(f->Provider, L"scoop"))
+        {
+            WCHAR b[24];
+            IniGet(&ini, L"Scoop", L"Bucket", L"", b, ARRAYSIZE(b));
+            IniGet(&ini, L"Scoop", L"App", L"", f->App, ARRAYSIZE(f->App));
+            StringCchPrintfW(f->Source, ARRAYSIZE(f->Source), L"scoop/%s", b[0] ? b : L"?");
+        }
+        else
+            StringCchCopyW(f->Source, ARRAYSIZE(f->Source), f->Provider[0] ? f->Provider : L"payload");
+    }
+    IniClose(&ini);
     return TRUE;
 }
 
@@ -218,12 +380,22 @@ static BOOL LoadManifest(LPCWSTR path, FM_FEATURE *f)
 /* Expand %PAYLOAD% (the feature's staged payload dir) and %env% variables. */
 static void ExpandCmd(LPCWSTR id, LPCWSTR raw, LPWSTR out, DWORD cch)
 {
-    WCHAR tmp[2048], payload[MAX_PATH];
+    WCHAR tmp[2048], payload[MAX_PATH], sroot[MAX_PATH];
     LPCWSTR p = raw;
     DWORD n = 0;
     FmGetPayloadDir(id, payload, MAX_PATH);
+    if (!FmScoopRoot(sroot, MAX_PATH)) sroot[0] = L'\0';
     while (*p && n + 1 < ARRAYSIZE(tmp))
     {
+        if (!_wcsnicmp(p, L"%SCOOPROOT%", 11))
+        {
+            size_t l = wcslen(sroot);
+            if (n + l + 1 >= ARRAYSIZE(tmp)) break;
+            memcpy(tmp + n, sroot, l * sizeof(WCHAR));
+            n += (DWORD)l;
+            p += 11;
+            continue;
+        }
         if (!_wcsnicmp(p, L"%PAYLOAD%", 9))
         {
             size_t l = wcslen(payload);
@@ -243,6 +415,11 @@ static void ExpandCmd(LPCWSTR id, LPCWSTR raw, LPWSTR out, DWORD cch)
 static BOOL IsAbsPath(LPCWSTR s)
 {
     return (s[0] && s[1] == L':') || (s[0] == L'\\');
+}
+
+static BOOL IsPs1(LPCWSTR path)
+{
+    return !_wcsicmp(PathFindExtensionW(path), L".ps1");
 }
 
 static BOOL IsScript(LPCWSTR path)
@@ -294,6 +471,8 @@ static BOOL SoftwareAvailable(const FM_FEATURE *f)
     WCHAR p[MAX_PATH];
     if (!_wcsicmp(f->Provider, L"command"))
         return InstallerPath(f, p, MAX_PATH) && GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES;
+    if (!_wcsicmp(f->Provider, L"scoop"))
+        return FmScoopUsable();
     if (_wcsicmp(f->Provider, L"rapps"))
         return FALSE;                                   /* unknown provider */
     if (!RappsExePath(p, MAX_PATH) || GetFileAttributesW(p) == INVALID_FILE_ATTRIBUTES)
@@ -360,10 +539,44 @@ static void ReadStateExtras(FM_FEATURE *f)
     RegCloseKey(k);
 }
 
+/* ---- installed-state detection (software tier) ---------------------------- */
+
+/* A software entry can name a path whose presence means "installed":
+ * [Install] DetectPath= (%SCOOPROOT% / %env% expanded), and for Provider=scoop the app's
+ * <root>\apps\<app>\current junction. The probe wins over the registry record, so installs
+ * and removals done outside featmgr (the scoop CLI) are seen. */
+static BOOL DetectPathFor(const FM_FEATURE *f, LPWSTR out, DWORD cch)
+{
+    if (f->Detect[0])
+    {
+        ExpandCmd(f->Id, f->Detect, out, cch);
+        return TRUE;
+    }
+    if (!_wcsicmp(f->Provider, L"scoop"))
+    {
+        WCHAR root[MAX_PATH];
+        if (!FmScoopValidApp(f->App) || !FmScoopRoot(root, MAX_PATH)) return FALSE;
+        return SUCCEEDED(StringCchPrintfW(out, cch, L"%s\\apps\\%s\\current", root, f->App));
+    }
+    return FALSE;
+}
+
+static void ResolveState(FM_FEATURE *f)
+{
+    WCHAR p[MAX_PATH];
+    BOOL present;
+    if (f->Tier != FM_TIER_SOFTWARE || !DetectPathFor(f, p, MAX_PATH)) return;
+    present = GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES;
+    if (present && f->State != FM_STATE_ENABLED)
+        f->State = FM_STATE_ENABLED;
+    else if (!present && f->State == FM_STATE_ENABLED)
+        f->State = FM_STATE_NOT_INSTALLED;
+}
+
 /* ---- enumeration --------------------------------------------------------- */
 
 /* Append every valid manifest in dir (*.ini) to the growing array. */
-static void EnumDir(LPCWSTR dir, FM_FEATURE **parr, int *pcount, int *pcap)
+static void EnumDir(LPCWSTR dir, BOOL fast, FM_FEATURE **parr, int *pcount, int *pcap)
 {
     WCHAR glob[MAX_PATH], path[MAX_PATH];
     WIN32_FIND_DATAW fd;
@@ -377,8 +590,9 @@ static void EnumDir(LPCWSTR dir, FM_FEATURE **parr, int *pcount, int *pcap)
         FM_FEATURE f;
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
         StringCchPrintfW(path, MAX_PATH, L"%s\\%s", dir, fd.cFileName);
-        if (!LoadManifest(path, &f)) continue;
-        f.State = FmGetState(f.Id);
+        if (!LoadManifestEx(path, &f, fast)) continue;
+        f.State = RawState(f.Id);
+        ResolveState(&f);
         f.PayloadAvailable = PayloadPresent(&f);
         ReadStateExtras(&f);
 
@@ -406,9 +620,9 @@ int FmEnumFeatures(FM_FEATURE **outArr)
 
     *outArr = NULL;
     if (!FmGetCatalogDir(catDir, MAX_PATH)) return 0;
-    EnumDir(catDir, &arr, &count, &cap);
+    EnumDir(catDir, FALSE, &arr, &count, &cap);
     if (FmGetSoftwareCatalogDir(swDir, MAX_PATH))
-        EnumDir(swDir, &arr, &count, &cap);
+        EnumDir(swDir, TRUE, &arr, &count, &cap);
 
     *outArr = arr;
     return count;
@@ -419,32 +633,38 @@ void FmFree(FM_FEATURE *arr)
     if (arr) HeapFree(GetProcessHeap(), 0, arr);
 }
 
+/* Fast path: the manifest file is named after the id (the software cache can hold
+ * thousands of entries, do not parse them all for a single lookup). */
+static BOOL FindByName(LPCWSTR id, FM_FEATURE *out)
+{
+    WCHAR dir[MAX_PATH], path[MAX_PATH];
+    int k;
+
+    if (!id[0] || wcspbrk(id, L"\\/:*?\"<>|")) return FALSE;
+    for (k = 0; k < 2; k++)
+    {
+        if (!(k ? FmGetSoftwareCatalogDir(dir, MAX_PATH) : FmGetCatalogDir(dir, MAX_PATH))) continue;
+        StringCchPrintfW(path, MAX_PATH, L"%s\\%s.ini", dir, id);
+        if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) continue;
+        if (LoadManifestEx(path, out, k == 1) && !_wcsicmp(out->Id, id))
+        {
+            out->State = RawState(out->Id);
+            ResolveState(out);
+            out->PayloadAvailable = PayloadPresent(out);
+            ReadStateExtras(out);
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 BOOL FmFindFeature(LPCWSTR id, FM_FEATURE *out)
 {
     FM_FEATURE *arr;
     int n, i;
     BOOL found = FALSE;
-    WCHAR dir[MAX_PATH], path[MAX_PATH];
 
-    /* fast path: manifest file named after the id (the software cache can hold
-     * hundreds of entries, do not parse them all for a single lookup) */
-    if (id[0] && !wcspbrk(id, L"\\/:*?\"<>|"))
-    {
-        int k;
-        for (k = 0; k < 2; k++)
-        {
-            if (!(k ? FmGetSoftwareCatalogDir(dir, MAX_PATH) : FmGetCatalogDir(dir, MAX_PATH))) continue;
-            StringCchPrintfW(path, MAX_PATH, L"%s\\%s.ini", dir, id);
-            if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) continue;
-            if (LoadManifest(path, out) && !_wcsicmp(out->Id, id))
-            {
-                out->State = FmGetState(out->Id);
-                out->PayloadAvailable = PayloadPresent(out);
-                ReadStateExtras(out);
-                return TRUE;
-            }
-        }
-    }
+    if (FindByName(id, out)) return TRUE;
     n = FmEnumFeatures(&arr);
     for (i = 0; i < n; i++)
     {
@@ -452,6 +672,14 @@ BOOL FmFindFeature(LPCWSTR id, FM_FEATURE *out)
     }
     FmFree(arr);
     return found;
+}
+
+/* Public state: the registry record merged with the installed-state probe. */
+FM_STATE FmGetState(LPCWSTR id)
+{
+    FM_FEATURE f;
+    if (FindByName(id, &f)) return f.State;
+    return RawState(id);
 }
 
 /* ---- apply / revert ------------------------------------------------------ */
@@ -815,39 +1043,189 @@ static void NotifyEnvironmentChanged(void)
                         SMTO_ABORTIFHUNG | SMTO_NORMAL, 3000, &res);
 }
 
+/* ---- captured child output ------------------------------------------------
+ * Installer / Scoop output is captured to a temp file (the child gets NUL as stdin, so it can
+ * never block on a prompt), streamed to the log while it runs, and its tail is kept so a
+ * failure can be shown to a caller that has no console (the GUI). */
+
+#define TAIL_CHARS 1500
+static WCHAR g_Tail[TAIL_CHARS + 1];
+
+static void TailAppend(LPCWSTR text)
+{
+    size_t n = wcslen(text), cur = wcslen(g_Tail);
+    if (n >= TAIL_CHARS) { StringCchCopyW(g_Tail, ARRAYSIZE(g_Tail), text + n - TAIL_CHARS); return; }
+    if (cur + n > TAIL_CHARS)
+    {
+        size_t drop = cur + n - TAIL_CHARS;
+        memmove(g_Tail, g_Tail + drop, (cur - drop + 1) * sizeof(WCHAR));
+    }
+    StringCchCatW(g_Tail, ARRAYSIZE(g_Tail), text);
+}
+
+/* bytes -> wide text without ANSI escapes and without carriage-return progress redraws */
+static void CleanChunk(const char *b, DWORD n, LPWSTR out, DWORD cch)
+{
+    WCHAR *w = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, (n + 1) * sizeof(WCHAR));
+    DWORD i, o = 0, wl, lineStart = 0;
+    int r;
+
+    out[0] = L'\0';
+    if (!w) return;
+    r = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, b, (int)n, w, (int)n);
+    if (r <= 0) r = MultiByteToWideChar(CP_OEMCP, 0, b, (int)n, w, (int)n);
+    wl = r > 0 ? (DWORD)r : 0;
+    for (i = 0; i < wl && o + 1 < cch; i++)
+    {
+        WCHAR c = w[i];
+        if (c == 0x1B)                                   /* ESC [ ... final-letter */
+        {
+            if (i + 1 < wl && w[i + 1] == L'[')
+            {
+                i += 2;
+                while (i < wl && !((w[i] >= L'@' && w[i] <= L'~'))) i++;
+            }
+            continue;
+        }
+        if (c == L'\r')
+        {
+            if (i + 1 < wl && w[i + 1] == L'\n') continue;   /* CRLF: the LF ends the line */
+            o = lineStart;                                    /* redraw: drop the partial line */
+            continue;
+        }
+        out[o++] = c;
+        if (c == L'\n') lineStart = o;
+    }
+    out[o] = L'\0';
+    HeapFree(GetProcessHeap(), 0, w);
+}
+
+static void EmitOutput(const char *b, DWORD n, FILE *log)
+{
+    WCHAR *t = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, (n + 1) * sizeof(WCHAR));
+    if (!t) return;
+    CleanChunk(b, n, t, n + 1);
+    if (t[0])
+    {
+        TailAppend(t);
+        if (log) { fputws(t, log); fflush(log); }
+    }
+    HeapFree(GetProcessHeap(), 0, t);
+}
+
+/* Read what the child wrote since *pos; emit whole lines (all of it when final). */
+static void DrainOutput(HANDLE hr, DWORD *pos, char *carry, DWORD *ncarry, DWORD ccap, BOOL final, FILE *log)
+{
+    char buf[4096];
+    DWORD got;
+    for (;;)
+    {
+        if (!ReadFile(hr, buf, sizeof(buf), &got, NULL) || !got) break;
+        *pos += got;
+        if (*ncarry + got > ccap)
+        {
+            EmitOutput(carry, *ncarry, log);              /* oversized line: flush as is */
+            *ncarry = 0;
+        }
+        if (got > ccap) { EmitOutput(buf, got, log); continue; }
+        memcpy(carry + *ncarry, buf, got);
+        *ncarry += got;
+        {
+            DWORD k = *ncarry;
+            while (k && carry[k - 1] != '\n') k--;
+            if (k)
+            {
+                EmitOutput(carry, k, log);
+                memmove(carry, carry + k, *ncarry - k);
+                *ncarry -= k;
+            }
+        }
+    }
+    if (final && *ncarry)
+    {
+        EmitOutput(carry, *ncarry, log);
+        *ncarry = 0;
+    }
+}
+
 /* Run a command line, wait, return its exit code in *code. A run that exceeds the
  * timeout is terminated (exact process handle) and reported as ERROR_TIMEOUT. */
 static HRESULT RunAndWait(LPCWSTR cmdline, DWORD timeoutMs, DWORD *code, FILE *log)
 {
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
-    WCHAR cl[2048];
-    DWORD w;
+    SECURITY_ATTRIBUTES sa;
+    WCHAR cl[2048], tmpDir[MAX_PATH], tmpFile[MAX_PATH];
+    HANDLE hOut = INVALID_HANDLE_VALUE, hIn = INVALID_HANDLE_VALUE, hRd = INVALID_HANDLE_VALUE;
+    char carry[8192];
+    DWORD ncarry = 0, pos = 0, w, flags = 0, start = GetTickCount(), elapsed;
+    HRESULT hr = S_OK;
+    BOOL ok;
 
     *code = (DWORD)-1;
+    g_Tail[0] = L'\0';
     ZeroMemory(&si, sizeof(si));
     si.cb = sizeof(si);
     StringCchCopyW(cl, ARRAYSIZE(cl), cmdline);   /* CreateProcessW may modify its buffer */
     LOGF(log, L"  run: %s\n", cl);
-    if (!CreateProcessW(NULL, cl, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
+
+    sa.nLength = sizeof(sa); sa.lpSecurityDescriptor = NULL; sa.bInheritHandle = TRUE;
+    tmpFile[0] = L'\0';
+    if (GetTempPathW(MAX_PATH, tmpDir)
+        && GetTempFileNameW(tmpDir, L"fmr", 0, tmpFile))
     {
-        LOGF(log, L"  ERROR: cannot start command (%lu)\n", GetLastError());
-        return HRESULT_FROM_WIN32(GetLastError());
+        hOut = CreateFileW(tmpFile, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_TEMPORARY, NULL);
+        hRd = CreateFileW(tmpFile, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        hIn = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, NULL);
+    }
+    if (hOut != INVALID_HANDLE_VALUE && hRd != INVALID_HANDLE_VALUE && hIn != INVALID_HANDLE_VALUE)
+    {
+        si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_HIDE;
+        si.hStdInput = hIn; si.hStdOutput = hOut; si.hStdError = hOut;
+        if (!GetConsoleWindow()) flags |= CREATE_NO_WINDOW;   /* GUI caller: no console pops up */
+    }
+    ok = CreateProcessW(NULL, cl, NULL, NULL, si.dwFlags & STARTF_USESTDHANDLES ? TRUE : FALSE, flags,
+                        NULL, NULL, &si, &pi);
+    if (!ok)
+    {
+        DWORD e = GetLastError();
+        LOGF(log, L"  ERROR: cannot start command (%lu)\n", e);
+        SetLastMsg(L"Cannot start the command (error %lu): %s", e, cl);
+        hr = HRESULT_FROM_WIN32(e);
+        goto out;
     }
     CloseHandle(pi.hThread);
-    w = WaitForSingleObject(pi.hProcess, timeoutMs);
+    for (;;)
+    {
+        elapsed = GetTickCount() - start;
+        if (elapsed >= timeoutMs) { w = WAIT_TIMEOUT; break; }
+        w = WaitForSingleObject(pi.hProcess, hRd != INVALID_HANDLE_VALUE ? 500 : timeoutMs - elapsed);
+        if (hRd != INVALID_HANDLE_VALUE) DrainOutput(hRd, &pos, carry, &ncarry, sizeof(carry), FALSE, log);
+        if (w != WAIT_TIMEOUT) break;
+    }
+    if (hRd != INVALID_HANDLE_VALUE) DrainOutput(hRd, &pos, carry, &ncarry, sizeof(carry), TRUE, log);
     if (w == WAIT_TIMEOUT)
     {
         LOGF(log, L"  ERROR: command still running after %lu s; terminating pid %lu\n",
              timeoutMs / 1000, pi.dwProcessId);
+        SetLastMsg(L"The command was still running after %lu s and was terminated.\n%s", timeoutMs / 1000, g_Tail);
         TerminateProcess(pi.hProcess, 1);
         CloseHandle(pi.hProcess);
-        return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+        hr = HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+        goto out;
     }
     GetExitCodeProcess(pi.hProcess, code);
     CloseHandle(pi.hProcess);
     LOGF(log, L"  exit code: %lu\n", *code);
-    return S_OK;
+out:
+    if (hOut != INVALID_HANDLE_VALUE) CloseHandle(hOut);
+    if (hRd != INVALID_HANDLE_VALUE) CloseHandle(hRd);
+    if (hIn != INVALID_HANDLE_VALUE) CloseHandle(hIn);
+    if (tmpFile[0]) DeleteFileW(tmpFile);
+    return hr;
 }
 
 /* Build the install + uninstall command lines for a software feature into
@@ -868,7 +1246,21 @@ static HRESULT BuildSoftwareCommands(const FM_FEATURE *f, LPWSTR inst, LPWSTR un
         }
         GetPrivateProfileStringW(L"Install", L"SilentArgs", L"", raw, ARRAYSIZE(raw), f->ManifestPath);
         ExpandCmd(f->Id, raw, args, ARRAYSIZE(args));
-        if (IsScript(path))
+        if (IsPs1(path))
+        {
+            WCHAR pwsh[MAX_PATH];
+            if (!FmPwshPath(pwsh, MAX_PATH) || GetFileAttributesW(pwsh) == INVALID_FILE_ATTRIBUTES)
+            {
+                LOGF(log, L"error: PowerShell 7 (%s) is required to run %s but is not installed\n", pwsh, path);
+                SetLastMsg(L"PowerShell 7 is required but is not installed. Install the 'powershell-7' feature first.");
+                return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+            }
+            SetEnvironmentVariableW(L"POWERSHELL_TELEMETRY_OPTOUT", L"1");
+            SetEnvironmentVariableW(L"POWERSHELL_UPDATECHECK", L"Off");
+            StringCchPrintfW(inst, cch, L"\"%s\" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%s\" %s",
+                             pwsh, path, args);
+        }
+        else if (IsScript(path))
             StringCchPrintfW(inst, cch, L"cmd.exe /c \"\"%s\" %s\"", path, args);
         else
             StringCchPrintfW(inst, cch, L"\"%s\" %s", path, args);
@@ -877,6 +1269,44 @@ static HRESULT BuildSoftwareCommands(const FM_FEATURE *f, LPWSTR inst, LPWSTR un
         {
             ExpandCmd(f->Id, raw, args, ARRAYSIZE(args));
             StringCchCopyW(uninst, cch, args);
+        }
+        else
+        {
+            /* [Install] UninstallScript= : a PowerShell 7 script run like an .ps1 Installer */
+            GetPrivateProfileStringW(L"Install", L"UninstallScript", L"", raw, ARRAYSIZE(raw), f->ManifestPath);
+            if (raw[0])
+            {
+                WCHAR pwsh[MAX_PATH];
+                ExpandCmd(f->Id, raw, args, ARRAYSIZE(args));
+                if (FmPwshPath(pwsh, MAX_PATH))
+                    StringCchPrintfW(uninst, cch,
+                        L"\"%s\" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%s\"", pwsh, args);
+            }
+        }
+        return S_OK;
+    }
+
+    if (!_wcsicmp(f->Provider, L"scoop"))
+    {
+        WCHAR app[64], bucket[32];
+        GetPrivateProfileStringW(L"Scoop", L"App", L"", app, ARRAYSIZE(app), f->ManifestPath);
+        GetPrivateProfileStringW(L"Scoop", L"Bucket", L"", bucket, ARRAYSIZE(bucket), f->ManifestPath);
+        {
+            WCHAR pw[MAX_PATH], runner[MAX_PATH];
+            if (!GetEnvironmentVariableW(L"FEATMGR_SCOOP_RUNNER", runner, MAX_PATH)
+                && (!FmPwshPath(pw, MAX_PATH) || GetFileAttributesW(pw) == INVALID_FILE_ATTRIBUTES))
+            {
+                LOGF(log, L"error: PowerShell 7 is required to run Scoop but is not installed\n");
+                SetLastMsg(L"PowerShell 7 is required to run Scoop but is not installed. Install the 'powershell-7' feature first.");
+                return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+            }
+        }
+        if (!FmScoopCommand(L"install", bucket, app, inst, cch)
+            || !FmScoopCommand(L"uninstall", bucket, app, uninst, cch))
+        {
+            LOGF(log, L"error: '%s' has no valid [Scoop] App/Bucket\n", f->Id);
+            SetLastMsg(L"'%s' has an invalid Scoop app or bucket name.", f->Id);
+            return E_INVALIDARG;
         }
         return S_OK;
     }
@@ -926,11 +1356,15 @@ static HRESULT SoftwareInstall(const FM_FEATURE *f, HKEY state, FILE *log)
         }
     }
     LOGF(log, L"  software install via '%s' provider\n", f->Provider);
+    if (!_wcsicmp(f->Provider, L"scoop"))
+        FmScoopPrepareEnv();
     hr = RunAndWait(inst, SW_RUN_TIMEOUT_MS, &code, log);
     if (FAILED(hr)) return hr;
     if (code != 0)
     {
         LOGF(log, L"error: installer for '%s' failed (exit code %lu)\n", f->Id, code);
+        SetLastMsg(L"The %s installer for '%s' failed (exit code %lu).\n\n%s",
+                   f->Provider, f->Id, code, g_Tail);
         return HRESULT_FROM_WIN32(ERROR_INSTALL_FAILURE);
     }
     SetStateSz(state, L"Provider", f->Provider);
@@ -940,7 +1374,7 @@ static HRESULT SoftwareInstall(const FM_FEATURE *f, HKEY state, FILE *log)
 }
 
 /* Run the uninstall command recorded at install time. S_OK if there is none. */
-static HRESULT SoftwareUninstall(HKEY state, FILE *log)
+static HRESULT SoftwareUninstall(const FM_FEATURE *f, HKEY state, FILE *log)
 {
     WCHAR cmd[2048];
     DWORD cb = sizeof(cmd) - sizeof(WCHAR), type = 0, code;
@@ -950,16 +1384,30 @@ static HRESULT SoftwareUninstall(HKEY state, FILE *log)
     if (RegQueryValueExW(state, L"Uninstall", NULL, &type, (LPBYTE)cmd, &cb) != ERROR_SUCCESS
         || type != REG_SZ || !cmd[0])
     {
-        LOGF(log, L"  note: no uninstall command recorded; nothing to run\n");
-        return S_OK;
+        cmd[0] = L'\0';
+        /* installed outside featmgr (scoop CLI): no recorded line, derive it from the manifest */
+        if (f && !_wcsicmp(f->Provider, L"scoop"))
+        {
+            WCHAR inst[2048];
+            hr = BuildSoftwareCommands(f, inst, cmd, ARRAYSIZE(cmd), log);
+            if (FAILED(hr)) return hr;
+        }
+        if (!cmd[0])
+        {
+            LOGF(log, L"  note: no uninstall command recorded; nothing to run\n");
+            return S_OK;
+        }
     }
     cmd[ARRAYSIZE(cmd) - 1] = L'\0';
+    if (f && !_wcsicmp(f->Provider, L"scoop"))
+        FmScoopPrepareEnv();
     hr = RunAndWait(cmd, SW_RUN_TIMEOUT_MS, &code, log);
     if (FAILED(hr)) return hr;
     NotifyEnvironmentChanged();
     if (code != 0)
     {
         LOGF(log, L"error: uninstaller failed (exit code %lu)\n", code);
+        SetLastMsg(L"The uninstaller for '%s' failed (exit code %lu).\n\n%s", f ? f->Id : L"?", code, g_Tail);
         return HRESULT_FROM_WIN32(ERROR_INSTALL_FAILURE);
     }
     return S_OK;
@@ -1006,7 +1454,40 @@ static HRESULT ApplyRegistrySection(const FM_FEATURE *f, HKEY state, FILE *log)
     return hr;
 }
 
+static HRESULT FmEnableInner(LPCWSTR id, FILE *log);
+
+/* Scoop (and anything that sets [Install] RequireNtfs=<path>) needs an NTFS volume: it builds
+ * its "current" version links with junctions, which FAT cannot hold. Refuse up front, before
+ * any dependency is downloaded. */
+static HRESULT CheckFsRequirement(const FM_FEATURE *f, FILE *log)
+{
+    WCHAR raw[MAX_PATH], path[MAX_PATH], fs[32];
+
+    path[0] = L'\0';
+    GetPrivateProfileStringW(L"Install", L"RequireNtfs", L"", raw, MAX_PATH, f->ManifestPath);
+    if (raw[0])
+        ExpandCmd(f->Id, raw, path, MAX_PATH);
+    else if (!_wcsicmp(f->Provider, L"scoop"))
+        FmScoopRoot(path, MAX_PATH);
+    if (!path[0] || FmVolumeIsNtfs(path, fs, ARRAYSIZE(fs))) return S_OK;
+    LOGF(log, L"error: '%s' needs an NTFS volume but %.2s is %s\n", f->Id, path, fs[0] ? fs : L"not NTFS");
+    SetLastMsg(L"'%s' needs an NTFS volume (it relies on junctions) but drive %.2s is %s. "
+               L"Nothing was installed. Convert the volume to NTFS first (convert %.2s /fs:ntfs) or "
+               L"install on an NTFS disk.", f->Name, path, fs[0] ? fs : L"not NTFS", path);
+    return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+}
+
 HRESULT FmEnable(LPCWSTR id, FILE *log)
+{
+    HRESULT result;
+
+    if (g_OpDepth++ == 0) { g_LastMsg[0] = L'\0'; g_Tail[0] = L'\0'; }
+    result = FmEnableInner(id, log);
+    g_OpDepth--;
+    return result;
+}
+
+static HRESULT FmEnableInner(LPCWSTR id, FILE *log)
 {
     FM_FEATURE f;
     HKEY state = NULL;
@@ -1026,7 +1507,12 @@ HRESULT FmEnable(LPCWSTR id, FILE *log)
     }
     if (!f.PayloadAvailable)
     {
-        if (f.Tier == FM_TIER_SOFTWARE && f.Provider[0])
+        if (!_wcsicmp(f.Provider, L"scoop"))
+        {
+            LOGF(log, L"error: '%s' is not available: Scoop needs 64-bit PowerShell 7, which this system does not have\n", id);
+            SetLastMsg(L"Scoop apps need 64-bit PowerShell 7 and are not available on this system (x86 images have no PowerShell 7 yet).");
+        }
+        else if (f.Tier == FM_TIER_SOFTWARE && f.Provider[0])
             LOGF(log, L"error: installer for '%s' is not available on this system "
                       L"(provider '%s': rapps.exe or the staged installer is missing)\n", id, f.Provider);
         else
@@ -1049,6 +1535,11 @@ HRESULT FmEnable(LPCWSTR id, FILE *log)
 
     LOGF(log, L"enabling '%s' (%s, tier=%s)\n", f.Id, f.Name, FmTierStr(f.Tier));
 
+    if (f.Tier == FM_TIER_SOFTWARE)
+    {
+        hr = CheckFsRequirement(&f, log);
+        if (FAILED(hr)) return hr;
+    }
     hr = EnableDeps(&f, log);
     if (FAILED(hr)) return hr;
 
@@ -1079,7 +1570,7 @@ HRESULT FmEnable(LPCWSTR id, FILE *log)
         {
             WCHAR sub[512];
             LOGF(log, L"post-install registry FAILED (0x%08lx); uninstalling\n", hr);
-            SoftwareUninstall(state, log);
+            SoftwareUninstall(&f, state, log);
             RevertState(state, log);
             RegCloseKey(state);
             if (f.State == FM_STATE_NOT_INSTALLED)
@@ -1238,8 +1729,10 @@ static HRESULT DisableOne(LPCWSTR id, DWORD flags, FILE *log)
 {
     HKEY state = NULL;
 
-    if (OpenStateKey(id, FALSE, KEY_READ | KEY_WRITE, &state) != ERROR_SUCCESS
-        || FmGetState(id) != FM_STATE_ENABLED)
+    /* FmGetState includes the installed-state probe: a Scoop app installed with the scoop CLI is
+     * Enabled without a record, so the record is created here when it is missing. */
+    if (FmGetState(id) != FM_STATE_ENABLED
+        || OpenStateKey(id, TRUE, KEY_READ | KEY_WRITE, &state) != ERROR_SUCCESS)
     {
         LOGF(log, L"feature '%s' is not enabled; nothing to do\n", id);
         if (state) RegCloseKey(state);
@@ -1252,7 +1745,7 @@ static HRESULT DisableOne(LPCWSTR id, DWORD flags, FILE *log)
         FM_FEATURE sf;
         if (FmFindFeature(id, &sf) && sf.Tier == FM_TIER_SOFTWARE && sf.Provider[0])
         {
-            HRESULT shr = SoftwareUninstall(state, log);
+            HRESULT shr = SoftwareUninstall(&sf, state, log);
             if (FAILED(shr))
             {
                 if (!(flags & FM_DISABLE_FORCE))
@@ -1309,12 +1802,10 @@ static BOOL DepsContain(LPCWSTR deps, LPCWSTR id)
     return FALSE;
 }
 
-int FmGetDependents(LPCWSTR id, LPWSTR buf, DWORD cch)
+int FmGetDependentsIn(const FM_FEATURE *arr, int n, LPCWSTR id, LPWSTR buf, DWORD cch)
 {
-    FM_FEATURE *arr;
-    int n, i, cnt = 0;
+    int i, cnt = 0;
     if (cch) buf[0] = L'\0';
-    n = FmEnumFeatures(&arr);
     for (i = 0; i < n; i++)
     {
         if (arr[i].State != FM_STATE_ENABLED || !_wcsicmp(arr[i].Id, id)) continue;
@@ -1322,6 +1813,15 @@ int FmGetDependents(LPCWSTR id, LPWSTR buf, DWORD cch)
         if (cnt++ && cch) StringCchCatW(buf, cch, L",");
         if (cch) StringCchCatW(buf, cch, arr[i].Id);
     }
+    return cnt;
+}
+
+int FmGetDependents(LPCWSTR id, LPWSTR buf, DWORD cch)
+{
+    FM_FEATURE *arr;
+    int n, cnt;
+    n = FmEnumFeatures(&arr);
+    cnt = FmGetDependentsIn(arr, n, id, buf, cch);
     FmFree(arr);
     return cnt;
 }
@@ -1332,6 +1832,7 @@ HRESULT FmDisableEx(LPCWSTR id, DWORD flags, FILE *log)
     WCHAR *ctx = NULL, *d;
     HRESULT hr;
 
+    if (g_OpDepth == 0) { g_LastMsg[0] = L'\0'; g_Tail[0] = L'\0'; }
     hr = CheckRemovable(id, log);      /* first: base component guard (GFX-FU) */
     if (FAILED(hr)) return hr;
 
@@ -1341,6 +1842,7 @@ HRESULT FmDisableEx(LPCWSTR id, DWORD flags, FILE *log)
         {
             LOGF(log, L"error: cannot disable '%s': enabled feature(s) depend on it: %s "
                       L"(disable those first, or use /cascade)\n", id, deps);
+            SetLastMsg(L"Cannot turn off '%s' while enabled features depend on it: %s (turn those off first, or use /cascade).", id, deps);
             return HRESULT_FROM_WIN32(ERROR_DEPENDENT_SERVICES_RUNNING);
         }
         /* dependents first; each recursive call handles its own dependents */
@@ -1370,6 +1872,7 @@ HRESULT FmUninstallEx(LPCWSTR id, DWORD flags, FILE *log)
     HRESULT hr;
     WCHAR sub[512];
     BOOL pending = FALSE;
+    LONG rdk;
 
     hr = CheckRemovable(id, log);
     if (FAILED(hr)) return hr;
@@ -1377,6 +1880,8 @@ HRESULT FmUninstallEx(LPCWSTR id, DWORD flags, FILE *log)
     if (FmGetState(id) == FM_STATE_NOT_INSTALLED)
     {
         LOGF(log, L"feature '%s' is not installed; nothing to do\n", id);
+        StringCchPrintfW(sub, 512, L"%s\\%s", STATE_KEY, id);
+        RegDeleteKeyW(HKEY_LOCAL_MACHINE, sub);          /* a stale record (app removed outside featmgr) */
         return S_OK;
     }
     hr = FmDisableEx(id, flags, log);   /* no-op if already Disabled */
@@ -1393,7 +1898,8 @@ HRESULT FmUninstallEx(LPCWSTR id, DWORD flags, FILE *log)
         return HRESULT_FROM_WIN32(ERROR_SUCCESS_REBOOT_REQUIRED);
     }
     StringCchPrintfW(sub, 512, L"%s\\%s", STATE_KEY, id);
-    if (RegDeleteKeyW(HKEY_LOCAL_MACHINE, sub) != ERROR_SUCCESS)
+    rdk = RegDeleteKeyW(HKEY_LOCAL_MACHINE, sub);
+    if (rdk != ERROR_SUCCESS && rdk != ERROR_FILE_NOT_FOUND)
     {
         LOGF(log, L"warn: could not delete state record for '%s'\n", id);
         return E_FAIL;
