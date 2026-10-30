@@ -127,6 +127,9 @@ static HRESULT WINAPI enum_class_object_Next(
     if (lTimeout != WBEM_INFINITE && !once++) FIXME("timeout not supported\n");
 
     *puReturned = 0;
+#ifdef __REACTOS__
+    if (view->type == VIEW_TYPE_SELECT && !view->table_count) return WBEM_E_INVALID_CLASS;
+#endif
     if (ec->index >= view->result_count) return WBEM_S_FALSE;
 
     table = get_view_table( view, ec->index );
@@ -619,7 +622,16 @@ static BSTR get_object_text( const struct view *view, UINT index )
 
     len = ARRAY_SIZE( fmtW );
     len += lstrlenW( table->name );
-    if (!(body = get_body_text( table, row, &len_body ))) return NULL;
+#ifdef __REACTOS__
+    lock_tables();
+    if (row >= table->num_rows) body = NULL;
+    else
+#endif
+    body = get_body_text( table, row, &len_body );
+#ifdef __REACTOS__
+    unlock_tables();
+#endif
+    if (!body) return NULL;
     len += len_body;
 
     if (!(ret = SysAllocStringLen( NULL, len ))) return NULL;
