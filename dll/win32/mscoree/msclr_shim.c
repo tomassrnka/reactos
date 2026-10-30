@@ -153,3 +153,55 @@ void *mscoree_real_export(const char *name)
     HMODULE mod = mscoree_get_real_mscoreei();
     return mod ? (void *)GetProcAddress(mod, name) : NULL;
 }
+
+/* Ordinal 24 (no name).  Microsoft clr.dll calls
+ * GetProcAddress(GetModuleHandle("mscoree.dll"), MAKEINTRESOURCE(24)) during
+ * EEStartup and invokes the result as HRESULT (WINAPI *)(void *, void **);
+ * it treats a success HRESULT as "the out-interface is valid" and calls
+ * through it.  Microsoft's own mscoree.dll implements this ordinal as a pure
+ * forwarder: it resolves ordinal 24 from the runtime's mscoreei.dll and calls
+ * it with the same two arguments, returning CLR_E_SHIM_RUNTIMEEXPORT when that
+ * is not possible.  Do the same.  Without an installed Microsoft runtime there
+ * is no caller for this ordinal (Mono never uses it). */
+HRESULT WINAPI MSCOREE_Ordinal24(void *arg1, void **arg2)
+{
+    typedef HRESULT (WINAPI *ord24_fn)(void *, void **);
+    ord24_fn fn = (ord24_fn)mscoree_real_export((const char *)MAKEINTRESOURCEA(24));
+
+    TRACE("(%p, %p) -> real %p\n", arg1, arg2, fn);
+    if (!fn)
+        return CLR_E_SHIM_RUNTIMEEXPORT;
+    return fn(arg1, arg2);
+}
+
+/* Exports that Microsoft clr.dll delay-imports from mscoree.dll by name and
+ * that Microsoft's mscoree implements by forwarding to mscoreei.dll. */
+HANDLE WINAPI GetProcessExecutableHeap(void)
+{
+    typedef HANDLE (WINAPI *fn_t)(void);
+    fn_t fn = (fn_t)mscoree_real_export("GetProcessExecutableHeap");
+
+    TRACE("() -> real %p\n", fn);
+    if (!fn)
+    {
+        FIXME("no Microsoft runtime installed\n");
+        return NULL;
+    }
+    return fn();
+}
+
+HRESULT WINAPI CorBindToRuntimeEx(LPWSTR, LPWSTR, DWORD, REFCLSID, REFIID, LPVOID *);
+
+HRESULT WINAPI CorBindToRuntime(LPCWSTR version, LPCWSTR flavor, REFCLSID rclsid,
+                                REFIID riid, LPVOID *ppv)
+{
+    typedef HRESULT (WINAPI *fn_t)(LPCWSTR, LPCWSTR, REFCLSID, REFIID, LPVOID *);
+    fn_t fn = (fn_t)mscoree_real_export("CorBindToRuntime");
+
+    TRACE("(%s, %s, %s, %s, %p) -> real %p\n", debugstr_w(version), debugstr_w(flavor),
+          debugstr_guid(rclsid), debugstr_guid(riid), ppv, fn);
+    if (fn)
+        return fn(version, flavor, rclsid, riid, ppv);
+    /* Same semantics as CorBindToRuntimeEx with no startup flags. */
+    return CorBindToRuntimeEx((LPWSTR)version, (LPWSTR)flavor, 0, rclsid, riid, ppv);
+}
