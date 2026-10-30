@@ -45,6 +45,18 @@ if(ARCH STREQUAL "amd64")
                 DESTINATION reactos/Featmgr/Catalog FOR all)
 endif()
 
+# --- Microsoft .NET Framework 4.8: software-tier entry (i386 and amd64) ---
+# Manifest + RAPPS-format entry only. The official offline installer is downloaded from Microsoft at install time
+# (SHA-256 checked) and is never bundled; the application compatibility database gives it the Windows 7 SP1 answer.
+add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/dotnet-framework-4.8.ini
+            DESTINATION reactos/Featmgr/Catalog FOR all)
+add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/dotnet-framework-4.8.txt
+            DESTINATION reactos/Featmgr/Catalog FOR all)
+if(ARCH STREQUAL "amd64")
+    add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/dotnet-framework-4.8-uninstall.cmd
+                DESTINATION reactos/Featmgr/Catalog FOR all)
+endif()
+
 # --- Scoop (SCOOP-FEATMGR-01): software-tier entry + its install/uninstall scripts (amd64 only: it needs
 # PowerShell 7, which has no x86 build yet; on i386 the feature is not in the catalog and
 # "featmgr /import-scoop" refuses). Only the manifest and two small scripts ship; the Scoop installer is
