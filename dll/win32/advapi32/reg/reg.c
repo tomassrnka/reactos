@@ -2886,6 +2886,12 @@ RegEnumKeyExW(
     LONG ErrorCode = ERROR_SUCCESS;
     NTSTATUS Status;
 
+    if (hKey == HKEY_PERFORMANCE_DATA)
+    {
+        /* The performance data key has no subkeys */
+        return ERROR_NO_MORE_ITEMS;
+    }
+
     Status = MapDefaultKey(&KeyHandle,
                            hKey);
     if (!NT_SUCCESS(Status))
@@ -3216,6 +3222,10 @@ RegEnumValueW(
 
     if ((data && !count) || reserved)
         return ERROR_INVALID_PARAMETER;
+
+    /* The performance data key has no enumerable values */
+    if (hKey == HKEY_PERFORMANCE_DATA)
+        return ERROR_NO_MORE_ITEMS;
 
     status = MapDefaultKey(&KeyHandle, hKey);
     if (!NT_SUCCESS(status))
@@ -4054,6 +4064,36 @@ RegQueryInfoKeyW(HKEY hKey,
     if ((lpClass) && (!lpcClass))
     {
         return ERROR_INVALID_PARAMETER;
+    }
+
+    if (hKey == HKEY_PERFORMANCE_DATA)
+    {
+        /* The performance data key is not backed by the registry:
+         * it has no subkeys and no class */
+        if (lpClass != NULL && lpcClass != NULL && *lpcClass > 0)
+            lpClass[0] = UNICODE_NULL;
+        if (lpcClass != NULL)
+            *lpcClass = 0;
+        if (lpcSubKeys != NULL)
+            *lpcSubKeys = 0;
+        if (lpcMaxSubKeyLen != NULL)
+            *lpcMaxSubKeyLen = 0;
+        if (lpcMaxClassLen != NULL)
+            *lpcMaxClassLen = 0;
+        if (lpcValues != NULL)
+            *lpcValues = 0;
+        if (lpcMaxValueNameLen != NULL)
+            *lpcMaxValueNameLen = 0;
+        if (lpcMaxValueLen != NULL)
+            *lpcMaxValueLen = 0;
+        if (lpcbSecurityDescriptor != NULL)
+            *lpcbSecurityDescriptor = 0;
+        if (lpftLastWriteTime != NULL)
+        {
+            lpftLastWriteTime->dwLowDateTime = 0;
+            lpftLastWriteTime->dwHighDateTime = 0;
+        }
+        return ERROR_SUCCESS;
     }
 
     Status = MapDefaultKey(&KeyHandle,
