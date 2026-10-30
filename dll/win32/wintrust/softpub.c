@@ -2009,6 +2009,53 @@ end:
     return !err ? S_OK : S_FALSE;
 }
 
+/* Whether the certificate is in the store of disallowed certificates.  Looked
+ * up by its signature hash when it has one (crypt32 cannot compute it for
+ * every signature algorithm, e.g. ECDSA) and by its SHA-1 thumbprint, which
+ * every certificate has: a certificate must not escape the store because one
+ * hash is unavailable. */
+static BOOL WINTRUST_IsCertDisallowed(PCCERT_CONTEXT cert)
+{
+    static const WCHAR disallowedW[] =
+     { 'D','i','s','a','l','l','o','w','e','d',0 };
+    HCERTSTORE disallowed;
+    PCCERT_CONTEXT found = NULL;
+    BYTE hash[64];
+    DWORD size;
+
+    disallowed = CertOpenStore(CERT_STORE_PROV_SYSTEM_W, X509_ASN_ENCODING, 0,
+     CERT_SYSTEM_STORE_CURRENT_USER, disallowedW);
+    if (!disallowed)
+        return FALSE;
+    /* The signature hash is as long as the certificate's signature
+     * algorithm's digest: 32 octets for SHA-256, up to 64. */
+    size = sizeof(hash);
+    if (CertGetCertificateContextProperty(cert, CERT_SIGNATURE_HASH_PROP_ID,
+     hash, &size))
+    {
+        CRYPT_HASH_BLOB blob = { size, hash };
+
+        found = CertFindCertificateInStore(disallowed, X509_ASN_ENCODING, 0,
+         CERT_FIND_SIGNATURE_HASH, &blob, NULL);
+    }
+    size = sizeof(hash);
+    if (!found && CertGetCertificateContextProperty(cert, CERT_HASH_PROP_ID,
+     hash, &size))
+    {
+        CRYPT_HASH_BLOB blob = { size, hash };
+
+        found = CertFindCertificateInStore(disallowed, X509_ASN_ENCODING, 0,
+         CERT_FIND_SHA1_HASH, &blob, NULL);
+    }
+    if (!found)
+        found = CertFindCertificateInStore(disallowed, X509_ASN_ENCODING, 0,
+         CERT_FIND_EXISTING, cert, NULL);
+    if (found)
+        CertFreeCertificateContext(found);
+    CertCloseStore(disallowed, 0);
+    return found != NULL;
+}
+
 HRESULT WINAPI SoftpubAuthenticode(CRYPT_PROVIDER_DATA *data)
 {
     BOOL ret;
@@ -2031,41 +2078,13 @@ HRESULT WINAPI SoftpubAuthenticode(CRYPT_PROVIDER_DATA *data)
         ret = TRUE;
         for (i = 0; ret && i < data->csSigners; i++)
         {
-            /* The signature hash is as long as the certificate's signature
-             * algorithm's digest: 32 octets for SHA-256, up to 64. */
-            BYTE hash[64];
-            DWORD size = sizeof(hash);
-
-            /* First make sure cert isn't disallowed.  A certificate without
-             * a signature hash cannot be in the store of disallowed ones, and
-             * must still go through the policy below: failing here would end
-             * the verification with no error at all. */
-            if (CertGetCertificateContextProperty(
-             data->pasSigners[i].pasCertChain[0].pCert,
-             CERT_SIGNATURE_HASH_PROP_ID, hash, &size))
+            /* First make sure cert isn't disallowed. */
+            if (WINTRUST_IsCertDisallowed(
+             data->pasSigners[i].pasCertChain[0].pCert))
             {
-                static const WCHAR disallowedW[] =
-                 { 'D','i','s','a','l','l','o','w','e','d',0 };
-                HCERTSTORE disallowed = CertOpenStore(CERT_STORE_PROV_SYSTEM_W,
-                 X509_ASN_ENCODING, 0, CERT_SYSTEM_STORE_CURRENT_USER,
-                 disallowedW);
-
-                if (disallowed)
-                {
-                    CRYPT_HASH_BLOB blob = { size, hash };
-                    PCCERT_CONTEXT found = CertFindCertificateInStore(
-                     disallowed, X509_ASN_ENCODING, 0, CERT_FIND_SIGNATURE_HASH,
-                     &blob, NULL);
-
-                    if (found)
-                    {
-                        /* Disallowed!  Can't verify it. */
-                        policyStatus.dwError = TRUST_E_SUBJECT_NOT_TRUSTED;
-                        ret = FALSE;
-                        CertFreeCertificateContext(found);
-                    }
-                    CertCloseStore(disallowed, 0);
-                }
+                /* Disallowed!  Can't verify it. */
+                policyStatus.dwError = TRUST_E_SUBJECT_NOT_TRUSTED;
+                ret = FALSE;
             }
             if (ret)
             {
