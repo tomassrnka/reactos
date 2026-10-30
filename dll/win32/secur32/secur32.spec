@@ -70,6 +70,8 @@
 @ stub SecpTranslateNameEx
 @ stdcall SetContextAttributesA(ptr long ptr long)
 @ stdcall SetContextAttributesW(ptr long ptr long)
+@ stdcall SetCredentialsAttributesA(ptr long ptr long)
+@ stdcall SetCredentialsAttributesW(ptr long ptr long)
 @ stdcall TranslateNameA(str long long ptr ptr)
 @ stdcall TranslateNameW(wstr long long ptr ptr)
 @ stdcall UnsealMessage(ptr ptr long ptr) DecryptMessage

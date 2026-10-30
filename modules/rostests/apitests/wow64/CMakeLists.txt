@@ -41,6 +41,7 @@ add_wow64_apitest(advapi32
     GetSecurityInfoSequence)
 add_wow64_apitest(wintrust WTHelperGetFileHash)
 add_wow64_apitest(iphlpapi NeighborEntry2)
+add_wow64_apitest(secur32 SetCredentialsAttributes)
 
 target_sources(advapi32_wow64_apitest PRIVATE ../advapi32/RegWow64Review.c)
 # LogonUser creates its test user through the SAM

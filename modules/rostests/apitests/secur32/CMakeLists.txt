@@ -5,6 +5,7 @@ list(APPEND SOURCE
     ReadConfigHandles.c
     SchannelHandshake.c
     SchannelServerCert.c
+    SetCredentialsAttributes.c
     testlist.c)
 
 add_executable(secur32_apitest ${SOURCE})
