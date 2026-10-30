@@ -195,6 +195,35 @@ NpQueryStandardInfo(IN PNP_CCB Ccb,
     return STATUS_SUCCESS;
 }
 
+/* The pipe directory (\Device\NamedPipe\): a plain directory, as on Windows */
+static
+VOID
+NpQueryRootBasicInfo(IN PVOID Buffer,
+                     IN OUT PULONG Length)
+{
+    PFILE_BASIC_INFORMATION InfoBuffer = Buffer;
+
+    *Length -= sizeof(*InfoBuffer);
+
+    RtlZeroMemory(InfoBuffer, sizeof(*InfoBuffer));
+    InfoBuffer->FileAttributes = FILE_ATTRIBUTE_DIRECTORY;
+}
+
+static
+VOID
+NpQueryRootStandardInfo(IN PVOID Buffer,
+                        IN OUT PULONG Length)
+{
+    PFILE_STANDARD_INFORMATION InfoBuffer = Buffer;
+
+    *Length -= sizeof(*InfoBuffer);
+
+    RtlZeroMemory(InfoBuffer, sizeof(*InfoBuffer));
+    InfoBuffer->NumberOfLinks = 1;
+    InfoBuffer->DeletePending = FALSE;
+    InfoBuffer->Directory = TRUE;
+}
+
 NTSTATUS
 NTAPI
 NpQueryEaInfo(IN PNP_CCB Ccb,
@@ -397,7 +426,11 @@ NpCommonQueryInformation(IN PDEVICE_OBJECT DeviceObject,
 
     if (NodeTypeCode != NPFS_NTC_CCB)
     {
-        if (NodeTypeCode != NPFS_NTC_ROOT_DCB || InfoClass != FileNameInformation)
+        if (NodeTypeCode != NPFS_NTC_ROOT_DCB ||
+            (InfoClass != FileNameInformation &&
+             InfoClass != FileBasicInformation &&
+             InfoClass != FileStandardInformation &&
+             InfoClass != FileInternalInformation))
         {
             return STATUS_INVALID_PARAMETER;
         }
@@ -438,14 +471,34 @@ NpCommonQueryInformation(IN PDEVICE_OBJECT DeviceObject,
             break;
 
         case FileBasicInformation:
+            if (NodeTypeCode == NPFS_NTC_ROOT_DCB)
+            {
+                NpQueryRootBasicInfo(Buffer, &Length);
+                Status = STATUS_SUCCESS;
+                break;
+            }
             Status = NpQueryBasicInfo(Ccb, Buffer, &Length);
             break;
 
         case FileStandardInformation:
+            if (NodeTypeCode == NPFS_NTC_ROOT_DCB)
+            {
+                NpQueryRootStandardInfo(Buffer, &Length);
+                Status = STATUS_SUCCESS;
+                break;
+            }
             Status = NpQueryStandardInfo(Ccb, Buffer, &Length, NamedPipeEnd);
             break;
 
         case FileInternalInformation:
+            if (NodeTypeCode == NPFS_NTC_ROOT_DCB)
+            {
+                /* the index of the root is 0 */
+                RtlZeroMemory(Buffer, sizeof(FILE_INTERNAL_INFORMATION));
+                Length -= sizeof(FILE_INTERNAL_INFORMATION);
+                Status = STATUS_SUCCESS;
+                break;
+            }
             Status = NpQueryInternalInfo(Ccb, Buffer, &Length);
             break;
 

@@ -1,5 +1,6 @@
 
 list(APPEND SOURCE
+    DirectoryQuery.c
     GetConnectionAttributes.c
     QueryClientProcess.c)
 

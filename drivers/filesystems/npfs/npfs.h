@@ -184,8 +184,10 @@ typedef struct _NP_EVENT_BUFFER
 typedef struct _NP_ROOT_DCB_CCB
 {
     NODE_TYPE_CODE NodeType;
-    PVOID Unknown;
-    ULONG Unknown2;
+    /* The pattern of the first directory query on this handle (upper case) */
+    PUNICODE_STRING QueryTemplate;
+    /* How many matching pipes the queries have returned since the last restart */
+    ULONG NextIndex;
 } NP_ROOT_DCB_CCB, *PNP_ROOT_DCB_FCB;
 
 /* The header that both FCB and DCB share */
@@ -695,6 +697,11 @@ NTAPI
 NpFsdQueryInformation(IN PDEVICE_OBJECT DeviceObject,
                      IN PIRP Irp);
 
+
+NTSTATUS
+NTAPI
+NpFsdDirectoryControl(IN PDEVICE_OBJECT DeviceObject,
+                      IN PIRP Irp);
 
 NTSTATUS
 NTAPI
