@@ -1,5 +1,6 @@
 
 list(APPEND SOURCE
+    CertEnumSystemStore.c
     CertEnumSystemStoreLocation.c
     testlist.c)
 

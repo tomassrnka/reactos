@@ -619,6 +619,26 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion","SoftwareType",2,"System"
 ; Auto-Execute (AE) Debugger: none by default, as on Windows 7; the crash dialog offers Debug only when one is set
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\AeDebug","UserDebuggerHotKey",0x00010001,0x00000000
 
+; System certificate stores of the machine (AuthRoot comes from caroots.inf, Root is added by crypt32 itself)
+HKLM,"SOFTWARE\Microsoft\SystemCertificates\My",,0x00000010
+HKLM,"SOFTWARE\Microsoft\SystemCertificates\Trust",,0x00000010
+HKLM,"SOFTWARE\Microsoft\SystemCertificates\CA",,0x00000010
+HKLM,"SOFTWARE\Microsoft\SystemCertificates\TrustedPublisher",,0x00000010
+HKLM,"SOFTWARE\Microsoft\SystemCertificates\Disallowed",,0x00000010
+HKLM,"SOFTWARE\Microsoft\SystemCertificates\TrustedPeople",,0x00000010
+HKLM,"SOFTWARE\Microsoft\SystemCertificates\ClientAuthIssuer",,0x00000010
+HKLM,"SOFTWARE\Microsoft\SystemCertificates\FlightRoot",,0x00000010
+HKLM,"SOFTWARE\Microsoft\SystemCertificates\TestSignRoot",,0x00000010
+HKLM,"SOFTWARE\Microsoft\SystemCertificates\AAD Token Issuer",,0x00000010
+HKLM,"SOFTWARE\Microsoft\SystemCertificates\eSIM Certification Authorities",,0x00000010
+HKLM,"SOFTWARE\Microsoft\SystemCertificates\Homegroup Machine Certificates",,0x00000010
+HKLM,"SOFTWARE\Microsoft\SystemCertificates\Remote Desktop",,0x00000010
+HKLM,"SOFTWARE\Microsoft\SystemCertificates\SmartCardRoot",,0x00000010
+HKLM,"SOFTWARE\Microsoft\SystemCertificates\TrustedAppRoot",,0x00000010
+HKLM,"SOFTWARE\Microsoft\SystemCertificates\TrustedDevices",,0x00000010
+HKLM,"SOFTWARE\Microsoft\SystemCertificates\Windows Live ID Token Issuer",,0x00000010
+HKLM,"SOFTWARE\Microsoft\SystemCertificates\WindowsServerUpdateServices",,0x00000010
+
 ; Local crash dumps of unhandled exceptions (written by default in this build)
 HKLM,"SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps",,0x00000010
 

@@ -3,6 +3,20 @@ Signature = "$Windows NT$"
 
 [AddReg]
 
+; System certificate stores of the user (Windows creates these with the profile; CertEnumSystemStore lists the subkeys)
+HKCU,"Software\Microsoft\SystemCertificates\My",,0x00000012
+HKCU,"Software\Microsoft\SystemCertificates\Root",,0x00000012
+HKCU,"Software\Microsoft\SystemCertificates\Trust",,0x00000012
+HKCU,"Software\Microsoft\SystemCertificates\CA",,0x00000012
+HKCU,"Software\Microsoft\SystemCertificates\UserDS",,0x00000012
+HKCU,"Software\Microsoft\SystemCertificates\TrustedPublisher",,0x00000012
+HKCU,"Software\Microsoft\SystemCertificates\Disallowed",,0x00000012
+HKCU,"Software\Microsoft\SystemCertificates\AuthRoot",,0x00000012
+HKCU,"Software\Microsoft\SystemCertificates\TrustedPeople",,0x00000012
+HKCU,"Software\Microsoft\SystemCertificates\ClientAuthIssuer",,0x00000012
+HKCU,"Software\Microsoft\SystemCertificates\Local NonRemovable Certificates",,0x00000012
+HKCU,"Software\Microsoft\SystemCertificates\SmartCardRoot",,0x00000012
+
 HKCU,"Control Panel",,0x00000012
 
 ; Accessibility
