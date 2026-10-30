@@ -43,6 +43,11 @@ add_wow64_apitest(wintrust WTHelperGetFileHash)
 add_wow64_apitest(iphlpapi NeighborEntry2)
 add_wow64_apitest(secur32 SetCredentialsAttributes)
 
+# The D3DKMT calls need a window station, so this one links the GUI libraries
+add_wow64_apitest(gdi32 D3DKMTCreateDCFromMemory D3DKMTWow64Thunks)
+target_include_directories(gdi32_wow64_apitest PRIVATE ${REACTOS_SOURCE_DIR}/win32ss)
+add_importlibs(gdi32_wow64_apitest gdi32 user32)
+
 target_sources(advapi32_wow64_apitest PRIVATE ../advapi32/RegWow64Review.c)
 # LogonUser creates its test user through the SAM
 add_importlibs(advapi32_wow64_apitest netapi32)

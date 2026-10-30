@@ -21,6 +21,7 @@ list(APPEND SOURCE
     CreatePen.c
     CreateRectRgn.c
     D3DKMTCreateDCFromMemory.c
+    D3DKMTWow64Thunks.c
     DPtoLP.c
     EngAcquireSemaphore.c
     EngCreateSemaphore.c
