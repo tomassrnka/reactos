@@ -21,6 +21,7 @@ list(APPEND SOURCE
     HKEY_CLASSES_ROOT.c
     IsTextUnicode.c
     LockServiceDatabase.c
+    LookupAccountSidCaller.c
     LogonUser.c
     LogonUserCleartext.c
     LsaLookupLeak.c

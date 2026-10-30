@@ -528,6 +528,31 @@ LookupAccountSidA(LPCSTR lpSystemName,
 }
 
 
+/* TRUE if Sid is the user of the token the caller runs with (the thread token while it impersonates) */
+static
+BOOL
+IsCallerTokenUser(PSID Sid)
+{
+    UCHAR Buffer[SECURITY_MAX_SID_SIZE + sizeof(TOKEN_USER)];
+    HANDLE Token;
+    ULONG Length;
+    BOOL Same = FALSE;
+    NTSTATUS Status;
+
+    Status = NtOpenThreadToken(NtCurrentThread(), TOKEN_QUERY, TRUE, &Token);
+    if (!NT_SUCCESS(Status))
+        Status = NtOpenProcessToken(NtCurrentProcess(), TOKEN_QUERY, &Token);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+
+    Status = NtQueryInformationToken(Token, TokenUser, Buffer, sizeof(Buffer), &Length);
+    if (NT_SUCCESS(Status))
+        Same = RtlEqualSid(((PTOKEN_USER)Buffer)->User.Sid, Sid);
+    NtClose(Token);
+
+    return Same;
+}
+
 /******************************************************************************
  * LookupAccountSidW [ADVAPI32.@]
  *
@@ -600,7 +625,15 @@ LookupAccountSidW(LPCWSTR pSystemName,
             *pdwDomainName = dwDomainName;
 
             if (peUse)
+            {
                 *peUse = TranslatedName->Use;
+
+                /* Windows reports the account of the caller as a user account even when it is
+                 * a well-known one: LookupAccountSid(S-1-5-18) is SidTypeUser for SYSTEM itself, and
+                 * SidTypeWellKnownGroup for everybody else. OpenSSH tells its own account by it. */
+                if (TranslatedName->Use == SidTypeWellKnownGroup && IsCallerTokenUser(pSid))
+                    *peUse = SidTypeUser;
+            }
         }
 
         if (!ret)

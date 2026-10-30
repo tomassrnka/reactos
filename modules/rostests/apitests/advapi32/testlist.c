@@ -21,6 +21,7 @@ extern void func_Hash(void);
 extern void func_HKEY_CLASSES_ROOT(void);
 extern void func_IsTextUnicode(void);
 extern void func_LockServiceDatabase(void);
+extern void func_LookupAccountSidCaller(void);
 extern void func_LogonUser(void);
 extern void func_LogonUserCleartext(void);
 extern void func_LsaLogonSession(void);
@@ -106,6 +107,7 @@ const struct test winetest_testlist[] =
     { "HKEY_CLASSES_ROOT", func_HKEY_CLASSES_ROOT },
     { "IsTextUnicode" , func_IsTextUnicode },
     { "LockServiceDatabase" , func_LockServiceDatabase },
+    { "LookupAccountSidCaller", func_LookupAccountSidCaller },
     { "LogonUser", func_LogonUser },
     { "LogonUserCleartext", func_LogonUserCleartext },
     { "LsaLogonSession", func_LsaLogonSession },
