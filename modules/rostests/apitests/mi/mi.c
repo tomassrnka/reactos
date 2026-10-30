@@ -10,6 +10,10 @@
 #include <apitest.h>
 #include <windef.h>
 #include <winbase.h>
+#define COBJMACROS
+#include <objbase.h>
+#include <initguid.h>
+#include <wbemcli.h>
 
 #define mi_clientFT_V1 mi_clientFT_V1_import
 #include <mi.h>
@@ -777,12 +781,230 @@ static void test_remote(MI_Application *app)
     if (res == MI_RESULT_OK) session.ft->Close(&session, NULL, NULL);
 }
 
+/* ---- review round 2: stale application handle, stale wbemprox view, DLL pinned by a worker ---- */
+
+#define STALE_CHILDREN 12
+#define STALE_CHILD_ARG L"mi_stale_child"
+
+/* MI_Application is passed by value: a copy kept across MI_Application_Close must be rejected, even once
+ * the memory behind it has been handed to a newer application. What Windows mi.dll does with a stale
+ * copy is undefined (it frees the block), so this only runs on ReactOS. */
+static void test_app_stale_copy(void)
+{
+    MI_Application app = MI_APPLICATION_NULL, copy, later = MI_APPLICATION_NULL, later_copy;
+    MI_Instance *ext = NULL, *inst = NULL;
+    MI_Result res;
+    UINT i;
+
+    if (!running_on_reactos()) return;
+
+    res = pMI_Application_InitializeV1(0, L"mi_apitest_stale", &ext, &app);
+    ok(res == MI_RESULT_OK, "Initialize returned %d\n", res);
+    if (res) return;
+    copy = app;
+    res = app.ft->Close(&app);
+    ok(res == MI_RESULT_OK, "Close returned %d\n", res);
+    ok(app.ft == NULL, "Close left ft set\n");
+
+    /* the stale by-value copy: no crash, no success */
+    res = copy.ft->Close(&copy);
+    ok(res != MI_RESULT_OK, "Close through a stale copy succeeded\n");
+    res = copy.ft->NewInstance(&copy, L"MI_Test", NULL, &inst);
+    ok(res != MI_RESULT_OK, "NewInstance through a stale copy succeeded\n");
+    if (res == MI_RESULT_OK && inst) inst->ft->Delete(inst);
+
+    /* a newer application may reuse the block: the stale copy must not reach it, nor close it */
+    for (i = 0; i < 4; i++)
+    {
+        res = pMI_Application_InitializeV1(0, L"mi_apitest_later", &ext, &later);
+        ok(res == MI_RESULT_OK, "second Initialize returned %d\n", res);
+        if (res) return;
+        res = copy.ft->Close(&copy);
+        ok(res != MI_RESULT_OK, "stale Close succeeded while a newer application is live\n");
+        inst = NULL;
+        res = later.ft->NewInstance(&later, L"MI_Test", NULL, &inst);
+        ok(res == MI_RESULT_OK, "the newer application was closed by a stale copy (%d)\n", res);
+        if (inst) inst->ft->Delete(inst);
+        later_copy = later;
+        res = later.ft->Close(&later);
+        ok(res == MI_RESULT_OK, "Close of the newer application returned %d\n", res);
+        ok(later.ft == NULL, "Close left ft set\n");
+        res = later_copy.ft->Close(&later_copy);
+        ok(res != MI_RESULT_OK, "double Close through a copy succeeded\n");
+    }
+}
+
+/* wbemprox keeps one table per class and refills it for every query. An object kept from an earlier
+ * query names a row of the old fill: once the table has shrunk, its properties (the system ones that read
+ * the key columns included) must fail instead of reading past the rows. */
+static void test_stale_view(void)
+{
+    static const WCHAR *prop_names[] = { L"__RELPATH", L"__PATH", L"Name", L"Handle", L"ProcessId" };
+    IWbemLocator *locator = NULL;
+    IWbemServices *services = NULL;
+    IEnumWbemClassObject *first = NULL, *second = NULL;
+    IWbemClassObject *objs[512], *obj;
+    BSTR ns, lang, query;
+    PROCESS_INFORMATION pi[STALE_CHILDREN];
+    STARTUPINFOW si;
+    WCHAR exe[MAX_PATH], cmd[MAX_PATH + 32];
+    ULONG got, count1 = 0, count2 = 0, i, p;
+    HRESULT hr;
+    VARIANT v;
+    UINT started = 0;
+
+    if (!running_on_reactos()) return;
+
+    hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    ok(SUCCEEDED(hr), "CoInitializeEx returned %08lx\n", hr);
+    hr = CoCreateInstance(&CLSID_WbemLocator, NULL, CLSCTX_INPROC_SERVER, &IID_IWbemLocator, (void **)&locator);
+    ok(hr == S_OK, "no locator: %08lx\n", hr);
+    if (hr != S_OK) goto done;
+    ns = SysAllocString(L"root\\cimv2");
+    hr = IWbemLocator_ConnectServer(locator, ns, NULL, NULL, NULL, 0, NULL, NULL, &services);
+    SysFreeString(ns);
+    ok(hr == S_OK, "ConnectServer returned %08lx\n", hr);
+    if (hr != S_OK) goto done;
+
+    GetModuleFileNameW(NULL, exe, ARRAYSIZE(exe));
+    _snwprintf(cmd, ARRAYSIZE(cmd) - 1, L"\"%s\" mi %s", exe, STALE_CHILD_ARG);
+    cmd[ARRAYSIZE(cmd) - 1] = 0;
+    memset(pi, 0, sizeof(pi));
+    for (i = 0; i < STALE_CHILDREN; i++)
+    {
+        memset(&si, 0, sizeof(si));
+        si.cb = sizeof(si);
+        if (CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi[started])) started++;
+    }
+    ok(started == STALE_CHILDREN, "only %u children started\n", started);
+    Sleep(500);
+
+    lang = SysAllocString(L"WQL");
+    query = SysAllocString(L"SELECT * FROM Win32_Process");
+    hr = IWbemServices_ExecQuery(services, lang, query, WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+                                 NULL, &first);
+    ok(hr == S_OK, "ExecQuery returned %08lx\n", hr);
+    if (hr == S_OK)
+    {
+        for (;;)
+        {
+            got = 0;
+            hr = IEnumWbemClassObject_Next(first, WBEM_INFINITE, 1, &obj, &got);
+            if (hr != S_OK || !got) break;
+            if (count1 < ARRAYSIZE(objs)) objs[count1++] = obj;
+            else IWbemClassObject_Release(obj);
+        }
+    }
+    ok(count1 > started, "first fill has %lu rows\n", count1);
+
+    /* the children go away and a second query shrinks the table */
+    for (i = 0; i < started; i++)
+    {
+        TerminateProcess(pi[i].hProcess, 0);
+        WaitForSingleObject(pi[i].hProcess, 10000);
+        CloseHandle(pi[i].hProcess);
+        CloseHandle(pi[i].hThread);
+    }
+    Sleep(500);
+    hr = IWbemServices_ExecQuery(services, lang, query, WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+                                 NULL, &second);
+    ok(hr == S_OK, "second ExecQuery returned %08lx\n", hr);
+    if (hr == S_OK)
+    {
+        for (;;)
+        {
+            got = 0;
+            hr = IEnumWbemClassObject_Next(second, WBEM_INFINITE, 1, &obj, &got);
+            if (hr != S_OK || !got) break;
+            count2++;
+            IWbemClassObject_Release(obj);
+        }
+    }
+    trace("stale view: first fill %lu rows, second fill %lu rows\n", count1, count2);
+
+    if (count1 && count2 < count1)
+    {
+        /* every kept object with a row index past the new fill is stale */
+        for (i = count2; i < count1; i++)
+        {
+            for (p = 0; p < ARRAYSIZE(prop_names); p++)
+            {
+                VariantInit(&v);
+                hr = IWbemClassObject_Get(objs[i], prop_names[p], 0, &v, NULL, NULL);
+                ok(hr == WBEM_E_NOT_FOUND, "row %lu of %lu, property %lu: Get returned %08lx\n", i, count2, p, hr);
+                VariantClear(&v);
+            }
+            /* the properties that name no row still answer */
+            VariantInit(&v);
+            hr = IWbemClassObject_Get(objs[i], L"__CLASS", 0, &v, NULL, NULL);
+            ok(hr == S_OK && V_VT(&v) == VT_BSTR, "__CLASS of a stale object returned %08lx\n", hr);
+            VariantClear(&v);
+        }
+        /* and a row inside the new fill is still readable */
+        VariantInit(&v);
+        hr = IWbemClassObject_Get(objs[0], L"__RELPATH", 0, &v, NULL, NULL);
+        ok(hr == S_OK, "__RELPATH of a row inside the table returned %08lx\n", hr);
+        VariantClear(&v);
+    }
+    else skip("the process table did not shrink (%lu -> %lu)\n", count1, count2);
+
+    for (i = 0; i < count1; i++) IWbemClassObject_Release(objs[i]);
+    if (first) IEnumWbemClassObject_Release(first);
+    if (second) IEnumWbemClassObject_Release(second);
+    SysFreeString(lang);
+    SysFreeString(query);
+done:
+    if (services) IWbemServices_Release(services);
+    if (locator) IWbemLocator_Release(locator);
+    CoUninitialize();
+}
+
+static LONG pin_callbacks;
+static HANDLE pin_seen;
+
+static void MI_CALL pin_callback(MI_Operation *op, void *context, const MI_Instance *inst, MI_Boolean more,
+                                 MI_Result result, const MI_Char *message, const MI_Instance *details,
+                                 MI_Result (MI_CALL *ack)(MI_Operation *))
+{
+    if (InterlockedIncrement(&pin_callbacks) == 1) SetEvent(pin_seen);
+    /* never acked: the worker stays parked in mi.dll */
+}
+
+/* A worker that is still inside mi.dll keeps the module loaded: the client's last FreeLibrary must not run
+ * DllMain (and delete the locks) under it. The worker is parked on an ack that never comes, so this runs
+ * last and leaves it behind. */
+static void test_unload_pin(MI_Application *app)
+{
+    static MI_OperationCallbacks cb;
+    static MI_Operation op;
+    MI_Session session = MI_SESSION_NULL;
+
+    if (app->ft->NewSession(app, NULL, NULL, NULL, NULL, NULL, &session) != MI_RESULT_OK) return;
+    pin_seen = CreateEventW(NULL, TRUE, FALSE, NULL);
+    memset(&cb, 0, sizeof(cb));
+    memset(&op, 0, sizeof(op));
+    cb.instanceResult = pin_callback;
+    session.ft->EnumerateInstances(&session, MI_OPERATIONFLAGS_MANUAL_ACK_RESULTS, NULL, L"root/cimv2",
+                                   L"Win32_Process", MI_FALSE, &cb, &op);
+    ok(WaitForSingleObject(pin_seen, 60000) == WAIT_OBJECT_0, "no result delivered\n");
+    session.ft->Close(&session, NULL, NULL);
+    app->ft->Close(app);
+    FreeLibrary(hmi);
+    ok(GetModuleHandleW(MI_DLL_NAME) != NULL, "mi.dll was unloaded under a live worker\n");
+    hmi = NULL;
+}
+
 START_TEST(mi)
 {
     MI_Application app = MI_APPLICATION_NULL;
     MI_Instance *ext = NULL;
     MI_Result res;
 
+    if (wcsstr(GetCommandLineW(), STALE_CHILD_ARG))
+    {
+        Sleep(120000); /* helper process for test_stale_view */
+        return;
+    }
     hmi = LoadLibraryW(MI_DLL_NAME);
     ok(hmi != NULL, "mi.dll not loaded, error %lu\n", GetLastError());
     if (!hmi) return;
@@ -806,7 +1028,14 @@ START_TEST(mi)
     test_concurrent_enumeration(&app);
     test_callback_lifetime(&app);
     test_remote(&app);
+    test_app_stale_copy();
+    test_stale_view();
 
+    if (running_on_reactos())
+    {
+        test_unload_pin(&app);
+        return;
+    }
     res = app.ft->Close(&app);
     ok(res == MI_RESULT_OK, "Application Close returned %d\n", res);
     FreeLibrary(hmi);

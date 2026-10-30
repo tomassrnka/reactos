@@ -887,13 +887,25 @@ static BSTR build_relpath( const struct view *view, UINT table_index, UINT resul
     static const WCHAR fmtW[] = {'%','s','.','%','s',0};
     BSTR class, proplist, ret = NULL;
     struct table *table = view->table[table_index];
-    UINT row = view->result[result_index];
-    UINT num_keys, len;
+    UINT row, num_keys, len;
 
     if (view->proplist) return NULL;
+#ifdef __REACTOS__
+    /* a class object has no row to name; a stale view must never be read past its table */
+    if (result_index < view->result_count)
+    {
+        if ((row = view->result[result_index]) >= table->num_rows) return NULL;
+    }
+    else row = ~0u;
+#else
+    row = view->result[result_index];
+#endif
 
     if (!(class = SysAllocString( view->table[table_index]->name ))) return NULL;
     if (!(num_keys = count_key_columns( table ))) return class;
+#ifdef __REACTOS__
+    if (row == ~0u) return class;
+#endif
     if (!(proplist = build_proplist( table, row, num_keys, &len ))) goto done;
 
     len += lstrlenW( fmtW ) + SysStringLen( class );
@@ -1190,6 +1202,22 @@ struct table *get_view_table( const struct view *view, UINT index )
 }
 
 #ifdef __REACTOS__
+/* another client may have refilled a volatile table behind this view: its row indices can lie past the
+ * rows the table has now. Called with the tables locked. */
+static BOOL is_stale_row( const struct view *view, UINT table_index, UINT result_index )
+{
+    if (!view->result_count) return FALSE; /* class object: no row is read */
+    if (result_index >= view->result_count) return TRUE;
+    return view->result[result_index] >= view->table[table_index]->num_rows;
+}
+
+static BOOL is_row_system_prop( const WCHAR *name )
+{
+    static const WCHAR relpathW[] = {'_','_','R','E','L','P','A','T','H',0};
+    static const WCHAR pathW[] = {'_','_','P','A','T','H',0};
+    return !wcsicmp( name, relpathW ) || !wcsicmp( name, pathW );
+}
+
 static HRESULT get_propval_locked( const struct view *view, UINT index, const WCHAR *name, VARIANT *ret, CIMTYPE *type,
                                    LONG *flavor );
 
@@ -1219,7 +1247,18 @@ HRESULT get_propval( const struct view *view, UINT index, const WCHAR *name, VAR
 
     if ((hr = map_view_index( view, index, &table_index, &result_index )) != S_OK) return hr;
 
+#ifdef __REACTOS__
+    if (is_system_prop( name ))
+    {
+        /* __RELPATH and __PATH read the key columns of the row: bounds-check it first (the row-independent
+         * system properties still answer for a stale view) */
+        if (is_row_system_prop( name ) && is_stale_row( view, table_index, result_index )) return WBEM_E_NOT_FOUND;
+        return get_system_propval( view, table_index, result_index, name, ret, type, flavor );
+    }
+    if (is_stale_row( view, table_index, result_index )) return WBEM_E_NOT_FOUND;
+#else
     if (is_system_prop( name )) return get_system_propval( view, table_index, result_index, name, ret, type, flavor );
+#endif
 #ifdef __REACTOS__
     if (!view->result_count && view->cond) return WBEM_E_NOT_FOUND; /* empty filtered result */
     if (!is_result_prop( view, name )) return WBEM_E_NOT_FOUND;

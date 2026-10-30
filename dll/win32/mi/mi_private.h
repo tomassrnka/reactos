@@ -163,6 +163,8 @@ const WCHAR *result_message(MI_Result result);
 
 /* main.c */
 extern const MI_ApplicationFT mi_application_ft;
+void mi_init_app_blocks(void);
+void mi_free_app_blocks(void);
 extern const MI_DestinationOptionsFT mi_destination_options_ft;
 extern const MI_OperationOptionsFT mi_operation_options_ft;
 const struct mi_option *options_find(const MI_OperationOptions *options, const WCHAR *name);

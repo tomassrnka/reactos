@@ -1055,6 +1055,7 @@ CmdLineQueryAll(
     HeapFree(GetProcessHeap(), 0, Buffer);
 }
 
+#ifndef _WIN64 /* only the 32-bit build asks whether it runs under WoW64 */
 static
 BOOL
 CmdLineIsWow64(
@@ -1069,6 +1070,7 @@ CmdLineIsWow64(
         pIsWow64Process(Process, &Wow64);
     return Wow64;
 }
+#endif
 
 /* A suspended child of the given image: its PEB and parameters exist, it never runs */
 static

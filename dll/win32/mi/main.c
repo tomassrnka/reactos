@@ -16,19 +16,78 @@ WINE_DEFAULT_DEBUG_CHANNEL(mi);
 
 #define MI_APP_MAGIC 0x50414d49 /* "IMAP" */
 
+/* An MI_Application is passed by value, so a client can keep stale copies of the handle after
+ * MI_Application_Close. The blocks they point to are therefore never freed while the DLL is loaded:
+ * a closed block goes on a free list, and each use of a block stamps it with a new generation that
+ * the handle carries in reserved1. A stale copy fails the generation check, even when its block
+ * has been handed to a newer application, and never touches freed memory. */
 struct mi_application
 {
     LONG magic;
     LONG closed;
+    ULONGLONG generation;
     WCHAR *id;
+    struct mi_application *next_free;
+    struct mi_application *next_all;
 };
+
+static CRITICAL_SECTION app_cs;
+static struct mi_application *app_free, *app_all;
+static ULONGLONG app_generation;
+
+void mi_init_app_blocks(void) { InitializeCriticalSection(&app_cs); }
+
+void mi_free_app_blocks(void)
+{
+    struct mi_application *a;
+    while ((a = app_all))
+    {
+        app_all = a->next_all;
+        mi_free(a->id);
+        mi_free(a);
+    }
+    DeleteCriticalSection(&app_cs);
+}
+
+static struct mi_application *app_block_get(ULONGLONG *generation)
+{
+    struct mi_application *a;
+
+    EnterCriticalSection(&app_cs);
+    if ((a = app_free)) app_free = a->next_free;
+    else if ((a = mi_alloc(sizeof(*a))))
+    {
+        a->next_all = app_all;
+        app_all = a;
+    }
+    if (a)
+    {
+        a->next_free = NULL;
+        a->closed = 0;
+        a->generation = *generation = ++app_generation;
+        a->magic = MI_APP_MAGIC;
+    }
+    LeaveCriticalSection(&app_cs);
+    return a;
+}
+
+static void app_block_put(struct mi_application *a)
+{
+    EnterCriticalSection(&app_cs);
+    a->magic = 0;
+    mi_free(a->id);
+    a->id = NULL;
+    a->next_free = app_free;
+    app_free = a;
+    LeaveCriticalSection(&app_cs);
+}
 
 static struct mi_application *get_application(const MI_Application *app)
 {
     struct mi_application *a;
     if (!app || app->ft != &mi_application_ft) return NULL;
     a = (struct mi_application *)app->reserved2;
-    if (!a || a->magic != MI_APP_MAGIC) return NULL;
+    if (!a || a->magic != MI_APP_MAGIC || a->generation != app->reserved1) return NULL;
     return a;
 }
 
@@ -634,10 +693,9 @@ static MI_Result MI_CALL app_Close(MI_Application *application)
     if (InterlockedExchange(&a->closed, 1)) return MI_RESULT_INVALID_PARAMETER;
     /* sessions keep their own state and never refer to the application block */
     application->ft = NULL;
+    application->reserved1 = 0;
     application->reserved2 = 0;
-    a->magic = 0;
-    mi_free(a->id);
-    mi_free(a);
+    app_block_put(a);
     return MI_RESULT_OK;
 }
 
@@ -942,16 +1000,16 @@ MI_Result MI_MAIN_CALL MI_Application_InitializeV1(MI_Uint32 flags, const MI_Cha
                                                    MI_Instance **extendedError, MI_Application *application)
 {
     struct mi_application *a;
+    ULONGLONG generation;
 
     TRACE("%#x %s %p %p\n", flags, debugstr_w(applicationID), extendedError, application);
     if (extendedError) *extendedError = NULL;
     if (!application) return MI_RESULT_INVALID_PARAMETER;
     memset(application, 0, sizeof(*application));
     if (flags) return MI_RESULT_INVALID_PARAMETER;
-    if (!(a = mi_alloc(sizeof(*a)))) return MI_RESULT_SERVER_LIMITS_EXCEEDED;
-    a->magic = MI_APP_MAGIC;
+    if (!(a = app_block_get(&generation))) return MI_RESULT_SERVER_LIMITS_EXCEEDED;
     a->id = mi_strdup(applicationID);
-    application->reserved1 = 1;
+    application->reserved1 = generation;
     application->reserved2 = (ptrdiff_t)a;
     application->ft = &mi_application_ft;
     return MI_RESULT_OK;
@@ -964,9 +1022,14 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void *reserved)
     case DLL_PROCESS_ATTACH:
         DisableThreadLibraryCalls(instance);
         mi_init_locks();
+        mi_init_app_blocks();
         break;
     case DLL_PROCESS_DETACH:
-        if (!reserved) mi_free_locks();
+        if (!reserved)
+        {
+            mi_free_locks();
+            mi_free_app_blocks();
+        }
         break;
     }
     return TRUE;
