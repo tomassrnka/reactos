@@ -8,6 +8,8 @@
 #include <apitest.h>
 #include <winsock2.h>
 #include <iphlpapi.h>
+#include <stdlib.h>
+#include <string.h>
 
 #define LOOPBACK_LUID 0x0018000000000000ULL
 #define MAX_ADAPTERS 64
@@ -137,6 +139,162 @@ static void TestLoopbackIndex(void)
     free(Adapters);
 }
 
+static BOOL HasGateway(const IP_ADAPTER_ADDRESSES_LH *Adapter, ULONG Address)
+{
+    const IP_ADAPTER_GATEWAY_ADDRESS_LH *Gateway;
+
+    for (Gateway = Adapter->FirstGatewayAddress; Gateway; Gateway = Gateway->Next)
+    {
+        if (Gateway->Address.lpSockaddr && Gateway->Address.lpSockaddr->sa_family == AF_INET &&
+            ((SOCKADDR_IN *)Gateway->Address.lpSockaddr)->sin_addr.S_un.S_addr == Address)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+static void TestGatewayList(ULONG Flags, const MIB_IPFORWARDTABLE *Routes)
+{
+    IP_ADAPTER_ADDRESSES_LH *Adapters, *A;
+    IP_ADAPTER_GATEWAY_ADDRESS_LH *G, *H;
+    ULONG i;
+
+    Adapters = GetAdapters(Flags);
+    if (!Adapters)
+        return;
+
+    for (A = Adapters; A; A = A->Next)
+    {
+        ULONG Count = 0;
+
+        for (G = A->FirstGatewayAddress; G; G = G->Next)
+        {
+            Count++;
+            ok(G->Length >= sizeof(IP_ADAPTER_GATEWAY_ADDRESS_LH), "flags 0x%lx, adapter %lu: gateway Length %lu\n",
+               Flags, A->IfIndex, G->Length);
+            ok(G->Address.lpSockaddr != NULL, "flags 0x%lx, adapter %lu: gateway without address\n", Flags,
+               A->IfIndex);
+            if (!G->Address.lpSockaddr)
+                continue;
+
+            ok(A->IfType != IF_TYPE_SOFTWARE_LOOPBACK, "flags 0x%lx: the loopback adapter has a gateway\n", Flags);
+            if (G->Address.lpSockaddr->sa_family != AF_INET)
+                continue;
+
+            ok(G->Address.iSockaddrLength == sizeof(SOCKADDR_IN), "flags 0x%lx, adapter %lu: gateway address length %d\n",
+               Flags, A->IfIndex, G->Address.iSockaddrLength);
+            ok(((SOCKADDR_IN *)G->Address.lpSockaddr)->sin_port == 0, "flags 0x%lx, adapter %lu: gateway port %u\n",
+               Flags, A->IfIndex, ((SOCKADDR_IN *)G->Address.lpSockaddr)->sin_port);
+            ok(((SOCKADDR_IN *)G->Address.lpSockaddr)->sin_addr.S_un.S_addr != 0, "flags 0x%lx, adapter %lu: gateway 0.0.0.0\n",
+               Flags, A->IfIndex);
+
+            /* the gateways of an adapter are all different */
+            for (H = A->FirstGatewayAddress; H != G; H = H->Next)
+            {
+                ok(H->Address.lpSockaddr->sa_family != AF_INET ||
+                   ((SOCKADDR_IN *)H->Address.lpSockaddr)->sin_addr.S_un.S_addr !=
+                   ((SOCKADDR_IN *)G->Address.lpSockaddr)->sin_addr.S_un.S_addr,
+                   "flags 0x%lx, adapter %lu: gateway listed twice\n", Flags, A->IfIndex);
+            }
+
+            /* ... and each is the next hop of a default route of the interface */
+            for (i = 0; i < Routes->dwNumEntries; i++)
+            {
+                if (Routes->table[i].dwForwardDest == 0 && Routes->table[i].dwForwardMask == 0 &&
+                    Routes->table[i].dwForwardIfIndex == A->IfIndex &&
+                    Routes->table[i].dwForwardNextHop == ((SOCKADDR_IN *)G->Address.lpSockaddr)->sin_addr.S_un.S_addr)
+                    break;
+            }
+            ok(i < Routes->dwNumEntries, "flags 0x%lx, adapter %lu: gateway %s is no default route\n", Flags,
+               A->IfIndex, inet_ntoa(((SOCKADDR_IN *)G->Address.lpSockaddr)->sin_addr));
+        }
+
+        if (!(Flags & GAA_FLAG_INCLUDE_GATEWAYS))
+        {
+            ok(Count == 0, "flags 0x%lx, adapter %lu: %lu gateways without GAA_FLAG_INCLUDE_GATEWAYS\n", Flags,
+               A->IfIndex, Count);
+            continue;
+        }
+
+        /* every default route that leaves through a router is a gateway of its interface */
+        for (i = 0; i < Routes->dwNumEntries; i++)
+        {
+            const MIB_IPFORWARDROW *Route = &Routes->table[i];
+
+            if (Route->dwForwardDest != 0 || Route->dwForwardMask != 0 || Route->dwForwardNextHop == 0 ||
+                Route->dwForwardIfIndex != A->IfIndex)
+                continue;
+            ok(HasGateway(A, Route->dwForwardNextHop), "flags 0x%lx, adapter %lu: no gateway for the default route via %s\n",
+               Flags, A->IfIndex, inet_ntoa(*(struct in_addr *)&Route->dwForwardNextHop));
+        }
+    }
+    free(Adapters);
+}
+
+static void TestGateways(void)
+{
+    MIB_IPFORWARDTABLE *Routes;
+    IP_ADAPTER_INFO *Info = NULL, *I;
+    IP_ADAPTER_ADDRESSES_LH *Adapters, *A;
+    ULONG Size = 0, i, Defaults = 0;
+    DWORD Error;
+
+    GetIpForwardTable(NULL, &Size, FALSE);
+    Routes = malloc(Size);
+    if (!Routes || GetIpForwardTable(Routes, &Size, FALSE) != NO_ERROR)
+    {
+        free(Routes);
+        skip("No route table\n");
+        return;
+    }
+    for (i = 0; i < Routes->dwNumEntries; i++)
+    {
+        if (Routes->table[i].dwForwardDest == 0 && Routes->table[i].dwForwardMask == 0 &&
+            Routes->table[i].dwForwardNextHop != 0)
+            Defaults++;
+    }
+
+    TestGatewayList(0, Routes);
+    TestGatewayList(GAA_FLAG_INCLUDE_GATEWAYS, Routes);
+    TestGatewayList(GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_SKIP_UNICAST | GAA_FLAG_SKIP_ANYCAST |
+                    GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, Routes);
+    TestGatewayList(GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_INCLUDE_PREFIX | GAA_FLAG_INCLUDE_WINS_INFO |
+                    GAA_FLAG_INCLUDE_ALL_INTERFACES, Routes);
+
+    if (!Defaults)
+    {
+        free(Routes);
+        skip("No default route\n");
+        return;
+    }
+
+    /* the first gateway is the one of GetAdaptersInfo */
+    Size = 0;
+    Error = GetAdaptersInfo(NULL, &Size);
+    if (Error == ERROR_BUFFER_OVERFLOW)
+    {
+        Info = malloc(Size);
+        Error = Info ? GetAdaptersInfo(Info, &Size) : ERROR_OUTOFMEMORY;
+    }
+    Adapters = GetAdapters(GAA_FLAG_INCLUDE_GATEWAYS);
+    for (I = Error == NO_ERROR ? Info : NULL; I && Adapters; I = I->Next)
+    {
+        for (A = Adapters; A && strcmp(A->AdapterName, I->AdapterName); A = A->Next)
+            ;
+        if (!A || I->GatewayList.IpAddress.String[0] == '0' || !I->GatewayList.IpAddress.String[0])
+            continue;
+        ok(A->FirstGatewayAddress != NULL &&
+           A->FirstGatewayAddress->Address.lpSockaddr->sa_family == AF_INET &&
+           !strcmp(inet_ntoa(((SOCKADDR_IN *)A->FirstGatewayAddress->Address.lpSockaddr)->sin_addr),
+                   I->GatewayList.IpAddress.String),
+           "adapter %s: GetAdaptersInfo gateway %s, GetAdaptersAddresses %s\n", I->AdapterName,
+           I->GatewayList.IpAddress.String,
+           A->FirstGatewayAddress ? "another one" : "none");
+    }
+    free(Adapters);
+    free(Info);
+    free(Routes);
+}
+
 START_TEST(GetAdaptersAddresses)
 {
     WSADATA Wsa;
@@ -144,5 +302,6 @@ START_TEST(GetAdaptersAddresses)
     WSAStartup(MAKEWORD(2, 2), &Wsa);
     TestAdapters();
     TestLoopbackIndex();
+    TestGateways();
     WSACleanup();
 }
