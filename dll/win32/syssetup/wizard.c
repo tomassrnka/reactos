@@ -2409,7 +2409,12 @@ RegisterWow64Dlls(VOID)
          * marshals it, so 32-bit COM servers (Google Updater) need it */
         L"actxprxy.dll",
         /* CLSID_TaskScheduler: 32-bit updaters register their wake tasks */
-        L"taskschd.dll"
+        L"taskschd.dll",
+        /* CLSID_WbemLocator, SWbemLocator and the WMI path parser: 32-bit WMI
+         * clients (installers, VBScript from SysWOW64) create them by CLSID */
+        L"wbem\\wbemprox.dll", L"wbem\\wbemdisp.dll", L"wbem\\wmiutils.dll",
+        /* Script engines and WScript.Shell/FileSystemObject for 32-bit scripts */
+        L"vbscript.dll", L"jscript.dll", L"scrrun.dll", L"wshom.ocx"
     };
     WCHAR Directory[MAX_PATH], Application[MAX_PATH], Command[2 * MAX_PATH + 64];
     STARTUPINFOW Startup = {sizeof(Startup)};

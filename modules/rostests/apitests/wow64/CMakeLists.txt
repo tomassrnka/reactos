@@ -295,3 +295,9 @@ add_importlibs(wow64_socket_event ws2_32 msvcrt kernel32 ntdll)
 add_executable(wow64_command_line EXCLUDE_FROM_ALL command_line.c)
 set_module_type(wow64_command_line win32cui UNICODE)
 add_importlibs(wow64_command_line msvcrt kernel32)
+
+# A 32-bit WMI client: the locator must be registered in the 32-bit registry view
+add_executable(wow64_wbem_locator EXCLUDE_FROM_ALL wbem_locator.c)
+set_module_type(wow64_wbem_locator win32cui UNICODE)
+target_link_libraries(wow64_wbem_locator uuid)
+add_importlibs(wow64_wbem_locator ole32 oleaut32 advapi32 msvcrt kernel32)
