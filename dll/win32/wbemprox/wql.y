@@ -230,7 +230,7 @@ static int wql_lex( void *val, struct parser *parser );
 }
 
 %token TK_SELECT TK_FROM TK_STAR TK_COMMA TK_DOT TK_IS TK_LP TK_RP TK_NULL TK_FALSE TK_TRUE
-%token TK_INTEGER TK_WHERE TK_SPACE TK_MINUS TK_ILLEGAL TK_BY TK_ASSOCIATORS TK_OF
+%token TK_INTEGER TK_WHERE TK_SPACE TK_MINUS TK_ILLEGAL TK_BY TK_ASSOCIATORS TK_OF TK_REFERENCES
 %token <str> TK_STRING TK_ID TK_PATH
 
 %type <string> id path
@@ -304,6 +304,36 @@ associatorsof:
             hr = create_view( VIEW_TYPE_ASSOCIATORS, $3, $5, NULL, NULL, NULL, &view );
             if (hr != S_OK)
                 YYABORT;
+
+            PARSER_BUBBLE_UP_VIEW( parser, $$, view );
+        }
+  | TK_REFERENCES TK_OF path
+        {
+            HRESULT hr;
+            struct parser *parser = ctx;
+            struct view *view;
+
+            hr = create_view( VIEW_TYPE_ASSOCIATORS, $3, NULL, NULL, NULL, NULL, &view );
+            if (hr != S_OK)
+                YYABORT;
+#ifdef __REACTOS__
+            view->references = TRUE;
+#endif
+
+            PARSER_BUBBLE_UP_VIEW( parser, $$, view );
+        }
+  | TK_REFERENCES TK_OF path TK_WHERE keywordlist
+        {
+            HRESULT hr;
+            struct parser *parser = ctx;
+            struct view *view;
+
+            hr = create_view( VIEW_TYPE_ASSOCIATORS, $3, $5, NULL, NULL, NULL, &view );
+            if (hr != S_OK)
+                YYABORT;
+#ifdef __REACTOS__
+            view->references = TRUE;
+#endif
 
             PARSER_BUBBLE_UP_VIEW( parser, $$, view );
         }
@@ -648,6 +678,7 @@ static const WCHAR notW[] = {'N','O','T'};
 static const WCHAR nullW[] = {'N','U','L','L'};
 static const WCHAR ofW[] = {'O','F'};
 static const WCHAR orW[] = {'O','R'};
+static const WCHAR referencesW[] = {'R','E','F','E','R','E','N','C','E','S'};
 static const WCHAR selectW[] = {'S','E','L','E','C','T'};
 static const WCHAR trueW[] = {'T','R','U','E'};
 static const WCHAR whereW[] = {'W','H','E','R','E'};
@@ -665,6 +696,7 @@ static const struct wql_keyword keyword_table[] =
     { nullW,        ARRAY_SIZE(nullW),        TK_NULL },
     { ofW,          ARRAY_SIZE(ofW),          TK_OF },
     { orW,          ARRAY_SIZE(orW),          TK_OR },
+    { referencesW,  ARRAY_SIZE(referencesW),  TK_REFERENCES },
     { selectW,      ARRAY_SIZE(selectW),      TK_SELECT },
     { trueW,        ARRAY_SIZE(trueW),        TK_TRUE },
     { whereW,       ARRAY_SIZE(whereW),       TK_WHERE }
@@ -720,7 +752,20 @@ static int get_token( const WCHAR *s, int *token )
         *token = TK_RP;
         return 1;
     case '{':
+#ifdef __REACTOS__
+        /* a quoted key value of the object path may hold a closing brace */
+        for (i = 1; s[i] && s[i] != '}'; i++)
+        {
+            if (s[i] == '"' || s[i] == '\'')
+            {
+                WCHAR quote = s[i];
+                for (i++; s[i] && s[i] != quote; i++) if (s[i] == '\\' && s[i + 1]) i++;
+                if (!s[i]) break;
+            }
+        }
+#else
         for (i = 1; s[i] && s[i] != '}'; i++) {}
+#endif
         if (s[i] != '}')
         {
             *token = TK_ILLEGAL;

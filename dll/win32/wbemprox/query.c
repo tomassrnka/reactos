@@ -92,6 +92,7 @@ void destroy_view( struct view *view )
     heap_free( view->result );
 #ifdef __REACTOS__
     heap_free( view->result_table );
+    if (view->objects) IEnumWbemClassObject_Release( view->objects );
 #endif
     heap_free( view );
 }
@@ -484,6 +485,7 @@ HRESULT eval_cond( const struct table *table, UINT row, const struct expr *cond,
     return WBEM_E_INVALID_QUERY;
 }
 
+#ifndef __REACTOS__
 static WCHAR *build_assoc_query( const WCHAR *class, UINT class_len )
 {
     static const WCHAR fmtW[] =
@@ -521,6 +523,8 @@ static WCHAR *build_antecedent_query( const WCHAR *assocclass, const WCHAR *depe
     return ret;
 }
 
+#endif
+
 static BSTR build_servername(void)
 {
     WCHAR server[MAX_COMPUTERNAME_LENGTH + 1], *p;
@@ -545,6 +549,7 @@ static BSTR build_namespace(void)
 }
 #endif
 
+#ifndef __REACTOS__
 static WCHAR *build_canonical_path( const WCHAR *relpath )
 {
     static const WCHAR fmtW[] = {'\\','\\','%','s','\\','%','s',':',0};
@@ -707,6 +712,7 @@ done:
     free_path( path );
     return hr;
 }
+#endif
 
 #ifdef __REACTOS__
 static HRESULT exec_select_view_locked( struct view *view );
@@ -714,7 +720,7 @@ static HRESULT exec_select_view_locked( struct view *view );
 /* the most rows of a SELECT over a class and its subclasses */
 #define MAX_SUBCLASS_ROWS 262144
 
-static BOOL is_disk_walk_table( const struct table *table )
+BOOL is_disk_walk_table( const struct table *table )
 {
     return !wcsicmp( table->name, L"CIM_DataFile" ) || !wcsicmp( table->name, L"Win32_Directory" ) ||
            !wcsicmp( table->name, L"CIM_Directory" );
@@ -846,7 +852,11 @@ HRESULT execute_view( struct view *view )
     switch (view->type)
     {
     case VIEW_TYPE_ASSOCIATORS:
+#ifdef __REACTOS__
+        return exec_assoc_query( view );
+#else
         return exec_assoc_view( view );
+#endif
 
     case VIEW_TYPE_SELECT:
         return exec_select_view( view );
@@ -895,6 +905,20 @@ HRESULT exec_query( const WCHAR *str, IEnumWbemClassObject **result )
 }
 
 HRESULT exec_query_ns( enum wbm_namespace ns, const WCHAR *str, IEnumWbemClassObject **result )
+{
+    return exec_query_flags( ns, str, 0, result );
+}
+
+/* an association query that names no object, a missing one or one of an unknown class fails as WMI
+ * fails it for a semisynchronous call: when the enumerator is read */
+static BOOL is_deferred_error( const struct view *view, HRESULT hr, LONG flags )
+{
+    if (!view || view->type != VIEW_TYPE_ASSOCIATORS || !(flags & WBEM_FLAG_RETURN_IMMEDIATELY)) return FALSE;
+    return hr == WBEM_E_NOT_FOUND || hr == WBEM_E_INVALID_CLASS || hr == WBEM_E_INVALID_OBJECT_PATH ||
+           hr == WBEM_E_INVALID_NAMESPACE || hr == WBEM_E_NOT_SUPPORTED;
+}
+
+HRESULT exec_query_flags( enum wbm_namespace ns, const WCHAR *str, LONG flags, IEnumWbemClassObject **result )
 #else
 HRESULT exec_query( const WCHAR *str, IEnumWbemClassObject **result )
 #endif
@@ -911,7 +935,21 @@ HRESULT exec_query( const WCHAR *str, IEnumWbemClassObject **result )
     if (hr != S_OK) goto done;
 #endif
     hr = execute_view( query->view );
+#ifdef __REACTOS__
+    if (hr != S_OK && is_deferred_error( query->view, hr, flags ))
+    {
+        hr = EnumWbemClassObjectError_create( hr, result );
+        goto done;
+    }
     if (hr != S_OK) goto done;
+    if (query->view->objects)
+    {
+        IEnumWbemClassObject_AddRef( (*result = query->view->objects) );
+        goto done;
+    }
+#else
+    if (hr != S_OK) goto done;
+#endif
     hr = EnumWbemClassObject_create( query, (void **)result );
 
 done:
@@ -1328,6 +1366,15 @@ static HRESULT map_view_index( const struct view *view, UINT index, UINT *table_
         break;
 
     case VIEW_TYPE_ASSOCIATORS:
+#ifdef __REACTOS__
+        if (view->result_table)
+        {
+            if (index >= view->result_count) return WBEM_E_NOT_FOUND;
+            *table_index = view->result_table[index];
+            *result_index = index;
+            break;
+        }
+#endif
         *table_index = *result_index = index;
         break;
 
@@ -1349,6 +1396,13 @@ struct table *get_view_table( const struct view *view, UINT index )
         return view->table[0];
 
     case VIEW_TYPE_ASSOCIATORS:
+#ifdef __REACTOS__
+        if (view->result_table)
+        {
+            if (index >= view->result_count) return NULL;
+            return view->table[view->result_table[index]];
+        }
+#endif
         return view->table[index];
 
     default:

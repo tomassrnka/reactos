@@ -1654,6 +1654,174 @@ static const struct column col_cim_managedelement[] =
     { L"ElementName", CIM_STRING },
     { L"InstanceID", CIM_STRING },
 };
+static const WCHAR *const order_win32_systemprocesses[] =
+{
+    L"GroupComponent", L"PartComponent",
+};
+static const WCHAR *const order_cim_systemcomponent[] =
+{
+    L"GroupComponent", L"PartComponent",
+};
+static const struct column col_cim_systemcomponent[] =
+{
+    { L"GroupComponent", CIM_REFERENCE },
+    { L"PartComponent", CIM_REFERENCE },
+};
+static const WCHAR *const order_cim_component[] =
+{
+    L"GroupComponent", L"PartComponent",
+};
+static const struct column col_cim_component[] =
+{
+    { L"GroupComponent", CIM_REFERENCE },
+    { L"PartComponent", CIM_REFERENCE },
+};
+static const WCHAR *const order_win32_systemservices[] =
+{
+    L"GroupComponent", L"PartComponent",
+};
+static const WCHAR *const order_win32_dependentservice[] =
+{
+    L"Antecedent", L"Dependent", L"TypeOfDependency",
+};
+static const WCHAR *const order_cim_serviceservicedependency[] =
+{
+    L"Antecedent", L"Dependent", L"TypeOfDependency",
+};
+static const struct column col_cim_serviceservicedependency[] =
+{
+    { L"Antecedent", CIM_REFERENCE },
+    { L"Dependent", CIM_REFERENCE },
+    { L"TypeOfDependency", CIM_UINT16 },
+};
+static const WCHAR *const order_win32_systemoperatingsystem[] =
+{
+    L"GroupComponent", L"PartComponent", L"PrimaryOS",
+};
+static const WCHAR *const order_cim_installedos[] =
+{
+    L"GroupComponent", L"PartComponent", L"PrimaryOS",
+};
+static const struct column col_cim_installedos[] =
+{
+    { L"GroupComponent", CIM_REFERENCE },
+    { L"PartComponent", CIM_REFERENCE },
+    { L"PrimaryOS", CIM_BOOLEAN },
+};
+static const WCHAR *const order_win32_systembios[] =
+{
+    L"GroupComponent", L"PartComponent",
+};
+static const WCHAR *const order_win32_computersystemprocessor[] =
+{
+    L"GroupComponent", L"PartComponent",
+};
+static const WCHAR *const order_win32_systemdevices[] =
+{
+    L"GroupComponent", L"PartComponent",
+};
+static const WCHAR *const order_cim_systemdevice[] =
+{
+    L"GroupComponent", L"PartComponent",
+};
+static const struct column col_cim_systemdevice[] =
+{
+    { L"GroupComponent", CIM_REFERENCE },
+    { L"PartComponent", CIM_REFERENCE },
+};
+static const WCHAR *const order_win32_systemtimezone[] =
+{
+    L"Element", L"Setting",
+};
+static const WCHAR *const order_win32_systemsetting[] =
+{
+    L"Element", L"Setting",
+};
+static const struct column col_win32_systemsetting[] =
+{
+    { L"Element", CIM_REFERENCE|COL_FLAG_KEY },
+    { L"Setting", CIM_REFERENCE|COL_FLAG_KEY },
+};
+static const WCHAR *const order_cim_elementsetting[] =
+{
+    L"Element", L"Setting",
+};
+static const struct column col_cim_elementsetting[] =
+{
+    { L"Element", CIM_REFERENCE },
+    { L"Setting", CIM_REFERENCE },
+};
+static const WCHAR *const order_win32_systempartitions[] =
+{
+    L"GroupComponent", L"PartComponent",
+};
+static const WCHAR *const order_win32_networkadaptersetting[] =
+{
+    L"Element", L"Setting",
+};
+static const WCHAR *const order_win32_devicesettings[] =
+{
+    L"Element", L"Setting",
+};
+static const struct column col_win32_devicesettings[] =
+{
+    { L"Element", CIM_REFERENCE|COL_FLAG_KEY },
+    { L"Setting", CIM_REFERENCE|COL_FLAG_KEY },
+};
+static const WCHAR *const order_win32_operatingsystemqfe[] =
+{
+    L"Antecedent", L"Dependent",
+};
+static const WCHAR *const order_cim_osprocess[] =
+{
+    L"GroupComponent", L"PartComponent",
+};
+static const struct column col_cim_osprocess[] =
+{
+    { L"GroupComponent", CIM_REFERENCE },
+    { L"PartComponent", CIM_REFERENCE },
+};
+static const WCHAR *const order_cim_hostedservice[] =
+{
+    L"Antecedent", L"Dependent",
+};
+static const struct column col_cim_hostedservice[] =
+{
+    { L"Antecedent", CIM_REFERENCE },
+    { L"Dependent", CIM_REFERENCE },
+};
+static const WCHAR *const order_cim_runningos[] =
+{
+    L"Antecedent", L"Dependent",
+};
+static const struct column col_cim_runningos[] =
+{
+    { L"Antecedent", CIM_REFERENCE },
+    { L"Dependent", CIM_REFERENCE },
+};
+static const WCHAR *const order_cim_logicalidentity[] =
+{
+    L"SameElement", L"SystemElement",
+};
+static const WCHAR *const writable_cim_logicalidentity[] = { L"SameElement", L"SystemElement" };
+static const struct column col_cim_logicalidentity[] =
+{
+    { L"SameElement", CIM_REFERENCE|COL_FLAG_KEY },
+    { L"SystemElement", CIM_REFERENCE|COL_FLAG_KEY },
+};
+static const WCHAR *const order_cim_processexecutable[] =
+{
+    L"Antecedent", L"Dependent", L"BaseAddress", L"GlobalProcessCount", L"ModuleInstance", L"ProcessCount",
+};
+static const struct column col_cim_processexecutable[] =
+{
+    { L"Antecedent", CIM_REFERENCE|COL_FLAG_KEY },
+    { L"Dependent", CIM_REFERENCE|COL_FLAG_KEY },
+    { L"BaseAddress", CIM_UINT64 },
+    { L"GlobalProcessCount", CIM_UINT32 },
+    { L"ModuleInstance", CIM_UINT32 },
+    { L"ProcessCount", CIM_UINT32 },
+};
 
 static const struct schema_class schema_classes[] =
 {
@@ -1742,4 +1910,28 @@ static const struct schema_class schema_classes[] =
     { L"Win32_PowerSupplyProfile", L"CIM_RegisteredProfile", SCHEMA_NS_INTEROP, col_win32_powersupplyprofile, ARRAY_SIZE(col_win32_powersupplyprofile), order_win32_powersupplyprofile, 10, writable_win32_powersupplyprofile, ARRAY_SIZE(writable_win32_powersupplyprofile), TRUE },
     { L"CIM_RegisteredProfile", L"CIM_ManagedElement", SCHEMA_NS_INTEROP, col_cim_registeredprofile, ARRAY_SIZE(col_cim_registeredprofile), order_cim_registeredprofile, 10, writable_cim_registeredprofile, ARRAY_SIZE(writable_cim_registeredprofile), TRUE },
     { L"CIM_ManagedElement", NULL, SCHEMA_NS_INTEROP, col_cim_managedelement, ARRAY_SIZE(col_cim_managedelement), order_cim_managedelement, 4, writable_cim_managedelement, ARRAY_SIZE(writable_cim_managedelement), TRUE },
+    { L"Win32_SystemProcesses", L"CIM_SystemComponent", SCHEMA_NS_CIMV2, NULL, 0, order_win32_systemprocesses, 2, NULL, 0, FALSE },
+    { L"CIM_SystemComponent", L"CIM_Component", SCHEMA_NS_CIMV2, col_cim_systemcomponent, ARRAY_SIZE(col_cim_systemcomponent), order_cim_systemcomponent, 2, NULL, 0, TRUE },
+    { L"CIM_Component", NULL, SCHEMA_NS_CIMV2, col_cim_component, ARRAY_SIZE(col_cim_component), order_cim_component, 2, NULL, 0, TRUE },
+    { L"Win32_SystemServices", L"CIM_SystemComponent", SCHEMA_NS_CIMV2, NULL, 0, order_win32_systemservices, 2, NULL, 0, FALSE },
+    { L"Win32_DependentService", L"CIM_ServiceServiceDependency", SCHEMA_NS_CIMV2, NULL, 0, order_win32_dependentservice, 3, NULL, 0, FALSE },
+    { L"CIM_ServiceServiceDependency", L"CIM_Dependency", SCHEMA_NS_CIMV2, col_cim_serviceservicedependency, ARRAY_SIZE(col_cim_serviceservicedependency), order_cim_serviceservicedependency, 3, NULL, 0, TRUE },
+    { L"Win32_SystemOperatingSystem", L"CIM_InstalledOS", SCHEMA_NS_CIMV2, NULL, 0, order_win32_systemoperatingsystem, 3, NULL, 0, FALSE },
+    { L"CIM_InstalledOS", L"CIM_SystemComponent", SCHEMA_NS_CIMV2, col_cim_installedos, ARRAY_SIZE(col_cim_installedos), order_cim_installedos, 3, NULL, 0, TRUE },
+    { L"Win32_SystemBIOS", L"CIM_SystemComponent", SCHEMA_NS_CIMV2, NULL, 0, order_win32_systembios, 2, NULL, 0, FALSE },
+    { L"Win32_ComputerSystemProcessor", L"Win32_SystemDevices", SCHEMA_NS_CIMV2, NULL, 0, order_win32_computersystemprocessor, 2, NULL, 0, FALSE },
+    { L"Win32_SystemDevices", L"CIM_SystemDevice", SCHEMA_NS_CIMV2, NULL, 0, order_win32_systemdevices, 2, NULL, 0, FALSE },
+    { L"CIM_SystemDevice", L"CIM_SystemComponent", SCHEMA_NS_CIMV2, col_cim_systemdevice, ARRAY_SIZE(col_cim_systemdevice), order_cim_systemdevice, 2, NULL, 0, TRUE },
+    { L"Win32_SystemTimeZone", L"Win32_SystemSetting", SCHEMA_NS_CIMV2, NULL, 0, order_win32_systemtimezone, 2, NULL, 0, FALSE },
+    { L"Win32_SystemSetting", L"CIM_ElementSetting", SCHEMA_NS_CIMV2, col_win32_systemsetting, ARRAY_SIZE(col_win32_systemsetting), order_win32_systemsetting, 2, NULL, 0, TRUE },
+    { L"CIM_ElementSetting", NULL, SCHEMA_NS_CIMV2, col_cim_elementsetting, ARRAY_SIZE(col_cim_elementsetting), order_cim_elementsetting, 2, NULL, 0, TRUE },
+    { L"Win32_SystemPartitions", L"Win32_SystemDevices", SCHEMA_NS_CIMV2, NULL, 0, order_win32_systempartitions, 2, NULL, 0, FALSE },
+    { L"Win32_NetworkAdapterSetting", L"Win32_DeviceSettings", SCHEMA_NS_CIMV2, NULL, 0, order_win32_networkadaptersetting, 2, NULL, 0, FALSE },
+    { L"Win32_DeviceSettings", L"CIM_ElementSetting", SCHEMA_NS_CIMV2, col_win32_devicesettings, ARRAY_SIZE(col_win32_devicesettings), order_win32_devicesettings, 2, NULL, 0, TRUE },
+    { L"Win32_OperatingSystemQFE", L"CIM_Dependency", SCHEMA_NS_CIMV2, NULL, 0, order_win32_operatingsystemqfe, 2, NULL, 0, FALSE },
+    { L"CIM_OSProcess", L"CIM_Component", SCHEMA_NS_CIMV2, col_cim_osprocess, ARRAY_SIZE(col_cim_osprocess), order_cim_osprocess, 2, NULL, 0, TRUE },
+    { L"CIM_HostedService", L"CIM_Dependency", SCHEMA_NS_CIMV2, col_cim_hostedservice, ARRAY_SIZE(col_cim_hostedservice), order_cim_hostedservice, 2, NULL, 0, TRUE },
+    { L"CIM_RunningOS", L"CIM_Dependency", SCHEMA_NS_CIMV2, col_cim_runningos, ARRAY_SIZE(col_cim_runningos), order_cim_runningos, 2, NULL, 0, TRUE },
+    { L"CIM_LogicalIdentity", NULL, SCHEMA_NS_CIMV2, col_cim_logicalidentity, ARRAY_SIZE(col_cim_logicalidentity), order_cim_logicalidentity, 2, writable_cim_logicalidentity, ARRAY_SIZE(writable_cim_logicalidentity), TRUE },
+    { L"CIM_ProcessExecutable", L"CIM_Dependency", SCHEMA_NS_CIMV2, col_cim_processexecutable, ARRAY_SIZE(col_cim_processexecutable), order_cim_processexecutable, 6, NULL, 0, TRUE },
 };

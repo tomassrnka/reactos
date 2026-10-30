@@ -242,6 +242,7 @@ struct enum_class_array
     UINT count;
     UINT index;
     IWbemClassObject **objs;
+    HRESULT error;      /* a query that failed: every Next returns this */
 };
 
 static inline struct enum_class_array *impl_from_array_iface( IEnumWbemClassObject *iface )
@@ -299,6 +300,11 @@ static HRESULT WINAPI enum_class_array_Next( IEnumWbemClassObject *iface, LONG t
 
     if (!count) return WBEM_S_FALSE;
     if (!objs || !returned) return WBEM_E_INVALID_PARAMETER;
+    if (ea->error)
+    {
+        *returned = 0;
+        return ea->error;
+    }
     while (i < count && ea->index < ea->count)
     {
         objs[i] = ea->objs[ea->index++];
@@ -327,6 +333,7 @@ static HRESULT WINAPI enum_class_array_Clone( IEnumWbemClassObject *iface, IEnum
     for (i = 0; i < ea->count; i++) IWbemClassObject_AddRef( (objs[i] = ea->objs[i]) );
     if ((hr = EnumWbemClassObjectArray_create( objs, ea->count, ret )) != S_OK)
         for (i = 0; i < ea->count; i++) IWbemClassObject_Release( objs[i] );
+    else impl_from_array_iface( *ret )->error = ea->error;
     heap_free( objs );
     return hr;
 }
@@ -372,6 +379,14 @@ HRESULT EnumWbemClassObjectArray_create( IWbemClassObject **objs, UINT count, IE
     ea->count = count;
     *ret = &ea->IEnumWbemClassObject_iface;
     return S_OK;
+}
+
+/* the enumerator of a semisynchronous query whose error shows when it is read */
+HRESULT EnumWbemClassObjectError_create( HRESULT error, IEnumWbemClassObject **ret )
+{
+    HRESULT hr = EnumWbemClassObjectArray_create( NULL, 0, ret );
+    if (hr == S_OK) impl_from_array_iface( *ret )->error = error;
+    return hr;
 }
 #endif
 

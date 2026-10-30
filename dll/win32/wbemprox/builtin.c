@@ -562,7 +562,11 @@ static const struct column col_compsys[] =
     { prop_domainroleW,           CIM_UINT16 },
     { prop_manufacturerW,         CIM_STRING|COL_FLAG_DYNAMIC },
     { prop_modelW,                CIM_STRING|COL_FLAG_DYNAMIC },
+#ifdef __REACTOS__
+    { prop_nameW,                 CIM_STRING|COL_FLAG_DYNAMIC|COL_FLAG_KEY },
+#else
     { prop_nameW,                 CIM_STRING|COL_FLAG_DYNAMIC },
+#endif
     { prop_numlogicalprocessorsW, CIM_UINT32 },
     { prop_numprocessorsW,        CIM_UINT32 },
     { prop_totalphysicalmemoryW,  CIM_UINT64 },
@@ -657,11 +661,13 @@ static const struct column col_diskdrive[] =
     { prop_serialnumberW,  CIM_STRING },
     { prop_sizeW,          CIM_UINT64 }
 };
+#ifndef __REACTOS__
 static const struct column col_diskdrivetodiskpartition[] =
 {
     { prop_antecedentW, CIM_REFERENCE|COL_FLAG_DYNAMIC|COL_FLAG_KEY },
     { prop_dependentW,  CIM_REFERENCE|COL_FLAG_DYNAMIC|COL_FLAG_KEY }
 };
+#endif /* !__REACTOS__ */
 static const struct column col_diskpartition[] =
 {
     { prop_bootableW,       CIM_BOOLEAN },
@@ -822,11 +828,13 @@ static const struct column col_logicaldisk[] =
     { L"SystemName", CIM_STRING|COL_FLAG_DYNAMIC },
     { L"VolumeDirty", CIM_BOOLEAN }
 };
+#ifndef __REACTOS__
 static const struct column col_logicaldisktopartition[] =
 {
     { prop_antecedentW, CIM_REFERENCE|COL_FLAG_DYNAMIC|COL_FLAG_KEY },
     { prop_dependentW,  CIM_REFERENCE|COL_FLAG_DYNAMIC|COL_FLAG_KEY }
 };
+#endif /* !__REACTOS__ */
 static const struct column col_networkadapter[] =
 {
     { prop_adaptertypeW,         CIM_STRING },
@@ -3655,6 +3663,7 @@ static enum fill_status fill_diskdrive( struct table *table, const struct expr *
     return status;
 }
 
+#ifndef __REACTOS__
 struct association
 {
     WCHAR *ref;
@@ -3758,6 +3767,7 @@ static enum fill_status fill_diskdrivetodiskpartition( struct table *table, cons
     table->num_rows = row;
     return status;
 }
+#endif /* !__REACTOS__ */
 
 static WCHAR *get_filesystem( const WCHAR *root )
 {
@@ -4024,6 +4034,7 @@ static enum fill_status fill_logicaldisk( struct table *table, const struct expr
     return status;
 }
 
+#ifndef __REACTOS__
 static struct association *get_logicaldisktopartition_pairs( UINT *count )
 {
     static const WCHAR pathW[] =
@@ -4111,6 +4122,7 @@ static enum fill_status fill_logicaldisktopartition( struct table *table, const 
     table->num_rows = row;
     return status;
 }
+#endif /* !__REACTOS__ */
 
 static UINT16 get_connection_status( IF_OPER_STATUS status )
 {
@@ -6428,6 +6440,340 @@ done:
 
 #endif /* !__REACTOS__ */
 
+#ifdef __REACTOS__
+/* association classes: assoc.c walks them for ASSOCIATORS OF and REFERENCES OF */
+
+static const struct column col_assoc_component[] =
+{
+    { L"GroupComponent", CIM_REFERENCE|COL_FLAG_DYNAMIC|COL_FLAG_KEY },
+    { L"PartComponent",  CIM_REFERENCE|COL_FLAG_DYNAMIC|COL_FLAG_KEY },
+};
+static const struct column col_assoc_dependency[] =
+{
+    { L"Antecedent", CIM_REFERENCE|COL_FLAG_DYNAMIC|COL_FLAG_KEY },
+    { L"Dependent",  CIM_REFERENCE|COL_FLAG_DYNAMIC|COL_FLAG_KEY },
+};
+static const struct column col_assoc_setting[] =
+{
+    { L"Element", CIM_REFERENCE|COL_FLAG_DYNAMIC|COL_FLAG_KEY },
+    { L"Setting", CIM_REFERENCE|COL_FLAG_DYNAMIC|COL_FLAG_KEY },
+};
+static const struct column col_systemoperatingsystem[] =
+{
+    { L"GroupComponent", CIM_REFERENCE|COL_FLAG_DYNAMIC|COL_FLAG_KEY },
+    { L"PartComponent",  CIM_REFERENCE|COL_FLAG_DYNAMIC|COL_FLAG_KEY },
+    { L"PrimaryOS",      CIM_BOOLEAN },
+};
+
+#include "pshpack1.h"
+struct record_assoc
+{
+    const WCHAR *ref;
+    const WCHAR *ref2;
+};
+struct record_systemoperatingsystem
+{
+    const WCHAR *ref;
+    const WCHAR *ref2;
+    int          primaryos;
+};
+#include "poppack.h"
+
+/* the most instances of one association class */
+#define MAX_ASSOC_ROWS 65536
+
+enum link_kind
+{
+    LINK_ALL,       /* every instance of the first query with every one of the second */
+    LINK_JOIN,      /* the pairs whose join properties are equal */
+    LINK_POSITION,  /* the n-th instance of the first query with the n-th of the second */
+};
+
+struct assoc_link
+{
+    const WCHAR *class;
+    const WCHAR *query;     /* instances of the first reference */
+    const WCHAR *query2;    /* instances of the second; NULL: the logical devices no subclass links */
+    enum link_kind kind;
+    const WCHAR *join;
+    const WCHAR *join2;
+};
+
+static const struct assoc_link assoc_links[] =
+{
+    { L"Win32_SystemProcesses", L"SELECT * FROM Win32_ComputerSystem", L"SELECT * FROM Win32_Process", LINK_ALL },
+    { L"Win32_SystemServices", L"SELECT * FROM Win32_ComputerSystem", L"SELECT * FROM Win32_Service", LINK_ALL },
+    { L"Win32_SystemOperatingSystem", L"SELECT * FROM Win32_ComputerSystem", L"SELECT * FROM Win32_OperatingSystem", LINK_ALL },
+    { L"Win32_SystemBIOS", L"SELECT * FROM Win32_ComputerSystem", L"SELECT * FROM Win32_BIOS", LINK_ALL },
+    { L"Win32_ComputerSystemProcessor", L"SELECT * FROM Win32_ComputerSystem", L"SELECT * FROM Win32_Processor", LINK_ALL },
+    { L"Win32_SystemTimeZone", L"SELECT * FROM Win32_ComputerSystem", L"SELECT * FROM Win32_TimeZone", LINK_ALL },
+    { L"Win32_SystemPartitions", L"SELECT * FROM Win32_ComputerSystem", L"SELECT * FROM Win32_DiskPartition", LINK_ALL },
+    { L"Win32_SystemDevices", L"SELECT * FROM Win32_ComputerSystem", NULL, LINK_ALL },
+    { L"Win32_NetworkAdapterSetting", L"SELECT * FROM Win32_NetworkAdapter", L"SELECT * FROM Win32_NetworkAdapterConfiguration",
+      LINK_JOIN, L"Index", L"Index" },
+    { L"Win32_OperatingSystemQFE", L"SELECT * FROM Win32_OperatingSystem", L"SELECT * FROM Win32_QuickFixEngineering", LINK_ALL },
+    /* fixed and removable disks are assumed to be enumerated in the same order as the partitions */
+    { L"Win32_DiskDriveToDiskPartition", L"SELECT * FROM Win32_DiskDrive", L"SELECT * FROM Win32_DiskPartition", LINK_POSITION },
+    { L"Win32_LogicalDiskToPartition", L"SELECT * FROM Win32_DiskPartition",
+      L"SELECT * FROM Win32_LogicalDisk WHERE DriveType=2 OR DriveType=3", LINK_POSITION },
+};
+
+struct instance_ref
+{
+    WCHAR *path;
+    BSTR join;
+};
+
+struct instance_refs
+{
+    struct instance_ref *items;
+    UINT count;
+    UINT size;
+};
+
+static void free_instance_refs( struct instance_refs *refs )
+{
+    UINT i;
+    for (i = 0; i < refs->count; i++)
+    {
+        heap_free( refs->items[i].path );
+        SysFreeString( refs->items[i].join );
+    }
+    heap_free( refs->items );
+    memset( refs, 0, sizeof(*refs) );
+}
+
+/* the object paths of the instances a query returns, and the value of their join property */
+static HRESULT add_instance_refs( const WCHAR *str, const WCHAR *join, struct instance_refs *refs )
+{
+    struct query *query;
+    HRESULT hr;
+    UINT i;
+
+    if (!(query = create_query())) return E_OUTOFMEMORY;
+    if ((hr = parse_query( str, &query->view, &query->mem )) != S_OK) goto done;
+    if ((hr = execute_view( query->view )) != S_OK) goto done;
+
+    for (i = 0; i < query->view->result_count && refs->count < MAX_ASSOC_ROWS; i++)
+    {
+        const struct table *table = get_view_table( query->view, i );
+        UINT row = query->view->result[i], column;
+        struct instance_ref *ref;
+
+        if (!table || row >= table->num_rows) continue;
+        if (refs->count == refs->size)
+        {
+            UINT size = refs->size ? refs->size * 2 : 16;
+            struct instance_ref *tmp;
+            if (!(tmp = heap_realloc( refs->items, size * sizeof(*tmp) )))
+            {
+                hr = E_OUTOFMEMORY;
+                break;
+            }
+            refs->items = tmp;
+            refs->size = size;
+        }
+        ref = &refs->items[refs->count];
+        ref->join = NULL;
+        if (!(ref->path = build_row_reference_path( table, row )))
+        {
+            hr = E_OUTOFMEMORY;
+            break;
+        }
+        if (join && get_column_index( table, join, &column ) == S_OK) ref->join = get_value_bstr( table, row, column );
+        refs->count++;
+    }
+
+done:
+    free_query( query );
+    return hr;
+}
+
+/* the logical devices that no subclass of Win32_SystemDevices links: these have their own */
+static BOOL is_system_device( const struct table *table )
+{
+    return is_subclass( table->name, L"CIM_LogicalDevice" ) && table->fill && is_table_visible( table->name, WBEMPROX_NAMESPACE_CIMV2 ) &&
+           wcsicmp( table->name, L"Win32_Processor" ) && wcsicmp( table->name, L"Win32_DiskPartition" );
+}
+
+static HRESULT add_device_refs( struct instance_refs *refs )
+{
+    const WCHAR *names[64];
+    struct table *table;
+    UINT count = 0, i;
+    HRESULT hr = S_OK;
+
+    LIST_FOR_EACH_ENTRY( table, table_list, struct table, entry )
+        if (count < ARRAY_SIZE(names) && is_system_device( table )) names[count++] = table->name; /* builtin tables */
+
+    for (i = 0; i < count && hr == S_OK; i++)
+    {
+        WCHAR query[128];
+        _snwprintf( query, ARRAY_SIZE(query) - 1, L"SELECT * FROM %s", names[i] );
+        query[ARRAY_SIZE(query) - 1] = 0;
+        hr = add_instance_refs( query, NULL, refs );
+    }
+    return hr;
+}
+
+static BOOL add_link_row( struct table *table, UINT *row, const WCHAR *ref, const WCHAR *ref2, const struct expr *cond,
+                          enum fill_status *status )
+{
+    struct record_systemoperatingsystem *rec;
+    UINT size = (table->num_cols == 3) ? sizeof(struct record_systemoperatingsystem) : sizeof(struct record_assoc);
+
+    if (*row >= MAX_ASSOC_ROWS) return FALSE;
+    if (!resize_table( table, *row + 1, size )) return FALSE;
+    rec = (struct record_systemoperatingsystem *)(table->data + *row * size);
+    if (!(rec->ref = heap_strdupW( ref )) || !(rec->ref2 = heap_strdupW( ref2 )))
+    {
+        heap_free( (WCHAR *)rec->ref );
+        return FALSE;
+    }
+    if (table->num_cols == 3) rec->primaryos = -1;
+    if (!match_row( table, *row, cond, status ))
+    {
+        free_row_values( table, *row );
+        return TRUE;
+    }
+    (*row)++;
+    return TRUE;
+}
+
+static enum fill_status fill_association( struct table *table, const struct expr *cond )
+{
+    struct instance_refs refs = { NULL, 0, 0 }, refs2 = { NULL, 0, 0 };
+    enum fill_status status = FILL_STATUS_UNFILTERED;
+    const struct assoc_link *link = NULL;
+    UINT i, j, row = 0;
+    HRESULT hr;
+
+    for (i = 0; i < ARRAY_SIZE(assoc_links); i++) if (!wcsicmp( assoc_links[i].class, table->name )) link = &assoc_links[i];
+    if (!link) return FILL_STATUS_FAILED;
+
+    if ((hr = add_instance_refs( link->query, link->join, &refs )) == S_OK)
+    {
+        if (link->query2) hr = add_instance_refs( link->query2, link->join2, &refs2 );
+        else hr = add_device_refs( &refs2 );
+    }
+    if (hr != S_OK)
+    {
+        free_instance_refs( &refs );
+        free_instance_refs( &refs2 );
+        return FILL_STATUS_FAILED;
+    }
+
+    for (i = 0; i < refs.count && row < MAX_ASSOC_ROWS; i++)
+    {
+        for (j = (link->kind == LINK_POSITION) ? i : 0; j < refs2.count && row < MAX_ASSOC_ROWS; j++)
+        {
+            if (link->kind == LINK_JOIN && (!refs.items[i].join || !refs2.items[j].join ||
+                                            wcscmp( refs.items[i].join, refs2.items[j].join ))) continue;
+            if (!add_link_row( table, &row, refs.items[i].path, refs2.items[j].path, cond, &status ))
+            {
+                status = FILL_STATUS_FAILED;
+                break;
+            }
+            if (link->kind == LINK_POSITION) break;
+        }
+        if (status == FILL_STATUS_FAILED) break;
+    }
+    free_instance_refs( &refs );
+    free_instance_refs( &refs2 );
+    if (status == FILL_STATUS_FAILED)
+    {
+        for (i = 0; i < row; i++) free_row_values( table, i );
+        row = 0;
+    }
+
+    TRACE("created %u rows\n", row);
+    table->num_rows = row;
+    return status;
+}
+
+/* Win32_DependentService: a service and each service it depends on (load order groups are not services) */
+static enum fill_status fill_dependentservice( struct table *table, const struct expr *cond )
+{
+    enum fill_status status = FILL_STATUS_UNFILTERED;
+    struct query *query;
+    SC_HANDLE manager;
+    UINT i, row = 0, column;
+    HRESULT hr;
+
+    if (!(manager = OpenSCManagerW( NULL, NULL, SC_MANAGER_ENUMERATE_SERVICE ))) return FILL_STATUS_FAILED;
+    if (!(query = create_query()))
+    {
+        CloseServiceHandle( manager );
+        return FILL_STATUS_FAILED;
+    }
+    /* the services Win32_Service lists, with the caller's access to the service manager */
+    if ((hr = parse_query( L"SELECT * FROM Win32_Service", &query->view, &query->mem )) != S_OK ||
+        (hr = execute_view( query->view )) != S_OK || !query->view->table_count ||
+        get_column_index( query->view->table[0], L"Name", &column ) != S_OK)
+    {
+        status = FILL_STATUS_FAILED;
+        goto done;
+    }
+
+    for (i = 0; i < query->view->result_count && status != FILL_STATUS_FAILED && row < MAX_ASSOC_ROWS; i++)
+    {
+        const struct table *services = query->view->table[0];
+        QUERY_SERVICE_CONFIGW *config;
+        const WCHAR *name, *dep;
+        WCHAR *path;
+        LONGLONG val;
+
+        if (query->view->result[i] >= services->num_rows) continue;
+        if (get_value( services, query->view->result[i], column, &val ) != S_OK || !val) continue;
+        name = (const WCHAR *)(INT_PTR)val;
+        if (!(config = query_service_config( manager, name ))) continue;
+        if (!config->lpDependencies || !(path = build_reference_path( L"Win32_Service", L"Name", name )))
+        {
+            heap_free( config );
+            continue;
+        }
+        /* the dependency list ends with an empty string; QueryServiceConfig bounds it by the buffer */
+        for (dep = config->lpDependencies; *dep && row < MAX_ASSOC_ROWS; dep += wcslen( dep ) + 1)
+        {
+            WCHAR *path2;
+            UINT j;
+
+            if (*dep == '+') continue; /* SC_GROUP_IDENTIFIER */
+            /* only a service that exists is an instance; name it as Win32_Service does */
+            for (j = 0; j < query->view->result_count; j++)
+            {
+                UINT r = query->view->result[j];
+                if (r < services->num_rows && get_value( services, r, column, &val ) == S_OK && val &&
+                    !wcsicmp( (const WCHAR *)(INT_PTR)val, dep )) break;
+            }
+            if (j == query->view->result_count) continue;
+            if (!(path2 = build_reference_path( L"Win32_Service", L"Name", (const WCHAR *)(INT_PTR)val )))
+            {
+                status = FILL_STATUS_FAILED;
+                break;
+            }
+            if (!add_link_row( table, &row, path2, path, cond, &status )) status = FILL_STATUS_FAILED;
+            heap_free( path2 );
+            if (status == FILL_STATUS_FAILED) break;
+        }
+        heap_free( path );
+        heap_free( config );
+    }
+
+done:
+    free_query( query );
+    CloseServiceHandle( manager );
+    if (status == FILL_STATUS_FAILED)
+    {
+        for (i = 0; i < row; i++) free_row_values( table, i );
+        row = 0;
+    }
+    TRACE("created %u rows\n", row);
+    table->num_rows = row;
+    return status;
+}
+#endif /* __REACTOS__ */
+
 #define C(c) sizeof(c)/sizeof(c[0]), c
 #define D(d) sizeof(d)/sizeof(d[0]), 0, (BYTE *)d
 static struct table builtin_classes[] =
@@ -6442,7 +6788,11 @@ static struct table builtin_classes[] =
     { class_desktopmonitorW, C(col_desktopmonitor), 0, 0, NULL, fill_desktopmonitor },
     { class_directoryW, C(col_directory), 0, 0, NULL, fill_directory },
     { class_diskdriveW, C(col_diskdrive), 0, 0, NULL, fill_diskdrive },
+#ifdef __REACTOS__
+    { class_diskdrivetodiskpartitionW, C(col_assoc_dependency), 0, 0, NULL, fill_association },
+#else
     { class_diskdrivetodiskpartitionW, C(col_diskdrivetodiskpartition), 0, 0, NULL, fill_diskdrivetodiskpartition },
+#endif
     { class_diskpartitionW, C(col_diskpartition), 0, 0, NULL, fill_diskpartition },
 #ifdef __REACTOS__
     { L"Win32_Environment", C(col_environment), 0, 0, NULL, fill_environment },
@@ -6455,7 +6805,11 @@ static struct table builtin_classes[] =
     /* CIM_LogicalDisk is the abstract superclass of Win32_LogicalDisk (schema.c) */
     { class_logicaldisk2W, C(col_logicaldisk), 0, 0, NULL, fill_logicaldisk },
 #endif
+#ifdef __REACTOS__
+    { class_logicaldisktopartitionW, C(col_assoc_dependency), 0, 0, NULL, fill_association },
+#else
     { class_logicaldisktopartitionW, C(col_logicaldisktopartition), 0, 0, NULL, fill_logicaldisktopartition },
+#endif
     { class_networkadapterW, C(col_networkadapter), 0, 0, NULL, fill_networkadapter },
     { class_networkadapterconfigW, C(col_networkadapterconfig), 0, 0, NULL, fill_networkadapterconfig },
     { class_operatingsystemW, C(col_operatingsystem), 0, 0, NULL, fill_operatingsystem },
@@ -6484,6 +6838,19 @@ static struct table builtin_classes[] =
 #endif
     { L"Win32_TimeZone", C(col_timezone), 0, 0, NULL, fill_timezone },
     { class_winsatW, C(col_winsat), D(data_winsat) },
+#ifdef __REACTOS__
+    { L"Win32_ComputerSystemProcessor", C(col_assoc_component), 0, 0, NULL, fill_association },
+    { L"Win32_DependentService", C(col_assoc_dependency), 0, 0, NULL, fill_dependentservice },
+    { L"Win32_NetworkAdapterSetting", C(col_assoc_setting), 0, 0, NULL, fill_association },
+    { L"Win32_OperatingSystemQFE", C(col_assoc_dependency), 0, 0, NULL, fill_association },
+    { L"Win32_SystemBIOS", C(col_assoc_component), 0, 0, NULL, fill_association },
+    { L"Win32_SystemDevices", C(col_assoc_component), 0, 0, NULL, fill_association },
+    { L"Win32_SystemOperatingSystem", C(col_systemoperatingsystem), 0, 0, NULL, fill_association },
+    { L"Win32_SystemPartitions", C(col_assoc_component), 0, 0, NULL, fill_association },
+    { L"Win32_SystemProcesses", C(col_assoc_component), 0, 0, NULL, fill_association },
+    { L"Win32_SystemServices", C(col_assoc_component), 0, 0, NULL, fill_association },
+    { L"Win32_SystemTimeZone", C(col_assoc_setting), 0, 0, NULL, fill_association },
+#endif
 };
 #undef C
 #undef D
