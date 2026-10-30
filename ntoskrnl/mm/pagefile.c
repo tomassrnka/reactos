@@ -348,7 +348,7 @@ MmFreeSwapPage(SWAPENTRY Entry)
  * NUL-terminated NT name (\??\C:\pagefile.sys); the sizes are in pages.
  *
  * The image is built in a pool buffer under the paging file lock and copied to
- * the caller's buffer after the lock is released: a fault on the caller's
+ * the caller's buffer after the lock is released (the image is nonpaged and zeroed): a fault on the caller's
  * buffer (decommitted by another thread, or a view of a paging file backed
  * section whose swap-in takes the lock again) must not happen with the lock held.
  */
@@ -409,7 +409,8 @@ MmQueryPagingFileInformation(
         KeReleaseGuardedMutex(&MmPageFileCreationLock);
         if (Image != NULL)
             ExFreePoolWithTag(Image, TAG_MM);
-        Image = ExAllocatePoolWithTag(PagedPool, Needed, TAG_MM);
+        /* Nonpaged and zeroed: a paged-out image would fault under the lock, and the padding goes to the caller */
+        Image = ExAllocatePoolZero(NonPagedPool, Needed, TAG_MM);
         if (Image == NULL)
             return STATUS_INSUFFICIENT_RESOURCES;
         ImageSize = Needed;
