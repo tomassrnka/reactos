@@ -23,7 +23,11 @@
  *    cursor position, relative to the view;
  *  - at most 16 parameters are used, the rest are ignored;
  *  - the parser state belongs to the screen buffer, so a sequence can be
- *    split over several writes.
+ *    split over several writes; an OSC string lasts until BEL or ST (also
+ *    over other processes' output), CAN and SUB cancel it;
+ *  - ESC P, ESC X, ESC ^ and ESC _ do not start strings; the 8-bit CSI
+ *    (U+009B) and ST (U+009C) work in WriteConsoleW, other C1 controls are
+ *    text, and a C1 control in the middle of a sequence cancels it.
  */
 
 /* INCLUDES *******************************************************************/
@@ -44,8 +48,6 @@
 #define VT_CSI_IGNORE       5
 #define VT_OSC              6
 #define VT_OSC_ESC          7
-#define VT_STRING           8   /* DCS, SOS, PM, APC: ignored up to the string terminator */
-#define VT_STRING_ESC       9
 
 #define VT_ESC  0x1B
 #define VT_CSI  0x9B    /* 8-bit CSI */
@@ -57,6 +59,14 @@
 #define VT_MAX_PARAM        32767
 #define VT_OSC_INVALID      0xFFFF
 #define VT_TAB_WIDTH        8
+
+/*
+ * A report (DSR, DA) is dropped while this many input events are pending,
+ * so that a program that floods the console with requests and never reads
+ * them cannot make the console server queue input without bound. Windows
+ * queues them all; nothing reads a report after 1024 unread events.
+ */
+#define VT_REPORT_MAX_PENDING   1024
 
 /* ANSI color number -> attribute color (the attribute has red and blue swapped) */
 static const UCHAR VtAnsiToAttrib[8] = { 0, 4, 2, 6, 1, 5, 3, 7 };
@@ -496,6 +506,9 @@ VtReport(PFRONTEND FrontEnd, PCWSTR Report)
 {
     INPUT_RECORD Event;
 
+    if (FrontEnd->Console->InputBuffer.NumberOfEvents > VT_REPORT_MAX_PENDING)
+        return;
+
     RtlZeroMemory(&Event, sizeof(Event));
     Event.EventType = KEY_EVENT;
     Event.Event.KeyEvent.wRepeatCount = 1;
@@ -691,7 +704,10 @@ VtDispatchEscape(PFRONTEND FrontEnd, PTEXTMODE_SCREEN_BUFFER Buff, WCHAR Final)
         Vt->DelayedWrap = FALSE;
         VtReverseIndex(FrontEnd, Buff);
         break;
-    /* Simple cursor positioning */
+    /*
+     * Simple cursor positioning, as measured on Windows 10: ESC D moves the
+     * cursor left (it is not IND) and ESC E does nothing (it is not NEL).
+     */
     case L'A':
         Vt->DelayedWrap = FALSE;
         Buff->CursorPosition.Y = max(Buff->CursorPosition.Y - 1, VtViewTop(Buff));
@@ -743,6 +759,27 @@ VtDispatchPrivateMode(PFRONTEND FrontEnd, PTEXTMODE_SCREEN_BUFFER Buff, BOOLEAN 
     }
 }
 
+/* Number of parameters a CSI function takes (empty ones count) */
+static UCHAR
+VtMaxParams(WCHAR Final)
+{
+    switch (Final)
+    {
+    case L'm':
+        /* SGR uses the first 16 and ignores the others */
+        return 0xFF;
+    case L'H':
+    case L'f':
+    case L'r':
+        return 2;
+    case L's':
+    case L'u':
+        return 0;
+    default:
+        return 1;
+    }
+}
+
 static VOID
 VtDispatchCsi(PFRONTEND FrontEnd, PTEXTMODE_SCREEN_BUFFER Buff, WCHAR Final)
 {
@@ -769,6 +806,10 @@ VtDispatchCsi(PFRONTEND FrontEnd, PTEXTMODE_SCREEN_BUFFER Buff, WCHAR Final)
         return;
     }
     if (Vt->Intermediate != 0)
+        return;
+
+    /* As on Windows, a sequence with more parameters than its function takes is ignored */
+    if (Vt->NumParams > VtMaxParams(Final))
         return;
 
     switch (Final)
@@ -907,8 +948,9 @@ VtDispatchCsi(PFRONTEND FrontEnd, PTEXTMODE_SCREEN_BUFFER Buff, WCHAR Final)
         if (Vt->LastChar)
         {
             WCHAR Chars[64];
+            /* More than a view of repetitions would only scroll it off */
             ULONG Left = min((ULONG)VtParam(Vt, 0, 1),
-                             (ULONG)Buff->ScreenBufferSize.X * Buff->ScreenBufferSize.Y);
+                             (ULONG)Buff->ScreenBufferSize.X * Buff->ViewSize.Y);
             UINT i;
 
             for (i = 0; i < ARRAYSIZE(Chars); ++i) Chars[i] = Vt->LastChar;
@@ -1009,13 +1051,11 @@ VtProcessChar(PFRONTEND FrontEnd, PTEXTMODE_SCREEN_BUFFER Buff, WCHAR Char, BOOL
 {
     PCONSOLE_VT_STATE Vt = &Buff->Vt;
 
-    /* An escape starts a new sequence, or terminates a string (ESC \) */
+    /* An escape starts a new sequence, or terminates an OSC string (ESC \) */
     if (Char == VT_ESC)
     {
         if (Vt->State == VT_OSC)
             Vt->State = VT_OSC_ESC;
-        else if (Vt->State == VT_STRING)
-            Vt->State = VT_STRING_ESC;
         else
             VtEnter(Vt, VT_ESCAPE);
         return;
@@ -1024,10 +1064,9 @@ VtProcessChar(PFRONTEND FrontEnd, PTEXTMODE_SCREEN_BUFFER Buff, WCHAR Char, BOOL
     switch (Vt->State)
     {
     case VT_OSC_ESC:
-    case VT_STRING_ESC:
         if (Char == L'\\')
         {
-            if (Vt->State == VT_OSC_ESC) VtDispatchOsc(FrontEnd, Buff);
+            VtDispatchOsc(FrontEnd, Buff);
             Vt->State = VT_GROUND;
             return;
         }
@@ -1036,10 +1075,19 @@ VtProcessChar(PFRONTEND FrontEnd, PTEXTMODE_SCREEN_BUFFER Buff, WCHAR Char, BOOL
         break;
 
     case VT_OSC:
+        /*
+         * As on Windows, the string goes on until BEL or ST, also over later
+         * writes and other processes' output; CAN and SUB cancel it.
+         */
         if (Char == VT_BEL || Char == VT_ST)
         {
             VtDispatchOsc(FrontEnd, Buff);
             Vt->State = VT_GROUND;
+        }
+        else if (Char == VT_CAN || Char == VT_SUB)
+        {
+            Vt->State = VT_GROUND;
+            ConioWriteText(FrontEnd, Buff, &Char, 1, Attrib, TRUE);
         }
         else if (Char >= 0x20)
         {
@@ -1061,11 +1109,6 @@ VtProcessChar(PFRONTEND FrontEnd, PTEXTMODE_SCREEN_BUFFER Buff, WCHAR Char, BOOL
             }
         }
         return;
-
-    case VT_STRING:
-        if (Char == VT_BEL || Char == VT_ST)
-            Vt->State = VT_GROUND;
-        return;
     }
 
     /* Escape and control sequences */
@@ -1084,6 +1127,12 @@ VtProcessChar(PFRONTEND FrontEnd, PTEXTMODE_SCREEN_BUFFER Buff, WCHAR Char, BOOL
     }
     if (Char == 0x7F)
         return;
+    if (Char >= 0x80 && Char <= 0x9F)
+    {
+        /* A C1 control (8-bit CSI included) cancels the sequence and is dropped, as on Windows */
+        Vt->State = VT_GROUND;
+        return;
+    }
     if (Char > 0x7E)
     {
         /* Not part of a sequence: cancel it and output the character */
@@ -1099,8 +1148,6 @@ VtProcessChar(PFRONTEND FrontEnd, PTEXTMODE_SCREEN_BUFFER Buff, WCHAR Char, BOOL
             VtEnter(Vt, VT_CSI_PARAM);
         else if (Char == L']')
             VtEnter(Vt, VT_OSC);
-        else if (Char == L'P' || Char == L'X' || Char == L'^' || Char == L'_')
-            VtEnter(Vt, VT_STRING);
         else if (Char < 0x30)
         {
             Vt->Intermediate = (UCHAR)Char;
