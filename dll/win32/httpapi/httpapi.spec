@@ -5,6 +5,9 @@
 @ stub HttpCreateConfigGroup
 @ stub HttpCreateFilter
 @ stdcall -stub HttpCreateHttpHandle(ptr long)
+@ stdcall HttpCreateRequestQueue(long wstr ptr long ptr)
+@ stdcall HttpCreateServerSession(long ptr long)
+@ stdcall HttpCreateUrlGroup(int64 ptr long)
 @ stub HttpDeleteConfigGroup
 @ stdcall -stub HttpDeleteServiceConfiguration(ptr long ptr long ptr)
 @ stub HttpFilterAccept
@@ -33,7 +36,6 @@
 @ stdcall -stub HttpRemoveUrl(ptr wstr)
 @ stdcall -stub HttpRemoveUrlFromUrlGroup(int64 wstr long)
 @ stdcall -stub HttpSendHttpResponse(ptr int64 long ptr ptr ptr ptr long ptr ptr)
-@ stub HttpSendResponseEntityBody
 @ stub HttpSetAppPoolInformation
 @ stub HttpSetConfigGroupInformation
 @ stub HttpSetControlChannelInformation
@@ -43,3 +45,16 @@
 @ stdcall -stub HttpTerminate(long ptr)
 @ stub HttpWaitForDemandStart
 @ stub HttpWaitForDisconnect
+@ stub HttpCancelHttpRequest
+@ stdcall HttpCloseRequestQueue(ptr)
+@ stdcall HttpCloseServerSession(int64)
+@ stdcall HttpCloseUrlGroup(int64)
+@ stub HttpControlService
+@ stub HttpQueryRequestQueueProperty
+@ stub HttpQueryServerSessionProperty
+@ stub HttpQueryUrlGroupProperty
+@ stdcall -stub HttpSendResponseEntityBody(ptr int64 long long ptr ptr ptr long ptr ptr)
+@ stdcall HttpSetRequestQueueProperty(ptr long ptr long long ptr)
+@ stdcall HttpSetServerSessionProperty(int64 long ptr long)
+@ stdcall HttpSetUrlGroupProperty(int64 long ptr long)
+@ stdcall HttpShutdownRequestQueue(ptr)

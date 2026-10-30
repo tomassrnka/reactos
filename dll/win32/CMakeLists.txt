@@ -308,6 +308,7 @@ if(DLL_EXPORT_VERSION GREATER_EQUAL 0x601)
     add_subdirectory(explorerframe)
     add_subdirectory(mf)
     add_subdirectory(mfplat)
+    add_subdirectory(mfplay)
     add_subdirectory(mfreadwrite)
 endif()
 

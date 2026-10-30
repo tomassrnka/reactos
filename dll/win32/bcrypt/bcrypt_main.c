@@ -1291,6 +1291,12 @@ static NTSTATUS get_dh_parameters( const struct key *key, UCHAR *buf, ULONG size
 
 static NTSTATUS get_key_property( const struct key *key, const WCHAR *prop, UCHAR *buf, ULONG size, ULONG *ret_size )
 {
+#ifdef __REACTOS__
+    /* Windows answers the name of the algorithm for a key handle as well */
+    if (!wcscmp( prop, BCRYPT_ALGORITHM_NAME ))
+        return get_generic_alg_property( key->alg_id, prop, buf, size, ret_size );
+#endif
+
     if (!wcscmp( prop, BCRYPT_KEY_STRENGTH ))
     {
         DWORD value = is_symmetric_key (key ) ? key->s.block_size * 8 : key->a.bitlen;
@@ -2692,10 +2698,47 @@ static NTSTATUS export_dh_key( const struct key *key, UCHAR *output, ULONG outpu
     return STATUS_SUCCESS;
 }
 
+#ifdef __REACTOS__
+/* The export functions below read the key as the kind of key that the blob type belongs to, so a blob type
+ * of another kind of key has to be refused first (STATUS_NOT_SUPPORTED, as on Windows) */
+static BOOL export_type_fits_key( const struct key *key, const WCHAR *type )
+{
+    BOOL ecc_key = key->alg_id == ALG_ID_ECDH || key->alg_id == ALG_ID_ECDH_P256 ||
+                   key->alg_id == ALG_ID_ECDH_P384 || key->alg_id == ALG_ID_ECDH_P521 ||
+                   key->alg_id == ALG_ID_ECDSA || key->alg_id == ALG_ID_ECDSA_P256 ||
+                   key->alg_id == ALG_ID_ECDSA_P384 || key->alg_id == ALG_ID_ECDSA_P521;
+    BOOL rsa_key = key->alg_id == ALG_ID_RSA || key->alg_id == ALG_ID_RSA_SIGN;
+
+    if (!wcscmp( type, BCRYPT_ECCPRIVATE_BLOB ) || !wcscmp( type, BCRYPT_ECCPUBLIC_BLOB )) return ecc_key;
+    if (!wcscmp( type, BCRYPT_RSAPRIVATE_BLOB ) || !wcscmp( type, BCRYPT_RSAFULLPRIVATE_BLOB ) ||
+        !wcscmp( type, BCRYPT_RSAPUBLIC_BLOB )) return rsa_key;
+    if (!wcscmp( type, BCRYPT_DSA_PRIVATE_BLOB ) || !wcscmp( type, BCRYPT_DSA_PUBLIC_BLOB ) ||
+        !wcscmp( type, LEGACY_DSA_V2_PRIVATE_BLOB ) || !wcscmp( type, LEGACY_DSA_V2_PUBLIC_BLOB ))
+        return key->alg_id == ALG_ID_DSA;
+    if (!wcscmp( type, BCRYPT_DH_PRIVATE_BLOB ) || !wcscmp( type, BCRYPT_DH_PUBLIC_BLOB ))
+        return key->alg_id == ALG_ID_DH;
+    if (!wcscmp( type, BCRYPT_KEY_DATA_BLOB ) || !wcscmp( type, BCRYPT_AES_WRAP_KEY_BLOB )) return FALSE;
+    return TRUE;
+}
+
+static BOOL is_asymmetric_blob_type( const WCHAR *type )
+{
+    return !wcscmp( type, BCRYPT_ECCPRIVATE_BLOB ) || !wcscmp( type, BCRYPT_ECCPUBLIC_BLOB ) ||
+           !wcscmp( type, BCRYPT_RSAPRIVATE_BLOB ) || !wcscmp( type, BCRYPT_RSAFULLPRIVATE_BLOB ) ||
+           !wcscmp( type, BCRYPT_RSAPUBLIC_BLOB ) || !wcscmp( type, BCRYPT_DSA_PRIVATE_BLOB ) ||
+           !wcscmp( type, BCRYPT_DSA_PUBLIC_BLOB ) || !wcscmp( type, LEGACY_DSA_V2_PRIVATE_BLOB ) ||
+           !wcscmp( type, LEGACY_DSA_V2_PUBLIC_BLOB ) || !wcscmp( type, BCRYPT_DH_PRIVATE_BLOB ) ||
+           !wcscmp( type, BCRYPT_DH_PUBLIC_BLOB );
+}
+#endif
+
 static NTSTATUS export_asymmetric_key( const struct key *key, const WCHAR *type, UCHAR *output, ULONG output_len,
                                        ULONG *ret_len )
 {
     if (!(key->flags & KEY_FLAG_FINALIZED)) return STATUS_INVALID_HANDLE;
+#ifdef __REACTOS__
+    if (!export_type_fits_key( key, type )) return STATUS_NOT_SUPPORTED;
+#endif
 
     if (!wcscmp( type, BCRYPT_ECCPRIVATE_BLOB ))
     {
@@ -2758,6 +2801,9 @@ NTSTATUS WINAPI BCryptExportKey( BCRYPT_KEY_HANDLE export_key_handle, BCRYPT_KEY
     if (!type || !size) return STATUS_INVALID_PARAMETER;
     if (encrypt_key_handle && !(encrypt_key = get_key_object( encrypt_key_handle ))) return STATUS_INVALID_HANDLE;
 
+#ifdef __REACTOS__
+    if (is_symmetric_key( key ) && is_asymmetric_blob_type( type )) return STATUS_NOT_SUPPORTED;
+#endif
     if (is_symmetric_key( key )) return export_symmetric_key( key, encrypt_key, type, output, output_len, size );
     return export_asymmetric_key( key, type, output, output_len, size );
 }

@@ -431,6 +431,7 @@ set(baseaddress_zipfldr                        0x7fe10000000)
 set(baseaddress_evr                           0x7fe0f000000) # manually added
 set(baseaddress_mf                            0x7fe0e000000) # manually added
 set(baseaddress_mfplat                        0x7fe0d000000) # manually added
+set(baseaddress_mfplay                         0x7fe06000000) # manually added
 set(baseaddress_mfreadwrite                   0x7fe0c000000) # manually added
 set(baseaddress_explorerframe                  0x7fe0b000000) # manually added
 set(baseaddress_kernelbase                     0x7fe0a000000) # manually added

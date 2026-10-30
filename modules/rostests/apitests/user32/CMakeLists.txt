@@ -37,6 +37,7 @@ list(APPEND SOURCE
     GetPeekMessage.c
     GetSetWindowInt.c
     GetSystemMetrics.c
+    GetUpdatedClipboardFormats.c
     GetUserObjectInformation.c
     GetWindowPlacement.c
     GW_ENABLEDPOPUP.c

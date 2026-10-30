@@ -17,6 +17,7 @@ add_definitions(-DWIN32_LEAN_AND_MEAN=)
 list(APPEND SOURCE
     apibuf.c
     browser.c
+    dav.c
     dfs.c
     display.c
     dssetup.c

@@ -1018,6 +1018,7 @@
 @ stdcall RtlIsCriticalSectionLockedByThread(ptr)
 @ stdcall -stub -version=0x600+ RtlIsCurrentThreadAttachExempt()
 @ stdcall RtlIsDosDeviceName_U(wstr)
+@ stdcall -version=0x600+ RtlIsEcCode(ptr)
 @ stdcall RtlIsGenericTableEmpty(ptr)
 @ stdcall RtlIsGenericTableEmptyAvl(ptr)
 @ stdcall -version=0x601+ RtlIsNameInExpression(ptr ptr long ptr)

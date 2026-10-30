@@ -36,6 +36,7 @@ extern void func_GetMessageTime(void);
 extern void func_GetPeekMessage(void);
 extern void func_GetSetWindowInt(void);
 extern void func_GetSystemMetrics(void);
+extern void func_GetUpdatedClipboardFormats(void);
 extern void func_GetUserObjectInformation(void);
 extern void func_GetWindowPlacement(void);
 extern void func_GW_ENABLEDPOPUP(void);
@@ -145,6 +146,7 @@ const struct test winetest_testlist[] =
     { "GetPeekMessage", func_GetPeekMessage },
     { "GetSetWindowInt", func_GetSetWindowInt },
     { "GetSystemMetrics", func_GetSystemMetrics },
+    { "GetUpdatedClipboardFormats", func_GetUpdatedClipboardFormats },
     { "GetUserObjectInformation", func_GetUserObjectInformation },
     { "GetWindowPlacement", func_GetWindowPlacement },
     { "GW_ENABLEDPOPUP", func_GW_ENABLEDPOPUP },

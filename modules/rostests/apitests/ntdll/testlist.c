@@ -153,6 +153,7 @@ extern void func_RtlRetrieveNtUserPfn(void);
 extern void func_RtlInitializeSidEx(void);
 extern void func_RtlIntSafe(void);
 extern void func_RtlIsNameInExpression(void);
+extern void func_RtlIsEcCode(void);
 extern void func_RtlIsNameLegalDOS8Dot3(void);
 extern void func_RtlLocale(void);
 extern void func_RtlMemIoResource(void);
@@ -355,6 +356,7 @@ const struct test winetest_testlist[] =
     { "RtlInitializeSidEx",         func_RtlInitializeSidEx },
     { "RtlIntSafe",                     func_RtlIntSafe },
     { "RtlIsNameInExpression",          func_RtlIsNameInExpression},
+    { "RtlIsEcCode",                    func_RtlIsEcCode },
     { "RtlIsNameLegalDOS8Dot3",         func_RtlIsNameLegalDOS8Dot3 },
     { "RtlLocale",                      func_RtlLocale },
     { "RtlMemIoResource",               func_RtlMemIoResource },

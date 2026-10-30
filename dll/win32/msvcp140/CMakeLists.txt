@@ -43,6 +43,7 @@ set_source_files_properties(${WINE_SOURCE} PROPERTIES COMPILE_OPTIONS "-include;
 
 list(APPEND SOURCE
     ${WINE_SOURCE}
+    money_ids.c
     msvcp140.rc
     ${CMAKE_CURRENT_BINARY_DIR}/msvcp140_stubs.c
     ${CMAKE_CURRENT_BINARY_DIR}/msvcp140.def)
