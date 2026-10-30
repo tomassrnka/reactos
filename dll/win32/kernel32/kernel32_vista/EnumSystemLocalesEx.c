@@ -32,6 +32,9 @@ static BOOL CALLBACK enum_locale_ex_proc( HMODULE module, LPCWSTR type,
                          LOCALE_INEUTRAL | LOCALE_NOUSEROVERRIDE | LOCALE_RETURN_NUMBER,
                          (LPWSTR)&neutral, sizeof(neutral) / sizeof(WCHAR) ))
         neutral = 0;
+    /* A name that LocaleNameToLCID does not resolve is no locale of Windows 10 (the data has a few more, such
+     * as "eo"); .NET lists the cultures with this function and throws for the first it cannot create */
+    if (buffer[0] && !LocaleNameToLCID( buffer, LOCALE_ALLOW_NEUTRAL_NAMES )) return TRUE;
     flags = LOCALE_WINDOWS;
     flags |= neutral ? LOCALE_NEUTRALDATA : LOCALE_SPECIFICDATA;
     if (data->flags && !(data->flags & flags)) return TRUE;
