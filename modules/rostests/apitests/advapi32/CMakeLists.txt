@@ -24,6 +24,7 @@ list(APPEND SOURCE
     LogonUser.c
     LsaLookupLeak.c
     ProcessThreadLabel.c
+    QueryServiceConfig.c
     QueryServiceConfig2.c
     RegConcurrentWrite.c
     RegCreateKeyEx.c

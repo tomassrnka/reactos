@@ -648,7 +648,7 @@ static void read_trusted_roots_from_known_locations(HCERTSTORE store, HCERTSTORE
 
     CryptAcquireContextW( &prov, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT );
     params.buffer = CryptMemAlloc( params.size );
-    while (!CRYPT32_CALL( enum_root_certs, &params ))
+    while (params.buffer && !CRYPT32_CALL( enum_root_certs, &params ))
     {
         if (needed > params.size)
         {
@@ -735,6 +735,87 @@ static HCERTSTORE create_root_store(HCERTSTORE cached, BOOL *delete)
     return memStore;
 }
 
+#ifdef __REACTOS__
+/* Whether a serialized store element (a registry Blob) carries an enhanced key
+ * usage property */
+static BOOL CRYPT_BlobHasUsageProperty(const BYTE *blob, DWORD size)
+{
+    DWORD offset = 0, id, cb;
+
+    while (size - offset >= 3 * sizeof(DWORD))
+    {
+        memcpy(&id, blob + offset, sizeof(id));
+        memcpy(&cb, blob + offset + 2 * sizeof(DWORD), sizeof(cb));
+        if (id == CERT_ENHKEY_USAGE_PROP_ID)
+            return TRUE;
+        if (cb > size - offset - 3 * sizeof(DWORD))
+            break;
+        offset += 3 * sizeof(DWORD) + cb;
+    }
+    return FALSE;
+}
+
+/* Whether the Blob value of key already is these bytes: it is left alone then,
+ * so the import does not write a registry value per restricted root on every
+ * start */
+static BOOL CRYPT_RegBlobEquals(HKEY key, const BYTE *blob, DWORD size)
+{
+    BYTE *existing;
+    DWORD existingSize = 0, type;
+    BOOL equal = FALSE;
+
+    if (RegQueryValueExW(key, L"Blob", NULL, &type, NULL, &existingSize) ||
+     type != REG_BINARY || existingSize != size || !(existing = CryptMemAlloc(size)))
+        return FALSE;
+    if (!RegQueryValueExW(key, L"Blob", NULL, &type, existing, &existingSize) &&
+     type == REG_BINARY && existingSize == size)
+        equal = !memcmp(existing, blob, size);
+    CryptMemFree(existing);
+    return equal;
+}
+
+/* The import above takes the certificates of the AuthRoot store, not their
+ * properties.  A root there that is only trusted for some purposes (its
+ * enhanced key usage property says which, see csroots.inf) must keep that
+ * restriction in the Root store, or it would be trusted for everything, TLS
+ * included: copy those entries whole. */
+static void CRYPT_CopyRestrictedAuthRoots(HKEY rootCerts)
+{
+    HKEY authRoot, src, dst;
+    WCHAR name[64];
+    DWORD i, size, type;
+    BYTE *blob;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+     L"Software\\Microsoft\\SystemCertificates\\AuthRoot\\Certificates", 0,
+     KEY_READ, &authRoot))
+        return;
+    for (i = 0; !RegEnumKeyW(authRoot, i, name, ARRAY_SIZE(name)); i++)
+    {
+        if (RegOpenKeyExW(authRoot, name, 0, KEY_READ, &src))
+            continue;
+        size = 0;
+        if (!RegQueryValueExW(src, L"Blob", NULL, &type, NULL, &size) &&
+         type == REG_BINARY && size && (blob = CryptMemAlloc(size)))
+        {
+            if (!RegQueryValueExW(src, L"Blob", NULL, &type, blob, &size) &&
+             CRYPT_BlobHasUsageProperty(blob, size) &&
+             !RegCreateKeyExW(rootCerts, name, 0, NULL, 0,
+             KEY_QUERY_VALUE | KEY_SET_VALUE, NULL, &dst, NULL))
+            {
+                if (!CRYPT_RegBlobEquals(dst, blob, size) &&
+                 RegSetValueExW(dst, L"Blob", 0, REG_BINARY, blob, size))
+                    ERR("Failed to restrict root %s\n", debugstr_w(name));
+                RegCloseKey(dst);
+            }
+            CryptMemFree(blob);
+        }
+        RegCloseKey(src);
+    }
+    RegCloseKey(authRoot);
+}
+#endif
+
 void CRYPT_ImportSystemRootCertsToReg(void)
 {
     HCERTSTORE store = NULL, reg = NULL;
@@ -782,6 +863,9 @@ void CRYPT_ImportSystemRootCertsToReg(void)
         ERR("Error deleting key.\n");
     if (!CRYPT_SerializeContextsToReg(key, 0, pCertInterface, store))
         ERR("Failed to import system certs into registry, %08lx\n", GetLastError());
+#ifdef __REACTOS__
+    CRYPT_CopyRestrictedAuthRoots(key);
+#endif
 
 done:
     RegCloseKey(key);

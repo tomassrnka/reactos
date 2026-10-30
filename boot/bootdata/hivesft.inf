@@ -625,7 +625,7 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion","SoftwareType",2,"System"
 ; Auto-Execute (AE) Debugger: none by default, as on Windows 7; the crash dialog offers Debug only when one is set
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\AeDebug","UserDebuggerHotKey",0x00010001,0x00000000
 
-; System certificate stores of the machine (AuthRoot comes from caroots.inf, Root is added by crypt32 itself)
+; System certificate stores of the machine (AuthRoot comes from caroots.inf and csroots.inf, Root is added by crypt32 itself)
 HKLM,"SOFTWARE\Microsoft\SystemCertificates\My",,0x00000010
 HKLM,"SOFTWARE\Microsoft\SystemCertificates\Trust",,0x00000010
 HKLM,"SOFTWARE\Microsoft\SystemCertificates\CA",,0x00000010

@@ -1,12 +1,30 @@
+# Ordinals 17-37 follow Microsoft mscoree.dll (4.0.31106, the shim that the
+# .NET 4 redistributable installs on XP/2003 and KB958488 installs on Windows 7).
+# Microsoft clr.dll resolves mscoree exports by ordinal (at least 24) during
+# EEStartup, so this layout is part of the ABI.
 17 stub InitErrors
 18 stub PostError
 19 stub InitSSAutoEnterThread
 20 stub UpdateError
+21 stub CloseCtrs
 22 stdcall LoadStringRC(long ptr long long)
 23 stub ReOpenMetaDataWithMemory
+24 stdcall -noname MSCOREE_Ordinal24(ptr ptr)
+25 stub CollectCtrs
+26 stub CorDllMainWorker
+27 stub EEDllGetClassObjectFromClass
+28 stub GetPrivateContextsPerfCounters
+29 stdcall GetProcessExecutableHeap()
+30 stub GetStartupFlags
+31 stub GetTargetForVTableEntry
+32 stdcall GetTokenForVTableEntry(ptr ptr)
+33 stub LogHelp_LogAssert
+34 stub LogHelp_NoGuiOnAssert
+35 stub LogHelp_TerminateOnAssert
+36 stub OpenCtrs
+37 stub SetTargetForVTableEntry
 
 @ stub CallFunctionShim
-@ stub CloseCtrs
 @ stdcall CLRCreateInstance(ptr ptr ptr)
 @ stdcall ClrCreateManagedInstance(wstr ptr ptr)
 @ stdcall CoEEShutDownCOM()
@@ -14,15 +32,13 @@
 @ stub CoInitializeEE
 @ stub CoUninitializeCor
 @ stub CoUninitializeEE
-@ stub CollectCtrs
 @ stdcall CorBindToCurrentRuntime(wstr ptr ptr ptr)
-@ stub CorBindToRuntime
+@ stdcall CorBindToRuntime(wstr wstr ptr ptr ptr)
 @ stub CorBindToRuntimeByCfg
 @ stub CorBindToRuntimeByPath
 @ stub CorBindToRuntimeByPathEx
 @ stdcall CorBindToRuntimeEx(wstr wstr long ptr ptr ptr)
 @ stdcall CorBindToRuntimeHost(wstr wstr wstr ptr long ptr ptr ptr)
-@ stub CorDllMainWorker
 @ stdcall CorExitProcess(long)
 @ stdcall CorGetSvc(ptr)
 @ stdcall CorIsLatestSvc(ptr ptr)
@@ -35,7 +51,6 @@
 @ stdcall -private DllGetClassObject(ptr ptr ptr)
 @ stdcall -private DllRegisterServer()
 @ stdcall -private DllUnregisterServer()
-@ stub EEDllGetClassObjectFromClass
 @ stub EEDllRegisterServer
 @ stub EEDllUnregisterServer
 @ stdcall GetAssemblyMDImport(wstr ptr ptr)
@@ -56,15 +71,10 @@
 @ stub GetMetaDataInternalInterfaceFromPublic
 @ stub GetMetaDataPublicInterfaceFromInternal
 @ stub GetPermissionRequests
-@ stub GetPrivateContextsPerfCounters
-@ stub GetProcessExecutableHeap
 @ stdcall GetRealProcAddress(str ptr)
 @ stdcall GetRequestedRuntimeInfo(wstr wstr wstr long long ptr long ptr ptr long ptr)
 @ stdcall GetRequestedRuntimeVersion(wstr ptr long ptr)
 @ stub GetRequestedRuntimeVersionForCLSID
-@ stub GetStartupFlags
-@ stub GetTargetForVTableEntry
-@ stdcall GetTokenForVTableEntry(ptr ptr)
 @ stdcall GetVersionFromProcess(ptr ptr long ptr)
 @ stub GetXMLElement
 @ stub GetXMLElementAttribute
@@ -84,13 +94,11 @@
 @ stdcall ND_WI4(ptr long long)
 @ stdcall ND_WI8(ptr long int64)
 @ stdcall ND_WU1(ptr long long)
-@ stub OpenCtrs
 @ stub ReOpenMetaDataWithMemoryEx
 @ stub RunDll@ShimW
 @ stub RuntimeOSHandle
 @ stub RuntimeOpenImage
 @ stub RuntimeReleaseHandle
-@ stub SetTargetForVTableEntry
 @ stub StrongNameCompareAssemblies
 @ stub StrongNameErrorInfo
 @ stub StrongNameFreeBuffer

@@ -32,8 +32,8 @@ FindCertInRegBlob(
     PCRYPT_CERT_PROP prop;
     DWORD offset = 0;
 
-    /* Parse the registry blob */
-    while ((offset + sizeof(CRYPT_CERT_PROP)) < RegBlob->cbData)
+    /* Parse the registry blob: each property is a header (FIELD_OFFSET(ajData)) and cbData bytes */
+    while (RegBlob->cbData - offset >= FIELD_OFFSET(CRYPT_CERT_PROP, ajData))
     {
         prop = (PCRYPT_CERT_PROP)(RegBlob->pbData + offset);
 
@@ -43,15 +43,15 @@ FindCertInRegBlob(
             return FALSE;
         }
 
+        if (prop->cbData > RegBlob->cbData - offset - FIELD_OFFSET(CRYPT_CERT_PROP, ajData))
+        {
+            /* The property's data (after its header) goes beyond the blob */
+            return FALSE;
+        }
+
         /* Check for the certificate property (ID 32) */
         if (prop->dwPropId == 32)
         {
-            if ((offset + prop->cbData) > RegBlob->cbData)
-            {
-                /* Invalid data size */
-                return FALSE;
-            }
-
             OutCertBlob->cbData = prop->cbData;
             OutCertBlob->pbData = prop->ajData;
             return TRUE;
@@ -230,8 +230,12 @@ EnumerateRootCertificates(
 
             if (ret == SEC_E_BUFFER_TOO_SMALL)
             {
-                /* Buffer too small, return required size, but don't increment index! */
-                return ENOBUFS;
+                /* Buffer too small: return the required size, as success, and
+                 * don't increment the index. Like the Unix side of Wine, the
+                 * caller grows its buffer and asks again; any other return
+                 * value ends its enumeration, which then silently missed
+                 * every root after the first one larger than its buffer. */
+                return 0;
             }
 
             if (ret == ERROR_NO_MORE_ITEMS)

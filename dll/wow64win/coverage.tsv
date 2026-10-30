@@ -681,59 +681,59 @@ NtGdiSetWindowOrgEx	B+S	generated	typed arguments; handle policy; measured layou
 NtGdiGetFontFamilyInfo	B	generated	typed arguments; handle policy; measured layouts
 NtGdiOffsetViewportOrgEx	B+S	generated	typed arguments; handle policy; measured layouts
 NtGdiOffsetWindowOrgEx	B+S	generated	typed arguments; handle policy; measured layouts
-NtGdiDdDDICreateDCFromMemory	C+S	unsupported	requires private structure or selector translation
-NtGdiDdDDIDestroyDCFromMemory	C+S	unsupported	requires private structure or selector translation
+NtGdiDdDDICreateDCFromMemory	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtGdiDdDDIDestroyDCFromMemory	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtGdiDdDDICheckExclusiveOwnership	A	generated	typed arguments; handle policy; measured layouts
-NtGdiDdDDICreateAllocation	C	unsupported	requires private structure or selector translation
+NtGdiDdDDICreateAllocation	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtGdiDdDDICheckMonitorPowerState	B	generated	typed arguments; handle policy; measured layouts
-NtGdiDdDDICheckOcclusion	C	unsupported	requires private structure or selector translation
+NtGdiDdDDICheckOcclusion	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtGdiDdDDICloseAdapter	B	generated	typed arguments; handle policy; measured layouts
-NtGdiDdDDICreateContext	C	unsupported	requires private structure or selector translation
-NtGdiDdDDICreateDevice	C	unsupported	requires private structure or selector translation
-NtGdiDdDDICreateOverlay	C	unsupported	requires private structure or selector translation
+NtGdiDdDDICreateContext	C	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtGdiDdDDICreateDevice	C	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtGdiDdDDICreateOverlay	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtGdiDdDDICreateSynchronizationObject	B	generated	typed arguments; handle policy; measured layouts
 NtGdiDdDDIWaitForVerticalBlankEvent	B	generated	typed arguments; handle policy; measured layouts
 NtGdiDdDDIWaitForIdle	B	generated	typed arguments; handle policy; measured layouts
-NtGdiDdDDIUpdateOverlay	C	unsupported	requires private structure or selector translation
-NtGdiDdDDIUnlock	C	unsupported	requires private structure or selector translation
-NtGdiDdDDIDestroyAllocation	C	unsupported	requires private structure or selector translation
+NtGdiDdDDIUpdateOverlay	C	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtGdiDdDDIUnlock	C	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtGdiDdDDIDestroyAllocation	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtGdiDdDDIDestroyContext	B	generated	typed arguments; handle policy; measured layouts
 NtGdiDdDDIDestroyDevice	B	generated	typed arguments; handle policy; measured layouts
 NtGdiDdDDIDestroyOverlay	B	generated	typed arguments; handle policy; measured layouts
 NtGdiDdDDIDestroySynchronizationObject	B	generated	typed arguments; handle policy; measured layouts
-NtGdiDdDDIEscape	C	unsupported	requires private structure or selector translation
-NtGdiDdDDIFlipOverlay	C	unsupported	requires private structure or selector translation
+NtGdiDdDDIEscape	C	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtGdiDdDDIFlipOverlay	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtGdiDdDDIGetContextSchedulingPriority	B	generated	typed arguments; handle policy; measured layouts
 NtGdiDdDDIGetDeviceState	B	generated	typed arguments; handle policy; measured layouts
-NtGdiDdDDIGetDisplayModeList	C	unsupported	requires private structure or selector translation
-NtGdiDdDDIGetMultisampleMethodList	C	unsupported	requires private structure or selector translation
-NtGdiDdDDIGetPresentHistory	C	unsupported	requires private structure or selector translation
+NtGdiDdDDIGetDisplayModeList	C	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtGdiDdDDIGetMultisampleMethodList	C	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtGdiDdDDIGetPresentHistory	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtGdiDdDDIGetProcessSchedulingPriorityClass	B	generated	typed arguments; handle policy; measured layouts
-NtGdiDdDDIGetRuntimeData	C	unsupported	requires private structure or selector translation
+NtGdiDdDDIGetRuntimeData	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtGdiDdDDIGetScanLine	B	generated	typed arguments; handle policy; measured layouts
 NtGdiDdDDIGetSharedPrimaryHandle	B	generated	typed arguments; handle policy; measured layouts
-NtGdiDdDDIInvalidateActiveVidPn	C	unsupported	requires private structure or selector translation
-NtGdiDdDDILock	C	unsupported	requires private structure or selector translation
-NtGdiDdDDIOpenAdapterFromDeviceName	C	unsupported	requires private structure or selector translation
+NtGdiDdDDIInvalidateActiveVidPn	C	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtGdiDdDDILock	C	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtGdiDdDDIOpenAdapterFromDeviceName	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtGdiDdDDIOpenAdapterFromGdiDisplayName	B	generated	typed arguments; handle policy; measured layouts
-NtGdiDdDDIOpenAdapterFromHdc	C	unsupported	requires private structure or selector translation
-NtGdiDdDDIOpenResource	C	unsupported	requires private structure or selector translation
+NtGdiDdDDIOpenAdapterFromHdc	C	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtGdiDdDDIOpenResource	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtGdiDdDDIPollDisplayChildren	B	generated	typed arguments; handle policy; measured layouts
-NtGdiDdDDIPresent	C	unsupported	requires private structure or selector translation
-NtGdiDdDDIQueryAdapterInfo	C	unsupported	requires private structure or selector translation
-NtGdiDdDDIQueryAllocationResidency	C	unsupported	requires private structure or selector translation
-NtGdiDdDDIQueryResourceInfo	C	unsupported	requires private structure or selector translation
-NtGdiDdDDIQueryStatistics	C	unsupported	requires private structure or selector translation
+NtGdiDdDDIPresent	C	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtGdiDdDDIQueryAdapterInfo	C	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtGdiDdDDIQueryAllocationResidency	C	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtGdiDdDDIQueryResourceInfo	C	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtGdiDdDDIQueryStatistics	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtGdiDdDDIReleaseProcessVidPnSourceOwners	A	generated	typed arguments; handle policy; measured layouts
-NtGdiDdDDIRender	C	unsupported	requires private structure or selector translation
-NtGdiDdDDISetAllocationPriority	C	unsupported	requires private structure or selector translation
+NtGdiDdDDIRender	C	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtGdiDdDDISetAllocationPriority	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtGdiDdDDISetContextSchedulingPriority	B	generated	typed arguments; handle policy; measured layouts
 NtGdiDdDDISetDisplayMode	B	generated	typed arguments; handle policy; measured layouts
 NtGdiDdDDISetDisplayPrivateDriverFormat	B	generated	typed arguments; handle policy; measured layouts
-NtGdiDdDDISetGammaRamp	C	unsupported	requires private structure or selector translation
+NtGdiDdDDISetGammaRamp	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtGdiDdDDISetProcessSchedulingPriorityClass	A	generated	typed arguments; handle policy; measured layouts
 NtGdiDdDDISetQueuedLimit	B	generated	typed arguments; handle policy; measured layouts
-NtGdiDdDDISetVidPnSourceOwner	C	unsupported	requires private structure or selector translation
+NtGdiDdDDISetVidPnSourceOwner	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtGdiDdDDISharedPrimaryLockNotification	B	generated	typed arguments; handle policy; measured layouts
 NtGdiDdDDISharedPrimaryUnLockNotification	B	generated	typed arguments; handle policy; measured layouts
 NtGdiDdDDISignalSynchronizationObject	B	generated	typed arguments; handle policy; measured layouts

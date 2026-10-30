@@ -25,6 +25,11 @@
 #define NDEBUG
 #include <debug.h>
 
+/* Heaps created with HEAP_CREATE_ENABLE_EXECUTE hold code (the CLR keeps its
+ * executable stubs in one): their pages must be executable, as on Windows. */
+#define RtlpHeapPageProtection(HeapFlags) \
+    (((HeapFlags) & HEAP_CREATE_ENABLE_EXECUTE) ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE)
+
 /* Bitmaps stuff */
 
 /* How many least significant bits are clear */
@@ -747,7 +752,7 @@ RtlpFindAndCommitPages(PHEAP Heap,
                                                  0,
                                                  Size,
                                                  MEM_COMMIT,
-                                                 PAGE_READWRITE);
+                                                 RtlpHeapPageProtection(Heap->Flags));
             }
 
             DPRINT("Committed %Iu bytes at base %08Ix, UCR size is %lu\n", *Size, Address, UcrDescriptor->Size);
@@ -1343,7 +1348,7 @@ RtlpExtendHeap(PHEAP Heap,
                                          0,
                                          &ReserveSize,
                                          MEM_RESERVE,
-                                         PAGE_READWRITE);
+                                         RtlpHeapPageProtection(Heap->Flags));
 
         /* If it failed, retry again with a half division algorithm */
         while (!NT_SUCCESS(Status) &&
@@ -1359,7 +1364,7 @@ RtlpExtendHeap(PHEAP Heap,
                                              0,
                                              &ReserveSize,
                                              MEM_RESERVE,
-                                             PAGE_READWRITE);
+                                             RtlpHeapPageProtection(Heap->Flags));
         }
 
         /* Proceed only if it's success */
@@ -1378,7 +1383,7 @@ RtlpExtendHeap(PHEAP Heap,
                                              0,
                                              &CommitSize,
                                              MEM_COMMIT,
-                                             PAGE_READWRITE);
+                                             RtlpHeapPageProtection(Heap->Flags));
 
             DPRINT("Committed %lu bytes at base %p\n", CommitSize, Segment);
 
@@ -1672,7 +1677,7 @@ RtlCreateHeap(ULONG Flags,
                                          0,
                                          &TotalSize,
                                          MEM_RESERVE,
-                                         PAGE_READWRITE);
+                                         RtlpHeapPageProtection(Flags));
 
         if (!NT_SUCCESS(Status))
         {
@@ -1694,7 +1699,7 @@ RtlCreateHeap(ULONG Flags,
                                          0,
                                          &CommitSize,
                                          MEM_COMMIT,
-                                         PAGE_READWRITE);
+                                         RtlpHeapPageProtection(Flags));
 
         DPRINT("Committed %Iu bytes at base %p\n", CommitSize, CommittedAddress);
 
@@ -2236,7 +2241,7 @@ RtlAllocateHeap(IN PVOID HeapPtr,
                                          0,
                                          &AllocationSize,
                                          MEM_COMMIT,
-                                         PAGE_READWRITE);
+                                         RtlpHeapPageProtection(Heap->Flags));
 
         if (!NT_SUCCESS(Status))
         {

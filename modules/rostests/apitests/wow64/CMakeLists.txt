@@ -33,18 +33,23 @@ add_wow64_apitest(kernel32
     IsDBCSLeadByteEx lstrlen Wow64Environment Wow64ProgramFiles Wow64EnvironmentBlock Wow64SystemDlls DynamicTls HandleList JobObject JobList
     Wow64Console FindFirstStream ProcThreadMitigation RegisterWait QueueUserWorkItem ResolveDelayLoadedAPI InterlockedPushListSListEx
     ConsoleCsrRequests ConsoleVirtualTerminal ConsoleCP ConsoleBufferSwitch ConsoleCreateRace ConsoleViewFollow
-    ConsoleWriteLatency SetConsoleWindowInfo)
+    ConsoleWriteLatency SetConsoleWindowInfo WerRegisterMemoryFile)
 # ConsoleCaret, ConsoleCtrlEventRace and ConsoleDisplayMode also call user32/gdi32: kernel32_apitest only
 add_wow64_apitest(ntdll StackOverflowDispatch NtRaiseHardErrorMode
     Wow64Continue Wow64SystemRangeStart Wow64QueryVirtualMemory Wow64PowerInformation Wow64QueryInformationProcess Wow64FailedOpenHandle NtOpenKey NtOpenKeyEx NtQueryKey NtQueryValueKey
     RtlDetermineDosPathNameType RtlUnicodeStringToAnsiString StackOverflow StackOverflowThread StackDeepRecursion SystemCallStubs
     Wow64SystemProcessInformation)
 add_wow64_apitest(advapi32
-    ServiceArgs SetSecurityInfoKey RegCreateKeyEx RegOpenKeyExW RegQueryValueExW RegEnumValueW RegWow64 RegWow64Unicode RegWow64Views RegWow64SharedCreate RegWow64Matrix RegWow64LongName RegWow64SharedLongName RegWow64Volatile RegWow64Aliases TokenLogonSid RestrictedSidsCopy TokenDefaultDacl LogonUser LsaLogonSession NetUserChangePassword
+    ServiceArgs QueryServiceConfig SetSecurityInfoKey RegCreateKeyEx RegOpenKeyExW RegQueryValueExW RegEnumValueW RegWow64 RegWow64Unicode RegWow64Views RegWow64SharedCreate RegWow64Matrix RegWow64LongName RegWow64SharedLongName RegWow64Volatile RegWow64Aliases TokenLogonSid RestrictedSidsCopy TokenDefaultDacl LogonUser LsaLogonSession NetUserChangePassword
     GetSecurityInfoSequence)
 add_wow64_apitest(wintrust WTHelperGetFileHash)
 add_wow64_apitest(iphlpapi NeighborEntry2)
 add_wow64_apitest(secur32 SetCredentialsAttributes)
+
+# The D3DKMT calls need a window station, so this one links the GUI libraries
+add_wow64_apitest(gdi32 D3DKMTCreateDCFromMemory D3DKMTWow64Thunks)
+target_include_directories(gdi32_wow64_apitest PRIVATE ${REACTOS_SOURCE_DIR}/win32ss)
+add_importlibs(gdi32_wow64_apitest gdi32 user32)
 
 target_sources(advapi32_wow64_apitest PRIVATE ../advapi32/RegWow64Review.c)
 # LogonUser creates its test user through the SAM

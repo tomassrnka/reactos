@@ -2394,7 +2394,7 @@ RegisterWow64Dlls(VOID)
     static const WCHAR *Dlls[] =
     {
         L"ole32.dll", L"oleaut32.dll", L"rsaenh.dll", L"wintrust.dll",
-        L"softpub.dll", L"mscat32.dll", L"cryptnet.dll", L"winhttp.dll", L"shell32.dll",
+        L"softpub.dll", L"mscat32.dll", L"msisip.dll", L"cryptnet.dll", L"winhttp.dll", L"shell32.dll",
         L"msxml3.dll",
         /* The rest of the shipped SysWOW64 COM set that setup registers for
          * the native view (OleControlDlls in syssetup.inf). Without these a
@@ -2449,6 +2449,47 @@ RegisterWow64Dlls(VOID)
             DPRINT1("SysWOW64 registration of %S failed: %lu\n", Dlls[i], Error);
             return Error;
         }
+    }
+    return ERROR_SUCCESS;
+}
+
+/* The .NET Framework shim finds the runtime through
+ * HKLM\SOFTWARE\Microsoft\.NETFramework\InstallRoot. syssetup.inf writes the
+ * x86 value; on x64 Windows the native view points at Framework64 and the
+ * 32-bit view (Wow6432Node) at Framework. Without the 32-bit value the
+ * 32-bit mscoreei.dll refuses to start any managed program. */
+static DWORD
+SetWow64NetFrameworkInstallRoots(VOID)
+{
+    static const struct
+    {
+        REGSAM View;
+        PCWSTR SubDir;
+    } Roots[] =
+    {
+        { KEY_WOW64_64KEY, L"\\Microsoft.NET\\Framework64\\" },
+        { KEY_WOW64_32KEY, L"\\Microsoft.NET\\Framework\\" },
+    };
+    WCHAR Value[MAX_PATH];
+    HKEY hKey;
+    DWORD i, Length, Error;
+
+    for (i = 0; i < ARRAYSIZE(Roots); ++i)
+    {
+        Length = GetWindowsDirectoryW(Value, ARRAYSIZE(Value));
+        if (!Length || Length + wcslen(Roots[i].SubDir) >= ARRAYSIZE(Value))
+            return ERROR_INSUFFICIENT_BUFFER;
+        wcscat(Value, Roots[i].SubDir);
+
+        Error = RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\.NETFramework", 0, NULL, 0,
+                                KEY_SET_VALUE | Roots[i].View, NULL, &hKey, NULL);
+        if (Error != ERROR_SUCCESS)
+            return Error;
+        Error = RegSetValueExW(hKey, L"InstallRoot", 0, REG_SZ, (const BYTE *)Value,
+                               (DWORD)(wcslen(Value) + 1) * sizeof(WCHAR));
+        RegCloseKey(hKey);
+        if (Error != ERROR_SUCCESS)
+            return Error;
     }
     return ERROR_SUCCESS;
 }
@@ -2536,6 +2577,15 @@ RegisterDlls(
 #if defined(_M_AMD64) && defined(BUILD_WOW64_ENABLED)
     if (Error == ERROR_SUCCESS)
         Error = RegisterWow64Dlls();
+    if (Error == ERROR_SUCCESS)
+    {
+        /* Not fatal: only managed programs depend on it, so do not fail all of
+         * the registrations over it. */
+        DWORD RootError = SetWow64NetFrameworkInstallRoots();
+
+        if (RootError != ERROR_SUCCESS)
+            DPRINT1("Setting the .NETFramework InstallRoot failed (%08lX)\n", RootError);
+    }
 #endif
 
     SetupTermDefaultQueueCallback(RegistrationData.DefaultContext);

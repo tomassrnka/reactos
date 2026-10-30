@@ -8,6 +8,11 @@ add_custom_target(converted_caroots_inf DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/caro
 utf16le_convert(${CMAKE_CURRENT_SOURCE_DIR}/caroots.inf ${CMAKE_CURRENT_BINARY_DIR}/caroots.inf)
 add_cd_file(TARGET converted_caroots_inf FILE ${CMAKE_CURRENT_BINARY_DIR}/caroots.inf DESTINATION reactos NO_CAB FOR bootcd regtest)
 
+# Code signing roots that caroots.inf (TLS roots) lacks, see sdk/tools/update_codesign_roots.py
+add_custom_target(converted_csroots_inf DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/csroots.inf)
+utf16le_convert(${CMAKE_CURRENT_SOURCE_DIR}/csroots.inf ${CMAKE_CURRENT_BINARY_DIR}/csroots.inf)
+add_cd_file(TARGET converted_csroots_inf FILE ${CMAKE_CURRENT_BINARY_DIR}/csroots.inf DESTINATION reactos NO_CAB FOR bootcd regtest)
+
 # Common hives
 add_registry_inf(
     hivecls.inf
