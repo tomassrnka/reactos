@@ -77,6 +77,7 @@ typedef struct icmp_echo_request
     UINT16 OptionsOffset;
     UINT8 OptionsSize;
     UINT8 Padding;
+    IPAddr SourceAddress; /* IcmpSendEcho2Ex; 0 = any local address */
 } ICMP_ECHO_REQUEST, *PICMP_ECHO_REQUEST;
 
 typedef struct icmp_echo_reply

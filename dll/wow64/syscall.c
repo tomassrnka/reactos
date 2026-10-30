@@ -1587,6 +1587,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         case IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST: /* NotifyAddrChange: no data; pends with the guest IOSB. */
         case IOCTL_IP_ADDCHANGE_CANCEL_REQUEST: /* CancelIPChangeNotify: no data. */
         case IOCTL_IP_ROUTECHANGE_NOTIFY_REQUEST: /* NotifyRouteChange: no data; pends with the guest IOSB. */
+        case IOCTL_ICMP_ECHO_REQUEST: /* IcmpSendEcho2: the request has no pointers; tcpip writes the 32-bit reply layout. */
         case IOCTL_AFD_GET_TDI_HANDLES: /* AFD captures the 32-bit output handles. */
         case IOCTL_AFD_EVENT_SELECT: /* AFD captures event handles and the in/out record. */
         case IOCTL_AFD_ENUM_NETWORK_EVENTS:
