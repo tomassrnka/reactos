@@ -2540,6 +2540,13 @@ static DWORD CRYPT_ChainQuality(const CertificateChain *chain)
     if (IS_TRUST_ERROR_SET(&chain->context.TrustStatus,
      CERT_TRUST_IS_NOT_SIGNATURE_VALID))
         quality &= ~CHAIN_QUALITY_SIGNATURE_VALID;
+    /* Between chains otherwise alike, prefer one valid for the requested
+     * usage: a root may be trusted for some purposes only, while another path
+     * (e.g. through a cross certificate) ends at a root trusted for all. */
+    quality <<= 1;
+    if (!(chain->context.TrustStatus.dwErrorStatus &
+     CERT_TRUST_IS_NOT_VALID_FOR_USAGE))
+        quality |= 1;
     return quality;
 }
 
@@ -2738,11 +2745,132 @@ static void CRYPT_VerifyChainRevocation(PCERT_CHAIN_CONTEXT chain,
     }
 }
 
+/* Whether a set of usages satisfies the requested usage match */
+static BOOL CRYPT_UsageMatches(const CERT_USAGE_MATCH *requested,
+ const CERT_ENHKEY_USAGE *usage)
+{
+    const CERT_ENHKEY_USAGE *requestedUsage = &requested->Usage;
+    BOOL validForUsage;
+    DWORD i, j;
+
+    if (requested->dwType == USAGE_MATCH_TYPE_AND)
+    {
+        /* For AND matches, all usages must be present */
+        validForUsage = TRUE;
+        for (i = 0; validForUsage && i < requestedUsage->cUsageIdentifier; i++)
+        {
+            BOOL match = FALSE;
+
+            for (j = 0; !match && j < usage->cUsageIdentifier; j++)
+                match = !strcmp(usage->rgpszUsageIdentifier[j],
+                 requestedUsage->rgpszUsageIdentifier[i]);
+            if (!match)
+                validForUsage = FALSE;
+        }
+    }
+    else
+    {
+        /* For OR matches, any matching usage suffices */
+        validForUsage = FALSE;
+        for (i = 0; !validForUsage && i < requestedUsage->cUsageIdentifier; i++)
+        {
+            for (j = 0; !validForUsage && j < usage->cUsageIdentifier; j++)
+                validForUsage = !strcmp(usage->rgpszUsageIdentifier[j],
+                 requestedUsage->rgpszUsageIdentifier[i]);
+        }
+    }
+    return validForUsage;
+}
+
+static BOOL CRYPT_HasRequestedUsage(const CERT_CHAIN_PARA *pChainPara)
+{
+    return pChainPara->cbSize >= sizeof(CERT_CHAIN_PARA_NO_EXTRA_FIELDS) &&
+     pChainPara->RequestedUsage.Usage.cUsageIdentifier;
+}
+
+/* Whether a certificate's enhanced key usage property, if it has one, allows
+ * the requested usage */
+static BOOL CRYPT_PropertyAllowsUsage(PCCERT_CONTEXT cert,
+ const CERT_USAGE_MATCH *requested)
+{
+    CERT_ENHKEY_USAGE *usage;
+    BYTE *prop;
+    DWORD size = 0;
+    BOOL allowed = FALSE;
+
+    if (!CertGetCertificateContextProperty(cert, CERT_ENHKEY_USAGE_PROP_ID,
+     NULL, &size))
+        return TRUE;
+    if ((prop = CryptMemAlloc(size)))
+    {
+        if (CertGetCertificateContextProperty(cert, CERT_ENHKEY_USAGE_PROP_ID,
+         prop, &size) &&
+         CryptDecodeObjectEx(X509_ASN_ENCODING, X509_ENHANCED_KEY_USAGE, prop,
+         size, CRYPT_DECODE_ALLOC_FLAG, NULL, &usage, &size))
+        {
+            allowed = CRYPT_UsageMatches(requested, usage);
+            LocalFree(usage);
+        }
+        CryptMemFree(prop);
+    }
+    return allowed;
+}
+
+/* A certificate's enhanced key usage property (set in its store, as for the
+ * roots of the AuthRoot store that are trusted for some purposes only)
+ * restricts the usages the certificate is valid for, wherever it is in the
+ * chain.  The property of the copy in the trusted root store counts too: the
+ * element may be a copy that came with the certificate being verified (a
+ * signature or a server can include the root), which has no properties.
+ * Flags every element that may not be used for the requested usage. */
+static void CRYPT_CheckPropertyUsages(HCERTSTORE hRoot,
+ PCERT_CHAIN_CONTEXT chain, const CERT_CHAIN_PARA *pChainPara)
+{
+    DWORD i, j;
+
+    if (!CRYPT_HasRequestedUsage(pChainPara))
+        return;
+    for (i = 0; i < chain->cChain; i++)
+    {
+        PCERT_SIMPLE_CHAIN simpleChain = chain->rgpChain[i];
+
+        for (j = 0; j < simpleChain->cElement; j++)
+        {
+            PCERT_CHAIN_ELEMENT element = simpleChain->rgpElement[j];
+            BOOL validForUsage = CRYPT_PropertyAllowsUsage(
+             element->pCertContext, &pChainPara->RequestedUsage);
+
+            if (validForUsage && hRoot)
+            {
+                PCCERT_CONTEXT trusted = CRYPT_FindCertInStore(hRoot,
+                 element->pCertContext);
+
+                if (trusted)
+                {
+                    validForUsage = CRYPT_PropertyAllowsUsage(trusted,
+                     &pChainPara->RequestedUsage);
+                    CertFreeCertificateContext(trusted);
+                }
+            }
+            if (!validForUsage)
+            {
+                TRACE_(chain)("chain %ld element %ld: its usage property does not allow the requested usage\n",
+                 i, j);
+                element->TrustStatus.dwErrorStatus |=
+                 CERT_TRUST_IS_NOT_VALID_FOR_USAGE;
+                simpleChain->TrustStatus.dwErrorStatus |=
+                 CERT_TRUST_IS_NOT_VALID_FOR_USAGE;
+                chain->TrustStatus.dwErrorStatus |=
+                 CERT_TRUST_IS_NOT_VALID_FOR_USAGE;
+            }
+        }
+    }
+}
+
 static void CRYPT_CheckUsages(PCERT_CHAIN_CONTEXT chain,
  const CERT_CHAIN_PARA *pChainPara)
 {
-    if (pChainPara->cbSize >= sizeof(CERT_CHAIN_PARA_NO_EXTRA_FIELDS) &&
-     pChainPara->RequestedUsage.Usage.cUsageIdentifier)
+    if (CRYPT_HasRequestedUsage(pChainPara))
     {
         PCCERT_CONTEXT endCert;
         PCERT_EXTENSION ext;
@@ -2770,8 +2898,6 @@ static void CRYPT_CheckUsages(PCERT_CHAIN_CONTEXT chain,
         if ((ext = CertFindExtension(szOID_ENHANCED_KEY_USAGE,
          endCert->pCertInfo->cExtension, endCert->pCertInfo->rgExtension)))
         {
-            const CERT_ENHKEY_USAGE *requestedUsage =
-             &pChainPara->RequestedUsage.Usage;
             CERT_ENHKEY_USAGE *usage;
             DWORD size;
 
@@ -2779,40 +2905,8 @@ static void CRYPT_CheckUsages(PCERT_CHAIN_CONTEXT chain,
              X509_ENHANCED_KEY_USAGE, ext->Value.pbData, ext->Value.cbData,
              CRYPT_DECODE_ALLOC_FLAG, NULL, &usage, &size))
             {
-                if (pChainPara->RequestedUsage.dwType == USAGE_MATCH_TYPE_AND)
-                {
-                    DWORD i, j;
-
-                    /* For AND matches, all usages must be present */
-                    validForUsage = TRUE;
-                    for (i = 0; validForUsage &&
-                     i < requestedUsage->cUsageIdentifier; i++)
-                    {
-                        BOOL match = FALSE;
-
-                        for (j = 0; !match && j < usage->cUsageIdentifier; j++)
-                            match = !strcmp(usage->rgpszUsageIdentifier[j],
-                             requestedUsage->rgpszUsageIdentifier[i]);
-                        if (!match)
-                            validForUsage = FALSE;
-                    }
-                }
-                else
-                {
-                    DWORD i, j;
-
-                    /* For OR matches, any matching usage suffices */
-                    validForUsage = FALSE;
-                    for (i = 0; !validForUsage &&
-                     i < requestedUsage->cUsageIdentifier; i++)
-                    {
-                        for (j = 0; !validForUsage &&
-                         j < usage->cUsageIdentifier; j++)
-                            validForUsage =
-                             !strcmp(usage->rgpszUsageIdentifier[j],
-                             requestedUsage->rgpszUsageIdentifier[i]);
-                    }
-                }
+                validForUsage = CRYPT_UsageMatches(&pChainPara->RequestedUsage,
+                 usage);
                 LocalFree(usage);
             }
             else
@@ -2923,6 +3017,16 @@ BOOL WINAPI CertGetCertificateChain(HCERTCHAINENGINE hChainEngine,
             if (alternate)
                 ret = CRYPT_AddAlternateChainToChain(chain, alternate);
         } while (ret && alternate);
+        if (ret)
+        {
+            DWORD i;
+
+            CRYPT_CheckPropertyUsages(engine->hRoot, &chain->context,
+             pChainPara);
+            for (i = 0; i < chain->context.cLowerQualityChainContext; i++)
+                CRYPT_CheckPropertyUsages(engine->hRoot, (PCERT_CHAIN_CONTEXT)
+                 chain->context.rgpLowerQualityChainContext[i], pChainPara);
+        }
         chain = CRYPT_ChooseHighestQualityChain(chain);
         if (!(dwFlags & CERT_CHAIN_RETURN_LOWER_QUALITY_CONTEXTS))
             CRYPT_FreeLowerQualityChains(chain);
