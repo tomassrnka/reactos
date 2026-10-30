@@ -273,6 +273,7 @@ set(baseaddress_mciseq                         0x73550000)
 set(baseaddress_mciwave                        0x73520000)
 set(baseaddress_mf                             0x73450000)
 set(baseaddress_mfplat                         0x73370000)
+set(baseaddress_mfplay                          0x73350000) # manually added
 set(baseaddress_mfreadwrite                    0x73310000)
 set(baseaddress_mgmtapi                        0x732e0000)
 set(baseaddress_midimap                        0x732b0000)
