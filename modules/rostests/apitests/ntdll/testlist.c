@@ -187,6 +187,7 @@ extern void func_RtlUnwind(void);
 extern void func_RtlUnwindEx(void);
 extern void func_RtlUpcaseUnicodeStringToCountedOemString(void);
 extern void func_RtlValidateUnicodeString(void);
+extern void func_RtlVerifyVersionInfo(void);
 extern void func_RtlWaitOnAddress(void);
 extern void func_RtlVirtualUnwind(void);
 extern void func_RtlxUnicodeStringToAnsiSize(void);
@@ -392,6 +393,7 @@ const struct test winetest_testlist[] =
     { "RtlUnwindIndirect",              func_RtlUnwindIndirect },
     { "RtlUpcaseUnicodeStringToCountedOemString", func_RtlUpcaseUnicodeStringToCountedOemString },
     { "RtlValidateUnicodeString",       func_RtlValidateUnicodeString },
+    { "RtlVerifyVersionInfo",           func_RtlVerifyVersionInfo },
     { "RtlWaitOnAddress",               func_RtlWaitOnAddress },
     { "SectionFaultCost",               func_SectionFaultCost },
     { "StackDeepRecursion",             func_StackDeepRecursion },

@@ -193,6 +193,7 @@ list(APPEND SOURCE
     RtlRetrieveNtUserPfn.c
     RtlUnhandledExceptionFilter.c
     RtlUnwindExConsolidate.c
+    RtlVerifyVersionInfo.c
     RtlUnicodeStringToAnsiString.c
     RtlUnicodeStringToCountedOemString.c
     RtlUnicodeToOemN.c
