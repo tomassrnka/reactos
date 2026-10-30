@@ -290,9 +290,9 @@ static void verify_nt6_verifyinfo(PHOOKAPI hook, const VersionLieInfo* info, PCS
         { 0, 0, 0, VER_MAJORVERSION, VER_GREATER_EQUAL, 0, 0, TRUE },
         { 1, 0, 0, VER_MAJORVERSION, VER_GREATER_EQUAL, 0, 0, FALSE },
         { -1, 0, 0, VER_MAJORVERSION, VER_GREATER_EQUAL, 0, 0, TRUE },
-        { 0, 0, 0, VER_MAJORVERSION, VER_GREATER, 0, 0, FALSE },
+        { 0, 0, 0, VER_MAJORVERSION, VER_GREATER, 0, 0, TRUE },     /* nothing else is tested: equal numbers hold */
         { -1, 0, 0, VER_MAJORVERSION, VER_GREATER, 0, 0, TRUE },
-        { 0, 0, 0, VER_MAJORVERSION, VER_LESS, 0, 0, FALSE },
+        { 0, 0, 0, VER_MAJORVERSION, VER_LESS, 0, 0, TRUE },
         { 1, 0, 0, VER_MAJORVERSION, VER_LESS, 0, 0, TRUE },
         { 0, 0, 0, VER_MAJORVERSION | VER_MINORVERSION, VER_GREATER_EQUAL, VER_GREATER_EQUAL, 0, TRUE },
         { 0, 1, 0, VER_MAJORVERSION | VER_MINORVERSION, VER_GREATER_EQUAL, VER_GREATER_EQUAL, 0, FALSE },
@@ -303,7 +303,7 @@ static void verify_nt6_verifyinfo(PHOOKAPI hook, const VersionLieInfo* info, PCS
         { 0, 0, 0, VER_MAJORVERSION | VER_MINORVERSION | VER_SERVICEPACKMAJOR, VER_GREATER_EQUAL, VER_GREATER_EQUAL, VER_GREATER_EQUAL, TRUE },
         { 0, 0, 1, VER_MAJORVERSION | VER_MINORVERSION | VER_SERVICEPACKMAJOR, VER_GREATER_EQUAL, VER_GREATER_EQUAL, VER_GREATER_EQUAL, FALSE },
         { 0, 1, 0, VER_MINORVERSION, VER_LESS, 0, 0, TRUE },
-        { 0, 0, 0, VER_MINORVERSION, VER_LESS, 0, 0, FALSE },
+        { 0, 0, 0, VER_MINORVERSION, VER_LESS, 0, 0, TRUE },
     };
     int n;
     DWORD err;
@@ -347,6 +347,10 @@ static void verify_nt6_verifyinfo(PHOOKAPI hook, const VersionLieInfo* info, PCS
     test_verify_version_cases(hook[4].ReplacementFunction, info->dwMajorVersion, info->dwMinorVersion, info->dwBuildNumber,
                               info->wServicePackMajor, info->wServicePackMinor, shim);
 
+    /* Every kind of request, against the answers of Windows */
+    test_verify_version_sweep(hook[4].ReplacementFunction, hook[5].ReplacementFunction, hook[6].ReplacementFunction,
+                              info->dwMajorVersion, info->dwMinorVersion, info->dwBuildNumber, info->wServicePackMajor, shim);
+
     /* Build number and platform */
     {
         OSVERSIONINFOEXW want = { sizeof(want) };
@@ -374,9 +378,15 @@ static void verify_nt6_verifyinfo(PHOOKAPI hook, const VersionLieInfo* info, PCS
         SetLastError(0xdeadbeef);
         res = ((VERIFYWPROC)hook[5].ReplacementFunction)(&want, 0, VerSetConditionMask(0, VER_MAJORVERSION, VER_EQUAL));
         winetest_ok(!res && GetLastError() == ERROR_BAD_ARGUMENTS, "Expected failure with ERROR_BAD_ARGUMENTS, got %d, %u for %s\n", res, GetLastError(), shim);
+
+        /* No condition at all is a valid request: it holds when the numbers are equal, and not otherwise */
+        want.dwMajorVersion = info->dwMajorVersion;
+        res = ((VERIFYWPROC)hook[5].ReplacementFunction)(&want, VER_MAJORVERSION, 0);
+        winetest_ok(res, "Expected a request without conditions for the major version to hold, got %d, %u for %s\n", res, GetLastError(), shim);
+        want.dwMajorVersion = info->dwMajorVersion + 1;
         SetLastError(0xdeadbeef);
         res = ((VERIFYWPROC)hook[5].ReplacementFunction)(&want, VER_MAJORVERSION, 0);
-        winetest_ok(!res && GetLastError() == ERROR_BAD_ARGUMENTS, "Expected failure with ERROR_BAD_ARGUMENTS, got %d, %u for %s\n", res, GetLastError(), shim);
+        winetest_ok(!res && GetLastError() == ERROR_OLD_WIN_VERSION, "Expected failure with ERROR_OLD_WIN_VERSION, got %d, %u for %s\n", res, GetLastError(), shim);
     }
 }
 
@@ -812,8 +822,26 @@ tGETHOOKAPIS LoadShimDLL2(PCWSTR ShimDll)
 }
 
 
+/* The system's own functions answer the sweep as the shims do: this is what the tables hold (Windows 10 itself, for the one without a service pack) */
+static void test_real_verify(void)
+{
+    OSVERSIONINFOEXW cur = { sizeof(cur) };
+    PVOID rtl = GetProcAddress(GetModuleHandleA("ntdll.dll"), "RtlVerifyVersionInfo");
+
+    if (!GetVersionExW((OSVERSIONINFOW*)&cur) || cur.wServicePackMajor != 0 || cur.wServicePackMinor != 0)
+    {
+        skip("The system has a service pack\n");
+        return;
+    }
+    /* The numbers are relative to what GetVersionExW says: without a manifest Windows 10 answers for 6.2, and RtlVerifyVersionInfo is left to ReactOS */
+    test_verify_version_sweep(VerifyVersionInfoA, VerifyVersionInfoW, is_reactos() ? rtl : NULL,
+                              cur.dwMajorVersion, cur.dwMinorVersion, cur.dwBuildNumber, 0, "the system");
+}
+
 START_TEST(versionlie)
 {
+    test_real_verify();
+
     pGetHookAPIs = LoadShimDLL2(L"aclayers.dll");
 
     if (!pGetHookAPIs)
