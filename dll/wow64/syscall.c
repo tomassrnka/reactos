@@ -754,6 +754,18 @@ static NTSTATUS FilterToken32(ULONG *a, WOW64_CLEANUP *Cleanup)
     return ReturnHandle32(a[5], Status, Cleanup);
 }
 
+/* A 32-bit process sees the 32-bit view unless it asks for the other one.
+ * That default belongs to names resolved from the root. A relative open
+ * without a selector keeps the view its parent handle was opened with
+ * (the configuration manager remembers it per handle), as Windows does. */
+static ACCESS_MASK
+KeyViewAccess(const OBJECT_ATTRIBUTES *Attributes, ACCESS_MASK Access)
+{
+    if (!(Access & KEY_WOW64_RES) && (!Attributes || !Attributes->RootDirectory))
+        Access |= KEY_WOW64_32KEY;
+    return Access;
+}
+
 static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
 {
     NTSTATUS Status;
@@ -1264,22 +1276,19 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
     case W64_NtOpenKey:
         PROBE(0);
         ATTR(2);
-        KeyAccess = a[1];
-        if (!(KeyAccess & KEY_WOW64_RES)) KeyAccess |= KEY_WOW64_32KEY;
+        KeyAccess = KeyViewAccess(OA(2), a[1]);
         Status = NtOpenKey(&Cleanup->Handle, KeyAccess, OA(2)); RETURN_HANDLE();
     case W64_NtOpenKeyEx:
         PROBE(0);
         ATTR(2);
-        KeyAccess = a[1];
-        if (!(KeyAccess & KEY_WOW64_RES)) KeyAccess |= KEY_WOW64_32KEY;
+        KeyAccess = KeyViewAccess(OA(2), a[1]);
         Status = NtOpenKeyEx(&Cleanup->Handle, KeyAccess, OA(2), a[3]); RETURN_HANDLE();
     case W64_NtCreateKey:
     {
         UNICODE_STRING Class;
         PROBE(0);
         ATTR(2);
-        KeyAccess = a[1];
-        if (!(KeyAccess & KEY_WOW64_RES)) KeyAccess |= KEY_WOW64_32KEY;
+        KeyAccess = KeyViewAccess(OA(2), a[1]);
         Status = NtCreateKey(&Cleanup->Handle, KeyAccess, OA(2), a[3], String32(&Class, P(4)), a[5], P(6));
         RETURN_HANDLE();
     }
