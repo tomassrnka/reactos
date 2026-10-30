@@ -89,6 +89,7 @@ list(APPEND SOURCE
     GetSystemTimePrecise.c
     GetVolumeInformation.c
     HandleList.c
+    HeapCreateExecute.c
     HeapWalk.c
     IdleProcessor.c
     InitOnce.c
@@ -164,6 +165,7 @@ list(APPEND SOURCE
     UnmapViewOfFileEx.c
     WaitOnAddress.c
     WerFlags.c
+    WerRegisterMemoryFile.c
     WerRuntimeExceptionModule.c
     WideCharToMultiByte.c
     Wow64Process.c

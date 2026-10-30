@@ -50,7 +50,7 @@ HeapCreate(DWORD flOptions,
     ULONG Flags;
 
     /* Remove non-Win32 flags and tag this allocation */
-    Flags = (flOptions & (HEAP_GENERATE_EXCEPTIONS | HEAP_NO_SERIALIZE)) |
+    Flags = (flOptions & (HEAP_GENERATE_EXCEPTIONS | HEAP_NO_SERIALIZE | HEAP_CREATE_ENABLE_EXECUTE)) |
             HEAP_CLASS_1;
 
     /* Check if heap is growable and ensure max size is correct */

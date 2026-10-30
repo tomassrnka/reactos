@@ -2,6 +2,7 @@
 list(APPEND SOURCE
     CertEnumSystemStore.c
     CertEnumSystemStoreLocation.c
+    ChainTrust.c
     CryptExportPublicKeyInfoFromBCryptKeyHandle.c
     CryptTimeStamp.c
     testlist.c)
