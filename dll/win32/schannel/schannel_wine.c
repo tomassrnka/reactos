@@ -141,7 +141,7 @@ static void *schan_get_object(ULONG_PTR handle_idx, enum schan_handle_type type)
 static void read_config(void)
 {
     DWORD enabled = 0, default_disabled = 0;
-    HKEY protocols_key, key;
+    HKEY protocols_key = NULL, key;
     WCHAR subkey_name[64];
     unsigned i;
     DWORD res;
@@ -223,7 +223,11 @@ static void read_config(void)
         }
     }
 
-    RegCloseKey(protocols_key);
+    /* Only close a key that was opened: protocols_key is not set when the open fails (the Protocols key does not
+     * exist by default), and closing whatever value it holds closes an unrelated handle of the process (seen as
+     * Google Updater's thread handle going invalid, CHECK in PlatformThread::Join, under WoW64) */
+    if (protocols_key)
+        RegCloseKey(protocols_key);
 
     config_enabled_protocols = enabled & schan_imp_enabled_protocols();
     config_default_disabled_protocols = default_disabled;
