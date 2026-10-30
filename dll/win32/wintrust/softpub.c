@@ -995,7 +995,11 @@ static BOOL WINTRUST_ParseTSTInfo(const BYTE *p, DWORD len, WINTRUST_TSTINFO *in
 }
 
 /* The digests the time stamps may use */
-static ALG_ID WINTRUST_TimeStampHashAlg(const char *oid)
+/* allowMd5: old Authenticode signatures digest their content with MD5, and
+ * the PKCS #9 countersignatures of the time stamping services of the 2000s
+ * were made with MD5 too; Windows still accepts both.  RFC 3161 time stamps
+ * are only believed with SHA-1 and SHA-2. */
+static ALG_ID WINTRUST_TimeStampHashAlg(const char *oid, BOOL allowMd5)
 {
     ALG_ID alg;
 
@@ -1003,12 +1007,14 @@ static ALG_ID WINTRUST_TimeStampHashAlg(const char *oid)
     alg = CertOIDToAlgId(oid);
     if (alg == CALG_SHA1 || alg == CALG_SHA_256 || alg == CALG_SHA_384 || alg == CALG_SHA_512)
         return alg;
+    if (allowMd5 && alg == CALG_MD5)
+        return alg;
     return 0;
 }
 
-static BOOL WINTRUST_CreateHash(const char *oid, HCRYPTPROV *prov, HCRYPTHASH *hash)
+static BOOL WINTRUST_CreateHash(const char *oid, BOOL allowMd5, HCRYPTPROV *prov, HCRYPTHASH *hash)
 {
-    ALG_ID alg = WINTRUST_TimeStampHashAlg(oid);
+    ALG_ID alg = WINTRUST_TimeStampHashAlg(oid, allowMd5);
 
     if (!alg || !CryptAcquireContextW(prov, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT))
         return FALSE;
@@ -1021,14 +1027,14 @@ static BOOL WINTRUST_CreateHash(const char *oid, HCRYPTPROV *prov, HCRYPTHASH *h
 }
 
 /* hash must have room for 64 octets */
-static BOOL WINTRUST_HashBytes(const char *oid, const BYTE *data, DWORD len, BYTE *hash,
- DWORD *hashLen)
+static BOOL WINTRUST_HashBytes(const char *oid, BOOL allowMd5, const BYTE *data, DWORD len,
+ BYTE *hash, DWORD *hashLen)
 {
     HCRYPTPROV prov;
     HCRYPTHASH h;
     BOOL ret = FALSE;
 
-    if (!WINTRUST_CreateHash(oid, &prov, &h)) return FALSE;
+    if (!WINTRUST_CreateHash(oid, allowMd5, &prov, &h)) return FALSE;
     *hashLen = 64;
     if (CryptHashData(h, data, len, 0))
         ret = CryptGetHashParam(h, HP_HASHVAL, hash, hashLen, 0);
@@ -1041,7 +1047,7 @@ static BOOL WINTRUST_HashBytes(const char *oid, const BYTE *data, DWORD len, BYT
  * the digest of data.  Whoever verifies the signature over the attributes
  * would otherwise not know that it covers the content. */
 static BOOL WINTRUST_CheckMessageDigest(const CRYPT_ATTRIBUTES *attrs, const char *hashOid,
- const BYTE *data, DWORD len)
+ BOOL allowMd5, const BYTE *data, DWORD len)
 {
     DWORD i, size, found = 0;
     const CRYPT_ATTRIBUTE *digestAttr = NULL;
@@ -1059,7 +1065,7 @@ static BOOL WINTRUST_CheckMessageDigest(const CRYPT_ATTRIBUTES *attrs, const cha
         }
     }
     if (found != 1 || digestAttr->cValue != 1) return FALSE;
-    if (!WINTRUST_HashBytes(hashOid, data, len, hash, &hashLen)) return FALSE;
+    if (!WINTRUST_HashBytes(hashOid, allowMd5, data, len, hash, &hashLen)) return FALSE;
     if (CryptDecodeObjectEx(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, X509_OCTET_STRING,
      digestAttr->rgValue[0].pbData, digestAttr->rgValue[0].cbData, CRYPT_DECODE_ALLOC_FLAG,
      NULL, &digest, &size))
@@ -1178,7 +1184,7 @@ static BOOL WINTRUST_VerifySignerInfoSignature(const BYTE *der, DWORD len,
 
     buf = HeapAlloc(GetProcessHeap(), 0, attrsEnd - attrs);
     sig = HeapAlloc(GetProcessHeap(), 0, sigLen);
-    if (buf && sig && WINTRUST_CreateHash(info->HashAlgorithm.pszObjId, &prov, &hash))
+    if (buf && sig && WINTRUST_CreateHash(info->HashAlgorithm.pszObjId, TRUE, &prov, &hash))
     {
         /* the signature covers the attributes encoded as a SET OF */
         memcpy(buf, attrs, attrsEnd - attrs);
@@ -1216,7 +1222,7 @@ static BOOL WINTRUST_VerifyCounterSigner(const CRYPT_PROVIDER_DATA *data,
      counter->SignerId.dwIdChoice != CERT_ID_ISSUER_SERIAL_NUMBER ||
      !signerInfo->EncryptedHash.cbData)
         return FALSE;
-    if (!WINTRUST_CheckMessageDigest(&counter->AuthAttrs, counter->HashAlgorithm.pszObjId,
+    if (!WINTRUST_CheckMessageDigest(&counter->AuthAttrs, counter->HashAlgorithm.pszObjId, TRUE,
      signerInfo->EncryptedHash.pbData, signerInfo->EncryptedHash.cbData))
         return FALSE;
     if (!WINTRUST_GetTimeFromCounterSigner(counter, time) || !WINTRUST_NotInFuture(time))
@@ -1305,7 +1311,7 @@ static BOOL WINTRUST_VerifyRFC3161Token(const CRYPT_ATTR_BLOB *token,
     if (!WINTRUST_ParseTSTInfo(content, size, &info, &tst, &tstLen)) goto done;
 
     /* the message imprint is the digest of the primary signature's value */
-    if (!WINTRUST_HashBytes(info.hashOid, primary->EncryptedHash.pbData,
+    if (!WINTRUST_HashBytes(info.hashOid, FALSE, primary->EncryptedHash.pbData,
      primary->EncryptedHash.cbData, hash, &hashLen) ||
      info.imprintLen != hashLen || memcmp(info.imprint, hash, hashLen))
         goto done;
@@ -1316,7 +1322,7 @@ static BOOL WINTRUST_VerifyRFC3161Token(const CRYPT_ATTR_BLOB *token,
      !(signer = HeapAlloc(GetProcessHeap(), 0, size)) ||
      !CryptMsgGetParam(msg, CMSG_SIGNER_INFO_PARAM, 0, signer, &size))
         goto done;
-    if (!WINTRUST_CheckMessageDigest(&signer->AuthAttrs, signer->HashAlgorithm.pszObjId, tst, tstLen))
+    if (!WINTRUST_CheckMessageDigest(&signer->AuthAttrs, signer->HashAlgorithm.pszObjId, FALSE, tst, tstLen))
         goto done;
 
     /* its certificate comes with the token; the signature must verify with it */
@@ -1475,29 +1481,81 @@ static CERT_INFO *WINTRUST_GetSignerCertInfo(CRYPT_PROVIDER_DATA *data,
     return certInfo;
 }
 
+/* The contents octets of the (BER or DER) value at the start of content:
+ * definite or indefinite length, and nothing after it. */
+static BOOL WINTRUST_ContentOctets(const BYTE *content, DWORD size,
+ const BYTE **octets, DWORD *len)
+{
+    const BYTE *p = content, *end = content + size;
+    BYTE tag;
+
+    if (size < 2) return FALSE;
+    if ((content[0] & 0x1f) == 0x1f) return FALSE;      /* no high tag numbers here */
+    if (content[1] == 0x80)
+    {
+        /* indefinite length, constructed only: up to the end-of-contents octets */
+        if (!(content[0] & 0x20) || size < 4 || end[-1] || end[-2]) return FALSE;
+        *octets = content + 2;
+        *len = size - 4;
+        return TRUE;
+    }
+    return (p = WINTRUST_DerNext(content, end, &tag, octets, len)) == end;
+}
+
 /* The signature of a signer with signed attributes covers those attributes
  * only: the content is bound to it by the attributes' message digest, which has
- * to be compared with the digest of the content.  It is taken over the content
- * octets of the encapsulated content, without its tag and length. */
+ * to be compared with the digest of the content.  That digest is taken over the
+ * contents octets of the encapsulated content: for id-data (which crypt32
+ * returns already decoded) the data itself; for any other type, such as
+ * Authenticode's SpcIndirectDataContent or a catalog's certificate trust list,
+ * the value without its tag and length.  A digest of the whole encoding binds
+ * the content as well, and is accepted too: some signing tools produce it. */
 static BOOL WINTRUST_CheckSignerContentDigest(CRYPT_PROVIDER_DATA *data,
  DWORD signerIdx)
 {
     const CMSG_SIGNER_INFO *signerInfo = data->pasSigners[signerIdx].psSigner;
-    DWORD size;
-    BYTE *content, tag;
-    const BYTE *c;
-    DWORD len;
+    const char *hashOid = signerInfo->HashAlgorithm.pszObjId;
+    DWORD size, typeSize = 0, len;
+    BYTE *content;
+    char *type = NULL;
+    const BYTE *octets;
     BOOL ret = FALSE;
 
     if (!signerInfo->AuthAttrs.cAttr) return TRUE;
+    if (CryptMsgGetParam(data->hMsg, CMSG_INNER_CONTENT_TYPE_PARAM, 0, NULL, &typeSize) &&
+     (type = HeapAlloc(GetProcessHeap(), 0, typeSize + 1)))
+    {
+        if (CryptMsgGetParam(data->hMsg, CMSG_INNER_CONTENT_TYPE_PARAM, 0, type, &typeSize))
+            type[typeSize] = 0;
+        else
+            type[0] = 0;
+    }
     if (!CryptMsgGetParam(data->hMsg, CMSG_CONTENT_PARAM, 0, NULL, &size) ||
-     !(content = HeapAlloc(GetProcessHeap(), 0, size)))
+     !(content = HeapAlloc(GetProcessHeap(), 0, size ? size : 1)))
+    {
+        HeapFree(GetProcessHeap(), 0, type);
         return FALSE;
-    if (CryptMsgGetParam(data->hMsg, CMSG_CONTENT_PARAM, 0, content, &size) &&
-     WINTRUST_DerNext(content, content + size, &tag, &c, &len) == content + size)
-        ret = WINTRUST_CheckMessageDigest(&signerInfo->AuthAttrs,
-         signerInfo->HashAlgorithm.pszObjId, c, len);
+    }
+    if (CryptMsgGetParam(data->hMsg, CMSG_CONTENT_PARAM, 0, content, &size))
+    {
+        if (type && !strcmp(type, szOID_RSA_data))
+            ret = WINTRUST_CheckMessageDigest(&signerInfo->AuthAttrs, hashOid, TRUE,
+             content, size);
+        else
+        {
+            if (WINTRUST_ContentOctets(content, size, &octets, &len))
+                ret = WINTRUST_CheckMessageDigest(&signerInfo->AuthAttrs, hashOid,
+                 TRUE, octets, len);
+            if (!ret)
+                ret = WINTRUST_CheckMessageDigest(&signerInfo->AuthAttrs, hashOid,
+                 TRUE, content, size);
+        }
+    }
+    if (!ret)
+        TRACE("signer %ld: the message digest does not match the content (type %s, %ld bytes)\n",
+         signerIdx, debugstr_a(type), size);
     HeapFree(GetProcessHeap(), 0, content);
+    HeapFree(GetProcessHeap(), 0, type);
     return ret;
 }
 
