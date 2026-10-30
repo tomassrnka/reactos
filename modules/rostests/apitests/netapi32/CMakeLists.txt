@@ -1,5 +1,6 @@
 
 list(APPEND SOURCE
+    DavPaths.c
     DsRoleGetPrimaryDomainInformation.c
     NetGetAadJoinInformation.c
     NetLocalGroup.c

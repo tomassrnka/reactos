@@ -8,6 +8,7 @@
 #define STANDALONE
 #include <apitest.h>
 
+extern void func_DavPaths(void);
 extern void func_DsRoleGetPrimaryDomainInformation(void);
 extern void func_NetGetAadJoinInformation(void);
 extern void func_NetLocalGroup(void);
@@ -16,6 +17,7 @@ extern void func_NetShare(void);
 
 const struct test winetest_testlist[] =
 {
+    { "DavPaths", func_DavPaths },
     { "DsRoleGetPrimaryDomainInformation", func_DsRoleGetPrimaryDomainInformation },
     { "NetGetAadJoinInformation", func_NetGetAadJoinInformation },
     { "NetLocalGroup", func_NetLocalGroup },
