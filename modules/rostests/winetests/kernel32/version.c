@@ -696,10 +696,22 @@ static void test_VerifyVersionInfo(void)
 
     info.wServicePackMajor = 0;
     info.wServicePackMinor = 10;
+    SetLastError(0xdeadbeef);
     ret = VerifyVersionInfoA(&info, VER_MINORVERSION | VER_SERVICEPACKMAJOR | VER_SERVICEPACKMINOR,
         VerSetConditionMask(VerSetConditionMask(0, VER_MINORVERSION, VER_GREATER_EQUAL),
             VER_MAJORVERSION, VER_GREATER_EQUAL));
-    ok(ret, "VerifyVersionInfoA failed with error %ld\n", GetLastError());
+    if (servicepack)
+    {
+        ok(ret, "VerifyVersionInfoA failed with error %ld\n", GetLastError());
+    }
+    else
+    {
+        /* Without a service pack the service pack major versions are equal,
+         * so the service pack minor version decides: 0 >= 10 does not hold.
+         * Windows 10 behaves this way. */
+        ok(!ret, "VerifyVersionInfoA succeeded\n");
+        ok(GetLastError() == ERROR_OLD_WIN_VERSION, "Unexpected error code %ld\n", GetLastError());
+    }
 
     /* test bad dwOSVersionInfoSize */
     info.dwOSVersionInfoSize = sizeof(OSVERSIONINFOEXA);
