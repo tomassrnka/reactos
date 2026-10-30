@@ -63,15 +63,16 @@ MempAddMemoryBlock(IN OUT PLOADER_PARAMETER_BLOCK LoaderBlock,
     TRACE("MempAddMemoryBlock(BasePage=0x%lx, PageCount=0x%lx, Type=%ld)\n",
           BasePage, PageCount, Type);
 
-    /* Check for memory block after 4GB - we don't support it yet
-       Note: Even last page before 4GB limit is not supported */
+    /* Skip memory the kernel cannot address: MM_MAX_PAGE is 4 GB on i386
+       without PAE and the 28-bit PFN limit on amd64. Note: the page at
+       MM_MAX_PAGE itself is not handed over either */
     if (BasePage >= MM_MAX_PAGE)
     {
         /* Just skip this, without even adding to MAD list */
         return;
     }
 
-    /* Check if last page is after 4GB limit and shorten this block if needed */
+    /* Check if last page is beyond MM_MAX_PAGE and shorten this block if needed */
     if (BasePage + PageCount > MM_MAX_PAGE)
     {
         /* Shorten this block */
