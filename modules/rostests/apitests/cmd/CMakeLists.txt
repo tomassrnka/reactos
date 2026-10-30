@@ -6,6 +6,7 @@ list(APPEND SOURCE
     search.c
     pipe.c
     ftype.c
+    mklink.c
     start.c
     testlist.c)
 
