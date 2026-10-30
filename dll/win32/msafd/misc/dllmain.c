@@ -187,6 +187,11 @@ WSPSocket(int AddressFamily,
         Socket->SharedDataHandle = UlongToHandle(lpProtocolInfo->dwServiceFlags3);
         Sock = UlongToHandle(lpProtocolInfo->dwServiceFlags4);
         Socket->Handle = (SOCKET)lpProtocolInfo->dwServiceFlags4;
+
+        /* The handle WSPDuplicateSocket made for this process is not inheritable;
+         * the socket made from it is, as on Windows, unless the caller opts out */
+        SetHandleInformation(Sock, HANDLE_FLAG_INHERIT,
+                             (dwFlags & WSA_FLAG_NO_HANDLE_INHERIT) ? 0 : HANDLE_FLAG_INHERIT);
     }
     else
     {
@@ -333,10 +338,11 @@ WSPSocket(int AddressFamily,
         }
     }
 
-    /* Set up Object Attributes */
+    /* Set up Object Attributes. Sockets are inheritable unless WSA_FLAG_NO_HANDLE_INHERIT is set */
     InitializeObjectAttributes (&Object,
                                 &DevName,
-                                OBJ_CASE_INSENSITIVE | OBJ_INHERIT,
+                                (dwFlags & WSA_FLAG_NO_HANDLE_INHERIT) ?
+                                    OBJ_CASE_INSENSITIVE : (OBJ_CASE_INSENSITIVE | OBJ_INHERIT),
                                 0,
                                 0);
 

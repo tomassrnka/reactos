@@ -23,6 +23,7 @@ extern void func_getpeername(void);
 extern void func_getservbyname(void);
 extern void func_getservbyport(void);
 extern void func_getsockname(void);
+extern void func_handleinherit(void);
 extern void func_iocpskip(void);
 extern void func_ioctlsocket(void);
 extern void func_killpendingio(void);
@@ -80,6 +81,7 @@ const struct test winetest_testlist[] =
     { "getservbyname", func_getservbyname },
     { "getservbyport", func_getservbyport },
     { "getsockname", func_getsockname },
+    { "handleinherit", func_handleinherit },
     { "iocpskip", func_iocpskip },
     { "ioctlsocket", func_ioctlsocket },
     { "killpendingio", func_killpendingio },
