@@ -13,6 +13,7 @@
 #include "featmgr.h"
 #include <commctrl.h>
 #include <strsafe.h>
+#include "resource.h"
 
 #define IDC_LIST       1001
 #define IDC_INSTALL    1002
@@ -31,6 +32,11 @@
 #define IDC_IMPORTSC   1015
 #define IDC_SOURCE     1016
 #define IDC_SRCLABEL   1017
+#define IDC_UPDATE     1018
+#define IDC_ADDBUCKET  1019
+#define IDC_SEARCH     1020
+#define IDC_SRCHLABEL  1021
+#define IDT_SEARCH     1     /* debounce timer: filter the list shortly after the last keystroke */
 
 /* A long software-tier install (download + run installer) must not run on the UI
  * thread or the dialog freezes. The op runs on a worker thread that posts this
@@ -39,9 +45,12 @@
 
 static HWND g_hTab, g_hList, g_hDesc, g_hInstr;
 static HWND g_hInstall, g_hEnable, g_hDisable, g_hUninstall, g_hImport, g_hImportSc;
-static HWND g_hSource, g_hSrcLabel;
+static HWND g_hSource, g_hSrcLabel, g_hUpdate, g_hAddBucket, g_hSearch, g_hSrchLabel;
+static WCHAR g_selectId[FM_MAX_ID]; /* command line /select:<id>: select that entry on the first fill (screenshots) */
+static WCHAR g_search[64];        /* Software tab search text (name + description, case-insensitive) */
 static WCHAR g_srcFilter[32];     /* Software tab source filter ("" = all sources) */
 static BOOL g_startSoftware;      /* command line /software: open on the Software tab */
+static BOOL g_openAddBucket;      /* command line /addbucket: open the Add bucket dialog at start (screenshots) */
 static HWND g_hOK, g_hCancel, g_hApply, g_hRefresh, g_hClose;
 static HFONT g_hFont = NULL;
 static FM_FEATURE *g_arr = NULL;
@@ -115,6 +124,7 @@ static void Populate(LPCWSTR keepId)
     LVITEMW it;
 
     g_populating = TRUE;
+    SendMessageW(g_hList, WM_SETREDRAW, FALSE, 0);
     ListView_DeleteAllItems(g_hList);
     ListView_SetExtendedListViewStyleEx(g_hList, LVS_EX_CHECKBOXES,
                                         os ? LVS_EX_CHECKBOXES : 0);
@@ -124,6 +134,7 @@ static void Populate(LPCWSTR keepId)
         WCHAR buf[FM_MAX_DEPS * 2 + 64];
         if ((g_arr[i].Tier == FM_TIER_SOFTWARE ? 1 : 0) != g_tier) continue;
         if (!os && g_srcFilter[0] && _wcsicmp(g_arr[i].Source, g_srcFilter)) continue;
+        if (!os && g_search[0] && !FmMatchSearch(&g_arr[i], g_search)) continue;
 
         ZeroMemory(&it, sizeof(it));
         it.mask = LVIF_TEXT | LVIF_PARAM;
@@ -136,8 +147,9 @@ static void Populate(LPCWSTR keepId)
                          g_arr[i].PayloadAvailable ? L"" : L" (deferred)");
         ListView_SetItemText(g_hList, row, 1, buf);
         ListView_SetItemText(g_hList, row, 2, g_arr[i].Version);
-        ListView_SetItemText(g_hList, row, 3, g_arr[i].InstallDate);
-        ListView_SetItemText(g_hList, row, 4, g_arr[i].Source);
+        ListView_SetItemText(g_hList, row, 3, g_arr[i].InstalledVersion);
+        ListView_SetItemText(g_hList, row, 4, g_arr[i].InstallDate);
+        ListView_SetItemText(g_hList, row, 5, g_arr[i].Source);
 
         buf[0] = L'\0';
         if (!g_arr[i].Removable)
@@ -148,9 +160,15 @@ static void Populate(LPCWSTR keepId)
             if (FmGetDependentsIn(g_arr, g_count, g_arr[i].Id, dep, ARRAYSIZE(dep)))
                 StringCchPrintfW(buf, ARRAYSIZE(buf), L"Required by: %s", dep);
         }
+        if (g_arr[i].UpdateAvailable)
+        {
+            WCHAR u[64];
+            StringCchPrintfW(u, ARRAYSIZE(u), L"%sUpdate available: %s", buf[0] ? L"; " : L"", g_arr[i].Version);
+            StringCchCatW(buf, ARRAYSIZE(buf), u);
+        }
         if (g_arr[i].PendingReboot)
             StringCchCatW(buf, ARRAYSIZE(buf), buf[0] ? L"; Reboot pending" : L"Reboot pending");
-        ListView_SetItemText(g_hList, row, 5, buf);
+        ListView_SetItemText(g_hList, row, 6, buf);
 
         if (os)
             ListView_SetCheckState(g_hList, row, g_arr[i].State == FM_STATE_ENABLED);
@@ -161,7 +179,16 @@ static void Populate(LPCWSTR keepId)
     if (reselect >= 0)
         ListView_SetItemState(g_hList, reselect, LVIS_SELECTED | LVIS_FOCUSED,
                               LVIS_SELECTED | LVIS_FOCUSED);
+    SendMessageW(g_hList, WM_SETREDRAW, TRUE, 0);
     g_populating = FALSE;
+    if (!os)
+    {
+        WCHAR t[256];
+        int total = 0;
+        for (i = 0; i < g_count; i++) if (g_arr[i].Tier == FM_TIER_SOFTWARE) total++;
+        StringCchPrintfW(t, ARRAYSIZE(t), L"%s Showing %d of %d.", szSwInstr, row, total);
+        SetWindowTextW(g_hInstr, t);
+    }
     UpdateButtons();
 }
 
@@ -194,19 +221,33 @@ static void FillList(void)
     int i = (g_arr ? SelectedIndex() : -1);
     keep[0] = L'\0';
     if (i >= 0 && i < g_count) StringCchCopyW(keep, ARRAYSIZE(keep), g_arr[i].Id);
+    else if (g_selectId[0]) { StringCchCopyW(keep, ARRAYSIZE(keep), g_selectId); g_selectId[0] = L'\0'; }
+    DWORD t0 = GetTickCount(), t1;
+    WCHAR tf[MAX_PATH];
     ListView_DeleteAllItems(g_hList);   /* rows hold indexes into the old array */
     if (g_arr) { FmFree(g_arr); g_arr = NULL; }
     g_count = FmEnumFeatures(&g_arr);
+    t1 = GetTickCount();
     UpdateTabLabels();
     RebuildSources();
     Populate(keep);
+    /* test hook: FEATMGR_TIMING_FILE=<path> appends how long the enumeration and the list fill took */
+    if (GetEnvironmentVariableW(L"FEATMGR_TIMING_FILE", tf, MAX_PATH))
+    {
+        FILE *f = _wfopen(tf, L"a");
+        if (f)
+        {
+            fwprintf(f, L"gui-fill entries=%d enumerate_ms=%lu populate_ms=%lu\n", g_count, t1 - t0, GetTickCount() - t1);
+            fclose(f);
+        }
+    }
 }
 
 static void UpdateButtons(void)
 {
     int i = SelectedIndex();
     BOOL os = (g_tier == FM_TIER_OS);
-    BOOL canInstall = FALSE, canEnable = FALSE, canDisable = FALSE, canUninstall = FALSE;
+    BOOL canInstall = FALSE, canEnable = FALSE, canDisable = FALSE, canUninstall = FALSE, canUpdate = FALSE;
     WCHAR text[FM_MAX_DESC + FM_MAX_DEPS * 2 + 256];
 
     if (i >= 0 && i < g_count)
@@ -220,17 +261,19 @@ static void UpdateButtons(void)
         canEnable    = f->State == FM_STATE_DISABLED && f->PayloadAvailable;
         canDisable   = f->State == FM_STATE_ENABLED && !guard;
         canUninstall = f->State != FM_STATE_NOT_INSTALLED && !guard;
+        canUpdate    = f->State == FM_STATE_ENABLED && f->UpdateAvailable && f->PayloadAvailable;
 
         StringCchPrintfW(text, ARRAYSIZE(text), L"%s", f->Description);
         if (!_wcsicmp(f->Provider, L"scoop"))
         {
-            WCHAR v[300];
             StringCchPrintfW(text + wcslen(text), ARRAYSIZE(text) - wcslen(text), L"\r\nSource: %s", f->Source);
-            GetPrivateProfileStringW(L"Scoop", L"Homepage", L"", v, ARRAYSIZE(v), f->ManifestPath);
-            if (v[0]) StringCchPrintfW(text + wcslen(text), ARRAYSIZE(text) - wcslen(text), L"   Homepage: %s", v);
-            GetPrivateProfileStringW(L"Scoop", L"License", L"", v, ARRAYSIZE(v), f->ManifestPath);
-            if (v[0]) StringCchPrintfW(text + wcslen(text), ARRAYSIZE(text) - wcslen(text), L"   License: %s", v);
+            if (f->Homepage[0]) StringCchPrintfW(text + wcslen(text), ARRAYSIZE(text) - wcslen(text), L"   Homepage: %s", f->Homepage);
+            if (f->License[0]) StringCchPrintfW(text + wcslen(text), ARRAYSIZE(text) - wcslen(text), L"   License: %s", f->License);
         }
+        if (f->InstalledVersion[0])
+            StringCchPrintfW(text + wcslen(text), ARRAYSIZE(text) - wcslen(text), L"\r\nInstalled version: %s%s%s",
+                             f->InstalledVersion, f->UpdateAvailable ? L"   Update available: " : L"",
+                             f->UpdateAvailable ? f->Version : L"");
         if (f->InstallDate[0])
             StringCchPrintfW(text + wcslen(text), ARRAYSIZE(text) - wcslen(text),
                              L"\r\nInstalled: %s", f->InstallDate);
@@ -263,13 +306,15 @@ static void UpdateButtons(void)
         EnableWindow(g_hEnable, canEnable);
         EnableWindow(g_hDisable, canDisable);
         EnableWindow(g_hUninstall, canUninstall);
+        EnableWindow(g_hUpdate, canUpdate);
     }
 }
 
-typedef enum { ACT_INSTALL, ACT_ENABLE, ACT_DISABLE, ACT_UNINSTALL } ACTION;
+typedef enum { ACT_INSTALL, ACT_ENABLE, ACT_DISABLE, ACT_UNINSTALL, ACT_UPDATE } ACTION;
 
 #define OP_IMPORT 100   /* OPCTX.op value for the "Import from RAPPS" action */
 #define OP_IMPORT_SCOOP 101
+#define OP_ADD_BUCKET 102
 
 
 /* Work item handed to the background thread. Carries its own copies of the id /
@@ -293,6 +338,9 @@ static void SetBusy(HWND hwnd, BOOL busy)
     EnableWindow(g_hEnable, !busy);
     EnableWindow(g_hDisable, !busy);
     EnableWindow(g_hUninstall, !busy);
+    EnableWindow(g_hUpdate, !busy);
+    EnableWindow(g_hAddBucket, !busy);
+    EnableWindow(g_hSearch, !busy);
     EnableWindow(g_hImport, !busy);
     EnableWindow(g_hImportSc, !busy);
     EnableWindow(g_hSource, !busy);
@@ -319,6 +367,8 @@ static DWORD WINAPI OpThreadProc(LPVOID param)
         case ACT_ENABLE:    c->hr = FmEnable(c->id, NULL); break;
         case ACT_DISABLE:   c->hr = FmDisable(c->id, NULL); break;
         case ACT_UNINSTALL: c->hr = FmUninstall(c->id, NULL); break;
+        case ACT_UPDATE:    c->hr = FmUpdate(c->id, NULL); break;
+        case OP_ADD_BUCKET: c->hr = FmScoopAddBucket(c->name, NULL, 0, NULL); break;
         case OP_IMPORT:
             c->importWritten = FmImportRapps(NULL, 0, &c->importSkipped, NULL);
             c->hr = (c->importWritten < 0) ? E_FAIL : S_OK;
@@ -399,6 +449,90 @@ static void DoImportScoop(HWND hwnd)
     StartOp(hwnd, c);
 }
 
+/* "Add bucket...": Scoop's own list of known buckets, nothing else. The checkbox is the explicit
+ * confirmation. Any other bucket (an arbitrary URL) is command-line only: featmgr /add-bucket <name> <url> /trust. */
+static FM_BUCKET g_kb[FM_BUCKET_MAX];
+static int g_nkb;
+static WCHAR g_pickedBucket[24];
+
+static void AddBucketShowUrl(HWND dlg)
+{
+    int sel = (int)SendDlgItemMessageW(dlg, IDC_AB_COMBO, CB_GETCURSEL, 0, 0);
+    WCHAR t[256], nm[24];
+    int i;
+    t[0] = L'\0';
+    if (sel >= 0)
+    {
+        SendDlgItemMessageW(dlg, IDC_AB_COMBO, CB_GETLBTEXT, sel, (LPARAM)nm);
+        for (i = 0; i < g_nkb; i++)
+            if (!_wcsicmp(g_kb[i].Name, nm))
+                StringCchPrintfW(t, ARRAYSIZE(t), L"%s", g_kb[i].Url[0] ? g_kb[i].Url : L"(address from Scoop's list)");
+    }
+    SetDlgItemTextW(dlg, IDC_AB_URL, t);
+}
+
+static INT_PTR CALLBACK AddBucketProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg)
+    {
+        case WM_INITDIALOG:
+        {
+            int i;
+            g_nkb = FmScoopKnownBuckets(g_kb, FM_BUCKET_MAX);
+            for (i = 0; i < g_nkb; i++)
+                if (!g_kb[i].Added)
+                    SendDlgItemMessageW(dlg, IDC_AB_COMBO, CB_ADDSTRING, 0, (LPARAM)g_kb[i].Name);
+            SendDlgItemMessageW(dlg, IDC_AB_COMBO, CB_SETCURSEL, 0, 0);
+            AddBucketShowUrl(dlg);
+            return TRUE;
+        }
+        case WM_COMMAND:
+            switch (LOWORD(wp))
+            {
+                case IDC_AB_COMBO:
+                    if (HIWORD(wp) == CBN_SELCHANGE) AddBucketShowUrl(dlg);
+                    return TRUE;
+                case IDC_AB_TRUST:
+                    EnableWindow(GetDlgItem(dlg, IDOK),
+                        IsDlgButtonChecked(dlg, IDC_AB_TRUST) == BST_CHECKED
+                        && SendDlgItemMessageW(dlg, IDC_AB_COMBO, CB_GETCURSEL, 0, 0) >= 0);
+                    return TRUE;
+                case IDOK:
+                {
+                    int sel = (int)SendDlgItemMessageW(dlg, IDC_AB_COMBO, CB_GETCURSEL, 0, 0);
+                    if (sel < 0 || IsDlgButtonChecked(dlg, IDC_AB_TRUST) != BST_CHECKED) return TRUE;
+                    SendDlgItemMessageW(dlg, IDC_AB_COMBO, CB_GETLBTEXT, sel, (LPARAM)g_pickedBucket);
+                    EndDialog(dlg, IDOK);
+                    return TRUE;
+                }
+                case IDCANCEL:
+                    EndDialog(dlg, IDCANCEL);
+                    return TRUE;
+            }
+            break;
+    }
+    return FALSE;
+}
+
+static void DoAddBucket(HWND hwnd)
+{
+    OPCTX *c;
+    if (g_busy) return;
+    if (!FmScoopAppInstalled(L"scoop"))
+    {
+        MessageBoxW(hwnd, L"Scoop is not installed. Select the 'scoop' entry and click Install first.",
+                    L"Add Scoop bucket", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (DialogBoxParamW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDD_ADDBUCKET), hwnd, AddBucketProc, 0) != IDOK)
+        return;
+    c = (OPCTX *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*c));
+    if (!c) return;
+    c->op = OP_ADD_BUCKET;
+    StringCchCopyW(c->name, ARRAYSIZE(c->name), g_pickedBucket);
+    StartOp(hwnd, c);
+}
+
 /* UI-thread completion handler for a background op (WM_APP_OPDONE). */
 static void OnOpDone(HWND hwnd, OPCTX *c)
 {
@@ -421,6 +555,21 @@ static void OnOpDone(HWND hwnd, OPCTX *c)
             StringCchCopyW(msg, ARRAYSIZE(msg),
                 L"Could not import the RAPPS catalog. The online catalog could not be "
                 L"downloaded: check the network connection (or run RAPPS once), then try again.");
+            icon = MB_ICONWARNING;
+        }
+    }
+    else if (c->op == OP_ADD_BUCKET)
+    {
+        caption = L"Add Scoop bucket";
+        if (SUCCEEDED(c->hr))
+            StringCchPrintfW(msg, ARRAYSIZE(msg), L"Bucket '%s' was added to Scoop and its apps were imported into the "
+                             L"Software tab (filter by Source: scoop/%s).", c->name, c->name);
+        else
+        {
+            WCHAR why[1024];
+            FmGetLastMessage(why, ARRAYSIZE(why));
+            StringCchPrintfW(msg, ARRAYSIZE(msg), L"Could not add bucket '%s'.\n\n%s\n\nScoop adds buckets with git: "
+                             L"if git is missing, install the 'git' entry first.", c->name, why);
             icon = MB_ICONWARNING;
         }
     }
@@ -451,8 +600,12 @@ static void OnOpDone(HWND hwnd, OPCTX *c)
         else if (SUCCEEDED(hr))
         {
             static const LPCWSTR done[] = { L"installed and enabled", L"enabled",
-                                            L"disabled and reverted", L"uninstalled" };
-            StringCchPrintfW(msg, ARRAYSIZE(msg), L"'%s' %s.", c->name, done[act]);
+                                            L"disabled and reverted", L"uninstalled", L"updated" };
+            FM_FEATURE nf;
+            if (act == ACT_UPDATE && FmFindFeature(c->id, &nf) && nf.InstalledVersion[0])
+                StringCchPrintfW(msg, ARRAYSIZE(msg), L"'%s' is now at version %s.", c->name, nf.InstalledVersion);
+            else
+                StringCchPrintfW(msg, ARRAYSIZE(msg), L"'%s' %s.", c->name, done[act]);
         }
         else if (hr == HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED) &&
                  (act == ACT_DISABLE || act == ACT_UNINSTALL))
@@ -661,8 +814,25 @@ static void LayoutButtons(HWND hwnd)
     ShowWindow(g_hClose,    os ? SW_HIDE : SW_SHOW);
     ShowWindow(g_hImport,   os ? SW_HIDE : SW_SHOW);
     ShowWindow(g_hImportSc, os ? SW_HIDE : SW_SHOW);
+    ShowWindow(g_hUpdate,   os ? SW_HIDE : SW_SHOW);
+    ShowWindow(g_hAddBucket, os ? SW_HIDE : SW_SHOW);
     ShowWindow(g_hSource,   os ? SW_HIDE : SW_SHOW);
     ShowWindow(g_hSrcLabel, os ? SW_HIDE : SW_SHOW);
+    ShowWindow(g_hSearch,   os ? SW_HIDE : SW_SHOW);
+    ShowWindow(g_hSrchLabel, os ? SW_HIDE : SW_SHOW);
+
+    /* the main controls follow the client size (the window is wider than M1: ten verbs + a search box) */
+    {
+        int descH = 62, tabY = 64, descY = y - 8 - descH, tabH = descY - 8 - tabY;
+        MoveWindow(g_hInstr, 12, 30, rc.right - 24, 30, TRUE);
+        MoveWindow(g_hTab, 12, tabY, rc.right - 24, tabH, TRUE);
+        MoveWindow(g_hList, 18, tabY + 30, rc.right - 36, tabH - 38, TRUE);
+        MoveWindow(g_hDesc, 12, descY, rc.right - 24, descH, TRUE);
+        MoveWindow(g_hSrchLabel, 262, tabY + 5, 46, 18, TRUE);
+        MoveWindow(g_hSearch, 310, tabY + 1, 170, 22, TRUE);
+        MoveWindow(g_hSource, rc.right - 12 - 222, tabY + 1, 222, 200, TRUE);
+        MoveWindow(g_hSrcLabel, rc.right - 12 - 222 - 50, tabY + 5, 46, 18, TRUE);
+    }
 
     if (os)
     {
@@ -674,13 +844,16 @@ static void LayoutButtons(HWND hwnd)
     }
     else
     {
-        bw = 80; gap = 4;       /* seven verbs in one row */
+        bw = 84; gap = 4;       /* ten verbs in one row */
+        if (10 * bw + 9 * gap > rc.right - 24) bw = (rc.right - 24 - 9 * gap) / 10;
         MoveWindow(g_hInstall,   12,                    y, bw, bh, TRUE);
         MoveWindow(g_hEnable,    12 + (bw + gap),       y, bw, bh, TRUE);
         MoveWindow(g_hDisable,   12 + 2 * (bw + gap),   y, bw, bh, TRUE);
         MoveWindow(g_hUninstall, 12 + 3 * (bw + gap),   y, bw, bh, TRUE);
-        MoveWindow(g_hImport,    12 + 4 * (bw + gap),   y, bw, bh, TRUE);
-        MoveWindow(g_hImportSc,  12 + 5 * (bw + gap),   y, bw, bh, TRUE);
+        MoveWindow(g_hUpdate,    12 + 4 * (bw + gap),   y, bw, bh, TRUE);
+        MoveWindow(g_hImport,    12 + 5 * (bw + gap),   y, bw, bh, TRUE);
+        MoveWindow(g_hImportSc,  12 + 6 * (bw + gap),   y, bw, bh, TRUE);
+        MoveWindow(g_hAddBucket, 12 + 7 * (bw + gap),   y, bw, bh, TRUE);
         MoveWindow(g_hClose,  right - bw,               y, bw, bh, TRUE);
         MoveWindow(g_hRefresh, right - 2 * bw - gap,    y, bw, bh, TRUE);
     }
@@ -732,12 +905,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
             ZeroMemory(&col, sizeof(col));
             col.mask = LVCF_TEXT | LVCF_WIDTH;
-            col.pszText = (LPWSTR)L"Feature";   col.cx = 175; ListView_InsertColumn(g_hList, 0, &col);
-            col.pszText = (LPWSTR)L"State";     col.cx = 110; ListView_InsertColumn(g_hList, 1, &col);
-            col.pszText = (LPWSTR)L"Version";   col.cx = 62;  ListView_InsertColumn(g_hList, 2, &col);
-            col.pszText = (LPWSTR)L"Installed (UTC)"; col.cx = 120; ListView_InsertColumn(g_hList, 3, &col);
-            col.pszText = (LPWSTR)L"Source";    col.cx = 90;  ListView_InsertColumn(g_hList, 4, &col);
-            col.pszText = (LPWSTR)L"Notes";     col.cx = 130; ListView_InsertColumn(g_hList, 5, &col);
+            col.pszText = (LPWSTR)L"Feature";   col.cx = 165; ListView_InsertColumn(g_hList, 0, &col);
+            col.pszText = (LPWSTR)L"State";     col.cx = 95;  ListView_InsertColumn(g_hList, 1, &col);
+            col.pszText = (LPWSTR)L"Version";   col.cx = 80;  ListView_InsertColumn(g_hList, 2, &col);
+            col.pszText = (LPWSTR)L"Installed version"; col.cx = 110; ListView_InsertColumn(g_hList, 3, &col);
+            col.pszText = (LPWSTR)L"Installed (UTC)"; col.cx = 120; ListView_InsertColumn(g_hList, 4, &col);
+            col.pszText = (LPWSTR)L"Source";    col.cx = 90;  ListView_InsertColumn(g_hList, 5, &col);
+            col.pszText = (LPWSTR)L"Notes";     col.cx = 190; ListView_InsertColumn(g_hList, 6, &col);
 
             g_hDesc = CreateWindowExW(WS_EX_CLIENTEDGE, L"STATIC",
                 L"Select a feature to see its description.",
@@ -782,6 +956,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             g_hImportSc = CreateWindowExW(0, L"BUTTON", L"Import &Scoop",
                 WS_CHILD | WS_TABSTOP, 0, 0, 90, 26, hwnd,
                 (HMENU)(INT_PTR)IDC_IMPORTSC, NULL, NULL);
+            g_hUpdate = CreateWindowExW(0, L"BUTTON", L"U&pdate",
+                WS_CHILD | WS_TABSTOP | WS_DISABLED, 0, 0, 90, 26, hwnd,
+                (HMENU)(INT_PTR)IDC_UPDATE, NULL, NULL);
+            g_hAddBucket = CreateWindowExW(0, L"BUTTON", L"Add &bucket...",
+                WS_CHILD | WS_TABSTOP, 0, 0, 90, 26, hwnd,
+                (HMENU)(INT_PTR)IDC_ADDBUCKET, NULL, NULL);
+            g_hSrchLabel = CreateWindowExW(0, L"STATIC", L"Search:",
+                WS_CHILD, 262, 69, 46, 18, hwnd, (HMENU)(INT_PTR)IDC_SRCHLABEL, NULL, NULL);
+            g_hSearch = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_search,
+                WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL, 310, 65, 170, 22, hwnd,
+                (HMENU)(INT_PTR)IDC_SEARCH, NULL, NULL);
+            SendMessageW(g_hSearch, EM_LIMITTEXT, ARRAYSIZE(g_search) - 1, 0);
             g_hSrcLabel = CreateWindowExW(0, L"STATIC", L"Source:",
                 WS_CHILD, 452, 69, 44, 18, hwnd, (HMENU)(INT_PTR)IDC_SRCLABEL, NULL, NULL);
             g_hSource = CreateWindowExW(0, L"COMBOBOX", L"",
@@ -797,14 +983,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
 
             g_hwndMain = hwnd;
-            FillList();
             if (g_startSoftware)
             {
                 g_tier = FM_TIER_SOFTWARE;
                 TabCtrl_SetCurSel(g_hTab, 1);
-                Populate(NULL);
             }
             LayoutButtons(hwnd);
+            FillList();          /* fills for g_tier (the Software tab when started with /software) */
             return 0;
         }
         case WM_NOTIFY:
@@ -813,8 +998,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (nh->idFrom == IDC_TAB && nh->code == TCN_SELCHANGE)
             {
                 g_tier = TabCtrl_GetCurSel(g_hTab) == 1 ? FM_TIER_SOFTWARE : FM_TIER_OS;
-                Populate(NULL);
                 LayoutButtons(hwnd);
+                Populate(NULL);
             }
             else if (nh->idFrom == IDC_LIST && nh->code == LVN_ITEMCHANGED)
             {
@@ -845,6 +1030,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 case IDC_ENABLE:    DoAction(hwnd, ACT_ENABLE);    break;
                 case IDC_DISABLE:   DoAction(hwnd, ACT_DISABLE);   break;
                 case IDC_UNINSTALL: DoAction(hwnd, ACT_UNINSTALL); break;
+                case IDC_UPDATE:    DoAction(hwnd, ACT_UPDATE); break;
+                case IDC_ADDBUCKET: DoAddBucket(hwnd); break;
+                case IDC_SEARCH:
+                    if (HIWORD(wp) == EN_CHANGE && !g_populating)
+                        SetTimer(hwnd, IDT_SEARCH, 250, NULL);       /* filter after the typing pauses */
+                    break;
                 case IDC_IMPORT:    DoImport(hwnd); break;
                 case IDC_IMPORTSC:  DoImportScoop(hwnd); break;
                 case IDC_SOURCE:
@@ -867,11 +1058,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case WM_APP_OPDONE:
             OnOpDone(hwnd, (OPCTX *)lp);
             return 0;
+        case WM_TIMER:
+            if (wp == IDT_SEARCH)
+            {
+                KillTimer(hwnd, IDT_SEARCH);
+                GetWindowTextW(g_hSearch, g_search, ARRAYSIZE(g_search));
+                Populate(NULL);
+            }
+            return 0;
         case WM_CLOSE:
             if (g_busy) return 0;   /* do not tear down while a worker op is in flight */
             DestroyWindow(hwnd);
             return 0;
         case WM_DESTROY:
+            KillTimer(hwnd, IDT_SEARCH);
             if (g_arr) { FmFree(g_arr); g_arr = NULL; }
             if (g_opThread) { CloseHandle(g_opThread); g_opThread = NULL; }
             if (g_hFont && g_hFont != GetStockObject(DEFAULT_GUI_FONT))
@@ -893,6 +1093,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmd, int nShow)
 
     /* optfeatures /software [/source:<source>] : open on the Software tab, optionally filtered */
     if (lpCmd && wcsstr(lpCmd, L"/software")) g_startSoftware = TRUE;
+    if (lpCmd && wcsstr(lpCmd, L"/addbucket")) { g_startSoftware = TRUE; g_openAddBucket = TRUE; }
     if (lpCmd)
     {
         LPCWSTR sp = wcsstr(lpCmd, L"/source:");
@@ -903,6 +1104,34 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmd, int nShow)
             {
                 wcsncpy(g_srcFilter, sp + 8, n);
                 g_srcFilter[n] = L'\0';
+            }
+        }
+    }
+
+    if (lpCmd)
+    {
+        LPCWSTR sp = wcsstr(lpCmd, L"/search:");
+        if (sp)
+        {
+            size_t n = wcscspn(sp + 8, L" \t");
+            if (n && n < ARRAYSIZE(g_search))
+            {
+                wcsncpy(g_search, sp + 8, n);
+                g_search[n] = L'\0';
+            }
+        }
+    }
+
+    if (lpCmd)
+    {
+        LPCWSTR sp = wcsstr(lpCmd, L"/select:");
+        if (sp)
+        {
+            size_t n = wcscspn(sp + 8, L" \t");
+            if (n && n < ARRAYSIZE(g_selectId))
+            {
+                wcsncpy(g_selectId, sp + 8, n);
+                g_selectId[n] = L'\0';
             }
         }
     }
@@ -926,7 +1155,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmd, int nShow)
      * hiding the OK/Apply row). Clamp so the caption and buttons stay reachable. */
     {
         RECT wa;
-        int w = 760, h = 520, x, y;
+        int w = 940, h = 540, x, y;
         if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0))
             SetRect(&wa, 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
         if (w > wa.right - wa.left) w = wa.right - wa.left;
@@ -941,6 +1170,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmd, int nShow)
 
     ShowWindow(hwnd, nShow);
     UpdateWindow(hwnd);
+    if (g_openAddBucket) PostMessageW(hwnd, WM_COMMAND, IDC_ADDBUCKET, 0);
 
     while (GetMessageW(&m, NULL, 0, 0) > 0)
     {
