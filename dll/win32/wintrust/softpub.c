@@ -1945,13 +1945,18 @@ HRESULT WINAPI SoftpubAuthenticode(CRYPT_PROVIDER_DATA *data)
         ret = TRUE;
         for (i = 0; ret && i < data->csSigners; i++)
         {
-            BYTE hash[20];
+            /* The signature hash is as long as the certificate's signature
+             * algorithm's digest: 32 octets for SHA-256, up to 64. */
+            BYTE hash[64];
             DWORD size = sizeof(hash);
 
-            /* First make sure cert isn't disallowed */
-            if ((ret = CertGetCertificateContextProperty(
+            /* First make sure cert isn't disallowed.  A certificate without
+             * a signature hash cannot be in the store of disallowed ones, and
+             * must still go through the policy below: failing here would end
+             * the verification with no error at all. */
+            if (CertGetCertificateContextProperty(
              data->pasSigners[i].pasCertChain[0].pCert,
-             CERT_SIGNATURE_HASH_PROP_ID, hash, &size)))
+             CERT_SIGNATURE_HASH_PROP_ID, hash, &size))
             {
                 static const WCHAR disallowedW[] =
                  { 'D','i','s','a','l','l','o','w','e','d',0 };
@@ -1961,9 +1966,10 @@ HRESULT WINAPI SoftpubAuthenticode(CRYPT_PROVIDER_DATA *data)
 
                 if (disallowed)
                 {
+                    CRYPT_HASH_BLOB blob = { size, hash };
                     PCCERT_CONTEXT found = CertFindCertificateInStore(
                      disallowed, X509_ASN_ENCODING, 0, CERT_FIND_SIGNATURE_HASH,
-                     hash, NULL);
+                     &blob, NULL);
 
                     if (found)
                     {
