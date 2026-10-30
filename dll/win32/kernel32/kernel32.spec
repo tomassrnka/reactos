@@ -1034,6 +1034,7 @@
 @ stub -version=0x600+ ReplacePartitionUnit
 @ stdcall RequestDeviceWakeup(long)
 @ stdcall RequestWakeupLatency(long)
+@ stdcall ResolveDelayLoadedAPI(ptr ptr ptr ptr ptr long) ntdll.LdrResolveDelayLoadedAPI
 @ stdcall ResetEvent(long)
 @ stdcall -version=0x601+ ResolveLocaleName(wstr ptr long)
 @ stdcall ResetWriteWatch(ptr long)

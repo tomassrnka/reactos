@@ -57,6 +57,7 @@ list(APPEND SOURCE
     dbg/dbgui.c
     etw/event.c
     ldr/ldrapi.c
+    ldr/ldrdelay.c
     ldr/ldrinit.c
     ldr/ldrpe.c
     ldr/ldrutils.c
