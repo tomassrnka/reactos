@@ -15,6 +15,31 @@
 
 /* FUNCTIONS *****************************************************************/
 
+#ifdef _M_AMD64
+/* Captures the extended state of a user mode context with CONTEXT_XSTATE, to be loaded into the current thread with
+   KiSetXStateContext. Raises the status of a context whose extended state description is invalid. Returns FALSE when
+   there is nothing to load: no CONTEXT_XSTATE, or a system without extended state, which ignores the flag. */
+static
+BOOLEAN
+KiCaptureContinueXState(
+    _In_ PCONTEXT UserContext,
+    _In_ ULONG ContextFlags,
+    _Out_ PKI_XSTATE_CONTEXT XState)
+{
+    NTSTATUS Status;
+
+    if ((ContextFlags & CONTEXT_XSTATE) != CONTEXT_XSTATE)
+        return FALSE;
+
+    Status = KiCaptureXStateContext(UserContext, UserMode, FALSE, XState);
+    if (Status == STATUS_NOT_SUPPORTED)
+        return FALSE;
+    if (!NT_SUCCESS(Status))
+        ExRaiseStatus(Status);
+    return TRUE;
+}
+#endif
+
 VOID
 NTAPI
 KiContinuePreviousModeUser(
@@ -23,10 +48,20 @@ KiContinuePreviousModeUser(
     _Out_ PKTRAP_FRAME TrapFrame)
 {
     CONTEXT LocalContext;
+#ifdef _M_AMD64
+    KI_XSTATE_CONTEXT XState;
+    BOOLEAN HaveXState;
+#endif
 
     /* We'll have to make a copy and probe it */
     ProbeForRead(Context, sizeof(CONTEXT), sizeof(ULONG));
     RtlCopyMemory(&LocalContext, Context, sizeof(CONTEXT));
+
+#ifdef _M_AMD64
+    /* The extended state the context carries (the one of an exception, for instance) is captured and checked before
+       anything changes: an invalid one fails the call with the thread untouched */
+    HaveXState = KiCaptureContinueXState(Context, LocalContext.ContextFlags, &XState);
+#endif
     Context = &LocalContext;
 
     /* Convert the context into Exception/Trap Frames */
@@ -35,6 +70,14 @@ KiContinuePreviousModeUser(
                          TrapFrame,
                          LocalContext.ContextFlags,
                          UserMode);
+
+#ifdef _M_AMD64
+    if (HaveXState)
+    {
+        KiSetXStateContext(&XState);
+        KiFreeXStateContext(&XState);
+    }
+#endif
 }
 
 NTSTATUS
@@ -98,6 +141,10 @@ KiRaiseException(
     CONTEXT LocalContext;
     EXCEPTION_RECORD LocalExceptionRecord;
     ULONG ParameterCount, Size;
+#ifdef _M_AMD64
+    PCONTEXT UserContext = Context;
+    KI_XSTATE_CONTEXT XState;
+#endif
 
     /* Check if we need to probe */
     if (PreviousMode != KernelMode)
@@ -138,6 +185,15 @@ KiRaiseException(
 
             /* Update the parameter count */
             ExceptionRecord->NumberParameters = ParameterCount;
+
+#ifdef _M_AMD64
+            /* The exception is dispatched with the extended state of the context */
+            if (KiCaptureContinueXState(UserContext, LocalContext.ContextFlags, &XState))
+            {
+                KiSetXStateContext(&XState);
+                KiFreeXStateContext(&XState);
+            }
+#endif
         }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
         {

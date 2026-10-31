@@ -204,11 +204,16 @@ EXTERN RtlRaiseException:PROC
         PEXCEPTION_RECORD ExceptionRecord<rdx>);
 
     This function is called with the following stack layout:
-        CONTEXT ContextRecord  <- RSP, RCX
-        EXCEPTION_RECORD ExceptionRecord <- RDX
+        CONTEXT ContextRecord  <- RSP, RDX
+        CONTEXT_EX ContextEx (padded to 0x20)
+        EXCEPTION_RECORD ExceptionRecord <- RCX
         ULONG64 Alignment
         MACHINE_FRAME MachineFrame
+        ULONG64 Alignment
+        extended state of the context, when it has CONTEXT_XSTATE
  */
+#define USER_EXCEPTION_RECORD (CONTEXT_FRAME_LENGTH + 32)
+
 PUBLIC KiUserExceptionDispatcher
 .PROC KiUserExceptionDispatcher
 
@@ -216,8 +221,8 @@ PUBLIC KiUserExceptionDispatcher
     /* The frame ends with a MACHINE_FRAME. */
     .PUSHFRAME
 
-    /* This is for the alignment, EXCEPTION_RECORD and CONTEXT */
-    .ALLOCSTACK 8 + EXCEPTION_RECORD_LENGTH + CONTEXT_FRAME_LENGTH
+    /* This is for the alignment, EXCEPTION_RECORD, CONTEXT_EX and CONTEXT */
+    .ALLOCSTACK 8 + EXCEPTION_RECORD_LENGTH + USER_EXCEPTION_RECORD
     .ENDPROLOG
 
     /* Clear direction flag */
@@ -229,14 +234,14 @@ PUBLIC KiUserExceptionDispatcher
     jz .NoWow64
 
     /* Prepare for WOW64 exception dispatching */
-    lea rcx, [rsp + CONTEXT_FRAME_LENGTH] /* ExceptionRecord */
+    lea rcx, [rsp + USER_EXCEPTION_RECORD] /* ExceptionRecord */
     lea rdx, [rsp] /* ContextRecord */
     call rax
 
 .NoWow64:
 
     /* Dispatch the exception */
-    lea rcx, [rsp + CONTEXT_FRAME_LENGTH] /* ExceptionRecord */
+    lea rcx, [rsp + USER_EXCEPTION_RECORD] /* ExceptionRecord */
     lea rdx, [rsp] /* ContextRecord */
     call RtlDispatchException
 
@@ -255,13 +260,13 @@ PUBLIC KiUserExceptionDispatcher
 RaiseException:
 
     /* Raise the exception */
-    lea rcx, [rsp + CONTEXT_FRAME_LENGTH] /* ExceptionRecord */
+    lea rcx, [rsp + USER_EXCEPTION_RECORD] /* ExceptionRecord */
     lea rdx, [rsp] /* ContextRecord */
     xor r8, r8
     call ZwRaiseException
 
 Exit:
-    lea rcx, [rsp + CONTEXT_FRAME_LENGTH] /* ExceptionRecord */
+    lea rcx, [rsp + USER_EXCEPTION_RECORD] /* ExceptionRecord */
     mov rdx, rax
     call KiUserExceptionDispatcherNested
     ret

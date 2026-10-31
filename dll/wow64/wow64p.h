@@ -71,6 +71,7 @@ NTSTATUS Wow64LpcRequest(ULONG Number, ULONG Handle, ULONG Request, ULONG Reply,
 VOID Wow64LpcForget(ULONG Handle);
 extern PVOID Wow64ExceptionDispatcher;
 NTSTATUS Wow64Continue(const WOW64_CONTEXT *Context, BOOLEAN TestAlert);
+NTSTATUS Wow64GetSetContextThread(HANDLE Thread, WOW64_CONTEXT *Guest, BOOLEAN Set);
 NTSTATUS Wow64InitializeRedirection(VOID);
 NTSTATUS Wow64RedirectFile(OBJECT_ATTRIBUTES *Attributes, UNICODE_STRING *Name, PVOID *Buffer);
 

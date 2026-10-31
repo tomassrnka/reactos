@@ -503,6 +503,50 @@ NTAPI
 KiInitializeXStateConfiguration(
     _In_ ULONG Processor);
 
+/* The extended state (CONTEXT_XSTATE) part of a CONTEXT, captured into kernel memory */
+typedef struct _KI_XSTATE_CONTEXT
+{
+    PXSAVE_AREA_HEADER UserHeader;  /* The chunk in the caller's CONTEXT_EX */
+    ULONG Length;                   /* Bytes of the chunk that are transferred */
+    ULONG64 Features;               /* Features 2 and up the chunk has room for */
+    PXSAVE_AREA_HEADER Chunk;       /* Kernel copy of the chunk */
+    PXSAVE_AREA Save;               /* XSAVE area of the standard format, 64 byte aligned */
+    PVOID Allocation;
+} KI_XSTATE_CONTEXT, *PKI_XSTATE_CONTEXT;
+
+NTSTATUS
+NTAPI
+KiCaptureXStateContext(
+    _In_ PCONTEXT Context,
+    _In_ KPROCESSOR_MODE PreviousMode,
+    _In_ BOOLEAN ForGet,
+    _Out_ PKI_XSTATE_CONTEXT XState);
+
+BOOLEAN
+NTAPI
+KiPrepareXStateDispatch(
+    _Out_ PKI_XSTATE_CONTEXT XState);
+
+NTSTATUS
+NTAPI
+KiCopyOutXStateContext(
+    _In_ PKI_XSTATE_CONTEXT XState);
+
+VOID
+NTAPI
+KiFreeXStateContext(
+    _Inout_ PKI_XSTATE_CONTEXT XState);
+
+VOID
+NTAPI
+KiGetXStateContext(
+    _Inout_ PKI_XSTATE_CONTEXT XState);
+
+VOID
+NTAPI
+KiSetXStateContext(
+    _In_ PKI_XSTATE_CONTEXT XState);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

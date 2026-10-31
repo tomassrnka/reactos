@@ -30,6 +30,21 @@
      XSTATE_MASK_UINTR | \
      XSTATE_MASK_LBR)
 
+/* Features a thread context can load into the processor. They have no reserved bits, so XRSTOR cannot fault on
+   what the caller put into them. The others (MPX BNDCSR, LWP, AMX tile configuration) keep their current value. */
+#define XSTATE_MASK_CONTEXT_LOADABLE \
+    (XSTATE_MASK_AVX | \
+     XSTATE_MASK_AVX512 | \
+     (1ULL << (XSTATE_MPX_BNDREGS)))
+
+#define TAG_XSTATE_CONTEXT 'cSXK'
+
+/* The context functions save and load the user features with XSAVE and XRSTOR in the standard format, which
+   every processor with XSAVE has. These are the offsets of that format (CPUID 0xD), whatever format the
+   configuration in KUSER_SHARED_DATA describes, and the length of the area up to the last enabled user feature. */
+static ULONG KiXStateStandardOffsets[MAXIMUM_XSTATE_FEATURES];
+static ULONG KiXStateStandardLength;
+
 /*!
  *   \brief Determines the extended state configuration for the current processor
  *
@@ -221,6 +236,31 @@ ValidateXStateConfig(
 }
 
 /*!
+ *   \brief Records the standard format layout of the enabled user features for the context functions
+ */
+CODE_SEG("INIT")
+static
+VOID
+KiInitializeXStateStandardLayout(
+    _In_ ULONG64 EnabledFeatures)
+{
+    KiXStateStandardLength = sizeof(XSAVE_AREA);
+
+    for (ULONG Component = 2; Component < MAXIMUM_XSTATE_FEATURES; Component++)
+    {
+        CPUID_EXTENDED_STATE_SIZE_OFFSET_REGS ExtStateComponent;
+
+        if ((EnabledFeatures & (1ULL << Component)) == 0)
+            continue;
+
+        __cpuidex(ExtStateComponent.AsInt32, CPUID_EXTENDED_STATE, Component);
+        KiXStateStandardOffsets[Component] = ExtStateComponent.Offset;
+        KiXStateStandardLength = max(KiXStateStandardLength,
+                                     ExtStateComponent.Offset + ExtStateComponent.Size);
+    }
+}
+
+/*!
  *   \brief Initializes the extended state configuration for the current processor
  *
  *   \param ProcessorNumber - Number of the current processor
@@ -250,6 +290,7 @@ KiInitializeXStateConfiguration(
         }
 
         KeXStateLength = SharedUserData->XState.AllFeatureSize;
+        KiInitializeXStateStandardLayout(SharedUserData->XState.EnabledFeatures);
     }
     else
     {
@@ -261,6 +302,13 @@ KiInitializeXStateConfiguration(
 
     /* Enable the user mode components in XCR0 */
     _xsetbv(0, SharedUserData->XState.EnabledFeatures);
+
+    /* The context functions load features into the processor with XRSTOR, which faults on a feature that is not
+       enabled in XCR0. Every processor has to have what the configuration says. */
+    if ((_xgetbv(0) & SharedUserData->XState.EnabledFeatures) != SharedUserData->XState.EnabledFeatures)
+    {
+        KeBugCheck(MULTIPROCESSOR_CONFIGURATION_NOT_SUPPORTED);
+    }
 
     /* Now that we have set everything up, query CPUID again to get the required
        size based on components enabled in XCR0 */
@@ -306,4 +354,350 @@ KiInitializeXStateConfiguration(
             SharedUserData->XState.AllFeatureSize = ExtStateSubLeaf.Ebx.XSaveAreaSize;
         }
     }
+}
+
+/* CONTEXT_XSTATE *************************************************************/
+
+/*
+ * The extended state of a CONTEXT is described by the CONTEXT_EX that directly follows it. Its XState chunk holds
+ * an XSAVE_AREA_HEADER followed by the features from 2 up (x87 and SSE are in the CONTEXT itself). In the standard
+ * format a feature lives at XSTATE_CONFIGURATION.Features[n].Offset from the start of the whole XSAVE area, which is
+ * sizeof(XSAVE_FORMAT) before the header. In the compacted format the features of the header's compaction mask follow
+ * one another, and a feature that asks for it is aligned to 64 bytes: the same rule as ntdll's RtlLocateExtendedFeature.
+ *
+ * The chunk the caller describes is captured into kernel memory once: the description is read and checked a single
+ * time and every later step uses the captured values, so neither its length nor its masks can change under the
+ * kernel. Only the features that fit entirely inside the described length are transferred.
+ */
+
+static
+ULONG
+KiGetXStateContextOffset(
+    _In_ const XSTATE_CONFIGURATION *Config,
+    _In_ ULONG64 CompactionMask,
+    _In_ ULONG Feature)
+{
+    ULONG Offset, Component;
+
+    if (!Config->CompactionEnabled)
+        return Config->Features[Feature].Offset - sizeof(XSAVE_FORMAT);
+
+    Offset = sizeof(XSAVE_AREA_HEADER);
+    for (Component = 2; Component < Feature; Component++)
+    {
+        if (CompactionMask & (1ULL << Component))
+            Offset += Config->Features[Component].Size;
+        if (Config->AlignedFeatures & (1ULL << (Component + 1)))
+            Offset = ALIGN_UP_BY(Offset, XSAVE_ALIGN);
+    }
+    return Offset;
+}
+
+/*!
+ *   \brief Keeps the features that fit into Length bytes of a chunk, returns the length they need
+ */
+static
+ULONG
+KiFitXStateContextFeatures(
+    _Inout_ PULONG64 Features,
+    _In_ ULONG Length)
+{
+    const XSTATE_CONFIGURATION *Config = &SharedUserData->XState;
+    ULONG64 Fitting = 0;
+    ULONG Needed = sizeof(XSAVE_AREA_HEADER);
+    ULONG Feature, End;
+
+    for (Feature = 2; Feature < MAXIMUM_XSTATE_FEATURES; Feature++)
+    {
+        if ((*Features & (1ULL << Feature)) == 0)
+            continue;
+        End = KiGetXStateContextOffset(Config, *Features, Feature) + Config->Features[Feature].Size;
+        if (End > Length)
+            continue;
+        Fitting |= 1ULL << Feature;
+        Needed = max(Needed, End);
+    }
+
+    *Features = Fitting;
+    return Needed;
+}
+
+static
+NTSTATUS
+KiAllocateXStateContext(
+    _Inout_ PKI_XSTATE_CONTEXT XState)
+{
+    ULONG SaveLength = ALIGN_UP_BY(KiXStateStandardLength, XSAVE_ALIGN);
+    PUCHAR Allocation;
+
+    Allocation = ExAllocatePoolZero(NonPagedPool,
+                                    XSAVE_ALIGN + SaveLength + XState->Length,
+                                    TAG_XSTATE_CONTEXT);
+    if (!Allocation)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    XState->Allocation = Allocation;
+    XState->Save = (PXSAVE_AREA)ALIGN_UP_POINTER_BY(Allocation, XSAVE_ALIGN);
+    XState->Chunk = (PXSAVE_AREA_HEADER)((PUCHAR)XState->Save + SaveLength);
+    return STATUS_SUCCESS;
+}
+
+/*!
+ *   \brief Captures the extended state description of a caller's CONTEXT
+ *
+ *   \param Context - The caller's CONTEXT, with CONTEXT_XSTATE in its flags. The CONTEXT_EX follows it.
+ *   \param PreviousMode - Mode of the caller; user mode buffers are probed
+ *   \param ForGet - TRUE when the state will be written to the caller's chunk, FALSE when it is read from it
+ *   \param XState - Receives the description and a kernel copy of the chunk; free it with KiFreeXStateContext
+ *
+ *   \return STATUS_NOT_SUPPORTED without extended state, STATUS_INVALID_PARAMETER for a chunk that cannot hold the
+ *           header, or the status of the probe. Must be called at or below APC_LEVEL.
+ */
+NTSTATUS
+NTAPI
+KiCaptureXStateContext(
+    _In_ PCONTEXT Context,
+    _In_ KPROCESSOR_MODE PreviousMode,
+    _In_ BOOLEAN ForGet,
+    _Out_ PKI_XSTATE_CONTEXT XState)
+{
+    const XSTATE_CONFIGURATION *Config = &SharedUserData->XState;
+    PCONTEXT_EX ContextEx;
+    PXSAVE_AREA_HEADER Header;
+    XSAVE_AREA_HEADER HeaderCopy;
+    LONG ChunkOffset, LegacyOffset, AllOffset;
+    ULONG ChunkLength, LegacyLength, AllLength;
+    ULONG64 Features;
+    NTSTATUS Status;
+
+    RtlZeroMemory(XState, sizeof(*XState));
+
+    Features = Config->EnabledFeatures & ~XSTATE_MASK_LEGACY;
+    if (((KeFeatureBits & KF_XSTATE) == 0) || (Features == 0))
+        return STATUS_NOT_SUPPORTED;
+
+    _SEH2_TRY
+    {
+        ContextEx = (PCONTEXT_EX)(Context + 1);
+        if (PreviousMode != KernelMode)
+            ProbeForRead(ContextEx, sizeof(*ContextEx), sizeof(ULONG));
+
+        ChunkOffset = ContextEx->XState.Offset;
+        ChunkLength = ContextEx->XState.Length;
+        LegacyOffset = ContextEx->Legacy.Offset;
+        LegacyLength = ContextEx->Legacy.Length;
+        AllOffset = ContextEx->All.Offset;
+        AllLength = ContextEx->All.Length;
+
+        /* A CONTEXT whose flags kept CONTEXT_XSTATE without a real CONTEXT_EX behind it must not steer the reads:
+           the legacy part and the whole area both start at the CONTEXT, which directly precedes the CONTEXT_EX,
+           the legacy part is the CONTEXT and the whole area holds at least the CONTEXT and the CONTEXT_EX */
+        if ((LegacyOffset != -(LONG)sizeof(CONTEXT)) ||
+            (LegacyLength != sizeof(CONTEXT)) ||
+            (AllOffset != -(LONG)sizeof(CONTEXT)) ||
+            (AllLength < sizeof(CONTEXT) + sizeof(CONTEXT_EX)))
+        {
+            _SEH2_YIELD(return STATUS_INVALID_PARAMETER);
+        }
+
+        /* The chunk follows the CONTEXT_EX and holds at least the header */
+        if ((ChunkOffset < (LONG)sizeof(CONTEXT_EX)) ||
+            (ChunkLength < sizeof(XSAVE_AREA_HEADER)))
+        {
+            _SEH2_YIELD(return STATUS_INVALID_PARAMETER);
+        }
+
+        Header = (PXSAVE_AREA_HEADER)((PUCHAR)ContextEx + ChunkOffset);
+        if (PreviousMode != KernelMode)
+            ProbeForRead(Header, sizeof(*Header), sizeof(UCHAR));
+
+        /* The header is read once: its masks come from this copy, here and when the chunk is copied below */
+        RtlCopyMemory(&HeaderCopy, Header, sizeof(HeaderCopy));
+
+        /* A compacted chunk has room for the features of its compaction mask */
+        if (Config->CompactionEnabled)
+            Features &= HeaderCopy.CompactionMask;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
+
+    XState->Length = KiFitXStateContextFeatures(&Features, ChunkLength);
+    XState->Features = Features;
+    XState->UserHeader = Header;
+
+    Status = KiAllocateXStateContext(XState);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    _SEH2_TRY
+    {
+        if (PreviousMode != KernelMode)
+        {
+            if (ForGet)
+                ProbeForWrite(Header, XState->Length, sizeof(UCHAR));
+            else
+                ProbeForRead(Header, XState->Length, sizeof(UCHAR));
+        }
+
+        /* Only the masks of the copy are used, and only within the captured features */
+        if (!ForGet)
+        {
+            RtlCopyMemory(XState->Chunk, Header, XState->Length);
+            *XState->Chunk = HeaderCopy;
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        KiFreeXStateContext(XState);
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
+
+    return STATUS_SUCCESS;
+}
+
+/*!
+ *   \brief Prepares the extended state description for an exception dispatched to user mode: all enabled user
+ *          features, in the format of the configuration
+ *
+ *   \return FALSE when there is no extended state or no memory for it; the exception goes without it then
+ */
+BOOLEAN
+NTAPI
+KiPrepareXStateDispatch(
+    _Out_ PKI_XSTATE_CONTEXT XState)
+{
+    const XSTATE_CONFIGURATION *Config = &SharedUserData->XState;
+    ULONG64 Features;
+
+    RtlZeroMemory(XState, sizeof(*XState));
+
+    Features = Config->EnabledFeatures & ~XSTATE_MASK_LEGACY;
+    if (((KeFeatureBits & KF_XSTATE) == 0) || (Features == 0))
+        return FALSE;
+
+    XState->Length = KiFitXStateContextFeatures(&Features, MAXULONG);
+    XState->Features = Features;
+    return NT_SUCCESS(KiAllocateXStateContext(XState));
+}
+
+/*!
+ *   \brief Copies the captured chunk back to the caller, after KiGetXStateContext
+ */
+NTSTATUS
+NTAPI
+KiCopyOutXStateContext(
+    _In_ PKI_XSTATE_CONTEXT XState)
+{
+    _SEH2_TRY
+    {
+        RtlCopyMemory(XState->UserHeader, XState->Chunk, XState->Length);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
+
+    return STATUS_SUCCESS;
+}
+
+VOID
+NTAPI
+KiFreeXStateContext(
+    _Inout_ PKI_XSTATE_CONTEXT XState)
+{
+    if (XState->Allocation)
+        ExFreePoolWithTag(XState->Allocation, TAG_XSTATE_CONTEXT);
+    XState->Allocation = NULL;
+    XState->Save = NULL;
+    XState->Chunk = NULL;
+}
+
+/*!
+ *   \brief Stores the current thread's extended state into the captured chunk
+ *
+ *   The kernel does not use the extended registers, so they hold the user mode values of the current thread.
+ *   The header of the chunk tells which features are not in their initial configuration, like the processor's
+ *   XSTATE_BV: the data of the others is zero.
+ */
+VOID
+NTAPI
+KiGetXStateContext(
+    _Inout_ PKI_XSTATE_CONTEXT XState)
+{
+    const XSTATE_CONFIGURATION *Config = &SharedUserData->XState;
+    ULONG64 InUse;
+    ULONG Feature;
+    KIRQL OldIrql;
+
+    RtlZeroMemory(XState->Chunk, XState->Length);
+    XState->Chunk->CompactionMask = Config->CompactionEnabled ?
+        (XSTATE_COMPACTION_ENABLE_MASK | XState->Features) : 0;
+    if (XState->Features == 0)
+        return;
+
+    /* No context switch while the state is saved */
+    KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+    XState->Save->Header.Mask = 0;
+    _xsave64(XState->Save, XState->Features);
+    KeLowerIrql(OldIrql);
+
+    InUse = XState->Save->Header.Mask & XState->Features;
+    XState->Chunk->Mask = InUse;
+    for (Feature = 2; Feature < MAXIMUM_XSTATE_FEATURES; Feature++)
+    {
+        if ((InUse & (1ULL << Feature)) == 0)
+            continue;
+        RtlCopyMemory((PUCHAR)XState->Chunk + KiGetXStateContextOffset(Config, XState->Features, Feature),
+                      (PUCHAR)XState->Save + KiXStateStandardOffsets[Feature],
+                      Config->Features[Feature].Size);
+    }
+}
+
+/*!
+ *   \brief Loads the captured chunk into the current thread's extended state
+ *
+ *   The features of the chunk whose bit is clear in the header's mask go to their initial configuration, as XRSTOR
+ *   does. Features that are not loadable keep their value.
+ */
+VOID
+NTAPI
+KiSetXStateContext(
+    _In_ PKI_XSTATE_CONTEXT XState)
+{
+    const XSTATE_CONFIGURATION *Config = &SharedUserData->XState;
+    ULONG64 Load, Present;
+    ULONG Feature;
+    KIRQL OldIrql;
+
+    /* Never ask for a feature this processor has not enabled in XCR0: XRSTOR would fault in the kernel */
+    Load = XState->Features & XSTATE_MASK_CONTEXT_LOADABLE & _xgetbv(0);
+    if (Load == 0)
+        return;
+    Present = XState->Chunk->Mask & Load;
+
+    /* No context switch between the save and the load */
+    KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+
+    /* Save first: the load takes MXCSR from the area too, it has to stay */
+    _xsave64(XState->Save, Load);
+    XState->Save->Header.Mask = Present;
+    XState->Save->Header.CompactionMask = 0;
+    RtlZeroMemory(XState->Save->Header.Reserved2, sizeof(XState->Save->Header.Reserved2));
+
+    for (Feature = 2; Feature < MAXIMUM_XSTATE_FEATURES; Feature++)
+    {
+        if ((Present & (1ULL << Feature)) == 0)
+            continue;
+        RtlCopyMemory((PUCHAR)XState->Save + KiXStateStandardOffsets[Feature],
+                      (PUCHAR)XState->Chunk + KiGetXStateContextOffset(Config, XState->Features, Feature),
+                      Config->Features[Feature].Size);
+    }
+
+    _xrstor64(XState->Save, Load);
+    KeLowerIrql(OldIrql);
 }

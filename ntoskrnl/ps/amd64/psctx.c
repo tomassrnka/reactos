@@ -55,11 +55,18 @@ PspGetOrSetContextKernelRoutine(
     {
         /* Set the nonvolatiles on the stack, target frame is the trap frame */
         KiSetTrapContext(TrapFrame, &GetSetContext->Context, GetSetContext->Mode);
+
+        /* The extended registers are live: this runs in the target thread */
+        if (GetSetContext->XState)
+            KiSetXStateContext(GetSetContext->XState);
     }
     else
     {
         /* Get the nonvolatiles from the stack */
         KiGetTrapContext(TrapFrame, &GetSetContext->Context);
+
+        if (GetSetContext->XState)
+            KiGetXStateContext(GetSetContext->XState);
     }
 
     /* Notify the Native API that we are done */

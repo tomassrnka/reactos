@@ -178,6 +178,7 @@ extern void func_WideCharToMultiByte(void);
 extern void func_ReadProcessMemory(void);
 extern void func_WriteProcessMemory(void);
 extern void func_XState(void);
+extern void func_XStateContext(void);
 extern void func_SetFileInformationByHandle(void);
 
 extern void func_Wow64Environment(void);
@@ -364,6 +365,7 @@ const struct test winetest_testlist[] =
     { "ReadProcessMemory",           func_ReadProcessMemory },
     { "WriteProcessMemory",          func_WriteProcessMemory },
     { "XState",                      func_XState },
+    { "XStateContext",               func_XStateContext },
     { "SetFileInformationByHandle",  func_SetFileInformationByHandle },
     { 0, 0 }
 };

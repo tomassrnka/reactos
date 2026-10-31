@@ -129,6 +129,9 @@ typedef struct _GET_SET_CTX_CONTEXT
     KEVENT Event;
     KPROCESSOR_MODE Mode;
     CONTEXT Context;
+#ifdef _M_AMD64
+    PKI_XSTATE_CONTEXT XState;      /* CONTEXT_XSTATE requested, or NULL */
+#endif
 } GET_SET_CTX_CONTEXT, *PGET_SET_CTX_CONTEXT;
 
 //
