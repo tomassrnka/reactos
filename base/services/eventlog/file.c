@@ -840,7 +840,17 @@ LogfReadEvents(PLOGFILE LogFile,
     while (BufferUsage <= BufSize);
 
     *BytesRead = BufferUsage;
-    *RecordNumber = RecNum;
+    /*
+     * Record number 0 is what a log handle starts with, and it means that
+     * the read starts at the first or the last record. A backwards read that
+     * has gone past the first record must not leave 0 as the next one to read,
+     * or it would start again at the last record, and never come to an end.
+     * No record has the number MAXULONG, so the next read finds none.
+     */
+    if (RecNum == 0 && (Flags & EVENTLOG_BACKWARDS_READ))
+        *RecordNumber = MAXULONG;
+    else
+        *RecordNumber = RecNum;
 
     Status = STATUS_SUCCESS;
 
