@@ -388,6 +388,13 @@ ConSrvNewProcess(PCSR_PROCESS SourceProcess,
                 DPRINT1("Inheriting handles table failed\n");
             }
 
+            /*
+             * The child joins the console of its parent when it connects,
+             * which can be after the parent is gone. Keep the console until then.
+             */
+            TargetProcessData->PendingConsoleHandle = SourceProcessData->ConsoleHandle;
+            _InterlockedIncrement(&SourceConsole->ReferenceCount);
+
             /* Unlock the parent's console */
             LeaveCriticalSection(&SourceConsole->Lock);
         }
@@ -402,11 +409,10 @@ ConSrvNewProcess(PCSR_PROCESS SourceProcess,
     return Status;
 }
 
-NTSTATUS
-NTAPI
-ConSrvConnect(IN PCSR_PROCESS CsrProcess,
-              IN OUT PVOID ConnectionInfo,
-              IN OUT PULONG ConnectionInfoLength)
+static NTSTATUS
+ConSrvConnectInternal(IN PCSR_PROCESS CsrProcess,
+                      IN OUT PVOID ConnectionInfo,
+                      IN OUT PULONG ConnectionInfoLength)
 {
     /**************************************************************************
      * This function is called whenever a CUI new process is created.
@@ -536,6 +542,21 @@ ConSrvConnect(IN PCSR_PROCESS CsrProcess,
     return STATUS_SUCCESS;
 }
 
+NTSTATUS
+NTAPI
+ConSrvConnect(IN PCSR_PROCESS CsrProcess,
+              IN OUT PVOID ConnectionInfo,
+              IN OUT PULONG ConnectionInfoLength)
+{
+    NTSTATUS Status;
+
+    Status = ConSrvConnectInternal(CsrProcess, ConnectionInfo, ConnectionInfoLength);
+
+    /* The process has its own reference on its console now, or none is needed */
+    ConSrvReleasePendingConsole(ConsoleGetPerProcessData(CsrProcess));
+    return Status;
+}
+
 VOID
 NTAPI
 ConSrvDisconnect(IN PCSR_PROCESS CsrProcess)
@@ -545,6 +566,9 @@ ConSrvDisconnect(IN PCSR_PROCESS CsrProcess)
     /**************************************************************************
      * This function is called whenever a new process (GUI or CUI) is destroyed.
      **************************************************************************/
+
+    /* The process died before it connected */
+    ConSrvReleasePendingConsole(ProcessData);
 
     if ( ProcessData->ConsoleHandle != NULL ||
          ProcessData->HandleTable   != NULL )

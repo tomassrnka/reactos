@@ -1235,6 +1235,26 @@ Quit:
     return Status;
 }
 
+/*
+ * Drop the reference that ConSrvNewProcess took on the console a new process
+ * was going to join. The reference keeps the console alive when its last
+ * process exits between the creation of the new process and its connection
+ * to the console server (a batch file that ends with "start /b program").
+ */
+VOID
+ConSrvReleasePendingConsole(
+    IN OUT PCONSOLE_PROCESS_DATA ProcessData)
+{
+    PCONSRV_CONSOLE Console;
+    HANDLE ConsoleHandle = ProcessData->PendingConsoleHandle;
+
+    if (!ConsoleHandle) return;
+    ProcessData->PendingConsoleHandle = NULL;
+
+    if (ConSrvValidateConsole(&Console, ConsoleHandle, CONSOLE_RUNNING, TRUE))
+        ConSrvReleaseConsole(Console, TRUE);
+}
+
 NTSTATUS
 ConSrvRemoveConsole(
     IN OUT PCONSOLE_PROCESS_DATA ProcessData)
