@@ -14,6 +14,7 @@ extern void func_message(void);
 extern void func_msg(void);
 extern void func_object(void);
 extern void func_oid(void);
+extern void func_pkcs12(void);
 extern void func_protectdata(void);
 extern void func_sip(void);
 extern void func_store(void);
@@ -32,6 +33,7 @@ const struct test winetest_testlist[] =
     { "msg", func_msg },
     { "object", func_object },
     { "oid", func_oid },
+    { "pkcs12", func_pkcs12 },
     { "protectdata", func_protectdata },
     { "sip", func_sip },
     { "store", func_store },

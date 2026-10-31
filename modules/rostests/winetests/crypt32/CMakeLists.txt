@@ -13,6 +13,7 @@ list(APPEND SOURCE
     msg.c
     object.c
     oid.c
+    pkcs12.c
     protectdata.c
     sip.c
     store.c

@@ -749,6 +749,7 @@ static BOOL CertContext_SetProperty(cert_t *cert, DWORD dwPropId,
         case CERT_CROSS_CERT_DIST_POINTS_PROP_ID:
         case CERT_OCSP_RESPONSE_PROP_ID:
         case CERT_RENEWAL_PROP_ID:
+        case 125: /* .NET marks a certificate whose key container it has to delete (CERT_CLR_DELETE_KEY_PROP_ID) */
         {
             if (pvData)
             {
@@ -827,6 +828,23 @@ static BOOL CertContext_SetProperty(cert_t *cert, DWORD dwPropId,
             break;
         }
         default:
+            if (dwPropId >= CERT_FIRST_USER_PROP_ID)
+            {
+                /* application defined properties are kept as they are given, as a blob */
+                if (pvData)
+                {
+                    const CRYPT_DATA_BLOB *blob = pvData;
+
+                    ret = ContextPropertyList_SetProperty(cert->base.properties, dwPropId,
+                     blob->pbData, blob->cbData);
+                }
+                else
+                {
+                    ContextPropertyList_RemoveProperty(cert->base.properties, dwPropId);
+                    ret = TRUE;
+                }
+                break;
+            }
             FIXME("%ld: stub\n", dwPropId);
             ret = FALSE;
         }
@@ -893,6 +911,16 @@ static BOOL CRYPT_AcquirePrivateKeyFromProvInfo(PCCERT_CONTEXT pCert, DWORD dwFl
         else
             SetLastError(CRYPT_E_NO_KEY_PROPERTY);
     }
+#ifdef __REACTOS__
+    /* The caller insists on a CNG key. A CryptoAPI provider handle is not one and would be misused
+     * as an NCRYPT_KEY_HANDLE; failing lets callers such as .NET fall back to the CSP interface. */
+    if (ret && (dwFlags & 0x00040000 /* CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG */) && info->dwProvType)
+    {
+        SetLastError(NTE_NOT_SUPPORTED);
+        ret = FALSE;
+    }
+    else
+#endif
     if (ret)
     {
         ret = CryptAcquireContextW(phCryptProv, info->pwszContainerName,

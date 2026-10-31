@@ -38,6 +38,7 @@ list(APPEND SOURCE
     store.c
     str.c
     reactos/bcryptkey.c
+    reactos/pkcs12.c
     reactos/store.c
     reactos/timestamp.c
     reactos/unixlib.c
@@ -61,7 +62,7 @@ if(MSVC)
 endif()
 
 set_module_type(crypt32 win32dll)
-target_link_libraries(crypt32 wine ${PSEH_LIB} oldnames)
+target_link_libraries(crypt32 wine cryptlib ${PSEH_LIB} oldnames)
 add_delay_importlibs(crypt32 cryptnet)
 add_importlibs(crypt32 bcrypt user32 advapi32 advapi32_vista msvcrt kernel32_vista kernel32 ntdll)
 add_pch(crypt32 precomp.h "${PCH_SKIP_SOURCE}")
