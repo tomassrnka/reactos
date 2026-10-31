@@ -28,24 +28,33 @@ static BOOLEAN Wow64XStateEnabled(VOID)
     return (SharedUserData->XState.EnabledFeatures & ~(ULONG64)3) != 0;
 }
 
-/* Gets (Set FALSE) or sets the extended state of a thread through the chunk of
- * a guest context with WOW64_CONTEXT_XSTATE. Without extended state the flag is
- * ignored, as the native services do. */
-NTSTATUS Wow64XStateContext(HANDLE Thread, WOW64_CONTEXT *Guest, BOOLEAN Set)
+#define WOW64_XSTATE_BUFFER_OFFSET ALIGN_UP_BY(sizeof(CONTEXT) + sizeof(WOW64_CONTEXT_EX), 64)
+
+/* Builds a native CONTEXT with CONTEXT_XSTATE, its CONTEXT_EX and the chunk of the guest
+ * context in one buffer: what NtGetContextThread, NtSetContextThread and NtContinue take.
+ * Buffer is 64 byte aligned and WOW64_XSTATE_BUFFER_OFFSET + WOW64_XSTATE_MAX bytes long.
+ * For a set the chunk is a copy of the guest's, for a get it is empty but for its
+ * compaction mask. */
+static NTSTATUS Wow64BuildXStateContext(const WOW64_CONTEXT *Guest, PUCHAR Buffer, BOOLEAN Set,
+                                        PUCHAR *OutGuestChunk, PULONG OutLength)
 {
-    DECLSPEC_ALIGN(64) UCHAR Buffer[ALIGN_UP_BY(sizeof(CONTEXT) + sizeof(WOW64_CONTEXT_EX), 64) + WOW64_XSTATE_MAX];
     PCONTEXT Native = (PCONTEXT)Buffer;
     WOW64_CONTEXT_EX *NativeEx = (WOW64_CONTEXT_EX *)(Native + 1);
-    PUCHAR NativeChunk = Buffer + ALIGN_UP_BY(sizeof(CONTEXT) + sizeof(WOW64_CONTEXT_EX), 64);
+    PUCHAR NativeChunk = Buffer + WOW64_XSTATE_BUFFER_OFFSET;
     WOW64_CONTEXT_EX GuestEx;
     PUCHAR GuestChunk;
     ULONG Length;
-    NTSTATUS Status;
 
-    if (!Wow64XStateEnabled()) return STATUS_SUCCESS;
     _SEH2_TRY
     {
         GuestEx = *(WOW64_CONTEXT_EX *)(Guest + 1);
+        /* As the native kernel does: the CONTEXT_EX has to describe the CONTEXT right before it (the legacy part
+         * is the integer part of it or all of it) and the area it spans */
+        if (GuestEx.Legacy.Offset != -(LONG)sizeof(WOW64_CONTEXT) ||
+            (GuestEx.Legacy.Length != 0xcc && GuestEx.Legacy.Length != sizeof(WOW64_CONTEXT)) ||
+            GuestEx.All.Offset != -(LONG)sizeof(WOW64_CONTEXT) ||
+            GuestEx.All.Length < sizeof(WOW64_CONTEXT) + sizeof(WOW64_CONTEXT_EX))
+            _SEH2_YIELD(return STATUS_INVALID_PARAMETER);
         if (GuestEx.XState.Offset < (LONG)sizeof(GuestEx) || GuestEx.XState.Length < sizeof(XSAVE_AREA_HEADER))
             _SEH2_YIELD(return STATUS_INVALID_PARAMETER);
         GuestChunk = (PUCHAR)(Guest + 1) + GuestEx.XState.Offset;
@@ -67,10 +76,28 @@ NTSTATUS Wow64XStateContext(HANDLE Thread, WOW64_CONTEXT *Guest, BOOLEAN Set)
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     { _SEH2_YIELD(return _SEH2_GetExceptionCode()); }
     _SEH2_END;
-    Status = Set ? NtSetContextThread(Thread, Native) : NtGetContextThread(Thread, Native);
+    *OutGuestChunk = GuestChunk;
+    *OutLength = Length;
+    return STATUS_SUCCESS;
+}
+
+/* Gets (Set FALSE) or sets the extended state of a thread through the chunk of
+ * a guest context with WOW64_CONTEXT_XSTATE. Without extended state the flag is
+ * ignored, as the native services do. */
+NTSTATUS Wow64XStateContext(HANDLE Thread, WOW64_CONTEXT *Guest, BOOLEAN Set)
+{
+    DECLSPEC_ALIGN(64) UCHAR Buffer[WOW64_XSTATE_BUFFER_OFFSET + WOW64_XSTATE_MAX];
+    PUCHAR GuestChunk;
+    ULONG Length;
+    NTSTATUS Status;
+
+    if (!Wow64XStateEnabled()) return STATUS_SUCCESS;
+    Status = Wow64BuildXStateContext(Guest, Buffer, Set, &GuestChunk, &Length);
+    if (!NT_SUCCESS(Status)) return Status;
+    Status = Set ? NtSetContextThread(Thread, (PCONTEXT)Buffer) : NtGetContextThread(Thread, (PCONTEXT)Buffer);
     if (NT_SUCCESS(Status) && !Set)
     {
-        _SEH2_TRY { RtlCopyMemory(GuestChunk, NativeChunk, Length); }
+        _SEH2_TRY { RtlCopyMemory(GuestChunk, Buffer + WOW64_XSTATE_BUFFER_OFFSET, Length); }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Status = _SEH2_GetExceptionCode(); }
         _SEH2_END;
     }
@@ -117,19 +144,29 @@ NTSTATUS Wow64GetSetContextThread(HANDLE Thread, WOW64_CONTEXT *Guest, BOOLEAN S
 
 NTSTATUS Wow64Continue(const WOW64_CONTEXT *Context, BOOLEAN TestAlert)
 {
-    CONTEXT Native;
+    /* With extended state the native CONTEXT is followed by its CONTEXT_EX and the chunk, and NtContinue
+     * loads everything at once: the registers are not touched between loading the state and leaving. */
+    DECLSPEC_ALIGN(64) UCHAR XBuffer[WOW64_XSTATE_BUFFER_OFFSET + WOW64_XSTATE_MAX];
+    CONTEXT NativeLocal;
+    PCONTEXT Native = &NativeLocal;
+    BOOLEAN HaveXState = FALSE;
     WOW64_CPU_STATE *Cpu = NtCurrentTeb()->TlsSlots[WOW64_TLS_CPU];
     WOW64_APC_FRAME *Apc = Cpu->ApcFrame;
     NTSTATUS Status;
     if ((Context->ContextFlags & WOW64_CONTEXT_FULL) != WOW64_CONTEXT_FULL ||
         (Context->ContextFlags & ~(WOW64_CONTEXT_ALL | WOW64_XSTATE_FLAG)))
         return STATUS_NOT_SUPPORTED;
-    /* The extended state goes to the processor first; nothing on the way to
-     * NtContinue uses those registers, and NtContinue leaves them alone. */
-    if (Context->ContextFlags & WOW64_XSTATE_FLAG)
+    if ((Context->ContextFlags & WOW64_XSTATE_FLAG) && Wow64XStateEnabled())
     {
-        Status = Wow64XStateContext(NtCurrentThread(), (WOW64_CONTEXT *)Context, TRUE);
+        PUCHAR GuestChunk;
+        ULONG Length;
+
+        Status = Wow64BuildXStateContext(Context, XBuffer, TRUE, &GuestChunk, &Length);
         if (!NT_SUCCESS(Status)) return Status;
+        (VOID)GuestChunk;
+        (VOID)Length;
+        Native = (PCONTEXT)XBuffer;
+        HaveXState = TRUE;
     }
     if (Apc && Context == Apc->Guest)
     {
@@ -145,6 +182,13 @@ NTSTATUS Wow64Continue(const WOW64_CONTEXT *Context, BOOLEAN TestAlert)
             Wow64ContextToNative(Apc->Native, Context);
         }
         else InterlockedExchange(&Apc->Previous->InTransition, Apc->PreviousTransition);
+        if (HaveXState)
+        {
+            /* The interrupted native context plus the extended state, in one buffer */
+            RtlCopyMemory(Native, Apc->Native, sizeof(CONTEXT));
+            Native->ContextFlags |= CONTEXT_XSTATE;
+            return NtContinue(Native, TestAlert);
+        }
         return NtContinue(Apc->Native, TestAlert);
     }
     InterlockedExchange(&Cpu->InTransition, 1);
@@ -157,10 +201,12 @@ NTSTATUS Wow64Continue(const WOW64_CONTEXT *Context, BOOLEAN TestAlert)
         NtCurrentTeb()->TlsSlots[WOW64_TLS_CPU] = Cpu;
         Apc = Cpu->ApcFrame;
     }
-    RtlCaptureContext(&Native);
-    Wow64ContextToNative(&Native, Context);
+    /* RtlCaptureContext writes the CONTEXT only: the CONTEXT_EX and chunk behind it stay */
+    RtlCaptureContext(Native);
+    Wow64ContextToNative(Native, Context);
+    if (HaveXState) Native->ContextFlags |= CONTEXT_XSTATE;
     InterlockedExchange(&Cpu->InTransition, 1);
-    return NtContinue(&Native, TestAlert);
+    return NtContinue(Native, TestAlert);
 }
 
 /* The lowest guest stack address a dispatch frame may use. The committed
