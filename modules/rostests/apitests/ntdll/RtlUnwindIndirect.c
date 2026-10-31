@@ -28,6 +28,10 @@ ULONG64 IndOuter(ULONG64 Rbx, ULONG64 Rsi);
 VOID IndPrimary(VOID);
 extern UCHAR IndFragment[];
 extern UCHAR IndFragmentReturn[];
+extern UCHAR IndEpiFragment[];
+extern UCHAR IndEpiFragmentPop[];
+extern UCHAR IndSelf[];
+extern RUNTIME_FUNCTION IndSelfEntry;
 extern UCHAR IndOuterReturn[];
 extern RUNTIME_FUNCTION IndPrimaryEntryCopy;
 extern ULONG IndPrimaryHandlerData;
@@ -204,6 +208,232 @@ TestVirtualUnwind(VOID)
 
 static
 VOID
+TestFragmentEpilog(VOID)
+{
+    ULONG64 Stack[16], ImageBase, EstablisherFrame;
+    PRUNTIME_FUNCTION FunctionEntry;
+    PEXCEPTION_ROUTINE Handler;
+    PVOID HandlerData;
+    CONTEXT Context;
+    ULONG i, Step;
+    PUCHAR Pc[2] = { IndEpiFragment, IndEpiFragmentPop };
+
+    /* The frame is released in a separated part: the code that frees it is
+       an epilog of IndPrimary, whose range is the part's own range. Once
+       the allocation is gone (second step) only the pops remain. */
+    for (Step = 0; Step < 2; Step++)
+    {
+        for (i = 0; i < ARRAYSIZE(Stack); i++)
+            Stack[i] = 0xAAAA000000000000ULL + i;
+        i = (Step == 0) ? 4 : 0;
+        Stack[i + 0] = 0x1234; /* rbp */
+        Stack[i + 1] = 0x5678; /* rsi */
+        Stack[i + 2] = 0x9ABC; /* rbx */
+        Stack[i + 3] = (ULONG64)IndOuter + 0x40;
+
+        RtlZeroMemory(&Context, sizeof(Context));
+        Context.Rip = (ULONG64)Pc[Step];
+        Context.Rsp = (ULONG64)&Stack[0];
+        Context.Rbp = Context.Rsi = Context.Rbx = 0xBAD;
+
+        FunctionEntry = RtlLookupFunctionEntry(Context.Rip, &ImageBase, NULL);
+        ok(FunctionEntry == &IndPrimaryEntryCopy, "Step %lu: entry %p, expected %p\n",
+           Step, FunctionEntry, &IndPrimaryEntryCopy);
+        if (FunctionEntry != &IndPrimaryEntryCopy)
+            continue;
+
+        HandlerData = NULL;
+        EstablisherFrame = 0;
+        Handler = RtlVirtualUnwind(UNW_FLAG_EHANDLER, ImageBase, Context.Rip, FunctionEntry,
+                                   &Context, &HandlerData, &EstablisherFrame, NULL);
+        ok(Handler == NULL, "Step %lu: handler %p in an epilog\n", Step, Handler);
+        ok(Context.Rbp == 0x1234, "Step %lu: Rbp 0x%I64x\n", Step, Context.Rbp);
+        ok(Context.Rsi == 0x5678, "Step %lu: Rsi 0x%I64x\n", Step, Context.Rsi);
+        ok(Context.Rbx == 0x9ABC, "Step %lu: Rbx 0x%I64x\n", Step, Context.Rbx);
+        ok(Context.Rip == Stack[i + 3], "Step %lu: Rip %p, expected %p\n",
+           Step, (PVOID)Context.Rip, (PVOID)Stack[i + 3]);
+        ok(Context.Rsp == (ULONG64)&Stack[i + 4], "Step %lu: Rsp %p, expected %p\n",
+           Step, (PVOID)Context.Rsp, &Stack[i + 4]);
+    }
+}
+
+static
+BOOLEAN
+RunsOnReactOS(VOID)
+{
+    UNICODE_STRING Name = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\ReactOS");
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE Key;
+
+    InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    if (!NT_SUCCESS(NtOpenKey(&Key, KEY_READ, &ObjectAttributes)))
+        return FALSE;
+    NtClose(Key);
+    return TRUE;
+}
+
+static
+VOID
+TestSelfReference(VOID)
+{
+    ULONG64 ImageBase = 0, EstablisherFrame = 0, Stack[4] = { 0 };
+    PRUNTIME_FUNCTION FunctionEntry;
+    PEXCEPTION_ROUTINE Handler;
+    PVOID HandlerData = (PVOID)(ULONG_PTR)0x1234;
+    CONTEXT Context;
+
+    /* Windows is not asked about an entry that points to itself: only the
+       data in this file can end the walk through it */
+    if (!RunsOnReactOS())
+    {
+        skip("Self-referencing entry is only checked on ReactOS\n");
+        return;
+    }
+
+    ok(((ULONG_PTR)&IndSelfEntry & 3) == 0, "Entry is not aligned\n");
+    FunctionEntry = RtlLookupFunctionEntry((ULONG64)IndSelf, &ImageBase, NULL);
+    ok(FunctionEntry == NULL, "Self-referencing entry resolved to %p\n", FunctionEntry);
+
+    RtlZeroMemory(&Context, sizeof(Context));
+    Context.Rip = (ULONG64)IndSelf;
+    Context.Rsp = (ULONG64)&Stack[0];
+    Handler = RtlVirtualUnwind(UNW_FLAG_EHANDLER, (ULONG64)GetModuleHandleW(NULL), Context.Rip,
+                               &IndSelfEntry, &Context, &HandlerData, &EstablisherFrame, NULL);
+    ok(Handler == NULL, "Handler %p\n", Handler);
+    ok(Context.Rip == (ULONG64)IndSelf, "Rip changed to %p\n", (PVOID)Context.Rip);
+    ok(Context.Rsp == (ULONG64)&Stack[0], "Rsp changed to %p\n", (PVOID)Context.Rsp);
+    ok(HandlerData == NULL, "HandlerData %p not set\n", HandlerData);
+    ok(EstablisherFrame == (ULONG64)&Stack[0], "EstablisherFrame %p not set\n", (PVOID)EstablisherFrame);
+}
+
+static ULONG CallbackCalls;
+static ULONG64 CallbackPc[16];
+static ULONG64 DynBase;
+static RUNTIME_FUNCTION DynEntry;
+
+static
+PRUNTIME_FUNCTION
+CALLBACK
+DynCallback(
+    _In_ DWORD64 ControlPc,
+    _In_ PVOID Context)
+{
+    if (CallbackCalls < ARRAYSIZE(CallbackPc))
+        CallbackPc[CallbackCalls] = ControlPc;
+    CallbackCalls++;
+
+    if ((ControlPc >= DynBase + 0x40) && (ControlPc < DynBase + 0x80))
+        return &DynEntry;
+    return NULL;
+}
+
+typedef BOOLEAN (NTAPI *PFN_INSTALL)(ULONG_PTR, ULONG_PTR, ULONG, PGET_RUNTIME_FUNCTION_CALLBACK, PVOID, PCWSTR);
+typedef BOOLEAN (NTAPI *PFN_DELETE_TABLE)(PRUNTIME_FUNCTION);
+
+static
+VOID
+TestDynamicCallback(VOID)
+{
+    HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
+    PFN_INSTALL pInstall = (PFN_INSTALL)GetProcAddress(hNtdll, "RtlInstallFunctionTableCallback");
+    PFN_DELETE_TABLE pDelete = (PFN_DELETE_TABLE)GetProcAddress(hNtdll, "RtlDeleteFunctionTable");
+    ULONG64 Stack[4], ImageBase, EstablisherFrame;
+    PRUNTIME_FUNCTION FunctionEntry;
+    PEXCEPTION_ROUTINE Handler;
+    PVOID HandlerData;
+    CONTEXT Context;
+    PUCHAR Mem;
+    ULONG Before, i;
+    ULONG64 Pc[] = { 0x100, 0x7F0, 0, 0 };
+    BOOLEAN Ok;
+
+    if (!pInstall || !pDelete)
+    {
+        skip("Function table callbacks are not available\n");
+        return;
+    }
+
+    Mem = VirtualAlloc(NULL, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    ok(Mem != NULL, "VirtualAlloc failed\n");
+    if (Mem == NULL)
+        return;
+    DynBase = (ULONG64)Mem;
+
+    /* A leaf function: no unwind codes, the return address is at rsp */
+    Mem[0] = 1;             /* version 1, no flags */
+    Mem[0x40] = 0xC3;       /* ret */
+    DynEntry.BeginAddress = 0x40;
+    DynEntry.EndAddress = 0x80;
+    DynEntry.UnwindData = 0;
+
+    Ok = pInstall(DynBase | 3, DynBase, 0x1000, DynCallback, NULL, NULL);
+    ok(Ok, "RtlInstallFunctionTableCallback failed, %lu\n", GetLastError());
+    if (!Ok)
+    {
+        VirtualFree(Mem, 0, MEM_RELEASE);
+        return;
+    }
+
+    CallbackCalls = 0;
+    ImageBase = 0;
+    FunctionEntry = RtlLookupFunctionEntry(DynBase + 0x44, &ImageBase, NULL);
+    ok(FunctionEntry == &DynEntry, "Entry %p, expected %p\n", FunctionEntry, &DynEntry);
+    ok(ImageBase == DynBase, "ImageBase %p\n", (PVOID)ImageBase);
+    ok(CallbackCalls == 1, "Lookup called the callback %lu times\n", CallbackCalls);
+    ok(CallbackPc[0] == DynBase + 0x44, "Callback pc %p\n", (PVOID)CallbackPc[0]);
+
+    /* A pc inside the function: RtlVirtualUnwind needs the entry only */
+    Before = CallbackCalls;
+    Stack[0] = 0x4242;
+    RtlZeroMemory(&Context, sizeof(Context));
+    Context.Rip = DynBase + 0x44;
+    Context.Rsp = (ULONG64)&Stack[0];
+    HandlerData = NULL;
+    EstablisherFrame = 0;
+    Handler = RtlVirtualUnwind(UNW_FLAG_EHANDLER, DynBase, Context.Rip, &DynEntry,
+                               &Context, &HandlerData, &EstablisherFrame, NULL);
+    ok(Handler == NULL, "Handler %p\n", Handler);
+    ok(Context.Rip == 0x4242, "Rip %p\n", (PVOID)Context.Rip);
+    ok(Context.Rsp == (ULONG64)&Stack[1], "Rsp %p\n", (PVOID)Context.Rsp);
+    ok(CallbackCalls == Before, "RtlVirtualUnwind inside the function called the callback %lu times\n",
+       CallbackCalls - Before);
+
+    /* A pc in the table's range but outside the function, and one outside
+       the range. Windows measured: RtlLookupFunctionEntry runs the callback
+       for the first only, and finds no entry; RtlVirtualUnwind with the
+       function's entry runs no callback for either, and unwinds with the
+       entry as for any pc in the leaf function */
+    Pc[2] = DynBase + 0x200;
+    Pc[3] = DynBase + 0x1000 + 0x40;
+    for (i = 2; i < ARRAYSIZE(Pc); i++)
+    {
+        Before = CallbackCalls;
+        ImageBase = 0;
+        FunctionEntry = RtlLookupFunctionEntry(Pc[i], &ImageBase, NULL);
+        ok(FunctionEntry == NULL, "Entry %p for pc %p\n", FunctionEntry, (PVOID)Pc[i]);
+        ok(CallbackCalls - Before == ((i == 2) ? 1 : 0),
+           "Lookup of pc %p called the callback %lu times\n", (PVOID)Pc[i], CallbackCalls - Before);
+
+        Before = CallbackCalls;
+        Stack[0] = 0x4242;
+        RtlZeroMemory(&Context, sizeof(Context));
+        Context.Rip = Pc[i];
+        Context.Rsp = (ULONG64)&Stack[0];
+        Handler = RtlVirtualUnwind(UNW_FLAG_EHANDLER, DynBase, Context.Rip, &DynEntry,
+                                   &Context, &HandlerData, &EstablisherFrame, NULL);
+        ok(CallbackCalls == Before, "RtlVirtualUnwind for pc %p called the callback %lu times\n",
+           (PVOID)Pc[i], CallbackCalls - Before);
+        ok(Handler == NULL, "Handler %p for pc %p\n", Handler, (PVOID)Pc[i]);
+        ok(Context.Rip == 0x4242, "Rip %p for pc %p\n", (PVOID)Context.Rip, (PVOID)Pc[i]);
+        ok(Context.Rsp == (ULONG64)&Stack[1], "Rsp %p for pc %p\n", (PVOID)Context.Rsp, (PVOID)Pc[i]);
+    }
+
+    ok(pDelete((PRUNTIME_FUNCTION)(DynBase | 3)), "RtlDeleteFunctionTable failed\n");
+    VirtualFree(Mem, 0, MEM_RELEASE);
+}
+
+static
+VOID
 TestDispatch(VOID)
 {
     ULONG64 ImageBase;
@@ -285,6 +515,9 @@ START_TEST(RtlUnwindIndirect)
 {
     TestLookup();
     TestVirtualUnwind();
+    TestFragmentEpilog();
+    TestSelfReference();
+    TestDynamicCallback();
     TestDispatch();
 }
 

@@ -23,6 +23,9 @@
  *               and jumps to IndFragment.
  * IndFragment   a separated part of IndPrimary (indirect entry): calls
  *               IndRaise, which raises an exception.
+ * IndEpiFragment  another separated part of IndPrimary, which releases the
+ *               frame: the epilog is in a range of its own.
+ * IndSelf       a part whose indirect entry points to itself (broken data).
  */
 
     .intel_syntax noprefix
@@ -31,6 +34,10 @@
     .globl IndPrimary
     .globl IndOuter
     .globl IndFragment
+    .globl IndEpiFragment
+    .globl IndEpiFragmentPop
+    .globl IndSelf
+    .globl IndSelfEntry
     .globl IndFragmentReturn
     .globl IndOuterReturn
     .globl IndPrimaryEntryCopy
@@ -94,6 +101,23 @@ IndFragmentReturn:
     int3
 IndFragmentEnd:
 
+/* A separated part of IndPrimary with the epilog of its frame */
+    .p2align 4
+IndEpiFragment:
+    add rsp, 0x20
+IndEpiFragmentPop:
+    pop rbp
+    pop rsi
+    pop rbx
+    ret
+IndEpiFragmentEnd:
+
+/* A part whose entry is indirect to itself */
+    .p2align 4
+IndSelf:
+    ret
+IndSelfEnd:
+
     .data
     .p2align 3
 IndOuterFrame:
@@ -138,8 +162,15 @@ IndOuterUnwind:
 IndPrimaryEntryCopy:
     .rva IndPrimary, IndPrimaryEnd, IndPrimaryUnwind
 
+/* The entry the part's entry points to: it points to itself. It is not in
+   .pdata, which the linker rearranges */
+IndSelfEntry:
+    .rva IndSelf, IndSelfEnd, IndSelfEntry + 1
+
     .section .pdata, "dr"
     .p2align 2
     .rva IndPrimary, IndPrimaryEnd, IndPrimaryUnwind
     .rva IndOuter, IndOuterEnd, IndOuterUnwind
     .rva IndFragment, IndFragmentEnd, IndPrimaryEntryCopy + 1
+    .rva IndEpiFragment, IndEpiFragmentEnd, IndPrimaryEntryCopy + 1
+    .rva IndSelf, IndSelfEnd, IndSelfEntry + 1
