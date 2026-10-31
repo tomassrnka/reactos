@@ -59,6 +59,7 @@ extern void func_RestrictedSidsCopy(void);
 extern void func_RtlEncryptMemory(void);
 extern void func_SaferIdentifyLevel(void);
 extern void func_TokenDefaultDacl(void);
+extern void func_TokenElevation(void);
 extern void func_TokenIntegrity(void);
 extern void func_TokenLogonSid(void);
 extern void func_ServiceArgs(void);
@@ -155,6 +156,7 @@ const struct test winetest_testlist[] =
     { "RtlEncryptMemory", func_RtlEncryptMemory },
     { "SaferIdentifyLevel", func_SaferIdentifyLevel },
     { "TokenDefaultDacl", func_TokenDefaultDacl },
+    { "TokenElevation", func_TokenElevation },
     { "TokenIntegrity", func_TokenIntegrity },
     { "TokenLogonSid", func_TokenLogonSid },
     { "ServiceArgs", func_ServiceArgs },
