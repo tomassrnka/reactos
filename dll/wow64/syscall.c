@@ -1783,6 +1783,12 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
                                        a[10], a[11], a[12], P(13));
         if (!NT_SUCCESS(Status)) Cleanup->Handle = NULL;
         StoreIo(a[3], &Io); RETURN_HANDLE();
+    case W64_NtCreateMailslotFile:
+        PROBE(0); ProbeOutput(a[3], sizeof(WOW64_IOSB));
+        FILEATTR(2);
+        Status = NtCreateMailslotFile(&Cleanup->Handle, a[1], OA(2), &Io, a[4], a[5], a[6], P(7));
+        if (!NT_SUCCESS(Status)) Cleanup->Handle = NULL;
+        StoreIo(a[3], &Io); RETURN_HANDLE();
     case W64_NtLockFile:
         return NtLockFile(H(0), H(1),
                          a[2] ? (PIO_APC_ROUTINE)(ULONG_PTR)(-((LONG64)a[2] << 2)) : NULL,
