@@ -20,6 +20,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 
 #include "windows.h"
 
@@ -1476,6 +1477,119 @@ static void test_counter_values(void)
     ok(ret == ERROR_SUCCESS, "PdhCloseQuery failed 0x%08lx\n", ret);
 }
 
+static void test_PdhFormatFromRawValue(void)
+{
+    static const struct
+    {
+        DWORD type, format;
+        LONGLONG timebase;          /* -1: a NULL pointer */
+        LONGLONG new_first, new_second, old_first, old_second;
+        BOOL has_old;
+        PDH_STATUS status;
+        double expected;
+    } tests[] =
+    {
+        /* values without a time reference */
+        { PERF_COUNTER_RAWCOUNT, PDH_FMT_DOUBLE, 10000000, 42, 0, 0, 0, TRUE, ERROR_SUCCESS, 42.0 },
+        { PERF_COUNTER_RAWCOUNT, PDH_FMT_DOUBLE, 10000000, 42, 0, 0, 0, FALSE, ERROR_SUCCESS, 42.0 },
+        { PERF_COUNTER_RAWCOUNT, PDH_FMT_DOUBLE, -1, 42, 0, 0, 0, FALSE, ERROR_SUCCESS, 42.0 },
+        { PERF_COUNTER_LARGE_RAWCOUNT, PDH_FMT_DOUBLE, 10000000, 0x123456789LL, 0, 0, 0, FALSE, ERROR_SUCCESS, 4886718345.0 },
+        { PERF_COUNTER_RAWCOUNT_HEX, PDH_FMT_DOUBLE, 10000000, 7000000, 0, 0, 0, FALSE, ERROR_SUCCESS, 7000000.0 },
+        /* rates: the time stamps are in ticks of the time base */
+        { PERF_COUNTER_COUNTER, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE, 10000000, 1000, 20000000, 500, 10000000, TRUE, ERROR_SUCCESS, 500.0 },
+        { PERF_COUNTER_COUNTER, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE, 20000000, 1000, 20000000, 500, 10000000, TRUE, ERROR_SUCCESS, 1000.0 },
+        { PERF_COUNTER_COUNTER, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE, 0, 1000, 20000000, 500, 10000000, TRUE, ERROR_SUCCESS, 0.0 },
+        { PERF_COUNTER_COUNTER, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE, -1, 1000, 20000000, 500, 10000000, TRUE, ERROR_SUCCESS, 0.0 },
+        { PERF_COUNTER_COUNTER, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE | PDH_FMT_1000, 10000000, 1000, 20000000, 500, 10000000, TRUE, ERROR_SUCCESS, 500000.0 },
+        { PERF_COUNTER_COUNTER, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE, 10000000, 1000, 20000000, 500, 10000000, FALSE, PDH_CSTATUS_INVALID_DATA, 0.0 },
+        { PERF_COUNTER_COUNTER, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE, 10000000, 1000, 20000000, 1000, 20000000, TRUE, ERROR_SUCCESS, 0.0 },
+        { PERF_COUNTER_COUNTER, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE, 10000000, 1000, 5000000, 500, 10000000, TRUE, PDH_CALC_NEGATIVE_DENOMINATOR, 0.0 },
+        { PERF_COUNTER_COUNTER, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE, 10000000, 100, 20000000, 500, 10000000, TRUE, PDH_CALC_NEGATIVE_VALUE, 0.0 },
+        { PERF_COUNTER_BULK_COUNT, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE, 10000000, 7000000, 20000000, 2000000, 10000000, TRUE, ERROR_SUCCESS, 5000000.0 },
+        /* timers use their own time stamps, the time base does not matter */
+        { PERF_100NSEC_TIMER, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE, 10000000, 7000000, 20000000, 2000000, 10000000, TRUE, ERROR_SUCCESS, 50.0 },
+        { PERF_100NSEC_TIMER, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE, -1, 7000000, 20000000, 2000000, 10000000, TRUE, ERROR_SUCCESS, 50.0 },
+        { PERF_100NSEC_TIMER, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE, 1, 7000000, 20000000, 2000000, 10000000, TRUE, ERROR_SUCCESS, 50.0 },
+        { PERF_100NSEC_TIMER_INV, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE | PDH_FMT_NOCAP100, 10000000, 7000000, 20000000, 2000000, 10000000, TRUE, ERROR_SUCCESS, 50.0 },
+        { PERF_100NSEC_TIMER, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE, 10000000, 7000000, 20000000, 2000000, 10000000, FALSE, PDH_CSTATUS_INVALID_DATA, 0.0 },
+        { PERF_100NSEC_TIMER, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE, 10000000, 15000000, 20000000, 0, 10000000, TRUE, ERROR_SUCCESS, 100.0 },
+        { PERF_100NSEC_TIMER, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE | PDH_FMT_NOCAP100, 10000000, 15000000, 20000000, 0, 10000000, TRUE, ERROR_SUCCESS, 150.0 },
+        { PERF_100NSEC_TIMER_INV, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE | PDH_FMT_NOCAP100, 10000000, 15000000, 20000000, 0, 10000000, TRUE, PDH_CALC_NEGATIVE_DENOMINATOR, 0.0 },
+        { PERF_100NSEC_TIMER_INV, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE | PDH_FMT_NOCAP100, 10000000, 2000000, 20000000, 7000000, 10000000, TRUE, PDH_CALC_NEGATIVE_VALUE, 0.0 },
+        { PERF_100NSEC_TIMER, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE, 10000000, 1000, 5000000, 500, 10000000, TRUE, PDH_CALC_NEGATIVE_DENOMINATOR, 0.0 },
+        { PERF_100NSEC_TIMER, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE, 10000000, 1000, 10000000, 500, 10000000, TRUE, ERROR_SUCCESS, 0.0 },
+        /* fractions: the second value is the base */
+        { PERF_RAW_FRACTION, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE, 10000000, 25, 100, 0, 0, FALSE, ERROR_SUCCESS, 25.0 },
+        { PERF_RAW_FRACTION, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE, 10000000, 5, 200, 3, 100, TRUE, ERROR_SUCCESS, 2.5 },
+        { PERF_RAW_FRACTION, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE, 10000000, 25, 0, 0, 0, FALSE, ERROR_SUCCESS, 0.0 },
+        { PERF_RAW_FRACTION, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE, 10000000, 150, 100, 0, 0, FALSE, ERROR_SUCCESS, 100.0 },
+        { PERF_RAW_FRACTION, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE | PDH_FMT_NOCAP100, 10000000, 150, 100, 0, 0, FALSE, ERROR_SUCCESS, 150.0 },
+        { 0x20570500 /* PERF_PRECISION_100NS_TIMER */, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE, 10000000, 7000000, 20000000, 2000000, 10000000, TRUE, ERROR_SUCCESS, 50.0 },
+        { 0x30020400 /* PERF_AVERAGE_TIMER */, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE, 10000000, 60000000, 12, 20000000, 4, TRUE, ERROR_SUCCESS, 0.5 },
+        { 0x40020500 /* PERF_AVERAGE_BULK */, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE, 10000000, 4000, 12, 1000, 4, TRUE, ERROR_SUCCESS, 375.0 },
+        { 0x20C20400 /* PERF_SAMPLE_FRACTION */, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE, 10000000, 30, 100, 10, 50, TRUE, ERROR_SUCCESS, 40.0 },
+    };
+    PDH_RAW_COUNTER raw1, raw2;
+    PDH_FMT_COUNTERVALUE value;
+    LONGLONG timebase;
+    PDH_STATUS ret;
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(tests); i++)
+    {
+        memset( &raw1, 0, sizeof(raw1) );
+        memset( &raw2, 0, sizeof(raw2) );
+        raw1.FirstValue = tests[i].new_first;
+        raw1.SecondValue = tests[i].new_second;
+        raw2.FirstValue = tests[i].old_first;
+        raw2.SecondValue = tests[i].old_second;
+        timebase = tests[i].timebase;
+        memset( &value, 0xcc, sizeof(value) );
+
+        ret = PdhFormatFromRawValue( tests[i].type, tests[i].format, tests[i].timebase == -1 ? NULL : &timebase,
+                                     &raw1, tests[i].has_old ? &raw2 : NULL, &value );
+        ok(ret == tests[i].status, "%u: got 0x%08lx, expected 0x%08lx\n", i, ret, tests[i].status);
+        if (tests[i].status == ERROR_SUCCESS)
+        {
+            ok(value.CStatus == PDH_CSTATUS_VALID_DATA, "%u: got status 0x%08lx\n", i, value.CStatus);
+            ok(fabs( value.doubleValue - tests[i].expected ) < 0.0001, "%u: got %f, expected %f\n", i, value.doubleValue,
+               tests[i].expected);
+        }
+        else
+            ok(value.CStatus == tests[i].status || value.CStatus == 0, "%u: got status 0x%08lx\n", i, value.CStatus);
+    }
+
+    /* formats */
+    timebase = 10000000;
+    memset( &raw1, 0, sizeof(raw1) );
+    memset( &raw2, 0, sizeof(raw2) );
+    raw1.FirstValue = 1000;
+    raw1.SecondValue = 20000000;
+    raw2.FirstValue = 500;
+    raw2.SecondValue = 10000000;
+
+    memset( &value, 0, sizeof(value) );
+    ret = PdhFormatFromRawValue( PERF_COUNTER_COUNTER, PDH_FMT_LONG | PDH_FMT_NOSCALE, &timebase, &raw1, &raw2, &value );
+    ok(ret == ERROR_SUCCESS, "got 0x%08lx\n", ret);
+    ok(value.longValue == 500, "got %ld\n", value.longValue);
+
+    memset( &value, 0, sizeof(value) );
+    ret = PdhFormatFromRawValue( PERF_COUNTER_COUNTER, PDH_FMT_LARGE | PDH_FMT_NOSCALE, &timebase, &raw1, &raw2, &value );
+    ok(ret == ERROR_SUCCESS, "got 0x%08lx\n", ret);
+    ok(value.largeValue == 500, "got %s\n", wine_dbgstr_longlong( value.largeValue ));
+
+    ret = PdhFormatFromRawValue( PERF_COUNTER_COUNTER, 0, &timebase, &raw1, &raw2, &value );
+    ok(ret == PDH_INVALID_ARGUMENT, "got 0x%08lx\n", ret);
+    ret = PdhFormatFromRawValue( PERF_COUNTER_COUNTER, PDH_FMT_LARGE | PDH_FMT_DOUBLE, &timebase, &raw1, &raw2, &value );
+    ok(ret == PDH_INVALID_ARGUMENT, "got 0x%08lx\n", ret);
+    ret = PdhFormatFromRawValue( PERF_COUNTER_COUNTER, PDH_FMT_DOUBLE, &timebase, &raw1, &raw2, NULL );
+    ok(ret == PDH_INVALID_ARGUMENT, "got 0x%08lx\n", ret);
+    ret = PdhFormatFromRawValue( PERF_COUNTER_COUNTER, PDH_FMT_DOUBLE, &timebase, NULL, &raw2, &value );
+    ok(ret == PDH_INVALID_ARGUMENT, "got 0x%08lx\n", ret);
+    ret = PdhFormatFromRawValue( 0x12345678, PDH_FMT_DOUBLE | PDH_FMT_NOSCALE, &timebase, &raw1, &raw2, &value );
+    ok(ret == PDH_FUNCTION_NOT_FOUND, "got 0x%08lx\n", ret);
+}
+
 static void test_add_counter_sets(void)
 {
     PDH_HCOUNTER counter;
@@ -1524,6 +1638,7 @@ START_TEST(pdh)
     if (pPdhCollectQueryDataWithTime) test_PdhCollectQueryDataWithTime();
 
     test_PdhGetFormattedCounterValue();
+    test_PdhFormatFromRawValue();
     test_PdhGetRawCounterValue();
     test_PdhSetCounterScaleFactor();
     test_PdhGetCounterTimeBase();

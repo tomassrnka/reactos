@@ -37,7 +37,7 @@
 #include "wine/debug.h"
 #include "wine/list.h"
 
-#include "pdh_perf.h"
+#include "perfdata.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(pdh);
 
@@ -607,6 +607,151 @@ PDH_STATUS WINAPI PdhCalculateCounterFromRawValue( PDH_HCOUNTER handle, DWORD fo
 
     LeaveCriticalSection( &pdh_handle_cs );
     return ret;
+}
+
+/***********************************************************************
+ *              PdhFormatFromRawValue   (PDH.@)
+ *
+ * Calculates the value of a counter from two raw samples (raw1 is the newer one) without a query.
+ * The .NET performance counter classes use it for every value they return.
+ */
+#ifndef PERF_OBJ_TIME_TIMER
+#define PERF_OBJ_TIME_TIMER           0x20610500
+#endif
+#ifndef PERF_PRECISION_SYSTEM_TIMER
+#define PERF_PRECISION_SYSTEM_TIMER   0x20470500
+#endif
+#ifndef PERF_PRECISION_100NS_TIMER
+#define PERF_PRECISION_100NS_TIMER    0x20570500
+#endif
+#ifndef PERF_PRECISION_OBJECT_TIMER
+#define PERF_PRECISION_OBJECT_TIMER   0x20670500
+#endif
+#ifndef PERF_LARGE_RAW_FRACTION
+#define PERF_LARGE_RAW_FRACTION       0x20020500
+#endif
+
+static LONG to_long( double d )
+{
+    return (d >= 2147483648.0 || d <= -2147483649.0) ? (LONG)0x80000000 : (LONG)d;
+}
+
+static LONGLONG to_large( double d )
+{
+    return (d >= 9223372036854775808.0 || d <= -9223372036854777856.0) ? (LONGLONG)0x8000000000000000ULL : (LONGLONG)d;
+}
+
+PDH_STATUS WINAPI PdhFormatFromRawValue( DWORD type, DWORD format, LONGLONG *timebase, PPDH_RAW_COUNTER raw1,
+                                         PPDH_RAW_COUNTER raw2, PPDH_FMT_COUNTERVALUE value )
+{
+    LONGLONG tb = timebase ? *timebase : 0;
+    DWORD kind = format & (PDH_FMT_LONG | PDH_FMT_DOUBLE | PDH_FMT_LARGE);
+    double d = 0.0, dt = 0.0, d1 = 0.0, first;
+    BOOL cap = TRUE;
+    PDH_STATUS ret = ERROR_SUCCESS;
+
+    TRACE("%#lx %#lx %p %p %p %p\n", type, format, timebase, raw1, raw2, value);
+
+    if (!value || !raw1) return PDH_INVALID_ARGUMENT;
+    memset( value, 0, sizeof(*value) );
+    if (kind != PDH_FMT_LONG && kind != PDH_FMT_DOUBLE && kind != PDH_FMT_LARGE) return PDH_INVALID_ARGUMENT;
+
+    first = (double)raw1->FirstValue;
+    switch (type)
+    {
+    case PERF_COUNTER_RAWCOUNT:
+    case PERF_COUNTER_RAWCOUNT_HEX:
+        d = (double)(DWORD)raw1->FirstValue;
+        cap = FALSE;
+        break;
+
+    case PERF_COUNTER_LARGE_RAWCOUNT:
+    case PERF_COUNTER_LARGE_RAWCOUNT_HEX:
+        d = first;
+        cap = FALSE;
+        break;
+
+    case PERF_RAW_FRACTION:
+    case PERF_LARGE_RAW_FRACTION:
+    {
+        double num = type == PERF_RAW_FRACTION ? (double)(DWORD)raw1->FirstValue : first;
+        double den = type == PERF_RAW_FRACTION ? (double)(DWORD)raw1->SecondValue : (double)raw1->SecondValue;
+        d = den != 0.0 ? 100.0 * num / den : 0.0;
+        break;
+    }
+
+    case PERF_COUNTER_COUNTER:
+    case PERF_COUNTER_BULK_COUNT:
+    case PERF_COUNTER_TIMER:
+    case PERF_COUNTER_TIMER_INV:
+    case PERF_100NSEC_TIMER:
+    case PERF_100NSEC_TIMER_INV:
+    case PERF_OBJ_TIME_TIMER:
+    case PERF_SAMPLE_FRACTION:
+    case PERF_PRECISION_SYSTEM_TIMER:
+    case PERF_PRECISION_100NS_TIMER:
+    case PERF_PRECISION_OBJECT_TIMER:
+    case PERF_AVERAGE_TIMER:
+    case PERF_AVERAGE_BULK:
+        if (!raw2)
+        {
+            value->CStatus = PDH_CSTATUS_INVALID_DATA;
+            return PDH_CSTATUS_INVALID_DATA;
+        }
+        d1 = (double)(raw1->FirstValue - raw2->FirstValue);
+        dt = (double)(raw1->SecondValue - raw2->SecondValue);
+        if (dt < 0.0) ret = PDH_CALC_NEGATIVE_DENOMINATOR;
+        else if (d1 < 0.0) ret = PDH_CALC_NEGATIVE_VALUE;
+        else if (dt > 0.0)
+        {
+            switch (type)
+            {
+            case PERF_COUNTER_COUNTER:
+            case PERF_COUNTER_BULK_COUNT:
+                d = tb > 0 ? d1 / (dt / (double)tb) : 0.0;
+                break;
+            case PERF_AVERAGE_TIMER:
+                d = tb > 0 ? d1 / (double)tb / dt : 0.0;
+                break;
+            case PERF_COUNTER_TIMER_INV:
+            case PERF_100NSEC_TIMER_INV:
+                d = 100.0 * (1.0 - d1 / dt);
+                if (d < 0.0) ret = PDH_CALC_NEGATIVE_DENOMINATOR;
+                break;
+            case PERF_AVERAGE_BULK:
+                d = d1 / dt;
+                break;
+            default:
+                d = 100.0 * d1 / dt;
+                break;
+            }
+        }
+        if (ret)
+        {
+            value->CStatus = ret;
+            return ret;
+        }
+        break;
+
+    case PERF_ELAPSED_TIME:
+        d = tb > 0 ? (double)(raw1->SecondValue - raw1->FirstValue) / (double)tb : 0.0;
+        if (d < 0.0) d = 0.0;
+        cap = FALSE;
+        break;
+
+    default:
+        FIXME("unhandled counter type %#lx\n", type);
+        return PDH_FUNCTION_NOT_FOUND;
+    }
+
+    if (cap && (type & PERF_DISPLAY_PERCENT) && !(format & PDH_FMT_NOCAP100) && d > 100.0) d = 100.0;
+    if (format & PDH_FMT_1000) d *= 1000;
+
+    if (kind == PDH_FMT_LONG) value->longValue = to_long( d );
+    else if (kind == PDH_FMT_LARGE) value->largeValue = to_large( d );
+    else value->doubleValue = d;
+    value->CStatus = PDH_CSTATUS_VALID_DATA;
+    return ERROR_SUCCESS;
 }
 
 /***********************************************************************

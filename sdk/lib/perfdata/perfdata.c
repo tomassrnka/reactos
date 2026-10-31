@@ -1,10 +1,15 @@
 /*
- * Performance Data Helper (pdh.dll): built-in counter sets and their providers.
+ * Built-in performance counter sets and their providers.
  *
+ * Shared by pdh.dll (the PDH counter API) and advapi32.dll (HKEY_PERFORMANCE_DATA).
  * The counter sets are the ones that Windows publishes for the system objects
  * (Memory, Processor, System, PhysicalDisk, Network Interface, Process); their
  * names, name indices and counter types follow Windows. Values come from
  * NtQuerySystemInformation, the disk class driver and the IP helper.
+ *
+ * This file is linked into advapi32, so it must not use the C runtime DLL:
+ * memory comes from the process heap, and only the string and sort helpers that
+ * ntdll exports are used.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -31,7 +36,6 @@
 #include "winreg.h"
 #include "winnls.h"
 #include "winioctl.h"
-#include "winternl.h"
 #include "ntddstor.h"
 #include "iphlpapi.h"
 
@@ -39,9 +43,7 @@
 #include "pdhmsg.h"
 #include "winperf.h"
 
-#include "wine/debug.h"
-
-#include "pdh_perf.h"
+#include "perfdata.h"
 
 #ifndef max
 #define max(a,b) (((a) > (b)) ? (a) : (b))
@@ -50,13 +52,52 @@
 #define min(a,b) (((a) < (b)) ? (a) : (b))
 #endif
 
-WINE_DEFAULT_DEBUG_CHANNEL(pdh);
-
 #ifndef ARRAY_SIZE
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 #endif
 
-#include "pdh_tables.h"
+
+/* process heap wrappers: no CRT */
+
+static void *perf_alloc( SIZE_T size )
+{
+    return HeapAlloc( GetProcessHeap(), 0, size ? size : 1 );
+}
+
+static void *perf_calloc( SIZE_T count, SIZE_T size )
+{
+    if (size && count > (~(SIZE_T)0) / size) return NULL;
+    return HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, (count && size) ? count * size : 1 );
+}
+
+static void *perf_realloc( void *ptr, SIZE_T size )
+{
+    if (!ptr) return perf_alloc( size );
+    return HeapReAlloc( GetProcessHeap(), 0, ptr, size ? size : 1 );
+}
+
+static void perf_free( void *ptr )
+{
+    if (ptr) HeapFree( GetProcessHeap(), 0, ptr );
+}
+
+static WCHAR *perf_wcsdup( const WCHAR *str )
+{
+    SIZE_T len = lstrlenW( str ) + 1;
+    WCHAR *ret = perf_alloc( len * sizeof(WCHAR) );
+    if (ret) memcpy( ret, str, len * sizeof(WCHAR) );
+    return ret;
+}
+
+#define malloc  perf_alloc
+#define calloc  perf_calloc
+#define realloc perf_realloc
+#define free    perf_free
+#define wcsdup  perf_wcsdup
+#define wcsicmp _wcsicmp
+#define wcsnicmp _wcsnicmp
+
+#include "perfdata_tables.h"
 
 static CRITICAL_SECTION perf_cs;
 static CRITICAL_SECTION_DEBUG perf_cs_debug =
@@ -156,7 +197,7 @@ struct pdh_process
     LARGE_INTEGER CreateTime;
     LARGE_INTEGER UserTime;
     LARGE_INTEGER KernelTime;
-    UNICODE_STRING ImageName;
+    struct { USHORT Length; USHORT MaximumLength; PWSTR Buffer; } ImageName;
     LONG BasePriority;
     HANDLE UniqueProcessId;
     HANDLE InheritedFromUniqueProcessId;
@@ -166,13 +207,16 @@ struct pdh_process
     struct pdh_vm_counters vm;
 };
 
+#define PDH_SYSINFO_TIMEOFDAY     3
 #define PDH_SYSINFO_PERFORMANCE   2
 #define PDH_SYSINFO_PROCESS       5
 #define PDH_SYSINFO_CPU_PERF      8
 
-static NTSTATUS query_sysinfo( ULONG class, void *buf, ULONG size, ULONG *ret )
+LONG NTAPI NtQuerySystemInformation( ULONG, PVOID, ULONG, PULONG );
+
+static LONG query_sysinfo( ULONG class, void *buf, ULONG size, ULONG *ret )
 {
-    return NtQuerySystemInformation( (SYSTEM_INFORMATION_CLASS)class, buf, size, ret );
+    return NtQuerySystemInformation( class, buf, size, ret );
 }
 
 /* ---- snapshots ----
@@ -336,10 +380,10 @@ static BOOL ensure_disk( BOOL force )
     {
         DWORD ret, l;
 
-        swprintf( path, ARRAY_SIZE(path), L"\\\\.\\PhysicalDrive%u", i );
+        _snwprintf( path, ARRAY_SIZE(path), L"\\\\.\\PhysicalDrive%u", i );
         h = CreateFileW( path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL );
         if (h == INVALID_HANDLE_VALUE) continue;
-        swprintf( disks[n].name, ARRAY_SIZE(disks[n].name), L"%u", i );
+        _snwprintf( disks[n].name, ARRAY_SIZE(disks[n].name), L"%u", i );
         for (l = 0; l < 26; l++) if (letter_disk[l] == i) append_letter( disks[n].name, ARRAY_SIZE(disks[n].name), 'A' + l );
         disks[n].have_perf = DeviceIoControl( h, IOCTL_DISK_PERFORMANCE, NULL, 0, &disks[n].perf,
                                               sizeof(disks[n].perf), &ret, NULL );
@@ -408,7 +452,7 @@ static BOOL ensure_net( BOOL force )
         if (!len)
         {
             WCHAR num[16];
-            swprintf( num, ARRAY_SIZE(num), L"%lu", row->dwIndex );
+            _snwprintf( num, ARRAY_SIZE(num), L"%lu", row->dwIndex );
             lstrcpyW( snap_net.net[n].name, L"Interface " );
             lstrcatW( snap_net.net[n].name, num );
         }
@@ -423,7 +467,7 @@ static BOOL ensure_net( BOOL force )
                 do
                 {
                     WCHAR num[16];
-                    swprintf( num, ARRAY_SIZE(num), L" _%u", k++ );
+                    _snwprintf( num, ARRAY_SIZE(num), L" _%u", k++ );
                     lstrcpyW( snap_net.net[n].name, base );
                     lstrcatW( snap_net.net[n].name, num );
                 }
@@ -442,7 +486,7 @@ static BOOL ensure_net( BOOL force )
 static BOOL ensure_proc( BOOL force )
 {
     ULONG size = 0x20000, ret;
-    NTSTATUS status;
+    LONG status;
     BYTE *buf = NULL;
     struct pdh_process *p;
     DWORD n = 0, i;
@@ -456,7 +500,7 @@ static BOOL ensure_proc( BOOL force )
         free( buf );
         if (!(buf = malloc( size ))) return FALSE;
         status = query_sysinfo( PDH_SYSINFO_PROCESS, buf, size, &ret );
-        if (status != (NTSTATUS)0xC0000004 /* STATUS_INFO_LENGTH_MISMATCH */) break;
+        if (status != (LONG)0xC0000004 /* STATUS_INFO_LENGTH_MISMATCH */) break;
         size = max( ret, size ) + 0x10000;
     }
     if (status < 0)
@@ -507,7 +551,7 @@ static BOOL ensure_proc( BOOL force )
         if (dup)
         {
             WCHAR num[16];
-            swprintf( num, ARRAY_SIZE(num), L"#%u", dup );
+            _snwprintf( num, ARRAY_SIZE(num), L"#%u", dup );
             lstrcatW( name, num );
         }
         snap_proc.name[i] = wcsdup( name );
@@ -668,11 +712,11 @@ BOOL perf_index_by_name( const WCHAR *name, DWORD *index )
 
 /* ---- instances ---- */
 
-PDH_STATUS perf_get_instances( const struct perf_object_def *obj, WCHAR ***names, DWORD *count )
+LONG perf_get_instances( const struct perf_object_def *obj, WCHAR ***names, DWORD *count )
 {
     WCHAR **list = NULL;
     DWORD i, n = 0;
-    PDH_STATUS ret = ERROR_SUCCESS;
+    LONG ret = ERROR_SUCCESS;
 
     *names = NULL;
     *count = 0;
@@ -687,7 +731,7 @@ PDH_STATUS perf_get_instances( const struct perf_object_def *obj, WCHAR ***names
         for (i = 0; i + 1 < n; i++)
         {
             WCHAR buf[16];
-            swprintf( buf, ARRAY_SIZE(buf), L"%u", i );
+            _snwprintf( buf, ARRAY_SIZE(buf), L"%u", i );
             list[i] = wcsdup( buf );
         }
         list[n - 1] = wcsdup( L"_Total" );
@@ -785,6 +829,28 @@ static void fetch_memory( DWORD id, LONGLONG *first, LONGLONG *second, BOOL *ok 
     *second = perf_now();
 }
 
+/* the time the system started, in FILETIME units; now is the current FILETIME */
+static LONGLONG perf_boot_time( LONGLONG now )
+{
+    struct
+    {
+        LARGE_INTEGER BootTime;
+        LARGE_INTEGER CurrentTime;
+        LARGE_INTEGER TimeZoneBias;
+        ULONG TimeZoneId;
+        ULONG Reserved;
+        ULONGLONG BootTimeBias;
+        ULONGLONG SleepTimeBias;
+    } tod;
+    ULONG len;
+
+    memset( &tod, 0, sizeof(tod) );
+    if (query_sysinfo( PDH_SYSINFO_TIMEOFDAY, &tod, sizeof(tod), &len ) >= 0 && tod.BootTime.QuadPart > 0 &&
+        tod.BootTime.QuadPart <= now)
+        return tod.BootTime.QuadPart;
+    return now - (LONGLONG)GetTickCount() * 10000;
+}
+
 static void fetch_system( DWORD id, LONGLONG *first, LONGLONG *second, BOOL *ok )
 {
     const struct pdh_spi *s;
@@ -794,7 +860,7 @@ static void fetch_system( DWORD id, LONGLONG *first, LONGLONG *second, BOOL *ok 
     {
     case CID_SYSTEM_SYSTEM_UP_TIME:
         *second = perf_now();
-        *first = *second - (LONGLONG)GetTickCount64() * 10000;
+        *first = perf_boot_time( *second );
         *ok = TRUE;
         return;
     case CID_SYSTEM_PROCESSES:
@@ -844,7 +910,7 @@ static LONGLONG cpu_value( DWORD id, const struct pdh_cpu *c )
     return 0;
 }
 
-static void fetch_cpu( DWORD id, const WCHAR *inst, LONGLONG *first, LONGLONG *second, PDH_STATUS *status )
+static void fetch_cpu( DWORD id, const WCHAR *inst, LONGLONG *first, LONGLONG *second, LONG *status )
 {
     DWORD i;
 
@@ -888,7 +954,7 @@ static LONGLONG disk_value( DWORD id, const struct disk_info *d )
     return 0;
 }
 
-static void fetch_disk( DWORD id, const WCHAR *inst, LONGLONG *first, LONGLONG *second, PDH_STATUS *status )
+static void fetch_disk( DWORD id, const WCHAR *inst, LONGLONG *first, LONGLONG *second, LONG *status )
 {
     DWORD i;
 
@@ -908,7 +974,7 @@ static void fetch_disk( DWORD id, const WCHAR *inst, LONGLONG *first, LONGLONG *
     *second = id == CID_PHYSICALDISK_CURRENT_DISK_QUEUE_LENGTH ? 0 : perf_now();
 }
 
-static void fetch_net( DWORD id, const WCHAR *inst, LONGLONG *first, LONGLONG *second, PDH_STATUS *status )
+static void fetch_net( DWORD id, const WCHAR *inst, LONGLONG *first, LONGLONG *second, LONG *status )
 {
     const MIB_IFROW *r;
     DWORD i;
@@ -956,7 +1022,7 @@ static LONGLONG proc_value( DWORD id, const struct pdh_process *p )
     return 0;
 }
 
-static void fetch_proc( DWORD id, const WCHAR *inst, LONGLONG *first, LONGLONG *second, PDH_STATUS *status )
+static void fetch_proc( DWORD id, const WCHAR *inst, LONGLONG *first, LONGLONG *second, LONG *status )
 {
     DWORD i;
 
@@ -986,10 +1052,10 @@ static void fetch_proc( DWORD id, const WCHAR *inst, LONGLONG *first, LONGLONG *
     }
 }
 
-PDH_STATUS perf_fetch( const struct perf_object_def *obj, const struct perf_counter_def *ctr, const WCHAR *inst,
+LONG perf_fetch( const struct perf_object_def *obj, const struct perf_counter_def *ctr, const WCHAR *inst,
                        DWORD instance_index, LONGLONG *first, LONGLONG *second )
 {
-    PDH_STATUS status = ERROR_SUCCESS;
+    LONG status = ERROR_SUCCESS;
     WCHAR key[300];
     BOOL ok = TRUE;
 
@@ -1001,7 +1067,7 @@ PDH_STATUS perf_fetch( const struct perf_object_def *obj, const struct perf_coun
         if (instance_index && instance_index != ~0u)
         {
             WCHAR num[16];
-            swprintf( num, ARRAY_SIZE(num), L"#%u", instance_index );
+            _snwprintf( num, ARRAY_SIZE(num), L"#%u", instance_index );
             lstrcatW( key, num );
         }
     }
@@ -1021,4 +1087,120 @@ PDH_STATUS perf_fetch( const struct perf_object_def *obj, const struct perf_coun
     }
     LeaveCriticalSection( &perf_cs );
     return status;
+}
+
+/* ---- built-in name and help tables (REG_MULTI_SZ layout: index, text, index, text ... ) ---- */
+
+struct name_entry
+{
+    DWORD        index;
+    const WCHAR *text;
+    WCHAR       *owned;   /* text built here, freed after the table is made */
+};
+
+static const WCHAR *object_help_text( const struct perf_object_def *obj )
+{
+    switch (obj->index)
+    {
+    case 2:   return L"Counters for the system as a whole: file operations, context switches, system calls, processes and threads.";
+    case 4:   return L"Counters for physical and virtual memory: available and committed memory, paging activity and pool sizes.";
+    case 230: return L"Counters for each running process: processor time, memory use, threads, handles and identifiers.";
+    case 234: return L"Counters for each physical disk drive: transfer rates, throughput, queue length and busy time.";
+    case 238: return L"Counters for each processor: how its time is divided between user mode, kernel mode, interrupts and idle.";
+    case 510: return L"Counters for each network adapter: traffic in bytes and packets, errors and the bandwidth of the link.";
+    }
+    return L"";
+}
+
+static void add_entry( struct name_entry *list, DWORD *count, DWORD index, const WCHAR *text, WCHAR *owned )
+{
+    DWORD i;
+
+    for (i = 0; i < *count; i++)
+    {
+        if (list[i].index == index)
+        {
+            perf_free( owned );
+            return;
+        }
+    }
+    list[*count].index = index;
+    list[*count].text = text;
+    list[*count].owned = owned;
+    (*count)++;
+}
+
+WCHAR *perf_builtin_names( BOOL help, DWORD *bytes )
+{
+    struct name_entry *list, tmp;
+    DWORD i, k, n = 0, total = 0, max = 0;
+    WCHAR *out, *p;
+
+    *bytes = 0;
+    for (i = 0; i < ARRAY_SIZE(objects); i++) max += 1 + objects[i].count;
+    if (!(list = perf_calloc( max, sizeof(*list) ))) return NULL;
+
+    for (i = 0; i < ARRAY_SIZE(objects); i++)
+    {
+        const struct perf_object_def *obj = &objects[i];
+
+        if (!help) add_entry( list, &n, obj->index, obj->name, NULL );
+        else add_entry( list, &n, obj->index + 1, object_help_text( obj ), NULL );
+        for (k = 0; k < obj->count; k++)
+        {
+            const struct perf_counter_def *ctr = &obj->counters[k];
+
+            if (!help) add_entry( list, &n, ctr->index, ctr->name, NULL );
+            else
+            {
+                /* no descriptive text yet: the help of a counter is its name */
+                WCHAR *text = perf_alloc( (lstrlenW( ctr->name ) + 2) * sizeof(WCHAR) );
+                if (!text) continue;
+                lstrcpyW( text, ctr->name );
+                lstrcatW( text, L"." );
+                add_entry( list, &n, ctr->index + 1, text, text );
+            }
+        }
+    }
+
+    for (i = 1; i < n; i++)  /* ascending by index, as Windows lists them */
+    {
+        tmp = list[i];
+        for (k = i; k > 0 && list[k - 1].index > tmp.index; k--) list[k] = list[k - 1];
+        list[k] = tmp;
+    }
+
+    for (i = 0; i < n; i++)
+    {
+        WCHAR num[16];
+        _snwprintf( num, ARRAY_SIZE(num), L"%lu", list[i].index );
+        num[ARRAY_SIZE(num) - 1] = 0;
+        total += lstrlenW( num ) + 1 + lstrlenW( list[i].text ) + 1;
+    }
+    total += 2;   /* the empty string that ends the list, and one more for readers that expect two */
+
+    if ((out = perf_alloc( total * sizeof(WCHAR) )))
+    {
+        for (p = out, i = 0; i < n; i++)
+        {
+            WCHAR num[16];
+            _snwprintf( num, ARRAY_SIZE(num), L"%lu", list[i].index );
+            num[ARRAY_SIZE(num) - 1] = 0;
+            lstrcpyW( p, num );
+            p += lstrlenW( p ) + 1;
+            lstrcpyW( p, list[i].text );
+            p += lstrlenW( p ) + 1;
+        }
+        *p++ = 0;
+        *p = 0;
+        *bytes = total * sizeof(WCHAR);
+    }
+    for (i = 0; i < n; i++) perf_free( list[i].owned );
+    perf_free( list );
+    return out;
+}
+
+void perf_free_buffer( void *ptr )
+{
+    perf_free( ptr );
 }

@@ -117,3 +117,17 @@ QueryInfoHKCRKey(
     _Out_opt_ LPDWORD lpcbMaxValueLen,
     _Out_opt_ LPDWORD lpcbSecurityDescriptor,
     _Out_opt_ PFILETIME lpftLastWriteTime);
+
+/* perfdata.c: HKEY_PERFORMANCE_DATA, HKEY_PERFORMANCE_TEXT and HKEY_PERFORMANCE_NLSTEXT */
+BOOL
+RegpIsPerformanceKey(
+    _In_ HKEY hKey);
+
+LONG
+RegpQueryPerformanceValue(
+    _In_ HKEY hKey,
+    _In_opt_ LPCWSTR lpValueName,
+    _In_ BOOL bAnsi,
+    _Out_opt_ LPDWORD lpType,
+    _Out_opt_ LPBYTE lpData,
+    _Inout_opt_ LPDWORD lpcbData);

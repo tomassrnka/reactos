@@ -1,5 +1,5 @@
 /*
- * Performance Data Helper (pdh.dll): built-in counter sets.
+ * Built-in performance counter sets (shared by pdh.dll and advapi32.dll).
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -16,8 +16,8 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#ifndef __PDH_PERF_H
-#define __PDH_PERF_H
+#ifndef __PERFDATA_H
+#define __PERFDATA_H
 
 enum inst_kind
 {
@@ -60,10 +60,15 @@ const struct perf_counter_def *perf_find_counter( const struct perf_object_def *
 BOOL perf_name_by_index( DWORD index, const WCHAR **name );
 BOOL perf_index_by_name( const WCHAR *name, DWORD *index );
 
-PDH_STATUS perf_get_instances( const struct perf_object_def *obj, WCHAR ***names, DWORD *count );
+LONG perf_get_instances( const struct perf_object_def *obj, WCHAR ***names, DWORD *count );
 void perf_free_instances( WCHAR **names, DWORD count );
 
-PDH_STATUS perf_fetch( const struct perf_object_def *obj, const struct perf_counter_def *ctr, const WCHAR *inst,
+LONG perf_fetch( const struct perf_object_def *obj, const struct perf_counter_def *ctr, const WCHAR *inst,
                        DWORD instance_index, LONGLONG *first, LONGLONG *second );
+
+/* the name (help = FALSE) or help (help = TRUE) table of the built-in schema as REG_MULTI_SZ data; *bytes is its size.
+ * Release with perf_free_buffer. */
+WCHAR *perf_builtin_names( BOOL help, DWORD *bytes );
+void perf_free_buffer( void *ptr );
 
 #endif
