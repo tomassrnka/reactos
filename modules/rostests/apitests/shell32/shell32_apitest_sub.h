@@ -13,6 +13,10 @@
 /* DriveTools: when set, the program appends "name|arguments" to this file and exits */
 #define DRIVETOOLS_MARKER_VARIABLE L"SHELL32_APITEST_DRIVETOOLS_MARKER"
 
+/* ShellExecuteExLnk: when set, the program appends "directory|show command|arguments|%LNKTEST_VAR%" to this
+   file and exits */
+#define LNK_MARKER_VARIABLE L"SHELL32_APITEST_LNK_MARKER"
+
 #define NUM_STAGE 10
 
 static inline BOOL FindSubProgram(LPWSTR pszSubProgram, DWORD cchSubProgram)
