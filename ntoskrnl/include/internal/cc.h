@@ -273,6 +273,30 @@ typedef struct _INTERNAL_BCB
     BOOLEAN Pinned;
 } INTERNAL_BCB, *PINTERNAL_BCB;
 
+/* Node type codes of the BCB handles Cc gives to file systems */
+#define CC_NTC_BCB  0x2FD
+#define CC_NTC_OBCB 0x2FA
+
+/*
+ * Overlap BCB: the handle of ONE pin whose range is not contained in a single
+ * pinned BCB. Linked pinned BCBs of a shared cache map never overlap each
+ * other (see CcpPinData), so such a pin is covered by several of them - the
+ * existing BCBs it overlaps plus new BCBs for the gaps - and holds all of
+ * their locks, so it excludes every pin that overlaps any part of its range.
+ * It is private to the pin: CcUnpinData(ForThread), CcRepinBcb,
+ * CcUnpinRepinnedBcb, CcSetDirtyPinnedData, CcSetBcbOwnerPointer and
+ * CcGetFileObjectFromBcb accept it like an INTERNAL_BCB handle and tell the
+ * two apart by PFCB.NodeTypeCode.
+ */
+typedef struct _INTERNAL_OBCB
+{
+    PUBLIC_BCB PFCB;          /* CC_NTC_OBCB, the range that was pinned */
+    volatile LONG RefCount;   /* 1 for the pin, +1 per CcRepinBcb */
+    volatile LONG Pinned;     /* the member locks are still held */
+    ULONG Count;
+    PINTERNAL_BCB Bcbs[ANYSIZE_ARRAY]; /* ascending, non-overlapping; one reference each */
+} INTERNAL_OBCB, *PINTERNAL_OBCB;
+
 typedef struct _LAZY_WRITER
 {
     LIST_ENTRY WorkQueue;

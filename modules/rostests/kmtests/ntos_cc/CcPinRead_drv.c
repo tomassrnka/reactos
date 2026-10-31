@@ -405,6 +405,9 @@ static volatile LONG PinRaceOwners;
 static volatile LONG PinRaceOverlaps;
 static volatile LONG PinRaceFailures;
 
+/* Context NULL: every thread pins the same page (TestId 7). Otherwise it is
+ * 1 + the thread index and threads pin 0x2000 bytes at 0, 0x800 or 0x1000:
+ * pairwise partially overlapping ranges (TestId 9). */
 static
 VOID
 NTAPI
@@ -412,10 +415,10 @@ PinRaceThread(IN PVOID Context)
 {
     LONG Round, Generation;
     LARGE_INTEGER Offset;
+    ULONG Length;
     PVOID Bcb, Buffer;
     BOOLEAN Ret;
-
-    UNREFERENCED_PARAMETER(Context);
+    ULONG_PTR Index = (ULONG_PTR)Context;
 
     for (Round = 0; Round < PIN_RACE_ROUNDS; Round++)
     {
@@ -432,11 +435,12 @@ PinRaceThread(IN PVOID Context)
                 YieldProcessor();
         }
 
-        Offset.QuadPart = 0;
+        Offset.QuadPart = Index ? (((Index - 1) % 3) * 0x800) : 0;
+        Length = Index ? 0x2000 : PAGE_SIZE;
         Ret = FALSE;
         _SEH2_TRY
         {
-            Ret = CcPinRead(TestFileObject, &Offset, PAGE_SIZE, PIN_WAIT | PIN_EXCLUSIVE, &Bcb, &Buffer);
+            Ret = CcPinRead(TestFileObject, &Offset, Length, PIN_WAIT | PIN_EXCLUSIVE, &Bcb, &Buffer);
         }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
         {
@@ -457,6 +461,232 @@ PinRaceThread(IN PVOID Context)
 
         CcUnpinData(Bcb);
     }
+}
+
+/* TestId 8: pins another thread tries (without waiting) while this one holds pins */
+#define OVERLAP_MAX_PROBES 4
+
+typedef struct _OVERLAP_PROBE
+{
+    ULONG Offset;
+    ULONG Length;
+    ULONG Flags;
+    BOOLEAN Expected;
+} OVERLAP_PROBE, *POVERLAP_PROBE;
+
+typedef struct _OVERLAP_PROBES
+{
+    PCSTR What;
+    ULONG Count;
+    OVERLAP_PROBE Probes[OVERLAP_MAX_PROBES];
+} OVERLAP_PROBES, *POVERLAP_PROBES;
+
+static
+VOID
+NTAPI
+OverlapProbeThread(IN PVOID Context)
+{
+    POVERLAP_PROBES Probes = Context;
+    LARGE_INTEGER Offset;
+    PVOID Bcb, Buffer;
+    BOOLEAN Ret;
+    ULONG i;
+
+    for (i = 0; i < Probes->Count; i++)
+    {
+        POVERLAP_PROBE Probe = &Probes->Probes[i];
+
+        Ret = FALSE;
+        Bcb = NULL;
+        Offset.QuadPart = Probe->Offset;
+        KmtStartSeh();
+        Ret = CcPinRead(TestFileObject, &Offset, Probe->Length, Probe->Flags, &Bcb, &Buffer);
+        KmtEndSeh(STATUS_SUCCESS);
+
+        ok(Ret == Probe->Expected, "%s: pin 0x%lx+0x%lx flags 0x%lx returned %u, expected %u\n",
+           Probes->What, Probe->Offset, Probe->Length, Probe->Flags, Ret, Probe->Expected);
+        if (Ret)
+        {
+            CcUnpinData(Bcb);
+        }
+    }
+}
+
+static
+VOID
+RunOverlapProbes(
+    PCSTR What,
+    ULONG Count,
+    const OVERLAP_PROBE *Probes)
+{
+    OVERLAP_PROBES Context;
+    PKTHREAD Thread;
+
+    ASSERT(Count <= OVERLAP_MAX_PROBES);
+    Context.What = What;
+    Context.Count = Count;
+    RtlCopyMemory(Context.Probes, Probes, Count * sizeof(*Probes));
+
+    Thread = KmtStartThread(OverlapProbeThread, &Context);
+    KmtFinishThread(Thread, NULL);
+}
+
+static
+BOOLEAN
+PinForOverlapTest(
+    ULONG Offset,
+    ULONG Length,
+    ULONG Flags,
+    PVOID *Bcb,
+    PVOID *Buffer)
+{
+    LARGE_INTEGER FileOffset;
+    BOOLEAN Ret = FALSE;
+
+    FileOffset.QuadPart = Offset;
+    KmtStartSeh();
+    Ret = CcPinRead(TestFileObject, &FileOffset, Length, Flags, Bcb, Buffer);
+    KmtEndSeh(STATUS_SUCCESS);
+    ok(Ret == TRUE, "CcPinRead(0x%lx+0x%lx, 0x%lx) failed\n", Offset, Length, Flags);
+
+    return Ret;
+}
+
+#define EXCL (PIN_EXCLUSIVE)
+#define SHRD (0)
+
+static
+VOID
+TestPartialOverlap(VOID)
+{
+    PVOID MapBcb, MapBuffer, Bcb, Bcb2, Buffer;
+    LARGE_INTEGER Offset;
+    IO_STATUS_BLOCK IoStatus;
+    BOOLEAN Ret;
+
+    /* Keep the file mapped and its pages resident, so the probes (which do
+     * not wait) can only fail on a BCB lock, not on paging in */
+    Ret = FALSE;
+    Offset.QuadPart = 0;
+    KmtStartSeh();
+    Ret = CcMapData(TestFileObject, &Offset, 0x4000, MAP_WAIT, &MapBcb, &MapBuffer);
+    KmtEndSeh(STATUS_SUCCESS);
+    if (skip(Ret == TRUE, "CcMapData failed\n"))
+        return;
+
+    /* Exclusive pin vs a partially overlapping pin starting above it */
+    if (PinForOverlapTest(0, 0x2000, PIN_WAIT | EXCL, &Bcb, &Buffer))
+    {
+        static const OVERLAP_PROBE Probes[] = {
+            { 0x1000, 0x2000, EXCL, FALSE },
+            { 0x1000, 0x2000, SHRD, FALSE },
+            { 0x1800, 0x0800, EXCL, FALSE },
+            { 0x2000, 0x1000, EXCL, TRUE },
+        };
+        RunOverlapProbes("exclusive held, overlap above", RTL_NUMBER_OF(Probes), Probes);
+        CcUnpinData(Bcb);
+    }
+
+    /* ... and below it */
+    if (PinForOverlapTest(0x1000, 0x2000, PIN_WAIT | EXCL, &Bcb, &Buffer))
+    {
+        static const OVERLAP_PROBE Probes[] = {
+            { 0x0000, 0x2000, EXCL, FALSE },
+            { 0x0000, 0x1800, SHRD, FALSE },
+            { 0x0000, 0x1000, EXCL, TRUE },
+            { 0x3000, 0x1000, EXCL, TRUE },
+        };
+        RunOverlapProbes("exclusive held, overlap below", RTL_NUMBER_OF(Probes), Probes);
+        CcUnpinData(Bcb);
+    }
+
+    /* Shared pins over partially overlapping ranges do not exclude each other */
+    if (PinForOverlapTest(0, 0x2000, PIN_WAIT | SHRD, &Bcb, &Buffer))
+    {
+        static const OVERLAP_PROBE Probes[] = {
+            { 0x1000, 0x2000, SHRD, TRUE },
+            { 0x1000, 0x2000, EXCL, FALSE },
+            { 0x0800, 0x0800, SHRD, TRUE },
+        };
+        RunOverlapProbes("shared held", RTL_NUMBER_OF(Probes), Probes);
+        CcUnpinData(Bcb);
+    }
+
+    /* A pin spanning two held pins and the gap between them */
+    if (PinForOverlapTest(0, 0x1000, PIN_WAIT | EXCL, &Bcb, &Buffer))
+    {
+        if (PinForOverlapTest(0x2000, 0x1000, PIN_WAIT | EXCL, &Bcb2, &Buffer))
+        {
+            static const OVERLAP_PROBE Probes[] = {
+                { 0x0800, 0x2000, EXCL, FALSE },
+                { 0x0800, 0x2000, SHRD, FALSE },
+                { 0x1000, 0x1000, EXCL, TRUE },
+            };
+            RunOverlapProbes("two exclusive held", RTL_NUMBER_OF(Probes), Probes);
+            CcUnpinData(Bcb2);
+        }
+        CcUnpinData(Bcb);
+    }
+
+    /* A pin that partially overlaps one of our own: the handle it returns
+     * covers every byte of its range, and works with the BCB routines */
+    if (PinForOverlapTest(0, 0x1000, PIN_WAIT | EXCL, &Bcb2, &Buffer))
+    {
+        if (PinForOverlapTest(0x0800, 0x2000, PIN_WAIT | EXCL, &Bcb, &Buffer))
+        {
+            ok_eq_pointer(Buffer, (PVOID)((ULONG_PTR)MapBuffer + 0x800));
+            ok_eq_pointer(CcGetFileObjectFromBcb(Bcb), TestFileObject);
+            CcUnpinData(Bcb2);
+            Bcb2 = NULL;
+
+            {
+                static const OVERLAP_PROBE Probes[] = {
+                    { 0x0000, 0x0800, EXCL, FALSE },
+                    { 0x1000, 0x0800, EXCL, FALSE },
+                    { 0x2000, 0x1000, SHRD, FALSE },
+                    { 0x2800, 0x1000, EXCL, TRUE },
+                };
+                RunOverlapProbes("own overlap pin held", RTL_NUMBER_OF(Probes), Probes);
+            }
+
+            RtlFillMemory(Buffer, 0x2000, 0x5A);
+            CcSetDirtyPinnedData(Bcb, NULL);
+            CcRepinBcb(Bcb);
+            CcUnpinData(Bcb);
+
+            /* Unpinned but still repinned: the range is free again */
+            {
+                static const OVERLAP_PROBE Probes[] = {
+                    { 0x0800, 0x2000, EXCL, TRUE },
+                    { 0x0000, 0x3000, EXCL, TRUE },
+                };
+                RunOverlapProbes("own overlap pin repinned", RTL_NUMBER_OF(Probes), Probes);
+            }
+
+            WriteOffset.QuadPart = -1LL;
+            WriteLength = MAXULONG;
+            IoStatus.Status = STATUS_UNSUCCESSFUL;
+            CcUnpinRepinnedBcb(Bcb, TRUE, &IoStatus);
+            ok_eq_hex(IoStatus.Status, STATUS_SUCCESS);
+            ok(WriteOffset.QuadPart != -1LL && WriteOffset.QuadPart <= 0x800 &&
+               WriteOffset.QuadPart + WriteLength >= 0x2800,
+               "Write-through wrote 0x%I64x+0x%lx\n", WriteOffset.QuadPart, WriteLength);
+        }
+        if (Bcb2 != NULL)
+        {
+            CcUnpinData(Bcb2);
+        }
+    }
+
+    /* Everything is unpinned and dereferenced: a fresh exclusive pin works */
+    {
+        static const OVERLAP_PROBE Probes[] = {
+            { 0x0000, 0x4000, EXCL, TRUE },
+        };
+        RunOverlapProbes("all released", RTL_NUMBER_OF(Probes), Probes);
+    }
+
+    CcUnpinData(MapBcb);
 }
 
 static
@@ -744,7 +974,11 @@ PerformTest(
                         CcUnpinData(Bcb);
                     }
                 }
-                else if (TestId == 7)
+                else if (TestId == 8)
+                {
+                    TestPartialOverlap();
+                }
+                else if (TestId == 7 || TestId == 9)
                 {
                     PKTHREAD Threads[PIN_RACE_MAX_THREADS];
                     LONG i;
@@ -759,7 +993,7 @@ PerformTest(
                         PinRaceFailures = 0;
 
                         for (i = 0; i < PinRaceThreads; i++)
-                            Threads[i] = KmtStartThread(PinRaceThread, NULL);
+                            Threads[i] = KmtStartThread(PinRaceThread, (TestId == 9) ? (PVOID)(ULONG_PTR)(i + 1) : NULL);
                         for (i = 0; i < PinRaceThreads; i++)
                             KmtFinishThread(Threads[i], NULL);
 
@@ -924,7 +1158,7 @@ TestIrpHandler(
         Offset = IoStack->Parameters.Write.ByteOffset;
         Length = IoStack->Parameters.Write.Length;
 
-        ok((TestTestId == 5) || (TestTestId == 6), "Unexpected test id: %d\n", TestTestId);
+        ok((TestTestId == 5) || (TestTestId == 6) || (TestTestId == 8), "Unexpected test id: %d\n", TestTestId);
         ok_eq_pointer(DeviceObject, TestDeviceObject);
         ok_eq_pointer(IoStack->FileObject, TestFileObject);
 
@@ -932,7 +1166,7 @@ TestIrpHandler(
 
         ok_irql(PASSIVE_LEVEL);
 
-        if (TestTestId == 5)
+        if (TestTestId == 5 || TestTestId == 8)
         {
             /* This assumes continuous writes. */
             if (WriteOffset.QuadPart != -1)
