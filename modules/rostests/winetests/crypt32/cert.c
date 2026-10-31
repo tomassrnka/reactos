@@ -4720,6 +4720,10 @@ static SECURITY_STATUS (WINAPI *pNCryptFinalizeKey)(NCRYPT_KEY_HANDLE, DWORD);
 static SECURITY_STATUS (WINAPI *pNCryptFreeObject)(NCRYPT_HANDLE);
 static SECURITY_STATUS (WINAPI *pNCryptGetProperty)(NCRYPT_HANDLE, const WCHAR *, BYTE *, DWORD, DWORD *, DWORD);
 
+/* STATUS_NOT_FOUND, which Windows leaves in the last error when the NCrypt attempt of CryptAcquireCertificatePrivateKey
+ * is the last one to fail */
+#define STATUS_NOT_FOUND_ERROR 0xc0000225
+
 static NCRYPT_KEY_HANDLE create_ncrypt_key(NCRYPT_PROV_HANDLE prov)
 {
     NCRYPT_KEY_HANDLE key = 0;
@@ -4945,17 +4949,26 @@ static void test_ncrypt_key_handle(void)
     ret = CertSerializeCertificateStoreElement(cert, 0, NULL, &size);
     ok(ret && size == size_plain, "got %d, size %lu, expected %lu\n", ret, size, size_plain);
 
-    /* without the key provider info only the cached key is returned, only to NCrypt callers */
+    /* without the key provider info only the cached key is returned, only to NCrypt callers. Windows 10 fails
+     * with NTE_BAD_PROV_TYPE if the last key type it tries is CryptoAPI (no NCrypt flag, or the preference for NCrypt
+     * keys, which tries CryptoAPI second) and with an NTSTATUS, STATUS_NOT_FOUND, if it is NCrypt. The key spec is
+     * only set in the second case. */
     for (i = 0; i < ARRAY_SIZE(nocache_flags); i++)
     {
+        BOOL ncrypt_last = (nocache_flags[i] & CRYPT_ACQUIRE_NCRYPT_KEY_FLAGS_MASK) &&
+                           !(nocache_flags[i] & CRYPT_ACQUIRE_PREFER_NCRYPT_KEY_FLAG);
+
         handle = 0xdeadbeef;
         spec = 0xdeadbeef;
         callerFree = 7;
         SetLastError(0xdeadbeef);
         ret = CryptAcquireCertificatePrivateKey(cert, nocache_flags[i], NULL, &handle, &spec, &callerFree);
-        ok(!ret && GetLastError() == CRYPT_E_NO_KEY_PROPERTY, "%#lx: got %d, error %#lx\n", nocache_flags[i], ret, GetLastError());
+        ok(!ret && GetLastError() == (ncrypt_last ? STATUS_NOT_FOUND_ERROR : NTE_BAD_PROV_TYPE),
+         "%#lx: got %d, error %#lx\n", nocache_flags[i], ret, GetLastError());
         ok(!handle, "%#lx: got handle %#Ix\n", nocache_flags[i], handle);
-        ok(!spec && !callerFree, "%#lx: got spec %#lx, callerFree %d\n", nocache_flags[i], spec, callerFree);
+        ok(!callerFree, "%#lx: got callerFree %d\n", nocache_flags[i], callerFree);
+        if (ncrypt_last)
+            ok(spec == CERT_NCRYPT_KEY_SPEC, "%#lx: got spec %#lx\n", nocache_flags[i], spec);
     }
     for (i = 0; i < ARRAY_SIZE(cache_flags); i++)
     {
@@ -5056,7 +5069,7 @@ static void test_ncrypt_key_handle(void)
     ok(!ret && GetLastError() == NTE_BAD_PROV_TYPE, "got %d, error %#lx\n", ret, GetLastError());
     SetLastError(0xdeadbeef);
     ret = CryptAcquireCertificatePrivateKey(cert, CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG, NULL, &handle, &spec, &callerFree);
-    ok(!ret && GetLastError() == NTE_BAD_KEYSET, "got %d, error %#lx\n", ret, GetLastError());
+    ok(!ret && GetLastError() == STATUS_NOT_FOUND_ERROR, "got %d, error %#lx\n", ret, GetLastError());
     ok(spec == CERT_NCRYPT_KEY_SPEC, "got spec %#lx\n", spec);
     key = create_ncrypt_key(prov);
     CertSetCertificateContextProperty(cert, CERT_NCRYPT_KEY_HANDLE_PROP_ID, 0, (void *)key);
@@ -5082,7 +5095,7 @@ static void test_ncrypt_key_handle(void)
     CertSetCertificateContextProperty(cert, CERT_KEY_PROV_INFO_PROP_ID, 0, &info);
     SetLastError(0xdeadbeef);
     ret = CryptAcquireCertificatePrivateKey(cert, CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG, NULL, &handle, &spec, &callerFree);
-    ok(!ret && GetLastError() == NTE_BAD_KEYSET, "got %d, error %#lx\n", ret, GetLastError());
+    ok(!ret && GetLastError() == STATUS_NOT_FOUND_ERROR, "got %d, error %#lx\n", ret, GetLastError());
     CertFreeCertificateContext(cert);
 
     test_ncrypt_key_cache(prov);
