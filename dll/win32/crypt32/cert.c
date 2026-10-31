@@ -1028,6 +1028,9 @@ BOOL WINAPI CertSetCertificateContextProperty(PCCERT_CONTEXT pCertContext,
  * the caller accepts NCrypt keys; a CryptoAPI key is opened with NCrypt when the
  * caller accepts nothing else.
  */
+/* STATUS_NOT_FOUND, which is what Windows leaves in the last error */
+#define STATUS_NOT_FOUND_WIN32 0xC0000225
+
 static BOOL CRYPT_AcquirePrivateKeyFromProvInfo(PCCERT_CONTEXT pCert, DWORD dwFlags,
  PCRYPT_KEY_PROV_INFO info, HCRYPTPROV_OR_NCRYPT_KEY_HANDLE *phCryptProv, DWORD *pdwKeySpec)
 {
@@ -1235,6 +1238,28 @@ BOOL WINAPI CryptAcquireCertificatePrivateKey(PCCERT_CONTEXT pCert,
                 if (pfCallerFreeProv)
                     *pfCallerFreeProv = TRUE;
             }
+        }
+    }
+    if (!ret)
+    {
+        /* Whatever the reason a key could not be acquired, Windows 10 reports one of two errors, by the kind
+         * of key the caller accepts: NTE_BAD_PROV_TYPE if it ends with a CryptoAPI attempt (no NCrypt flag, or
+         * CRYPT_ACQUIRE_PREFER_NCRYPT_KEY_FLAG, which tries CryptoAPI second), STATUS_NOT_FOUND from the NCrypt
+         * attempt otherwise, and then it reports the key spec of an NCrypt key. */
+        switch (GetLastError())
+        {
+        case CRYPT_E_NO_KEY_PROPERTY:
+        case NTE_BAD_KEYSET:
+        case NTE_BAD_PROV_TYPE:
+            if (ncrypt && !(dwFlags & CRYPT_ACQUIRE_PREFER_NCRYPT_KEY_FLAG))
+            {
+                if (pdwKeySpec)
+                    *pdwKeySpec = CERT_NCRYPT_KEY_SPEC;
+                SetLastError(STATUS_NOT_FOUND_WIN32);
+            }
+            else
+                SetLastError(NTE_BAD_PROV_TYPE);
+            break;
         }
     }
     CryptMemFree(info);
