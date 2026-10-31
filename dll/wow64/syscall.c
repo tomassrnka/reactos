@@ -1,6 +1,9 @@
 /* ReactOS WoW64 NT argument translation. SPDX-License-Identifier: GPL-2.0-or-later */
 #include "wow64p.h"
 #include <mountmgr.h>
+#include <mountdev.h>
+#include <winioctl.h>
+#include <ntddstor.h>
 #include <winsock2.h>
 #include <tdi.h>
 #include <tcpioctl.h>
@@ -1843,6 +1846,32 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
                 return AfdGetContext32(a);
             break;
         case IOCTL_MOUNTMGR_QUERY_DOS_VOLUME_PATH:
+        /* The rest of the mount manager and mount device requests: counted names and offsets inside one buffer,
+         * no pointers (GetVolumeNameForVolumeMountPoint, mount points, drive letters). */
+        case IOCTL_MOUNTMGR_QUERY_DOS_VOLUME_PATHS:
+        case IOCTL_MOUNTMGR_CREATE_POINT:
+        case IOCTL_MOUNTMGR_DELETE_POINTS:
+        case IOCTL_MOUNTMGR_QUERY_POINTS:
+        case IOCTL_MOUNTMGR_DELETE_POINTS_DBONLY:
+        case IOCTL_MOUNTMGR_NEXT_DRIVE_LETTER:
+        case IOCTL_MOUNTMGR_AUTO_DL_ASSIGNMENTS:
+        case IOCTL_MOUNTMGR_VOLUME_MOUNT_POINT_CREATED:
+        case IOCTL_MOUNTMGR_VOLUME_MOUNT_POINT_DELETED:
+        case IOCTL_MOUNTMGR_CHANGE_NOTIFY:
+        case IOCTL_MOUNTMGR_KEEP_LINKS_WHEN_OFFLINE:
+        case IOCTL_MOUNTMGR_CHECK_UNPROCESSED_VOLUMES:
+        case IOCTL_MOUNTMGR_VOLUME_ARRIVAL_NOTIFICATION:
+        case IOCTL_MOUNTMGR_QUERY_AUTO_MOUNT:
+        case IOCTL_MOUNTMGR_SET_AUTO_MOUNT:
+        case IOCTL_MOUNTDEV_QUERY_DEVICE_NAME:
+        case IOCTL_MOUNTDEV_QUERY_UNIQUE_ID:
+        case IOCTL_MOUNTDEV_QUERY_SUGGESTED_LINK_NAME:
+        case IOCTL_MOUNTDEV_QUERY_STABLE_GUID:
+        /* DISK_PERFORMANCE: LARGE_INTEGERs at multiples of 8, the same bytes in both ABIs. */
+        case IOCTL_DISK_PERFORMANCE:
+        /* Volume extents (LARGE_INTEGERs at multiples of 8) and the storage property query: no pointers. */
+        case IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS:
+        case IOCTL_STORAGE_QUERY_PROPERTY:
         case IOCTL_TCP_QUERY_INFORMATION_EX: /* TCP captures the guest context offset. */
         case IOCTL_TCP_SET_INFORMATION_EX: /* setsockopt partner: TDIObjectID + BufferSize + inline bytes, no pointers. */
         case IOCTL_SET_IP_ADDRESS: /* AddIPAddress: three integers, no pointers. */
