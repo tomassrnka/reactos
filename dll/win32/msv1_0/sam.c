@@ -156,37 +156,34 @@ static
 bool
 MsvpCheckLogonHours(
     _In_ PSAMPR_LOGON_HOURS LogonHours,
-    _In_ LARGE_INTEGER LogonTime)
+    _In_ LARGE_INTEGER LogonTime,
+    _In_ bool Enforce)
 {
-#if 0
     LARGE_INTEGER LocalLogonTime;
     TIME_FIELDS TimeFields;
-    USHORT MinutesPerUnit, Offset;
-    bool bFound;
+    ULONG MinutesPerUnit, Offset;
 
-    FIXME("MsvpCheckLogonHours(%p %llx)\n", LogonHours, LogonTime);
-
-    if (LogonHours->UnitsPerWeek == 0 || LogonHours->LogonHours == NULL)
-    {
-        FIXME("No logon hours!\n");
+    /* Only an S4U logon with MSV1_0_S4U_LOGON_FLAG_CHECK_LOGONHOURS is checked so far */
+    if (!Enforce)
         return true;
-    }
 
+    /* No logon hours restriction */
+    if (LogonHours->UnitsPerWeek == 0 || LogonHours->LogonHours == NULL)
+        return true;
+
+    /* The hours are bits, the first one is Sunday 00:00 local time */
     RtlSystemTimeToLocalTime(&LogonTime, &LocalLogonTime);
     RtlTimeToTimeFields(&LocalLogonTime, &TimeFields);
 
-    FIXME("UnitsPerWeek: %u\n", LogonHours->UnitsPerWeek);
     MinutesPerUnit = 10080 / LogonHours->UnitsPerWeek;
+    if (MinutesPerUnit == 0)
+        return true;
 
     Offset = ((TimeFields.Weekday * 24 + TimeFields.Hour) * 60 + TimeFields.Minute) / MinutesPerUnit;
-    FIXME("Offset: %us\n", Offset);
+    if (Offset >= LogonHours->UnitsPerWeek)
+        return true;
 
-    bFound = (bool)(LogonHours->LogonHours[Offset / 8] & (1 << (Offset % 8)));
-    FIXME("Logon permitted: %s\n", bFound ? "Yes" : "No");
-
-    return bFound;
-#endif
-    return true;
+    return (LogonHours->LogonHours[Offset / 8] & (1 << (Offset % 8))) != 0;
 }
 
 
@@ -259,6 +256,7 @@ SamValidateNormalUser(
     SAMPR_ULONG_ARRAY Use = {0, NULL};
     PSAMPR_USER_INFO_BUFFER UserInfo = NULL;
     LARGE_INTEGER LogonTime;
+    PWCHAR NameCopy = NULL;
 
     /* Get the logon time */
     NtQuerySystemTime(&LogonTime);
@@ -287,9 +285,19 @@ SamValidateNormalUser(
         goto done;
     }
 
+    /* The lookup expects a terminated name, the caller's string need not be */
+    NameCopy = RtlAllocateHeap(RtlGetProcessHeap(), 0, UserName->Length + sizeof(WCHAR));
+    if (NameCopy == NULL)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto done;
+    }
+    RtlCopyMemory(NameCopy, UserName->Buffer, UserName->Length);
+    NameCopy[UserName->Length / sizeof(WCHAR)] = UNICODE_NULL;
+
     Names[0].Length = UserName->Length;
-    Names[0].MaximumLength = UserName->MaximumLength;
-    Names[0].Buffer = UserName->Buffer;
+    Names[0].MaximumLength = UserName->Length + sizeof(WCHAR);
+    Names[0].Buffer = NameCopy;
 
     /* Try to get the RID for the user name */
     Status = SamrLookupNamesInDomain(DomainHandle, 1, Names, &RelativeIds, &Use);
@@ -330,8 +338,9 @@ SamValidateNormalUser(
 
     TRACE("UserName: %wZ\n", &UserInfo->All.UserName);
 
-    /* Check the password */
-    if ((UserInfo->All.UserAccountControl & USER_PASSWORD_NOT_REQUIRED) == 0)
+    /* Check the password (an S4U logon has none) */
+    if (!PwdData->IsS4U &&
+        (UserInfo->All.UserAccountControl & USER_PASSWORD_NOT_REQUIRED) == 0)
     {
         Status = MsvpCheckPassword(PwdData, UserInfo);
         if (!NT_SUCCESS(Status))
@@ -366,13 +375,22 @@ SamValidateNormalUser(
         if (LogonTime.QuadPart >= *(UINT64*)&UserInfo->All.AccountExpires)
         {
             ERR("Account expired!\n");
-            *SubStatus = STATUS_ACCOUNT_EXPIRED;
-            Status = STATUS_ACCOUNT_RESTRICTION;
+            if (PwdData->IsS4U)
+            {
+                /* An S4U logon reports it as the status itself */
+                Status = STATUS_ACCOUNT_EXPIRED;
+            }
+            else
+            {
+                *SubStatus = STATUS_ACCOUNT_EXPIRED;
+                Status = STATUS_ACCOUNT_RESTRICTION;
+            }
             goto done;
         }
 
-        /* Check if the password expired */
-        if (LogonTime.QuadPart >= *(UINT64*)&UserInfo->All.PasswordMustChange)
+        /* Check if the password expired (an S4U logon does not look at the password) */
+        if (!PwdData->IsS4U &&
+            LogonTime.QuadPart >= *(UINT64*)&UserInfo->All.PasswordMustChange)
         {
             ERR("Password expired!\n");
             if (*(UINT64*)&UserInfo->All.PasswordLastSet == 0)
@@ -385,7 +403,8 @@ SamValidateNormalUser(
         }
 
         /* Check logon hours */
-        if (!MsvpCheckLogonHours(&UserInfo->All.LogonHours, LogonTime))
+        if (!MsvpCheckLogonHours(&UserInfo->All.LogonHours, LogonTime,
+                                 PwdData->IsS4U && PwdData->CheckLogonHours))
         {
             ERR("Invalid logon hours!\n");
             *SubStatus = STATUS_INVALID_LOGON_HOURS;
@@ -393,8 +412,9 @@ SamValidateNormalUser(
             goto done;
         }
 
-        /* Check workstations */
-        if (!MsvpCheckWorkstations(&UserInfo->All.WorkStations, ComputerName->Buffer))
+        /* Check workstations (not for an S4U logon) */
+        if (!PwdData->IsS4U &&
+            !MsvpCheckWorkstations(&UserInfo->All.WorkStations, ComputerName->Buffer))
         {
             ERR("Invalid workstation!\n");
             *SubStatus = STATUS_INVALID_WORKSTATION;
@@ -420,6 +440,9 @@ done:
         SamIFree_SAMPR_USER_INFO_BUFFER(UserInfo,
                                         UserAllInformation);
     }
+
+    if (NameCopy != NULL)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, NameCopy);
 
     SamIFree_SAMPR_ULONG_ARRAY(&RelativeIds);
     SamIFree_SAMPR_ULONG_ARRAY(&Use);

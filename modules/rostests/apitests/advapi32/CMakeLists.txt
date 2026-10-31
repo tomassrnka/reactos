@@ -30,6 +30,7 @@ list(APPEND SOURCE
     LogonUserServiceSecret.c
     LogonUserUserRights.c
     LsaLookupLeak.c
+    LsaLogonUserS4U.c
     LsaManageSidNameMapping.c
     ProcessThreadLabel.c
     QueryServiceConfig.c
