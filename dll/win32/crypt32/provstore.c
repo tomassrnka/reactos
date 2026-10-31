@@ -87,8 +87,16 @@ static BOOL ProvStore_addCert(WINECRYPT_CERTSTORE *store, context_t *cert,
     TRACE("(%p, %p, %p, %p)\n", store, cert, toReplace, ppStoreContext);
 
     if (toReplace)
-        ret = ps->memStore->vtbl->certs.addContext(ps->memStore, cert, toReplace,
-         ppStoreContext, TRUE);
+    {
+        /* A replacement is a write as well: the provider must see it. */
+        ret = TRUE;
+        if (ps->provWriteCert)
+            ret = ps->provWriteCert(ps->hStoreProv, context_ptr(cert),
+             CERT_STORE_PROV_WRITE_ADD_FLAG);
+        if (ret)
+            ret = ps->memStore->vtbl->certs.addContext(ps->memStore, cert, toReplace,
+             ppStoreContext, TRUE);
+    }
     else
     {
         ret = TRUE;
@@ -145,8 +153,16 @@ static BOOL ProvStore_addCRL(WINECRYPT_CERTSTORE *store, context_t *crl,
     TRACE("(%p, %p, %p, %p)\n", store, crl, toReplace, ppStoreContext);
 
     if (toReplace)
-        ret = ps->memStore->vtbl->crls.addContext(ps->memStore, crl, toReplace,
-         ppStoreContext, TRUE);
+    {
+        /* A replacement is a write as well: the provider must see it. */
+        ret = TRUE;
+        if (ps->provWriteCrl)
+            ret = ps->provWriteCrl(ps->hStoreProv, context_ptr(crl),
+             CERT_STORE_PROV_WRITE_ADD_FLAG);
+        if (ret)
+            ret = ps->memStore->vtbl->crls.addContext(ps->memStore, crl, toReplace,
+             ppStoreContext, TRUE);
+    }
     else
     {
         if (ps->hdr.dwOpenFlags & CERT_STORE_READONLY_FLAG)
@@ -212,8 +228,16 @@ static BOOL ProvStore_addCTL(WINECRYPT_CERTSTORE *store, context_t *ctl,
     TRACE("(%p, %p, %p, %p)\n", store, ctl, toReplace, ppStoreContext);
 
     if (toReplace)
-        ret = ps->memStore->vtbl->ctls.addContext(ps->memStore, ctl, toReplace,
-         ppStoreContext, TRUE);
+    {
+        /* A replacement is a write as well: the provider must see it. */
+        ret = TRUE;
+        if (ps->provWriteCtl)
+            ret = ps->provWriteCtl(ps->hStoreProv, context_ptr(ctl),
+             CERT_STORE_PROV_WRITE_ADD_FLAG);
+        if (ret)
+            ret = ps->memStore->vtbl->ctls.addContext(ps->memStore, ctl, toReplace,
+             ppStoreContext, TRUE);
+    }
     else
     {
         if (ps->hdr.dwOpenFlags & CERT_STORE_READONLY_FLAG)
