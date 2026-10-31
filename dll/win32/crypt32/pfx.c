@@ -208,7 +208,8 @@ static BOOL set_ncrypt_key( const void *ctx, const BYTE *pkcs8, DWORD len, DWORD
 {
     NCRYPT_PROV_HANDLE prov;
     NCRYPT_KEY_HANDLE key;
-    DWORD policy = (flags & CRYPT_EXPORTABLE) ? NCRYPT_ALLOW_EXPORT_FLAG | NCRYPT_ALLOW_PLAINTEXT_EXPORT_FLAG : 0;
+    /* as on Windows an exportable key can be exported by PFXExportCertStoreEx, not in plaintext */
+    DWORD policy = (flags & CRYPT_EXPORTABLE) ? NCRYPT_ALLOW_EXPORT_FLAG : 0;
     SECURITY_STATUS status;
 
     if ((status = NCryptOpenStorageProvider( &prov, MS_KEY_STORAGE_PROVIDER, 0 ))) return FALSE;
@@ -443,6 +444,8 @@ typedef LONG (WINAPI *PNCryptOpenStorageProvider)( ULONG_PTR *, LPCWSTR, DWORD )
 typedef LONG (WINAPI *PNCryptOpenKey)( ULONG_PTR, ULONG_PTR *, LPCWSTR, DWORD, DWORD );
 typedef LONG (WINAPI *PNCryptExportKey)( ULONG_PTR, ULONG_PTR, LPCWSTR, void *, BYTE *, DWORD, DWORD *, DWORD );
 typedef LONG (WINAPI *PNCryptFreeObject)( ULONG_PTR );
+typedef LONG (WINAPI *PNCryptGetProperty)( ULONG_PTR, LPCWSTR, BYTE *, DWORD, DWORD *, DWORD );
+typedef LONG (WINAPI *PNCryptSetProperty)( ULONG_PTR, LPCWSTR, BYTE *, DWORD, DWORD );
 
 /* PKCS #8 PrivateKeyInfo of a CNG key, from a key handle or a provider/key name */
 static BOOL export_cng_key( ULONG_PTR key, const WCHAR *prov_name, const WCHAR *key_name, DWORD flags,
@@ -453,7 +456,10 @@ static BOOL export_cng_key( ULONG_PTR key, const WCHAR *prov_name, const WCHAR *
     PNCryptOpenKey open_key;
     PNCryptExportKey export_key;
     PNCryptFreeObject free_object;
+    PNCryptGetProperty get_property;
+    PNCryptSetProperty set_property;
     ULONG_PTR provider = 0, opened = 0;
+    DWORD policy = 0, size, raised = FALSE;
     BOOL ret = FALSE;
 
     if (!mod) return FALSE;
@@ -461,7 +467,9 @@ static BOOL export_cng_key( ULONG_PTR key, const WCHAR *prov_name, const WCHAR *
     open_key = (PNCryptOpenKey)GetProcAddress( mod, "NCryptOpenKey" );
     export_key = (PNCryptExportKey)GetProcAddress( mod, "NCryptExportKey" );
     free_object = (PNCryptFreeObject)GetProcAddress( mod, "NCryptFreeObject" );
-    if (!open_provider || !open_key || !export_key || !free_object) goto done;
+    get_property = (PNCryptGetProperty)GetProcAddress( mod, "NCryptGetProperty" );
+    set_property = (PNCryptSetProperty)GetProcAddress( mod, "NCryptSetProperty" );
+    if (!open_provider || !open_key || !export_key || !free_object || !get_property || !set_property) goto done;
 
     if (!key)
     {
@@ -469,17 +477,24 @@ static BOOL export_cng_key( ULONG_PTR key, const WCHAR *prov_name, const WCHAR *
             goto done;
         key = opened;
     }
+    /* A key that may be exported is read here for the PFX, whatever it allows an application to do with it:
+     * the plaintext export right is added for the time of the export. */
+    if (!get_property( key, L"Export Policy", (BYTE *)&policy, sizeof(policy), &size, 0 ) && (policy & 1) &&
+        !(policy & 2))
+        raised = !set_property( key, L"Export Policy", (BYTE *)&(DWORD){ policy | 2 }, sizeof(DWORD), 0 );
     *len = 0;
     if (export_key( key, 0, L"PKCS8_PRIVATEKEY", NULL, NULL, 0, len, 0 ) || !*len) goto done;
     if (!(*pkcs8 = CryptMemAlloc( *len ))) goto done;
     if (export_key( key, 0, L"PKCS8_PRIVATEKEY", NULL, *pkcs8, *len, len, 0 ))
     {
+        SecureZeroMemory( *pkcs8, *len );
         CryptMemFree( *pkcs8 );
         *pkcs8 = NULL;
         goto done;
     }
     ret = TRUE;
 done:
+    if (raised) set_property( key, L"Export Policy", (BYTE *)&policy, sizeof(policy), 0 );
     if (opened) free_object( opened );
     if (provider) free_object( provider );
     FreeLibrary( mod );
