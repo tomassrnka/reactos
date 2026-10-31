@@ -52,6 +52,52 @@ BOOL xpath_match(const struct xpath *path, struct xnode *document);
 struct xnode *xml_parse_event(const WCHAR *xml);
 void xml_free(struct xnode *document);
 
+/* The document of an event as xml_render_event writes it. The text of the node that a path of names names
+   (Event/System/Provider/@Name), or NULL. An element with no text gives an empty string. */
+const WCHAR *xml_value(struct xnode *document, const WCHAR *path);
+
+/* evtx.c: the events of an .evtx file, read-only. Everything in the file is untrusted. */
+
+struct evtx_file;
+
+/* One value of the data of an event (EventData or UserData), as the file holds it */
+struct evtx_value
+{
+    DWORD type;                     /* EvtVarType of the value */
+    DWORD size;                     /* bytes */
+    DWORD offset;                   /* in the blob of the event */
+};
+
+struct evtx_event
+{
+    WCHAR *xml;
+    WCHAR *path;                    /* of the file */
+    ULONGLONG record_id;
+    ULONGLONG time;                 /* FILETIME units */
+    ULONGLONG keywords;
+    WCHAR *provider, *channel, *computer;
+    WCHAR **strings;                /* the values of the data as text */
+    GUID provider_guid, activity, related_activity;
+    BOOL has_provider_guid, has_activity, has_related_activity, has_qualifiers;
+    WORD id, qualifiers, task;
+    BYTE level, opcode, version;
+    DWORD process_id, thread_id;
+    PSID sid;
+    struct evtx_value *values;
+    DWORD value_count;
+    BYTE *blob;
+    DWORD blob_len;
+};
+
+DWORD evtx_open(const WCHAR *path, BOOL reverse, struct evtx_file **file);
+void evtx_close(struct evtx_file *file);
+/* Starts again; the direction of the reading is the one that evtx_open was given */
+void evtx_rewind(struct evtx_file *file);
+/* ERROR_SUCCESS with an event, ERROR_NO_MORE_ITEMS at the end, ERROR_EVENTLOG_FILE_CORRUPT for something that is
+   wrong in the file, after which the next call reads on with what can still be read. */
+DWORD evtx_next(struct evtx_file *file, struct evtx_event **event);
+void evtx_event_free(struct evtx_event *event);
+
 /* classic.c: records, sources and the text of messages */
 
 /* The fields of one record of a classic log, seen as the system section of an event */
@@ -73,9 +119,12 @@ struct classic_event
     const BYTE *data;
     DWORD data_len;
     PSID sid;
+    const struct evtx_event *evtx;  /* for an event of an .evtx file, which has the fields above set and no rec */
 };
 
 BOOL classic_event_init(struct classic_event *event, const EVENTLOGRECORD *rec, const WCHAR *channel);
+/* The view of an event of an .evtx file. The event must outlive the view. */
+BOOL classic_event_from_evtx(struct classic_event *event, const struct evtx_event *evtx);
 void classic_event_free(struct classic_event *event);
 
 /* A source (publisher) of the classic logs, with the files that hold its message texts */
@@ -133,14 +182,23 @@ struct classic_select
 {
     WCHAR *channel;
     WCHAR *xpath;                   /* NULL for every event */
+    BOOL file;                      /* the channel is the path of an .evtx file */
     DWORD group;                    /* the query that it belongs to */
     BOOL suppress;
 };
 
+/* What a query hands over: a record of a classic log, or an event of an .evtx file */
+struct qevent
+{
+    EVENTLOGRECORD *rec;
+    struct evtx_event *evtx;
+};
+
 DWORD classic_query_open(const struct classic_select *selects, DWORD count, BOOL reverse, struct classic_query **query);
 void classic_query_free(struct classic_query *query);
-/* The next event, in the order of the time that records were generated at. NULL for the end; the error is set. */
-EVENTLOGRECORD *classic_query_next(struct classic_query *query, const WCHAR **channel, DWORD *error);
+/* The next event, in the order of the time that events were generated at. FALSE for the end or for an error,
+   which is set; after the error of a file that is damaged the next call goes on. */
+BOOL classic_query_next(struct classic_query *query, struct qevent *event, const WCHAR **channel, DWORD *error);
 DWORD classic_query_names(const struct classic_query *query, DWORD size, void *buffer, DWORD *used);
 DWORD classic_query_statuses(const struct classic_query *query, DWORD size, void *buffer, DWORD *used);
 /* Starts again from the first event, and skips the given number of events */
