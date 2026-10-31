@@ -2167,6 +2167,13 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         ProbeOutput(a[2], sizeof(WOW64_IOSB));
         Status = NtCancelIoFileEx(H(0), a[1] ? (PIO_STATUS_BLOCK)(ULONG_PTR)a[1] : NULL, &Io);
         StoreIo(a[2], &Io); return Status;
+    case W64_NtCancelSynchronousIoFile:
+        /* Like NtCancelIoFileEx the request to cancel is compared with the guest address kept in the IRP */
+        ProbeOutput(a[2], sizeof(WOW64_IOSB));
+        Status = NtCancelSynchronousIoFile(H(0), a[1] ? (PIO_STATUS_BLOCK)(ULONG_PTR)a[1] : NULL, &Io);
+        StoreIo(a[2], &Io); return Status;
+    case W64_NtCompareObjects:
+        return NtCompareObjects(H(0), H(1));
     case W64_NtNotifyChangeDirectoryFile:
     {
         /* The kernel completes the request later: like NtReadFile it gets the

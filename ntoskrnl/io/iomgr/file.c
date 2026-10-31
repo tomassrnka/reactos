@@ -4633,6 +4633,234 @@ NtCancelIoFileEx(IN HANDLE FileHandle,
     return Status;
 }
 
+typedef struct _IOP_SYNC_CANCEL_APC
+{
+    KAPC Apc;
+    PIO_STATUS_BLOCK IoRequestToCancel;
+} IOP_SYNC_CANCEL_APC, *PIOP_SYNC_CANCEL_APC;
+
+/*
+ * A request the thread waits for inside its system service: one on a file
+ * opened for synchronous I/O (the service locks the file and waits for it)
+ * or one with a service-owned event (IRP_SYNCHRONOUS_API). Closing a file and
+ * paging I/O are not cancellable this way.
+ */
+static
+BOOLEAN
+IopIsSynchronousRequestToCancel(IN PIRP Irp,
+                                IN PIO_STATUS_BLOCK IoRequestToCancel OPTIONAL)
+{
+    PFILE_OBJECT FileObject = Irp->Tail.Overlay.OriginalFileObject;
+
+    if (Irp->Flags & (IRP_CLOSE_OPERATION | IRP_PAGING_IO))
+        return FALSE;
+
+    if (!(Irp->Flags & IRP_SYNCHRONOUS_API) &&
+        !(FileObject && (FileObject->Flags & FO_SYNCHRONOUS_IO)))
+    {
+        return FALSE;
+    }
+
+    return !(IoRequestToCancel) || (Irp->UserIosb == IoRequestToCancel);
+}
+
+/* Only the owning thread walks its IRP list to cancel, at APC_LEVEL */
+static
+BOOLEAN
+IopCancelThreadSynchronousIrps(IN PETHREAD Thread,
+                               IN PIO_STATUS_BLOCK IoRequestToCancel OPTIONAL)
+{
+    PLIST_ENTRY ListHead, NextEntry;
+    BOOLEAN Found = FALSE;
+    PIRP Irp;
+
+    ASSERT(Thread == PsGetCurrentThread());
+    ASSERT(KeGetCurrentIrql() == APC_LEVEL);
+
+    ListHead = &Thread->IrpList;
+    for (NextEntry = ListHead->Flink; NextEntry != ListHead; NextEntry = NextEntry->Flink)
+    {
+        Irp = CONTAINING_RECORD(NextEntry, IRP, ThreadListEntry);
+        if (IopIsSynchronousRequestToCancel(Irp, IoRequestToCancel))
+        {
+            IoCancelIrp(Irp);
+            Found = TRUE;
+        }
+    }
+
+    return Found;
+}
+
+/* Looks for the synchronous requests of another thread without cancelling them */
+static
+BOOLEAN
+IopThreadHasSynchronousIrps(IN PETHREAD Thread,
+                            IN PIO_STATUS_BLOCK IoRequestToCancel OPTIONAL)
+{
+    PLIST_ENTRY ListHead, NextEntry;
+    BOOLEAN Found = FALSE;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(IopGetThreadIrpListLock(Thread), &OldIrql);
+    ListHead = &Thread->IrpList;
+    for (NextEntry = ListHead->Flink; NextEntry != ListHead; NextEntry = NextEntry->Flink)
+    {
+        if (IopIsSynchronousRequestToCancel(CONTAINING_RECORD(NextEntry, IRP, ThreadListEntry),
+                                            IoRequestToCancel))
+        {
+            Found = TRUE;
+            break;
+        }
+    }
+    KeReleaseSpinLock(IopGetThreadIrpListLock(Thread), OldIrql);
+
+    return Found;
+}
+
+static
+VOID
+NTAPI
+IopSyncCancelApcKernelRoutine(IN PKAPC Apc,
+                              IN OUT PKNORMAL_ROUTINE *NormalRoutine,
+                              IN OUT PVOID *NormalContext,
+                              IN OUT PVOID *SystemArgument1,
+                              IN OUT PVOID *SystemArgument2)
+{
+    /* The normal routine does the work */
+    UNREFERENCED_PARAMETER(Apc);
+}
+
+static
+VOID
+NTAPI
+IopSyncCancelApcRundownRoutine(IN PKAPC Apc)
+{
+    /* The thread exited before the APC ran: it cancelled its own requests then */
+    ExFreePoolWithTag(CONTAINING_RECORD(Apc, IOP_SYNC_CANCEL_APC, Apc), TAG_IO);
+}
+
+/* Normal kernel APC: not delivered while the thread is in a critical region, where drivers hold their cancel locks */
+static
+VOID
+NTAPI
+IopSyncCancelApcNormalRoutine(IN PVOID NormalContext,
+                              IN PVOID SystemArgument1,
+                              IN PVOID SystemArgument2)
+{
+    PIOP_SYNC_CANCEL_APC CancelApc = NormalContext;
+    KIRQL OldIrql;
+
+    /* Completion runs as a special kernel APC, which APC_LEVEL holds off */
+    KeRaiseIrql(APC_LEVEL, &OldIrql);
+    IopCancelThreadSynchronousIrps(PsGetCurrentThread(), CancelApc->IoRequestToCancel);
+    KeLowerIrql(OldIrql);
+
+    ExFreePoolWithTag(CancelApc, TAG_IO);
+}
+
+/*
+ * @implemented
+ *
+ * Cancels the synchronous I/O (the request that makes the thread wait inside
+ * its system service) the thread has in progress, whatever file it is on, or
+ * the one whose I/O status block is IoRequestToCancel. STATUS_NOT_FOUND when
+ * there is none. The thread cancels from a kernel APC: only the owner walks
+ * its IRP list. Cancellation does not wait for the request to complete.
+ */
+NTSTATUS
+NTAPI
+NtCancelSynchronousIoFile(IN HANDLE ThreadHandle,
+                          IN PIO_STATUS_BLOCK IoRequestToCancel OPTIONAL,
+                          OUT PIO_STATUS_BLOCK IoStatusBlock)
+{
+    PETHREAD Thread;
+    PIOP_SYNC_CANCEL_APC CancelApc;
+    BOOLEAN Found;
+    KIRQL OldIrql;
+    KPROCESSOR_MODE PreviousMode = KeGetPreviousMode();
+    NTSTATUS Status;
+    PAGED_CODE();
+
+    /* Check the previous mode */
+    if (PreviousMode != KernelMode)
+    {
+        /* Enter SEH for probing, IoRequestToCancel is only compared, never dereferenced */
+        _SEH2_TRY
+        {
+            ProbeForWriteIoStatusBlock(IoStatusBlock);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            _SEH2_YIELD(return _SEH2_GetExceptionCode());
+        }
+        _SEH2_END;
+    }
+
+    Status = ObReferenceObjectByHandle(ThreadHandle,
+                                       THREAD_TERMINATE,
+                                       PsThreadType,
+                                       PreviousMode,
+                                       (PVOID*)&Thread,
+                                       NULL);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    /* Update the operation counts */
+    IopUpdateOperationCount(IopOtherTransfer);
+
+    if (Thread == PsGetCurrentThread())
+    {
+        /* A thread inside this service has no request of its own in progress, but look anyway */
+        KeRaiseIrql(APC_LEVEL, &OldIrql);
+        Found = IopCancelThreadSynchronousIrps(Thread, IoRequestToCancel);
+        KeLowerIrql(OldIrql);
+        Status = Found ? STATUS_SUCCESS : STATUS_NOT_FOUND;
+    }
+    else if (!IopThreadHasSynchronousIrps(Thread, IoRequestToCancel))
+    {
+        Status = STATUS_NOT_FOUND;
+    }
+    else
+    {
+        CancelApc = ExAllocatePoolWithTag(NonPagedPool, sizeof(*CancelApc), TAG_IO);
+        if (!CancelApc)
+        {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+        }
+        else
+        {
+            CancelApc->IoRequestToCancel = IoRequestToCancel;
+            KeInitializeApc(&CancelApc->Apc,
+                            &Thread->Tcb,
+                            OriginalApcEnvironment,
+                            IopSyncCancelApcKernelRoutine,
+                            IopSyncCancelApcRundownRoutine,
+                            IopSyncCancelApcNormalRoutine,
+                            KernelMode,
+                            CancelApc);
+
+            /* A thread that is exiting cancels its I/O itself (IoCancelThreadIo) */
+            if (!KeInsertQueueApc(&CancelApc->Apc, NULL, NULL, IO_NO_INCREMENT))
+                ExFreePoolWithTag(CancelApc, TAG_IO);
+            Status = STATUS_SUCCESS;
+        }
+    }
+
+    /* Enter SEH for writing back the I/O Status */
+    _SEH2_TRY
+    {
+        IoStatusBlock->Status = Status;
+        IoStatusBlock->Information = 0;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        /* Ignore exception */
+    }
+    _SEH2_END;
+
+    ObDereferenceObject(Thread);
+    return Status;
+}
+
 /*
  * @implemented
  */
