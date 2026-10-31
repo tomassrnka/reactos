@@ -8204,8 +8204,10 @@ GreGetCharWidthW(
 
         FT_Load_Glyph(face, glyph_index, FT_LOAD_DEFAULT);
 
+        /* GetCharWidthFloat reports the width in 1/16 of the integer one, as Windows does (mintty sizes its
+         * cells as (int)(width * 16)) */
         if (!fl)
-            SafeBuffF[i - FirstChar] = (FLOAT) ((face->glyph->advance.x + 32) >> 6);
+            SafeBuffF[i - FirstChar] = (FLOAT) ((face->glyph->advance.x + 32) >> 6) / 16.0f;
         else
             SafeBuffI[i - FirstChar] = (face->glyph->advance.x + 32) >> 6;
     }

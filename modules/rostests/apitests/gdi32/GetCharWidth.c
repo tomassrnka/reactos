@@ -346,6 +346,59 @@ static void Test_CharWidthFloatW(HDC hDC)
     ok_err(0xBEEFCAFE);
 }
 
+/* Windows reports GetCharWidthFloat in 1/16 of the GetCharWidth32 value (mintty sizes its cells from it) */
+static void Test_CharWidthFloatScale(HDC hDC, const char *pszName)
+{
+    UINT ch;
+    INT nWidth;
+    FLOAT eWidth;
+    BOOL ret, bOK = TRUE;
+
+    for (ch = 'A'; ch <= 'Z'; ++ch)
+    {
+        nWidth = -1;
+        eWidth = -1;
+        ret = GetCharWidth32W(hDC, ch, ch, &nWidth);
+        ok(ret, "%s: GetCharWidth32W failed\n", pszName);
+        ret = GetCharWidthFloatW(hDC, ch, ch, &eWidth);
+        ok(ret, "%s: GetCharWidthFloatW failed\n", pszName);
+        if (nWidth <= 0 || eWidth != (FLOAT)nWidth / 16.0f)
+        {
+            ok(0, "%s: U+%04X: width %d, float %f\n", pszName, ch, nWidth, eWidth);
+            bOK = FALSE;
+            break;
+        }
+    }
+    ok(bOK, "%s: float widths are not 1/16 of the integer ones\n", pszName);
+}
+
+static void Test_CharWidthFloatScaleFonts(HDC hDC)
+{
+    HFONT hFont, hOld;
+
+    hOld = SelectObject(hDC, GetStockObject(SYSTEM_FIXED_FONT));
+    Test_CharWidthFloatScale(hDC, "SYSTEM_FIXED_FONT");
+    SelectObject(hDC, hOld);
+
+    hFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+                        FIXED_PITCH | FF_MODERN, L"Courier New");
+    ok(hFont != NULL, "CreateFontW failed\n");
+    hOld = SelectObject(hDC, hFont);
+    Test_CharWidthFloatScale(hDC, "Courier New -12");
+    SelectObject(hDC, hOld);
+    DeleteObject(hFont);
+
+    hFont = CreateFontW(-24, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+                        VARIABLE_PITCH | FF_SWISS, L"Arial");
+    ok(hFont != NULL, "CreateFontW failed\n");
+    hOld = SelectObject(hDC, hFont);
+    Test_CharWidthFloatScale(hDC, "Arial -24");
+    SelectObject(hDC, hOld);
+    DeleteObject(hFont);
+}
+
 START_TEST(GetCharWidth)
 {
     HDC hDC = CreateCompatibleDC(NULL);
@@ -356,5 +409,6 @@ START_TEST(GetCharWidth)
     Test_CharWidth32W(hDC);
     Test_CharWidthFloatA(hDC);
     Test_CharWidthFloatW(hDC);
+    Test_CharWidthFloatScaleFonts(hDC);
     DeleteDC(hDC);
 }
