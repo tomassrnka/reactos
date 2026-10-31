@@ -305,18 +305,40 @@ static void mutex_ready(struct mutex *m)
 		return;
 	st = 0;
 	if (__atomic_compare_exchange_n(&m->state, &st, 1, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
-		ngos_ev_init(&m->ev, 1, 1);
+		ngos_ev_init(&m->ev, 1, 0);
 		__atomic_store_n(&m->state, 2, __ATOMIC_RELEASE);
 		return;
 	}
 	while (__atomic_load_n(&m->state, __ATOMIC_ACQUIRE) != 2)
 		ngos_yield();
 }
-void mutex_init(struct mutex *m) { ngos_ev_init(&m->ev, 1, 1); m->state = 2; }
-void mutex_lock(struct mutex *m) { mutex_ready(m); ngos_ev_wait(&m->ev); }
-int mutex_trylock(struct mutex *m) { mutex_ready(m); return ngos_ev_trywait(&m->ev); }
-void mutex_unlock(struct mutex *m) { ngos_ev_set(&m->ev); }
-int mutex_is_locked(struct mutex *m) { mutex_ready(m); return !ngos_ev_state(&m->ev); }
+/*
+ * count: 0 free, 1 held, more: held with waiters.  Only contention reaches the dispatcher, as with
+ * a FAST_MUTEX.  An uncontended wait on a signaled event would still be charged a quantum unit
+ * (KiAdjustQuantumThread): with every processor busy at the holder's priority, a loop over the
+ * cached inodes then gave the processor away every few inodes while holding the volume lock.
+ * An unlock that finds a waiter sets the event once; a waiter that has not reached its wait yet
+ * finds it signaled.
+ */
+void mutex_init(struct mutex *m) { ngos_ev_init(&m->ev, 1, 0); m->count = 0; m->state = 2; }
+void mutex_lock(struct mutex *m)
+{
+	mutex_ready(m);
+	if (__atomic_add_fetch(&m->count, 1, __ATOMIC_SEQ_CST) != 1)
+		ngos_ev_wait(&m->ev);
+}
+int mutex_trylock(struct mutex *m)
+{
+	long free = 0;
+	mutex_ready(m);
+	return __atomic_compare_exchange_n(&m->count, &free, 1, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+void mutex_unlock(struct mutex *m)
+{
+	if (__atomic_sub_fetch(&m->count, 1, __ATOMIC_SEQ_CST) != 0)
+		ngos_ev_set(&m->ev);
+}
+int mutex_is_locked(struct mutex *m) { return __atomic_load_n(&m->count, __ATOMIC_SEQ_CST) != 0; }
 
 void read_lock(rwlock_t *l)
 {
