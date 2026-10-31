@@ -16,12 +16,10 @@
 /* Get IPRouteEntry s for each of the routes in the system */
 TDI_STATUS InfoTdiQueryGetRouteTable( PIP_INTERFACE IF, PNDIS_BUFFER Buffer, PUINT BufferSize ) {
     TDI_STATUS Status;
-    KIRQL OldIrql;
     UINT RtCount = CountFIBs(IF);
     UINT Size = sizeof( IPROUTE_ENTRY ) * RtCount;
     PFIB_ENTRY RCache, RCacheCur;
     PIPROUTE_ENTRY RouteEntries, RtCurrent;
-    UINT i;
 
     TI_DbgPrint(DEBUG_INFO, ("Called, routes = %d\n",
 			    RtCount));
@@ -72,17 +70,9 @@ TDI_STATUS InfoTdiQueryGetRouteTable( PIP_INTERFACE IF, PNDIS_BUFFER Buffer, PUI
 	      RtCurrent->Gw,
 	      RtCurrent->Metric1 ));
 
-	TcpipAcquireSpinLock(&EntityListLock, &OldIrql);
-	for (i = 0; i < EntityCount; i++)
-             if (EntityList[i].context == IF)
-                 break;
-
-        if (i < EntityCount)
-            RtCurrent->Index = EntityList[i].tei_instance;
-        else
-            RtCurrent->Index = 0;
-
-	TcpipReleaseSpinLock(&EntityListLock, OldIrql);
+	/* The interface index, as in IFEntry.if_index and IPAddrEntry.iae_index (the entity
+	   instance numbers an interface from 0, and its index no longer does) */
+	RtCurrent->Index = IF->Index;
 
 	NBDereferenceNeighbor(RCacheCur->Router);
 

@@ -324,6 +324,34 @@ NTSTATUS getInterfaceInfoByIndex( HANDLE tcpFile, DWORD index, IFInfo *info ) {
     return status;
 }
 
+/* The IP entity of the interface with this interface index (if_index, not an ordinal: the indexes
+   count from 1 and an interface's entities share one instance number) */
+NTSTATUS getIpEntityByIfIndex( HANDLE tcpFile, DWORD ifIndex, TDIEntityID *ent ) {
+    IFInfo info;
+    DWORD numEntities = 0, i;
+    TDIEntityID *entitySet = 0;
+    NTSTATUS status = getInterfaceInfoByIndex( tcpFile, ifIndex, &info );
+
+    if( !NT_SUCCESS(status) )
+        return status;
+
+    status = tdiGetEntityIDSet( tcpFile, &entitySet, &numEntities );
+    if( !NT_SUCCESS(status) )
+        return status;
+
+    for( i = 0; i < numEntities; i++ ) {
+        if( (entitySet[i].tei_entity == CL_NL_ENTITY || entitySet[i].tei_entity == CO_NL_ENTITY) &&
+            entitySet[i].tei_instance == info.entity_id.tei_instance ) {
+            memcpy( ent, &entitySet[i], sizeof(*ent) );
+            tdiFreeThingSet( entitySet );
+            return STATUS_SUCCESS;
+        }
+    }
+
+    tdiFreeThingSet( entitySet );
+    return STATUS_UNSUCCESSFUL;
+}
+
 NTSTATUS getInterfaceInfoByName( HANDLE tcpFile, char *name, IFInfo *info ) {
     IFInfo *ifInfo;
     DWORD numInterfaces;

@@ -78,7 +78,7 @@ static void TestAdapters(void)
         {
             Loopbacks++;
             ok(A->Luid.Value == LOOPBACK_LUID, "loopback: luid 0x%I64x\n", (ULONGLONG)A->Luid.Value);
-            todo_if(is_reactos()) ok(A->IfIndex == 1, "loopback: index %lu\n", A->IfIndex);
+            ok(A->IfIndex == 1, "loopback: index %lu\n", A->IfIndex);
         }
     }
     ok(Count != 0, "no adapters\n");

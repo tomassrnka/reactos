@@ -347,7 +347,9 @@ BOOLEAN IPRegisterInterface(
  */
 {
     KIRQL OldIrql;
-    UINT ChosenIndex = 0;
+    /* Windows numbers its interfaces from 1: the loopback interface registered first is index 1.
+       Index 0 means "no interface" to the callers (GetIfEntry2, IP_PKTINFO, the NTE contexts) */
+    UINT ChosenIndex = 1;
     BOOLEAN IndexHasBeenChosen;
     IF_LIST_ITER(Interface);
 

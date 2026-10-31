@@ -175,7 +175,7 @@ static void TestLoopback(void)
     ok(Error == NO_ERROR, "ResolveIpNetEntry2(127.0.0.1): %lu\n", Error);
     if (Error == NO_ERROR)
     {
-        /* the index is not checked: the loopback interface of this stack has index 0, Windows 1 */
+        ok(Row.InterfaceIndex == 1, "index %lu\n", Row.InterfaceIndex);
         ok(Row.InterfaceLuid.Value == LOOPBACK_LUID, "luid 0x%I64x\n", Row.InterfaceLuid.Value);
         ok(Row.State == NlnsPermanent, "state %lu\n", Row.State);
         ok(Row.PhysicalAddressLength == 0, "link address length %lu\n", Row.PhysicalAddressLength);
