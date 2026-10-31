@@ -9,7 +9,7 @@ if(BUILD_WOW64_ENABLED OR SYSWOW64_GUEST)
         "${CMAKE_CURRENT_SOURCE_DIR}/kernel32.spec")
     file(READ "${CMAKE_CURRENT_SOURCE_DIR}/kernel32.spec" wow64_kernel32_spec)
     foreach(function Wow64GetThreadContext Wow64SetThreadContext)
-        string(REPLACE "@ stub -version=0x600+ ${function}" "@ stdcall -version=0x600+ ${function}(ptr ptr)" wow64_kernel32_spec "${wow64_kernel32_spec}")
+        string(REPLACE "@ stub -version=0x600+ -arch=i386,arm ${function}" "@ stdcall -version=0x600+ -arch=i386,arm ${function}(ptr ptr)" wow64_kernel32_spec "${wow64_kernel32_spec}")
     endforeach()
     file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/kernel32-wow64.spec" "${wow64_kernel32_spec}")
     file(RELATIVE_PATH kernel32_spec "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/kernel32-wow64.spec")
@@ -29,6 +29,7 @@ list(APPEND SOURCE
     client/appcache.c
     client/atom.c
     client/appmodel.c
+    client/acnamedobj.c
     client/capsid.c
     client/atomansi.c
     client/compname.c

@@ -29,9 +29,11 @@
 @ BaseInitAppcompatCacheSupport
 @ BaseUpdateAppcompatCache
 @ Beep
+@ CallbackMayRunLong -version=0x600+
 @ CallNamedPipeW
 @ CancelIo
 @ CancelIoEx -version=0x600+
+@ CancelSynchronousIo -version=0x600+
 @ CancelThreadpoolIo -version=0x600+
 @ ChangeTimerQueueTimer
 @ CheckRemoteDebuggerPresent
@@ -46,6 +48,7 @@
 @ CloseThreadpoolWait -version=0x600+
 @ CloseThreadpoolWork -version=0x600+
 @ CompareFileTime
+@ CompareObjectHandles -version=0x601+
 @ CompareStringA
 @ CompareStringEx -version=0x600+
 @ CompareStringW
@@ -111,6 +114,7 @@
 @ DeriveCapabilitySidsFromName -version=0x601+
 @ DeviceIoControl
 @ DisableThreadLibraryCalls
+@ DisassociateCurrentThreadFromCallback -version=0x600+
 @ DiscardVirtualMemory -version=0x601+
 @ DisconnectNamedPipe
 @ DuplicateHandle
@@ -184,6 +188,7 @@
 @ FreeEnvironmentStringsW
 @ FreeLibrary
 @ FreeLibraryAndExitThread
+@ FreeLibraryWhenCallbackReturns -version=0x600+
 @ FreeResource
 @ FreeUserPhysicalPages
 @ GenerateConsoleCtrlEvent
@@ -452,6 +457,7 @@
 @ IsValidLocale
 @ IsValidLocaleName -version=0x600+
 @ IsWow64Process
+@ IsWow64Process2 -version=0x601+
 @ K32EmptyWorkingSet -version=0x601+
 @ K32EnumDeviceDrivers -version=0x601+
 @ K32EnumPageFilesA -version=0x601+
@@ -482,6 +488,7 @@
 @ LCMapStringA
 @ LCMapStringEx -version=0x600+
 @ LCMapStringW
+@ LeaveCriticalSectionWhenCallbackReturns -version=0x600+
 @ LoadLibraryA
 @ LoadLibraryExA
 @ LoadLibraryExW
@@ -552,6 +559,8 @@
 @ QueueUserWorkItem
 @ RaiseException
 @ RaiseFailFastException -version=0x601+
+@ ReleaseMutexWhenCallbackReturns -version=0x600+
+@ ReleaseSemaphoreWhenCallbackReturns -version=0x600+
 @ ReOpenFile
 @ ReadConsoleA
 @ ReadConsoleInputA
@@ -618,6 +627,7 @@
 @ SetEnvironmentVariableA
 @ SetEnvironmentVariableW
 @ SetErrorMode
+@ SetEventWhenCallbackReturns -version=0x600+
 @ SetFileApisToANSI
 @ SetFileApisToOEM
 @ SetFileAttributesA
