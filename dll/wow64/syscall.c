@@ -2040,6 +2040,10 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         {
         case FSCTL_PIPE_PEEK: case FSCTL_PIPE_LISTEN: case FSCTL_PIPE_DISCONNECT:
         case FSCTL_PIPE_WAIT: case FSCTL_PIPE_TRANSCEIVE:
+        /* No buffers (impersonate) or opaque bytes: a name in, a number out (GetNamedPipeClientProcessId). */
+        case FSCTL_PIPE_IMPERSONATE:
+        case FSCTL_PIPE_GET_CONNECTION_ATTRIBUTE:
+        case FSCTL_PIPE_SET_CONNECTION_ATTRIBUTE:
         /* The reparse point operations carry a flat REPARSE_DATA_BUFFER (no embedded
          * pointers) in or out; the generic passthrough call suffices. */
         case FSCTL_GET_REPARSE_POINT:
