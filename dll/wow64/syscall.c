@@ -2058,15 +2058,12 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
     case W64_NtDeleteFile:
         FILEATTR(0); return NtDeleteFile(OA(0));
     case W64_NtFlushBuffersFile:
-    {
-        FILE_MODE_INFORMATION Mode;
-        ProbeOutput(a[1], sizeof(WOW64_IOSB));
-        Status = NtQueryInformationFile(H(0), &Io, &Mode, sizeof(Mode), FileModeInformation);
-        if (!NT_SUCCESS(Status)) return Status;
-        if (!(Mode.Mode & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)))
-            UNSUPPORTED(MODE, 2);
-        Status = NtFlushBuffersFile(H(0), &Io);
-        StoreIo(a[1], &Io);
+        /* The block is a local one in both cases: the kernel completes the request before it returns, a
+         * synchronous handle through the file object lock and an asynchronous one through its own event and
+         * wait (FlushFileBuffers on an overlapped pipe handle waits for the peer to read). A request
+         * refused before it started leaves the guest block as it was. */
+        Status = NtFlushBuffersFile(H(0), IoBegin(a[1], &Io));
+        IoEnd(a[1], &Io);
         return Status;
     }
     case W64_NtSetInformationFile:
