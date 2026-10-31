@@ -1623,12 +1623,17 @@ RtlRestoreContext(
         }
     }
 
-    /* A user mode context with extended state (the one of an exception, for instance) goes
-       through NtContinue, which loads that state too. It does not return on success. */
-    if (((ContextRecord->ContextFlags & CONTEXT_XSTATE) == CONTEXT_XSTATE) &&
-        (RtlpGetMode() == UserMode))
+    /* A user mode context that is not a complete CONTROL, INTEGER and FLOATING_POINT one, or that carries
+       extended state (the one of an exception, for instance), goes through NtContinue: it restores the
+       groups the context names and no other, and loads that state too. Without CONTEXT_CONTROL it returns
+       here, as RtlRestoreContext does on Windows. The common complete context stays in user mode. */
+    if (RtlpGetMode() == UserMode &&
+        (((ContextRecord->ContextFlags & CONTEXT_XSTATE) == CONTEXT_XSTATE) ||
+         ((ContextRecord->ContextFlags & CONTEXT_FULL) != CONTEXT_FULL)))
     {
         ZwContinue(ContextRecord, FALSE);
+        if ((ContextRecord->ContextFlags & CONTEXT_CONTROL) != CONTEXT_CONTROL)
+            return;
     }
 
     RtlpRestoreContextInternal(ContextRecord);
