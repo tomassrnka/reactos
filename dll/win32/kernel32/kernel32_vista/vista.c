@@ -1065,15 +1065,23 @@ GetThreadPreferredUILanguages(
 }
 
 /*
- * @unimplemented
+ * @implemented
+ *
+ * The first language of the thread (SetThreadPreferredUILanguages, SetThreadUILanguage), else the first of
+ * the process (SetProcessPreferredUILanguages), else the user's UI language: measured on Windows 10 22H2,
+ * where the default of a thread is the user's UI language and neither the thread locale nor a new thread
+ * of a process whose thread language was set changes it. The thread languages cannot be set yet.
  */
 LANGID
 WINAPI
 GetThreadUILanguage(VOID)
 {
-    UNIMPLEMENTED;
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return 0;
+    LANGID Ids[MAX_PROCESS_UI_LANGUAGES];
+
+    if (BasepGetProcessUILanguageIds(Ids) != 0)
+        return Ids[0];
+
+    return GetUserDefaultUILanguage();
 }
 
 /*
