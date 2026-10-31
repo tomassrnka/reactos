@@ -979,6 +979,48 @@ static NTSTATUS Call(ULONG *a, BOOLEAN *Reported)
             *Guest = BaseMessage.Data.ShutdownParametersRequest;
         return Status;
     }
+    case CSR_CREATE_API_NUMBER(BASESRV_SERVERDLL_INDEX, BasepDefineDosDevice):
+    {
+        /* ULONG Flags and two UNICODE_STRINGs whose buffers lie in the guest capture buffer (20 bytes; the
+         * native request is 40). Each string is copied once into a native capture buffer with a terminator,
+         * as the server validates the target with one. */
+        struct { ULONG Flags; USHORT NameLength, NameMax; ULONG Name; USHORT TargetLength, TargetMax; ULONG Target; }
+            Guest;
+        BASE_API_MESSAGE BaseMessage = {0};
+        PBASE_DEFINE_DOS_DEVICE To = &BaseMessage.Data.DefineDosDeviceRequest;
+        PCSR_CAPTURE_BUFFER Capture;
+        PVOID GuestName, GuestTarget, Buffer;
+        ULONG Buffers;
+        C_ASSERT(sizeof(Guest) == 20);
+        if (a[3] != sizeof(Guest)) return STATUS_INFO_LENGTH_MISMATCH;
+        RtlCopyMemory(&Guest, Data, sizeof(Guest));
+        Status = GuestBuffer(Guest.Name, Guest.NameLength, FALSE, &GuestName);
+        if (NT_SUCCESS(Status)) Status = GuestBuffer(Guest.Target, Guest.TargetLength, FALSE, &GuestTarget);
+        if (!NT_SUCCESS(Status)) return Status;
+        Buffers = 1 + (Guest.TargetLength != 0);
+        Capture = CsrAllocateCaptureBuffer(Buffers, Guest.NameLength + Guest.TargetLength + 16);
+        if (!Capture) return STATUS_NO_MEMORY;
+        To->Flags = Guest.Flags;
+        To->DeviceName.Length = Guest.NameLength;
+        /* The pointer fields must be those of the message: the capture buffer turns them into offsets */
+        To->DeviceName.MaximumLength = CsrAllocateMessagePointer(Capture, Guest.NameLength + sizeof(WCHAR),
+                                                                 (PVOID *)&To->DeviceName.Buffer);
+        Buffer = To->DeviceName.Buffer;
+        if (Guest.NameLength) RtlCopyMemory(Buffer, GuestName, Guest.NameLength);
+        ((PWCHAR)((PUCHAR)Buffer + Guest.NameLength))[0] = UNICODE_NULL;
+        if (Guest.TargetLength)
+        {
+            To->TargetPath.Length = Guest.TargetLength;
+            To->TargetPath.MaximumLength = CsrAllocateMessagePointer(Capture, Guest.TargetLength + sizeof(WCHAR),
+                                                                     (PVOID *)&To->TargetPath.Buffer);
+            Buffer = To->TargetPath.Buffer;
+            RtlCopyMemory(Buffer, GuestTarget, Guest.TargetLength);
+            ((PWCHAR)((PUCHAR)Buffer + Guest.TargetLength))[0] = UNICODE_NULL;
+        }
+        Status = CsrClientCallServer((PCSR_API_MESSAGE)&BaseMessage, Capture, Api, sizeof(*To));
+        CsrFreeCaptureBuffer(Capture);
+        return Status;
+    }
     case CSR_CREATE_API_NUMBER(BASESRV_SERVERDLL_INDEX, BasepExitProcess):
     {
         BASE_API_MESSAGE BaseMessage = {0};

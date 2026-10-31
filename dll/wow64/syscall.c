@@ -1,6 +1,9 @@
 /* ReactOS WoW64 NT argument translation. SPDX-License-Identifier: GPL-2.0-or-later */
 #include "wow64p.h"
 #include <mountmgr.h>
+#include <mountdev.h>
+#include <winioctl.h>
+#include <ntddstor.h>
 #include <winsock2.h>
 #include <tdi.h>
 #include <tcpioctl.h>
@@ -1315,6 +1318,15 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         Status = NtProtectVirtualMemory(H(0), &Base, &Size, a[3], P(4));
         if (NT_SUCCESS(Status)) { U(1) = PtrToUlong(Base); U(2) = Size; }
         return Status;
+    case W64_NtFlushVirtualMemory:
+        /* FlushViewOfFile: the base and size are updated (rounded to pages) like NtProtectVirtualMemory's, and
+         * the block describes the write that was started */
+        PROBE(1); PROBE(2);
+        Base = PTR32(U(1)); Size = U(2);
+        Status = NtFlushVirtualMemory(H(0), &Base, &Size, IoBegin(a[3], &Io));
+        IoEnd(a[3], &Io);
+        if (NT_SUCCESS(Status)) { U(1) = PtrToUlong(Base); U(2) = Size; }
+        return Status;
     case W64_NtQueryVirtualMemory:
     {
         MEMORY_BASIC_INFORMATION Info;
@@ -1834,6 +1846,32 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
                 return AfdGetContext32(a);
             break;
         case IOCTL_MOUNTMGR_QUERY_DOS_VOLUME_PATH:
+        /* The rest of the mount manager and mount device requests: counted names and offsets inside one buffer,
+         * no pointers (GetVolumeNameForVolumeMountPoint, mount points, drive letters). */
+        case IOCTL_MOUNTMGR_QUERY_DOS_VOLUME_PATHS:
+        case IOCTL_MOUNTMGR_CREATE_POINT:
+        case IOCTL_MOUNTMGR_DELETE_POINTS:
+        case IOCTL_MOUNTMGR_QUERY_POINTS:
+        case IOCTL_MOUNTMGR_DELETE_POINTS_DBONLY:
+        case IOCTL_MOUNTMGR_NEXT_DRIVE_LETTER:
+        case IOCTL_MOUNTMGR_AUTO_DL_ASSIGNMENTS:
+        case IOCTL_MOUNTMGR_VOLUME_MOUNT_POINT_CREATED:
+        case IOCTL_MOUNTMGR_VOLUME_MOUNT_POINT_DELETED:
+        case IOCTL_MOUNTMGR_CHANGE_NOTIFY:
+        case IOCTL_MOUNTMGR_KEEP_LINKS_WHEN_OFFLINE:
+        case IOCTL_MOUNTMGR_CHECK_UNPROCESSED_VOLUMES:
+        case IOCTL_MOUNTMGR_VOLUME_ARRIVAL_NOTIFICATION:
+        case IOCTL_MOUNTMGR_QUERY_AUTO_MOUNT:
+        case IOCTL_MOUNTMGR_SET_AUTO_MOUNT:
+        case IOCTL_MOUNTDEV_QUERY_DEVICE_NAME:
+        case IOCTL_MOUNTDEV_QUERY_UNIQUE_ID:
+        case IOCTL_MOUNTDEV_QUERY_SUGGESTED_LINK_NAME:
+        case IOCTL_MOUNTDEV_QUERY_STABLE_GUID:
+        /* DISK_PERFORMANCE: LARGE_INTEGERs at multiples of 8, the same bytes in both ABIs. */
+        case IOCTL_DISK_PERFORMANCE:
+        /* Volume extents (LARGE_INTEGERs at multiples of 8) and the storage property query: no pointers. */
+        case IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS:
+        case IOCTL_STORAGE_QUERY_PROPERTY:
         case IOCTL_TCP_QUERY_INFORMATION_EX: /* TCP captures the guest context offset. */
         case IOCTL_TCP_SET_INFORMATION_EX: /* setsockopt partner: TDIObjectID + BufferSize + inline bytes, no pointers. */
         case IOCTL_SET_IP_ADDRESS: /* AddIPAddress: three integers, no pointers. */
@@ -2040,6 +2078,10 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         {
         case FSCTL_PIPE_PEEK: case FSCTL_PIPE_LISTEN: case FSCTL_PIPE_DISCONNECT:
         case FSCTL_PIPE_WAIT: case FSCTL_PIPE_TRANSCEIVE:
+        /* No buffers (impersonate) or opaque bytes: a name in, a number out (GetNamedPipeClientProcessId). */
+        case FSCTL_PIPE_IMPERSONATE:
+        case FSCTL_PIPE_GET_CONNECTION_ATTRIBUTE:
+        case FSCTL_PIPE_SET_CONNECTION_ATTRIBUTE:
         /* The reparse point operations carry a flat REPARSE_DATA_BUFFER (no embedded
          * pointers) in or out; the generic passthrough call suffices. */
         case FSCTL_GET_REPARSE_POINT:
@@ -2058,17 +2100,20 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
     case W64_NtDeleteFile:
         FILEATTR(0); return NtDeleteFile(OA(0));
     case W64_NtFlushBuffersFile:
-    {
-        FILE_MODE_INFORMATION Mode;
-        ProbeOutput(a[1], sizeof(WOW64_IOSB));
-        Status = NtQueryInformationFile(H(0), &Io, &Mode, sizeof(Mode), FileModeInformation);
-        if (!NT_SUCCESS(Status)) return Status;
-        if (!(Mode.Mode & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)))
-            UNSUPPORTED(MODE, 2);
-        Status = NtFlushBuffersFile(H(0), &Io);
-        StoreIo(a[1], &Io);
+        /* The block is a local one in both cases: the kernel completes the request before it returns, a
+         * synchronous handle through the file object lock and an asynchronous one through its own event and
+         * wait (FlushFileBuffers on an overlapped pipe handle waits for the peer to read). A request
+         * refused before it started leaves the guest block as it was. */
+        Status = NtFlushBuffersFile(H(0), IoBegin(a[1], &Io));
+        IoEnd(a[1], &Io);
         return Status;
-    }
+    case W64_NtQueryEaFile:
+        /* Extended attribute lists are flat records: the same bytes in both ABIs */
+        Status = NtQueryEaFile(H(0), IoBegin(a[1], &Io), P(2), a[3], (BOOLEAN)a[4], P(5), a[6], P(7), (BOOLEAN)a[8]);
+        IoEnd(a[1], &Io); return Status;
+    case W64_NtSetEaFile:
+        Status = NtSetEaFile(H(0), IoBegin(a[1], &Io), P(2), a[3]);
+        IoEnd(a[1], &Io); return Status;
     case W64_NtSetInformationFile:
         return Wow64SetInformationFile(a, Cleanup);
     case W64_NtQueryInformationFile:

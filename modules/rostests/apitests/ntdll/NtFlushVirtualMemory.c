@@ -1,0 +1,83 @@
+/*
+ * PROJECT:     ReactOS API Tests
+ * LICENSE:     LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later)
+ * PURPOSE:     Test for NtFlushVirtualMemory (FlushViewOfFile)
+ * COPYRIGHT:   Copyright 2026 Tomas Srnka (tomas.srnka@e2b.dev)
+ */
+
+#include "precomp.h"
+
+#define PATTERN 0x55
+#define FILE_SIZE 0x3000
+
+START_TEST(NtFlushVirtualMemory)
+{
+    WCHAR Path[MAX_PATH];
+    IO_STATUS_BLOCK Io;
+    NTSTATUS Status;
+    HANDLE File, Mapping, Reader;
+    PBYTE View;
+    PVOID Base;
+    SIZE_T Size;
+    DWORD Count;
+    BYTE Byte;
+    ULONG Length;
+
+    Length = GetTempPathW(RTL_NUMBER_OF(Path), Path);
+    StringCbPrintfW(Path + Length, sizeof(Path) - Length * sizeof(WCHAR), L"wow64pf_flushvm_%lu.tmp", GetCurrentProcessId());
+    File = CreateFileW(Path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CREATE_ALWAYS,
+                       FILE_ATTRIBUTE_NORMAL, NULL);
+    ok(File != INVALID_HANDLE_VALUE, "CreateFile failed, error %lu\n", GetLastError());
+    if (File == INVALID_HANDLE_VALUE)
+        return;
+    SetFilePointer(File, FILE_SIZE, NULL, FILE_BEGIN);
+    SetEndOfFile(File);
+    Mapping = CreateFileMappingW(File, NULL, PAGE_READWRITE, 0, FILE_SIZE, NULL);
+    View = Mapping ? MapViewOfFile(Mapping, FILE_MAP_WRITE, 0, 0, 0) : NULL;
+    ok(View != NULL, "mapping failed, error %lu\n", GetLastError());
+    if (!View)
+    {
+        CloseHandle(File);
+        DeleteFileW(Path);
+        return;
+    }
+    View[0x1100] = 0x42;
+
+    /* A range inside the second page: rounded out to whole pages */
+    Base = View + 0x1100;
+    Size = 0x10;
+    RtlFillMemory(&Io, sizeof(Io), PATTERN);
+    Status = NtFlushVirtualMemory(NtCurrentProcess(), &Base, &Size, &Io);
+    ok_hex(Status, STATUS_SUCCESS);
+    ok(Base == View + 0x1000, "base %p, view %p\n", Base, View);
+    /* Windows reports the rounded size, the ReactOS kernel a zero */
+    ok(Size == 0x1000 || Size == 0, "size %Ix\n", Size);
+
+    /* The data is on its way to the file: another handle reads it */
+    Reader = CreateFileW(Path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    ok(Reader != INVALID_HANDLE_VALUE, "reader failed, error %lu\n", GetLastError());
+    Byte = 0;
+    SetFilePointer(Reader, 0x1100, NULL, FILE_BEGIN);
+    ok(ReadFile(Reader, &Byte, 1, &Count, NULL) && Count == 1, "read failed, error %lu\n", GetLastError());
+    ok_eq_hex(Byte, 0x42);
+    CloseHandle(Reader);
+    ok(FlushViewOfFile(View, 0), "FlushViewOfFile failed, error %lu\n", GetLastError());
+
+    /* Size 0: to the end of the view */
+    Base = View;
+    Size = 0;
+    Status = NtFlushVirtualMemory(NtCurrentProcess(), &Base, &Size, &Io);
+    ok_hex(Status, STATUS_SUCCESS);
+    ok(Base == View, "base %p, view %p\n", Base, View);
+    ok(Size == FILE_SIZE || Size == 0, "size %Ix\n", Size);
+
+    Base = View;
+    Size = 0;
+    Status = NtFlushVirtualMemory((HANDLE)(ULONG_PTR)0x12344, &Base, &Size, &Io);
+    ok_hex(Status, STATUS_INVALID_HANDLE);
+
+    UnmapViewOfFile(View);
+    CloseHandle(Mapping);
+    CloseHandle(File);
+    DeleteFileW(Path);
+}
