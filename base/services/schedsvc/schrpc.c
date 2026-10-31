@@ -19,6 +19,8 @@
  */
 
 #include <stdarg.h>
+#include <stdio.h>
+#include <wctype.h>
 #ifdef __REACTOS__
 #include <pseh/pseh2.h>
 #endif
@@ -1167,30 +1169,148 @@ HRESULT __cdecl SchRpcEnumTasks(const WCHAR *path, DWORD flags, DWORD *start_ind
     return *start_index ? S_FALSE : S_OK;
 }
 
+/*
+ * IRegisteredTask::put_Enabled: set <Settings><Enabled> in the task XML, text only, and write the file and the
+ * record back. The record keeps its registrant: this is not a registration.
+ */
+static HRESULT patch_enabled(const WCHAR *xml, BOOL enable, WCHAR **out)
+{
+    const WCHAR *value = enable ? L"true" : L"false";
+    const WCHAR *settings, *settings_end, *enabled, *enabled_end, *at = NULL, *skip;
+    WCHAR element[64], *result;
+    SIZE_T prefix, len;
+
+    _snwprintf(element, ARRAYSIZE(element), L"<Enabled>%s</Enabled>", value);
+    *out = NULL;
+
+    if ((settings = wcsstr(xml, L"<Settings>")))
+    {
+        if (!(settings_end = wcsstr(settings, L"</Settings>"))) return SCHED_E_MALFORMEDXML;
+        enabled = wcsstr(settings, L"<Enabled>");
+        if (enabled && enabled < settings_end)
+        {
+            if (!(enabled_end = wcsstr(enabled, L"</Enabled>")) || enabled_end > settings_end)
+                return SCHED_E_MALFORMEDXML;
+            prefix = enabled - xml;
+            skip = enabled_end + wcslen(L"</Enabled>");
+        }
+        else
+        {
+            prefix = settings + wcslen(L"<Settings>") - xml;
+            skip = xml + prefix;
+        }
+    }
+    else if ((settings = wcsstr(xml, L"<Settings/>")))
+    {
+        prefix = settings - xml;
+        skip = settings + wcslen(L"<Settings/>");
+        _snwprintf(element, ARRAYSIZE(element), L"<Settings><Enabled>%s</Enabled></Settings>", value);
+    }
+    else if (wcsstr(xml, L"Settings"))
+        return SCHED_E_MALFORMEDXML;    /* a form this does not edit: do not guess */
+    else
+    {
+        const WCHAR *p = xml;
+
+        while ((p = wcsstr(p, L"</Task>"))) { at = p; p++; }
+        if (!at) return SCHED_E_MALFORMEDXML;
+        prefix = at - xml;
+        skip = at;
+        _snwprintf(element, ARRAYSIZE(element), L"<Settings><Enabled>%s</Enabled></Settings>", value);
+    }
+
+    len = prefix + wcslen(element) + wcslen(skip) + 1;
+    if (!(result = malloc(len * sizeof(WCHAR)))) return E_OUTOFMEMORY;
+    memcpy(result, xml, prefix * sizeof(WCHAR));
+    wcscpy(result + prefix, element);
+    wcscpy(result + prefix + wcslen(element), skip);
+    *out = result;
+    return S_OK;
+}
+
+/* the XML without the BOM and the leading comment that the service itself writes into every file */
+static const WCHAR *strip_file_header(const WCHAR *xml)
+{
+    const WCHAR *end;
+
+    if (*xml == 0xfeff) xml++;
+    while (iswspace(*xml)) xml++;
+    if (!wcsncmp(xml, L"<!--", 4) && (end = wcsstr(xml, L"-->")))
+    {
+        xml = end + 3;
+        while (iswspace(*xml)) xml++;
+    }
+    return xml;
+}
+
 HRESULT __cdecl SchRpcEnumInstances(const WCHAR *path, DWORD flags, DWORD *n_guids, GUID **guids)
 {
-    FIXME("%s,%#lx,%p,%p: stub\n", debugstr_w(path), flags, n_guids, guids);
-    return E_NOTIMPL;
+    struct caller caller;
+    HRESULT hr;
+
+    TRACE("%s,%#lx,%p,%p\n", debugstr_w(path), flags, n_guids, guids);
+
+    *n_guids = 0;
+    *guids = NULL;
+    if (flags) return E_INVALIDARG;
+    if (FAILED(hr = schedsvc_begin_call(&caller))) return hr;
+    if (path && !schedsvc_valid_path(path))
+        hr = HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
+    else
+        hr = schedsvc_enum_instances(&caller, path, n_guids, guids);
+    schedsvc_end_call(&caller);
+    return hr;
 }
 
 HRESULT __cdecl SchRpcGetInstanceInfo(GUID guid, WCHAR **path, DWORD *task_state, WCHAR **action,
                                       WCHAR **info, DWORD *n_instances, GUID **instances, DWORD *pid)
 {
-    FIXME("%s,%p,%p,%p,%p,%p,%p,%p: stub\n", wine_dbgstr_guid(&guid), path, task_state, action,
+    struct caller caller;
+    HRESULT hr;
+
+    TRACE("%s,%p,%p,%p,%p,%p,%p,%p\n", wine_dbgstr_guid(&guid), path, task_state, action,
           info, n_instances, instances, pid);
-    return E_NOTIMPL;
+
+    *path = *action = *info = NULL;
+    *instances = NULL;
+    *n_instances = 0;
+    *task_state = TASK_STATE_UNKNOWN;
+    *pid = 0;
+    if (FAILED(hr = schedsvc_begin_call(&caller))) return hr;
+    hr = schedsvc_instance_info(&caller, &guid, path, task_state, action, info, n_instances, instances, pid);
+    schedsvc_end_call(&caller);
+    return hr;
 }
 
 HRESULT __cdecl SchRpcStopInstance(GUID guid, DWORD flags)
 {
-    FIXME("%s,%#lx: stub\n", wine_dbgstr_guid(&guid), flags);
-    return E_NOTIMPL;
+    struct caller caller;
+    HRESULT hr;
+
+    TRACE("%s,%#lx\n", wine_dbgstr_guid(&guid), flags);
+
+    if (flags) return E_INVALIDARG;
+    if (FAILED(hr = schedsvc_begin_call(&caller))) return hr;
+    hr = schedsvc_stop(&caller, NULL, &guid);
+    schedsvc_end_call(&caller);
+    return hr;
 }
 
 HRESULT __cdecl SchRpcStop(const WCHAR *path, DWORD flags)
 {
-    FIXME("%s,%#lx: stub\n", debugstr_w(path), flags);
-    return E_NOTIMPL;
+    struct caller caller;
+    HRESULT hr;
+
+    TRACE("%s,%#lx\n", debugstr_w(path), flags);
+
+    if (flags) return E_INVALIDARG;
+    if (FAILED(hr = schedsvc_begin_call(&caller))) return hr;
+    if (path && !schedsvc_valid_path(path))
+        hr = HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
+    else
+        hr = schedsvc_stop(&caller, path, NULL);
+    schedsvc_end_call(&caller);
+    return hr;
 }
 
 HRESULT __cdecl SchRpcRun(const WCHAR *path, DWORD n_args, const WCHAR **args, DWORD flags,
@@ -1298,15 +1418,40 @@ HRESULT __cdecl SchRpcRename(const WCHAR *path, const WCHAR *name, DWORD flags)
 HRESULT __cdecl SchRpcScheduledRuntimes(const WCHAR *path, SYSTEMTIME *start, SYSTEMTIME *end, DWORD flags,
                                         DWORD n_requested, DWORD *n_runtimes, SYSTEMTIME **runtimes)
 {
-    FIXME("%s,%p,%p,%#lx,%lu,%p,%p: stub\n", debugstr_w(path), start, end, flags,
+    struct caller caller;
+    HRESULT hr;
+
+    TRACE("%s,%p,%p,%#lx,%lu,%p,%p\n", debugstr_w(path), start, end, flags,
           n_requested, n_runtimes, runtimes);
-    return E_NOTIMPL;
+
+    *n_runtimes = 0;
+    *runtimes = NULL;
+    if (flags) return E_INVALIDARG;
+    if (FAILED(hr = schedsvc_begin_call(&caller))) return hr;
+    if (!schedsvc_valid_path(path))
+        hr = HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
+    else
+        hr = schedsvc_scheduled_runtimes(&caller, path, start, end, n_requested, n_runtimes, runtimes);
+    schedsvc_end_call(&caller);
+    return hr;
 }
 
 HRESULT __cdecl SchRpcGetLastRunInfo(const WCHAR *path, SYSTEMTIME *last_runtime, DWORD *last_return_code)
 {
-    FIXME("%s,%p,%p: stub\n", debugstr_w(path), last_runtime, last_return_code);
-    return E_NOTIMPL;
+    struct caller caller;
+    HRESULT hr;
+
+    TRACE("%s,%p,%p\n", debugstr_w(path), last_runtime, last_return_code);
+
+    memset(last_runtime, 0, sizeof(*last_runtime));
+    *last_return_code = SCHED_S_TASK_HAS_NOT_RUN;
+    if (FAILED(hr = schedsvc_begin_call(&caller))) return hr;
+    if (!schedsvc_valid_path(path))
+        hr = HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
+    else
+        hr = schedsvc_get_last_run(&caller, path, last_runtime, last_return_code);
+    schedsvc_end_call(&caller);
+    return hr;
 }
 
 HRESULT __cdecl SchRpcGetTaskInfo(const WCHAR *path, DWORD flags, DWORD *enabled, DWORD *task_state)
@@ -1316,7 +1461,7 @@ HRESULT __cdecl SchRpcGetTaskInfo(const WCHAR *path, DWORD flags, DWORD *enabled
     struct caller caller;
     HRESULT hr;
 
-    FIXME("%s,%#lx,%p,%p: stub\n", debugstr_w(path), flags, enabled, task_state);
+    TRACE("%s,%#lx,%p,%p\n", debugstr_w(path), flags, enabled, task_state);
 
 #ifdef __REACTOS__
     if (FAILED(hr = schedsvc_begin_call(&caller))) return hr;
@@ -1348,7 +1493,8 @@ HRESULT __cdecl SchRpcGetTaskInfo(const WCHAR *path, DWORD flags, DWORD *enabled
 
     *enabled = info.enabled;
     if (flags & SCH_FLAG_STATE)
-        *task_state = *enabled ? TASK_STATE_READY : TASK_STATE_DISABLED;
+        *task_state = !*enabled ? TASK_STATE_DISABLED :
+                      schedsvc_task_running(path) ? TASK_STATE_RUNNING : TASK_STATE_READY;
     else
         *task_state = TASK_STATE_UNKNOWN;
     return S_OK;
@@ -1356,12 +1502,61 @@ HRESULT __cdecl SchRpcGetTaskInfo(const WCHAR *path, DWORD flags, DWORD *enabled
 
 HRESULT __cdecl SchRpcGetNumberOfMissedRuns(const WCHAR *path, DWORD *runs)
 {
-    FIXME("%s,%p: stub\n", debugstr_w(path), runs);
-    return E_NOTIMPL;
+    struct caller caller;
+    SYSTEMTIME last;
+    DWORD result;
+    HRESULT hr;
+
+    TRACE("%s,%p\n", debugstr_w(path), runs);
+
+    /* missed runs are not tracked (StartWhenAvailable catch-up is phase 2): none, for a task the caller may see */
+    *runs = 0;
+    if (FAILED(hr = schedsvc_begin_call(&caller))) return hr;
+    if (!schedsvc_valid_path(path))
+        hr = HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
+    else
+        hr = schedsvc_get_last_run(&caller, path, &last, &result);
+    schedsvc_end_call(&caller);
+    return hr;
 }
 
 HRESULT __cdecl SchRpcEnableTask(const WCHAR *path, DWORD enabled)
 {
-    FIXME("%s,%lu: stub\n", debugstr_w(path), enabled);
-    return E_NOTIMPL;
+    WCHAR *full_name, *xml = NULL, *patched = NULL;
+    struct caller caller;
+    HRESULT hr;
+
+    TRACE("%s,%lu\n", debugstr_w(path), enabled);
+
+    if (FAILED(hr = schedsvc_begin_call(&caller))) return hr;
+    if (!schedsvc_valid_path(path) || !*path)
+    {
+        schedsvc_end_call(&caller);
+        return HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
+    }
+    if (!(full_name = get_full_name(path, NULL)))
+    {
+        schedsvc_end_call(&caller);
+        return E_OUTOFMEMORY;
+    }
+
+    /*
+     * Only the owner or an administrator changes a task; check, read and write are one step. The XML to
+     * patch is the record's, not the file's: the file is not trusted, and a change to it must not slip
+     * into what the service runs just because somebody enabled the task.
+     */
+    schedsvc_lock();
+    hr = schedsvc_check_owner(&caller, path);
+    if (hr == S_OK) hr = schedsvc_task_get_xml(path, &xml);
+    if (hr == S_OK) hr = patch_enabled(strip_file_header(xml), enabled != 0, &patched);
+    if (hr == S_OK) hr = schedsvc_validate_xml(patched);
+    if (hr == S_OK) hr = write_xml_utf8(full_name, OPEN_EXISTING, patched);
+    if (hr == S_OK) hr = schedsvc_task_update_xml(path, patched);
+    schedsvc_unlock();
+
+    free(patched);
+    free(xml);
+    free(full_name);
+    schedsvc_end_call(&caller);
+    return hr;
 }

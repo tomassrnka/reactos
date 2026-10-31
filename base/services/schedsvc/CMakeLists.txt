@@ -15,6 +15,7 @@ add_library(schedsvc MODULE
     schedsvc.c
     schrpc.c
     taskrun.c
+    taskcache.c
     schedsvc.rc
     ${CMAKE_CURRENT_BINARY_DIR}/atsvc_s.c
     ${CMAKE_CURRENT_BINARY_DIR}/schrpc_s.c
