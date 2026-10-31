@@ -91,6 +91,8 @@ list(APPEND SOURCE
     GetOverlappedResultEx.c
     GetQueuedCompletionStatusEx.c
     GetSystemTimePrecise.c
+    GetThreadUILanguage.c
+    DiskPerformance.c
     GetVolumeInformation.c
     HandleList.c
     HeapCreateExecute.c

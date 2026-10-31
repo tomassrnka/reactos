@@ -1,5 +1,6 @@
 
 list(APPEND SOURCE
+    iostats.c
     partition.c
     partmgr.c
     utils.c)

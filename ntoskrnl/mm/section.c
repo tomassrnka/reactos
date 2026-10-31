@@ -306,7 +306,11 @@ MiWritePages(
     }
 
     if (NT_SUCCESS(Status))
+    {
         InterlockedExchangeAdd(&MiReclaimProgress, (LONG)Count);
+        MI_PRCB_COUNT_ADD(MmMappedPagesWriteCount, Count);
+        MI_PRCB_COUNT_ADD(MmMappedWriteIoCount, 1);
+    }
 
     return Status;
 }
@@ -1643,6 +1647,9 @@ MmMakeSegmentResident(
                 break;
             }
 
+            if (NT_SUCCESS(Status))
+                MI_COUNT_PAGE_READ(BYTES_TO_PAGES(ReadLength));
+
             if (!NT_SUCCESS(Status))
             {
                 /* Damn. Roll back. */
@@ -2043,6 +2050,7 @@ MiNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
         if ((Offset.QuadPart >= (LONGLONG)PAGE_ROUND_UP(Segment->RawLength.QuadPart)) && (MemoryArea->VadNode.u.VadFlags.VadType == VadImageMap))
         {
             /* We are beyond the data which is on file. Just get a new page. */
+            MI_PRCB_COUNT_ADD(MmDemandZeroCount, 1);
             MI_SET_USAGE(MI_USAGE_SECTION);
             if (Process) MI_SET_PROCESS2(Process->ImageFileName);
             if (!Process) MI_SET_PROCESS2("Kernel Section");
@@ -2184,6 +2192,7 @@ MiNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
     {
         /* We already have a page on this section offset. Map it into the process address space. */
         Page = PFN_FROM_SSE(Entry);
+        MI_PRCB_COUNT_ADD(MmTransitionCount, 1);
 
         Status = MmCreateVirtualMapping(Process,
                                         PAddress,
@@ -2353,6 +2362,7 @@ MiAccessFaultSectionView(PMMSUPPORT AddressSpace,
      * Copy the old page
      */
     NT_VERIFY(NT_SUCCESS(MiCopyFromUserPage(NewPage, PAddress)));
+    MI_PRCB_COUNT_ADD(MmCopyOnWriteCount, 1);
 
     /*
      * Unshare the old page.
@@ -5798,6 +5808,9 @@ MiReadSegmentPage(
     if (Mdl->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA)
         MmUnmapLockedPages(Mdl->MappedSystemVa, Mdl);
     KeLowerIrql(OldIrql);
+
+    if (NT_SUCCESS(Status) || (Status == STATUS_END_OF_FILE))
+        MI_COUNT_PAGE_READ(1);
 
     return (Status == STATUS_END_OF_FILE) ? STATUS_SUCCESS : Status;
 }

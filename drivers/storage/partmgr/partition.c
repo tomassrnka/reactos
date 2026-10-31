@@ -64,6 +64,7 @@ PartitionCreateDevice(
 
     partExt->DeviceObject = partitionDevice;
     partExt->LowerDevice = FDObject;
+    PartMgrIoStatsInit(&partExt->IoStats);
 
     // NOTE: See comment above.
     // PFDO_EXTENSION fdoExtension = FDObject->DeviceExtension;
@@ -1084,6 +1085,13 @@ PartitionHandleDeviceControl(
             WARN("Ignored MountMgr notification: 0x%lX\n",
                  ioStack->Parameters.DeviceIoControl.IoControlCode);
             status = STATUS_NOT_IMPLEMENTED;
+            break;
+        }
+        case IOCTL_DISK_PERFORMANCE:
+        {
+            // the partition's own count, with the volume number as its device number (Windows reports
+            // the volume manager's there)
+            status = PartMgrIoctlDiskPerformance(&partExt->IoStats, partExt->VolumeNumber, Irp);
             break;
         }
         default:

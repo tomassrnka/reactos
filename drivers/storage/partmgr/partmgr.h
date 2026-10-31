@@ -67,6 +67,22 @@ typedef struct _PARTITION_ID_RECORD
     WCHAR BaseId[PARTITION_INSTANCE_ID_CHARS];
 } PARTITION_ID_RECORD, *PPARTITION_ID_RECORD;
 
+// what IOCTL_DISK_PERFORMANCE reports; see iostats.c
+typedef struct _PARTMGR_IO_STATS
+{
+    KSPIN_LOCK Lock;
+    LONGLONG BytesRead;
+    LONGLONG BytesWritten;
+    LONGLONG ReadTime;      // 100 ns units, summed over the requests
+    LONGLONG WriteTime;
+    LONGLONG IdleTime;      // time with no request in flight, up to the last request that started
+    ULONGLONG IdleSince;    // when the queue last became empty
+    ULONG ReadCount;
+    ULONG WriteCount;
+    ULONG QueueDepth;
+    ULONG SplitCount;       // always 0: requests are split below partmgr
+} PARTMGR_IO_STATS, *PPARTMGR_IO_STATS;
+
 typedef struct _FDO_EXTENSION
 {
     BOOLEAN IsFDO;
@@ -98,6 +114,7 @@ typedef struct _FDO_EXTENSION
         };
     } DiskData;
     UNICODE_STRING DiskInterfaceName;
+    PARTMGR_IO_STATS IoStats;
 } FDO_EXTENSION, *PFDO_EXTENSION;
 
 typedef struct _PARTITION_EXTENSION
@@ -140,6 +157,7 @@ typedef struct _PARTITION_EXTENSION
     PVPB CreatedVpb; // the VPB the device got at creation
     PPARTITION_ID_RECORD IdRecord; // the instance ID, from the first time PnP asked for it
     WCHAR BaseId[PARTITION_INSTANCE_ID_CHARS]; // signature or disk GUID and offset at creation
+    PARTMGR_IO_STATS IoStats;
 } PARTITION_EXTENSION, *PPARTITION_EXTENSION;
 
 CODE_SEG("PAGE")
@@ -181,6 +199,22 @@ PartitionHandlePnp(
 NTSTATUS
 PartitionHandleDeviceControl(
     _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ PIRP Irp);
+
+VOID
+PartMgrIoStatsInit(
+    _Out_ PPARTMGR_IO_STATS Stats);
+
+NTSTATUS
+PartMgrIoStatsCallDriver(
+    _In_ PPARTMGR_IO_STATS Stats,
+    _In_ PDEVICE_OBJECT LowerDevice,
+    _In_ PIRP Irp);
+
+NTSTATUS
+PartMgrIoctlDiskPerformance(
+    _In_ PPARTMGR_IO_STATS Stats,
+    _In_ ULONG StorageDeviceNumber,
     _In_ PIRP Irp);
 
 NTSTATUS

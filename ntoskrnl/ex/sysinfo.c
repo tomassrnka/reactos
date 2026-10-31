@@ -729,19 +729,37 @@ QSI_DEF(SystemPerformanceInformation)
     Spi->CommitLimit = max(MiGetCommitLimit(), MmTotalCommittedPages);
 
     Spi->PeakCommitment = MmPeakCommitment;
-    Spi->PageFaultCount = 0; /* FIXME */
-    Spi->CopyOnWriteCount = 0; /* FIXME */
-    Spi->TransitionCount = 0; /* FIXME */
-    Spi->CacheTransitionCount = 0; /* FIXME */
-    Spi->DemandZeroCount = 0; /* FIXME */
-    Spi->PageReadCount = 0; /* FIXME */
-    Spi->PageReadIoCount = 0; /* FIXME */
-    Spi->CacheReadCount = 0; /* FIXME */
-    Spi->CacheIoCount = 0; /* FIXME */
-    Spi->DirtyPagesWriteCount = 0; /* FIXME */
-    Spi->DirtyWriteIoCount = 0; /* FIXME */
-    Spi->MappedPagesWriteCount = 0; /* FIXME */
-    Spi->MappedWriteIoCount = 0; /* FIXME */
+    /* The memory manager counts faults and paging I/O per processor (see MI_PRCB_COUNT_ADD); sum them */
+    Spi->PageFaultCount = 0;
+    Spi->CopyOnWriteCount = 0;
+    Spi->TransitionCount = 0;
+    Spi->CacheTransitionCount = 0; /* no separate system cache faults: the cache manager maps views */
+    Spi->DemandZeroCount = 0;
+    Spi->PageReadCount = 0;
+    Spi->PageReadIoCount = 0;
+    Spi->CacheReadCount = 0;
+    Spi->CacheIoCount = 0;
+    Spi->DirtyPagesWriteCount = 0;
+    Spi->DirtyWriteIoCount = 0;
+    Spi->MappedPagesWriteCount = 0;
+    Spi->MappedWriteIoCount = 0;
+    for (i = 0; i < KeNumberProcessors; i++)
+    {
+        Prcb = KiProcessorBlock[i];
+        if (Prcb)
+        {
+            Spi->PageFaultCount += Prcb->MmPageFaultCount;
+            Spi->CopyOnWriteCount += Prcb->MmCopyOnWriteCount;
+            Spi->TransitionCount += Prcb->MmTransitionCount;
+            Spi->DemandZeroCount += Prcb->MmDemandZeroCount;
+            Spi->PageReadCount += Prcb->MmPageReadCount;
+            Spi->PageReadIoCount += Prcb->MmPageReadIoCount;
+            Spi->DirtyPagesWriteCount += Prcb->MmDirtyPagesWriteCount;
+            Spi->DirtyWriteIoCount += Prcb->MmDirtyWriteIoCount;
+            Spi->MappedPagesWriteCount += Prcb->MmMappedPagesWriteCount;
+            Spi->MappedWriteIoCount += Prcb->MmMappedWriteIoCount;
+        }
+    }
 
     Spi->PagedPoolPages = 0;
     Spi->NonPagedPoolPages = 0;

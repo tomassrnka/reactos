@@ -2482,6 +2482,7 @@ UserFault:
 
                 /* Return the status */
                 MiUnlockProcessWorkingSet(CurrentProcess, CurrentThread);
+                MI_PRCB_COUNT_ADD(MmCopyOnWriteCount, 1);
                 return STATUS_PAGE_FAULT_COPY_ON_WRITE;
             }
 
