@@ -95,6 +95,44 @@ static LSTATUS open_log_key(const WCHAR *log, HKEY *key)
     return status;
 }
 
+/*
+ * What wevtutil im registers: the publishers (WINEVT\\Publishers\\{guid}, the name is the default value) and
+ * the channels (WINEVT\\Channels\\name). There are no records behind them: the log of such a channel is empty.
+ */
+
+static const WCHAR winevt_key[] = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\WINEVT";
+
+static LSTATUS open_winevt_key(const WCHAR *kind, const WCHAR *name, HKEY *key)
+{
+    WCHAR path[ARRAY_SIZE(winevt_key) + 16 + 256 + 2];
+
+    if (name && is_bad_name(name)) return ERROR_FILE_NOT_FOUND;
+    if (name) _snwprintf(path, ARRAY_SIZE(path), L"%ls\\%ls\\%ls", winevt_key, kind, name);
+    else _snwprintf(path, ARRAY_SIZE(path), L"%ls\\%ls", winevt_key, kind);
+    return RegOpenKeyExW(HKEY_LOCAL_MACHINE, path, 0, KEY_READ, key);
+}
+
+BOOL classic_registered_channel(const WCHAR *name)
+{
+    HKEY key;
+
+    if (open_winevt_key(L"Channels", name, &key)) return FALSE;
+    RegCloseKey(key);
+    return TRUE;
+}
+
+/* The name of the publisher that has the guid, or NULL */
+static WCHAR *registered_publisher_name(const WCHAR *guid)
+{
+    HKEY key;
+    WCHAR *name;
+
+    if (!guid || !guid[0] || open_winevt_key(L"Publishers", guid, &key)) return NULL;
+    name = reg_string(key, NULL);
+    RegCloseKey(key);
+    return name;
+}
+
 WCHAR *classic_expand(const WCHAR *value)
 {
     DWORD len = ExpandEnvironmentStringsW(value, NULL, 0);
@@ -152,6 +190,50 @@ static DWORD enum_sources(HKEY log_key, WCHAR ***names, DWORD *count, BOOL uniqu
     return ERROR_SUCCESS;
 }
 
+DWORD classic_channel_list(WCHAR ***names)
+{
+    HKEY key;
+    DWORD count = 0;
+
+    *names = NULL;
+    if (!RegOpenKeyExW(HKEY_LOCAL_MACHINE, eventlog_key, 0, KEY_READ, &key))
+    {
+        enum_sources(key, names, &count, TRUE);
+        RegCloseKey(key);
+    }
+    if (!open_winevt_key(L"Channels", NULL, &key))
+    {
+        enum_sources(key, names, &count, TRUE);
+        RegCloseKey(key);
+    }
+    return count;
+}
+
+/* The names of the publishers that installed manifests register */
+static void enum_registered_publishers(WCHAR ***names, DWORD *count)
+{
+    HKEY root, key;
+    DWORD i;
+
+    if (open_winevt_key(L"Publishers", NULL, &root)) return;
+    for (i = 0;; i++)
+    {
+        WCHAR guid[64], *name;
+        DWORD size = ARRAY_SIZE(guid);
+        LSTATUS status = RegEnumKeyExW(root, i, guid, &size, NULL, NULL, NULL, NULL);
+
+        if (status == ERROR_NO_MORE_ITEMS) break;
+        if (status == ERROR_MORE_DATA) continue;
+        if (status) break;
+        if (RegOpenKeyExW(root, guid, 0, KEY_READ, &key)) continue;
+        name = reg_string(key, NULL);
+        RegCloseKey(key);
+        if (name && name[0]) add_name(names, count, name, TRUE);
+        free(name);
+    }
+    RegCloseKey(root);
+}
+
 DWORD classic_pub_list_for_log(const WCHAR *log, WCHAR ***names)
 {
     DWORD count = 0;
@@ -191,6 +273,7 @@ DWORD classic_pub_list(WCHAR ***names)
         RegCloseKey(key);
     }
     RegCloseKey(root);
+    enum_registered_publishers(names, &count);
     return count;
 }
 
@@ -203,6 +286,56 @@ void classic_pub_free(struct classic_pub *pub)
     free(pub->category_file);
     free(pub->parameter_file);
     free(pub);
+}
+
+/* The publisher of an installed manifest that has the name: its files and the channels that it references */
+static BOOL fill_registered_publisher(struct classic_pub *pub, const WCHAR *name)
+{
+    HKEY root, key, refs, ref;
+    DWORD i;
+    BOOL found = FALSE;
+
+    if (open_winevt_key(L"Publishers", NULL, &root)) return FALSE;
+    for (i = 0; !found; i++)
+    {
+        WCHAR guid[64], *value;
+        DWORD size = ARRAY_SIZE(guid);
+        LSTATUS status = RegEnumKeyExW(root, i, guid, &size, NULL, NULL, NULL, NULL);
+
+        if (status == ERROR_NO_MORE_ITEMS) break;
+        if (status == ERROR_MORE_DATA) continue;
+        if (status) break;
+        if (RegOpenKeyExW(root, guid, 0, KEY_READ, &key)) continue;
+        value = reg_string(key, NULL);
+        if (value && !_wcsicmp(value, name)) found = TRUE;
+        free(value);
+        if (found) break;
+        RegCloseKey(key);
+    }
+    RegCloseKey(root);
+    if (!found) return FALSE;
+
+    pub->event_file = reg_string(key, L"MessageFileName");
+    pub->parameter_file = reg_string(key, L"ParameterFileName");
+    if (!RegOpenKeyExW(key, L"ChannelReferences", 0, KEY_READ, &refs))
+    {
+        for (i = 0; i < 1024; i++)
+        {
+            WCHAR index[16], *channel;
+
+            _snwprintf(index, ARRAY_SIZE(index), L"%lu", i);
+            if (RegOpenKeyExW(refs, index, 0, KEY_READ, &ref)) break;
+            channel = reg_string(ref, NULL);
+            RegCloseKey(ref);
+            if (channel && channel[0]) add_name(&pub->logs, &pub->log_count, channel, FALSE);
+            free(channel);
+        }
+        RegCloseKey(refs);
+    }
+    RegCloseKey(key);
+    /* a publisher without channel references is still a publisher */
+    if (!pub->log_count && !add_name(&pub->logs, &pub->log_count, L"Application", FALSE)) return FALSE;
+    return TRUE;
 }
 
 /* The publisher that has no name, whose messages are the standard ones of Windows */
@@ -247,7 +380,8 @@ struct classic_pub *classic_pub_open(const WCHAR *name)
         RegCloseKey(log_key);
     }
     RegCloseKey(root);
-    if (!pub->log_count || !(pub->name = dup_string(name))) goto error_noroot;
+    if (!pub->log_count && !fill_registered_publisher(pub, name)) goto error_noroot;
+    if (!(pub->name = dup_string(name))) goto error_noroot;
     return pub;
 
 error:
@@ -1159,6 +1293,109 @@ static const WCHAR default_sddl_other[] =
     L"O:BAG:SYD:(A;;0xf0007;;;SY)(A;;0x7;;;BA)(A;;0x7;;;SO)(A;;0x3;;;IU)(A;;0x3;;;SU)(A;;0x3;;;S-1-5-3)"
     L"(A;;0x3;;;S-1-5-33)(A;;0x1;;;S-1-5-32-573)";
 
+/* A channel that an installed manifest registers: Type 0 to 3 is Admin, Operational, Analytic and Debug, Isolation 0 to 2 Application, System, Custom */
+static DWORD registered_channel_property(const WCHAR *channel, DWORD id, DWORD size, void *buffer, DWORD *used)
+{
+    struct vpack p;
+    HKEY key;
+    DWORD value, type = 0, isolation = 0, enabled = 0;
+    WCHAR *text = NULL, *owner = NULL, *file = NULL, *names[1];
+    SIZE_T len, i;
+    BOOL file_log;
+
+    if (open_winevt_key(L"Channels", channel, &key)) return ERROR_EVT_CHANNEL_NOT_FOUND;
+    if (reg_dword(key, L"Type", &value) && value < 4) type = value;
+    if (reg_dword(key, L"Isolation", &value) && value < 3) isolation = value;
+    if (reg_dword(key, L"Enabled", &value)) enabled = value != 0;
+    file_log = type < 2;
+    vp_init(&p, buffer, size, 1);
+
+    switch (id)
+    {
+    case EvtChannelConfigEnabled:
+        vp_u64(&p, 0, EvtVarTypeBoolean, enabled);
+        break;
+    case EvtChannelConfigClassicEventlog:
+        vp_u64(&p, 0, EvtVarTypeBoolean, FALSE);
+        break;
+    case EvtChannelConfigIsolation:
+        vp_u64(&p, 0, EvtVarTypeUInt32, isolation);
+        break;
+    case EvtChannelConfigType:
+        vp_u64(&p, 0, EvtVarTypeUInt32, type);
+        break;
+    case EvtChannelConfigOwningPublisher:
+    case EvtChannelPublisherList:
+        text = reg_string(key, L"OwningPublisher");
+        owner = registered_publisher_name(text);
+        if (id == EvtChannelConfigOwningPublisher) vp_string(&p, 0, owner ? owner : L"");
+        else
+        {
+            names[0] = owner;
+            vp_string_array(&p, 0, names, owner ? 1 : 0);
+        }
+        break;
+    case EvtChannelConfigAccess:
+        text = reg_string(key, L"ChannelAccess");
+        vp_string(&p, 0, text && text[0] ? text : isolation == 1 ? default_sddl_system : default_sddl_other);
+        break;
+    case EvtChannelLoggingConfigRetention:
+        vp_u64(&p, 0, EvtVarTypeBoolean, !file_log);
+        break;
+    case EvtChannelLoggingConfigAutoBackup:
+        vp_u64(&p, 0, EvtVarTypeBoolean, FALSE);
+        break;
+    case EvtChannelLoggingConfigMaxSize:
+        vp_u64(&p, 0, EvtVarTypeUInt64, 1052672);
+        break;
+    case EvtChannelLoggingConfigLogFilePath:
+        /* the name of the file is the name of the channel, with the slash as %4 */
+        len = ARRAY_SIZE(default_log_dir) + wcslen(channel) * 2 + ARRAY_SIZE(L".evtx");
+        if ((file = calloc(len, sizeof(WCHAR))))
+        {
+            wcscpy(file, default_log_dir);
+            for (i = 0; channel[i]; i++)
+            {
+                if (channel[i] == '/') wcscat(file, L"%4");
+                else file[wcslen(file)] = channel[i];
+            }
+            wcscat(file, file_log ? L".evtx" : L".etl");
+        }
+        vp_string(&p, 0, file ? file : L"");
+        break;
+    case EvtChannelPublishingConfigLevel:
+    case EvtChannelPublishingConfigKeywords:
+    case EvtChannelPublishingConfigControlGuid:
+        vp_null(&p, 0);
+        break;
+    case EvtChannelPublishingConfigBufferSize:
+        vp_u64(&p, 0, EvtVarTypeUInt32, 64);
+        break;
+    case EvtChannelPublishingConfigMinBuffers:
+    case EvtChannelPublishingConfigClockType:
+        vp_u64(&p, 0, EvtVarTypeUInt32, 0);
+        break;
+    case EvtChannelPublishingConfigMaxBuffers:
+        vp_u64(&p, 0, EvtVarTypeUInt32, 16);
+        break;
+    case EvtChannelPublishingConfigLatency:
+        vp_u64(&p, 0, EvtVarTypeUInt32, 1000);
+        break;
+    case EvtChannelPublishingConfigSidType:
+    case EvtChannelPublishingConfigFileMax:
+        vp_u64(&p, 0, EvtVarTypeUInt32, 1);
+        break;
+    default:
+        RegCloseKey(key);
+        return ERROR_INVALID_PARAMETER;
+    }
+    RegCloseKey(key);
+    free(text);
+    free(owner);
+    free(file);
+    return vp_finish(&p, used);
+}
+
 DWORD classic_channel_property(const WCHAR *channel, DWORD id, DWORD size, void *buffer, DWORD *used)
 {
     struct vpack p;
@@ -1168,7 +1405,7 @@ DWORD classic_channel_property(const WCHAR *channel, DWORD id, DWORD size, void 
     DWORD count = 0;
     BOOL is_system = !_wcsicmp(channel, L"System"), is_security = !_wcsicmp(channel, L"Security"), ret;
 
-    if ((status = open_log_key(channel, &key))) return ERROR_EVT_CHANNEL_NOT_FOUND;
+    if ((status = open_log_key(channel, &key))) return registered_channel_property(channel, id, size, buffer, used);
     vp_init(&p, buffer, size, 1);
 
     switch (id)
@@ -1255,12 +1492,21 @@ DWORD classic_log_property(const WCHAR *channel, DWORD id, DWORD size, void *buf
     HANDLE log;
     DWORD value = 0;
     ULONGLONG time = 0;
+    BOOL registered = FALSE;
 
-    if (open_log_key(channel, &key)) return ERROR_EVT_CHANNEL_NOT_FOUND;
-    if (id >= EvtLogPropertyIdEND) { RegCloseKey(key); return ERROR_INVALID_PARAMETER; }
-    if (get_log_file(key, channel, &file) && (expanded = classic_expand(file)))
-        have_attr = GetFileAttributesExW(expanded, GetFileExInfoStandard, &attr);
-    RegCloseKey(key);
+    if (open_log_key(channel, &key))
+    {
+        /* the log of a channel that a manifest registers has no file and no records */
+        if (!classic_registered_channel(channel)) return ERROR_EVT_CHANNEL_NOT_FOUND;
+        registered = TRUE;
+    }
+    if (id >= EvtLogPropertyIdEND) { if (!registered) RegCloseKey(key); return ERROR_INVALID_PARAMETER; }
+    if (!registered)
+    {
+        if (get_log_file(key, channel, &file) && (expanded = classic_expand(file)))
+            have_attr = GetFileAttributesExW(expanded, GetFileExInfoStandard, &attr);
+        RegCloseKey(key);
+    }
     free(file);
     free(expanded);
 
@@ -1286,10 +1532,13 @@ DWORD classic_log_property(const WCHAR *channel, DWORD id, DWORD size, void *buf
         break;
     case EvtLogNumberOfLogRecords:
     case EvtLogOldestRecordNumber:
-        if (!(log = OpenEventLogW(NULL, channel))) return GetLastError();
-        if (id == EvtLogNumberOfLogRecords) GetNumberOfEventLogRecords(log, &value);
-        else GetOldestEventLogRecord(log, &value);
-        CloseEventLog(log);
+        if (!registered)
+        {
+            if (!(log = OpenEventLogW(NULL, channel))) return GetLastError();
+            if (id == EvtLogNumberOfLogRecords) GetNumberOfEventLogRecords(log, &value);
+            else GetOldestEventLogRecord(log, &value);
+            CloseEventLog(log);
+        }
         vp_u64(&p, 0, EvtVarTypeUInt64, value);
         break;
     case EvtLogFull:
@@ -1366,6 +1615,18 @@ void classic_query_free(struct classic_query *query)
 
 static DWORD stream_open(struct stream *s)
 {
+    HKEY key;
+
+    /* a channel that only a manifest registers has no records */
+    if (open_log_key(s->channel, &key))
+    {
+        if (classic_registered_channel(s->channel))
+        {
+            s->eof = TRUE;
+            return ERROR_SUCCESS;
+        }
+    }
+    else RegCloseKey(key);
     if (!(s->log = OpenEventLogW(NULL, s->channel))) return GetLastError();
     s->cap = 64 * 1024;
     if (!(s->buf = malloc(s->cap))) return ERROR_OUTOFMEMORY;

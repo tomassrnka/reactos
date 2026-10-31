@@ -97,6 +97,10 @@ DWORD classic_pub_list(WCHAR ***names);
 /* The names of the sources that one log registers. */
 DWORD classic_pub_list_for_log(const WCHAR *log, WCHAR ***names);
 void classic_names_free(WCHAR **names, DWORD count);
+/* The names of the channels: the classic logs, and the channels that an installed manifest registers */
+DWORD classic_channel_list(WCHAR ***names);
+/* Whether an installed manifest registers the channel (HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\WINEVT\\Channels) */
+BOOL classic_registered_channel(const WCHAR *name);
 /* A copy of the raw value with its environment variables expanded, or NULL */
 WCHAR *classic_expand(const WCHAR *value);
 

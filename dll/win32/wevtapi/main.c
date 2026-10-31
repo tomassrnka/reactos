@@ -192,6 +192,7 @@ static void free_object(struct object *object)
     case OBJECT_PUBLISHER:
         classic_pub_free(object->data);
         break;
+    case OBJECT_CHANNEL_ENUM:
     case OBJECT_PUBLISHER_ENUM:
     {
         struct publisher_enum *list = object->data;
@@ -265,11 +266,11 @@ static DWORD check_channel(const WCHAR *name)
         if (is_bad_channel_char(*p)) return ERROR_EVT_INVALID_CHANNEL_PATH;
     if (wcschr(name, '\\')) return ERROR_EVT_CHANNEL_NOT_FOUND;
 
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, eventlog_key, 0, KEY_READ, &root)) return ERROR_EVT_CHANNEL_NOT_FOUND;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, eventlog_key, 0, KEY_READ, &root)) return classic_registered_channel(name) ? ERROR_SUCCESS : ERROR_EVT_CHANNEL_NOT_FOUND;
     status = RegOpenKeyExW(root, name, 0, KEY_READ, &key);
     if (!status) RegCloseKey(key);
     RegCloseKey(root);
-    return status ? ERROR_EVT_CHANNEL_NOT_FOUND : ERROR_SUCCESS;
+    return status && !classic_registered_channel(name) ? ERROR_EVT_CHANNEL_NOT_FOUND : ERROR_SUCCESS;
 }
 
 /* A reader for the small subset of XML that structured queries and bookmarks use */
@@ -696,6 +697,28 @@ DWORD WINAPI EvtGetExtendedStatus(DWORD size, WCHAR *buffer, DWORD *used)
     return ERROR_SUCCESS;
 }
 
+/* The channels as they are when the enumeration opens: the classic logs and those that installed manifests register */
+static EVT_HANDLE new_channel_enum(void)
+{
+    struct publisher_enum *list = calloc(1, sizeof(*list));
+    EVT_HANDLE handle;
+
+    if (!list)
+    {
+        SetLastError(ERROR_OUTOFMEMORY);
+        return NULL;
+    }
+    list->count = classic_channel_list(&list->names);
+    if (!(handle = new_object(OBJECT_CHANNEL_ENUM, FALSE, NULL)))
+    {
+        classic_names_free(list->names, list->count);
+        free(list);
+        return NULL;
+    }
+    ((struct object *)handle)->data = list;
+    return handle;
+}
+
 EVT_HANDLE WINAPI EvtOpenChannelEnum(EVT_HANDLE session, DWORD flags)
 {
     BOOL remote;
@@ -713,16 +736,14 @@ EVT_HANDLE WINAPI EvtOpenChannelEnum(EVT_HANDLE session, DWORD flags)
         no_service();
         return NULL;
     }
-    return new_object(OBJECT_CHANNEL_ENUM, FALSE, NULL);
+    return new_channel_enum();
 }
 
 BOOL WINAPI EvtNextChannelPath(EVT_HANDLE channel_enum, DWORD buffer_len, WCHAR *buffer, DWORD *used)
 {
     struct object *object;
-    WCHAR name[256];
-    DWORD size, len;
-    HKEY key;
-    LSTATUS status;
+    struct publisher_enum *list;
+    DWORD len;
     BOOL ret = FALSE;
 
     TRACE("(%p %lu %p %p)\n", channel_enum, buffer_len, buffer, used);
@@ -731,24 +752,17 @@ BOOL WINAPI EvtNextChannelPath(EVT_HANDLE channel_enum, DWORD buffer_len, WCHAR 
     object = find_object(channel_enum, OBJECT_CHANNEL_ENUM);
     if (!object) SetLastError(ERROR_INVALID_HANDLE);
     else if (!used || (buffer_len && !buffer)) SetLastError(ERROR_INVALID_PARAMETER);
-    else if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, eventlog_key, 0, KEY_READ, &key)) SetLastError(ERROR_NO_MORE_ITEMS);
+    else if (!(list = object->data) || object->index >= list->count) SetLastError(ERROR_NO_MORE_ITEMS);
     else
     {
-        size = ARRAY_SIZE(name);
-        status = RegEnumKeyExW(key, object->index, name, &size, NULL, NULL, NULL, NULL);
-        RegCloseKey(key);
-        if (status) SetLastError(ERROR_NO_MORE_ITEMS);
+        len = lstrlenW(list->names[object->index]) + 1;
+        *used = len;
+        if (buffer_len < len) SetLastError(ERROR_INSUFFICIENT_BUFFER);
         else
         {
-            len = size + 1;
-            *used = len;
-            if (buffer_len < len) SetLastError(ERROR_INSUFFICIENT_BUFFER);
-            else
-            {
-                memcpy(buffer, name, len * sizeof(WCHAR));
-                object->index++;
-                ret = TRUE;
-            }
+            memcpy(buffer, list->names[object->index], len * sizeof(WCHAR));
+            object->index++;
+            ret = TRUE;
         }
     }
     LeaveCriticalSection(&object_cs);
