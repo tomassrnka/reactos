@@ -212,6 +212,16 @@ DispatchToUser:
     _SEH2_EXCEPT((FaultRecord = *_SEH2_GetExceptionInformation()->ExceptionRecord),
                  EXCEPTION_EXECUTE_HANDLER)
     {
+        /* The frame with the extended state is about 2.7 KB larger than the one without. If the stack has no
+           room for it, whatever the failure was, try the frame without it first: that one may still fit, and
+           only a failure of that frame is a stack overflow of the thread. */
+        if (HaveXState)
+        {
+            KiFreeXStateContext(&XState);
+            HaveXState = FALSE;
+            _SEH2_YIELD(goto DispatchToUser);
+        }
+
         /* Check if we got a stack overflow and raise that instead. The
            overflow committed the rest of the stack, so one retry is enough. */
         if (((NTSTATUS)FaultRecord.ExceptionCode == STATUS_STACK_OVERFLOW) && !Retried)
@@ -223,23 +233,7 @@ DispatchToUser:
             UserRecord = ExceptionRecord;
             Retried = TRUE;
 
-            /* What is left of the stack goes to the handlers, not to the extended state */
-            if (HaveXState)
-            {
-                KiFreeXStateContext(&XState);
-                HaveXState = FALSE;
-            }
-
             /* Do the exception again */
-            _SEH2_YIELD(goto DispatchToUser);
-        }
-
-        /* The stack may have no room left for the extended state, after an
-           overflow for instance: dispatch without it, as before */
-        if (HaveXState)
-        {
-            KiFreeXStateContext(&XState);
-            HaveXState = FALSE;
             _SEH2_YIELD(goto DispatchToUser);
         }
 

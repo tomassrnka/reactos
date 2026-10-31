@@ -303,6 +303,13 @@ KiInitializeXStateConfiguration(
     /* Enable the user mode components in XCR0 */
     _xsetbv(0, SharedUserData->XState.EnabledFeatures);
 
+    /* The context functions load features into the processor with XRSTOR, which faults on a feature that is not
+       enabled in XCR0. Every processor has to have what the configuration says. */
+    if ((_xgetbv(0) & SharedUserData->XState.EnabledFeatures) != SharedUserData->XState.EnabledFeatures)
+    {
+        KeBugCheck(MULTIPROCESSOR_CONFIGURATION_NOT_SUPPORTED);
+    }
+
     /* Now that we have set everything up, query CPUID again to get the required
        size based on components enabled in XCR0 */
     CPUID_EXTENDED_STATE_MAIN_LEAF_REGS ExtStateMain;
@@ -457,8 +464,9 @@ KiCaptureXStateContext(
     const XSTATE_CONFIGURATION *Config = &SharedUserData->XState;
     PCONTEXT_EX ContextEx;
     PXSAVE_AREA_HEADER Header;
-    LONG ChunkOffset;
-    ULONG ChunkLength;
+    XSAVE_AREA_HEADER HeaderCopy;
+    LONG ChunkOffset, LegacyOffset, AllOffset;
+    ULONG ChunkLength, LegacyLength, AllLength;
     ULONG64 Features;
     NTSTATUS Status;
 
@@ -476,6 +484,21 @@ KiCaptureXStateContext(
 
         ChunkOffset = ContextEx->XState.Offset;
         ChunkLength = ContextEx->XState.Length;
+        LegacyOffset = ContextEx->Legacy.Offset;
+        LegacyLength = ContextEx->Legacy.Length;
+        AllOffset = ContextEx->All.Offset;
+        AllLength = ContextEx->All.Length;
+
+        /* A CONTEXT whose flags kept CONTEXT_XSTATE without a real CONTEXT_EX behind it must not steer the reads:
+           the legacy part and the whole area both start at the CONTEXT, which directly precedes the CONTEXT_EX,
+           the legacy part is the CONTEXT and the whole area holds at least the CONTEXT and the CONTEXT_EX */
+        if ((LegacyOffset != -(LONG)sizeof(CONTEXT)) ||
+            (LegacyLength != sizeof(CONTEXT)) ||
+            (AllOffset != -(LONG)sizeof(CONTEXT)) ||
+            (AllLength < sizeof(CONTEXT) + sizeof(CONTEXT_EX)))
+        {
+            _SEH2_YIELD(return STATUS_INVALID_PARAMETER);
+        }
 
         /* The chunk follows the CONTEXT_EX and holds at least the header */
         if ((ChunkOffset < (LONG)sizeof(CONTEXT_EX)) ||
@@ -488,9 +511,12 @@ KiCaptureXStateContext(
         if (PreviousMode != KernelMode)
             ProbeForRead(Header, sizeof(*Header), sizeof(UCHAR));
 
+        /* The header is read once: its masks come from this copy, here and when the chunk is copied below */
+        RtlCopyMemory(&HeaderCopy, Header, sizeof(HeaderCopy));
+
         /* A compacted chunk has room for the features of its compaction mask */
         if (Config->CompactionEnabled)
-            Features &= Header->CompactionMask;
+            Features &= HeaderCopy.CompactionMask;
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -518,7 +544,10 @@ KiCaptureXStateContext(
 
         /* Only the masks of the copy are used, and only within the captured features */
         if (!ForGet)
+        {
             RtlCopyMemory(XState->Chunk, Header, XState->Length);
+            *XState->Chunk = HeaderCopy;
+        }
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -645,7 +674,8 @@ KiSetXStateContext(
     ULONG Feature;
     KIRQL OldIrql;
 
-    Load = XState->Features & XSTATE_MASK_CONTEXT_LOADABLE;
+    /* Never ask for a feature this processor has not enabled in XCR0: XRSTOR would fault in the kernel */
+    Load = XState->Features & XSTATE_MASK_CONTEXT_LOADABLE & _xgetbv(0);
     if (Load == 0)
         return;
     Present = XState->Chunk->Mask & Load;
