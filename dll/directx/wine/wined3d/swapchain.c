@@ -27,12 +27,41 @@
 WINE_DEFAULT_DEBUG_CHANNEL(d3d);
 WINE_DECLARE_DEBUG_CHANNEL(d3d_perf);
 
+/* A context outlives the swapchains it renders to: it is per device and thread, and an offscreen
+ * target (such as the surface of a Direct2D DC render target) leaves it on the swapchain it last
+ * presented to. Point it at a swapchain that is still alive, otherwise the next activation of the
+ * context reads the freed swapchain and loses the window, so the context turns invalid and every
+ * later draw and readback on the device is dropped. */
+static void wined3d_swapchain_detach_contexts(struct wined3d_swapchain *swapchain)
+{
+    struct wined3d_device *device = swapchain->device;
+    struct wined3d_swapchain *fallback = NULL;
+    unsigned int i;
+
+    for (i = 0; i < device->swapchain_count && device->swapchains; ++i)
+    {
+        if (device->swapchains[i] && device->swapchains[i] != swapchain)
+        {
+            fallback = device->swapchains[i];
+            break;
+        }
+    }
+
+    for (i = 0; i < device->context_count; ++i)
+    {
+        if (device->contexts[i]->swapchain == swapchain)
+            device->contexts[i]->swapchain = fallback;
+    }
+}
+
 void wined3d_swapchain_cleanup(struct wined3d_swapchain *swapchain)
 {
     HRESULT hr;
     UINT i;
 
     TRACE("Destroying swapchain %p.\n", swapchain);
+
+    wined3d_swapchain_detach_contexts(swapchain);
 
     wined3d_swapchain_state_cleanup(&swapchain->state);
     wined3d_swapchain_set_gamma_ramp(swapchain, 0, &swapchain->orig_gamma);

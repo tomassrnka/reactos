@@ -67,16 +67,26 @@ static void fill(ID2D1RenderTarget *rt, float r, float g, float b)
     ok(hr == S_OK, "EndDraw failed, hr %#lx\n", hr);
 }
 
-static void check_screen(const char *what, BOOL todo)
+/* A process in a non-interactive window station (a service, a remote shell) has no screen to draw on:
+ * window render targets cannot be created there, and GetPixel on the screen DC fails */
+static BOOL screen_readable(void)
+{
+    HDC screen = GetDC(NULL);
+    BOOL ret = screen && GetPixel(screen, 0, 0) != CLR_INVALID;
+
+    if (screen)
+        ReleaseDC(NULL, screen);
+    return ret;
+}
+
+static void check_screen(const char *what)
 {
     HDC screen = GetDC(NULL);
     COLORREF inside = GetPixel(screen, WND_X + 32, WND_Y + 32);
     COLORREF outside = GetPixel(screen, WND_X + 80, WND_Y + 80);
 
     ReleaseDC(NULL, screen);
-    todo_if(todo)
     ok(inside == RGB(0, 0, 255), "%s: the rectangle is %06lx on the screen, expected 0000ff\n", what, inside);
-    todo_if(todo)
     ok(outside == RGB(255, 255, 255), "%s: the cleared area is %06lx on the screen, expected ffffff\n", what, outside);
 }
 
@@ -88,6 +98,12 @@ static void test_hwnd_target_present(void)
     HWND hwnd;
     HRESULT hr;
     int frame;
+
+    if (!screen_readable())
+    {
+        skip("The screen is not accessible\n");
+        return;
+    }
 
     hwnd = create_window();
     if (!hwnd)
@@ -115,14 +131,14 @@ static void test_hwnd_target_present(void)
     {
         fill((ID2D1RenderTarget *)rt, 0.0f, 0.0f, 1.0f);
         pump(300);
-        check_screen("window target", FALSE);
+        check_screen("window target");
     }
 
     ID2D1HwndRenderTarget_Release(rt);
     DestroyWindow(hwnd);
 }
 
-static void test_dc_target_screen(BOOL after_window_target)
+static void test_dc_target_screen(void)
 {
     D2D1_RENDER_TARGET_PROPERTIES desc;
     ID2D1DCRenderTarget *rt;
@@ -130,6 +146,12 @@ static void test_dc_target_screen(BOOL after_window_target)
     HDC dc;
     RECT rect;
     HRESULT hr;
+
+    if (!screen_readable())
+    {
+        skip("The screen is not accessible\n");
+        return;
+    }
 
     hwnd = create_window();
     if (!hwnd)
@@ -155,27 +177,89 @@ static void test_dc_target_screen(BOOL after_window_target)
     fill((ID2D1RenderTarget *)rt, 0.0f, 0.0f, 1.0f);
     GdiFlush();
     pump(100);
-    check_screen("DC target on a window DC", after_window_target);
+    check_screen("DC target on a window DC");
 
     ReleaseDC(hwnd, dc);
     ID2D1DCRenderTarget_Release(rt);
     DestroyWindow(hwnd);
 }
 
+static void test_dc_target_dib(void)
+{
+    D2D1_RENDER_TARGET_PROPERTIES desc;
+    ID2D1DCRenderTarget *rt;
+    BITMAPINFO bi;
+    HBITMAP bitmap;
+    DWORD *bits;
+    HDC screen, dc;
+    RECT rect;
+    HRESULT hr;
+
+    memset(&desc, 0, sizeof(desc));
+    desc.type = D2D1_RENDER_TARGET_TYPE_DEFAULT;
+    desc.pixelFormat.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.pixelFormat.alphaMode = D2D1_ALPHA_MODE_IGNORE;
+
+    hr = ID2D1Factory_CreateDCRenderTarget(factory, &desc, &rt);
+    if (FAILED(hr))
+    {
+        skip("Cannot create a DC render target, hr %#lx\n", hr);
+        return;
+    }
+
+    memset(&bi, 0, sizeof(bi));
+    bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+    bi.bmiHeader.biWidth = WND_SIZE;
+    bi.bmiHeader.biHeight = -WND_SIZE;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    screen = GetDC(NULL);
+    bitmap = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, (void **)&bits, NULL, 0);
+    dc = CreateCompatibleDC(screen);
+    ReleaseDC(NULL, screen);
+    ok(bitmap != NULL && dc != NULL, "Cannot create the DIB, error %lu\n", GetLastError());
+    if (bitmap && dc)
+    {
+        SelectObject(dc, bitmap);
+        memset(bits, 0x7f, WND_SIZE * WND_SIZE * 4);
+
+        SetRect(&rect, 0, 0, WND_SIZE, WND_SIZE);
+        hr = ID2D1DCRenderTarget_BindDC(rt, dc, &rect);
+        ok(hr == S_OK, "BindDC failed, hr %#lx\n", hr);
+        fill((ID2D1RenderTarget *)rt, 0.0f, 0.0f, 1.0f);
+        GdiFlush();
+
+        ok((bits[32 * WND_SIZE + 32] & 0xffffff) == 0x0000ff, "DC target on a DIB: the rectangle is %06lx, expected 0000ff\n",
+           bits[32 * WND_SIZE + 32] & 0xffffff);
+        ok((bits[80 * WND_SIZE + 80] & 0xffffff) == 0xffffff, "DC target on a DIB: the cleared area is %06lx, expected ffffff\n",
+           bits[80 * WND_SIZE + 80] & 0xffffff);
+    }
+    if (dc) DeleteDC(dc);
+    if (bitmap) DeleteObject(bitmap);
+    ID2D1DCRenderTarget_Release(rt);
+}
+
 START_TEST(d2d1_present)
 {
     HRESULT hr;
+    int i;
 
     hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &IID_ID2D1Factory, NULL, (void **)&factory);
     ok(hr == S_OK, "D2D1CreateFactory failed, hr %#lx\n", hr);
     if (FAILED(hr))
         return;
 
-    test_dc_target_screen(FALSE);
+    test_dc_target_dib();
+    test_dc_target_screen();
     test_hwnd_target_present();
-    /* Known failure, independent of the window target fix: once a window target has presented, every
-     * DC target of the process reads back zeros from its surface (a memory DIB as well as a window DC) */
-    test_dc_target_screen(TRUE);
+    /* The window target and the DC targets share the factory's Direct3D device. Destroying the window
+     * target's swap chain used to leave the device's GL context pointing at the freed swap chain, and the
+     * DC targets then read back zeros, a few draws later than the first one: repeat */
+    for (i = 0; i < 4; i++)
+    {
+        test_dc_target_dib();
+        test_dc_target_screen();
+    }
 
     ID2D1Factory_Release(factory);
 }

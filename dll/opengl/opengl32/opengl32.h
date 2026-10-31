@@ -68,9 +68,15 @@ struct wgl_dc_data
     INT nb_sw_formats;
     void* sw_data;
 
+    /* Reference count: one for the list, one per get_dc_data caller until its release_dc_data, one per
+     * thread that has the record current (see IntMakeCurrent) */
+    volatile LONG refs;
+
     /* Linked list */
     struct wgl_dc_data* next;
 };
+
+void release_dc_data(struct wgl_dc_data* dc_data);
 
 /* Clean up functions */
 void IntDeleteAllContexts(void);
@@ -95,10 +101,18 @@ void
 IntMakeCurrent(HGLRC hglrc, HDC hdc, struct wgl_dc_data* dc_data)
 {
     TEB* CurrentTeb = NtCurrentTeb();
+    struct wgl_dc_data* old_dc_data = CurrentTeb->glSectionInfo;
+
+    /* The record stays alive while it is current, whatever happens to its window */
+    if(dc_data)
+        InterlockedIncrement(&dc_data->refs);
 
     CurrentTeb->glCurrentRC = hglrc;
     CurrentTeb->glReserved2 = hdc;
     CurrentTeb->glSectionInfo = dc_data;
+
+    if(old_dc_data)
+        release_dc_data(old_dc_data);
 }
 
 FORCEINLINE

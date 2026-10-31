@@ -16,6 +16,45 @@ static struct wgl_dc_data* dc_data_list = NULL;
 
 LIST_ENTRY ContextListHead;
 
+/* The records are looked up by window (or memory DC) handle and nothing tells opengl32 when that
+ * window is destroyed or the DC deleted, so a program that keeps creating GL windows would grow the
+ * list forever. Called with dc_data_cs held, when a new record is about to be added: unlink the
+ * records whose window or DC is gone and drop the reference of the list. A record is freed when the
+ * last reference goes (release_dc_data), so a call that is still using it, and a thread that has it
+ * current, are not affected. Records with a software framebuffer stay: contexts use that framebuffer
+ * without holding the record. */
+static
+void
+sweep_dc_data(void)
+{
+    struct wgl_dc_data** link = &dc_data_list;
+    struct wgl_dc_data* data;
+    DWORD last_error = GetLastError();
+
+    while((data = *link) != NULL)
+    {
+        BOOL gone;
+
+        if(data->sw_data != NULL)
+            gone = FALSE;
+        else if(data->flags & WGL_DC_OBJ_DC)
+            gone = !IsWindow(data->owner.hwnd);
+        else
+            gone = (GetObjectType(data->owner.hdc) == 0);
+
+        if(gone)
+        {
+            *link = data->next;
+            release_dc_data(data);
+            continue;
+        }
+        link = &data->next;
+    }
+
+    /* The probes above fail for the records that are gone: the caller must not see that */
+    SetLastError(last_error);
+}
+
 /* FIXME: suboptimal */
 static
 struct wgl_dc_data*
@@ -56,11 +95,13 @@ get_dc_data_ex(HDC hdc, INT format, UINT size, PIXELFORMATDESCRIPTOR *descr)
     {
         if(data->owner.u == id.u)
         {
+            InterlockedIncrement(&data->refs);
             LeaveCriticalSection(&dc_data_cs);
             return data;
         }
         data = data->next;
     }
+    sweep_dc_data();
     data= HeapAlloc(GetProcessHeap(), 0, sizeof(*data));
     if(!data)
     {
@@ -72,6 +113,7 @@ get_dc_data_ex(HDC hdc, INT format, UINT size, PIXELFORMATDESCRIPTOR *descr)
     data->flags = flags;
     data->pixelformat = 0;
     data->sw_data = NULL;
+    data->refs = 2; /* the list and the caller */
     /* Load the driver */
     data->icd_data = IntGetIcdData(hdc);
     /* Get the number of available formats for this DC once and for all */
@@ -96,7 +138,9 @@ get_dc_data(HDC hdc)
 
 void release_dc_data(struct wgl_dc_data* dc_data)
 {
-    (void)dc_data;
+    /* A record that is not in the list any more has no other owner: the last release frees it */
+    if(InterlockedDecrement(&dc_data->refs) == 0)
+        HeapFree(GetProcessHeap(), 0, dc_data);
 }
 
 struct wgl_context* get_context(HGLRC hglrc)
@@ -383,20 +427,13 @@ BOOL WINAPI wglCopyContext(HGLRC hglrcSrc, HGLRC hglrcDst, UINT mask)
     return sw_CopyContext(ctx_src->dhglrc, ctx_dst->dhglrc, mask);
 }
 
-HGLRC WINAPI wglCreateContext(HDC hdc)
+static HGLRC wglCreateContext_impl(HDC hdc, struct wgl_dc_data* dc_data)
 {
-    struct wgl_dc_data* dc_data = get_dc_data(hdc);
     struct wgl_context* context;
     DHGLRC dhglrc;
 
     TRACE("Creating context for %p.\n", hdc);
 
-    if(!dc_data)
-    {
-        WARN("Not a DC handle!\n");
-        SetLastError(ERROR_INVALID_HANDLE);
-        return NULL;
-    }
 
     if(!dc_data->pixelformat)
     {
@@ -447,6 +484,22 @@ HGLRC WINAPI wglCreateContext(HDC hdc)
 
     TRACE("Success!\n");
     return (HGLRC)context;
+}
+
+HGLRC WINAPI wglCreateContext(HDC hdc)
+{
+    struct wgl_dc_data* dc_data = get_dc_data(hdc);
+    HGLRC ret;
+
+    if(!dc_data)
+    {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return NULL;
+    }
+
+    ret = wglCreateContext_impl(hdc, dc_data);
+    release_dc_data(dc_data);
+    return ret;
 }
 
 HGLRC WINAPI wglCreateLayerContext(HDC hdc, int iLayerPlane)
@@ -555,19 +608,9 @@ BOOL WINAPI wglDeleteContext(HGLRC hglrc)
     return TRUE;
 }
 
-BOOL WINAPI wglDescribeLayerPlane(HDC hdc,
-                                  int iPixelFormat,
-                                  int iLayerPlane,
-                                  UINT nBytes,
-                                  LPLAYERPLANEDESCRIPTOR plpd)
+static BOOL wglDescribeLayerPlane_impl(HDC hdc, int iPixelFormat, int iLayerPlane, UINT nBytes, LPLAYERPLANEDESCRIPTOR plpd, struct wgl_dc_data* dc_data)
 {
-    struct wgl_dc_data* dc_data = get_dc_data(hdc);
 
-    if(!dc_data)
-    {
-        SetLastError(ERROR_INVALID_HANDLE);
-        return FALSE;
-    }
 
     if((iPixelFormat > 0) && (iPixelFormat <= dc_data->nb_icd_formats))
     {
@@ -580,6 +623,26 @@ BOOL WINAPI wglDescribeLayerPlane(HDC hdc,
 
     /* SW implementation doesn't support this */
     return FALSE;
+}
+
+BOOL WINAPI wglDescribeLayerPlane(HDC hdc,
+                                  int iPixelFormat,
+                                  int iLayerPlane,
+                                  UINT nBytes,
+                                  LPLAYERPLANEDESCRIPTOR plpd)
+{
+    struct wgl_dc_data* dc_data = get_dc_data(hdc);
+    BOOL ret;
+
+    if(!dc_data)
+    {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+
+    ret = wglDescribeLayerPlane_impl(hdc, iPixelFormat, iLayerPlane, nBytes, plpd, dc_data);
+    release_dc_data(dc_data);
+    return ret;
 }
 
 HGLRC WINAPI wglGetCurrentContext(void)
@@ -598,15 +661,9 @@ PROC WINAPI wglGetDefaultProcAddress(LPCSTR lpszProc)
     return NULL;
 }
 
-int WINAPI wglGetLayerPaletteEntries(HDC hdc, int iLayerPlane, int iStart, int cEntries, COLORREF* pcr )
+static int wglGetLayerPaletteEntries_impl(HDC hdc, int iLayerPlane, int iStart, int cEntries, COLORREF* pcr , struct wgl_dc_data* dc_data)
 {
-    struct wgl_dc_data* dc_data = get_dc_data(hdc);
 
-    if(!dc_data)
-    {
-        SetLastError(ERROR_INVALID_HANDLE);
-        return 0;
-    }
 
     if(!dc_data->pixelformat)
     {
@@ -619,6 +676,22 @@ int WINAPI wglGetLayerPaletteEntries(HDC hdc, int iLayerPlane, int iStart, int c
 
     /* SW implementation doesn't support this */
     return 0;
+}
+
+int WINAPI wglGetLayerPaletteEntries(HDC hdc, int iLayerPlane, int iStart, int cEntries, COLORREF* pcr )
+{
+    struct wgl_dc_data* dc_data = get_dc_data(hdc);
+    int ret;
+
+    if(!dc_data)
+    {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return 0;
+    }
+
+    ret = wglGetLayerPaletteEntries_impl(hdc, iLayerPlane, iStart, cEntries, pcr, dc_data);
+    release_dc_data(dc_data);
+    return ret;
 }
 
 INT WINAPI wglGetPixelFormat(HDC hdc)
@@ -765,6 +838,7 @@ BOOL WINAPI wglMakeCurrent(HDC hdc, HGLRC hglrc)
                 /* revert */
                 InterlockedExchange(&ctx->thread_id, 0);
                 IntSetCurrentDispatchTable(NULL);
+                release_dc_data(dc_data);
                 SetLastError(ERROR_INVALID_PARAMETER);
                 return FALSE;
             }
@@ -782,10 +856,12 @@ BOOL WINAPI wglMakeCurrent(HDC hdc, HGLRC hglrc)
                 /* revert */
                 IntMakeCurrent(NULL, NULL, NULL);
                 InterlockedExchange(&ctx->thread_id, 0);
+                release_dc_data(dc_data);
                 SetLastError(ERROR_INVALID_PARAMETER);
                 return FALSE;
             }
         }
+        release_dc_data(dc_data);
     }
     else if(old_ctx)
     {
@@ -818,17 +894,9 @@ BOOL WINAPI wglMakeCurrent(HDC hdc, HGLRC hglrc)
     return TRUE;
 }
 
-BOOL WINAPI wglRealizeLayerPalette(HDC hdc,
-                                   int iLayerPlane,
-                                   BOOL bRealize)
+static BOOL wglRealizeLayerPalette_impl(HDC hdc, int iLayerPlane, BOOL bRealize, struct wgl_dc_data* dc_data)
 {
-    struct wgl_dc_data* dc_data = get_dc_data(hdc);
 
-    if(!dc_data)
-    {
-        SetLastError(ERROR_INVALID_HANDLE);
-        return FALSE;
-    }
 
     if(!dc_data->pixelformat)
     {
@@ -843,19 +911,27 @@ BOOL WINAPI wglRealizeLayerPalette(HDC hdc,
     return FALSE;
 }
 
-int WINAPI wglSetLayerPaletteEntries(HDC hdc,
-                                     int iLayerPlane,
-                                     int iStart,
-                                     int cEntries,
-                                     const COLORREF *pcr)
+BOOL WINAPI wglRealizeLayerPalette(HDC hdc,
+                                   int iLayerPlane,
+                                   BOOL bRealize)
 {
     struct wgl_dc_data* dc_data = get_dc_data(hdc);
+    BOOL ret;
 
     if(!dc_data)
     {
         SetLastError(ERROR_INVALID_HANDLE);
-        return 0;
+        return FALSE;
     }
+
+    ret = wglRealizeLayerPalette_impl(hdc, iLayerPlane, bRealize, dc_data);
+    release_dc_data(dc_data);
+    return ret;
+}
+
+static int wglSetLayerPaletteEntries_impl(HDC hdc, int iLayerPlane, int iStart, int cEntries, const COLORREF *pcr, struct wgl_dc_data* dc_data)
+{
+
 
     if(!dc_data->pixelformat)
     {
@@ -870,20 +946,33 @@ int WINAPI wglSetLayerPaletteEntries(HDC hdc,
     return 0;
 }
 
-BOOL WINAPI wglSetPixelFormat(HDC hdc, INT format, const PIXELFORMATDESCRIPTOR *descr)
+int WINAPI wglSetLayerPaletteEntries(HDC hdc,
+                                     int iLayerPlane,
+                                     int iStart,
+                                     int cEntries,
+                                     const COLORREF *pcr)
 {
     struct wgl_dc_data* dc_data = get_dc_data(hdc);
+    int ret;
+
+    if(!dc_data)
+    {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return 0;
+    }
+
+    ret = wglSetLayerPaletteEntries_impl(hdc, iLayerPlane, iStart, cEntries, pcr, dc_data);
+    release_dc_data(dc_data);
+    return ret;
+}
+
+static BOOL wglSetPixelFormat_impl(HDC hdc, INT format, const PIXELFORMATDESCRIPTOR *descr, struct wgl_dc_data* dc_data)
+{
     INT sw_format;
     BOOL ret;
 
     TRACE("HDC %p, format %i.\n", hdc, format);
 
-    if(!dc_data)
-    {
-        WARN("Not a valid DC!.\n");
-        SetLastError(ERROR_INVALID_HANDLE);
-        return FALSE;
-    }
 
     if(!format)
     {
@@ -930,6 +1019,22 @@ BOOL WINAPI wglSetPixelFormat(HDC hdc, INT format, const PIXELFORMATDESCRIPTOR *
     return FALSE;
 }
 
+BOOL WINAPI wglSetPixelFormat(HDC hdc, INT format, const PIXELFORMATDESCRIPTOR *descr)
+{
+    struct wgl_dc_data* dc_data = get_dc_data(hdc);
+    BOOL ret;
+
+    if(!dc_data)
+    {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+
+    ret = wglSetPixelFormat_impl(hdc, format, descr, dc_data);
+    release_dc_data(dc_data);
+    return ret;
+}
+
 BOOL WINAPI wglShareLists(HGLRC hglrcSrc, HGLRC hglrcDst)
 {
     struct wgl_context* ctx_src = get_context(hglrcSrc);
@@ -955,15 +1060,9 @@ BOOL WINAPI wglShareLists(HGLRC hglrcSrc, HGLRC hglrcDst)
     return sw_ShareLists(ctx_src->dhglrc, ctx_dst->dhglrc);
 }
 
-BOOL WINAPI DECLSPEC_HOTPATCH wglSwapBuffers(HDC hdc)
+static BOOL wglSwapBuffers_impl(HDC hdc, struct wgl_dc_data* dc_data)
 {
-    struct wgl_dc_data* dc_data = get_dc_data(hdc);
 
-    if(!dc_data)
-    {
-        SetLastError(ERROR_INVALID_HANDLE);
-        return FALSE;
-    }
 
     if(!dc_data->pixelformat)
     {
@@ -975,6 +1074,22 @@ BOOL WINAPI DECLSPEC_HOTPATCH wglSwapBuffers(HDC hdc)
         return dc_data->icd_data->DrvSwapBuffers(hdc);
 
     return sw_SwapBuffers(hdc, dc_data);
+}
+
+BOOL WINAPI DECLSPEC_HOTPATCH wglSwapBuffers(HDC hdc)
+{
+    struct wgl_dc_data* dc_data = get_dc_data(hdc);
+    BOOL ret;
+
+    if(!dc_data)
+    {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+
+    ret = wglSwapBuffers_impl(hdc, dc_data);
+    release_dc_data(dc_data);
+    return ret;
 }
 
 BOOL WINAPI wglSwapLayerBuffers(HDC hdc, UINT fuPlanes)
