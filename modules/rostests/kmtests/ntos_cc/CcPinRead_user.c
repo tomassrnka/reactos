@@ -26,8 +26,10 @@ START_TEST(CcPinRead)
      * 1 test for length/offset
      * 1 test for read/write size
      * 1 test for concurrent exclusive pins
+     * 1 test for partially overlapping pins
+     * 1 test for concurrent partially overlapping exclusive pins
      */
-    for (TestId = 0; TestId < 8; ++TestId)
+    for (TestId = 0; TestId < 10; ++TestId)
     {
         Ret = KmtSendUlongToDriver(IOCTL_START_TEST, TestId);
         ok(Ret == ERROR_SUCCESS, "KmtSendUlongToDriver failed: %lx\n", Ret);
