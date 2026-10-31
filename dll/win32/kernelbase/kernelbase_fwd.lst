@@ -705,6 +705,7 @@
 @ VerSetConditionMask
 @ VirtualAlloc
 @ VirtualAllocEx
+@ VirtualAllocExNuma -version=0x600+
 @ VirtualFree
 @ VirtualFreeEx
 @ VirtualLock
