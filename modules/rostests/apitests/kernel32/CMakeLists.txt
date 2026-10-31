@@ -102,6 +102,7 @@ list(APPEND SOURCE
     IdleProcessor.c
     InitOnce.c
     InterlockedPushListSListEx.c
+    KernelBaseForwarders.c
     KernelBaseTime.c
     interlck.c
     IsApiSetImplemented.c
