@@ -454,6 +454,7 @@ typedef struct _SOCK_SHARED_INFO {
         BOOLEAN					UseDelayedAcceptance:1;
 		BOOLEAN					UseSAN:1;
 		BOOLEAN					IpPktInfo:1;
+		BOOLEAN					TcpNoDelay:1; /* TCP_NODELAY as set, for getsockopt (a bit of the flag word: layout unchanged) */
     }; // Flags
     DWORD						CreateFlags;
     DWORD						ServiceFlags1;

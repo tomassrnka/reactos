@@ -210,10 +210,13 @@ static
 BOOLEAN
 MsafdSendStreamWhole(
     _In_ PSOCKET_INFORMATION Socket,
-    _In_ DWORD iFlags)
+    _In_ DWORD iFlags,
+    _In_ BOOLEAN Overlapped)
 {
+    /* An overlapped send completes whole on Windows whether or not the socket is in non-blocking
+     * mode; a plain send on a non-blocking socket takes what fits */
     return Socket->SharedData->SocketType == SOCK_STREAM &&
-           !Socket->SharedData->NonBlocking &&
+           (Overlapped || !Socket->SharedData->NonBlocking) &&
            !(iFlags & (MSG_OOB | MSG_PARTIAL));
 }
 
@@ -1018,7 +1021,7 @@ WSPSend(SOCKET Handle,
             Event = NULL;
 
             /* A stream send is sent whole: keep the buffers to send what AFD does not take */
-            if (dwBufferCount != 0 && MsafdSendStreamWhole(Socket, iFlags))
+            if (dwBufferCount != 0 && MsafdSendStreamWhole(Socket, iFlags, TRUE))
             {
                 PMSAFD_SEND_REST Rest = HeapAlloc(GlobalHeap, 0,
                     FIELD_OFFSET(MSAFD_SEND_REST, Buffers) + dwBufferCount * sizeof(AFD_WSABUF));
@@ -1041,8 +1044,11 @@ WSPSend(SOCKET Handle,
             Event = lpOverlapped->hEvent;
 
             /* A stream send is completed whole by AFD: nothing here can continue it later */
-            if (dwBufferCount != 0 && MsafdSendStreamWhole(Socket, iFlags))
-                SendInfo.AfdFlags |= AFD_SEND_WHOLE;
+            if (dwBufferCount != 0 && MsafdSendStreamWhole(Socket, iFlags, TRUE))
+            {
+                /* AFD copies all of it, so the send does not return early on a non-blocking socket */
+                SendInfo.AfdFlags = (SendInfo.AfdFlags & ~AFD_IMMEDIATE) | AFD_SEND_WHOLE;
+            }
 
             APCFunction = NULL;
             if (Event)
@@ -1092,7 +1098,7 @@ WSPSend(SOCKET Handle,
 
     /* A blocking stream send is sent whole: send what AFD did not take */
     if (!lpOverlapped && NT_SUCCESS(Status) && Status != STATUS_PENDING &&
-        dwBufferCount != 0 && MsafdSendStreamWhole(Socket, iFlags))
+        dwBufferCount != 0 && MsafdSendStreamWhole(Socket, iFlags, FALSE))
     {
         PAFD_WSABUF Rest = HeapAlloc(GlobalHeap, 0, dwBufferCount * sizeof(AFD_WSABUF)), First;
         ULONG Total = 0, Left;

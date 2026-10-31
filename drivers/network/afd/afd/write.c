@@ -829,12 +829,12 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         SendLength = AfdSaturatedAdd(SendLength, SendReq->BufferArray[i].len);
     }
 
-    /* A stream send of a blocking socket that the caller has no thread to continue (an event or
-     * a completion port) stays queued until all of it is copied, as on Windows. The count
+    /* A stream send that the caller has no thread to continue (an event or a completion port) stays
+     * queued until all of it is copied, as on Windows, also for a socket in non-blocking mode (msafd
+     * asks for it only for an overlapped send, a plain send on such a socket takes what fits). The count
      * saturates only for a request AFD could not describe anyway */
     Whole = (SendReq->AfdFlags & AFD_SEND_WHOLE) &&
             (SendReq->AfdFlags & AFD_OVERLAPPED) &&
-            !((SendReq->AfdFlags & AFD_IMMEDIATE) || FCB->NonBlocking) &&
             SendLength != MAXULONG;
 
     /* An earlier whole send that is not copied yet goes first */
