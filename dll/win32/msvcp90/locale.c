@@ -157,6 +157,10 @@ typedef struct {
 
 typedef struct {
     locale_facet facet;
+} time_base;
+
+typedef struct {
+    locale_facet facet;
     const char *days;
     const char *months;
     dateorder dateorder;
@@ -11174,6 +11178,57 @@ istreambuf_iterator_char* __thiscall time_get_char_get_fmt(const time_get_char *
     return ret;
 }
 
+/* ??_7time_base@std@@6B@ */
+extern const vtable_ptr time_base_vtable;
+
+/* ??0time_base@std@@QAE@I@Z */
+/* ??0time_base@std@@QEAA@_K@Z */
+DEFINE_THISCALL_WRAPPER(time_base_ctor_refs, 8)
+time_base* __thiscall time_base_ctor_refs(time_base *this, size_t refs)
+{
+    TRACE("(%p %Iu)\n", this, refs);
+    locale_facet_ctor_refs(&this->facet, refs);
+    this->facet.vtable = &time_base_vtable;
+    return this;
+}
+
+/* ??_Ftime_base@std@@QAEXXZ */
+/* ??_Ftime_base@std@@QEAAXXZ */
+DEFINE_THISCALL_WRAPPER(time_base_ctor, 4)
+time_base* __thiscall time_base_ctor(time_base *this)
+{
+    TRACE("(%p)\n", this);
+    return time_base_ctor_refs(this, 0);
+}
+
+/* ??1time_base@std@@UAE@XZ */
+/* ??1time_base@std@@UEAA@XZ */
+DEFINE_THISCALL_WRAPPER(time_base_dtor, 4)
+void __thiscall time_base_dtor(time_base *this)
+{
+    TRACE("(%p)\n", this);
+}
+
+DEFINE_THISCALL_WRAPPER(time_base_vector_dtor, 8)
+time_base* __thiscall time_base_vector_dtor(time_base *this, unsigned int flags)
+{
+    TRACE("(%p %x)\n", this, flags);
+    if(flags & 2) {
+        /* we have an array, with the number of elements stored before the first object */
+        INT_PTR i, *ptr = (INT_PTR *)this-1;
+
+        for(i=*ptr-1; i>=0; i--)
+            time_base_dtor(this+i);
+        operator_delete(ptr);
+    } else {
+        time_base_dtor(this);
+        if(flags & 1)
+            operator_delete(this);
+    }
+
+    return this;
+}
+
 /* ?id@?$time_get@_WV?$istreambuf_iterator@_WU?$char_traits@_W@std@@@std@@@std@@2V0locale@2@A */
 locale_id time_get_wchar_id = {0};
 
@@ -13163,6 +13218,7 @@ DEFINE_RTTI_DATA(time_put_short, 0, ".?AV?$num_put@GV?$ostreambuf_iterator@GU?$c
 DEFINE_RTTI_DATA(time_base, 0, ".?AUtime_base@std@@", locale_facet_rtti_base_descriptor)
 DEFINE_RTTI_DATA(time_get_char, 0, ".?AV?$time_get@DV?$istreambuf_iterator@DU?$char_traits@D@std@@@std@@@std@@", time_base_rtti_base_descriptor, locale_facet_rtti_base_descriptor)
 DEFINE_RTTI_DATA(time_get_wchar, 0, ".?AV?$time_get@_WV?$istreambuf_iterator@_WU?$char_traits@_W@std@@@std@@@std@@", time_base_rtti_base_descriptor, locale_facet_rtti_base_descriptor)
+DEFINE_RTTI_DATA(time_get_short, 0, ".?AV?$time_get@GV?$istreambuf_iterator@GU?$char_traits@G@std@@@std@@@std@@", time_base_rtti_base_descriptor, locale_facet_rtti_base_descriptor)
 
 __ASM_BLOCK_BEGIN(locale_vtables)
     __ASM_VTABLE(_Facet_base,
@@ -13521,6 +13577,13 @@ __ASM_BLOCK_BEGIN(locale_vtables)
             VTABLE_ADD_FUNC(locale_facet__Decref)
 #endif
             VTABLE_ADD_FUNC(time_put_wchar_do_put));
+    __ASM_VTABLE(time_base,
+            VTABLE_ADD_FUNC(time_base_vector_dtor)
+#if _MSVCP_VER >= 110
+            VTABLE_ADD_FUNC(locale_facet__Incref)
+            VTABLE_ADD_FUNC(locale_facet__Decref)
+#endif
+            );
     __ASM_VTABLE(time_get_char,
             VTABLE_ADD_FUNC(time_get_char_vector_dtor)
 #if _MSVCP_VER >= 110
@@ -13538,6 +13601,23 @@ __ASM_BLOCK_BEGIN(locale_vtables)
 #endif
             );
     __ASM_VTABLE(time_get_wchar,
+            VTABLE_ADD_FUNC(time_get_wchar_vector_dtor)
+#if _MSVCP_VER >= 110
+            VTABLE_ADD_FUNC(locale_facet__Incref)
+            VTABLE_ADD_FUNC(locale_facet__Decref)
+#endif
+            VTABLE_ADD_FUNC(time_get_wchar_do_date_order)
+            VTABLE_ADD_FUNC(time_get_wchar_do_get_time)
+            VTABLE_ADD_FUNC(time_get_wchar_do_get_date)
+            VTABLE_ADD_FUNC(time_get_wchar_do_get_weekday)
+            VTABLE_ADD_FUNC(time_get_wchar_do_get_monthname)
+            VTABLE_ADD_FUNC(time_get_wchar_do_get_year)
+#if _MSVCP_VER >= 100
+            VTABLE_ADD_FUNC(time_get_wchar_do_get)
+#endif
+            );
+    /* like time_put_short and the other short facets: 16-bit characters, so the wchar_t code serves */
+    __ASM_VTABLE(time_get_short,
             VTABLE_ADD_FUNC(time_get_wchar_vector_dtor)
 #if _MSVCP_VER >= 110
             VTABLE_ADD_FUNC(locale_facet__Incref)
@@ -13590,6 +13670,7 @@ void init_locale(void *base)
     INIT_RTTI(time_base, base);
     INIT_RTTI(time_get_char, base);
     INIT_RTTI(time_get_wchar, base);
+    INIT_RTTI(time_get_short, base);
 }
 
 void free_locale(void)
