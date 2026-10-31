@@ -591,6 +591,11 @@ AfdCleanupSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     for (Function = 0; Function < MAX_FUNCTIONS; Function++)
     {
+        /* Closing a stream socket aborts its pending receives (STATUS_CONNECTION_ABORTED,
+           as Windows does); every other request, and any receive of a datagram socket, is cancelled */
+        FCB->AbortingReceives = (Function == FUNCTION_RECV) &&
+                                !(FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS);
+
         CurrentEntry = FCB->PendingIrpList[Function].Flink;
         while (CurrentEntry != &FCB->PendingIrpList[Function])
         {
@@ -603,6 +608,7 @@ AfdCleanupSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
            CurrentEntry = NextEntry;
         }
     }
+    FCB->AbortingReceives = FALSE;
 
     KillSelectsForFCB( FCB->DeviceExt, FileObject, FALSE );
 
@@ -965,6 +971,12 @@ AfdDisconnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     {
         /* Mark that we can't issue another receive request */
         FCB->TdiReceiveClosed = TRUE;
+
+        /* An abortive close of a stream socket aborts the receives that are pending (the
+           cancel of the transport's receive below would complete them as cancelled) */
+        if ((DisReq->DisconnectType & AFD_DISCONNECT_ABORT) &&
+            !(FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS))
+            AfdAbortPendingReceives(FCB);
 
         /* Try to cancel a pending TDI receive IRP if there was one in progress */
         if (FCB->ReceiveIrp.InFlightRequest)
@@ -1613,7 +1625,11 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
                     Irp->Tail.Overlay.DriverContext[3] = NULL;
                 }
             }
-            UnlockAndMaybeComplete(FCB, STATUS_CANCELLED, Irp, 0);
+            /* The cancel comes from the cleanup of a stream socket: the connection is gone */
+            UnlockAndMaybeComplete(FCB,
+                                   (Function == FUNCTION_RECV && FCB->AbortingReceives) ?
+                                       STATUS_CONNECTION_ABORTED : STATUS_CANCELLED,
+                                   Irp, 0);
             ObDereferenceObject(FileObject);
             return;
         }
