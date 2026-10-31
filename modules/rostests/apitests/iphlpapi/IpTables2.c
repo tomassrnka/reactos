@@ -63,6 +63,40 @@ static void test_family_table(HMODULE hIphlpapi, const char *name)
     ok(ret == ERROR_INVALID_PARAMETER, "%s(NULL table): got %lu\n", name, ret);
 }
 
+/* the head of MIB_ANYCASTIPADDRESS_TABLE */
+typedef struct { ULONG NumEntries; } ANYCAST_TABLE;
+
+/* A system without anycast addresses (every VM here and the oracle) gets an empty table, with NO_ERROR. */
+static void test_anycast_empty(HMODULE hIphlpapi)
+{
+    DWORD (WINAPI *pGetAnycast)(ULONG, ANYCAST_TABLE **) =
+        (PVOID)GetProcAddress(hIphlpapi, "GetAnycastIpAddressTable");
+    static const ULONG families[] = { AF_UNSPEC, AF_INET, AF_INET6 };
+    ANYCAST_TABLE *table;
+    DWORD ret;
+    int i;
+
+    if (!pGetAnycast)
+    {
+        skip("GetAnycastIpAddressTable is not available\n");
+        return;
+    }
+
+    for (i = 0; i < 3; i++)
+    {
+        table = NULL;
+        ret = pGetAnycast(families[i], &table);
+        ok(ret == NO_ERROR, "GetAnycastIpAddressTable(%lu): got %lu\n", families[i], ret);
+        ok(table != NULL, "GetAnycastIpAddressTable(%lu): no table\n", families[i]);
+        if (table)
+        {
+            ok(table->NumEntries == 0, "GetAnycastIpAddressTable(%lu): %lu entries\n", families[i], table->NumEntries);
+            if (pFreeMibTable)
+                pFreeMibTable(table);
+        }
+    }
+}
+
 START_TEST(IpTables2)
 {
     HMODULE hIphlpapi = GetModuleHandleW(L"iphlpapi.dll");
@@ -111,6 +145,8 @@ START_TEST(IpTables2)
     }
 
     test_family_table(hIphlpapi, "GetUnicastIpAddressTable");
+    test_family_table(hIphlpapi, "GetAnycastIpAddressTable");
+    test_anycast_empty(hIphlpapi);
     test_family_table(hIphlpapi, "GetIpNetTable2");
     test_family_table(hIphlpapi, "GetIpForwardTable2");
 

@@ -43,6 +43,7 @@
 @ stdcall GetAdapterOrderMap()
 @ stdcall GetAdaptersAddresses(long long ptr ptr ptr)
 @ stdcall GetAdaptersInfo(ptr ptr)
+@ stdcall -version=0x600+ GetAnycastIpAddressTable(long ptr)
 @ stdcall GetBestInterface(long ptr)
 @ stdcall GetBestInterfaceEx(ptr ptr)
 @ stub GetBestInterfaceFromStack
