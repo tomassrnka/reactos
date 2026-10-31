@@ -26,6 +26,7 @@ list(APPEND SOURCE
     ConsoleBufferSwitch.c
     ConsoleCaret.c
     ConsoleCreateRace.c
+    ConsoleOrphanChild.c
     ConsoleCsrRequests.c
     ConsoleCtrlEventRace.c
     ConsoleCtrlHandler.c

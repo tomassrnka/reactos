@@ -46,6 +46,13 @@ typedef struct _CONSOLE_PROCESS_DATA
     HANDLE ConsoleHandle;
     BOOLEAN ConsoleApp;     // TRUE if it is a CUI app, FALSE otherwise.
 
+    /*
+     * Console of the parent that this process is going to join. It is
+     * referenced from the creation of the process (ConSrvNewProcess) until
+     * the process connects (ConSrvConnect) and holds its own reference.
+     */
+    HANDLE PendingConsoleHandle;
+
     RTL_CRITICAL_SECTION HandleTableLock;
     ULONG HandleTableSize;
     struct _CONSOLE_IO_HANDLE* /* PCONSOLE_IO_HANDLE */ HandleTable; // Length-varying table

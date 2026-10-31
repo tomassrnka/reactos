@@ -29,3 +29,7 @@ ConSrvInheritConsole(
 NTSTATUS
 ConSrvRemoveConsole(
     IN OUT PCONSOLE_PROCESS_DATA ProcessData);
+
+VOID
+ConSrvReleasePendingConsole(
+    IN OUT PCONSOLE_PROCESS_DATA ProcessData);
