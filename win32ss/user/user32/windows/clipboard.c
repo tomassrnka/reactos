@@ -302,7 +302,9 @@ SetClipboardData(UINT uFormat, HANDLE hMem)
     HANDLE hGlobal;
     LPVOID pMem;
     HANDLE hRet = NULL, hTemp;
-    SETCLIPBDATA scd = {FALSE, FALSE};
+    /* An application's SetClipboardData is a clipboard change (sequence number,
+       viewers and listeners); the formats GetClipboardData synthesizes are not */
+    SETCLIPBDATA scd = {FALSE, TRUE};
 
     /* Check if this is a delayed rendering */
     if (hMem == NULL)
@@ -375,81 +377,27 @@ SetClipboardData(UINT uFormat, HANDLE hMem)
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 BOOL
 WINAPI
 AddClipboardFormatListener(HWND hwnd)
 {
-    UNIMPLEMENTED;
-    return FALSE;
+    return NtUserAddClipboardFormatListener(hwnd);
 }
+
 /*
- * @unimplemented
+ * @implemented
  */
 BOOL
 WINAPI
 RemoveClipboardFormatListener(HWND hwnd)
 {
-    UNIMPLEMENTED;
-    return FALSE;
-}
-
-/*
- * Formats of the clipboard in the order win32k keeps them (what the open clipboard enumerates).
- * Pass NULL to only count. The clipboard must be open by the caller.
- */
-static UINT
-IntEnumOpenClipboardFormats(PUINT lpuiFormats, UINT cFormats)
-{
-    UINT Count = 0, Format = 0;
-
-    while ((Format = EnumClipboardFormats(Format)) != 0)
-    {
-        if (lpuiFormats && Count < cFormats)
-            lpuiFormats[Count] = Format;
-        Count++;
-    }
-    return Count;
-}
-
-/*
- * Formats of a clipboard that nobody has open, by asking about every format id it can hold,
- * in ascending order. CountClipboardFormats and IsClipboardFormatAvailable need no open clipboard.
- */
-static UINT
-IntScanClipboardFormats(PUINT lpuiFormats, UINT cFormats, UINT Count)
-{
-    UINT Found = 0, Format;
-
-    for (Format = 1; Format < 0x400 && Found < Count; Format++)
-    {
-        if (IsClipboardFormatAvailable(Format))
-        {
-            if (lpuiFormats && Found < cFormats)
-                lpuiFormats[Found] = Format;
-            Found++;
-        }
-    }
-    for (Format = 0xC000; Format <= 0xFFFF && Found < Count; Format++)
-    {
-        if (IsClipboardFormatAvailable(Format))
-        {
-            if (lpuiFormats && Found < cFormats)
-                lpuiFormats[Found] = Format;
-            Found++;
-        }
-    }
-    return Found;
+    return NtUserRemoveClipboardFormatListener(hwnd);
 }
 
 /*
  * @implemented
- *
- * win32k has no clipboard format listener bookkeeping yet, so this reports the formats the
- * clipboard holds now, which is also what Windows returns. They come back in clipboard order:
- * from the clipboard if the caller has it open, else by opening it for a moment, and only when
- * somebody else holds it open in ascending id order.
  */
 BOOL
 WINAPI
@@ -457,63 +405,5 @@ GetUpdatedClipboardFormats(PUINT lpuiFormats,
                            UINT cFormats,
                            PUINT pcFormatsOut)
 {
-    UINT Count;
-    BOOL bOpened = FALSE;
-    DWORD dwError;
-
-    if (!pcFormatsOut)
-    {
-        SetLastError(ERROR_NOACCESS);
-        return FALSE;
-    }
-
-    /* Is the clipboard already open by this thread? */
-    SetLastError(ERROR_SUCCESS);
-    if (EnumClipboardFormats(0) == 0 && GetLastError() == ERROR_CLIPBOARD_NOT_OPEN)
-    {
-        bOpened = OpenClipboard(NULL);
-        if (!bOpened)
-        {
-            /* Somebody else has it open */
-            Count = CountClipboardFormats();
-            *pcFormatsOut = Count;
-            if (Count == 0)
-                return TRUE;
-            if (!lpuiFormats && cFormats)
-            {
-                SetLastError(ERROR_NOACCESS);
-                return FALSE;
-            }
-            if (!lpuiFormats || cFormats < Count)
-            {
-                SetLastError(ERROR_INSUFFICIENT_BUFFER);
-                return FALSE;
-            }
-            *pcFormatsOut = IntScanClipboardFormats(lpuiFormats, cFormats, Count);
-            return TRUE;
-        }
-    }
-
-    Count = IntEnumOpenClipboardFormats(NULL, 0);
-    *pcFormatsOut = Count;
-    dwError = ERROR_SUCCESS;
-    if (Count != 0)
-    {
-        if (!lpuiFormats && cFormats)
-            dwError = ERROR_NOACCESS;
-        else if (!lpuiFormats || cFormats < Count)
-            dwError = ERROR_INSUFFICIENT_BUFFER;
-        else
-            IntEnumOpenClipboardFormats(lpuiFormats, cFormats);
-    }
-
-    if (bOpened)
-        CloseClipboard();
-
-    if (dwError != ERROR_SUCCESS)
-    {
-        SetLastError(dwError);
-        return FALSE;
-    }
-    return TRUE;
+    return NtUserGetUpdatedClipboardFormats(lpuiFormats, cFormats, pcFormatsOut);
 }

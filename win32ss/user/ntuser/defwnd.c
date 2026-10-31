@@ -686,7 +686,8 @@ DefWndScreenshot(PWND pWnd)
     INT h;
     HBITMAP hbitmap;
     HDC hdc2;
-    SETCLIPBDATA scd = {FALSE, FALSE};
+    /* A clipboard change like an application's SetClipboardData */
+    SETCLIPBDATA scd = {FALSE, TRUE};
 
     UserOpenClipboard(UserHMGetHandle(pWnd));
     UserEmptyClipboard();

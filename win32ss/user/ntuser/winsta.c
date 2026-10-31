@@ -138,6 +138,7 @@ IntWinStaObjectDelete(
     }
 
     UserEmptyClipboardData(WinSta);
+    UserClipboardFreeListeners(WinSta);
 
     RtlDestroyAtomTable(WinSta->AtomTable);
 
