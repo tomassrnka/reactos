@@ -25,6 +25,7 @@ void expect_shim_imp(PHOOKAPI hook, PCSTR library, PCSTR function, PCSTR shim, i
 
 /* verifyversion.c */
 void test_verify_version_cases(PVOID verify, DWORD major, DWORD minor, DWORD build, WORD sp_major, WORD sp_minor, PCSTR shim);
+void test_verify_version_sweep(PVOID verifyA, PVOID verifyW, PVOID verifyRtl, DWORD major, DWORD minor, DWORD build, WORD sp_major, PCSTR shim);
 
 BOOL LoadShimDLL(PCWSTR ShimDll, HMODULE* module, tGETHOOKAPIS* ppGetHookAPIs);
 tGETHOOKAPIS LoadShimDLL2(PCWSTR ShimDll);

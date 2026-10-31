@@ -124,113 +124,22 @@ typedef LONG(WINAPI* REGGETVALUEAPROC)(HKEY, LPCSTR, LPCSTR, DWORD, LPDWORD, PVO
 #define STATUS_REVISION_MISMATCH ((NTSTATUS)0xC0000059L)
 #endif
 
+#include <reactos/verifyver.h>
 
-/* Compare one field of the version the program asked about with the one we pretend to be */
-static BOOL VerCompare(DWORD Have, DWORD Want, DWORD Condition)
-{
-    switch (Condition)
-    {
-    case VER_EQUAL:         return Have == Want;
-    case VER_GREATER:       return Have > Want;
-    case VER_GREATER_EQUAL: return Have >= Want;
-    case VER_LESS:          return Have < Want;
-    case VER_LESS_EQUAL:    return Have <= Want;
-    }
-    return FALSE;
-}
-
-/* The condition of one field is 3 bits of the mask; the position is the number of the field's type bit */
-static DWORD VerCondition(DWORDLONG ConditionMask, DWORD TypeBit)
-{
-    DWORD Shift = 0;
-    while (!(TypeBit & 1))
-    {
-        TypeBit >>= 1;
-        Shift++;
-    }
-    return (DWORD)(ConditionMask >> (Shift * VER_NUM_BITS_PER_CONDITION_MASK)) & VER_CONDITION_MASK;
-}
 
 /*
- * Answer VerifyVersionInfo / RtlVerifyVersionInfo as if the operating system were pFake.
+ * Answer VerifyVersionInfo / RtlVerifyVersionInfo as if the operating system were pFake, with the
+ * comparison RtlVerifyVersionInfo makes (reactos/verifyver.h).
  * 'Have' holds what the operating system really reports for the fields the lie does not cover
  * (product type, suite mask); the lie is applied on top of it.
- *
- * Major, minor, service pack major and service pack minor are one version that is compared from the
- * left. A field that is equal hands over to the next one; the condition of the first field is kept
- * for the later ones unless it is "equal", in which case each field brings its own. The last field
- * that is looked at decides, also when it is equal.
  */
 static NTSTATUS VerifyFakeVersion(const RTL_OSVERSIONINFOEXW* Want, DWORD TypeMask, DWORDLONG ConditionMask,
                                   RTL_OSVERSIONINFOEXW* Have, VersionLieInfo* pFake)
 {
-    static const DWORD ChainBits[4] = { VER_MAJORVERSION, VER_MINORVERSION, VER_SERVICEPACKMAJOR, VER_SERVICEPACKMINOR };
-    DWORD HaveChain[4], WantChain[4];
-    DWORD Condition = VER_EQUAL, n;
-    BOOL Satisfied = TRUE;
-
-    if (!TypeMask || !ConditionMask)
-        return STATUS_INVALID_PARAMETER;
-
     if (!FakeVersion((LPOSVERSIONINFOEXA)Have, pFake))
         return STATUS_INVALID_PARAMETER;
 
-    if (TypeMask & VER_PRODUCT_TYPE)
-    {
-        if (!VerCompare(Have->wProductType, Want->wProductType, VerCondition(ConditionMask, VER_PRODUCT_TYPE)))
-            return STATUS_REVISION_MISMATCH;
-    }
-
-    if (TypeMask & VER_SUITENAME)
-    {
-        switch (VerCondition(ConditionMask, VER_SUITENAME))
-        {
-        case VER_AND:
-            if ((Want->wSuiteMask & Have->wSuiteMask) != Want->wSuiteMask)
-                return STATUS_REVISION_MISMATCH;
-            break;
-        case VER_OR:
-            if (Want->wSuiteMask && !(Want->wSuiteMask & Have->wSuiteMask))
-                return STATUS_REVISION_MISMATCH;
-            break;
-        default:
-            return STATUS_INVALID_PARAMETER;
-        }
-    }
-
-    if (TypeMask & VER_PLATFORMID)
-    {
-        if (!VerCompare(Have->dwPlatformId, Want->dwPlatformId, VerCondition(ConditionMask, VER_PLATFORMID)))
-            return STATUS_REVISION_MISMATCH;
-    }
-
-    if (TypeMask & VER_BUILDNUMBER)
-    {
-        if (!VerCompare(Have->dwBuildNumber, Want->dwBuildNumber, VerCondition(ConditionMask, VER_BUILDNUMBER)))
-            return STATUS_REVISION_MISMATCH;
-    }
-
-    HaveChain[0] = Have->dwMajorVersion;        WantChain[0] = Want->dwMajorVersion;
-    HaveChain[1] = Have->dwMinorVersion;        WantChain[1] = Want->dwMinorVersion;
-    HaveChain[2] = Have->wServicePackMajor;     WantChain[2] = Want->wServicePackMajor;
-    HaveChain[3] = Have->wServicePackMinor;     WantChain[3] = Want->wServicePackMinor;
-
-    for (n = 0; n < 4; ++n)
-    {
-        if (!(TypeMask & ChainBits[n]))
-            continue;
-
-        if (Condition == VER_EQUAL)
-            Condition = VerCondition(ConditionMask, ChainBits[n]);
-
-        Satisfied = VerCompare(HaveChain[n], WantChain[n], Condition);
-
-        /* A field that differs decides; an equal one leaves the decision to the next field, or to itself when it is the last */
-        if (HaveChain[n] != WantChain[n])
-            break;
-    }
-
-    return Satisfied ? STATUS_SUCCESS : STATUS_REVISION_MISMATCH;
+    return RtlpVerifyVersionInfo(Have, Want, TypeMask, ConditionMask);
 }
 
 /* The wanted version as wide structure */
