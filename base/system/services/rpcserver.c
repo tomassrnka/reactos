@@ -703,8 +703,9 @@ ScmCanonDriverImagePath(DWORD dwStartType,
         return NO_ERROR;
     }
 
-    /* Check if it's a relative path name */
-    if (lpServiceName[0] != L'\\' && lpServiceName[1] != L':')
+    /* Check if it's a relative path name, or an NT path (\??\C:\...) that needs no conversion */
+    if ((lpServiceName[0] != L'\\' && lpServiceName[1] != L':') ||
+        !_wcsnicmp(L"\\??\\", lpServiceName, 4))
     {
         *lpCanonName = HeapAlloc(GetProcessHeap(),
                                  HEAP_ZERO_MEMORY,
