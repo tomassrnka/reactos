@@ -1946,6 +1946,16 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
             StoreIo(a[1], &Io);
             return Status;
         }
+        case FileIoCompletionNotificationInformation:
+        {
+            ULONG Modes; /* a single ULONG, same in both layouts */
+            if (a[3] != sizeof(Modes)) return STATUS_INFO_LENGTH_MISMATCH;
+            ProbeOutput(a[1], sizeof(WOW64_IOSB));
+            Modes = *(ULONG *)P(2);
+            Status = NtSetInformationFile(H(0), &Io, &Modes, sizeof(Modes), a[4]);
+            StoreIo(a[1], &Io);
+            return Status;
+        }
         case FileBasicInformation: case FileDispositionInformation:
         case FilePositionInformation: case FileEndOfFileInformation:
         case FileAllocationInformation: case FilePipeInformation:
@@ -2018,6 +2028,24 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         ProbeOutput(a[1], sizeof(WOW64_IOSB));
         Status = NtCancelIoFile(H(0), &Io);
         StoreIo(a[1], &Io); return Status;
+    case W64_NtCancelIoFileEx:
+        /* The request to cancel is only compared with the IOSB pointer the
+         * kernel keeps in each IRP. For requests issued through these thunks
+         * that is the guest address (the explicit IOSB32 marker is stripped
+         * on capture), so pass it zero-extended and without the marker. */
+        ProbeOutput(a[2], sizeof(WOW64_IOSB));
+        Status = NtCancelIoFileEx(H(0), a[1] ? (PIO_STATUS_BLOCK)(ULONG_PTR)a[1] : NULL, &Io);
+        StoreIo(a[2], &Io); return Status;
+    case W64_NtNotifyChangeDirectoryFile:
+    {
+        /* The kernel completes the request later: like NtReadFile it gets the
+         * explicit IOSB32 marker and the encoded APC routine, and writes the
+         * guest block. FILE_NOTIFY_INFORMATION is the same in both layouts. */
+        PIO_APC_ROUTINE Routine = a[2] ? (PIO_APC_ROUTINE)(ULONG_PTR)(-((LONG64)a[2] << 2)) : NULL;
+        ProbeOutput(a[4], sizeof(WOW64_IOSB));
+        return NtNotifyChangeDirectoryFile(H(0), H(1), Routine, P(3), (PVOID)(0x8000000000000000ULL | a[4]),
+                                           P(5), a[6], a[7], (BOOLEAN)a[8]);
+    }
     case W64_NtOpenProcess:
     case W64_NtOpenThread:
     {

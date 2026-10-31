@@ -148,6 +148,7 @@ list(APPEND SOURCE
     QueueUserAPC.c
     QueueUserWorkItem.c
     RaiseFailFastException.c
+    ReadDirectoryChanges.c
     ReadFile.c
     RegisterWait.c
     ResolveDelayLoadedAPI.c

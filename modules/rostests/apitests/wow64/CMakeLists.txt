@@ -33,7 +33,8 @@ add_wow64_apitest(kernel32
     IsDBCSLeadByteEx lstrlen Wow64Environment Wow64ProgramFiles Wow64EnvironmentBlock Wow64SystemDlls DynamicTls HandleList JobObject JobList
     Wow64Console FindFirstStream ProcThreadMitigation RegisterWait QueueUserWorkItem ResolveDelayLoadedAPI InterlockedPushListSListEx
     ConsoleCsrRequests ConsoleVirtualTerminal ConsoleCP ConsoleBufferSwitch ConsoleCreateRace ConsoleOrphanChild ConsoleViewFollow
-    ConsoleWriteLatency SetConsoleWindowInfo WerRegisterMemoryFile)
+    ConsoleWriteLatency SetConsoleWindowInfo WerRegisterMemoryFile
+    CancelIoEx ReadDirectoryChanges)
 # ConsoleCaret, ConsoleCtrlEventRace, ConsoleCtrlHandler and ConsoleDisplayMode also call user32/gdi32: kernel32_apitest only
 add_wow64_apitest(ntdll StackOverflowDispatch NtRaiseHardErrorMode
     Wow64Continue Wow64ServiceArguments Wow64SystemRangeStart Wow64QueryVirtualMemory Wow64PowerInformation Wow64QueryInformationProcess Wow64FailedOpenHandle NtOpenKey NtOpenKeyEx NtQueryKey NtQueryValueKey

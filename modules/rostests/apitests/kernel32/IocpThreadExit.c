@@ -231,8 +231,6 @@ TestPipePortOnly(_In_ const char *Label, _In_ int After, _In_ BOOL SkipOnSuccess
     if (SkipOnSuccess)
     {
         Ret = pSetFileCompletionNotificationModes(Server, FILE_SKIP_COMPLETION_PORT_ON_SUCCESS);
-        /* nitro: the WoW64 layer does not pass FileIoCompletionNotificationInformation through yet */
-        todo_if(is_reactos() && IsWow64)
         ok(Ret, "%s: SetFileCompletionNotificationModes failed: %lu\n", Label, GetLastError());
     }
 
@@ -251,8 +249,6 @@ TestPipePortOnly(_In_ const char *Label, _In_ int After, _In_ BOOL SkipOnSuccess
         case AFTER_CANCELIOEX:
         case AFTER_CANCELIOEX_ALL:
             Ret = pCancelIoEx(Server, After == AFTER_CANCELIOEX ? &Ov : NULL);
-            /* nitro: the WoW64 layer does not pass NtCancelIoFileEx through yet */
-            todo_if(is_reactos() && IsWow64)
             ok(Ret, "%s: CancelIoEx failed: %lu\n", Label, GetLastError());
             if (!Ret)
                 break;
@@ -422,7 +418,6 @@ TestTcp(_In_ const char *Label, _In_ int After)
     else
     {
         Ret = pCancelIoEx((HANDLE)Sock, &Ov);
-        todo_if(is_reactos() && IsWow64)
         ok(Ret, "%s: CancelIoEx failed: %lu\n", Label, GetLastError());
         if (Ret)
             CheckPacket(Label, Port, KEY, ERROR_OPERATION_ABORTED, 0, ST_CANCELLED);
@@ -479,8 +474,6 @@ TestDirectoryNotify(VOID)
     WaitForSingleObject(Thread, INFINITE);
     GetExitCodeThread(Thread, &Code);
     CloseHandle(Thread);
-    /* nitro: the WoW64 layer does not pass NtNotifyChangeDirectoryFile through yet */
-    todo_if(is_reactos() && IsWow64)
     ok(Code == ERROR_IO_PENDING, "ReadDirectoryChangesW error %lu\n", Code);
     if (Code == ERROR_IO_PENDING)
     {

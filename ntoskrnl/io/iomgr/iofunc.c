@@ -1695,7 +1695,19 @@ NtNotifyChangeDirectoryFile(IN HANDLE FileHandle,
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
     NTSTATUS Status;
     BOOLEAN LockedForSync = FALSE;
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    BOOLEAN Wow64Iosb = FALSE;
+#endif
     PAGED_CODE();
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    /* Explicit guest IOSB marker, shared with read/write/device control. */
+    if (PreviousMode == UserMode && PsGetCurrentProcess()->Wow64Process &&
+        ((ULONG64)IoStatusBlock >> 32) == 0x80000000)
+    {
+        Wow64Iosb = TRUE;
+        IoStatusBlock = (PVOID)(ULONG_PTR)(ULONG)(ULONG_PTR)IoStatusBlock;
+    }
+#endif
     IOTRACE(IO_API_DEBUG, "FileHandle: %p\n", FileHandle);
 
     /* Check if we're called from user mode */
@@ -1705,7 +1717,11 @@ NtNotifyChangeDirectoryFile(IN HANDLE FileHandle,
         _SEH2_TRY
         {
             /* Probe the I/O STatus block */
-            ProbeForWriteIoStatusBlock(IoStatusBlock);
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+            if (Wow64Iosb) ProbeForWrite(IoStatusBlock, sizeof(IO_STATUS_BLOCK32), sizeof(ULONG));
+            else
+#endif
+                ProbeForWriteIoStatusBlock(IoStatusBlock);
 
             /* Probe the buffer */
             if (BufferSize) ProbeForWrite(Buffer, BufferSize, sizeof(ULONG));
@@ -1803,6 +1819,10 @@ NtNotifyChangeDirectoryFile(IN HANDLE FileHandle,
     IoStack->Parameters.NotifyDirectory.CompletionFilter = CompletionFilter;
     IoStack->Parameters.NotifyDirectory.Length = BufferSize;
     if (WatchTree) IoStack->Flags = SL_WATCH_TREE;
+
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (Wow64Iosb) Irp->Flags |= IRP_WOW64_IO_STATUS;
+#endif
 
     /* Perform the call */
     return IopPerformSynchronousRequest(DeviceObject,
