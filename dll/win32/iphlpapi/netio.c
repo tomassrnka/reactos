@@ -2,7 +2,7 @@
  * PROJECT:     ReactOS IP Helper API
  * LICENSE:     LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later)
  * PURPOSE:     The Vista interface and address tables (NETIO): GetIfTable2, GetIpInterfaceTable,
- *              GetUnicastIpAddressTable, the interface name and luid conversions
+ *              GetUnicastIpAddressTable, GetAnycastIpAddressTable, the interface name and luid conversions
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -654,6 +654,29 @@ DWORD WINAPI GetUnicastIpAddressTable(ADDRESS_FAMILY Family, PMIB_UNICASTIPADDRE
 
   HeapFree(GetProcessHeap(), 0, Addresses);
   HeapFree(GetProcessHeap(), 0, List);
+  *Table = Out;
+  return NO_ERROR;
+}
+
+/*
+ * The stack has no anycast addresses and Windows 10 returns an empty table, with NO_ERROR, on a system that has
+ * none (the same arguments are rejected as for GetUnicastIpAddressTable). Java's net.dll delay-loads it.
+ */
+DWORD WINAPI GetAnycastIpAddressTable(ADDRESS_FAMILY Family, PMIB_ANYCASTIPADDRESS_TABLE *Table)
+{
+  PMIB_ANYCASTIPADDRESS_TABLE Out;
+
+  TRACE("(%u, %p)\n", Family, Table);
+
+  if (!Table || (Family != AF_UNSPEC && Family != AF_INET && Family != AF_INET6))
+    return ERROR_INVALID_PARAMETER;
+
+  Out = alloc_zeroed(sizeof(*Out));
+  if (!Out)
+  {
+    *Table = NULL;
+    return ERROR_NOT_ENOUGH_MEMORY;
+  }
   *Table = Out;
   return NO_ERROR;
 }
