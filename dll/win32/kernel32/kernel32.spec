@@ -215,6 +215,7 @@
 @ stdcall DeleteTimerQueueTimer(long long long)
 @ stdcall DeleteVolumeMountPointA(str) ;check
 @ stdcall DeleteVolumeMountPointW(wstr) ;check
+@ stdcall -private -version=0x601+ DeriveCapabilitySidsFromName(wstr ptr ptr ptr ptr)
 @ stdcall DeviceIoControl(long long ptr long ptr long ptr ptr)
 @ stdcall DisableThreadLibraryCalls(ptr)
 @ stub -version=0x600+ DisassociateCurrentThreadFromCallback

@@ -52,6 +52,7 @@ list(APPEND SOURCE
     DefaultActCtx.c
     DiscardVirtualMemory.c
     DeleteTimerQueueEx.c
+    DeriveCapabilitySidsFromName.c
     DeviceIoControl.c
     DllInitParentPrecondition.c
     dosdev.c

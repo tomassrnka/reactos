@@ -29,6 +29,7 @@ list(APPEND SOURCE
     client/appcache.c
     client/atom.c
     client/appmodel.c
+    client/capsid.c
     client/atomansi.c
     client/compname.c
     client/debugger.c

@@ -55,6 +55,7 @@ extern void func_ActCtxResDirBound(void);
 extern void func_DefaultActCtx(void);
 extern void func_DiscardVirtualMemory(void);
 extern void func_DeleteTimerQueueEx(void);
+extern void func_DeriveCapabilitySidsFromName(void);
 extern void func_DeviceIoControl(void);
 extern void func_DllInitParentPrecondition(void);
 extern void func_dosdev(void);
@@ -246,6 +247,7 @@ const struct test winetest_testlist[] =
     { "DefaultActCtx",               func_DefaultActCtx },
     { "DiscardVirtualMemory", func_DiscardVirtualMemory },
     { "DeleteTimerQueueEx",          func_DeleteTimerQueueEx },
+    { "DeriveCapabilitySidsFromName", func_DeriveCapabilitySidsFromName },
     { "DeviceIoControl",             func_DeviceIoControl },
     { "DllInitParentPrecondition",   func_DllInitParentPrecondition },
     { "dosdev",                      func_dosdev },
