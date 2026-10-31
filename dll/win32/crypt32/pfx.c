@@ -31,6 +31,7 @@
 #include "winbase.h"
 #include "wincrypt.h"
 #include "bcrypt.h"
+#include "ncrypt.h"
 #include "snmp.h"
 #include "crypt32_private.h"
 #include "reactos/pkcs12.h"
@@ -201,6 +202,34 @@ static HCRYPTPROV import_key( struct imported_key *key, DWORD flags )
     return prov;
 }
 
+/* An ephemeral key asked for with the CNG key storage flags becomes an NCrypt key the certificate
+ * owns (CERT_NCRYPT_KEY_HANDLE_PROP_ID), as on Windows: .NET reaches EphemeralKeySet keys that way. */
+static BOOL set_ncrypt_key( const void *ctx, const BYTE *pkcs8, DWORD len, DWORD flags )
+{
+    NCRYPT_PROV_HANDLE prov;
+    NCRYPT_KEY_HANDLE key;
+    DWORD policy = (flags & CRYPT_EXPORTABLE) ? NCRYPT_ALLOW_EXPORT_FLAG | NCRYPT_ALLOW_PLAINTEXT_EXPORT_FLAG : 0;
+    SECURITY_STATUS status;
+
+    if ((status = NCryptOpenStorageProvider( &prov, MS_KEY_STORAGE_PROVIDER, 0 ))) return FALSE;
+    status = NCryptImportKey( prov, 0, NCRYPT_PKCS8_PRIVATE_KEY_BLOB, NULL, &key, (BYTE *)pkcs8, len,
+                              NCRYPT_DO_NOT_FINALIZE_FLAG );
+    NCryptFreeObject( prov );
+    if (status)
+    {
+        WARN( "NCryptImportKey failed %08lx\n", status );
+        return FALSE;
+    }
+    if (NCryptSetProperty( key, NCRYPT_EXPORT_POLICY_PROPERTY, (BYTE *)&policy, sizeof(policy), 0 ) ||
+        NCryptFinalizeKey( key, 0 ) ||
+        !CertSetCertificateContextProperty( ctx, CERT_NCRYPT_KEY_HANDLE_PROP_ID, 0, (void *)key ))
+    {
+        NCryptFreeObject( key );
+        return FALSE;
+    }
+    return TRUE;
+}
+
 static BOOL set_key_context( const void *ctx, HCRYPTPROV prov )
 {
     CERT_KEY_CONTEXT key_ctx;
@@ -277,8 +306,8 @@ HCERTSTORE WINAPI PFXImportCertStore( CRYPT_DATA_BLOB *pfx, const WCHAR *passwor
         SetLastError( CRYPT_E_BAD_ENCODE );
         return NULL;
     }
-    /* CNG key storage is not available for imported keys yet (see the NCrypt key handle work): RSA keys
-     * go to a CryptoAPI container. Windows uses the type 1 enhanced provider here, but that one cannot
+    /* There is no persisted CNG key storage: persisted RSA keys go to a CryptoAPI container (ephemeral
+     * keys asked for with the CNG flags become NCrypt keys, see set_ncrypt_key). Windows uses the type 1 enhanced provider here, but that one cannot
      * sign with SHA-2, which is what callers that reach the key through the CSP interface (.NET
      * falling back from CNG) need; the AES provider is the same key store with the hashes. */
     if (flags & (PKCS12_PREFER_CNG_KSP | PKCS12_ALWAYS_CNG_KSP))
@@ -334,7 +363,23 @@ HCERTSTORE WINAPI PFXImportCertStore( CRYPT_DATA_BLOB *pfx, const WCHAR *passwor
             name.cbData = (len + 1) * sizeof(WCHAR);
             CertSetCertificateContextProperty( ctx, CERT_FRIENDLY_NAME_PROP_ID, 0, &name );
         }
-        if (k >= 0 && keys[k].blob)
+        /* the key goes on the context of the store: an NCrypt key is not copied with a context */
+        {
+            PCCERT_CONTEXT added;
+
+            if (!CertAddCertificateContextToStore( store, ctx, CERT_STORE_ADD_ALWAYS, &added ))
+            {
+                err = GetLastError();
+                CertFreeCertificateContext( ctx );
+                break;
+            }
+            CertFreeCertificateContext( ctx );
+            ctx = added;
+        }
+        if (k >= 0 && (flags & PKCS12_NO_PERSIST_KEY) && (flags & (PKCS12_PREFER_CNG_KSP | PKCS12_ALWAYS_CNG_KSP)) &&
+            set_ncrypt_key( ctx, contents.keys[k].data, contents.keys[k].len, flags ))
+            ;
+        else if (k >= 0 && keys[k].blob)
         {
             if (flags & PKCS12_NO_PERSIST_KEY)
             {
@@ -359,10 +404,6 @@ HCERTSTORE WINAPI PFXImportCertStore( CRYPT_DATA_BLOB *pfx, const WCHAR *passwor
             if (!ok) err = GetLastError();
         }
         else if (k >= 0) WARN( "key of certificate %Iu is not an RSA key, importing the certificate only\n", i );
-        if (ok && !CertAddCertificateContextToStore( store, ctx, CERT_STORE_ADD_ALWAYS, NULL ))
-        {
-            err = GetLastError();
-        }
         CertFreeCertificateContext( ctx );
     }
 
