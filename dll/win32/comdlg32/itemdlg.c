@@ -807,6 +807,14 @@ static HRESULT on_default_action(FileDialogImpl *This)
             filter = fn_iter;
         }
 
+#ifdef __REACTOS__
+        /* A pidl from SHSimpleIDListFromPath does not carry the folder attribute (Windows reports none
+         * for it either), so the check below would reject every folder. Use the real item of a folder. */
+        pidla[i] = NULL;
+        if((This->options & FOS_PICKFOLDERS) && PathIsDirectoryW(canon_filename))
+            pidla[i] = ILCreateFromPathW(canon_filename);
+        if(!pidla[i])
+#endif
         pidla[i] = SHSimpleIDListFromPath(canon_filename);
 
         if(psf_parent && !(open_action == ONOPEN_BROWSE))
@@ -825,7 +833,16 @@ static HRESULT on_default_action(FileDialogImpl *This)
 #endif
 
     if((This->options & FOS_PICKFOLDERS) && open_action == ONOPEN_BROWSE)
+    {
         open_action = ONOPEN_OPEN; /* FIXME: Multiple folders? */
+#ifdef __REACTOS__
+        if(psf_parent)
+        {
+            IShellFolder_Release(psf_parent);
+            psf_parent = NULL;
+        }
+#endif
+    }
 
     switch(open_action)
     {
