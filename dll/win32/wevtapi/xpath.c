@@ -1331,3 +1331,36 @@ BOOL xpath_match(const struct xpath *path, struct xnode *document)
     ctx_free(&ctx);
     return match;
 }
+
+/* The text of the node that a path of names (Event/System/Provider/@Name) leads to, from the document */
+const WCHAR *xml_value(struct xnode *doc, const WCHAR *path)
+{
+    struct xnode *cur = doc;
+    const WCHAR *p = path;
+
+    while (*p)
+    {
+        const WCHAR *end = wcschr(p, '/');
+        SIZE_T len = end ? (SIZE_T)(end - p) : wcslen(p);
+        struct xnode *found = NULL;
+        DWORD i;
+
+        if (*p == '@')
+        {
+            for (i = 0; i < cur->attr_count; i++)
+                if (wcslen(cur->attrs[i]->name) == len - 1 && !wcsncmp(cur->attrs[i]->name, p + 1, len - 1)) found = cur->attrs[i];
+            return found ? (found->text ? found->text : L"") : NULL;
+        }
+        for (i = 0; i < cur->kid_count; i++)
+            if (cur->kids[i]->kind == X_ELEM && wcslen(cur->kids[i]->name) == len && !wcsncmp(cur->kids[i]->name, p, len))
+            {
+                found = cur->kids[i];
+                break;
+            }
+        if (!found) return NULL;
+        cur = found;
+        p += len;
+        if (*p == '/') p++;
+    }
+    return cur->text ? cur->text : L"";
+}

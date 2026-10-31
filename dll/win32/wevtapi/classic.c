@@ -25,8 +25,8 @@
 WINE_DEFAULT_DEBUG_CHANNEL(wevtapi);
 
 /*
- * There is no manifest-based publisher here and no .evtx file: what the library reads are the
- * records that ReadEventLog gives, which are what a classic provider wrote with ReportEvent. They
+ * There is no manifest-based publisher here, and the .evtx files are read by evtx.c: what this file reads
+ * are the records that ReadEventLog gives, which are what a classic provider wrote with ReportEvent. They
  * are presented the way Windows presents such records: the event id is the low word of the
  * record's id and the qualifiers its high word, the level follows from the type of the record,
  * the keywords say "classic", the task is the category and the data are the insertion strings
@@ -478,6 +478,29 @@ BOOL classic_event_init(struct classic_event *event, const EVENTLOGRECORD *rec, 
     return TRUE;
 }
 
+BOOL classic_event_from_evtx(struct classic_event *event, const struct evtx_event *evtx)
+{
+    memset(event, 0, sizeof(*event));
+    event->evtx = evtx;
+    event->channel = evtx->channel;
+    event->source = evtx->provider;
+    event->computer = evtx->computer;
+    event->id = evtx->id;
+    event->qualifiers = evtx->qualifiers;
+    event->level = evtx->level;
+    event->task = evtx->task;
+    event->keywords = evtx->keywords;
+    event->time = evtx->time;
+    event->record_id = evtx->record_id;
+    /* the values of the data stand for the strings that a message inserts */
+    event->string_count = evtx->value_count;
+    event->strings = NULL;
+    event->sid = evtx->sid;
+    if (evtx->value_count && !(event->strings = malloc(evtx->value_count * sizeof(*event->strings)))) return FALSE;
+    if (evtx->value_count) memcpy(event->strings, evtx->strings, evtx->value_count * sizeof(*event->strings));
+    return TRUE;
+}
+
 /* Variants for EvtRender and the properties */
 
 struct vpack
@@ -600,32 +623,132 @@ static void vp_string_array(struct vpack *p, DWORD i, WCHAR *const *names, DWORD
     v->Type = EvtVarTypeString | EVT_VARIANT_TYPE_ARRAY;
 }
 
+static void vp_guid(struct vpack *p, DWORD i, const GUID *guid)
+{
+    void *mem = vp_alloc(p, sizeof(GUID));
+    EVT_VARIANT *v = vp_slot(p, i);
+
+    if (!mem || !v) return;
+    memcpy(mem, guid, sizeof(GUID));
+    v->UInt64Val = 0;
+    v->GuidVal = mem;
+    v->Type = EvtVarTypeGuid;
+}
+
+/* One value of the data of an event of a file, with the type that the file gave it */
+static void vp_evtx_value(struct vpack *p, DWORD i, const struct evtx_event *evtx, const struct evtx_value *val)
+{
+    const BYTE *d = evtx->blob + val->offset;
+    DWORD type = val->type;
+
+    if (type & 0x80)
+    {
+        /* an array stands as the text of its items */
+        vp_string(p, i, evtx->strings[val - evtx->values]);
+        return;
+    }
+    switch (type)
+    {
+    case EvtVarTypeNull: vp_null(p, i); return;
+    case EvtVarTypeString: vp_string(p, i, evtx->strings[val - evtx->values]); return;
+    case EvtVarTypeSByte: vp_u64(p, i, type, (ULONGLONG)(LONGLONG)(signed char)d[0]); return;
+    case EvtVarTypeByte: vp_u64(p, i, type, d[0]); return;
+    case EvtVarTypeInt16: vp_u64(p, i, type, (ULONGLONG)(LONGLONG)(short)(d[0] | (d[1] << 8))); return;
+    case EvtVarTypeUInt16: vp_u64(p, i, type, d[0] | (d[1] << 8)); return;
+    case EvtVarTypeInt32: vp_u64(p, i, type, (ULONGLONG)(LONGLONG)(int)(d[0] | (d[1] << 8) | (d[2] << 16) | ((DWORD)d[3] << 24))); return;
+    case EvtVarTypeUInt32: case EvtVarTypeHexInt32: case EvtVarTypeSingle:
+        vp_u64(p, i, type, d[0] | (d[1] << 8) | (d[2] << 16) | ((DWORD)d[3] << 24));
+        return;
+    case EvtVarTypeBoolean:
+        vp_u64(p, i, type, (d[0] | d[1] | d[2] | d[3]) != 0);
+        return;
+    case EvtVarTypeInt64: case EvtVarTypeUInt64: case EvtVarTypeDouble: case EvtVarTypeFileTime: case EvtVarTypeHexInt64:
+    {
+        ULONGLONG v = 0;
+        int k;
+
+        for (k = 7; k >= 0; k--) v = (v << 8) | d[k];
+        vp_u64(p, i, type, v);
+        return;
+    }
+    case EvtVarTypeSizeT:
+    {
+        ULONGLONG v = 0;
+        int k;
+
+        for (k = (int)val->size - 1; k >= 0; k--) v = (v << 8) | d[k];
+        vp_u64(p, i, type, v);
+        return;
+    }
+    case EvtVarTypeBinary: vp_binary(p, i, d, val->size); return;
+    case EvtVarTypeGuid:
+    {
+        GUID guid;
+
+        guid.Data1 = d[0] | (d[1] << 8) | (d[2] << 16) | ((DWORD)d[3] << 24);
+        guid.Data2 = d[4] | (d[5] << 8);
+        guid.Data3 = d[6] | (d[7] << 8);
+        memcpy(guid.Data4, d + 8, 8);
+        vp_guid(p, i, &guid);
+        return;
+    }
+    case EvtVarTypeSid:
+        if (val->size >= 8 && IsValidSid((PSID)d) && GetLengthSid((PSID)d) <= val->size) vp_sid(p, i, (PSID)d);
+        else vp_null(p, i);
+        return;
+    default:
+        /* what has no variant of its own stands as its text */
+        vp_string(p, i, evtx->strings[val - evtx->values]);
+        return;
+    }
+}
+
 static void fill_system_value(struct vpack *p, DWORD slot, int index, const struct classic_event *event)
 {
+    const struct evtx_event *x = event->evtx;
+
     switch (index)
     {
     case 0: vp_string(p, slot, event->source); break;
-    case 1: vp_null(p, slot); break;
+    case 1:
+        if (x && x->has_provider_guid) vp_guid(p, slot, &x->provider_guid);
+        else vp_null(p, slot);
+        break;
     case 2: vp_u64(p, slot, EvtVarTypeUInt16, event->id); break;
-    case 3: vp_u64(p, slot, EvtVarTypeUInt16, event->qualifiers); break;
+    case 3:
+        if (x && !x->has_qualifiers) vp_null(p, slot);
+        else vp_u64(p, slot, EvtVarTypeUInt16, event->qualifiers);
+        break;
     case 4: vp_u64(p, slot, EvtVarTypeByte, event->level); break;
     case 5: vp_u64(p, slot, EvtVarTypeUInt16, event->task); break;
-    case 6: vp_u64(p, slot, EvtVarTypeByte, 0); break;
+    case 6: vp_u64(p, slot, EvtVarTypeByte, x ? x->opcode : 0); break;
     case 7: vp_u64(p, slot, EvtVarTypeHexInt64, event->keywords); break;
     case 8: vp_u64(p, slot, EvtVarTypeFileTime, event->time); break;
     case 9: vp_u64(p, slot, EvtVarTypeUInt64, event->record_id); break;
-    case 10: case 11: vp_null(p, slot); break;
-    case 12: case 13: vp_u64(p, slot, EvtVarTypeUInt32, 0); break;
+    case 10:
+        if (x && x->has_activity) vp_guid(p, slot, &x->activity);
+        else vp_null(p, slot);
+        break;
+    case 11:
+        if (x && x->has_related_activity) vp_guid(p, slot, &x->related_activity);
+        else vp_null(p, slot);
+        break;
+    case 12: vp_u64(p, slot, EvtVarTypeUInt32, x ? x->process_id : 0); break;
+    case 13: vp_u64(p, slot, EvtVarTypeUInt32, x ? x->thread_id : 0); break;
     case 14: vp_string(p, slot, event->channel); break;
     case 15: vp_string(p, slot, event->computer); break;
     case 16:
         if (event->sid) vp_sid(p, slot, event->sid);
         else vp_null(p, slot);
         break;
-    case 17: vp_u64(p, slot, EvtVarTypeByte, 0); break;
+    case 17: vp_u64(p, slot, EvtVarTypeByte, x ? x->version : 0); break;
     default:
         /* the strings of the event, from 100 on */
-        if (index >= 100 && (DWORD)(index - 100) < event->string_count) vp_string(p, slot, event->strings[index - 100]);
+        if (index >= 100 && (DWORD)(index - 100) < event->string_count)
+        {
+            if (x) vp_evtx_value(p, slot, x, &x->values[index - 100]);
+            else vp_string(p, slot, event->strings[index - 100]);
+        }
         else vp_null(p, slot);
         break;
     }
@@ -674,7 +797,11 @@ DWORD classic_render_values(DWORD context_flags, const DWORD *indexes, DWORD ind
     {
         slots = event->string_count + (event->data_len ? 1 : 0);
         vp_init(&p, buffer, size, slots);
-        for (i = 0; i < event->string_count; i++) vp_string(&p, i, event->strings[i]);
+        for (i = 0; i < event->string_count; i++)
+        {
+            if (event->evtx) vp_evtx_value(&p, i, event->evtx, &event->evtx->values[i]);
+            else vp_string(&p, i, event->strings[i]);
+        }
         if (event->data_len) vp_binary(&p, event->string_count, event->data, event->data_len);
     }
     else
@@ -682,6 +809,16 @@ DWORD classic_render_values(DWORD context_flags, const DWORD *indexes, DWORD ind
         slots = index_count;
         vp_init(&p, buffer, size, slots);
         for (i = 0; i < slots; i++) fill_system_value(&p, i, indexes[i], event);
+    }
+    /* what is rendered carries the length of its string or of its SID, as Windows has it, and nothing otherwise */
+    for (i = 0; i < slots; i++)
+    {
+        EVT_VARIANT *v = vp_slot(&p, i);
+
+        if (!v) continue;
+        if (v->Type == EvtVarTypeString && v->StringVal) v->Count = (DWORD)wcslen(v->StringVal);
+        else if (v->Type == EvtVarTypeSid && v->SidVal) v->Count = GetLengthSid(v->SidVal);
+        else if (v->Type != EvtVarTypeBinary && !(v->Type & EVT_VARIANT_TYPE_ARRAY)) v->Count = 0;
     }
     *count = slots;
     return vp_finish(&p, used);
@@ -744,7 +881,28 @@ static void sb_printf_u(struct sb *b, const WCHAR *format, ULONGLONG value)
     sb_add(b, text);
 }
 
+static WCHAR *render_xml_classic(const struct classic_event *event, const WCHAR *rendering);
+
 WCHAR *classic_render_xml(const struct classic_event *event, const WCHAR *rendering)
+{
+    struct sb b = { NULL, 0, 0, FALSE };
+
+    if (event->evtx)
+    {
+        /* the XML of the file, with the rendering added at the end of the event as it is for the others */
+        const WCHAR *xml = event->evtx->xml, *close = wcsrchr(xml, '<');
+
+        if (!rendering || !close) return dup_string(xml);
+        sb_add_n(&b, xml, close - xml);
+        sb_add(&b, rendering);
+        sb_add(&b, close);
+        if (b.fail) { free(b.buf); return NULL; }
+        return b.buf;
+    }
+    return render_xml_classic(event, rendering);
+}
+
+static WCHAR *render_xml_classic(const struct classic_event *event, const WCHAR *rendering)
 {
     struct sb b = { NULL, 0, 0, FALSE };
     WCHAR text[96];
@@ -1253,13 +1411,13 @@ DWORD classic_event_info(const struct classic_event *event, DWORD id, DWORD size
             *ids = 0;
             v->UInt64Val = 0;
             v->UInt32Arr = ids;
-            v->Count = 1;
+            v->Count = event->evtx ? 0 : 1;
             v->Type = EvtVarTypeUInt32 | EVT_VARIANT_TYPE_ARRAY;
         }
         break;
     }
     case EvtEventPath:
-        vp_string(&p, 0, event->channel);
+        vp_string(&p, 0, event->evtx ? event->evtx->path : event->channel);
         break;
     default:
         return ERROR_INVALID_PARAMETER;
@@ -1570,6 +1728,11 @@ struct stream
     DWORD last_number;              /* the number of the record that was read last */
     BOOL have_last;
     EVENTLOGRECORD *next;           /* the next event that passes, read ahead */
+    BOOL file;                      /* the channel is the path of an .evtx file */
+    struct evtx_file *evtx;
+    struct evtx_event *next_evtx;   /* the next event of the file that passes */
+    ULONGLONG next_key;             /* when the next event was generated, FILETIME units */
+    DWORD soft_error;               /* an error to report that does not end the reading */
 };
 
 struct classic_query
@@ -1590,6 +1753,11 @@ static void stream_close(struct stream *s)
     s->cap = s->len = s->pos = 0;
     free(s->next);
     s->next = NULL;
+    evtx_close(s->evtx);
+    s->evtx = NULL;
+    evtx_event_free(s->next_evtx);
+    s->next_evtx = NULL;
+    s->soft_error = 0;
     s->eof = FALSE;
     s->error = 0;
     s->have_last = FALSE;
@@ -1613,9 +1781,16 @@ void classic_query_free(struct classic_query *query)
     free(query);
 }
 
-static DWORD stream_open(struct stream *s)
+static DWORD stream_open(struct stream *s, BOOL reverse)
 {
     HKEY key;
+    DWORD error;
+
+    if (s->file)
+    {
+        if ((error = evtx_open(s->channel, reverse, &s->evtx))) return error;
+        return ERROR_SUCCESS;
+    }
 
     /* a channel that only a manifest registers has no records */
     if (open_log_key(s->channel, &key))
@@ -1654,15 +1829,16 @@ DWORD classic_query_open(const struct classic_select *selects, DWORD count, BOOL
             BOOL selected = FALSE;
 
             for (j = 0; j < count; j++)
-                if (!selects[j].suppress && selects[j].group == selects[i].group && !_wcsicmp(selects[j].channel, selects[i].channel)) selected = TRUE;
+                if (!selects[j].suppress && selects[j].group == selects[i].group && selects[j].file == selects[i].file && !_wcsicmp(selects[j].channel, selects[i].channel)) selected = TRUE;
             if (!selected) continue;
         }
         for (j = 0; j < query->count; j++)
-            if (!_wcsicmp(query->streams[j].channel, selects[i].channel)) { s = &query->streams[j]; break; }
+            if (query->streams[j].file == selects[i].file && !_wcsicmp(query->streams[j].channel, selects[i].channel)) { s = &query->streams[j]; break; }
         if (!s)
         {
             s = &query->streams[query->count];
             if (!(s->channel = dup_string(selects[i].channel))) { error = ERROR_OUTOFMEMORY; goto fail; }
+            s->file = selects[i].file;
             query->count++;
         }
         if (!(rules = realloc(s->rules, (s->rule_count + 1) * sizeof(*rules)))) { error = ERROR_OUTOFMEMORY; goto fail; }
@@ -1679,7 +1855,7 @@ DWORD classic_query_open(const struct classic_select *selects, DWORD count, BOOL
         s->rule_count++;
     }
     for (i = 0; i < query->count; i++)
-        if ((error = stream_open(&query->streams[i]))) goto fail;
+        if ((error = stream_open(&query->streams[i], reverse))) goto fail;
     *ret = query;
     return ERROR_SUCCESS;
 
@@ -1697,32 +1873,54 @@ DWORD classic_query_rewind(struct classic_query *query, ULONGLONG skip)
         struct stream *s = &query->streams[i];
 
         /* the compiled paths stay, and only the position of the reader goes back */
+        if (s->file && s->evtx)
+        {
+            evtx_event_free(s->next_evtx);
+            s->next_evtx = NULL;
+            s->soft_error = 0;
+            s->eof = FALSE;
+            s->error = 0;
+            evtx_rewind(s->evtx);
+            continue;
+        }
         if (s->log) CloseEventLog(s->log);
         s->log = NULL;
         free(s->buf);
         s->buf = NULL;
         free(s->next);
         s->next = NULL;
+        evtx_close(s->evtx);
+        s->evtx = NULL;
+        evtx_event_free(s->next_evtx);
+        s->next_evtx = NULL;
+        s->soft_error = 0;
         s->cap = s->len = s->pos = 0;
         s->eof = FALSE;
         s->error = 0;
         s->have_last = FALSE;
-        if ((error = stream_open(s))) return error;
+        if ((error = stream_open(s, query->reverse))) return error;
     }
     while (skip--)
     {
-        DWORD e;
+        DWORD e = ERROR_SUCCESS;
         const WCHAR *channel;
-        EVENTLOGRECORD *rec = classic_query_next(query, &channel, &e);
+        struct qevent event;
 
-        if (!rec) break;
-        free(rec);
+        /* an event that a damaged file cannot give does not count as one that was skipped */
+        if (!classic_query_next(query, &event, &channel, &e))
+        {
+            if (e == ERROR_NO_MORE_ITEMS) break;
+            skip++;
+            continue;
+        }
+        free(event.rec);
+        evtx_event_free(event.evtx);
     }
     return ERROR_SUCCESS;
 }
 
 /* Whether the event passes the rules of the stream */
-static BOOL stream_matches(struct stream *s, const EVENTLOGRECORD *rec)
+static BOOL stream_matches(struct stream *s, const EVENTLOGRECORD *rec, const struct evtx_event *evtx)
 {
     struct classic_event event;
     struct xnode *doc = NULL;
@@ -1744,7 +1942,7 @@ static BOOL stream_matches(struct stream *s, const EVENTLOGRECORD *rec)
         return FALSE;
     }
 
-    if (!classic_event_init(&event, rec, s->channel)) return FALSE;
+    if (evtx ? !classic_event_from_evtx(&event, evtx) : !classic_event_init(&event, rec, s->channel)) return FALSE;
     for (i = 0; i < s->rule_count && !result; i++)
     {
         struct rule *sel = &s->rules[i];
@@ -1787,7 +1985,27 @@ static BOOL stream_matches(struct stream *s, const EVENTLOGRECORD *rec)
 /* Reads on until a record passes, or the log ends */
 static void stream_advance(struct classic_query *query, struct stream *s)
 {
-    while (!s->next && !s->eof)
+    while (s->file && !s->next_evtx && !s->eof && !s->soft_error)
+    {
+        struct evtx_event *event;
+        DWORD error = evtx_next(s->evtx, &event);
+
+        if (error == ERROR_NO_MORE_ITEMS) { s->eof = TRUE; return; }
+        if (error)
+        {
+            /* what is damaged is reported, and the reading goes on behind it */
+            s->soft_error = error;
+            return;
+        }
+        if (!stream_matches(s, NULL, event))
+        {
+            evtx_event_free(event);
+            continue;
+        }
+        s->next_evtx = event;
+        s->next_key = event->time;
+    }
+    while (!s->file && !s->next && !s->eof)
     {
         const EVENTLOGRECORD *rec;
         DWORD read, needed;
@@ -1837,35 +2055,44 @@ static void stream_advance(struct classic_query *query, struct stream *s)
         }
         s->last_number = rec->RecordNumber;
         s->have_last = TRUE;
-        if (!stream_matches(s, rec)) continue;
+        if (!stream_matches(s, rec, NULL)) continue;
+        s->next_key = (ULONGLONG)rec->TimeGenerated * 10000000 + 116444736000000000ULL;
         if (!(s->next = malloc(rec->Length))) { s->eof = TRUE; s->error = ERROR_OUTOFMEMORY; return; }
         memcpy(s->next, rec, rec->Length);
     }
 }
 
-EVENTLOGRECORD *classic_query_next(struct classic_query *query, const WCHAR **channel, DWORD *error)
+BOOL classic_query_next(struct classic_query *query, struct qevent *event, const WCHAR **channel, DWORD *error)
 {
     struct stream *best = NULL;
-    EVENTLOGRECORD *rec;
     DWORD i;
 
     *error = ERROR_NO_MORE_ITEMS;
+    event->rec = NULL;
+    event->evtx = NULL;
     for (i = 0; i < query->count; i++)
     {
         struct stream *s = &query->streams[i];
 
         stream_advance(query, s);
-        if (!s->next) continue;
+        if (s->soft_error)
+        {
+            *error = s->soft_error;
+            s->soft_error = 0;
+            return FALSE;
+        }
+        if (!s->next && !s->next_evtx) continue;
         if (!best) best = s;
-        else if (query->reverse ? s->next->TimeGenerated > best->next->TimeGenerated :
-                                  s->next->TimeGenerated < best->next->TimeGenerated) best = s;
+        else if (query->reverse ? s->next_key > best->next_key : s->next_key < best->next_key) best = s;
     }
-    if (!best) return NULL;
-    rec = best->next;
+    if (!best) return FALSE;
+    event->rec = best->next;
+    event->evtx = best->next_evtx;
     best->next = NULL;
+    best->next_evtx = NULL;
     *channel = best->channel;
     *error = ERROR_SUCCESS;
-    return rec;
+    return TRUE;
 }
 
 DWORD classic_query_names(const struct classic_query *query, DWORD size, void *buffer, DWORD *used)

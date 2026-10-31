@@ -24,13 +24,13 @@
 WINE_DEFAULT_DEBUG_CHANNEL(wevtapi);
 
 /*
- * There is no event log service of the Vista kind behind this library, and no .evtx file. What
- * it knows about are the classic logs that the registry lists under the EventLog key: it offers
+ * There is no event log service of the Vista kind behind this library. What it knows about are
+ * the .evtx files that a query names (evtx.c reads them) and the classic logs that the registry lists under the EventLog key: it offers
  * them as channels, reads their records through the classic eventlog API (see classic.c), and
  * lets the sources that those logs register stand for publishers. The handles, the arguments and
  * the channel names are checked the way Windows checks them. A call that would need what is not
- * here (a server on another machine, a subscription, an .evtx file, the export or the clearing
- * of a log) fails, after those checks, with the error of an RPC server that cannot be reached or
+ * here (a server on another machine, a subscription, the log information of an .evtx file, the
+ * export or the clearing of a log) fails, after those checks, with the error of an RPC server that cannot be reached or
  * with the error for a request that is not supported.
  */
 
@@ -59,7 +59,8 @@ enum array_kind
 
 struct event_data
 {
-    EVENTLOGRECORD *rec;
+    EVENTLOGRECORD *rec;            /* an event of a classic log, or */
+    struct evtx_event *evtx;        /* an event of an .evtx file */
     WCHAR *channel;
 };
 
@@ -179,7 +180,7 @@ static void free_object(struct object *object)
     {
         struct event_data *event = object->data;
 
-        if (event) { free(event->rec); free(event->channel); free(event); }
+        if (event) { free(event->rec); evtx_event_free(event->evtx); free(event->channel); free(event); }
         break;
     }
     case OBJECT_RENDER_CONTEXT:
@@ -867,7 +868,7 @@ static void free_selects(struct classic_select *selects, DWORD count)
     free(selects);
 }
 
-static BOOL add_select(struct classic_select **selects, DWORD *count, const WCHAR *channel, const WCHAR *xpath, DWORD group, BOOL suppress)
+static BOOL add_select(struct classic_select **selects, DWORD *count, const WCHAR *channel, const WCHAR *xpath, DWORD group, BOOL suppress, BOOL file)
 {
     struct classic_select *p = realloc(*selects, (*count + 1) * sizeof(*p)), *sel;
 
@@ -877,13 +878,14 @@ static BOOL add_select(struct classic_select **selects, DWORD *count, const WCHA
     memset(sel, 0, sizeof(*sel));
     sel->group = group;
     sel->suppress = suppress;
+    sel->file = file;
     if (!(sel->channel = _wcsdup(channel))) return FALSE;
     if (xpath && !(sel->xpath = _wcsdup(xpath))) { free(sel->channel); return FALSE; }
     (*count)++;
     return TRUE;
 }
 
-static DWORD build_selects(const WCHAR *path, const WCHAR *query, struct classic_select **selects, DWORD *count)
+static DWORD build_selects(const WCHAR *path, const WCHAR *query, BOOL file, struct classic_select **selects, DWORD *count)
 {
     struct xml_tag tag;
     const WCHAR *p = query;
@@ -895,7 +897,7 @@ static DWORD build_selects(const WCHAR *path, const WCHAR *query, struct classic
     *count = 0;
     if (!is_query_list(query))
     {
-        if (!add_select(selects, count, path, query, 0, FALSE)) error = ERROR_OUTOFMEMORY;
+        if (!add_select(selects, count, path, query, 0, FALSE, file)) error = ERROR_OUTOFMEMORY;
         goto done;
     }
 
@@ -925,8 +927,9 @@ static DWORD build_selects(const WCHAR *path, const WCHAR *query, struct classic
 
             if (!xpath) error = ERROR_EVT_MALFORMED_XML_TEXT;
             else if (!value) value = query_path;
-            if (!error && value && is_file_uri(value)) error = ERROR_NOT_SUPPORTED;
-            else if (!error && value && !add_select(selects, count, value, xpath, group, suppress)) error = ERROR_OUTOFMEMORY;
+            if (!error && value && !add_select(selects, count, is_file_uri(value) ? value + 7 : value, xpath, group, suppress,
+                                               is_file_uri(value)))
+                error = ERROR_OUTOFMEMORY;
             free(xpath);
         }
         free_tag(&tag);
@@ -968,13 +971,7 @@ EVT_HANDLE WINAPI EvtQuery(EVT_HANDLE session, const WCHAR *path, const WCHAR *q
         SetLastError(error);
         return NULL;
     }
-    /* the records of an .evtx file are not something that this library can read */
-    if ((flags & 3) == EvtQueryFilePath && !is_query_list(query))
-    {
-        SetLastError(ERROR_NOT_SUPPORTED);
-        return NULL;
-    }
-    if ((error = build_selects(path, query, &selects, &count)))
+    if ((error = build_selects(path, query, (flags & 3) == EvtQueryFilePath, &selects, &count)))
     {
         SetLastError(error);
         return NULL;
@@ -1000,7 +997,7 @@ invalid:
     return NULL;
 }
 
-static EVT_HANDLE new_event(EVENTLOGRECORD *rec, const WCHAR *channel)
+static EVT_HANDLE new_event(EVENTLOGRECORD *rec, struct evtx_event *evtx, const WCHAR *channel)
 {
     struct event_data *event = calloc(1, sizeof(*event));
     EVT_HANDLE handle;
@@ -1014,6 +1011,7 @@ static EVT_HANDLE new_event(EVENTLOGRECORD *rec, const WCHAR *channel)
     }
     /* the handle owns the record from here */
     event->rec = rec;
+    event->evtx = evtx;
     ((struct object *)handle)->data = event;
     return handle;
 }
@@ -1031,17 +1029,24 @@ BOOL WINAPI EvtNext(EVT_HANDLE result_set, DWORD size, EVT_HANDLE *array, DWORD 
     else if (!array || !ret_count || flags) error = ERROR_INVALID_PARAMETER;
     /* room for no event is room for the end of the results, as far as Windows goes */
     else if (!size) error = ERROR_NO_MORE_ITEMS;
+    else if (object->index)
+    {
+        /* an error of a damaged file that came behind events that were handed over */
+        error = object->index;
+        object->index = 0;
+    }
     else
     {
         while (n < size)
         {
             const WCHAR *channel;
-            EVENTLOGRECORD *rec = classic_query_next(object->data, &channel, &error);
+            struct qevent qe;
 
-            if (!rec) break;
-            if (!(array[n] = new_event(rec, channel)))
+            if (!classic_query_next(object->data, &qe, &channel, &error)) break;
+            if (!(array[n] = new_event(qe.rec, qe.evtx, channel)))
             {
-                free(rec);
+                free(qe.rec);
+                evtx_event_free(qe.evtx);
                 error = ERROR_OUTOFMEMORY;
                 break;
             }
@@ -1049,6 +1054,7 @@ BOOL WINAPI EvtNext(EVT_HANDLE result_set, DWORD size, EVT_HANDLE *array, DWORD 
             error = ERROR_SUCCESS;
         }
         /* what was read is handed over, and the end or the error shows with the next call */
+        if (n && error != ERROR_SUCCESS && error != ERROR_NO_MORE_ITEMS && error != ERROR_OUTOFMEMORY) object->index = error;
         if (n) error = ERROR_SUCCESS;
         else if (!error) error = ERROR_NO_MORE_ITEMS;
         if (n) *ret_count = n;
@@ -1152,7 +1158,7 @@ EVT_HANDLE WINAPI EvtOpenLog(EVT_HANDLE session, const WCHAR *path, DWORD flags)
         SetLastError(error);
         return NULL;
     }
-    /* the records of an .evtx file are not something that this library can read */
+    /* the information about an .evtx file is not something that this library gives */
     if (flags == EvtOpenFilePath)
     {
         SetLastError(ERROR_NOT_SUPPORTED);
@@ -1505,6 +1511,7 @@ static BOOL get_event(EVT_HANDLE handle, struct classic_event *event)
 
     if (!object) return FALSE;
     data = object->data;
+    if (data->evtx) return classic_event_from_evtx(event, data->evtx);
     return classic_event_init(event, data->rec, data->channel);
 }
 
