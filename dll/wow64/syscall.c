@@ -2078,7 +2078,13 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         Status = NtFlushBuffersFile(H(0), IoBegin(a[1], &Io));
         IoEnd(a[1], &Io);
         return Status;
-    }
+    case W64_NtQueryEaFile:
+        /* Extended attribute lists are flat records: the same bytes in both ABIs */
+        Status = NtQueryEaFile(H(0), IoBegin(a[1], &Io), P(2), a[3], (BOOLEAN)a[4], P(5), a[6], P(7), (BOOLEAN)a[8]);
+        IoEnd(a[1], &Io); return Status;
+    case W64_NtSetEaFile:
+        Status = NtSetEaFile(H(0), IoBegin(a[1], &Io), P(2), a[3]);
+        IoEnd(a[1], &Io); return Status;
     case W64_NtSetInformationFile:
         return Wow64SetInformationFile(a, Cleanup);
     case W64_NtQueryInformationFile:
