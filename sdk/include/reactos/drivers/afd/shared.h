@@ -279,6 +279,8 @@ typedef struct _AFD_TDI_HANDLE_DATA
 #define AFD_SKIP_FIO			0x1L
 #define AFD_OVERLAPPED			0x2L
 #define AFD_IMMEDIATE                   0x4L
+/* ReactOS: complete an overlapped stream send only when all of it is sent (the caller has no thread to continue it) */
+#define AFD_SEND_WHOLE                  0x8L
 
 /* IOCTL Generation */
 #define FSCTL_AFD_BASE                  FILE_DEVICE_NETWORK
