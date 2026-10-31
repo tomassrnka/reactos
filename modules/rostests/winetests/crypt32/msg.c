@@ -4395,6 +4395,74 @@ static void test_cms_rc2_params(void)
     ok(!ret && (GetLastError() == CRYPT_E_ASN1_EOD || GetLastError() == CRYPT_E_ASN1_CORRUPT), "got %d, %08lx\n", ret, GetLastError());
 }
 
+/* an RC2 message made with parameters of the caller: the content key has the size of the parameters (here 128
+ * bits), and all of it is random */
+static void test_cms_rc2_key(void)
+{
+    static const BYTE params[] = { 0x30, 0x0d, 0x02, 0x01, 0x3a, 0x04, 0x08, 1, 2, 3, 4, 5, 6, 7, 8 };
+    PCCERT_CONTEXT cert;
+    cms_enveloped_encode_info info;
+    PCERT_INFO cert_info;
+    HCRYPTMSG msg, dec;
+    BYTE *encoded = NULL, key[256];
+    CMSG_CMS_RECIPIENT_INFO *recipient;
+    cms_NCryptDecrypt decrypt;
+    HMODULE ncrypt;
+    DWORD size = 0, key_len = 0, i;
+    BOOL ret, tail_random = FALSE;
+    LONG status;
+
+    if (!cms_keys.have_ncrypt)
+    {
+        skip("no NCrypt keys\n");
+        return;
+    }
+    ncrypt = GetModuleHandleW(L"ncrypt.dll");
+    decrypt = ncrypt ? (void *)GetProcAddress(ncrypt, "NCryptDecrypt") : NULL;
+    if (!decrypt) { skip("no NCryptDecrypt\n"); return; }
+    cert = CertCreateCertificateContext(X509_ASN_ENCODING, cms_cert_a, sizeof(cms_cert_a));
+    cert_info = cert->pCertInfo;
+    memset(&info, 0, sizeof(info));
+    info.cbSize = sizeof(info);
+    info.ContentEncryptionAlgorithm.pszObjId = (char *)"1.2.840.113549.3.2";
+    info.ContentEncryptionAlgorithm.Parameters.cbData = sizeof(params);
+    info.ContentEncryptionAlgorithm.Parameters.pbData = (BYTE *)params;
+    info.cRecipients = 1;
+    info.rgpRecipientCert = &cert_info;
+    msg = CryptMsgOpenToEncode(PKCS_7_ASN_ENCODING | X509_ASN_ENCODING, 0, CMSG_ENVELOPED, &info, NULL, NULL);
+    ok(!!msg, "CryptMsgOpenToEncode failed: %08lx\n", GetLastError());
+    if (msg)
+    {
+        ret = CryptMsgUpdate(msg, (const BYTE *)"rc2 key", 7, TRUE);
+        ok(ret, "CryptMsgUpdate failed: %08lx\n", GetLastError());
+        CryptMsgGetParam(msg, CMSG_CONTENT_PARAM, 0, NULL, &size);
+        encoded = HeapAlloc(GetProcessHeap(), 0, size);
+        ret = CryptMsgGetParam(msg, CMSG_CONTENT_PARAM, 0, encoded, &size);
+        ok(ret, "CryptMsgGetParam failed: %08lx\n", GetLastError());
+        CryptMsgClose(msg);
+    }
+    dec = encoded ? cms_open(encoded, size) : NULL;
+    ok(!encoded || !!dec, "CryptMsgUpdate failed: %08lx\n", GetLastError());
+    if (dec)
+    {
+        recipient = cms_param(dec, CMSG_CMS_RECIPIENT_INFO_PARAM, 0, NULL);
+        ok(!!recipient, "CMSG_CMS_RECIPIENT_INFO_PARAM failed: %08lx\n", GetLastError());
+        if (recipient)
+        {
+            status = decrypt(cms_keys.ncrypt_a, recipient->pKeyTrans->EncryptedKey.pbData, recipient->pKeyTrans->EncryptedKey.cbData,
+                             NULL, key, sizeof(key), &key_len, 2);
+            ok(!status, "NCryptDecrypt failed: %08lx\n", status);
+            ok(!status && key_len == 16, "expected a 128 bit key, got %lu bytes\n", key_len);
+            for (i = 5; !status && i < key_len; i++) if (key[i]) tail_random = TRUE;
+            ok(status || tail_random, "the key bytes behind the first 40 bits are all zero\n");
+            HeapFree(GetProcessHeap(), 0, recipient);
+        }
+        CryptMsgClose(dec);
+    }
+    HeapFree(GetProcessHeap(), 0, encoded);
+    CertFreeCertificateContext(cert);
+}
+
 static void test_cms_oid_info(void)
 {
     static const struct { const char *oid; const WCHAR *name; ALG_ID alg; } tests[] =
@@ -4417,6 +4485,42 @@ static void test_cms_oid_info(void)
     }
 }
 
+/* malformed messages must be refused cleanly: the lengths inside the originatorInfo, the recipient set and the
+ * encrypted content are checked against the bytes that are there */
+static void test_cms_malformed(void)
+{
+    static const BYTE ci_head[] = { 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x03 };
+    static const struct { const char *name; BYTE data[24]; DWORD len; } tests[] =
+    {
+        { "originator_length_past_end", { 0x30, 0x05, 0x02, 0x01, 0xff, 0xa0, 0x2f }, 7 },
+        { "originator_long_length", { 0x30, 0x09, 0x02, 0x01, 0x00, 0xa0, 0x84, 0xff, 0xff, 0xff, 0xff }, 11 },
+        { "originator_indefinite_open", { 0x30, 0x06, 0x02, 0x01, 0x00, 0xa0, 0x80, 0x00 }, 8 },
+        { "originator_one_byte", { 0x30, 0x04, 0x02, 0x01, 0x00, 0xa0 }, 6 },
+        { "recipient_set_length_past_end", { 0x30, 0x07, 0x02, 0x01, 0x00, 0x31, 0x7f, 0x30, 0x00 }, 9 },
+        { "recipient_set_missing", { 0x30, 0x03, 0x02, 0x01, 0x00 }, 5 },
+    };
+    DWORD i;
+
+    for (i = 0; i < ARRAY_SIZE(tests); i++)
+    {
+        BYTE msg_data[64], *p = msg_data;
+        HCRYPTMSG msg;
+        DWORD inner = tests[i].len;
+
+        *p++ = 0x30;
+        *p++ = sizeof(ci_head) + 2 + inner;
+        memcpy(p, ci_head, sizeof(ci_head));
+        p += sizeof(ci_head);
+        *p++ = 0xa0;
+        *p++ = inner;
+        memcpy(p, tests[i].data, inner);
+        p += inner;
+        msg = cms_open(msg_data, p - msg_data);
+        ok(!msg, "%s: expected failure\n", tests[i].name);
+        if (msg) CryptMsgClose(msg);
+    }
+}
+
 static void test_enveloped_cms(void)
 {
     cms_load_keys();
@@ -4428,9 +4532,11 @@ static void test_enveloped_cms(void)
     test_cms_two_recipients();
     test_cms_encode();
     test_cms_inner_type();
+    test_cms_rc2_key();
     cms_free_keys();
     test_cms_rc2_params();
     test_cms_oid_info();
+    test_cms_malformed();
 }
 
 START_TEST(msg)

@@ -789,6 +789,7 @@ static BOOL capi_unwrap(HCRYPTPROV prov, DWORD keyspec, const BYTE *enc, DWORD e
     CryptDestroyKey(ckey);
     *cek_len = *(DWORD *)(out + sizeof(BLOBHEADER));
     memmove(out, out + sizeof(BLOBHEADER) + sizeof(DWORD), *cek_len);
+    SecureZeroMemory(out + *cek_len, outlen - *cek_len);       /* no key residue behind the moved key */
     *cek = out;
     return TRUE;
 }
@@ -1045,7 +1046,7 @@ BOOL CMSEnv_Decode(const BYTE *pb, DWORD cb, struct cms_env **out)
     {
         span orig, el;
 
-        der_read(&seq, NULL, &orig, NULL);
+        if (!der_read(&seq, NULL, &orig, NULL)) goto done;
         while (orig.n)
         {
             span set;
@@ -1062,7 +1063,7 @@ BOOL CMSEnv_Decode(const BYTE *pb, DWORD cb, struct cms_env **out)
             if (!(*arr = CryptMemAlloc(n * sizeof(**arr)))) { SetLastError(ERROR_OUTOFMEMORY); goto done; }
             for (el = set; el.n;)
             {
-                der_read(&el, &tag, NULL, &whole);
+                if (!der_read(&el, &tag, NULL, &whole)) goto done;
                 if (tag != 0x30) continue;  /* attribute certificates and other formats */
                 (*arr)[*cnt].cbData = whole.n;
                 (*arr)[*cnt].pbData = (BYTE *)whole.p;
@@ -1084,7 +1085,7 @@ BOOL CMSEnv_Decode(const BYTE *pb, DWORD cb, struct cms_env **out)
     {
         span ri;
 
-        der_read(&v, &tag, &ri, NULL);
+        if (!der_read(&v, &tag, &ri, NULL)) goto done;
         switch (tag)
         {
         case 0x30:
@@ -1312,6 +1313,7 @@ static BOOL enc_setup_cipher(struct cms_enc *e, const char *oid, const CRYPT_DAT
             if (a->cbSize != sizeof(*a)) { SetLastError(E_INVALIDARG); return FALSE; }
             bits = a->dwBitLen & 0xffff;
             no_salt = !!(a->dwBitLen & 0x40000000);
+            if (a->dwBitLen & 0x80000000) FIXME("CMSG_SP3_COMPATIBLE_ENCRYPT_FLAG is not supported\n");
         }
         if (d->kind == P12_CIPHER_RC2)
         {
@@ -1336,16 +1338,17 @@ static BOOL enc_setup_cipher(struct cms_enc *e, const char *oid, const CRYPT_DAT
         iv_given.cbData = 1;
     }
     if (d->ivlen && !iv_given.cbData && p12_random(e->cipher.iv, d->ivlen)) { SetLastError(NTE_FAIL); return FALSE; }
-    if (p12_random(e->key, e->keylen) || (e->cipher.salt_len && p12_random(e->cipher.salt, e->cipher.salt_len)))
-    {
-        SetLastError(NTE_FAIL);
-        return FALSE;
-    }
     if (d->kind == P12_CIPHER_RC2 && e->cipher.rc2bits != 0)
     {
         for (i = 0; i < ARRAY_SIZE(rc2_versions) && rc2_versions[i].bits != e->cipher.rc2bits; i++) ;
         if (i == ARRAY_SIZE(rc2_versions)) { SetLastError(E_INVALIDARG); return FALSE; }
         e->keylen = e->cipher.rc2bits / 8;
+    }
+    /* the key size is settled now: the random key must fill all of it */
+    if (p12_random(e->key, e->keylen) || (e->cipher.salt_len && p12_random(e->cipher.salt, e->cipher.salt_len)))
+    {
+        SetLastError(NTE_FAIL);
+        return FALSE;
     }
 
     /* AlgorithmIdentifier */
@@ -1479,7 +1482,7 @@ struct cms_enc *CMSEnv_EncNew(const char *content_type, const char *content_alg,
         if (!e->recip[i].pbData) { SetLastError(ERROR_OUTOFMEMORY); goto fail; }
         e->n_recip = i + 1;
     }
-    qsort(e->recip, e->n_recip, sizeof(*e->recip), cmp_der);
+    if (e->n_recip > 1) qsort(e->recip, e->n_recip, sizeof(*e->recip), cmp_der);
     if (n_cert || n_crl)
     {
         struct wbuf o = { 0 }, set = { 0 };
