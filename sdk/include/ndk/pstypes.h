@@ -1796,6 +1796,15 @@ typedef struct _EJOB
     LIST_ENTRY JobSetLinks;
     ULONG MemberLevel;
     ULONG JobFlags;
+#ifdef __REACTOS__
+    /* Job hierarchy (nested jobs, Windows 8 and later). The parent holds a
+       reference to every child, so a job's ParentJob never dangles. Both links
+       are only modified under the parent's JobLock and the child's JobLock;
+       ParentJob never changes once set. MemberLevel is 0 for a root job. */
+    struct _EJOB *ParentJob;
+    LIST_ENTRY ChildJobsHead;
+    LIST_ENTRY ChildJobsLinks;
+#endif
 } EJOB, *PEJOB;
 
 //

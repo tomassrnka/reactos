@@ -746,30 +746,26 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
     if (SeDetailedAuditingWithToken(NULL)) SeAuditProcessCreate(Process);
 
     /*
-     * Attach the process to parent's job if:
-     *  a) parent exists,
-     *  b) parent has a job,
-     *  c) parent's job does NOT allow silent breakaway.
+     * Attach the process to the jobs of its parent if the parent has a job.
+     * The new process leaves the jobs that allow it (silent breakaway, or
+     * breakaway when the caller asked for it) and joins the first one that
+     * does not, together with that job's parents.
      */
-    if (Parent && Parent->Job &&
-        !FlagOn(Parent->Job->LimitFlags, JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK))
+    if (Parent && Parent->Job)
     {
-        PEJOB ParentJob = Parent->Job;
+        PEJOB TargetJob;
 
-        /* If caller explicitly requested breakaway from the job */
-        if (FlagOn(Flags, PROCESS_CREATE_FLAGS_BREAKAWAY))
+        Status = PspSelectJobForNewProcess(Parent->Job,
+                                           FlagOn(Flags, PROCESS_CREATE_FLAGS_BREAKAWAY) != 0,
+                                           &TargetJob);
+        if (!NT_SUCCESS(Status))
         {
-            /* Deny if the job forbids breakaway */
-            if (!FlagOn(ParentJob->LimitFlags, JOB_OBJECT_LIMIT_BREAKAWAY_OK))
-            {
-                Status = STATUS_ACCESS_DENIED;
-                goto CleanupWithRef;
-            }
+            goto CleanupWithRef;
         }
-        else
+
+        if (TargetJob != NULL)
         {
-            /* Under normal conditions, child should join a parent's job */
-            Status = PspAssignProcessToJob(Process, ParentJob);
+            Status = PspAssignProcessToJob(Process, TargetJob);
             if (!NT_SUCCESS(Status))
             {
                 goto CleanupWithRef;
