@@ -143,6 +143,22 @@ no shaders). Chromium 138 (Electron 37.6) with ANGLE on Vulkan, WebGL scene of 1
 lavapipe against 30.8 ms with SwiftShader (mean of 5 launches); a page of 150 blurred layers animated by CSS reaches 4.5 frames
 per second against 3.0. The first draw call costs about 30 ms more with the JIT (130 ms against 100 ms).
 
+### Staging and public builds
+
+Both staging scripts (`stage-amd64-llvm.sh`, `stage-i386-llvm.sh`) run on every configure. They extract and verify the
+pack in a temporary directory next to the target and move it into place, so a failure never leaves a half-staged
+`amd64-llvm/` or `i386-llvm/`; the pinned artifact hash is stored in `.artifact-sha256` in the staged directory, and a
+changed pin in the script stages the new pack again. CMake accepts the directory only with every DLL, both licence files
+and `SHA256SUMS`. `rclone` runs with `--contimeout 15s --timeout 60s --retries 2`. At the end of the configure there is
+one line per architecture, `Mesa3D amd64: llvmpipe (artifact 6ab3d0fe)` or
+`Mesa3D amd64: softpipe fallback (<reason>)` (and the same for i386 in the SysWOW64 guest configure), so a silent fall
+back to OpenGL 3.3 is visible.
+
+**Public builds.** The `vultr` S3 remote is private. A builder without it (every public builder) gets the softpipe
+fallback on both architectures: OpenGL 3.3, no compute shaders and no lavapipe Vulkan ICD on amd64, and softpipe in
+SysWOW64. Such a build is complete and works; to get llvmpipe either set `LAVAPIPE_ARTIFACT` /
+`LLVMPIPE_I386_ARTIFACT` to a local copy of the artifacts or build the packs with `build-llvm.sh` and `build-mesa.sh`.
+
 ## 32-bit programs on amd64 (SysWOW64)
 
 The opengl32 of SysWOW64 finds its driver as the 64-bit one does, but a 32-bit process reads `HKLM\SOFTWARE` through

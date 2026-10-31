@@ -1,4 +1,56 @@
 # Mesa3D software drivers (prebuilt by build-mesa.sh); see README.md
+
+# Runs the staging script of an llvmpipe pack on every configure (it is a no-op that needs no network when the
+# directory is already staged with the script's pinned artifact, and replaces a stale one) and sets, in the caller:
+#   <prefix>_OK      TRUE when the pack is staged, verified and complete (DLL, licence files and SHA256SUMS)
+#   <prefix>_STATUS  the status line printed at the end of the configure
+# mesa3d_stage_llvm(<prefix> <arch> <script> <dir> <enabled> <why not enabled> <files>...)
+function(mesa3d_stage_llvm PREFIX ARCH_NAME SCRIPT DIRNAME ENABLED WHY_OFF)
+    set(_dir ${CMAKE_CURRENT_SOURCE_DIR}/${DIRNAME})
+    set(_ok FALSE)
+    set(_reason "${WHY_OFF}")
+    if(ENABLED)
+        message(STATUS "Mesa3D: staging the ${ARCH_NAME} llvmpipe pack ...")
+        execute_process(
+            COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/${SCRIPT}
+            RESULT_VARIABLE _rc
+            OUTPUT_VARIABLE _out
+            ERROR_VARIABLE _out)
+        string(STRIP "${_out}" _out)
+        if(NOT _rc EQUAL 0)
+            # the script's last line is its one-line reason
+            string(REGEX REPLACE "^.*\n" "" _reason "${_out}")
+            string(REGEX REPLACE "^stage-[a-z0-9]+-llvm: " "" _reason "${_reason}")
+            message(WARNING "Mesa3D: could not stage the ${ARCH_NAME} llvmpipe pack (rc=${_rc}); keeping the in-tree "
+                            "softpipe OpenGL driver. Output:\n${_out}")
+        else()
+            message(STATUS "Mesa3D: ${_out}")
+            set(_ok TRUE)
+            # the DLLs and both notices, not only the DLL: a half-populated directory must not be accepted
+            foreach(_f ${ARGN} SHA256SUMS .artifact-sha256)
+                if(NOT EXISTS ${_dir}/${_f})
+                    set(_ok FALSE)
+                    set(_reason "staged ${DIRNAME}/ lacks ${_f}")
+                endif()
+            endforeach()
+        endif()
+    endif()
+    if(_ok)
+        file(STRINGS ${_dir}/.artifact-sha256 _pin LIMIT_COUNT 1)
+        string(SUBSTRING "${_pin}" 0 8 _sha8)
+        set(_status "Mesa3D ${ARCH_NAME}: llvmpipe (artifact ${_sha8})")
+    else()
+        set(_status "Mesa3D ${ARCH_NAME}: softpipe fallback (${_reason})")
+    endif()
+    set(${PREFIX}_OK ${_ok} PARENT_SCOPE)
+    set(${PREFIX}_STATUS "${_status}" PARENT_SCOPE)
+endfunction()
+
+# One status line per arch; the top-level CMakeLists.txt prints them at the end of the configure
+function(mesa3d_report_status LINE)
+    set_property(GLOBAL APPEND PROPERTY MESA3D_STATUS_LINES "${LINE}")
+endfunction()
+
 if(ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64")
     set(MESA3D_GL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/${ARCH})
     set(MESA3D_LICENSES ${CMAKE_CURRENT_SOURCE_DIR}/mesa3d-licenses.txt)
@@ -6,27 +58,20 @@ if(ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64")
     # amd64 ships llvmpipe (OpenGL) + lavapipe (Vulkan) as the DEFAULT GPU of the base image. The
     # ~116 MB pack is not in git, so it is fetched from the S3 cold tier at configure time by
     # stage-amd64-llvm.sh. This is ON by default; -DMESA3D_AMD64_LLVM=OFF, or a build host without
-    # rclone / network / the artifact, falls back to the in-tree softpipe-only OpenGL driver below
-    # (no Vulkan ICD) so the build never breaks. i386 uses softpipe, except SysWOW64 (below).
+    # rclone / network / the artifact (every public builder: the S3 remote is private), falls back to the
+    # in-tree softpipe-only OpenGL driver below (no Vulkan ICD) so the build never breaks. i386 uses
+    # softpipe, except SysWOW64 (below).
     option(MESA3D_AMD64_LLVM "amd64: default to llvmpipe/lavapipe (fetch the LLVM Mesa pack from S3 at configure)" ON)
-    if(ARCH STREQUAL "amd64" AND MESA3D_AMD64_LLVM AND NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/amd64-llvm/vulkan_lvp.dll)
-        message(STATUS "Mesa3D: staging the llvmpipe/lavapipe pack (amd64 default GPU) ...")
-        execute_process(
-            COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/stage-amd64-llvm.sh
-            RESULT_VARIABLE _mesa3d_stage_rc
-            OUTPUT_VARIABLE _mesa3d_stage_out
-            ERROR_VARIABLE _mesa3d_stage_out)
-        if(NOT _mesa3d_stage_rc EQUAL 0)
-            message(WARNING "Mesa3D: could not stage the amd64 llvmpipe/lavapipe pack (rc=${_mesa3d_stage_rc}); "
-                            "keeping the in-tree softpipe OpenGL default. Output:\n${_mesa3d_stage_out}")
-        else()
-            message(STATUS "Mesa3D: ${_mesa3d_stage_out}")
-        endif()
+    if(ARCH STREQUAL "amd64")
+        mesa3d_stage_llvm(_mesa3d_amd64 amd64 stage-amd64-llvm.sh amd64-llvm ${MESA3D_AMD64_LLVM}
+            "disabled by -DMESA3D_AMD64_LLVM=OFF"
+            vulkan_lvp.dll lvp_icd.json libgallium_wgl.dll llvm-licenses.txt mesa3d-licenses.txt)
+        mesa3d_report_status("${_mesa3d_amd64_STATUS}")
     endif()
 
     # amd64: when amd64-llvm/ holds the LLVM build (llvmpipe for OpenGL, lavapipe for Vulkan), it replaces the softpipe-only
     # OpenGL driver and adds the Vulkan ICD. The LLVM DLLs are 66-69 MB each, so they are an option of the image.
-    if(ARCH STREQUAL "amd64" AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/amd64-llvm/vulkan_lvp.dll)
+    if(ARCH STREQUAL "amd64" AND _mesa3d_amd64_OK)
         set(MESA3D_GL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/amd64-llvm)
         add_cd_file(FILE ${MESA3D_GL_DIR}/vulkan_lvp.dll DESTINATION reactos/system32 FOR all)
         add_cd_file(FILE ${MESA3D_GL_DIR}/lvp_icd.json DESTINATION reactos/system32 FOR all)
@@ -40,21 +85,17 @@ if(ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64")
     # it (-DMESA3D_WOW64_LLVM=OFF, no rclone/network/artifact) SysWOW64 keeps the in-tree softpipe driver. A native
     # i386 image keeps softpipe.
     option(MESA3D_WOW64_LLVM "SysWOW64: ship the i386 llvmpipe OpenGL driver (fetched from S3 at configure)" ON)
-    if(ARCH STREQUAL "i386" AND SYSWOW64_GUEST AND MESA3D_WOW64_LLVM AND NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/i386-llvm/libgallium_wgl.dll)
-        message(STATUS "Mesa3D: staging the i386 llvmpipe driver (SysWOW64) ...")
-        execute_process(
-            COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/stage-i386-llvm.sh
-            RESULT_VARIABLE _mesa3d_stage_rc
-            OUTPUT_VARIABLE _mesa3d_stage_out
-            ERROR_VARIABLE _mesa3d_stage_out)
-        if(NOT _mesa3d_stage_rc EQUAL 0)
-            message(WARNING "Mesa3D: could not stage the i386 llvmpipe driver (rc=${_mesa3d_stage_rc}); "
-                            "SysWOW64 keeps the in-tree softpipe OpenGL driver. Output:\n${_mesa3d_stage_out}")
+    if(ARCH STREQUAL "i386")
+        if(SYSWOW64_GUEST)
+            mesa3d_stage_llvm(_mesa3d_i386 i386 stage-i386-llvm.sh i386-llvm ${MESA3D_WOW64_LLVM}
+                "disabled by -DMESA3D_WOW64_LLVM=OFF"
+                libgallium_wgl.dll mesa3d-licenses.txt)
+            mesa3d_report_status("${_mesa3d_i386_STATUS}")
         else()
-            message(STATUS "Mesa3D: ${_mesa3d_stage_out}")
+            mesa3d_report_status("Mesa3D i386: softpipe fallback (native i386 image, llvmpipe is staged for the SysWOW64 guest only)")
         endif()
     endif()
-    if(ARCH STREQUAL "i386" AND SYSWOW64_GUEST AND MESA3D_WOW64_LLVM AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/i386-llvm/libgallium_wgl.dll)
+    if(ARCH STREQUAL "i386" AND SYSWOW64_GUEST AND _mesa3d_i386_OK)
         set(MESA3D_GL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/i386-llvm)
         set(MESA3D_LICENSES ${MESA3D_GL_DIR}/mesa3d-licenses.txt)
     endif()
