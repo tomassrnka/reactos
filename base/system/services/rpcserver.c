@@ -1320,6 +1320,22 @@ RLockServiceDatabase(
 }
 
 
+/*
+ * Services that are not Win32 services (drivers) come without a security descriptor: give them the
+ * default one when somebody asks for it. The caller holds the service database exclusive.
+ */
+static
+DWORD
+ScmEnsureServiceSD(
+    _In_ PSERVICE lpService)
+{
+    if (lpService->pSecurityDescriptor != NULL)
+        return ERROR_SUCCESS;
+
+    return ScmCreateDefaultServiceSD(&lpService->pSecurityDescriptor);
+}
+
+
 /* Function 4 */
 DWORD
 WINAPI
@@ -1368,8 +1384,15 @@ RQueryServiceObjectSecurity(
         return ERROR_INVALID_HANDLE;
     }
 
-    /* Lock the service database */
-    ScmLockDatabaseShared();
+    /* Lock the service database (exclusive: a missing descriptor is created) */
+    ScmLockDatabaseExclusive();
+
+    dwError = ScmEnsureServiceSD(lpService);
+    if (dwError != ERROR_SUCCESS)
+    {
+        ScmUnlockDatabase();
+        return dwError;
+    }
 
     /* Retrieve the security descriptor */
     Status = RtlQuerySecurityObject(lpService->pSecurityDescriptor,
@@ -1492,6 +1515,14 @@ RSetServiceObjectSecurity(
     RpcRevertToSelf();
 #endif
 
+    /* Lock the service database exclusive */
+    ScmLockDatabaseExclusive();
+    bDatabaseLocked = TRUE;
+
+    dwError = ScmEnsureServiceSD(lpService);
+    if (dwError != ERROR_SUCCESS)
+        goto Done;
+
     /* Build the new security descriptor */
     Status = RtlSetSecurityObject(dwSecurityInformation,
                                   (PSECURITY_DESCRIPTOR)lpSecurityDescriptor,
@@ -1503,10 +1534,6 @@ RSetServiceObjectSecurity(
         dwError = RtlNtStatusToDosError(Status);
         goto Done;
     }
-
-    /* Lock the service database exclusive */
-    ScmLockDatabaseExclusive();
-    bDatabaseLocked = TRUE;
 
     /* Open the service key */
     dwError = ScmOpenServiceKey(lpService->lpServiceName,
