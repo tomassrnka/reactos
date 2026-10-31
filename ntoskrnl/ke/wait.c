@@ -303,7 +303,7 @@ KeDelayExecutionThread(IN KPROCESSOR_MODE WaitMode,
     NTSTATUS WaitStatus;
     BOOLEAN Swappable;
     PLARGE_INTEGER OriginalDueTime;
-    LARGE_INTEGER DueTime, NewDueTime, InterruptTime;
+    LARGE_INTEGER DueTime, NewDueTime, InterruptTime, PreciseInterval;
     ULONG Hand = 0;
 
     if (Thread->WaitNext)
@@ -320,6 +320,21 @@ KeDelayExecutionThread(IN KPROCESSOR_MODE WaitMode,
             /* Yield execution */
             return NtYieldExecution();
         }
+    }
+
+    /* The interrupt time only moves with the clock interrupt, so a due time
+       computed from it alone can lie up to one interval too early. A delay
+       must not end before the interval has passed, so count it from now: add
+       the time since the last clock interrupt. The timer then expires with the
+       first clock interrupt at or after the interval. Kernel mode callers keep
+       the tick granular delay: they poll and pace (memory manager retries, the
+       boot animation), and with the longer delay the boot takes seconds longer. */
+    if ((Interval->QuadPart < 0) && (WaitMode != KernelMode))
+    {
+        LONGLONG Phase = KiQueryClockPhase();
+        PreciseInterval.QuadPart = Interval->QuadPart;
+        if (PreciseInterval.QuadPart > (MINLONGLONG + Phase)) PreciseInterval.QuadPart -= Phase;
+        Interval = &PreciseInterval;
     }
 
     /* Setup the original time and timer/wait blocks */
