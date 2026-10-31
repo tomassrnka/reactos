@@ -667,19 +667,30 @@ IopCompleteRequest(IN PKAPC Apc,
  * the detached requests of the process and waits for them, so no worker
  * touches the address space after it is gone.
  *
- * Detach and the final IofCompleteRequest race; neither writes anything a
- * driver writes (drivers update Irp->Flags without interlocking, e.g. npfs
- * on a pending read). IofCompleteRequest sets IRP_COMPLETION_CLAIMED, then
- * reads IopDetachedIrpCount; IoCancelThreadIo increments the count, then
- * reads the flag, both under IopDetachedIrpLock and with full barriers in
- * between, so at least one of them sees the other: either the detach backs
- * off (the APC goes to the still living thread, which waits for it), or the
- * completion finds the entry under the lock.
+ * Detach and the final IofCompleteRequest race; the detach never writes
+ * anything a driver writes (drivers update Irp->Flags without interlocking,
+ * e.g. npfs on a pending read). IofCompleteRequest sets
+ * IRP_COMPLETION_CLAIMED (a bit no WDK flag uses; the I/O manager owns the
+ * IRP from there on), then reads whether the issuing thread is terminated.
+ * The exiting thread sets its Terminated flag first, and IoCancelThreadIo
+ * reads the claim under IopDetachedIrpLock, both sides with full barriers
+ * in between, so at least one of them sees the other: either the detach
+ * backs off (the APC goes to the still living thread, which waits for it),
+ * or the completion sees the thread terminated and looks for the entry under
+ * the lock. IRPs of threads that are not terminated never take the lock.
+ *
+ * The lookup key is the IRP address, which is recycled as soon as the IRP is
+ * released. So the entry leaves the hash table, under the lock, in the same
+ * step that marks it Completed and before the IRP can be released; from then
+ * on it is only a rundown counter (on the list of all entries) and its Irp
+ * pointer is never used again.
  */
 typedef struct _IOP_DETACHED_IRP
 {
-    LIST_ENTRY Links;               /* in the bucket of Irp */
-    PIRP Irp;
+    LIST_ENTRY Links;               /* in the bucket of Irp until Completed */
+    LIST_ENTRY AllLinks;            /* in IopDetachedIrpAll until the worker is done */
+    PIRP Irp;                       /* not valid once Completed (recycled address) */
+    PVOID DataBuffer;               /* what IofCompleteRequest saved for the completion */
     PETHREAD Thread;                /* the issuing thread, referenced */
     PEPROCESS Process;
     PFILE_OBJECT FileObject;
@@ -693,9 +704,22 @@ typedef struct _IOP_DETACHED_IRP
 
 #define IOP_DETACHED_IRP_BUCKETS 64
 static LIST_ENTRY IopDetachedIrpBuckets[IOP_DETACHED_IRP_BUCKETS];
-static BOOLEAN IopDetachedIrpTableReady;
+static LIST_ENTRY IopDetachedIrpAll;
 static KSPIN_LOCK IopDetachedIrpLock;
 static volatile LONG IopDetachedIrpCount;
+
+CODE_SEG("INIT")
+VOID
+NTAPI
+IopInitializeDetachedIrps(VOID)
+{
+    ULONG i;
+
+    KeInitializeSpinLock(&IopDetachedIrpLock);
+    for (i = 0; i < IOP_DETACHED_IRP_BUCKETS; i++)
+        InitializeListHead(&IopDetachedIrpBuckets[i]);
+    InitializeListHead(&IopDetachedIrpAll);
+}
 
 static
 PLIST_ENTRY
@@ -705,7 +729,7 @@ IopDetachedIrpBucket(IN PIRP Irp)
     return &IopDetachedIrpBuckets[((Value >> 4) ^ (Value >> 12)) % IOP_DETACHED_IRP_BUCKETS];
 }
 
-/* Called with IopDetachedIrpLock held */
+/* Called with IopDetachedIrpLock held; completed entries are not in the table */
 static
 PIOP_DETACHED_IRP
 IopFindDetachedIrp(IN PIRP Irp)
@@ -713,11 +737,11 @@ IopFindDetachedIrp(IN PIRP Irp)
     PLIST_ENTRY Head, Entry;
     PIOP_DETACHED_IRP Detached;
 
-    if (!IopDetachedIrpTableReady) return NULL;
     Head = IopDetachedIrpBucket(Irp);
     for (Entry = Head->Flink; Entry != Head; Entry = Entry->Flink)
     {
         Detached = CONTAINING_RECORD(Entry, IOP_DETACHED_IRP, Links);
+        ASSERT(!Detached->Completed);
         if (Detached->Irp == Irp) return Detached;
     }
     return NULL;
@@ -755,7 +779,9 @@ IopDetachThreadIrp(IN PETHREAD Thread,
     PIOP_DETACHED_IRP Detached;
     PEPROCESS Process = PsGetThreadProcess(Thread);
     KIRQL OldIrql;
-    ULONG i;
+
+    /* IofCompleteRequest only looks for detached requests of terminated threads */
+    if (!(Thread->CrossThreadFlags & CT_TERMINATED_BIT)) return FALSE;
 
     Detached = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Detached), TAG_IO);
     if (!Detached) return FALSE;
@@ -776,18 +802,9 @@ IopDetachThreadIrp(IN PETHREAD Thread,
         return FALSE;
     }
 
-    if (!IopDetachedIrpTableReady)
-    {
-        for (i = 0; i < IOP_DETACHED_IRP_BUCKETS; i++)
-            InitializeListHead(&IopDetachedIrpBuckets[i]);
-        IopDetachedIrpTableReady = TRUE;
-    }
-
-    /* Announce the entry, then look whether IofCompleteRequest claimed the IRP (see above) */
-    InterlockedIncrement(&IopDetachedIrpCount);
+    /* Did IofCompleteRequest claim the IRP? Then its APC goes to this thread (see above) */
     if (*(volatile ULONG *)&Irp->Flags & IRP_COMPLETION_CLAIMED)
     {
-        InterlockedDecrement(&IopDetachedIrpCount);
         KeReleaseSpinLock(&IopDetachedIrpLock, OldIrql);
         ExFreePoolWithTag(Detached, TAG_IO);
         return FALSE;
@@ -800,6 +817,8 @@ IopDetachThreadIrp(IN PETHREAD Thread,
     InitializeListHead(&Irp->ThreadListEntry);
     KeReleaseSpinLockFromDpcLevel(IopGetThreadIrpListLock(Thread));
     InsertTailList(IopDetachedIrpBucket(Irp), &Detached->Links);
+    InsertTailList(&IopDetachedIrpAll, &Detached->AllLinks);
+    InterlockedIncrement(&IopDetachedIrpCount);
 
     KeReleaseSpinLock(&IopDetachedIrpLock, OldIrql);
     IOTRACE(IO_IRP_DEBUG, "%s - Detached IRP %p from %p\n", __FUNCTION__, Irp, Thread);
@@ -836,7 +855,7 @@ IopCompleteDetachedIrp(IN PVOID Context)
         /* Complete it as the completion APC would have, in the issuing process */
         KeStackAttachProcess(&Detached->Process->Pcb, &ApcState);
         KeRaiseIrql(APC_LEVEL, &OldIrql);
-        IopCompleteIrp(Irp, FileObject, NULL, Detached->Thread);
+        IopCompleteIrp(Irp, FileObject, Detached->DataBuffer, Detached->Thread);
         KeLowerIrql(OldIrql);
         KeUnstackDetachProcess(&ApcState);
     }
@@ -848,7 +867,7 @@ IopCompleteDetachedIrp(IN PVOID Context)
 
     /* Only now may the exiting process go on */
     KeAcquireSpinLock(&IopDetachedIrpLock, &OldIrql);
-    RemoveEntryList(&Detached->Links);
+    RemoveEntryList(&Detached->AllLinks);
     InterlockedDecrement(&IopDetachedIrpCount);
     KeReleaseSpinLock(&IopDetachedIrpLock, OldIrql);
 
@@ -857,24 +876,27 @@ IopCompleteDetachedIrp(IN PVOID Context)
 }
 
 /*
- * IofCompleteRequest, after setting IRP_COMPLETION_CLAIMED: if IoCancelThreadIo
- * detached Irp, queue its completion to a worker. Any IRQL up to DISPATCH_LEVEL.
+ * IofCompleteRequest, after setting IRP_COMPLETION_CLAIMED and seeing the
+ * thread of Irp terminated: if IoCancelThreadIo detached Irp, queue its
+ * completion to a worker. Any IRQL up to DISPATCH_LEVEL.
  */
 static
 BOOLEAN
-IopCompleteDetachedIrpLater(IN PIRP Irp)
+IopCompleteDetachedIrpLater(IN PIRP Irp,
+                            IN PVOID DataBuffer)
 {
     PIOP_DETACHED_IRP Detached;
     KIRQL OldIrql;
-
-    if (!IopDetachedIrpCount) return FALSE;
 
     KeAcquireSpinLock(&IopDetachedIrpLock, &OldIrql);
     Detached = IopFindDetachedIrp(Irp);
     if (Detached)
     {
-        ASSERT(!Detached->Completed);
+        /* Out of the table before the IRP can be released and its address reused */
         Detached->Completed = TRUE;
+        Detached->DataBuffer = DataBuffer;
+        RemoveEntryList(&Detached->Links);
+        InitializeListHead(&Detached->Links);
     }
     KeReleaseSpinLock(&IopDetachedIrpLock, OldIrql);
     if (!Detached) return FALSE;
@@ -914,28 +936,30 @@ IopCancelDetachedIrps(IN PEPROCESS Process,
     PIOP_DETACHED_IRP Detached;
     BOOLEAN Found = FALSE;
     KIRQL OldIrql;
-    ULONG i;
 
+    /*
+     * Unlocked early-out. A thread of Process that detaches later increments
+     * the count before it can leave IoCancelThreadIo, and the callers look
+     * again after their cancel APC has run on, or could not be queued to, each
+     * thread, so they cannot miss it.
+     */
     if (!IopDetachedIrpCount) return FALSE;
 
     KeAcquireSpinLock(&IopDetachedIrpLock, &OldIrql);
-    for (i = 0; IopDetachedIrpTableReady && i < IOP_DETACHED_IRP_BUCKETS; i++)
+    for (Entry = IopDetachedIrpAll.Flink; Entry != &IopDetachedIrpAll; Entry = Entry->Flink)
     {
-        for (Entry = IopDetachedIrpBuckets[i].Flink; Entry != &IopDetachedIrpBuckets[i]; Entry = Entry->Flink)
+        Detached = CONTAINING_RECORD(Entry, IOP_DETACHED_IRP, AllLinks);
+        if ((Detached->Process != Process) ||
+            (Detached->FileObject != FileObject) ||
+            ((IoRequestToCancel) && (Detached->UserIosb != IoRequestToCancel)) ||
+            (Detached->Completed) ||
+            (Detached->Orphaned))
         {
-            Detached = CONTAINING_RECORD(Entry, IOP_DETACHED_IRP, Links);
-            if ((Detached->Process != Process) ||
-                (Detached->FileObject != FileObject) ||
-                ((IoRequestToCancel) && (Detached->UserIosb != IoRequestToCancel)) ||
-                (Detached->Completed) ||
-                (Detached->Orphaned))
-            {
-                continue;
-            }
-
-            Found = TRUE;
-            IopCancelDetachedIrp(Detached, &OldIrql);
+            continue;
         }
+
+        Found = TRUE;
+        IopCancelDetachedIrp(Detached, &OldIrql);
     }
     KeReleaseSpinLock(&IopDetachedIrpLock, OldIrql);
 
@@ -948,8 +972,8 @@ IopCancelDetachedIrps(IN PEPROCESS Process,
  * A request a broken driver never completes is orphaned after a while; its
  * worker then frees it without touching user memory.
  */
-static
 VOID
+NTAPI
 IopRundownDetachedIrps(IN PEPROCESS Process)
 {
     PLIST_ENTRY Entry;
@@ -958,39 +982,38 @@ IopRundownDetachedIrps(IN PEPROCESS Process)
     ULONG Retries = 30000;
     BOOLEAN Pending;
     KIRQL OldIrql;
-    ULONG i;
 
     /* Wait 10 milliseconds between looks */
     Interval.QuadPart = -100000;
 
     for (;;)
     {
-        if (!IopDetachedIrpCount) break;
-
+        /*
+         * Always under the lock: a thread of the process that detaches
+         * concurrently either did so before this look (and is seen), or sees
+         * ProcessDelete under the same lock and cancels its requests instead.
+         */
         Pending = FALSE;
         KeAcquireSpinLock(&IopDetachedIrpLock, &OldIrql);
-        for (i = 0; IopDetachedIrpTableReady && i < IOP_DETACHED_IRP_BUCKETS; i++)
+        for (Entry = IopDetachedIrpAll.Flink; Entry != &IopDetachedIrpAll; Entry = Entry->Flink)
         {
-            for (Entry = IopDetachedIrpBuckets[i].Flink; Entry != &IopDetachedIrpBuckets[i]; Entry = Entry->Flink)
+            Detached = CONTAINING_RECORD(Entry, IOP_DETACHED_IRP, AllLinks);
+            if ((Detached->Process != Process) || (Detached->Orphaned)) continue;
+
+            if (!Detached->Completed && !Detached->CancelSent)
             {
-                Detached = CONTAINING_RECORD(Entry, IOP_DETACHED_IRP, Links);
-                if ((Detached->Process != Process) || (Detached->Orphaned)) continue;
-
-                if (!Detached->Completed && !Detached->CancelSent)
-                {
-                    Detached->CancelSent = TRUE;
-                    IopCancelDetachedIrp(Detached, &OldIrql);
-                }
-
-                if (!Detached->Completed && !Retries)
-                {
-                    /* Broken driver: give up on this one */
-                    DPRINT1("Broken driver did not complete detached IRP %p!\n", Detached->Irp);
-                    Detached->Orphaned = TRUE;
-                    continue;
-                }
-                Pending = TRUE;
+                Detached->CancelSent = TRUE;
+                IopCancelDetachedIrp(Detached, &OldIrql);
             }
+
+            if (!Detached->Completed && !Retries)
+            {
+                /* Broken driver: give up on this one */
+                DPRINT1("Broken driver did not complete detached IRP %p!\n", Detached->Irp);
+                Detached->Orphaned = TRUE;
+                continue;
+            }
+            Pending = TRUE;
         }
         KeReleaseSpinLock(&IopDetachedIrpLock, OldIrql);
 
@@ -1669,9 +1692,6 @@ IoCancelThreadIo(IN PETHREAD Thread)
 
     /* We're done, lower the IRQL */
     KeLowerIrql(OldIrql);
-
-    /* The last thread also ends the requests that outlived the other threads */
-    if (Process->ProcessDelete) IopRundownDetachedIrps(Process);
 }
 
 /*
@@ -2029,12 +2049,11 @@ IofCompleteRequest(IN PIRP Irp,
      */
     if (Thread)
     {
-        /* Full barrier before IopCompleteDetachedIrpLater reads the count */
+        /* The full barrier orders the claim before the read of the flag */
         InterlockedOr((PLONG)&Irp->Flags, IRP_COMPLETION_CLAIMED);
-        if (IopCompleteDetachedIrpLater(Irp))
+        if ((Thread->CrossThreadFlags & CT_TERMINATED_BIT) &&
+            IopCompleteDetachedIrpLater(Irp, DataBuffer))
         {
-            /* Only creates carry a reparse buffer, and they are never detached */
-            ASSERT(DataBuffer == NULL);
             return;
         }
     }

@@ -4552,7 +4552,13 @@ IopCancelProcessFileIrps(IN PEPROCESS Process,
         }
     }
 
-    /* A thread that exited meanwhile detached its port-only requests instead of cancelling them */
+    /*
+     * A thread that exited meanwhile detached its port-only requests instead of
+     * cancelling them. PspExitThread clears ApcQueueable only after
+     * IoCancelThreadIo: a thread that refused the APC has detached already (this
+     * look finds it), one that took it detaches before it can run the APC, whose
+     * routine looks again (IopCancelApcNormalRoutine).
+     */
     if (IopCancelDetachedIrps(Process, FileObject, IoRequestToCancel))
         *Found = TRUE;
 

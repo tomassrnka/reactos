@@ -503,6 +503,215 @@ TestDirectoryNotify(VOID)
     RemoveDirectoryW(Dir);
 }
 
+/*
+ * Detached requests and recycled IRP addresses: threads leave port-only reads pending and exit while
+ * other threads, on the same CPU, do unrelated pipe I/O that allocates and frees IRPs all the time, so
+ * the address of a completed detached request is soon reused by a new IRP of a live thread. Every
+ * request must complete exactly once, by itself: a read completes with its data (or is cancelled), and
+ * none of the unrelated requests loses its completion.
+ */
+#define RECYCLE_VICTIMS     4
+#define RECYCLE_NOISE       3
+#define RECYCLE_ROUNDS      400
+
+static OVERLAPPED VictimOv[RECYCLE_VICTIMS];
+static CHAR VictimBuffer[RECYCLE_VICTIMS][64];
+static HANDLE VictimServer[RECYCLE_VICTIMS], VictimClient[RECYCLE_VICTIMS];
+static DWORD_PTR RecycleAffinity;
+static volatile LONG NoiseStop, NoiseFailures, NoiseOps;
+
+typedef struct _NOISE_PIPE { HANDLE Server, Client; } NOISE_PIPE;
+
+static
+DWORD
+WINAPI
+VictimThread(_In_ LPVOID Param)
+{
+    ULONG_PTR Index = (ULONG_PTR)Param;
+    BOOL Ret;
+
+    SetThreadAffinityMask(GetCurrentThread(), RecycleAffinity);
+    Ret = ReadFile(VictimServer[Index], VictimBuffer[Index], sizeof(VictimBuffer[Index]), NULL, &VictimOv[Index]);
+    return Ret ? ERROR_SUCCESS : GetLastError();
+}
+
+/* Waits for an overlapped request with an event; FALSE if it never completed */
+static
+BOOL
+NoiseWait(_In_ HANDLE Pipe, _In_ OVERLAPPED *Overlapped, _In_ BOOL Ret, _Out_ PDWORD Done)
+{
+    *Done = 0;
+    if (!Ret)
+    {
+        if (GetLastError() != ERROR_IO_PENDING)
+            return FALSE;
+        if (WaitForSingleObject(Overlapped->hEvent, 10000) != WAIT_OBJECT_0)
+        {
+            pCancelIoEx(Pipe, Overlapped);
+            return FALSE;
+        }
+    }
+    return GetOverlappedResult(Pipe, Overlapped, Done, FALSE);
+}
+
+static
+DWORD
+WINAPI
+NoiseThread(_In_ LPVOID Param)
+{
+    NOISE_PIPE *Pipe = Param;
+    OVERLAPPED ReadOv = { 0 }, WriteOv = { 0 };
+    CHAR In[16];
+    DWORD Done;
+
+    SetThreadAffinityMask(GetCurrentThread(), RecycleAffinity);
+    ReadOv.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    WriteOv.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+
+    while (!NoiseStop)
+    {
+        if (!NoiseWait(Pipe->Server, &WriteOv, WriteFile(Pipe->Server, DATA, 8, NULL, &WriteOv), &Done) || Done != 8 ||
+            !NoiseWait(Pipe->Client, &ReadOv, ReadFile(Pipe->Client, In, 8, NULL, &ReadOv), &Done) || Done != 8)
+        {
+            InterlockedIncrement(&NoiseFailures);
+            break;
+        }
+        InterlockedIncrement(&NoiseOps);
+    }
+
+    CloseHandle(ReadOv.hEvent);
+    CloseHandle(WriteOv.hEvent);
+    return 0;
+}
+
+static
+VOID
+TestAddressRecycling(VOID)
+{
+    NOISE_PIPE NoisePipe[RECYCLE_NOISE];
+    HANDLE NoiseThreads[RECYCLE_NOISE], Port, Victim;
+    DWORD_PTR ProcessMask, SystemMask;
+    int i, Round, Wrong = 0, Missing = 0, Started = 0;
+
+    if (GetProcessAffinityMask(GetCurrentProcess(), &ProcessMask, &SystemMask) && ProcessMask)
+        RecycleAffinity = ProcessMask & (~ProcessMask + 1);
+    else
+        RecycleAffinity = 1;
+    SetThreadAffinityMask(GetCurrentThread(), RecycleAffinity);
+    /* The consumer of the packets runs as soon as one arrives and frees the IRP on this CPU, ahead of the noise */
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+
+    Port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
+    ok(Port != NULL, "CreateIoCompletionPort failed: %lu\n", GetLastError());
+    for (i = 0; i < RECYCLE_VICTIMS; i++)
+    {
+        if (!CreatePipePair(&VictimServer[i], &VictimClient[i], FALSE) ||
+            !CreateIoCompletionPort(VictimServer[i], Port, KEY + i, 0))
+        {
+            skip("Could not create the victim pipes\n");
+            return;
+        }
+    }
+    for (i = 0; i < RECYCLE_NOISE; i++)
+    {
+        if (!CreatePipePair(&NoisePipe[i].Server, &NoisePipe[i].Client, FALSE))
+        {
+            skip("Could not create the noise pipes\n");
+            return;
+        }
+    }
+
+    NoiseStop = NoiseFailures = NoiseOps = 0;
+    for (i = 0; i < RECYCLE_NOISE; i++)
+    {
+        NoiseThreads[i] = CreateThread(NULL, 0, NoiseThread, &NoisePipe[i], 0, NULL);
+        if (NoiseThreads[i])
+            Started++;
+    }
+    ok(Started == RECYCLE_NOISE, "Started %d noise threads\n", Started);
+
+    for (Round = 0; Round < RECYCLE_ROUNDS; Round++)
+    {
+        BOOL Cancel = (Round % 3) == 2;
+        DWORD Bytes = 0xdeadbeef, Error, Code = 0xdeadbeef;
+        ULONG_PTR Key = 0;
+        OVERLAPPED *Got = NULL;
+        int Index = Round % RECYCLE_VICTIMS;
+        BOOL Ret;
+
+        memset(VictimBuffer[Index], 0, sizeof(VictimBuffer[Index]));
+        memset(&VictimOv[Index], 0, sizeof(VictimOv[Index]));
+        Victim = CreateThread(NULL, 0, VictimThread, (PVOID)(ULONG_PTR)Index, 0, NULL);
+        if (!Victim)
+        {
+            Wrong++;
+            continue;
+        }
+        WaitForSingleObject(Victim, INFINITE);
+        GetExitCodeThread(Victim, &Code);
+        CloseHandle(Victim);
+        if (Code != ERROR_IO_PENDING)
+        {
+            Wrong++;
+            continue;
+        }
+
+        if (Cancel && !pCancelIoEx(VictimServer[Index], &VictimOv[Index]))
+        {
+            /* The 32-bit CancelIoEx of WoW64 has no thunk (see TestPipePortOnly): complete it with data instead */
+            if (!IsWow64)
+                Wrong++;
+            Cancel = FALSE;
+        }
+        if (!Cancel)
+            WritePipe(VictimClient[Index]);
+
+        SetLastError(0xdeadbeef);
+        Ret = GetQueuedCompletionStatus(Port, &Bytes, &Key, &Got, 5000);
+        Error = Ret ? ERROR_SUCCESS : GetLastError();
+        if (!Got)
+        {
+            Missing++;
+            trace("round %d: no packet (error %lu)\n", Round, Error);
+            /* Do not leave a read behind the buffers of the next round */
+            pCancelIoEx(VictimServer[Index], NULL);
+            continue;
+        }
+        if (Got != &VictimOv[Index] || Key != (ULONG_PTR)(KEY + Index) ||
+            (Cancel ? (Ret || Error != ERROR_OPERATION_ABORTED || Bytes != 0)
+                    : (!Ret || Bytes != DATA_LEN || memcmp(VictimBuffer[Index], DATA, DATA_LEN))))
+        {
+            Wrong++;
+            trace("round %d: got %p key %Iu ret %d error %lu bytes %lu\n", Round, Got, Key, Ret, Error, Bytes);
+        }
+    }
+
+    NoiseStop = TRUE;
+    WaitForMultipleObjects(Started, NoiseThreads, TRUE, 30000);
+    for (i = 0; i < Started; i++)
+        CloseHandle(NoiseThreads[i]);
+
+    ok(Missing == 0, "%d of %d completions of detached requests were lost\n", Missing, RECYCLE_ROUNDS);
+    ok(Wrong == 0, "%d of %d detached requests completed wrongly\n", Wrong, RECYCLE_ROUNDS);
+    ok(NoiseFailures == 0, "%ld unrelated requests of other threads lost their completion\n", NoiseFailures);
+    ok(NoiseOps > 0, "No unrelated request ran\n");
+    trace("%ld unrelated requests during %d rounds\n", NoiseOps, RECYCLE_ROUNDS);
+
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
+    SetThreadAffinityMask(GetCurrentThread(), ProcessMask ? ProcessMask : 1);
+    for (i = 0; i < RECYCLE_VICTIMS; i++)
+    {
+        CloseHandle(VictimServer[i]);
+        CloseHandle(VictimClient[i]);
+    }
+    for (i = 0; i < RECYCLE_NOISE; i++)
+    {
+        CloseHandle(NoisePipe[i].Server);
+        CloseHandle(NoisePipe[i].Client);
+    }
+    CloseHandle(Port);
+}
+
 /* Child: bind the inherited pipe end to a port, leave a port-only read behind a thread, exit */
 static
 VOID
@@ -594,6 +803,7 @@ START_TEST(IocpThreadExit)
     TestPipeNoPort("no port, event", ISSUE_READ, TRUE);
     TestPipeNoPort("no port, APC", ISSUE_READEX, FALSE);
     TestDirectoryNotify();
+    TestAddressRecycling();
     TestProcessExit(Argv[0]);
 
     Ws2 = LoadLibraryW(L"ws2_32.dll");

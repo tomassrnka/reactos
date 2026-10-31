@@ -21,7 +21,10 @@
 
 /* Private I/O-manager IRP flag: set (interlocked) by the final
  * IofCompleteRequest of an IRP that has a thread. IoCancelThreadIo does not
- * detach a port-only request whose completion has started (irp.c). */
+ * detach a port-only request whose completion has started (irp.c).
+ * 0x20000000 is not among the IRP_* flags of the WDK (the highest is
+ * IRP_CLASS_CACHE_OPERATION, 0x8000); the I/O manager owns the IRP when it
+ * is set, as for IRP_WOW64_IO_STATUS above. */
 #define IRP_COMPLETION_CLAIMED  0x20000000
 
 //
@@ -1074,6 +1077,17 @@ VOID
 NTAPI
 IopWriteDeferredPortIosb(
     IN PIRP Irp
+);
+
+CODE_SEG("INIT")
+VOID
+NTAPI
+IopInitializeDetachedIrps(VOID);
+
+VOID
+NTAPI
+IopRundownDetachedIrps(
+    IN PEPROCESS Process
 );
 
 BOOLEAN
