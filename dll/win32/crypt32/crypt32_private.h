@@ -384,8 +384,19 @@ struct store_CERT_KEY_CONTEXT
     DWORD   cbSize;
     DWORD64 hCryptProv;
     DWORD   dwKeySpec;
+    DWORD   dwFlags; /* in memory only: CERT_STORE_NO_CRYPT_RELEASE_FLAG given with an NCrypt key */
 };
 void CRYPT_ConvertKeyContext(const struct store_CERT_KEY_CONTEXT *src, CERT_KEY_CONTEXT *dst);
+
+/* An NCRYPT_KEY_HANDLE in a key context (CERT_NCRYPT_KEY_HANDLE_PROP_ID) belongs to the context
+ * it was set on: it is never copied to another context, never serialized, and is released with
+ * NCryptFreeObject when it is replaced, removed or the context is freed. */
+static inline BOOL CRYPT_IsNCryptKeyContext(const CRYPT_DATA_BLOB *blob)
+{
+    return blob->cbData >= FIELD_OFFSET(struct store_CERT_KEY_CONTEXT, dwFlags) &&
+     ((const struct store_CERT_KEY_CONTEXT *)blob->pbData)->dwKeySpec == CERT_NCRYPT_KEY_SPEC;
+}
+void CRYPT_ReleaseNCryptKeyContext(const CRYPT_DATA_BLOB *blob);
 
 /**
  *  String functions

@@ -116,6 +116,17 @@ static DWORD serialize_KeyProvInfoProperty(const CRYPT_KEY_PROV_INFO *info, stru
     return size;
 }
 
+/* An NCrypt key handle only means something to the context that owns it. */
+static BOOL is_ncrypt_key_context(const void *context, const WINE_CONTEXT_INTERFACE *contextInterface, DWORD prop)
+{
+    CERT_KEY_CONTEXT keyContext;
+    DWORD size = sizeof(keyContext);
+
+    return prop == CERT_KEY_CONTEXT_PROP_ID &&
+     contextInterface->getProp(context, prop, &keyContext, &size) &&
+     keyContext.dwKeySpec == CERT_NCRYPT_KEY_SPEC;
+}
+
 static BOOL CRYPT_SerializeStoreElement(const void *context,
  const BYTE *encodedContext, DWORD cbEncodedContext, DWORD contextPropID,
  const WINE_CONTEXT_INTERFACE *contextInterface, DWORD dwFlags, BOOL omitHashes,
@@ -134,7 +145,8 @@ static BOOL CRYPT_SerializeStoreElement(const void *context,
         ret = TRUE;
         do {
             prop = contextInterface->enumProps(context, prop);
-            if (prop && (!omitHashes || !IS_CERT_HASH_PROP_ID(prop)))
+            if (prop && (!omitHashes || !IS_CERT_HASH_PROP_ID(prop)) &&
+             !is_ncrypt_key_context(context, contextInterface, prop))
             {
                 DWORD propSize = 0;
 
@@ -173,7 +185,8 @@ static BOOL CRYPT_SerializeStoreElement(const void *context,
             prop = 0;
             do {
                 prop = contextInterface->enumProps(context, prop);
-                if (prop && (!omitHashes || !IS_CERT_HASH_PROP_ID(prop)))
+                if (prop && (!omitHashes || !IS_CERT_HASH_PROP_ID(prop)) &&
+                 !is_ncrypt_key_context(context, contextInterface, prop))
                 {
                     DWORD propSize = 0;
 
@@ -464,7 +477,11 @@ static BOOL CRYPT_ReadContextProp(
         {
             CERT_KEY_CONTEXT ctx;
             CRYPT_ConvertKeyContext((struct store_CERT_KEY_CONTEXT *)pbElement, &ctx);
-            ret = contextInterface->setProp(context, hdr->propID, 0, &ctx);
+            /* never adopt an NCrypt key handle from serialized data */
+            if (ctx.dwKeySpec == CERT_NCRYPT_KEY_SPEC)
+                ret = TRUE;
+            else
+                ret = contextInterface->setProp(context, hdr->propID, 0, &ctx);
             break;
         }
         default:

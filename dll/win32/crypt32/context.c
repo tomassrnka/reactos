@@ -94,6 +94,10 @@ void Context_Free(context_t *context)
     assert(!context->ref);
 
     if (!context->linked) {
+        CRYPT_DATA_BLOB blob;
+
+        if (ContextPropertyList_FindProperty(context->properties, CERT_KEY_CONTEXT_PROP_ID, &blob))
+            CRYPT_ReleaseNCryptKeyContext(&blob);
         ContextPropertyList_Free(context->properties);
         context->vtbl->free(context);
     }else {
@@ -124,8 +128,31 @@ void Context_CopyProperties(const void *to, const void *from)
 {
     CONTEXT_PROPERTY_LIST *toProperties, *fromProperties;
 
+    CRYPT_DATA_BLOB blob;
+    BYTE *saved = NULL;
+    DWORD saved_size = 0;
+    BOOL ncrypt_from;
+
     toProperties = context_from_ptr(to)->properties;
     fromProperties = context_from_ptr(from)->properties;
     assert(toProperties && fromProperties);
+
+    /* An NCrypt key stays with the context that owns it: keep the destination's own key context. */
+    ncrypt_from = ContextPropertyList_FindProperty(fromProperties, CERT_KEY_CONTEXT_PROP_ID, &blob) &&
+     CRYPT_IsNCryptKeyContext(&blob);
+    if (ncrypt_from && ContextPropertyList_FindProperty(toProperties, CERT_KEY_CONTEXT_PROP_ID, &blob) &&
+     (saved = CryptMemAlloc(blob.cbData)))
+    {
+        memcpy(saved, blob.pbData, blob.cbData);
+        saved_size = blob.cbData;
+    }
     ContextPropertyList_Copy(toProperties, fromProperties);
+    if (ncrypt_from)
+    {
+        if (saved)
+            ContextPropertyList_SetProperty(toProperties, CERT_KEY_CONTEXT_PROP_ID, saved, saved_size);
+        else
+            ContextPropertyList_RemoveProperty(toProperties, CERT_KEY_CONTEXT_PROP_ID);
+        CryptMemFree(saved);
+    }
 }

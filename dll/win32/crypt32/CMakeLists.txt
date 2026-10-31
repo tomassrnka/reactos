@@ -64,7 +64,7 @@ endif()
 
 set_module_type(crypt32 win32dll)
 target_link_libraries(crypt32 wine cryptlib ${PSEH_LIB} oldnames)
-add_delay_importlibs(crypt32 cryptnet)
+add_delay_importlibs(crypt32 cryptnet ncrypt)
 add_importlibs(crypt32 bcrypt user32 advapi32 advapi32_vista msvcrt kernel32_vista kernel32 ntdll)
 add_pch(crypt32 precomp.h "${PCH_SKIP_SOURCE}")
 add_cd_file(TARGET crypt32 DESTINATION reactos/system32 FOR all)
