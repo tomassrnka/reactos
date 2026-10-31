@@ -112,7 +112,7 @@ UCHAR IopSetOperationLength[] =
     0,
     0,
     sizeof(FILE_VALID_DATA_LENGTH_INFORMATION),
-    sizeof(UNICODE_STRING),
+    sizeof(FILE_NAME_INFORMATION), /* FileShortNameInformation: a ULONG length and the name, 8 bytes on both x86 and x64 */
     sizeof(FILE_IO_COMPLETION_NOTIFICATION_INFORMATION),
 };
 
