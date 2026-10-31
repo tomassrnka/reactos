@@ -15,6 +15,8 @@
 #include <winerror.h>
 #include <winevt.h>
 
+#include "evtx_sample.h"
+
 typedef EVT_HANDLE (WINAPI *PEvtOpenSession)(EVT_LOGIN_CLASS, PVOID, DWORD, DWORD);
 typedef BOOL (WINAPI *PEvtClose)(EVT_HANDLE);
 typedef BOOL (WINAPI *PEvtCancel)(EVT_HANDLE);
@@ -848,6 +850,133 @@ static void test_header_names(void)
     ok(EventMetadataEventID == 0 && EventMetadataEventTemplate == 8 && EvtEventMetadataPropertyIdEND == 9, "event metadata properties\n");
 }
 
+
+/*
+ * Files are untrusted input. Truncated and corrupted copies of a small .evtx file must be refused or read
+ * as far as they can be, with an error of the event log for what is wrong, and without a crash, a hang
+ * or an event that cannot be rendered. Not for Windows: this is what the library does, and what Windows
+ * says to damaged files was not measured.
+ */
+static ULONG FuzzSeed = 12345;
+
+static DWORD FuzzRand(void)
+{
+    FuzzSeed = FuzzSeed * 1103515245 + 12345;
+    return (FuzzSeed >> 8) & 0xffffff;
+}
+
+static DWORD FuzzOpenAndRead(const WCHAR *Path, const BYTE *Data, DWORD Size, const WCHAR *Filter, DWORD Flags, DWORD *Events)
+{
+    static const WCHAR *Paths[] = { L"Event/System/Provider/@Name", L"Event/System/EventRecordID" };
+    HANDLE File;
+    EVT_HANDLE Query, Event, Context;
+    DWORD Written, Calls = 0, N, Used, Props, Errors = 0;
+    BYTE Buffer[4096];
+    WCHAR *Xml;
+
+    *Events = 0;
+    File = CreateFileW(Path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (File == INVALID_HANDLE_VALUE) return 0xffffffff;
+    WriteFile(File, Data, Size, &Written, NULL);
+    CloseHandle(File);
+
+    SetLastError(0xdeadbeef);
+    Query = pEvtQuery(NULL, Path, Filter, EvtQueryFilePath | Flags);
+    if (!Query)
+    {
+        DWORD Error = GetLastError();
+
+        ok(Error == ERROR_EVENTLOG_FILE_CORRUPT, "EvtQuery of a damaged file: %lu\n", Error);
+        return 1;
+    }
+    Context = pEvtCreateRenderContext(2, Paths, EvtRenderContextValues);
+    while (Calls++ < 100)
+    {
+        SetLastError(0xdeadbeef);
+        if (!pEvtNext(Query, 1, &Event, 1000, 0, &N))
+        {
+            DWORD Error = GetLastError();
+
+            if (Error == ERROR_NO_MORE_ITEMS) break;
+            ok(Error == ERROR_EVENTLOG_FILE_CORRUPT, "EvtNext on a damaged file: %lu\n", Error);
+            Errors++;
+            continue;
+        }
+        (*Events)++;
+        Used = Props = 0;
+        pEvtRender(NULL, Event, EvtRenderEventXml, 0, NULL, &Used, &Props);
+        Xml = malloc(Used + 2);
+        if (Xml)
+        {
+            ok(pEvtRender(NULL, Event, EvtRenderEventXml, Used, Xml, &Used, &Props), "EvtRender of the XML: %lu\n", GetLastError());
+            free(Xml);
+        }
+        ok(pEvtRender(Context, Event, EvtRenderEventValues, sizeof(Buffer), Buffer, &Used, &Props), "EvtRender of values: %lu\n", GetLastError());
+        pEvtClose(Event);
+    }
+    ok(Calls <= 100, "The reading does not end\n");
+    pEvtClose(Context);
+    pEvtClose(Query);
+    return Errors;
+}
+
+static void test_evtx_robustness(void)
+{
+    static BYTE Good[EVTX_SAMPLE_SIZE], Bad[EVTX_SAMPLE_SIZE];
+    WCHAR Dir[MAX_PATH], Path[MAX_PATH];
+    DWORD Events, Errors, Size, i, j, N, Cuts, Rounds, Kept = 4096 + 5664;
+    char Env[16];
+    static const DWORD Sizes[] = { 0, 1, 7, 8, 127, 128, 511, 512, 4095, 4096, 4097, 4096 + 127, 4096 + 128, 4096 + 511,
+                                   4096 + 512, 4096 + 513, 4096 + 1000, 4096 + 2920, 4096 + 3000, 4096 + 5663, 4096 + 5664,
+                                   4096 + 5665, 4096 + 65535 };
+
+    GetTempPathW(MAX_PATH, Dir);
+    GetTempFileNameW(Dir, L"wfz", 0, Path);
+    build_evtx_sample(Good);
+
+    /* the file as it is: three events and the error of the checksum */
+    Errors = FuzzOpenAndRead(Path, Good, sizeof(Good), L"*", EvtQueryForwardDirection, &Events);
+    ok(Events == 3 && Errors == 1, "Good file: %lu events, %lu errors\n", Events, Errors);
+
+    /* cut off at the edges of the header, the chunk and the records, and at every 61st byte of what is used */
+    Cuts = 0;
+    for (i = 0; i < ARRAY_SIZE(Sizes); i++, Cuts++)
+        FuzzOpenAndRead(Path, Good, Sizes[i], L"*", EvtQueryReverseDirection, &Events);
+    for (Size = 3; Size < Kept; Size += 61, Cuts++)
+        FuzzOpenAndRead(Path, Good, Size, L"*[UserData/*/Param2='Windows x64']", EvtQueryForwardDirection, &Events);
+
+    /* bytes that are changed: one to eight places, in the header, the chunk header and the records, to any value or to the extremes */
+    Rounds = GetEnvironmentVariableA("WEVTAPI_FUZZ_ROUNDS", Env, sizeof(Env)) ? (DWORD)atoi(Env) : 1500;
+    for (i = 0; i < Rounds; i++)
+    {
+        memcpy(Bad, Good, sizeof(Bad));
+        N = 1 + FuzzRand() % 8;
+        for (j = 0; j < N; j++)
+        {
+            DWORD Where = FuzzRand() % 4 ? 4096 + FuzzRand() % 5664 : FuzzRand() % 4200;
+            DWORD How = FuzzRand() % 4;
+
+            Bad[Where] = How == 0 ? 0 : How == 1 ? 0xff : (BYTE)FuzzRand();
+        }
+        FuzzOpenAndRead(Path, Bad, sizeof(Bad), i % 3 ? L"*" : L"*[System[EventID=370]]", i % 2 ? EvtQueryReverseDirection : EvtQueryForwardDirection, &Events);
+    }
+
+    /* whole fields set to extremes: sizes, offsets and counts of the chunk, the records and the binary XML */
+    for (i = 0; i < 600; i++)
+    {
+        DWORD Where = 4096 + 40 + (FuzzRand() % 3) * 4;
+        DWORD Value = FuzzRand() % 2 ? 0xffffffff : FuzzRand() * 256;
+
+        memcpy(Bad, Good, sizeof(Bad));
+        if (i % 3 == 0) memcpy(Bad + Where, &Value, 4);                                       /* the chunk header */
+        else if (i % 3 == 1) memcpy(Bad + 4096 + 512 + 4 + (FuzzRand() % 3) * 4, &Value, 4);   /* the first record */
+        else memcpy(Bad + 4096 + 512 + 24 + FuzzRand() % 400, &Value, 4);                      /* its binary XML */
+        FuzzOpenAndRead(Path, Bad, sizeof(Bad), L"*", EvtQueryForwardDirection, &Events);
+    }
+    DeleteFileW(Path);
+    trace("%lu cut copies and %lu changed copies read\n", Cuts, Rounds + 600);
+}
+
 START_TEST(wevtapi)
 {
     hWevtapi = LoadLibraryW(L"wevtapi.dll");
@@ -891,6 +1020,7 @@ START_TEST(wevtapi)
     test_render_context();
     test_bookmark();
     test_extended_status();
+    test_evtx_robustness();
 
     FreeLibrary(hWevtapi);
 }

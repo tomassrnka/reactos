@@ -22,6 +22,7 @@
 #include "winbase.h"
 #include "winevt.h"
 #include "wine/test.h"
+#include "evtx_sample.h"
 
 static void test_EvtGetChannelConfigProperty(void)
 {
@@ -473,6 +474,229 @@ static void test_backwards_read(void)
     HeapFree(GetProcessHeap(), 0, buffer);
 }
 
+
+static WCHAR evtx_path[MAX_PATH];
+
+static BOOL write_evtx_file(void)
+{
+    static BYTE buf[EVTX_SAMPLE_SIZE];
+    WCHAR dir[MAX_PATH];
+    HANDLE file;
+    DWORD written;
+    BOOL ret;
+
+    GetTempPathW(MAX_PATH, dir);
+    GetTempFileNameW(dir, L"wev", 0, evtx_path);
+    file = CreateFileW(evtx_path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+    build_evtx_sample(buf);
+    ret = WriteFile(file, buf, sizeof(buf), &written, NULL) && written == sizeof(buf);
+    CloseHandle(file);
+    return ret;
+}
+
+/* The record numbers that a query gives, in order. A damaged file is reported with an error and read on. */
+static DWORD read_records(EVT_HANDLE query, ULONGLONG *ids, DWORD max, DWORD *errors)
+{
+    static const WCHAR *paths[] = { L"Event/System/EventRecordID" };
+    EVT_HANDLE event, context = EvtCreateRenderContext(1, paths, EvtRenderContextValues);
+    DWORD count = 0, calls = 0, n, size, props;
+    EVT_VARIANT value;
+
+    *errors = 0;
+    while (calls++ < 20)
+    {
+        SetLastError(0xdeadbeef);
+        if (!EvtNext(query, 1, &event, 5000, 0, &n))
+        {
+            DWORD error = GetLastError();
+
+            if (error == ERROR_NO_MORE_ITEMS) break;
+            ok(error == ERROR_EVENTLOG_FILE_CORRUPT, "got %lu\n", error);
+            (*errors)++;
+            continue;
+        }
+        ok(n == 1, "got %lu\n", n);
+        if (EvtRender(context, event, EvtRenderEventValues, sizeof(value), &value, &size, &props) && count < max)
+            ids[count++] = value.UInt64Val;
+        EvtClose(event);
+    }
+    EvtClose(context);
+    return count;
+}
+
+static void test_evtx_file(void)
+{
+    static const WCHAR *xml_10 =
+        L"<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><System>"
+        L"<Provider Name='Microsoft-Windows-PrintService' Guid='{747ef6fd-e535-4d16-b510-42c90f6873a1}'/>"
+        L"<EventID>370</EventID><Version>0</Version><Level>2</Level><Task>38</Task><Opcode>12</Opcode>"
+        L"<Keywords>0x8000000000000900</Keywords><TimeCreated SystemTime='2016-09-21T10:22:57.9085752Z'/>"
+        L"<EventRecordID>10</EventRecordID><Correlation/><Execution ProcessID='2424' ThreadID='4728'/>"
+        L"<Channel>Microsoft-Windows-PrintService/Admin</Channel>"
+        L"<Computer>joeuser6.rrrrrrr.cccc.company12.com</Computer><Security UserID='S-1-5-18'/></System>"
+        L"<UserData><PackageRegenerationForDriverFailed xmlns='http://manifests.microsoft.com/win/2005/08/windows/printing/spooler/core/events'>"
+        L"<Param1>Remote Desktop Easy Print</Param1><Param2>Windows x64</Param2><Param3>87 (0x57)</Param3>"
+        L"</PackageRegenerationForDriverFailed></UserData></Event>";
+    EVT_HANDLE query, event, context;
+    ULONGLONG ids[8];
+    DWORD count, errors, size, props, n, i, error;
+    WCHAR *query_text, *xml;
+    EVT_VARIANT *values;
+    BOOL ret;
+
+    if (!write_evtx_file())
+    {
+        skip("Cannot write the sample file, error %lu\n", GetLastError());
+        return;
+    }
+
+    /* oldest first: the checksum of the records is wrong, which is reported once, and the first event is lost */
+    SetLastError(0xdeadbeef);
+    query = EvtQuery(NULL, evtx_path, L"*", EvtQueryFilePath | EvtQueryForwardDirection);
+    ok(query != NULL, "EvtQuery error %lu\n", GetLastError());
+    if (!query) goto done;
+    count = read_records(query, ids, ARRAY_SIZE(ids), &errors);
+    ok(count == 3, "got %lu\n", count);
+    ok(errors == 1, "got %lu\n", errors);
+    if (count == 3) ok(ids[0] == 10 && ids[1] == 11 && ids[2] == 12, "got %I64u %I64u %I64u\n", ids[0], ids[1], ids[2]);
+
+    /* a seek back to the start reads the file again with no error and with every event */
+    ret = EvtSeek(query, 0, NULL, 0, EvtSeekRelativeToFirst);
+    ok(ret, "EvtSeek error %lu\n", GetLastError());
+    count = read_records(query, ids, ARRAY_SIZE(ids), &errors);
+    ok(count == 4 && errors == 0, "got %lu %lu\n", count, errors);
+    if (count == 4) ok(ids[0] == 9 && ids[1] == 10 && ids[2] == 11 && ids[3] == 12, "got %I64u %I64u %I64u %I64u\n", ids[0], ids[1], ids[2], ids[3]);
+    EvtClose(query);
+
+    query = EvtQuery(NULL, evtx_path, L"*", EvtQueryFilePath | EvtQueryReverseDirection);
+    ok(query != NULL, "EvtQuery error %lu\n", GetLastError());
+    count = read_records(query, ids, ARRAY_SIZE(ids), &errors);
+    ok(count == 3, "got %lu\n", count);
+    ok(errors == 1, "got %lu\n", errors);
+    if (count == 3) ok(ids[0] == 11 && ids[1] == 10 && ids[2] == 9, "got %I64u %I64u %I64u\n", ids[0], ids[1], ids[2]);
+
+    /* the XML, the system values and the values of the data of the event of record 10 */
+    ret = EvtNext(query, 1, &event, 1000, 0, &n);
+    ok(!ret && GetLastError() == ERROR_NO_MORE_ITEMS, "got %d %lu\n", ret, GetLastError());
+    EvtClose(query);
+
+    query = EvtQuery(NULL, evtx_path, L"*[UserData/*/Param2='Windows x64']", EvtQueryFilePath | EvtQueryReverseDirection);
+    ok(query != NULL, "EvtQuery error %lu\n", GetLastError());
+    count = read_records(query, ids, ARRAY_SIZE(ids), &errors);
+    ok(count == 1 && errors == 1, "got %lu %lu\n", count, errors);
+    if (count == 1) ok(ids[0] == 10, "got %I64u\n", ids[0]);
+    EvtClose(query);
+
+    query = EvtQuery(NULL, evtx_path, L"*/UserData/*/Param2='Windows x64'", EvtQueryFilePath | EvtQueryReverseDirection);
+    ok(query != NULL, "EvtQuery error %lu\n", GetLastError());
+    count = read_records(query, ids, ARRAY_SIZE(ids), &errors);
+    ok(count == 1 && (count < 1 || ids[0] == 10), "got %lu\n", count);
+    EvtClose(query);
+
+    query = EvtQuery(NULL, evtx_path, L"*[System[EventID=215]]", EvtQueryFilePath | EvtQueryForwardDirection);
+    count = read_records(query, ids, ARRAY_SIZE(ids), &errors);
+    ok(count == 1 && (count < 1 || ids[0] == 11), "got %lu\n", count);
+    EvtClose(query);
+
+    /* a structured query with a file, and a suppression */
+    query_text = malloc(2048 * sizeof(WCHAR));
+    swprintf(query_text, 2048, L"<QueryList><Query Id='0'><Select Path='file://%ls'>*</Select>"
+             L"<Suppress Path='file://%ls'>*[System[EventID=370]]</Suppress></Query></QueryList>", evtx_path, evtx_path);
+    query = EvtQuery(NULL, NULL, query_text, EvtQueryFilePath | EvtQueryReverseDirection);
+    ok(query != NULL, "EvtQuery error %lu\n", GetLastError());
+    count = read_records(query, ids, ARRAY_SIZE(ids), &errors);
+    ok(count == 2, "got %lu\n", count);
+    if (count == 2) ok(ids[0] == 11 && ids[1] == 9, "got %I64u %I64u\n", ids[0], ids[1]);
+    EvtClose(query);
+    free(query_text);
+
+    /* the events of the file in reverse order, the one with record 10 is the second one after the error */
+    query = EvtQuery(NULL, evtx_path, L"*[System[EventRecordID=10]]", EvtQueryFilePath | EvtQueryForwardDirection);
+    ok(query != NULL, "EvtQuery error %lu\n", GetLastError());
+    event = NULL;
+    for (i = 0; i < 4; i++)
+    {
+        if (EvtNext(query, 1, &event, 1000, 0, &n)) break;
+        error = GetLastError();
+        ok(error == ERROR_EVENTLOG_FILE_CORRUPT, "got %lu\n", error);
+    }
+    ok(event != NULL, "no event\n");
+    if (event)
+    {
+        size = 0;
+        ret = EvtRender(NULL, event, EvtRenderEventXml, 0, NULL, &size, &props);
+        ok(!ret && GetLastError() == ERROR_INSUFFICIENT_BUFFER, "got %d %lu\n", ret, GetLastError());
+        xml = malloc(size);
+        ret = EvtRender(NULL, event, EvtRenderEventXml, size, xml, &size, &props);
+        ok(ret, "EvtRender error %lu\n", GetLastError());
+        if (ret) ok(!wcscmp(xml, xml_10), "got %s\n", wine_dbgstr_w(xml));
+        free(xml);
+
+        context = EvtCreateRenderContext(0, NULL, EvtRenderContextSystem);
+        size = 0;
+        EvtRender(context, event, EvtRenderEventValues, 0, NULL, &size, &props);
+        values = malloc(size);
+        ret = EvtRender(context, event, EvtRenderEventValues, size, values, &size, &props);
+        ok(ret, "EvtRender error %lu\n", GetLastError());
+        ok(props == 18, "got %lu\n", props);
+        if (ret && props == 18)
+        {
+            ok(values[0].Type == EvtVarTypeString && !wcscmp(values[0].StringVal, L"Microsoft-Windows-PrintService"), "got %s\n",
+               wine_dbgstr_w(values[0].StringVal));
+            ok(values[1].Type == EvtVarTypeGuid && values[1].GuidVal->Data1 == 0x747ef6fd, "got %lu\n", values[1].Type);
+            ok(values[2].Type == EvtVarTypeUInt16 && values[2].UInt16Val == 370, "got %lu\n", values[2].Type);
+            ok(values[3].Type == EvtVarTypeNull, "got %lu\n", values[3].Type);
+            ok(values[4].Type == EvtVarTypeByte && values[4].ByteVal == 2, "got %lu\n", values[4].Type);
+            ok(values[5].Type == EvtVarTypeUInt16 && values[5].UInt16Val == 38, "got %lu\n", values[5].Type);
+            ok(values[6].Type == EvtVarTypeByte && values[6].ByteVal == 12, "got %lu\n", values[6].Type);
+            ok(values[7].Type == EvtVarTypeHexInt64 && values[7].UInt64Val == 0x8000000000000900ull, "got %lu\n", values[7].Type);
+            ok(values[8].Type == EvtVarTypeFileTime && values[8].FileTimeVal == 0x1d213f21f8679b8ull, "got %I64x\n", values[8].FileTimeVal);
+            ok(values[9].Type == EvtVarTypeUInt64 && values[9].UInt64Val == 10, "got %lu\n", values[9].Type);
+            ok(values[10].Type == EvtVarTypeNull && values[11].Type == EvtVarTypeNull, "got %lu %lu\n", values[10].Type, values[11].Type);
+            ok(values[12].Type == EvtVarTypeUInt32 && values[12].UInt32Val == 2424, "got %lu\n", values[12].Type);
+            ok(values[13].Type == EvtVarTypeUInt32 && values[13].UInt32Val == 4728, "got %lu\n", values[13].Type);
+            ok(values[14].Type == EvtVarTypeString && !wcscmp(values[14].StringVal, L"Microsoft-Windows-PrintService/Admin"), "got %lu\n", values[14].Type);
+            ok(values[15].Type == EvtVarTypeString && !wcscmp(values[15].StringVal, L"joeuser6.rrrrrrr.cccc.company12.com"), "got %lu\n", values[15].Type);
+            ok(values[16].Type == EvtVarTypeSid && IsValidSid(values[16].SidVal), "got %lu\n", values[16].Type);
+            ok(values[17].Type == EvtVarTypeByte && values[17].ByteVal == 0, "got %lu\n", values[17].Type);
+        }
+        free(values);
+        EvtClose(context);
+
+        context = EvtCreateRenderContext(0, NULL, EvtRenderContextUser);
+        size = 0;
+        EvtRender(context, event, EvtRenderEventValues, 0, NULL, &size, &props);
+        values = malloc(size);
+        ret = EvtRender(context, event, EvtRenderEventValues, size, values, &size, &props);
+        ok(ret, "EvtRender error %lu\n", GetLastError());
+        ok(props == 3, "got %lu\n", props);
+        if (ret && props == 3)
+        {
+            ok(values[0].Type == EvtVarTypeString && !wcscmp(values[0].StringVal, L"Remote Desktop Easy Print"), "got %lu\n", values[0].Type);
+            ok(values[1].Type == EvtVarTypeString && !wcscmp(values[1].StringVal, L"Windows x64"), "got %lu\n", values[1].Type);
+            ok(values[2].Type == EvtVarTypeString && !wcscmp(values[2].StringVal, L"87 (0x57)"), "got %lu\n", values[2].Type);
+        }
+        free(values);
+        EvtClose(context);
+
+        /* the path that an event of a file is said to come from is the file */
+        {
+            struct { EVT_VARIANT var; WCHAR buf[MAX_PATH]; } info;
+
+            ret = EvtGetEventInfo(event, EvtEventPath, sizeof(info), &info.var, &size);
+            ok(ret, "EvtGetEventInfo error %lu\n", GetLastError());
+            if (ret) ok(info.var.Type == EvtVarTypeString && !_wcsicmp(info.var.StringVal, evtx_path), "got %s\n",
+                        wine_dbgstr_w(info.var.StringVal));
+        }
+        EvtClose(event);
+    }
+    EvtClose(query);
+
+done:
+    DeleteFileW(evtx_path);
+}
+
 START_TEST(wevtapi)
 {
     test_EvtGetChannelConfigProperty();
@@ -481,4 +705,5 @@ START_TEST(wevtapi)
     test_publishers();
     test_query_and_render();
     test_backwards_read();
+    test_evtx_file();
 }
