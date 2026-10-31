@@ -279,6 +279,28 @@ typedef enum _EVT_PUBLISHER_METADATA_PROPERTY_ID {
     EvtPublisherMetadataPropertyIdEND
 } EVT_PUBLISHER_METADATA_PROPERTY_ID;
 
+typedef enum _EVT_SYSTEM_PROPERTY_ID {
+    EvtSystemProviderName = 0,
+    EvtSystemProviderGuid,
+    EvtSystemEventID,
+    EvtSystemQualifiers,
+    EvtSystemLevel,
+    EvtSystemTask,
+    EvtSystemOpcode,
+    EvtSystemKeywords,
+    EvtSystemTimeCreated,
+    EvtSystemEventRecordId,
+    EvtSystemActivityID,
+    EvtSystemRelatedActivityID,
+    EvtSystemProcessID,
+    EvtSystemThreadID,
+    EvtSystemChannel,
+    EvtSystemComputer,
+    EvtSystemUserID,
+    EvtSystemVersion,
+    EvtSystemPropertyIdEND
+} EVT_SYSTEM_PROPERTY_ID;
+
 typedef enum _EVT_CHANNEL_REFERENCE_FLAGS {
     EvtChannelReferenceImported = 1
 } EVT_CHANNEL_REFERENCE_FLAGS;
