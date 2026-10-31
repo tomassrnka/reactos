@@ -37,7 +37,10 @@
 #include "winnls.h"
 #include "winioctl.h"
 #include "ntddstor.h"
+#include "winsock2.h"
+#include "ws2tcpip.h"
 #include "iphlpapi.h"
+#include "iptypes.h"
 
 #include "pdh.h"
 #include "pdhmsg.h"
@@ -396,6 +399,37 @@ static BOOL ensure_disk( BOOL force )
 }
 
 typedef DWORD (WINAPI *GetIfTable_t)( PMIB_IFTABLE, PULONG, BOOL );
+typedef ULONG (WINAPI *GetAdaptersAddresses_t)( ULONG, ULONG, PVOID, PIP_ADAPTER_ADDRESSES, PULONG );
+
+/* The adapters with their descriptions: GetIfTable's bDescr is the adapter's GUID here, not a description. */
+static PIP_ADAPTER_ADDRESSES get_adapter_addresses( HMODULE iphlpapi )
+{
+    GetAdaptersAddresses_t pGetAdaptersAddresses;
+    PIP_ADAPTER_ADDRESSES aa;
+    ULONG size = 0, ret;
+    ULONG flags = GAA_FLAG_SKIP_UNICAST | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    int tries;
+
+    if (!(pGetAdaptersAddresses = (GetAdaptersAddresses_t)GetProcAddress( iphlpapi, "GetAdaptersAddresses" ))) return NULL;
+    for (tries = 0; tries < 3; tries++)
+    {
+        ret = pGetAdaptersAddresses( AF_UNSPEC, flags, NULL, NULL, &size );
+        if (ret != ERROR_BUFFER_OVERFLOW || !size) return NULL;
+        if (!(aa = malloc( size ))) return NULL;
+        ret = pGetAdaptersAddresses( AF_UNSPEC, flags, NULL, aa, &size );
+        if (ret == ERROR_SUCCESS) return aa;
+        free( aa );
+        if (ret != ERROR_BUFFER_OVERFLOW) break;
+    }
+    return NULL;
+}
+
+static const WCHAR *adapter_description( PIP_ADAPTER_ADDRESSES aa, DWORD index )
+{
+    for (; aa; aa = aa->Next)
+        if (aa->IfIndex == index && aa->Description && aa->Description[0]) return aa->Description;
+    return NULL;
+}
 
 static void sanitize_adapter_name( WCHAR *s )
 {
@@ -412,6 +446,7 @@ static BOOL ensure_net( BOOL force )
     static HMODULE iphlpapi;
     GetIfTable_t pGetIfTable;
     MIB_IFTABLE *table = NULL;
+    PIP_ADAPTER_ADDRESSES addresses;
     ULONG size = 0;
     DWORD i, n, ret;
 
@@ -437,18 +472,29 @@ static BOOL ensure_net( BOOL force )
         free( table );
         return FALSE;
     }
+    addresses = get_adapter_addresses( iphlpapi );
     for (n = 0, i = 0; i < table->dwNumEntries; i++)
     {
         MIB_IFROW *row = &table->table[i];
         DWORD len, j;
 
         if (row->dwType == MIB_IF_TYPE_LOOPBACK) continue;
-        len = row->dwDescrLen;
-        if (len && row->bDescr[len - 1] == 0) len--;
-        if (len >= ARRAY_SIZE(snap_net.net[n].name)) len = ARRAY_SIZE(snap_net.net[n].name) - 1;
-        len = MultiByteToWideChar( CP_ACP, 0, (const char *)row->bDescr, len, snap_net.net[n].name,
-                                   ARRAY_SIZE(snap_net.net[n].name) - 1 );
-        snap_net.net[n].name[len] = 0;
+        const WCHAR *descr = adapter_description( addresses, row->dwIndex );
+
+        if (descr)
+        {
+            lstrcpynW( snap_net.net[n].name, descr, ARRAY_SIZE(snap_net.net[n].name) );
+            len = lstrlenW( snap_net.net[n].name );
+        }
+        else
+        {
+            len = row->dwDescrLen;
+            if (len && row->bDescr[len - 1] == 0) len--;
+            if (len >= ARRAY_SIZE(snap_net.net[n].name)) len = ARRAY_SIZE(snap_net.net[n].name) - 1;
+            len = MultiByteToWideChar( CP_ACP, 0, (const char *)row->bDescr, len, snap_net.net[n].name,
+                                       ARRAY_SIZE(snap_net.net[n].name) - 1 );
+            snap_net.net[n].name[len] = 0;
+        }
         if (!len)
         {
             WCHAR num[16];
@@ -479,6 +525,7 @@ static BOOL ensure_net( BOOL force )
         n++;
     }
     snap_net.count = n;
+    free( addresses );
     free( table );
     return TRUE;
 }
