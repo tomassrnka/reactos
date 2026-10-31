@@ -1712,8 +1712,8 @@
 # #@ stub VerifyPackageId
 # #@ stub VerifyPackageRelativeApplicationId
 # #@ stub VerifyScripts
-#@ stdcall VirtualAlloc2(long ptr long long long ptr long)
-#@ stdcall VirtualAlloc2FromApp(long ptr long long long ptr long)
+@ stdcall VirtualAlloc2(long ptr long long long ptr long)
+@ stdcall VirtualAlloc2FromApp(long ptr long long long ptr long)
 #@ stdcall VirtualAlloc(ptr long long long)
 #@ stdcall VirtualAllocEx(long ptr long long long)
 #@ stdcall VirtualAllocExNuma(long ptr long long long long)

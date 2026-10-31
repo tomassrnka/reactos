@@ -2,6 +2,7 @@
 #define STANDALONE
 #include <apitest.h>
 
+extern void func_VirtualAlloc2(void);
 extern void func_Wow64Process(void);
 extern void func_Wow64Threads(void);
 extern void func_Wow64CreateThreadAccess(void);
@@ -184,6 +185,7 @@ extern void func_Wow64EnvironmentBlock(void);
 
 const struct test winetest_testlist[] =
 {
+    { "VirtualAlloc2",               func_VirtualAlloc2 },
     { "Wow64Environment", func_Wow64Environment },
     { "Wow64ProgramFiles", func_Wow64ProgramFiles },
     { "Wow64EnvironmentBlock", func_Wow64EnvironmentBlock },
