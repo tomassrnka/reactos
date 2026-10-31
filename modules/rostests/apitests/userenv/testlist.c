@@ -2,6 +2,7 @@
 #define STANDALONE
 #include <apitest.h>
 
+extern void func_AppContainerProfile(void);
 extern void func_AppContainerRegisterSid(void);
 extern void func_DeleteProfile(void);
 extern void func_DeriveAppContainerSid(void);
@@ -11,6 +12,7 @@ extern void func_LoadUserProfile(void);
 
 const struct test winetest_testlist[] =
 {
+    { "AppContainerProfile", func_AppContainerProfile },
     { "AppContainerRegisterSid", func_AppContainerRegisterSid },
     { "DeleteProfile", func_DeleteProfile },
     { "DeriveAppContainerSid", func_DeriveAppContainerSid },
