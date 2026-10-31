@@ -63,6 +63,10 @@ _RtlCaptureContext@4:
     mov [ebx+CONTEXT_ESI], esi
     mov [ebx+CONTEXT_EDI], edi
 
+    /* The flags always say what was captured (Windows: CONTEXT_FULL), whatever the context held.
+       RtlpCaptureContext leaves them to its caller */
+    mov dword ptr [ebx+CONTEXT_FLAGS], CONTEXT_FULL
+
     /* Capture the other regs */
     jmp CaptureRest
 
