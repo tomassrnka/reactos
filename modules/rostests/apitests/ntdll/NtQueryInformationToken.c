@@ -874,7 +874,44 @@ QueryTokenOriginTests(
 /*
  * Elevation queries (T121). Burn/WiX read TokenElevation and TokenElevationType;
  * both used to fail with STATUS_INVALID_INFO_CLASS (GetTokenInformation: error 87).
+ *
+ * ReactOS has no UAC, so the expectations are those of Windows with UAC off
+ * (EnableLUA = 0, measured on Windows 10 22H2): TokenElevationType is always
+ * TokenElevationTypeDefault, whatever the groups, privileges and integrity level;
+ * TokenElevation is 1 when the Administrators group is in the token and not
+ * deny-only, or when the token holds one of the privileges below.
  */
+static
+BOOLEAN
+TokenHoldsElevatingPrivilege(
+    _In_ HANDLE Token,
+    _In_ BOOLEAN IncludeImpersonate)
+{
+    static const ULONG Elevating[] =
+    {
+        SE_CREATE_TOKEN_PRIVILEGE, SE_TCB_PRIVILEGE, SE_TAKE_OWNERSHIP_PRIVILEGE,
+        SE_LOAD_DRIVER_PRIVILEGE, SE_BACKUP_PRIVILEGE, SE_RESTORE_PRIVILEGE,
+        SE_DEBUG_PRIVILEGE, SE_IMPERSONATE_PRIVILEGE, SE_RELABEL_PRIVILEGE
+    };
+    BYTE Buffer[2048];
+    PTOKEN_PRIVILEGES Privileges = (PTOKEN_PRIVILEGES)Buffer;
+    ULONG Length, i, j;
+
+    if (!NT_SUCCESS(NtQueryInformationToken(Token, TokenPrivileges, Buffer, sizeof(Buffer), &Length)))
+        return FALSE;
+    for (i = 0; i < Privileges->PrivilegeCount; i++)
+    {
+        for (j = 0; j < RTL_NUMBER_OF(Elevating); j++)
+        {
+            if (Privileges->Privileges[i].Luid.HighPart == 0 &&
+                Privileges->Privileges[i].Luid.LowPart == Elevating[j] &&
+                (IncludeImpersonate || Elevating[j] != SE_IMPERSONATE_PRIVILEGE))
+                return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 static
 BOOLEAN
 TokenHasEnabledAdminGroup(
@@ -895,7 +932,7 @@ TokenHasEnabledAdminGroup(
     for (i = 0; i < Groups->GroupCount; i++)
     {
         if (RtlEqualSid(Groups->Groups[i].Sid, AdminSid) &&
-            (Groups->Groups[i].Attributes & SE_GROUP_ENABLED))
+            !(Groups->Groups[i].Attributes & SE_GROUP_USE_FOR_DENY_ONLY))
             Result = TRUE;
     }
     RtlFreeSid(AdminSid);
@@ -1067,10 +1104,58 @@ QueryTokenElevationCreatedTests(
     Created = CreateTestToken(Token, TRUE, SE_GROUP_USE_FOR_DENY_ONLY);
     if (Created)
     {
-        CheckElevation(Created, "created admin (deny-only group)", 0, 3 /* Limited */);
+        CheckElevation(Created, "created admin (deny-only group)", 0, 1 /* Default: no UAC */);
         CheckIntegrityLevel(Created, "created admin (deny-only group)", SECURITY_MANDATORY_MEDIUM_RID);
         NtClose(Created);
     }
+}
+
+/* A copy of Token made by NtFilterToken: the Administrators group deny-only, privileges optionally deleted */
+static
+HANDLE
+FilterTokenForElevation(
+    _In_ HANDLE Token,
+    _In_ BOOLEAN DenyAdmins,
+    _In_ BOOLEAN KeepOnlyImpersonate,
+    _In_ BOOLEAN DeleteImpersonate)
+{
+    NTSTATUS Status;
+    HANDLE Filtered = NULL;
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    PSID AdminSid = NULL;
+    union
+    {
+        TOKEN_GROUPS Groups;
+        BYTE Buffer[sizeof(TOKEN_GROUPS) + sizeof(SID_AND_ATTRIBUTES)];
+    } Disable;
+    BYTE Current[2048], Delete[2048];
+    PTOKEN_PRIVILEGES CurrentPrivileges = (PTOKEN_PRIVILEGES)Current;
+    PTOKEN_PRIVILEGES DeletePrivileges = (PTOKEN_PRIVILEGES)Delete;
+    ULONG Length, i;
+
+    RtlAllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS,
+                                0, 0, 0, 0, 0, 0, &AdminSid);
+    Disable.Groups.GroupCount = 1;
+    Disable.Groups.Groups[0].Sid = AdminSid;
+    Disable.Groups.Groups[0].Attributes = 0;
+
+    DeletePrivileges->PrivilegeCount = 0;
+    if (!NT_SUCCESS(NtQueryInformationToken(Token, TokenPrivileges, Current, sizeof(Current), &Length)))
+        return NULL;
+    for (i = 0; i < CurrentPrivileges->PrivilegeCount; i++)
+    {
+        BOOLEAN IsImpersonate = CurrentPrivileges->Privileges[i].Luid.HighPart == 0 &&
+                                CurrentPrivileges->Privileges[i].Luid.LowPart == SE_IMPERSONATE_PRIVILEGE;
+
+        if ((KeepOnlyImpersonate && !IsImpersonate) || (DeleteImpersonate && IsImpersonate))
+            DeletePrivileges->Privileges[DeletePrivileges->PrivilegeCount++] = CurrentPrivileges->Privileges[i];
+    }
+
+    Status = NtFilterToken(Token, 0, DenyAdmins ? &Disable.Groups : NULL,
+                           DeletePrivileges->PrivilegeCount ? DeletePrivileges : NULL, NULL, &Filtered);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    RtlFreeSid(AdminSid);
+    return NT_SUCCESS(Status) ? Filtered : NULL;
 }
 
 static
@@ -1079,26 +1164,44 @@ QueryTokenElevationTests(
     _In_ HANDLE Token)
 {
     NTSTATUS Status;
-    ULONG Length, Value;
-    HANDLE Dup = NULL;
+    ULONG Length, Value[2];
+    HANDLE Dup = NULL, Filtered;
     OBJECT_ATTRIBUTES ObjectAttributes;
     BOOLEAN Admin = TokenHasEnabledAdminGroup(Token);
-    ULONG Integrity;
+    ULONG Integrity, Rid, RidIndex;
+    static const ULONG Rids[] = { SECURITY_MANDATORY_HIGH_RID, SECURITY_MANDATORY_MEDIUM_RID, SECURITY_MANDATORY_LOW_RID };
     BYTE LabelBuffer[64];
     PTOKEN_MANDATORY_LABEL Label = (PTOKEN_MANDATORY_LABEL)LabelBuffer;
 
-    /* Negative control: too small buffers report the required length */
+    /* TokenElevation insists on the exact size, TokenElevationType takes anything from 4 up (measured on Windows 10) */
     Length = 0;
     Status = NtQueryInformationToken(Token, TokenElevation, NULL, 0, &Length);
-    ok_ntstatus(Status, STATUS_BUFFER_TOO_SMALL);
+    ok_ntstatus(Status, STATUS_INFO_LENGTH_MISMATCH);
     ok_dec(Length, (ULONG)sizeof(TOKEN_ELEVATION));
 
     Length = 0;
-    Status = NtQueryInformationToken(Token, TokenElevationType, &Value, sizeof(Value) - 1, &Length);
+    Status = NtQueryInformationToken(Token, TokenElevation, Value, sizeof(Value), &Length);
+    ok_ntstatus(Status, STATUS_INFO_LENGTH_MISMATCH);
+    ok_dec(Length, (ULONG)sizeof(TOKEN_ELEVATION));
+
+    Length = 0;
+    Status = NtQueryInformationToken(Token, TokenElevation, Value, sizeof(TOKEN_ELEVATION) - 1, &Length);
+    ok_ntstatus(Status, STATUS_INFO_LENGTH_MISMATCH);
+
+    Length = 0;
+    Status = NtQueryInformationToken(Token, TokenElevationType, Value, sizeof(ULONG) - 1, &Length);
     ok_ntstatus(Status, STATUS_BUFFER_TOO_SMALL);
     ok_dec(Length, (ULONG)sizeof(TOKEN_ELEVATION_TYPE));
 
-    /* The current token: derive the expectation from its integrity level and groups */
+    Length = 0;
+    Value[0] = Value[1] = 0xdeadbeef;
+    Status = NtQueryInformationToken(Token, TokenElevationType, Value, sizeof(Value), &Length);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    ok_dec(Length, (ULONG)sizeof(TOKEN_ELEVATION_TYPE));
+    ok_dec(Value[0], 1UL);
+    ok_hex(Value[1], 0xdeadbeef);
+
+    /* The current token */
     Status = NtQueryInformationToken(Token, TokenIntegrityLevel, LabelBuffer, sizeof(LabelBuffer), &Length);
     ok_ntstatus(Status, STATUS_SUCCESS);
     if (!NT_SUCCESS(Status))
@@ -1106,41 +1209,153 @@ QueryTokenElevationTests(
     Integrity = *RtlSubAuthoritySid(Label->Label.Sid, 0);
     trace("current token: admin=%d integrity=0x%lx\n", Admin, Integrity);
 
-    if (Admin && Integrity >= SECURITY_MANDATORY_HIGH_RID)
-        CheckElevation(Token, "current (admin, high)", 1, TokenElevationTypeDefault);
-    else if (Admin)
-        CheckElevation(Token, "current (admin, lowered)", 0, TokenElevationTypeLimited);
-    else
-        CheckElevation(Token, "current (standard)", 0, TokenElevationTypeDefault);
+    CheckElevation(Token, "current", Admin || TokenHoldsElevatingPrivilege(Token, TRUE), TokenElevationTypeDefault);
 
-    if (!Admin || Integrity < SECURITY_MANDATORY_HIGH_RID)
+    if (!Admin)
     {
-        skip("Current token is not elevated, cannot derive limited tokens from it\n");
+        skip("Current token has no Administrators group, cannot derive elevated tokens from it\n");
         return;
     }
 
-    /* Limited: the same token with its integrity level lowered to Medium */
-    InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
-    Status = NtDuplicateToken(Token, TOKEN_ALL_ACCESS, &ObjectAttributes, FALSE, TokenPrimary, &Dup);
-    ok_ntstatus(Status, STATUS_SUCCESS);
-    if (NT_SUCCESS(Status))
+    /* The integrity level does not matter: a medium or low copy of an administrator's token is elevated too */
+    for (RidIndex = 0; RidIndex < RTL_NUMBER_OF(Rids); RidIndex++)
     {
-        SID_IDENTIFIER_AUTHORITY LabelAuthority = {SECURITY_MANDATORY_LABEL_AUTHORITY};
-
-        CheckElevation(Dup, "duplicate (admin, high)", 1, TokenElevationTypeDefault);
-
-        RtlInitializeSid((PSID)(Label + 1), &LabelAuthority, 1);
-        *RtlSubAuthoritySid((PSID)(Label + 1), 0) = SECURITY_MANDATORY_MEDIUM_RID;
-        Label->Label.Sid = (PSID)(Label + 1);
-        Label->Label.Attributes = SE_GROUP_INTEGRITY;
-        Status = NtSetInformationToken(Dup, TokenIntegrityLevel, Label, sizeof(LabelBuffer));
+        Rid = Rids[RidIndex];
+        InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
+        Status = NtDuplicateToken(Token, TOKEN_ALL_ACCESS, &ObjectAttributes, FALSE, TokenPrimary, &Dup);
         ok_ntstatus(Status, STATUS_SUCCESS);
         if (NT_SUCCESS(Status))
-            CheckElevation(Dup, "duplicate (admin, medium)", 0, TokenElevationTypeLimited);
+        {
+            SID_IDENTIFIER_AUTHORITY LabelAuthority = {SECURITY_MANDATORY_LABEL_AUTHORITY};
+            CHAR Name[64];
+
+            RtlInitializeSid((PSID)(Label + 1), &LabelAuthority, 1);
+            *RtlSubAuthoritySid((PSID)(Label + 1), 0) = Rid;
+            Label->Label.Sid = (PSID)(Label + 1);
+            Label->Label.Attributes = SE_GROUP_INTEGRITY;
+            Status = NtSetInformationToken(Dup, TokenIntegrityLevel, Label, sizeof(LabelBuffer));
+            ok_ntstatus(Status, STATUS_SUCCESS);
+            sprintf(Name, "duplicate (admin, integrity 0x%lx)", Rid);
+            if (NT_SUCCESS(Status))
+                CheckElevation(Dup, Name, 1, TokenElevationTypeDefault);
+            NtClose(Dup);
+        }
+    }
+
+    /* Impersonation copies are the same */
+    Status = NtDuplicateToken(Token, TOKEN_ALL_ACCESS, NULL, FALSE, TokenImpersonation, &Dup);
+    if (NT_SUCCESS(Status))
+    {
+        CheckElevation(Dup, "impersonation duplicate", 1, TokenElevationTypeDefault);
         NtClose(Dup);
     }
 
+    /* Filtered copies. The Administrators group deny-only does not make a token elevated, a privilege does */
+    if (TokenHoldsElevatingPrivilege(Token, TRUE))
+    {
+        Filtered = FilterTokenForElevation(Token, TRUE, FALSE, FALSE);
+        if (Filtered)
+        {
+            CheckElevation(Filtered, "filtered (admins deny-only, privileges kept)", 1, TokenElevationTypeDefault);
+            NtClose(Filtered);
+        }
+
+        Filtered = FilterTokenForElevation(Token, FALSE, FALSE, TRUE);
+        if (Filtered)
+        {
+            CheckElevation(Filtered, "filtered (admins enabled, no SeImpersonate)", 1, TokenElevationTypeDefault);
+            NtClose(Filtered);
+        }
+
+        Filtered = FilterTokenForElevation(Token, TRUE, TRUE, FALSE);
+        if (Filtered)
+        {
+            CheckElevation(Filtered, "filtered (admins deny-only, only SeImpersonate)", 1, TokenElevationTypeDefault);
+            NtClose(Filtered);
+        }
+    }
+    else
+    {
+        skip("Current token holds no elevating privilege, no filtered token tests\n");
+    }
+
     QueryTokenElevationCreatedTests(Token);
+}
+
+/*
+ * The other NT 6 classes, with UAC off: no linked token, UI access and
+ * virtualization off, the default mandatory policy, not an AppContainer.
+ * Lengths and statuses as measured on Windows 10 (x64 and WoW64).
+ */
+static
+VOID
+QueryTokenNt6ClassesTests(
+    _In_ HANDLE Token)
+{
+    static const struct
+    {
+        TOKEN_INFORMATION_CLASS Class;
+        PCSTR Name;
+        ULONG Expected;
+    } Classes[] =
+    {
+        { TokenVirtualizationAllowed, "TokenVirtualizationAllowed", 0 },
+        { TokenVirtualizationEnabled, "TokenVirtualizationEnabled", 0 },
+        { TokenUIAccess, "TokenUIAccess", 0 },
+        { TokenMandatoryPolicy, "TokenMandatoryPolicy", TOKEN_MANDATORY_POLICY_NO_WRITE_UP | TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN },
+        { TokenIsAppContainer, "TokenIsAppContainer", 0 },
+    };
+    NTSTATUS Status;
+    ULONG Length, Value[2], i;
+    HANDLE Linked[2];
+
+    for (i = 0; i < RTL_NUMBER_OF(Classes); i++)
+    {
+        Length = 0;
+        Value[0] = Value[1] = 0xdeadbeef;
+        Status = NtQueryInformationToken(Token, Classes[i].Class, Value, sizeof(ULONG), &Length);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        ok_dec(Length, (ULONG)sizeof(ULONG));
+        ok(Value[0] == Classes[i].Expected, "%s = %lu, expected %lu\n", Classes[i].Name, Value[0], Classes[i].Expected);
+
+        /* Larger buffers are fine, smaller ones are not */
+        Length = 0;
+        Status = NtQueryInformationToken(Token, Classes[i].Class, Value, sizeof(Value), &Length);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        ok_dec(Length, (ULONG)sizeof(ULONG));
+
+        Length = 0;
+        Status = NtQueryInformationToken(Token, Classes[i].Class, Value, sizeof(ULONG) - 1, &Length);
+        ok_ntstatus(Status, STATUS_BUFFER_TOO_SMALL);
+        ok_dec(Length, (ULONG)sizeof(ULONG));
+
+        Length = 0;
+        Status = NtQueryInformationToken(Token, Classes[i].Class, NULL, 0, &Length);
+        ok_ntstatus(Status, STATUS_BUFFER_TOO_SMALL);
+        ok_dec(Length, (ULONG)sizeof(ULONG));
+    }
+
+    /* No token has a linked token without UAC; the length has to be exactly that of a handle */
+    Length = 0;
+    Linked[0] = Linked[1] = (HANDLE)(ULONG_PTR)0xdeadbeef;
+    Status = NtQueryInformationToken(Token, TokenLinkedToken, Linked, sizeof(HANDLE), &Length);
+    ok_ntstatus(Status, STATUS_NO_SUCH_LOGON_SESSION);
+    ok_dec(Length, (ULONG)sizeof(HANDLE));
+    ok(Linked[0] == (HANDLE)(ULONG_PTR)0xdeadbeef, "handle written: %p\n", Linked[0]);
+
+    Length = 0;
+    Status = NtQueryInformationToken(Token, TokenLinkedToken, Linked, sizeof(HANDLE) * 2, &Length);
+    ok_ntstatus(Status, STATUS_INFO_LENGTH_MISMATCH);
+    ok_dec(Length, (ULONG)sizeof(HANDLE));
+
+    Length = 0;
+    Status = NtQueryInformationToken(Token, TokenLinkedToken, Linked, sizeof(HANDLE) - 1, &Length);
+    ok_ntstatus(Status, STATUS_INFO_LENGTH_MISMATCH);
+
+    Length = 0;
+    Status = NtQueryInformationToken(Token, TokenLinkedToken, NULL, 0, &Length);
+    ok_ntstatus(Status, STATUS_INFO_LENGTH_MISMATCH);
+    ok_dec(Length, (ULONG)sizeof(HANDLE));
 }
 
 static
@@ -1271,6 +1486,7 @@ START_TEST(NtQueryInformationToken)
     QueryTokenIsSandboxInert(Token);
     QueryTokenOriginTests(Token);
     QueryTokenElevationTests(Token);
+    QueryTokenNt6ClassesTests(Token);
     QueryTokenHasRestrictionsTests(Token);
 
     NtClose(Token);
