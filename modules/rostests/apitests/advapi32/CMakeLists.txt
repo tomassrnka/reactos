@@ -67,6 +67,7 @@ list(APPEND SOURCE
     SddlRights.c
     ServiceProcess.c
     ServiceStructLayout.c
+    ServiceTriggerPrivileges.c
     svchlp.c)
 
 list(APPEND PCH_SKIP_SOURCE
