@@ -9,6 +9,7 @@
 #include <apitest.h>
 
 extern void func_ItemDialog(void);
+extern void func_PickFolders(void);
 extern void func_PrintDlg(void);
 extern void func_SaveDialogDefExt(void);
 extern void func_SaveDialogFolder(void);
@@ -17,6 +18,7 @@ extern void func_SaveDialogLongName(void);
 const struct test winetest_testlist[] =
 {
     { "ItemDialog", func_ItemDialog },
+    { "PickFolders", func_PickFolders },
     { "PrintDlg", func_PrintDlg },
     { "SaveDialogDefExt", func_SaveDialogDefExt },
     { "SaveDialogFolder", func_SaveDialogFolder },
