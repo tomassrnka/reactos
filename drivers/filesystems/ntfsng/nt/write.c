@@ -952,11 +952,17 @@ NTSTATUS NgShutdown(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     return STATUS_SUCCESS;
 }
 
-/* Linux's flusher stand-in: writes back dirty core metadata every NG_FLUSH_PERIOD_MS. */
+/*
+ * Linux's flusher stand-in: writes back dirty core metadata every NG_FLUSH_PERIOD_MS.  It runs at the
+ * priority of the critical work queue (13), where Windows runs the lazy writer and the NTFS checkpoint:
+ * it holds CoreLock while it commits, and at the default 8 it shared the processors round-robin with
+ * busy normal-priority threads, so every open, listing and write on the volume waited for their quanta.
+ */
 static VOID NTAPI NgFlusherThread(PVOID Context)
 {
     PNG_VCB Vcb = Context;
     LARGE_INTEGER Period;
+    KeSetBasePriorityThread(KeGetCurrentThread(), NG_FLUSHER_PRIORITY_INCREMENT);
     Period.QuadPart = -10000LL * NG_FLUSH_PERIOD_MS;
     for (;;)
     {

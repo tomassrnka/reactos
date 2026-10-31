@@ -128,6 +128,8 @@ typedef struct _NG_VCB
 } NG_VCB, *PNG_VCB;
 
 #define NG_FLUSH_PERIOD_MS 2000
+/* Over the System process base (8): 13, the critical work queue (EX_CRITICAL_QUEUE_PRIORITY_INCREMENT). */
+#define NG_FLUSHER_PRIORITY_INCREMENT 5
 
 /* One run of a paging file: VCN, LCN (negative for a hole) and length, in clusters. */
 typedef struct _NG_RUN
