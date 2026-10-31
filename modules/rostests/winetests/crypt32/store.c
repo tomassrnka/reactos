@@ -1322,6 +1322,410 @@ static void testSystemRegStore(void)
      "Expected ERROR_FILE_NOT_FOUND, got %08lx\n", GetLastError());
 }
 
+/* Registry stores write through: additions, deletions, replacements and
+ * property changes are in the registry (so visible to other handles and
+ * processes) as soon as the call returns, not when the store is committed or
+ * closed.  Another handle that is already open only sees them after a resync.
+ */
+enum { RW_CERT, RW_CRL, RW_CTL, RW_TYPES };
+static const WCHAR * const rw_subkeys[] = { L"Certificates", L"CRLs", L"CTLs" };
+static const WCHAR rw_store_name[] = L"WineRegStoreWriteThrough";
+static const WCHAR rw_store_path[] = L"Software\\Microsoft\\SystemCertificates\\WineRegStoreWriteThrough";
+
+static const void *rw_create(int type)
+{
+    switch (type)
+    {
+    case RW_CERT: return CertCreateCertificateContext(X509_ASN_ENCODING, bigCert2, sizeof(bigCert2));
+    case RW_CRL: return CertCreateCRLContext(X509_ASN_ENCODING, signedCRL, sizeof(signedCRL));
+    default: return CertCreateCTLContext(X509_ASN_ENCODING, signedCTLWithCTLInnerContent,
+                                         sizeof(signedCTLWithCTLInnerContent));
+    }
+}
+
+static void rw_free(int type, const void *context)
+{
+    switch (type)
+    {
+    case RW_CERT: CertFreeCertificateContext(context); break;
+    case RW_CRL: CertFreeCRLContext(context); break;
+    default: CertFreeCTLContext(context); break;
+    }
+}
+
+static BOOL rw_get_hash(int type, const void *context, BYTE *hash)
+{
+    DWORD size = 20;
+
+    switch (type)
+    {
+    case RW_CERT: return CertGetCertificateContextProperty(context, CERT_HASH_PROP_ID, hash, &size);
+    case RW_CRL: return CertGetCRLContextProperty(context, CERT_HASH_PROP_ID, hash, &size);
+    default: return CertGetCTLContextProperty(context, CERT_HASH_PROP_ID, hash, &size);
+    }
+}
+
+static BOOL rw_add(HCERTSTORE store, int type, DWORD disposition)
+{
+    const void *context = rw_create(type);
+    BOOL ret;
+
+    ok(context != NULL, "type %d: creating the context failed: %08lx\n", type, GetLastError());
+    if (!context) return FALSE;
+    switch (type)
+    {
+    case RW_CERT: ret = CertAddCertificateContextToStore(store, context, disposition, NULL); break;
+    case RW_CRL: ret = CertAddCRLContextToStore(store, context, disposition, NULL); break;
+    default: ret = CertAddCTLContextToStore(store, context, disposition, NULL); break;
+    }
+    rw_free(type, context);
+    return ret;
+}
+
+/* The context in the store with the given hash, or NULL. */
+static const void *rw_find(HCERTSTORE store, int type, const BYTE *hash)
+{
+    const void *context = NULL;
+    BYTE found[20];
+
+    for (;;)
+    {
+        switch (type)
+        {
+        case RW_CERT: context = CertEnumCertificatesInStore(store, context); break;
+        case RW_CRL: context = CertEnumCRLsInStore(store, context); break;
+        default: context = CertEnumCTLsInStore(store, context); break;
+        }
+        if (!context) return NULL;
+        if (rw_get_hash(type, context, found) && !memcmp(found, hash, 20))
+            return context;
+    }
+}
+
+static BOOL rw_has(HCERTSTORE store, int type, const BYTE *hash)
+{
+    const void *context = rw_find(store, type, hash);
+
+    if (context) rw_free(type, context);
+    return context != NULL;
+}
+
+/* Is the context in a fresh handle on the store? */
+static BOOL rw_has_fresh(int type, const BYTE *hash)
+{
+    HCERTSTORE store = CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0, CERT_SYSTEM_STORE_CURRENT_USER, rw_store_name);
+    BOOL ret;
+
+    ok(store != NULL, "CertOpenStore failed: %08lx\n", GetLastError());
+    if (!store) return FALSE;
+    ret = rw_has(store, type, hash);
+    CertCloseStore(store, 0);
+    return ret;
+}
+
+static BOOL rw_delete(HCERTSTORE store, int type, const BYTE *hash)
+{
+    const void *context = rw_find(store, type, hash);
+
+    if (!context) return FALSE;
+    switch (type)
+    {
+    case RW_CERT: return CertDeleteCertificateFromStore(context);
+    case RW_CRL: return CertDeleteCRLFromStore(context);
+    default: return CertDeleteCTLFromStore(context);
+    }
+}
+
+static BOOL rw_set_name(int type, const void *context, const WCHAR *name)
+{
+    CRYPT_DATA_BLOB blob = { (lstrlenW(name) + 1) * sizeof(WCHAR), (BYTE *)name };
+
+    switch (type)
+    {
+    case RW_CERT: return CertSetCertificateContextProperty(context, CERT_FRIENDLY_NAME_PROP_ID, 0, &blob);
+    case RW_CRL: return CertSetCRLContextProperty(context, CERT_FRIENDLY_NAME_PROP_ID, 0, &blob);
+    default: return CertSetCTLContextProperty(context, CERT_FRIENDLY_NAME_PROP_ID, 0, &blob);
+    }
+}
+
+static BOOL rw_has_name(int type, const void *context)
+{
+    WCHAR name[64];
+    DWORD size = sizeof(name);
+
+    switch (type)
+    {
+    case RW_CERT: return CertGetCertificateContextProperty(context, CERT_FRIENDLY_NAME_PROP_ID, name, &size);
+    case RW_CRL: return CertGetCRLContextProperty(context, CERT_FRIENDLY_NAME_PROP_ID, name, &size);
+    default: return CertGetCTLContextProperty(context, CERT_FRIENDLY_NAME_PROP_ID, name, &size);
+    }
+}
+
+static BOOL rw_fresh_has_name(int type, const BYTE *hash)
+{
+    HCERTSTORE store = CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0, CERT_SYSTEM_STORE_CURRENT_USER, rw_store_name);
+    const void *context;
+    BOOL ret = FALSE;
+
+    if (!store) return FALSE;
+    context = rw_find(store, type, hash);
+    if (context)
+    {
+        ret = rw_has_name(type, context);
+        rw_free(type, context);
+    }
+    CertCloseStore(store, 0);
+    return ret;
+}
+
+/* Size of the context's serialized entry in the store's registry key, 0 if there is none. */
+static DWORD rw_reg_size(int type, const BYTE *hash)
+{
+    WCHAR path[MAX_PATH], name[41];
+    DWORD size = 0, i;
+    HKEY key;
+
+    for (i = 0; i < 20; i++)
+        wsprintfW(name + i * 2, L"%02X", hash[i]);
+    wsprintfW(path, L"%s\\%s\\%s", rw_store_path, rw_subkeys[type], name);
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, path, 0, KEY_READ, &key))
+        return 0;
+    if (RegQueryValueExW(key, L"Blob", NULL, NULL, NULL, &size))
+        size = 0;
+    RegCloseKey(key);
+    return size;
+}
+
+/* Polls for whether the context is in the store, for as long as Windows takes to notice an outside change. */
+static BOOL rw_wait_for(HCERTSTORE store, int type, const BYTE *hash, BOOL present)
+{
+    DWORD i;
+
+    for (i = 0; i < 100; i++)
+    {
+        if (rw_has(store, type, hash) == present) return TRUE;
+        Sleep(100);
+    }
+    return FALSE;
+}
+
+static void testRegStoreWriteThrough(void)
+{
+    static const WCHAR friendlyName[] = L"wine write through";
+    HCERTSTORE a, b, ro;
+    BYTE hash[RW_TYPES][20];
+    DWORD size;
+    BOOL ret;
+    int type;
+
+    for (type = 0; type < RW_TYPES; type++)
+    {
+        const void *context = rw_create(type);
+
+        ok(context != NULL, "type %d: creating the context failed: %08lx\n", type, GetLastError());
+        if (!context) return;
+        ret = rw_get_hash(type, context, hash[type]);
+        ok(ret, "type %d: getting the hash failed: %08lx\n", type, GetLastError());
+        rw_free(type, context);
+    }
+
+    SHDeleteKeyW(HKEY_CURRENT_USER, rw_store_path);
+    for (type = 0; type < RW_TYPES; type++)
+    {
+        DWORD before;
+
+        winetest_push_context("type %d", type);
+
+        a = CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0, CERT_SYSTEM_STORE_CURRENT_USER, rw_store_name);
+        ok(a != NULL, "CertOpenStore failed: %08lx\n", GetLastError());
+        b = CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0, CERT_SYSTEM_STORE_CURRENT_USER, rw_store_name);
+        ok(b != NULL, "CertOpenStore failed: %08lx\n", GetLastError());
+        if (!a || !b)
+        {
+            if (a) CertCloseStore(a, 0);
+            if (b) CertCloseStore(b, 0);
+            winetest_pop_context();
+            break;
+        }
+
+        /* An addition is persisted at once, without a commit or close. */
+        ret = rw_add(a, type, CERT_STORE_ADD_ALWAYS);
+        ok(ret, "adding failed: %08lx\n", GetLastError());
+        ok(rw_reg_size(type, hash[type]) != 0, "the context is not in the registry\n");
+        ok(rw_has(a, type, hash[type]), "the context is not in the store it was added to\n");
+        ok(rw_has_fresh(type, hash[type]), "the context is not in a newly opened store\n");
+        /* A handle that was already open does not see it until it is resynced. */
+        ok(!rw_has(b, type, hash[type]), "the context is already in the other store\n");
+        ret = CertControlStore(b, 0, CERT_STORE_CTRL_RESYNC, NULL);
+        ok(ret, "CertControlStore failed: %08lx\n", GetLastError());
+        ok(rw_has(b, type, hash[type]), "the context is not in the other store after a resync\n");
+        /* A resync replaces the cached contents with the registry's, and leaves the registry alone. */
+        ret = CertControlStore(b, 0, CERT_STORE_CTRL_RESYNC, NULL);
+        ok(ret, "CertControlStore failed: %08lx\n", GetLastError());
+        ok(rw_has(b, type, hash[type]), "the context is not in the other store after a second resync\n");
+        ok(rw_reg_size(type, hash[type]) != 0, "a resync removed the context from the registry\n");
+        ok(rw_has_fresh(type, hash[type]), "a resync removed the context from the store\n");
+
+        /* A commit has nothing to write and succeeds; so does forcing one. */
+        ret = CertControlStore(a, 0, CERT_STORE_CTRL_COMMIT, NULL);
+        ok(ret, "CertControlStore failed: %08lx\n", GetLastError());
+        ret = CertControlStore(a, CERT_STORE_CTRL_COMMIT_FORCE_FLAG, CERT_STORE_CTRL_COMMIT, NULL);
+        ok(ret, "CertControlStore failed: %08lx\n", GetLastError());
+        ok(rw_reg_size(type, hash[type]) != 0, "the context is not in the registry after a commit\n");
+
+        /* A deletion is persisted at once as well. */
+        ret = rw_delete(a, type, hash[type]);
+        ok(ret, "deleting failed: %08lx\n", GetLastError());
+        ok(!rw_reg_size(type, hash[type]), "the context is still in the registry\n");
+        ok(!rw_has_fresh(type, hash[type]), "the context is still in a newly opened store\n");
+        ok(rw_has(b, type, hash[type]), "the context is already gone from the other store\n");
+        ret = CertControlStore(b, 0, CERT_STORE_CTRL_RESYNC, NULL);
+        ok(ret, "CertControlStore failed: %08lx\n", GetLastError());
+        ok(!rw_has(b, type, hash[type]), "the context is still in the other store after a resync\n");
+
+        /* Deleting a context that another handle already removed is not an error, and closing
+         * a store that still has it does not bring it back. */
+        ret = rw_add(b, type, CERT_STORE_ADD_ALWAYS);
+        ok(ret, "adding failed: %08lx\n", GetLastError());
+        ret = CertControlStore(a, 0, CERT_STORE_CTRL_RESYNC, NULL);
+        ok(ret, "CertControlStore failed: %08lx\n", GetLastError());
+        ok(rw_has(a, type, hash[type]), "the context is not in the store after a resync\n");
+        ret = rw_delete(b, type, hash[type]);
+        ok(ret, "deleting failed: %08lx\n", GetLastError());
+        ok(rw_has(a, type, hash[type]), "the context is already gone from the other store\n");
+        ret = rw_delete(a, type, hash[type]);
+        ok(ret, "deleting a context that is already gone failed: %08lx\n", GetLastError());
+        ret = rw_add(b, type, CERT_STORE_ADD_ALWAYS);
+        ok(ret, "adding failed: %08lx\n", GetLastError());
+        ret = CertControlStore(a, 0, CERT_STORE_CTRL_RESYNC, NULL);
+        ok(ret, "CertControlStore failed: %08lx\n", GetLastError());
+        ret = rw_delete(b, type, hash[type]);
+        ok(ret, "deleting failed: %08lx\n", GetLastError());
+        CertCloseStore(a, 0);
+        CertCloseStore(b, 0);
+        ok(!rw_reg_size(type, hash[type]), "closing the stores brought the context back\n");
+
+        /* A property change is persisted at once. */
+        a = CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0, CERT_SYSTEM_STORE_CURRENT_USER, rw_store_name);
+        b = CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0, CERT_SYSTEM_STORE_CURRENT_USER, rw_store_name);
+        ret = rw_add(a, type, CERT_STORE_ADD_ALWAYS);
+        ok(ret, "adding failed: %08lx\n", GetLastError());
+        before = rw_reg_size(type, hash[type]);
+        ok(before != 0, "the context is not in the registry\n");
+        {
+            const void *context = rw_find(a, type, hash[type]);
+
+            ok(context != NULL, "the context is not in the store\n");
+            if (context)
+            {
+                ret = rw_set_name(type, context, friendlyName);
+                ok(ret, "setting the property failed: %08lx\n", GetLastError());
+                rw_free(type, context);
+            }
+        }
+        size = rw_reg_size(type, hash[type]);
+        ok(size > before, "the property is not in the registry (%lu, was %lu)\n", size, before);
+        ok(rw_fresh_has_name(type, hash[type]), "the property is not in a newly opened store\n");
+        ret = CertControlStore(b, 0, CERT_STORE_CTRL_RESYNC, NULL);
+        ok(ret, "CertControlStore failed: %08lx\n", GetLastError());
+        {
+            const void *context = rw_find(b, type, hash[type]);
+
+            ok(context != NULL, "the context is not in the other store after a resync\n");
+            if (context)
+            {
+                ok(rw_has_name(type, context), "the property is not in the other store after a resync\n");
+                rw_free(type, context);
+            }
+        }
+
+        /* Replacing the context with one that has a different set of properties is persisted at once. */
+        ret = rw_delete(a, type, hash[type]);
+        ok(ret, "deleting failed: %08lx\n", GetLastError());
+        ret = rw_add(a, type, CERT_STORE_ADD_ALWAYS);
+        ok(ret, "adding failed: %08lx\n", GetLastError());
+        before = rw_reg_size(type, hash[type]);
+        {
+            const void *context = rw_create(type);
+
+            ret = rw_set_name(type, context, friendlyName);
+            ok(ret, "setting the property failed: %08lx\n", GetLastError());
+            switch (type)
+            {
+            case RW_CERT: ret = CertAddCertificateContextToStore(a, context, CERT_STORE_ADD_REPLACE_EXISTING, NULL); break;
+            case RW_CRL: ret = CertAddCRLContextToStore(a, context, CERT_STORE_ADD_REPLACE_EXISTING, NULL); break;
+            default: ret = CertAddCTLContextToStore(a, context, CERT_STORE_ADD_REPLACE_EXISTING, NULL); break;
+            }
+            ok(ret, "replacing failed: %08lx\n", GetLastError());
+            rw_free(type, context);
+        }
+        size = rw_reg_size(type, hash[type]);
+        ok(size > before, "the replacement is not in the registry (%lu, was %lu)\n", size, before);
+        ok(rw_fresh_has_name(type, hash[type]), "the replacement's property is not in a newly opened store\n");
+
+        /* A read-only handle refuses all changes. */
+        ro = CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0, CERT_SYSTEM_STORE_CURRENT_USER | CERT_STORE_READONLY_FLAG,
+         rw_store_name);
+        ok(ro != NULL, "CertOpenStore failed: %08lx\n", GetLastError());
+        if (ro)
+        {
+            const void *context;
+
+            before = rw_reg_size(type, hash[type]);
+            SetLastError(0xdeadbeef);
+            ret = rw_delete(ro, type, hash[type]);
+            ok(!ret && GetLastError() == E_ACCESSDENIED, "got %d, error %08lx\n", ret, GetLastError());
+            ok(rw_reg_size(type, hash[type]) == before, "the registry changed\n");
+            context = rw_find(ro, type, hash[type]);
+            ok(context != NULL, "the context is not in the read-only store\n");
+            if (context)
+            {
+                SetLastError(0xdeadbeef);
+                ret = rw_set_name(type, context, L"other name");
+                ok(!ret && GetLastError() == E_ACCESSDENIED, "got %d, error %08lx\n", ret, GetLastError());
+                rw_free(type, context);
+            }
+            ok(rw_reg_size(type, hash[type]) == before, "the registry changed\n");
+            ret = rw_delete(a, type, hash[type]);
+            ok(ret, "deleting failed: %08lx\n", GetLastError());
+            SetLastError(0xdeadbeef);
+            ret = rw_add(ro, type, CERT_STORE_ADD_ALWAYS);
+            ok(!ret && GetLastError() == E_ACCESSDENIED, "got %d, error %08lx\n", ret, GetLastError());
+            ok(!rw_reg_size(type, hash[type]), "the context was added through a read-only store\n");
+            ok(!rw_has_fresh(type, hash[type]), "the context is in a newly opened store\n");
+            CertCloseStore(ro, 0);
+            ok(!rw_reg_size(type, hash[type]), "closing the read-only store changed the registry\n");
+        }
+        /* A store that asked for automatic resyncs notices changes made through another handle. */
+        {
+            HCERTSTORE c = CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0, CERT_SYSTEM_STORE_CURRENT_USER, rw_store_name);
+            HCERTSTORE d = CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0, CERT_SYSTEM_STORE_CURRENT_USER, rw_store_name);
+
+            ok(c != NULL && d != NULL, "CertOpenStore failed: %08lx\n", GetLastError());
+            if (c && d)
+            {
+                ret = CertControlStore(d, 0, CERT_STORE_CTRL_AUTO_RESYNC, NULL);
+                ok(ret, "CertControlStore failed: %08lx\n", GetLastError());
+                ok(!rw_has(d, type, hash[type]), "the context is already in the store\n");
+                ret = rw_add(c, type, CERT_STORE_ADD_ALWAYS);
+                ok(ret, "adding failed: %08lx\n", GetLastError());
+                ok(rw_wait_for(d, type, hash[type], TRUE), "the context did not show up in the store that resyncs automatically\n");
+                ret = rw_delete(c, type, hash[type]);
+                ok(ret, "deleting failed: %08lx\n", GetLastError());
+                ok(rw_wait_for(d, type, hash[type], FALSE), "the context did not go from the store that resyncs automatically\n");
+            }
+            if (c) CertCloseStore(c, 0);
+            if (d) CertCloseStore(d, 0);
+        }
+        CertCloseStore(a, 0);
+        CertCloseStore(b, 0);
+        winetest_pop_context();
+    }
+    CertOpenStore(CERT_STORE_PROV_SYSTEM_REGISTRY_W, 0, 0, CERT_SYSTEM_STORE_CURRENT_USER | CERT_STORE_DELETE_FLAG,
+     rw_store_name);
+    SHDeleteKeyW(HKEY_CURRENT_USER, rw_store_path);
+}
+
 static void testSystemStore(void)
 {
     HCERTSTORE store;
@@ -3335,6 +3739,7 @@ START_TEST(store)
 
     testRegStore();
     testRegStoreSavedCerts();
+    testRegStoreWriteThrough();
 
     testSystemRegStore();
     testSystemStore();
