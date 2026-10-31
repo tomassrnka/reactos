@@ -372,15 +372,6 @@ static BOOL ImpersonateSystem(void)
     return Done;
 }
 
-static BOOL IsWow64(void)
-{
-    BOOL (WINAPI *pIsWow64Process)(HANDLE, PBOOL) =
-        (PVOID)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "IsWow64Process");
-    BOOL Wow64 = FALSE;
-
-    return pIsWow64Process && pIsWow64Process(GetCurrentProcess(), &Wow64) && Wow64;
-}
-
 static void TestCommon(HANDLE Lsa, ULONG Package, PCWSTR Tag, SECURITY_IMPERSONATION_LEVEL Level, BOOL Full)
 {
     static const WCHAR User[] = L"s4utest1";
@@ -391,12 +382,6 @@ static void TestCommon(HANDLE Lsa, ULONG Package, PCWSTR Tag, SECURITY_IMPERSONA
 
     StringCchPrintfW(What, RTL_NUMBER_OF(What), L"%ls computer name", Tag);
     S4ULogon(Lsa, Package, Network, User, ComputerName, 0, FALSE, &Result);
-    if (Result.Status == NT_STATUS_NOT_SUPPORTED && IsWow64())
-    {
-        /* ReactOS' WoW64 passes only an interactive logon of a 32-bit process on to the LSA */
-        skip("%ls: WoW64 does not pass an S4U logon on\n", Tag);
-        return;
-    }
     ok(Result.Status == STATUS_SUCCESS, "%ls: S4U logon failed: 0x%08lx (sub 0x%08lx)\n", What, Result.Status, Result.SubStatus);
     if (Result.Status == STATUS_SUCCESS)
     {

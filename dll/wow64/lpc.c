@@ -104,6 +104,32 @@ typedef struct
 } WOW64_MSV1_0_INTERACTIVE_LOGON;
 C_ASSERT(sizeof(WOW64_MSV1_0_INTERACTIVE_LOGON) == 28);
 
+/* MSV1_0_S4U_LOGON for i386: the strings hold addresses in the guest, or offsets from the start of the buffer */
+typedef struct
+{
+    ULONG MessageType;
+    ULONG Flags;
+    WOW64_STRING UserPrincipalName, DomainName;
+} WOW64_MSV1_0_S4U_LOGON;
+C_ASSERT(sizeof(WOW64_MSV1_0_S4U_LOGON) == 24);
+
+/* MSV1_0_LM20_LOGON_PROFILE for i386 (the profile of an S4U logon): the times are 8-byte aligned */
+typedef struct
+{
+    ULONG MessageType;
+    LONGLONG KickOffTime, LogoffTime;
+    ULONG UserFlags;
+    UCHAR UserSessionKey[MSV1_0_USER_SESSION_KEY_LENGTH];
+    WOW64_STRING LogonDomainName;
+    UCHAR LanmanSessionKey[MSV1_0_LANMAN_SESSION_KEY_LENGTH];
+    WOW64_STRING LogonServer, UserParameters;
+} WOW64_MSV1_0_LM20_LOGON_PROFILE;
+C_ASSERT(FIELD_OFFSET(WOW64_MSV1_0_LM20_LOGON_PROFILE, KickOffTime) == 8);
+C_ASSERT(FIELD_OFFSET(WOW64_MSV1_0_LM20_LOGON_PROFILE, UserFlags) == 24);
+C_ASSERT(FIELD_OFFSET(WOW64_MSV1_0_LM20_LOGON_PROFILE, LogonDomainName) == 44);
+C_ASSERT(FIELD_OFFSET(WOW64_MSV1_0_LM20_LOGON_PROFILE, LogonServer) == 60);
+C_ASSERT(sizeof(WOW64_MSV1_0_LM20_LOGON_PROFILE) == 80);
+
 typedef struct
 {
     ULONG MessageType;
@@ -211,11 +237,11 @@ NTSTATUS Wow64LpcConnect(ULONG Number, const ULONG *a, HANDLE *Handle, BOOLEAN *
     return Status;
 }
 
-/* The guest's MSV1_0_INTERACTIVE_LOGON in the native layout, in one heap block with its strings.
- * The block holds the password, so it is wiped before it is freed. */
-static NTSTATUS InteractiveLogonFrom32(ULONG Number, ULONG Guest, ULONG Length, PVOID *Native, ULONG *NativeLength)
+/* The guest's MSV1_0_INTERACTIVE_LOGON (the copy made by LogonSubmitFrom32) in the native layout, in one
+ * heap block with its strings. The block holds the password, so it is wiped before it is freed. */
+static NTSTATUS InteractiveLogonFrom32(const WOW64_MSV1_0_INTERACTIVE_LOGON *Captured, PVOID *Native, ULONG *NativeLength)
 {
-    WOW64_MSV1_0_INTERACTIVE_LOGON Logon;
+    const WOW64_MSV1_0_INTERACTIVE_LOGON Logon = *Captured;
     const WOW64_STRING *From[3];
     ULONG Bytes[3];
     UNICODE_STRING *To[3];
@@ -224,25 +250,6 @@ static NTSTATUS InteractiveLogonFrom32(ULONG Number, ULONG Guest, ULONG Length, 
     ULONG Size = sizeof(MSV1_0_INTERACTIVE_LOGON), i;
     NTSTATUS Status = STATUS_SUCCESS;
 
-    if (Length < sizeof(Logon) || !InGuest(Guest, Length))
-        return STATUS_INVALID_PARAMETER;
-    _SEH2_TRY
-    {
-        RtlCopyMemory(&Logon, PTR32(Guest), sizeof(Logon));
-    }
-    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-    {
-        Status = _SEH2_GetExceptionCode();
-    }
-    _SEH2_END;
-    if (!NT_SUCCESS(Status)) return Status;
-    if (Logon.MessageType != MsV1_0InteractiveLogon)
-    {
-        if (Wow64FirstReport(Number, WOW64_UNSUPPORTED_CLASS, Logon.MessageType))
-            DbgPrint("WoW64: unsupported LsaLogonUser logon submit type %lu, pid %lx\n", Logon.MessageType,
-                     HandleToUlong(NtCurrentTeb()->ClientId.UniqueProcess));
-        return STATUS_NOT_SUPPORTED;
-    }
     From[0] = &Logon.LogonDomainName;
     From[1] = &Logon.UserName;
     From[2] = &Logon.Password;
@@ -291,6 +298,122 @@ static NTSTATUS InteractiveLogonFrom32(ULONG Number, ULONG Guest, ULONG Length, 
     return STATUS_SUCCESS;
 }
 
+/* The guest's MSV1_0_S4U_LOGON in the native layout, in one heap block that holds the two strings after
+ * the structure. A string is an address inside the guest's buffer, or an offset from its start, which
+ * is how msv1_0 tells them apart; the same rule picks where the characters are read from, once. A
+ * string that does not lie inside the buffer is passed on with a Buffer outside the block, so msv1_0
+ * rejects it in its own order of checks. */
+static NTSTATUS S4ULogonFrom32(ULONG Guest, ULONG Length, ULONG Captured, const WOW64_MSV1_0_S4U_LOGON *Submit,
+                               PVOID *Native, ULONG *NativeLength)
+{
+    const WOW64_MSV1_0_S4U_LOGON Logon = *Submit;
+    const WOW64_STRING *From[2];
+    UNICODE_STRING *To[2];
+    ULONG Offset[2];
+    BOOLEAN Inside[2];
+    PMSV1_0_S4U_LOGON Blob;
+    PUCHAR Next;
+    ULONG Size = sizeof(MSV1_0_S4U_LOGON), i;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    if (Captured < sizeof(Logon))
+        return STATUS_INVALID_PARAMETER;
+    From[0] = &Logon.UserPrincipalName;
+    From[1] = &Logon.DomainName;
+    for (i = 0; i < 2; ++i)
+    {
+        ULONG64 Address = From[i]->Buffer;
+
+        /* As in msv1_0: an address in the buffer is turned into an offset */
+        Offset[i] = From[i]->Buffer;
+        if (Address >= Guest && Address - Guest <= Length)
+            Offset[i] = (ULONG)(Address - Guest);
+        Inside[i] = Offset[i] <= Length && From[i]->Length <= Length - Offset[i];
+        if (Inside[i]) Size += From[i]->Length;
+    }
+    Blob = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, Size);
+    if (!Blob) return STATUS_NO_MEMORY;
+    Blob->MessageType = MsV1_0S4ULogon;
+    Blob->Flags = Logon.Flags;
+    To[0] = &Blob->UserPrincipalName;
+    To[1] = &Blob->DomainName;
+    Next = (PUCHAR)(Blob + 1);
+    _SEH2_TRY
+    {
+        for (i = 0; i < 2; ++i)
+        {
+            To[i]->Length = From[i]->Length;
+            To[i]->MaximumLength = From[i]->MaximumLength;
+            if (!From[i]->Buffer)
+                continue; /* a missing string keeps a NULL buffer */
+            if (!Inside[i])
+            {
+                To[i]->Buffer = (PWSTR)~(ULONG_PTR)0;
+                continue;
+            }
+            To[i]->Buffer = (PWSTR)Next;
+            if (From[i]->Length) RtlCopyMemory(Next, PTR32(Guest + Offset[i]), From[i]->Length);
+            Next += From[i]->Length;
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+    if (!NT_SUCCESS(Status))
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Blob);
+        return Status;
+    }
+    *Native = Blob;
+    *NativeLength = Size;
+    return STATUS_SUCCESS;
+}
+
+/* The submit buffer of LsaLogonUser for MSV1_0, which holds the guest's layout of the message the
+ * first ULONG names. Its start is read once, as far as the buffer goes, and every later decision is
+ * made from that copy. */
+static NTSTATUS LogonSubmitFrom32(ULONG Number, ULONG Guest, ULONG Length, PVOID *Native, ULONG *NativeLength)
+{
+    union
+    {
+        ULONG MessageType;
+        WOW64_MSV1_0_INTERACTIVE_LOGON Interactive;
+        WOW64_MSV1_0_S4U_LOGON S4U;
+    } Submit;
+    ULONG Captured;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    if (!Guest || Length < sizeof(ULONG) || !InGuest(Guest, Length))
+        return STATUS_INVALID_PARAMETER;
+    Captured = min(Length, sizeof(Submit));
+    RtlZeroMemory(&Submit, sizeof(Submit));
+    _SEH2_TRY
+    {
+        RtlCopyMemory(&Submit, PTR32(Guest), Captured);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+    if (!NT_SUCCESS(Status)) return Status;
+
+    if (Submit.MessageType == MsV1_0S4ULogon)
+        return S4ULogonFrom32(Guest, Length, Captured, &Submit.S4U, Native, NativeLength);
+    if (Length < sizeof(Submit.Interactive))
+        return STATUS_INVALID_PARAMETER;
+    if (Submit.MessageType != MsV1_0InteractiveLogon)
+    {
+        if (Wow64FirstReport(Number, WOW64_UNSUPPORTED_CLASS, Submit.MessageType))
+            DbgPrint("WoW64: unsupported LsaLogonUser logon submit type %lu, pid %lx\n", Submit.MessageType,
+                     HandleToUlong(NtCurrentTeb()->ClientId.UniqueProcess));
+        return STATUS_NOT_SUPPORTED;
+    }
+    return InteractiveLogonFrom32(&Submit.Interactive, Native, NativeLength);
+}
+
 /* The guest's TOKEN_GROUPS in the native layout; the SIDs stay in guest memory, where lsass reads them */
 static NTSTATUS GroupsFrom32(ULONG Guest, ULONG Count, PTOKEN_GROUPS *Native)
 {
@@ -329,6 +452,59 @@ static NTSTATUS GroupsFrom32(ULONG Guest, ULONG Count, PTOKEN_GROUPS *Native)
     return STATUS_SUCCESS;
 }
 
+/* The MSV1_0_LM20_LOGON_PROFILE of an S4U logon as the guest's layout, in a new block below the
+ * guest's limit with the strings after the structure (the caller frees the native one) */
+static NTSTATUS Lm20ProfileTo32(PVOID Native, ULONG *Guest, ULONG *GuestLength)
+{
+    PMSV1_0_LM20_LOGON_PROFILE From = Native;
+    WOW64_MSV1_0_LM20_LOGON_PROFILE *To;
+    const UNICODE_STRING *Source[3];
+    WOW64_STRING *Target[3];
+    ULONG Bytes[3];
+    SIZE_T Size = sizeof(*To);
+    PUCHAR Next;
+    PVOID Block = NULL;
+    NTSTATUS Status;
+    ULONG i;
+
+    Source[0] = &From->LogonDomainName;
+    Source[1] = &From->LogonServer;
+    Source[2] = &From->UserParameters;
+    for (i = 0; i < 3; ++i)
+    {
+        /* lsass wrote the profile, but the copy never reads past a string's own buffer */
+        Bytes[i] = Source[i]->Buffer ? min(Source[i]->Length, Source[i]->MaximumLength) : 0;
+        if (Source[i]->Buffer) Size += ALIGN_UP_BY(Source[i]->MaximumLength, sizeof(ULONG));
+    }
+    Status = Wow64Allocate(Size, &Block);
+    if (!NT_SUCCESS(Status)) return Status;
+    To = Block;
+    To->MessageType = From->MessageType;
+    To->KickOffTime = From->KickOffTime.QuadPart;
+    To->LogoffTime = From->LogoffTime.QuadPart;
+    To->UserFlags = From->UserFlags;
+    RtlCopyMemory(To->UserSessionKey, From->UserSessionKey, sizeof(To->UserSessionKey));
+    RtlCopyMemory(To->LanmanSessionKey, From->LanmanSessionKey, sizeof(To->LanmanSessionKey));
+    Target[0] = &To->LogonDomainName;
+    Target[1] = &To->LogonServer;
+    Target[2] = &To->UserParameters;
+    Next = (PUCHAR)(To + 1);
+    for (i = 0; i < 3; ++i)
+    {
+        Target[i]->Length = (USHORT)Bytes[i];
+        Target[i]->MaximumLength = Source[i]->MaximumLength;
+        if (Source[i]->Buffer)
+        {
+            Target[i]->Buffer = PtrToUlong(Next);
+            RtlCopyMemory(Next, Source[i]->Buffer, Bytes[i]);
+            Next += ALIGN_UP_BY(Source[i]->MaximumLength, sizeof(ULONG));
+        }
+    }
+    *Guest = PtrToUlong(Block);
+    *GuestLength = (ULONG)Size;
+    return STATUS_SUCCESS;
+}
+
 /* The native profile lsass left in this process, as a guest MSV1_0_INTERACTIVE_PROFILE in a new
  * block below the guest's limit. The native block is freed; the guest frees the new one with
  * LsaFreeReturnBuffer as for any profile. Other profile types are dropped. */
@@ -346,6 +522,11 @@ static NTSTATUS ProfileTo32(PVOID Native, ULONG *Guest, ULONG *GuestLength)
 
     *Guest = 0;
     *GuestLength = 0;
+    if (From->MessageType == MsV1_0Lm20LogonProfile)
+    {
+        Status = Lm20ProfileTo32(Native, Guest, GuestLength);
+        goto Free;
+    }
     if (From->MessageType != MsV1_0InteractiveProfile)
         goto Free;
     Source[0] = &From->LogonScript;
@@ -418,8 +599,8 @@ static NTSTATUS RequestLogonUser(ULONG Number, HANDLE Port, UCHAR *Message, ULON
 
     if (Request.AuthenticationInformationLength)
     {
-        Status = InteractiveLogonFrom32(Number, Request.AuthenticationInformation,
-                                        Request.AuthenticationInformationLength, &AuthInfo, &AuthInfoLength);
+        Status = LogonSubmitFrom32(Number, Request.AuthenticationInformation,
+                                   Request.AuthenticationInformationLength, &AuthInfo, &AuthInfoLength);
         if (!NT_SUCCESS(Status)) return Status;
     }
     Status = GroupsFrom32(Request.LocalGroups, Request.LocalGroupsCount, &Groups);
