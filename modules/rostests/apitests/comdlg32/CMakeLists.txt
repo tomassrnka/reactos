@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     ItemDialog.c
+    PickFolders.c
     PrintDlg.c
     SaveDialogDefExt.c
     SaveDialogFolder.c

@@ -117,6 +117,8 @@ typedef struct
 #define IDS_FILENOTEXISTING		123
 #define IDS_INVALID_FOLDERNAME		124
 #define IDS_PATHTOOLONG		125
+#define IDS_FOLDER_PATHNOTEXIST		126
+#define IDS_FOLDER_NAMENOTVALID		127
 
 /* File Dialog Tooltips string IDs */
 
