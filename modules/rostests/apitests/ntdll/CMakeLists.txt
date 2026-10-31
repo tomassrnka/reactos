@@ -97,6 +97,12 @@ list(APPEND SOURCE
     NtOpenThreadToken.c
     NtProtectVirtualMemory.c
     NtQueryDirectoryFile.c
+    DefineDosDevice.c
+    NtFlushBuffersFile.c
+    NtFsControlFilePipe.c
+    NtFlushVirtualMemory.c
+    NtEaFile.c
+    VolumeControlCodes.c
     NtQueryInformationFile.c
     NtQueryInformationProcess.c
     NtQueryInformationThread.c

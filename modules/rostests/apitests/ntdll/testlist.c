@@ -82,6 +82,12 @@ extern void func_NtOpenProcessToken(void);
 extern void func_NtOpenThreadToken(void);
 extern void func_NtProtectVirtualMemory(void);
 extern void func_NtQueryDirectoryFile(void);
+extern void func_DefineDosDevice(void);
+extern void func_NtFlushBuffersFile(void);
+extern void func_NtFsControlFilePipe(void);
+extern void func_NtFlushVirtualMemory(void);
+extern void func_NtEaFile(void);
+extern void func_VolumeControlCodes(void);
 extern void func_NtQueryInformationFile(void);
 extern void func_NtQueryInformationProcess(void);
 extern void func_NtQueryInformationThread(void);
@@ -291,6 +297,12 @@ const struct test winetest_testlist[] =
     { "NtOpenThreadToken",              func_NtOpenThreadToken },
     { "NtProtectVirtualMemory",         func_NtProtectVirtualMemory },
     { "NtQueryDirectoryFile",           func_NtQueryDirectoryFile },
+    { "DefineDosDevice",                func_DefineDosDevice },
+    { "NtFlushBuffersFile",             func_NtFlushBuffersFile },
+    { "NtFsControlFilePipe",            func_NtFsControlFilePipe },
+    { "NtFlushVirtualMemory",           func_NtFlushVirtualMemory },
+    { "NtEaFile",                       func_NtEaFile },
+    { "VolumeControlCodes",             func_VolumeControlCodes },
     { "NtQueryInformationFile",         func_NtQueryInformationFile },
     { "NtQueryInformationProcess",      func_NtQueryInformationProcess },
     { "NtQueryInformationThread",       func_NtQueryInformationThread },
