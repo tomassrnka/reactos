@@ -120,6 +120,15 @@ CountPairs(
 }
 
 static
+BOOL
+IsWow64(VOID)
+{
+    BOOL Wow64 = FALSE;
+
+    return IsWow64Process(GetCurrentProcess(), &Wow64) && Wow64;
+}
+
+static
 VOID
 test_name_tables(VOID)
 {
@@ -134,6 +143,12 @@ test_name_tables(VOID)
     for (i = 0; i < PERF_ARRAY_SIZE(Names); i++)
     {
         ret = QueryValue(HKEY_PERFORMANCE_DATA, Names[i], &Type, &Size);
+        /* Windows 10 does not know "Counter 0409" to a 32-bit process on a 64-bit system */
+        if (ret == ERROR_FILE_NOT_FOUND && !lstrcmpW(Names[i], L"Counter 0409") && IsWow64())
+        {
+            trace("Counter 0409 is not found in a WoW64 process\n");
+            continue;
+        }
         ok(ret == ERROR_SUCCESS, "%ls: ret = %ld\n", Names[i], ret);
         if (ret != ERROR_SUCCESS)
             continue;
@@ -850,6 +865,83 @@ test_objects(VOID)
     }
 }
 
+/* Reads the 238 block into Buffer and returns the _Total raw % Processor Time counter and the 100 ns time of the block */
+static
+BOOL
+SampleProcessorTime(
+    _Out_ PULONGLONG Data,
+    _Out_ PULONGLONG Time,
+    _Out_ PDWORD CounterType)
+{
+    const PERF_DATA_BLOCK *Header;
+    const PERF_OBJECT_TYPE *Object;
+    const PERF_COUNTER_DEFINITION *Definition;
+    const PERF_COUNTER_BLOCK *Block;
+    const WCHAR *Name;
+    DWORD Type, Size;
+    LONG ret, i;
+
+    ret = QueryValue(HKEY_PERFORMANCE_DATA, L"238", &Type, &Size);
+    ok(ret == ERROR_SUCCESS, "238: ret = %ld\n", ret);
+    if (ret != ERROR_SUCCESS)
+        return FALSE;
+    Header = (const PERF_DATA_BLOCK *)g_Buffer;
+    Object = FindObject(g_Buffer, INDEX_PROCESSOR);
+    ok(Object != NULL, "238: no Processor object\n");
+    if (!Object)
+        return FALSE;
+    Definition = FindCounter(Object, INDEX_PROCESSOR_TIME);
+    ok(Definition != NULL, "238: no %% Processor Time\n");
+    if (!Definition || Definition->CounterSize != 8)
+        return FALSE;
+    for (i = 0; i < Object->NumInstances; i++)
+    {
+        Block = GetInstance(Object, i, &Name);
+        if (Block && Name && !lstrcmpW(Name, L"_Total"))
+        {
+            *Data = ReadValue(Block, Definition);
+            *Time = Header->PerfTime100nSec.QuadPart;
+            *CounterType = Definition->CounterType;
+            return TRUE;
+        }
+    }
+    ok(0, "238: no _Total instance\n");
+    return FALSE;
+}
+
+/*
+ * What .NET and PDH do for % Processor Time (PERF_100NSEC_TIMER_INV): two samples, and
+ * 100 * (1 - delta idle time / delta time). A counter that does not advance reads 100 %.
+ */
+static
+VOID
+test_processor_time(VOID)
+{
+    ULONGLONG Data1, Time1, Data2, Time2;
+    DWORD Type1, Type2;
+    double Percent;
+
+    if (!SampleProcessorTime(&Data1, &Time1, &Type1))
+        return;
+    Sleep(1000);
+    if (!SampleProcessorTime(&Data2, &Time2, &Type2))
+        return;
+
+    ok(Type1 == 0x21510500 && Type2 == Type1, "%% Processor Time types: 0x%lx, 0x%lx\n", Type1, Type2);
+    ok(Time2 > Time1, "PerfTime100nSec did not advance: %I64u, %I64u\n", Time1, Time2);
+    ok(Time2 - Time1 > 5000000 && Time2 - Time1 < 100000000, "1 s sleep, but PerfTime100nSec advanced by %I64u\n", Time2 - Time1);
+    /* a counter that stays 0 is the failure that matters: 0 and 0 give 100 % */
+    ok(Data1 != 0 && Data2 != 0, "_Total idle time is 0: %I64u, %I64u\n", Data1, Data2);
+    ok(Data2 >= Data1, "_Total idle time went back: %I64u, %I64u\n", Data1, Data2);
+    if (Time2 <= Time1)
+        return;
+
+    Percent = 100.0 * (1.0 - (double)(LONGLONG)(Data2 - Data1) / (double)(LONGLONG)(Time2 - Time1));
+    trace("%% Processor Time _Total = %.2f (idle %I64u of %I64u)\n", Percent, Data2 - Data1, Time2 - Time1);
+    /* The idle time is in ticks and a loaded host can make a guest look busy, so only the range is checked, not that it is low */
+    ok(Percent >= -1.0 && Percent <= 100.0, "%% Processor Time _Total = %.2f\n", Percent);
+}
+
 static
 VOID
 test_ansi(VOID)
@@ -957,6 +1049,7 @@ START_TEST(RegPerformanceData)
     test_global();
     test_object_lists();
     test_objects();
+    test_processor_time();
     test_ansi();
     test_open();
 
