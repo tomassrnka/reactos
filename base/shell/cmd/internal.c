@@ -334,6 +334,29 @@ MakeFullPath(TCHAR * DirPath)
         return FALSE;
 
     /* got ERROR_PATH_NOT_FOUND, so try building it up one component at a time */
+    if (p[0] == _T('\\') && p[1] == _T('\\'))
+    {
+        /* \\?\C:\dir, \\.\C:\dir, \\?\UNC\server\share\dir, \\server\share\dir: the root cannot be created */
+        UINT cRoot = 2; /* server and share */
+
+        p += 2;
+        if ((p[0] == _T('?') || p[0] == _T('.')) && p[1] == _T('\\'))
+        {
+            p += 2;
+            if (!_tcsnicmp(p, _T("UNC\\"), 4))
+                p += 4;
+            else
+                cRoot = 0;
+        }
+        while (cRoot-- && p)
+        {
+            p = _tcschr(p, _T('\\'));
+            if (p)
+                p++;
+        }
+        if (!p)
+            return FALSE;
+    }
     if (p[0] && p[1] == _T(':'))
         p += 2;
     while (*p == _T('\\'))
@@ -344,10 +367,14 @@ MakeFullPath(TCHAR * DirPath)
         n = p ? p++ - DirPath : _tcslen(DirPath);
         _tcsncpy(path, DirPath, n);
         path[n] = _T('\0');
-        if ( !CreateDirectory(path, NULL) &&
+        if (!CreateDirectory(path, NULL) &&
             (GetLastError() != ERROR_ALREADY_EXISTS))
         {
-            return FALSE;
+            /* A file system may refuse to create what is there already with another error (sshfs: access denied) */
+            DWORD dwAttr = GetFileAttributes(path);
+
+            if (dwAttr == INVALID_FILE_ATTRIBUTES || !(dwAttr & FILE_ATTRIBUTE_DIRECTORY))
+                return FALSE;
         }
     } while (p != NULL);
 

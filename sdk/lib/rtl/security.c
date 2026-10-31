@@ -1354,7 +1354,13 @@ RtlQuerySecurityObject(IN PSECURITY_DESCRIPTOR ObjectDescriptor,
     }
 
     *ReturnLength = DescriptorLength;
-    return RtlAbsoluteToSelfRelativeSD(&desc, ResultantDescriptor, ReturnLength);
+    Status = RtlAbsoluteToSelfRelativeSD(&desc, ResultantDescriptor, ReturnLength);
+    if (NT_SUCCESS(Status))
+    {
+        /* The length that was needed, not the length of the buffer */
+        *ReturnLength = RtlLengthSecurityDescriptor(ResultantDescriptor);
+    }
+    return Status;
 }
 
 

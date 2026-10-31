@@ -1327,6 +1327,45 @@ CheckDllState:
                                            &DllBase);
             }
 
+            /*
+             * A driver installed outside of the system directories (a side
+             * by side driver under Program Files, say) still resolves its
+             * imports from the system drivers directory (cng.sys etc.)
+             */
+            if ((Status == STATUS_OBJECT_NAME_NOT_FOUND) ||
+                (Status == STATUS_OBJECT_PATH_NOT_FOUND))
+            {
+                static UNICODE_STRING SystemDriversPath =
+                    RTL_CONSTANT_STRING(L"\\SystemRoot\\System32\\drivers\\");
+
+                /* Free the old name buffer */
+                ExFreePoolWithTag(DllName.Buffer, TAG_LDR_WSTR);
+
+                DllName.MaximumLength = SystemDriversPath.Length +
+                                        NameString.Length +
+                                        sizeof(UNICODE_NULL);
+                DllName.Buffer = ExAllocatePoolWithTag(NonPagedPool,
+                                                       DllName.MaximumLength,
+                                                       TAG_LDR_WSTR);
+                if (!DllName.Buffer)
+                {
+                    /* We're out of resources */
+                    Status = STATUS_INSUFFICIENT_RESOURCES;
+                    goto Failure;
+                }
+
+                RtlCopyUnicodeString(&DllName, &SystemDriversPath);
+                RtlAppendUnicodeStringToString(&DllName, &NameString);
+
+                /* Try once again to load the image */
+                Status = MmLoadSystemImage(&DllName,
+                                           NamePrefix,
+                                           NULL,
+                                           FALSE,
+                                           (PVOID *)&DllEntry,
+                                           &DllBase);
+            }
+
             if (!NT_SUCCESS(Status))
             {
                 /* Fill out the information for the error */

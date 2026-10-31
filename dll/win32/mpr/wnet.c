@@ -1482,6 +1482,9 @@ static DWORD _enumerateConnectedW(PWNetEnumerator enumerator, DWORD* user_count,
             ret = providerTable->table[index].enumResource(handles[index],
                                                            &count, buffer,
                                                            &size);
+            /* A provider with nothing more to return leaves the count it was given (-1 for all) alone */
+            if (ret != WN_SUCCESS && ret != WN_MORE_DATA)
+                count = 0;
             total_count += count;
             if (ret == WN_MORE_DATA)
                 break;

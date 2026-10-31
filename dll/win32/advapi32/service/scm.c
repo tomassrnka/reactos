@@ -3533,9 +3533,17 @@ QueryServiceObjectSecurity(SC_HANDLE hService,
                            LPDWORD pcbBytesNeeded)
 {
     DWORD dwError;
+    BYTE Dummy;
 
     TRACE("QueryServiceObjectSecurity(%p %lu %p)\n",
            hService, dwSecurityInformation, lpSecurityDescriptor);
+
+    /* A NULL buffer asks for the size: the RPC stub does not take a NULL output pointer */
+    if (lpSecurityDescriptor == NULL)
+    {
+        lpSecurityDescriptor = (PSECURITY_DESCRIPTOR)&Dummy;
+        cbBufSize = 0;
+    }
 
     RpcTryExcept
     {

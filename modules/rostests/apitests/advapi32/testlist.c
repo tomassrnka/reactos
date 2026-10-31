@@ -35,6 +35,7 @@ extern void func_NetUserChangePassword(void);
 extern void func_ProcessThreadLabel(void);
 extern void func_QueryServiceConfig(void);
 extern void func_QueryServiceConfig2(void);
+extern void func_QueryServiceObjectSecurity(void);
 extern void func_RegConcurrentWrite(void);
 extern void func_RegCreateKeyEx(void);
 extern void func_RegCreateKeyTransacted(void);
@@ -127,6 +128,7 @@ const struct test winetest_testlist[] =
     { "ProcessThreadLabel", func_ProcessThreadLabel },
     { "QueryServiceConfig", func_QueryServiceConfig },
     { "QueryServiceConfig2", func_QueryServiceConfig2 },
+    { "QueryServiceObjectSecurity", func_QueryServiceObjectSecurity },
     { "RegConcurrentWrite", func_RegConcurrentWrite },
     { "RegCreateKeyEx", func_RegCreateKeyEx },
     { "RegCreateKeyTransacted", func_RegCreateKeyTransacted },

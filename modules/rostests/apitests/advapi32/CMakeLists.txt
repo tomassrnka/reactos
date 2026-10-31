@@ -34,6 +34,7 @@ list(APPEND SOURCE
     ProcessThreadLabel.c
     QueryServiceConfig.c
     QueryServiceConfig2.c
+    QueryServiceObjectSecurity.c
     RegConcurrentWrite.c
     RegCreateKeyEx.c
     RegCreateKeyTransacted.c
