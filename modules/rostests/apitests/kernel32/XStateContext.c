@@ -492,7 +492,8 @@ static void TestMalformed(void)
             { "legacy offset 0",     0, 0 },
             { "legacy offset +8",    0, 8 },
             { "legacy length 0",     1, 0 },
-            { "legacy length 0xcc",  1, 0xcc },
+            { "legacy length +4",    1, (LONG)(sizeof(CONTEXT) + 4) },
+            { "legacy length -4",    1, (LONG)(sizeof(CONTEXT) - 4) },
             { "legacy length big",   1, 0x7fffffff },
             { "all offset 0",        2, 0 },
             { "all offset -8",       2, -(LONG)sizeof(CONTEXT) - 8 },
@@ -676,8 +677,9 @@ static void TestException(void)
 /*
  * An exception raised close to the end of the stack. The frame with the extended state is a few KB larger than the
  * one without it; when only that part does not fit, the exception has to be dispatched without it, not turned into
- * a stack overflow. A thread recurses until it is Distance bytes above the end of its stack and raises there. The
- * results over decreasing distances have to run: with the extended state, without it, stack overflow.
+ * a stack overflow. A thread recurses until it is Distance bytes above the end of its stack and raises there. Close
+ * to the end the results are with the extended state, then (in a window of a few KB) without it, then stack overflow;
+ * a few distances in between may overflow because of where the guard page is.
  */
 #define XSC_DEEP_NONE     0
 #define XSC_DEEP_XSTATE   1
@@ -737,9 +739,14 @@ static void TestStackEnd(void)
     ULONG Count = 0, i, Xs = 0, Plain = 0, Over = 0;
     SIZE_T Distance;
     PVOID Handler;
-    BOOL Ordered = TRUE;
+    LONG LastXs = -1, FirstPlain = -1;
 
     pNtTerminateThread = (PFN_NtTerminateThread)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtTerminateThread");
+#if !defined(__x86_64__)
+    /* The WOW64 guest has its own frames and does not survive a stack overflow in the handler */
+    skip("the stack end is tested on amd64 only\n");
+    return;
+#endif
     if (!is_reactos() || !pNtTerminateThread)
     {
         skip("the frame sizes of the stack end are ReactOS specific\n");
@@ -763,15 +770,13 @@ static void TestStackEnd(void)
     for (i = 0; i < Count; i++)
     {
         trace("stack end, distance 0x%lx: %ld\n", (ULONG)(0x5000 - i * 0x80), Sequence[i]);
-        if (Sequence[i] == XSC_DEEP_XSTATE) Xs++;
-        else if (Sequence[i] == XSC_DEEP_PLAIN) Plain++;
+        if (Sequence[i] == XSC_DEEP_XSTATE) { Xs++; LastXs = i; }
+        else if (Sequence[i] == XSC_DEEP_PLAIN) { Plain++; if (FirstPlain < 0) FirstPlain = i; }
         else Over++;
-        if (i && Sequence[i] < Sequence[i - 1] && Sequence[i - 1] != XSC_DEEP_NONE)
-            Ordered = FALSE;
     }
     trace("stack end: %lu with the extended state, %lu without, %lu overflow or none\n", Xs, Plain, Over);
     ok(Xs != 0, "no exception had room for the extended state\n");
-    ok(Ordered, "the results do not go from the extended state to a plain frame to the overflow\n");
+    ok(FirstPlain < 0 || LastXs < FirstPlain, "a frame with the extended state was dispatched after one without it\n");
     ok(Plain != 0, "an exception whose frame fits without the extended state was not dispatched\n");
 }
 #endif /* __GNUC__ */
