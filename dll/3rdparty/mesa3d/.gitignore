@@ -4,3 +4,5 @@
 # Staged at configure time by stage-i386-llvm.sh for SysWOW64 (fetched from S3, never committed; 73 MB DLL).
 /i386-llvm/
 /.stage-i386-llvm.lock
+# Temporary directories of the staging scripts (renamed to amd64-llvm/ or i386-llvm/ once verified)
+/.stage-*.tmp.*/

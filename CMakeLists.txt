@@ -406,4 +406,10 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
     file(MAKE_DIRECTORY ${REACTOS_BINARY_DIR}/sdk/include/reactos)
 
     add_dependency_footer()
+
+    # Which Mesa3D driver the image gets (llvmpipe or the softpipe fallback), one line per architecture
+    get_property(_mesa3d_status GLOBAL PROPERTY MESA3D_STATUS_LINES)
+    foreach(_line ${_mesa3d_status})
+        message(STATUS "${_line}")
+    endforeach()
 endif()
