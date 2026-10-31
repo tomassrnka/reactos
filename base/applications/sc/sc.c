@@ -46,6 +46,7 @@ ScControl(LPCTSTR Server,       // remote machine name
           DWORD ArgCount)       // argument counter
 {
     LPCTSTR ServiceName = NULL;
+    INT nResult = 0;
 
     if (Server)
     {
@@ -324,12 +325,50 @@ ScControl(LPCTSTR Server,       // remote machine name
         else
             EnumDependUsage();
     }
+    else if (!lstrcmpi(Command, _T("privs")))
+    {
+        if (ArgCount > 1)
+            nResult = (INT)SetPrivileges(ServiceArgs[0], ServiceArgs[1]);
+        else
+            SetPrivilegesUsage();
+    }
+    else if (!lstrcmpi(Command, _T("qprivs")))
+    {
+        if (ArgCount > 0)
+            nResult = (INT)QueryPrivileges(ServiceArgs[0], (ArgCount > 1) ? ServiceArgs[1] : NULL);
+        else
+            QueryPrivilegesUsage();
+    }
+    else if (!lstrcmpi(Command, _T("triggerinfo")))
+    {
+        if (ArgCount > 1)
+        {
+            nResult = (INT)SetTriggerInfo(ServiceArgs[0], ServiceArgs + 1, ArgCount - 1);
+        }
+        else
+        {
+            SetTriggerInfoUsage();
+            nResult = ERROR_INVALID_COMMAND_LINE;
+        }
+    }
+    else if (!lstrcmpi(Command, _T("qtriggerinfo")))
+    {
+        if (ArgCount > 0)
+        {
+            nResult = (INT)QueryTriggerInfo(ServiceArgs[0], (ArgCount > 1) ? ServiceArgs[1] : NULL);
+        }
+        else
+        {
+            QueryTriggerInfoUsage();
+            nResult = ERROR_INVALID_COMMAND_LINE;
+        }
+    }
     else
     {
         MainUsage();
     }
 
-    return 0;
+    return nResult;
 }
 
 int _tmain(int argc, LPCTSTR argv[])

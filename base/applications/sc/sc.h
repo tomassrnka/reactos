@@ -55,6 +55,15 @@ BOOL GetDisplayName(LPCTSTR ServiceName);
 BOOL GetKeyName(LPCTSTR ServiceName);
 BOOL EnumDepend(LPCTSTR ServiceName);
 
+/* privs.c and triggerinfo.c: they return the error code of what failed (what sc exits with) */
+DWORD SetPrivileges(LPCTSTR ServiceName, LPCTSTR Privileges);
+DWORD QueryPrivileges(LPCTSTR ServiceName, LPCTSTR BufferSize);
+DWORD SetTriggerInfo(LPCTSTR ServiceName, LPCTSTR *Options, INT OptionCount);
+DWORD QueryTriggerInfo(LPCTSTR ServiceName, LPCTSTR BufferSize);
+VOID ReportApiFailure(LPCTSTR pszApi, DWORD dwError);
+DWORD OpenServiceForConfig(LPCTSTR ServiceName, DWORD dwAccess, SC_HANDLE *phManager, SC_HANDLE *phService);
+DWORD QueryConfigLevel(SC_HANDLE hService, DWORD dwInfoLevel, LPCTSTR BufferSize, LPBYTE *ppBuffer);
+
 /* print and error functions */
 VOID PrintService(LPCTSTR ServiceName, LPCTSTR DisplayName, LPSERVICE_STATUS_PROCESS pStatus, BOOL bExtended);
 VOID PrintServiceStatus(LPSERVICE_STATUS pStatus);
@@ -96,5 +105,9 @@ VOID SetFailureUsage(VOID);
 VOID GetDisplayNameUsage(VOID);
 VOID GetKeyNameUsage(VOID);
 VOID EnumDependUsage(VOID);
+VOID SetPrivilegesUsage(VOID);
+VOID QueryPrivilegesUsage(VOID);
+VOID SetTriggerInfoUsage(VOID);
+VOID QueryTriggerInfoUsage(VOID);
 
 #endif /* _SC_PCH_ */
