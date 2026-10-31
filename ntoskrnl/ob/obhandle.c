@@ -3705,4 +3705,44 @@ ObIsKernelHandle(IN HANDLE Handle)
     return ObpIsKernelHandle(Handle, KernelMode);
 }
 
+/*
+ * @implemented
+ *
+ * Succeeds when both handles (pseudo handles included) refer to the same object, with
+ * STATUS_NOT_SAME_OBJECT otherwise. Neither handle needs any access.
+ */
+NTSTATUS
+NTAPI
+NtCompareObjects(IN HANDLE FirstObjectHandle,
+                 IN HANDLE SecondObjectHandle)
+{
+    PVOID FirstObject, SecondObject;
+    KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+    NTSTATUS Status;
+    PAGED_CODE();
+
+    Status = ObReferenceObjectByHandle(FirstObjectHandle,
+                                       0,
+                                       NULL,
+                                       PreviousMode,
+                                       &FirstObject,
+                                       NULL);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    Status = ObReferenceObjectByHandle(SecondObjectHandle,
+                                       0,
+                                       NULL,
+                                       PreviousMode,
+                                       &SecondObject,
+                                       NULL);
+    if (NT_SUCCESS(Status))
+    {
+        Status = (FirstObject == SecondObject) ? STATUS_SUCCESS : STATUS_NOT_SAME_OBJECT;
+        ObDereferenceObject(SecondObject);
+    }
+
+    ObDereferenceObject(FirstObject);
+    return Status;
+}
+
 /* EOF */

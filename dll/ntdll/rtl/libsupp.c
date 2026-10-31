@@ -1718,6 +1718,30 @@ RtlGetTickCount(VOID)
     return KiTickCountToMs(TickCount);
 }
 
+/*
+ * @implemented
+ *
+ * The transaction handle of the thread (NTFS transactions, TxF) is only kept in the TEB.
+ */
+PVOID
+NTAPI
+RtlGetCurrentTransaction(VOID)
+{
+    return NtCurrentTeb()->CurrentTransactionHandle;
+}
+
+/*
+ * @implemented
+ */
+LOGICAL
+NTAPI
+RtlSetCurrentTransaction(
+    _In_opt_ PVOID TransactionHandle)
+{
+    NtCurrentTeb()->CurrentTransactionHandle = TransactionHandle;
+    return TRUE;
+}
+
 /* EOF */
 
 #ifdef BUILD_WOW64_ENABLED

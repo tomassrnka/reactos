@@ -57,6 +57,12 @@ extern void func_DefaultActCtx(void);
 extern void func_DiscardVirtualMemory(void);
 extern void func_DeleteTimerQueueEx(void);
 extern void func_DeriveCapabilitySidsFromName(void);
+extern void func_CallbackCompletion(void);
+extern void func_GetAppContainerNamedObjectPath(void);
+extern void func_CompareObjectHandles(void);
+extern void func_CancelSynchronousIo(void);
+extern void func_IsWow64Process2(void);
+extern void func_VirtualAllocExNuma(void);
 extern void func_DeviceIoControl(void);
 extern void func_DllInitParentPrecondition(void);
 extern void func_dosdev(void);
@@ -251,6 +257,12 @@ const struct test winetest_testlist[] =
     { "DiscardVirtualMemory", func_DiscardVirtualMemory },
     { "DeleteTimerQueueEx",          func_DeleteTimerQueueEx },
     { "DeriveCapabilitySidsFromName", func_DeriveCapabilitySidsFromName },
+    { "CallbackCompletion", func_CallbackCompletion },
+    { "GetAppContainerNamedObjectPath", func_GetAppContainerNamedObjectPath },
+    { "CompareObjectHandles", func_CompareObjectHandles },
+    { "CancelSynchronousIo", func_CancelSynchronousIo },
+    { "IsWow64Process2", func_IsWow64Process2 },
+    { "VirtualAllocExNuma", func_VirtualAllocExNuma },
     { "DeviceIoControl",             func_DeviceIoControl },
     { "DllInitParentPrecondition",   func_DllInitParentPrecondition },
     { "dosdev",                      func_dosdev },

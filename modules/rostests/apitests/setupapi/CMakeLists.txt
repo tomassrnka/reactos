@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     CM_Is_Dock_Station_Present.c
+    CM_Get_DevNode_Property.c
     CM_Register_Notification.c
     devclass.c
     RootBusDisable.c

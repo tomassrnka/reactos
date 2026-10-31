@@ -27,6 +27,7 @@ extern void func_wcstoul(void);
 extern void func_wcstombs(void);
 
 extern void func_CommitCharge(void);
+extern void func_RtlCurrentTransaction(void);
 extern void func_CreatorAccess(void);
 extern void func_DllLoadNotification(void);
 extern void func_EmptyPxeFree(void);
@@ -243,6 +244,7 @@ const struct test winetest_testlist[] =
     { "wcstombs", func_wcstombs },
 
     { "CommitCharge",                   func_CommitCharge },
+    { "RtlCurrentTransaction",          func_RtlCurrentTransaction },
     { "CreatorAccess",                  func_CreatorAccess },
     { "DllLoadNotification",            func_DllLoadNotification },
     { "EmptyPxeFree",                   func_EmptyPxeFree },

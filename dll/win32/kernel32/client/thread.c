@@ -1928,7 +1928,7 @@ SetThreadInformation(
 
 /* EOF */
 
-#if defined(BUILD_WOW64_ENABLED) || defined(SYSWOW64_GUEST)
+#if defined(_WIN64) || defined(BUILD_WOW64_ENABLED) || defined(SYSWOW64_GUEST)
 BOOL WINAPI Wow64GetThreadContext(HANDLE Thread, PWOW64_CONTEXT Context)
 {
 #ifdef _WIN64

@@ -67,6 +67,8 @@
 @ stdcall CM_Get_DevNode_Registry_PropertyW(long long ptr ptr ptr long) setupapi.CM_Get_DevNode_Registry_PropertyW
 @ stdcall CM_Get_DevNode_Registry_Property_ExA(long long ptr ptr ptr long long) setupapi.CM_Get_DevNode_Registry_Property_ExA
 @ stdcall CM_Get_DevNode_Registry_Property_ExW(long long ptr ptr ptr long long) setupapi.CM_Get_DevNode_Registry_Property_ExW
+@ stdcall -version=0x600+ CM_Get_DevNode_PropertyW(long ptr ptr ptr ptr long) setupapi.CM_Get_DevNode_PropertyW
+@ stdcall -version=0x600+ CM_Get_DevNode_Property_ExW(long ptr ptr ptr ptr long ptr) setupapi.CM_Get_DevNode_Property_ExW
 @ stdcall CM_Get_DevNode_Status(ptr ptr long long) setupapi.CM_Get_DevNode_Status
 @ stdcall CM_Get_DevNode_Status_Ex(ptr ptr long long long) setupapi.CM_Get_DevNode_Status_Ex
 @ stdcall CM_Get_Device_IDA(long str long long) setupapi.CM_Get_Device_IDA

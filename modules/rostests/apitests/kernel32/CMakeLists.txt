@@ -54,6 +54,12 @@ list(APPEND SOURCE
     DiscardVirtualMemory.c
     DeleteTimerQueueEx.c
     DeriveCapabilitySidsFromName.c
+    CallbackCompletion.c
+    GetAppContainerNamedObjectPath.c
+    CompareObjectHandles.c
+    CancelSynchronousIo.c
+    IsWow64Process2.c
+    VirtualAllocExNuma.c
     DeviceIoControl.c
     DllInitParentPrecondition.c
     dosdev.c

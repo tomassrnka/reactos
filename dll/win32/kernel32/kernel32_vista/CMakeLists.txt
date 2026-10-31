@@ -8,6 +8,8 @@ spec2def(kernel32_vista.dll kernel32_vista.spec ADD_IMPORTLIB)
 
 list(APPEND SOURCE
     CancelIoEx.c
+    CancelSynchronousIo.c
+    CompareObjectHandles.c
     DiscardVirtualMemory.c
     EnumSystemLocalesEx.c
     firmware.c

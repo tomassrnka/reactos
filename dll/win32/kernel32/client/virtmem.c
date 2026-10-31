@@ -57,6 +57,40 @@ VirtualAllocEx(IN HANDLE hProcess,
     return lpAddress;
 }
 
+BOOL WINAPI GetNumaHighestNodeNumber(OUT PULONG HighestNodeNumber);
+
+/*
+ * @implemented
+ *
+ * The preferred NUMA node must exist (or be NUMA_NO_PREFERRED_NODE), else this is an invalid parameter as on
+ * Windows; the memory is then allocated as VirtualAllocEx does, without a preference.
+ */
+LPVOID
+NTAPI
+VirtualAllocExNuma(IN HANDLE hProcess,
+                   IN LPVOID lpAddress,
+                   IN SIZE_T dwSize,
+                   IN DWORD flAllocationType,
+                   IN DWORD flProtect,
+                   IN DWORD nndPreferred)
+{
+    ULONG HighestNode;
+
+    if (nndPreferred != 0xFFFFFFFF)
+    {
+        if (!GetNumaHighestNodeNumber(&HighestNode))
+            return NULL;
+
+        if (nndPreferred > HighestNode)
+        {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return NULL;
+        }
+    }
+
+    return VirtualAllocEx(hProcess, lpAddress, dwSize, flAllocationType, flProtect);
+}
+
 /*
  * @implemented
  */

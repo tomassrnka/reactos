@@ -3,6 +3,7 @@
 #include <apitest.h>
 
 extern void func_CM_Is_Dock_Station_Present(void);
+extern void func_CM_Get_DevNode_Property(void);
 extern void func_CM_Register_Notification(void);
 extern void func_devclass(void);
 extern void func_RootBusDisable(void);
@@ -16,6 +17,7 @@ extern void func_SetupInstallServicesFromInfSectionEx(void);
 const struct test winetest_testlist[] =
 {
     { "CM_Is_Dock_Station_Present", func_CM_Is_Dock_Station_Present },
+    { "CM_Get_DevNode_Property", func_CM_Get_DevNode_Property },
     { "CM_Register_Notification", func_CM_Register_Notification },
     { "devclass", func_devclass },
     { "RootBusDisable", func_RootBusDisable },

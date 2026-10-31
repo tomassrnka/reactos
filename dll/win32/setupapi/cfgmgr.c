@@ -3657,6 +3657,135 @@ CM_Get_DevNode_Registry_Property_ExW(
 }
 
 
+CONFIGRET
+WINAPI
+CM_Get_DevNode_Property_ExW(
+    _In_ DEVINST dnDevInst,
+    _In_ CONST DEVPROPKEY *PropertyKey,
+    _Out_ DEVPROPTYPE *PropertyType,
+    _Out_writes_bytes_opt_(*PropertyBufferSize) PBYTE PropertyBuffer,
+    _Inout_ PULONG PropertyBufferSize,
+    _In_ ULONG ulFlags,
+    _In_opt_ HMACHINE hMachine);
+
+
+/***********************************************************************
+ * CM_Get_DevNode_PropertyW [SETUPAPI.@]
+ */
+CONFIGRET
+WINAPI
+CM_Get_DevNode_PropertyW(
+    _In_ DEVINST dnDevInst,
+    _In_ CONST DEVPROPKEY *PropertyKey,
+    _Out_ DEVPROPTYPE *PropertyType,
+    _Out_writes_bytes_opt_(*PropertyBufferSize) PBYTE PropertyBuffer,
+    _Inout_ PULONG PropertyBufferSize,
+    _In_ ULONG ulFlags)
+{
+    TRACE("CM_Get_DevNode_PropertyW(%lx %p %p %p %p %lx)\n",
+          dnDevInst, PropertyKey, PropertyType, PropertyBuffer, PropertyBufferSize, ulFlags);
+
+    return CM_Get_DevNode_Property_ExW(dnDevInst, PropertyKey, PropertyType, PropertyBuffer,
+                                       PropertyBufferSize, ulFlags, NULL);
+}
+
+
+/***********************************************************************
+ * CM_Get_DevNode_Property_ExW [SETUPAPI.@]
+ *
+ * The properties of SetupDiGetDevicePropertyW, read through a device information set of the one devnode.
+ * A property the devnode does not have (or the key is not known) is CR_NO_SUCH_VALUE and sets the size to zero,
+ * a buffer that is too small is CR_BUFFER_SMALL with the type and the size set (measured on Windows 10 22H2).
+ */
+CONFIGRET
+WINAPI
+CM_Get_DevNode_Property_ExW(
+    _In_ DEVINST dnDevInst,
+    _In_ CONST DEVPROPKEY *PropertyKey,
+    _Out_ DEVPROPTYPE *PropertyType,
+    _Out_writes_bytes_opt_(*PropertyBufferSize) PBYTE PropertyBuffer,
+    _Inout_ PULONG PropertyBufferSize,
+    _In_ ULONG ulFlags,
+    _In_opt_ HMACHINE hMachine)
+{
+    WCHAR DeviceId[MAX_DEVICE_ID_LEN];
+    SP_DEVINFO_DATA DeviceInfoData;
+    PCWSTR MachineName = NULL;
+    HDEVINFO DeviceInfoSet;
+    DEVPROPTYPE Type = DEVPROP_TYPE_EMPTY;
+    DWORD Required = 0, Error;
+    CONFIGRET ret;
+
+    TRACE("CM_Get_DevNode_Property_ExW(%lx %p %p %p %p %lx %p)\n",
+          dnDevInst, PropertyKey, PropertyType, PropertyBuffer, PropertyBufferSize, ulFlags, hMachine);
+
+    if (!PropertyType || !PropertyBufferSize || (!PropertyBuffer && *PropertyBufferSize))
+        return CR_INVALID_POINTER;
+
+    if (ulFlags != 0)
+        return CR_INVALID_FLAG;
+
+    if (!PropertyKey)
+        return CR_FAILURE;
+
+    if (dnDevInst == 0)
+        return CR_INVALID_DEVNODE;
+
+    /* A number that is no devnode of the machine */
+    if (CM_Get_Device_ID_ExW(dnDevInst, DeviceId, ARRAYSIZE(DeviceId), 0, hMachine) != CR_SUCCESS)
+        return CR_INVALID_DEVNODE;
+
+    if (hMachine && !((PMACHINE_INFO)hMachine)->bLocal)
+        MachineName = ((PMACHINE_INFO)hMachine)->szMachineName;
+
+    DeviceInfoSet = SetupDiCreateDeviceInfoListExW(NULL, NULL, MachineName, NULL);
+    if (DeviceInfoSet == INVALID_HANDLE_VALUE)
+        return CR_FAILURE;
+
+    DeviceInfoData.cbSize = sizeof(DeviceInfoData);
+    if (!SetupDiOpenDeviceInfoW(DeviceInfoSet, DeviceId, NULL, 0, &DeviceInfoData))
+    {
+        SetupDiDestroyDeviceInfoList(DeviceInfoSet);
+        return CR_INVALID_DEVNODE;
+    }
+
+    if (SetupDiGetDevicePropertyW(DeviceInfoSet, &DeviceInfoData, PropertyKey, &Type, PropertyBuffer,
+                                  *PropertyBufferSize, &Required, 0))
+    {
+        Error = ERROR_SUCCESS;
+    }
+    else
+    {
+        Error = GetLastError();
+    }
+    SetupDiDestroyDeviceInfoList(DeviceInfoSet);
+
+    switch (Error)
+    {
+        case ERROR_SUCCESS:
+            ret = CR_SUCCESS;
+            break;
+
+        case ERROR_INSUFFICIENT_BUFFER:
+            ret = CR_BUFFER_SMALL;
+            break;
+
+        case ERROR_NOT_FOUND:
+        case ERROR_INVALID_REG_PROPERTY:
+        case ERROR_INVALID_DATA:
+            *PropertyBufferSize = 0;
+            return CR_NO_SUCH_VALUE;
+
+        default:
+            return CR_FAILURE;
+    }
+
+    *PropertyType = Type;
+    *PropertyBufferSize = Required;
+    return ret;
+}
+
+
 /***********************************************************************
  * CM_Get_DevNode_Status [SETUPAPI.@]
  */

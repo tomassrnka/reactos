@@ -2101,6 +2101,72 @@ IsWow64Process(IN HANDLE hProcess,
 /*
  * @implemented
  */
+BOOL
+WINAPI
+IsWow64Process2(IN HANDLE hProcess,
+                OUT USHORT *pProcessMachine,
+                OUT USHORT *pNativeMachine OPTIONAL)
+{
+    ULONG_PTR Wow64Information = 0;
+    SYSTEM_PROCESSOR_INFORMATION ProcessorInfo;
+    USHORT NativeMachine;
+    NTSTATUS Status;
+
+    /* A NULL handle is not rejected: it reads as a native process */
+    if (hProcess)
+    {
+        Status = NtQueryInformationProcess(hProcess,
+                                           ProcessWow64Information,
+                                           &Wow64Information,
+                                           sizeof(Wow64Information),
+                                           NULL);
+        if (!NT_SUCCESS(Status))
+        {
+            BaseSetLastNTError(Status);
+            return FALSE;
+        }
+    }
+
+    /* The machine the system runs on, not the one this process emulates */
+    Status = RtlGetNativeSystemInformation(SystemProcessorInformation,
+                                           &ProcessorInfo,
+                                           sizeof(ProcessorInfo),
+                                           NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    switch (ProcessorInfo.ProcessorArchitecture)
+    {
+        case PROCESSOR_ARCHITECTURE_AMD64:
+            NativeMachine = IMAGE_FILE_MACHINE_AMD64;
+            break;
+        case PROCESSOR_ARCHITECTURE_ARM64:
+            NativeMachine = IMAGE_FILE_MACHINE_ARM64;
+            break;
+        case PROCESSOR_ARCHITECTURE_ARM:
+            NativeMachine = IMAGE_FILE_MACHINE_ARMNT;
+            break;
+        case PROCESSOR_ARCHITECTURE_IA64:
+            NativeMachine = IMAGE_FILE_MACHINE_IA64;
+            break;
+        default:
+            NativeMachine = IMAGE_FILE_MACHINE_I386;
+            break;
+    }
+
+    /* The only guest ReactOS runs is 32-bit x86 */
+    *pProcessMachine = Wow64Information ? IMAGE_FILE_MACHINE_I386 : IMAGE_FILE_MACHINE_UNKNOWN;
+    if (pNativeMachine)
+        *pNativeMachine = NativeMachine;
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
 LPSTR
 WINAPI
 GetCommandLineA(VOID)

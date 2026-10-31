@@ -10,6 +10,7 @@ list(APPEND SOURCE
     CharFuncs.c
     CloseWindow.c
     CopyImage.c
+    CalculatePopupWindowPosition.c
     CreateDialog.c
     CreateIconFromResourceEx.c
     CreateWindowEx.c
