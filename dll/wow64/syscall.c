@@ -2248,8 +2248,26 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         {
         case TokenType: case TokenImpersonationLevel: case TokenStatistics:
         case TokenPrivileges: case TokenSessionId: case TokenElevationType:
-        case TokenElevation: case TokenIsAppContainer:
+        case TokenElevation: case TokenIsAppContainer: case TokenHasRestrictions:
+        case TokenVirtualizationAllowed: case TokenVirtualizationEnabled:
+        case TokenUIAccess: case TokenMandatoryPolicy:
             return NtQueryInformationToken(H(0), a[1], P(2), a[3], P(4));
+        case TokenLinkedToken:
+        {
+            /* A 32-bit caller passes the size of its own handle, 4 bytes (measured on Windows
+             * WOW64: any other length is STATUS_INFO_LENGTH_MISMATCH, and the token is
+             * checked next). The kernel answers for its 8 byte handle. */
+            HANDLE Linked = NULL;
+            ULONG Bytes = 0;
+            PROBE(4);
+            if (a[3] != sizeof(ULONG)) { U(4) = sizeof(ULONG); return STATUS_INFO_LENGTH_MISMATCH; }
+            Status = NtQueryInformationToken(H(0), a[1], &Linked, sizeof(Linked), &Bytes);
+            U(4) = sizeof(ULONG);
+            if (!NT_SUCCESS(Status)) return Status;
+            ProbeOutput(a[2], sizeof(ULONG));
+            *(ULONG *)P(2) = (ULONG)(ULONG_PTR)Linked;
+            return STATUS_SUCCESS;
+        }
         case TokenGroups: case TokenRestrictedSids: case TokenLogonSid:
             return TokenGroups32(H(0), a[1], a[2], a[3], a[4], Cleanup);
         case TokenDefaultDacl:
