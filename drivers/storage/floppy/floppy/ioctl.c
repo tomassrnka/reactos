@@ -60,6 +60,111 @@ DeviceIoctl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 }
 
 
+/*
+ * Whether answering an IOCTL means reading the media (change line, geometry, write protect).
+ * Everything else is answered from driver state alone and must not touch the controller.
+ */
+static BOOLEAN
+IoctlNeedsMedia(ULONG Code)
+{
+    switch(Code)
+    {
+    case IOCTL_DISK_IS_WRITABLE:
+    case IOCTL_DISK_CHECK_VERIFY:
+    case IOCTL_DISK_GET_DRIVE_GEOMETRY:
+    case IOCTL_DISK_FORMAT_TRACKS:
+    case IOCTL_DISK_FORMAT_TRACKS_EX:
+    case IOCTL_DISK_GET_PARTITION_INFO:
+        return TRUE;
+
+    default:
+        return FALSE;
+    }
+}
+
+
+/*
+ * IOCTLs that do not depend on the media: the mount manager's name and unique ID queries, and
+ * IOCTLs this driver does not implement.
+ *
+ * Without a diskette the change line stays set, so routing these through the media check made every
+ * name query fail (STATUS_IO_DEVICE_ERROR, volume not mounted) after a recalibrate and two head seeks.
+ * The mount manager then never registered the drive, and retried a name query for every drive letter
+ * from A: to Z:, each of them costing two seeks again.
+ */
+static VOID
+DeviceIoctlNoMedia(PDRIVE_INFO DriveInfo, PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    ULONG OutputLength = Stack->Parameters.DeviceIoControl.OutputBufferLength;
+    ULONG Code = Stack->Parameters.DeviceIoControl.IoControlCode;
+    PMOUNTDEV_NAME Name;
+    PMOUNTDEV_UNIQUE_ID UniqueId;
+
+    switch(Code)
+    {
+    case IOCTL_MOUNTDEV_QUERY_UNIQUE_ID:
+        if(OutputLength < sizeof(MOUNTDEV_UNIQUE_ID))
+        {
+            Irp->IoStatus.Status = STATUS_BUFFER_TOO_SMALL;
+            Irp->IoStatus.Information = 0;
+            break;
+        }
+
+        UniqueId = Irp->AssociatedIrp.SystemBuffer;
+        UniqueId->UniqueIdLength = (USHORT)wcslen(&DriveInfo->DeviceNameBuffer[0]) * sizeof(WCHAR);
+
+        if(OutputLength < FIELD_OFFSET(MOUNTDEV_UNIQUE_ID, UniqueId) + UniqueId->UniqueIdLength)
+        {
+            Irp->IoStatus.Status = STATUS_BUFFER_OVERFLOW;
+            Irp->IoStatus.Information = sizeof(MOUNTDEV_UNIQUE_ID);
+            break;
+        }
+
+        RtlCopyMemory(UniqueId->UniqueId, &DriveInfo->DeviceNameBuffer[0],
+                      UniqueId->UniqueIdLength);
+
+        Irp->IoStatus.Status = STATUS_SUCCESS;
+        Irp->IoStatus.Information = FIELD_OFFSET(MOUNTDEV_UNIQUE_ID, UniqueId) + UniqueId->UniqueIdLength;
+        break;
+
+    case IOCTL_MOUNTDEV_QUERY_DEVICE_NAME:
+        if(OutputLength < sizeof(MOUNTDEV_NAME))
+        {
+            Irp->IoStatus.Status = STATUS_BUFFER_TOO_SMALL;
+            Irp->IoStatus.Information = 0;
+            break;
+        }
+
+        Name = Irp->AssociatedIrp.SystemBuffer;
+        Name->NameLength = (USHORT)wcslen(&DriveInfo->DeviceNameBuffer[0]) * sizeof(WCHAR);
+
+        if(OutputLength < FIELD_OFFSET(MOUNTDEV_NAME, Name) + Name->NameLength)
+        {
+            Irp->IoStatus.Status = STATUS_BUFFER_OVERFLOW;
+            Irp->IoStatus.Information = sizeof(MOUNTDEV_NAME);
+            break;
+        }
+
+        RtlCopyMemory(Name->Name, &DriveInfo->DeviceNameBuffer[0],
+                      Name->NameLength);
+
+        Irp->IoStatus.Status = STATUS_SUCCESS;
+        Irp->IoStatus.Information = FIELD_OFFSET(MOUNTDEV_NAME, Name) + Name->NameLength;
+        break;
+
+    default:
+        ERR_(FLOPPY, "UNKNOWN IOCTL CODE: 0x%x\n", Code);
+        Irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
+        Irp->IoStatus.Information = 0;
+        break;
+    }
+
+    INFO_(FLOPPY, "ioctl: completing with status 0x%x\n", Irp->IoStatus.Status);
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+}
+
+
 VOID NTAPI
 DeviceIoctlPassive(PDRIVE_INFO DriveInfo, PIRP Irp)
 /*
@@ -74,8 +179,6 @@ DeviceIoctlPassive(PDRIVE_INFO DriveInfo, PIRP Irp)
     PVOID OutputBuffer = Irp->AssociatedIrp.SystemBuffer;
     ULONG Code = Stack->Parameters.DeviceIoControl.IoControlCode;
     BOOLEAN DiskChanged;
-    PMOUNTDEV_NAME Name;
-    PMOUNTDEV_UNIQUE_ID UniqueId;
 
     TRACE_(FLOPPY, "DeviceIoctl called\n");
     Irp->IoStatus.Status = STATUS_SUCCESS;
@@ -111,6 +214,15 @@ DeviceIoctlPassive(PDRIVE_INFO DriveInfo, PIRP Irp)
         INFO_(FLOPPY, "Ioctl: completing with STATUS_SUCCESS\n");
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
 
+        return;
+    }
+
+    /*
+     * Then the ones that do not depend on the media at all
+     */
+    if(!IoctlNeedsMedia(Code))
+    {
+        DeviceIoctlNoMedia(DriveInfo, Irp);
         return;
     }
 
@@ -251,61 +363,6 @@ DeviceIoctlPassive(PDRIVE_INFO DriveInfo, PIRP Irp)
         Irp->IoStatus.Information = 0;
         break;
 
-    case IOCTL_MOUNTDEV_QUERY_UNIQUE_ID:
-        if(OutputLength < sizeof(MOUNTDEV_UNIQUE_ID))
-        {
-            Irp->IoStatus.Status = STATUS_BUFFER_TOO_SMALL;
-            Irp->IoStatus.Information = 0;
-            break;
-        }
-
-        UniqueId = Irp->AssociatedIrp.SystemBuffer;
-        UniqueId->UniqueIdLength = (USHORT)wcslen(&DriveInfo->DeviceNameBuffer[0]) * sizeof(WCHAR);
-
-        if(OutputLength < FIELD_OFFSET(MOUNTDEV_UNIQUE_ID, UniqueId) + UniqueId->UniqueIdLength)
-        {
-            Irp->IoStatus.Status = STATUS_BUFFER_OVERFLOW;
-            Irp->IoStatus.Information = sizeof(MOUNTDEV_UNIQUE_ID);
-            break;
-        }
-
-        RtlCopyMemory(UniqueId->UniqueId, &DriveInfo->DeviceNameBuffer[0],
-                      UniqueId->UniqueIdLength);
-
-        Irp->IoStatus.Status = STATUS_SUCCESS;
-        Irp->IoStatus.Information = FIELD_OFFSET(MOUNTDEV_UNIQUE_ID, UniqueId) + UniqueId->UniqueIdLength;
-        break;
-
-    case IOCTL_MOUNTDEV_QUERY_DEVICE_NAME:
-        if(OutputLength < sizeof(MOUNTDEV_NAME))
-        {
-            Irp->IoStatus.Status = STATUS_BUFFER_TOO_SMALL;
-            Irp->IoStatus.Information = 0;
-            break;
-        }
-
-        Name = Irp->AssociatedIrp.SystemBuffer;
-        Name->NameLength = (USHORT)wcslen(&DriveInfo->DeviceNameBuffer[0]) * sizeof(WCHAR);
-
-        if(OutputLength < FIELD_OFFSET(MOUNTDEV_NAME, Name) + Name->NameLength)
-        {
-            Irp->IoStatus.Status = STATUS_BUFFER_OVERFLOW;
-            Irp->IoStatus.Information = sizeof(MOUNTDEV_NAME);
-            break;
-        }
-
-        RtlCopyMemory(Name->Name, &DriveInfo->DeviceNameBuffer[0],
-                      Name->NameLength);
-
-        Irp->IoStatus.Status = STATUS_SUCCESS;
-        Irp->IoStatus.Information = FIELD_OFFSET(MOUNTDEV_NAME, Name) + Name->NameLength;
-        break;
-
-    default:
-        ERR_(FLOPPY, "UNKNOWN IOCTL CODE: 0x%x\n", Code);
-        Irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
-        Irp->IoStatus.Information = 0;
-        break;
     }
 
     INFO_(FLOPPY, "ioctl: completing with status 0x%x\n", Irp->IoStatus.Status);
