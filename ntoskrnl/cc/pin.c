@@ -78,6 +78,51 @@ CcpFindBcb(
     return (Found ? Bcb : NULL);
 }
 
+/*
+ * Linked pinned BCBs of a shared cache map never overlap each other. A pin
+ * contained in one of them uses it (CcpFindBcb); a pin that overlaps none
+ * gets a new one; any other pin is covered by an overlap BCB (CcpCreateObcb)
+ * that holds the lock of every pinned BCB its range touches, so overlapping
+ * exclusive pins serialize while overlapping shared pins still run together.
+ * The new-BCB path (CcpGetAppropriateBcb) and CcpCreateObcb link BCBs only
+ * under BcbSpinLock after checking for overlaps, which keeps the invariant.
+ */
+static
+BOOLEAN
+CcpPinnedBcbOverlaps(
+    IN PINTERNAL_BCB Bcb,
+    IN LONGLONG Start,
+    IN LONGLONG End)
+{
+    return Bcb->Pinned &&
+           Bcb->PFCB.MappedFileOffset.QuadPart < End &&
+           (Bcb->PFCB.MappedFileOffset.QuadPart + Bcb->PFCB.MappedLength) > Start;
+}
+
+/* Caller holds BcbSpinLock */
+static
+ULONG
+CcpCountPinnedOverlaps(
+    IN PROS_SHARED_CACHE_MAP SharedCacheMap,
+    IN LONGLONG Start,
+    IN LONGLONG End)
+{
+    PLIST_ENTRY NextEntry;
+    ULONG Count = 0;
+
+    for (NextEntry = SharedCacheMap->BcbList.Flink;
+         NextEntry != &SharedCacheMap->BcbList;
+         NextEntry = NextEntry->Flink)
+    {
+        if (CcpPinnedBcbOverlaps(CONTAINING_RECORD(NextEntry, INTERNAL_BCB, BcbEntry), Start, End))
+        {
+            Count++;
+        }
+    }
+
+    return Count;
+}
+
 static
 VOID
 CcpDereferenceBcb(
@@ -137,11 +182,14 @@ CcpGetAppropriateBcb(
     IN PLARGE_INTEGER FileOffset,
     IN ULONG Length,
     IN ULONG PinFlags,
-    IN BOOLEAN ToPin)
+    IN BOOLEAN ToPin,
+    OUT PBOOLEAN Retry)
 {
     KIRQL OldIrql;
     BOOLEAN Result;
     PINTERNAL_BCB iBcb, DupBcb;
+
+    *Retry = FALSE;
 
     iBcb = ExAllocateFromNPagedLookasideList(&iBcbLookasideList);
     if (iBcb == NULL)
@@ -151,7 +199,7 @@ CcpGetAppropriateBcb(
     }
 
     RtlZeroMemory(iBcb, sizeof(*iBcb));
-    iBcb->PFCB.NodeTypeCode = 0x2FD; /* As per KMTests */
+    iBcb->PFCB.NodeTypeCode = CC_NTC_BCB; /* As per KMTests */
     iBcb->PFCB.NodeByteSize = 0;
     iBcb->PFCB.MappedLength = Length;
     iBcb->PFCB.MappedFileOffset = *FileOffset;
@@ -210,6 +258,22 @@ CcpGetAppropriateBcb(
          */
         iBcb = DupBcb;
     }
+    /* A pinned BCB appeared that partially overlaps the range since the
+     * caller looked: linking ours would break the no-overlap invariant of
+     * pinned BCBs. Let the caller start over (it releases its VACB). */
+    else if (ToPin &&
+             CcpCountPinnedOverlaps(SharedCacheMap,
+                                    FileOffset->QuadPart,
+                                    FileOffset->QuadPart + Length) != 0)
+    {
+        KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
+
+        ExDeleteResourceLite(&iBcb->Lock);
+        ExFreeToNPagedLookasideList(&iBcbLookasideList, iBcb);
+
+        *Retry = TRUE;
+        return NULL;
+    }
     /* Nope, insert ourselves */
     else
     {
@@ -236,6 +300,266 @@ CcpGetAppropriateBcb(
     return iBcb;
 }
 
+/*
+ * Build the overlap BCB of a pin of [FileOffset, FileOffset + Length) that is
+ * not contained in one pinned BCB but overlaps at least one. Called with
+ * BcbSpinLock held and returns with it held: the overlapped BCBs are found,
+ * referenced and the gaps between them covered by new pinned BCBs linked into
+ * BcbList in one hold, so the result cannot race another pin of the range.
+ * Everything here is legal at DISPATCH_LEVEL: nonpaged allocations, resource
+ * initialization, and the gap BCBs' VACB references, taken on the VACB the
+ * overlapped BCBs already reference (a pin never spans VACBs). The member
+ * locks are not acquired here - see CcpAcquireObcb.
+ * Returns NULL if out of memory, or with PIN_IF_BCB if the range has gaps.
+ */
+static
+PINTERNAL_OBCB
+CcpCreateObcb(
+    IN PROS_SHARED_CACHE_MAP SharedCacheMap,
+    IN PLARGE_INTEGER FileOffset,
+    IN ULONG Length,
+    IN ULONG Flags)
+{
+    LONGLONG Start = FileOffset->QuadPart, End = FileOffset->QuadPart + Length;
+    LONGLONG Cursor, GapEnd;
+    ULONG Overlaps, Gaps, Count, i, j;
+    PINTERNAL_OBCB Obcb;
+    PINTERNAL_BCB Bcb, *Sorted;
+    PROS_VACB Vacb;
+    PLIST_ENTRY NextEntry;
+    LIST_ENTRY GapList;
+
+    Overlaps = CcpCountPinnedOverlaps(SharedCacheMap, Start, End);
+    ASSERT(Overlaps != 0);
+
+    /* N non-overlapping BCBs leave at most N + 1 gaps in the range: room for
+     * the result (2N + 1) and, behind it, the overlapped BCBs sorted (N). */
+    Obcb = ExAllocatePoolWithTag(NonPagedPool,
+                                 FIELD_OFFSET(INTERNAL_OBCB, Bcbs) +
+                                     (3 * Overlaps + 1) * sizeof(PINTERNAL_BCB),
+                                 TAG_BCB);
+    if (Obcb == NULL)
+    {
+        return NULL;
+    }
+    Sorted = &Obcb->Bcbs[2 * Overlaps + 1];
+
+    /* Collect the overlapped BCBs in ascending offset order */
+    Count = 0;
+    for (NextEntry = SharedCacheMap->BcbList.Flink;
+         NextEntry != &SharedCacheMap->BcbList;
+         NextEntry = NextEntry->Flink)
+    {
+        Bcb = CONTAINING_RECORD(NextEntry, INTERNAL_BCB, BcbEntry);
+        if (!CcpPinnedBcbOverlaps(Bcb, Start, End))
+            continue;
+
+        for (i = Count;
+             i > 0 && Sorted[i - 1]->PFCB.MappedFileOffset.QuadPart > Bcb->PFCB.MappedFileOffset.QuadPart;
+             i--)
+        {
+            Sorted[i] = Sorted[i - 1];
+        }
+        Sorted[i] = Bcb;
+        Count++;
+    }
+    ASSERT(Count == Overlaps);
+
+    Vacb = Sorted[0]->Vacb;
+
+    /* Count the gaps */
+    Gaps = 0;
+    Cursor = Start;
+    for (i = 0; i < Count; i++)
+    {
+        ASSERT(Sorted[i]->Vacb == Vacb);
+        ASSERT(i == 0 || Sorted[i]->PFCB.MappedFileOffset.QuadPart >= Cursor);
+        if (Sorted[i]->PFCB.MappedFileOffset.QuadPart > Cursor)
+            Gaps++;
+        Cursor = Sorted[i]->PFCB.MappedFileOffset.QuadPart + Sorted[i]->PFCB.MappedLength;
+    }
+    if (Cursor < End)
+        Gaps++;
+
+    /* PIN_IF_BCB only pins what is already pinned */
+    if (Gaps != 0 && BooleanFlagOn(Flags, PIN_IF_BCB))
+    {
+        ExFreePoolWithTag(Obcb, TAG_BCB);
+        return NULL;
+    }
+
+    /* Allocate the gap BCBs before changing anything, so failing is clean */
+    InitializeListHead(&GapList);
+    for (i = 0; i < Gaps; i++)
+    {
+        Bcb = ExAllocateFromNPagedLookasideList(&iBcbLookasideList);
+        if (Bcb == NULL)
+        {
+            while (!IsListEmpty(&GapList))
+            {
+                Bcb = CONTAINING_RECORD(RemoveHeadList(&GapList), INTERNAL_BCB, BcbEntry);
+                ExDeleteResourceLite(&Bcb->Lock);
+                ExFreeToNPagedLookasideList(&iBcbLookasideList, Bcb);
+            }
+            ExFreePoolWithTag(Obcb, TAG_BCB);
+            return NULL;
+        }
+
+        RtlZeroMemory(Bcb, sizeof(*Bcb));
+        Bcb->PFCB.NodeTypeCode = CC_NTC_BCB;
+        Bcb->PFCB.NodeByteSize = 0;
+        Bcb->Vacb = Vacb;
+        Bcb->PinCount = 0;
+        Bcb->RefCount = 1; /* the overlap BCB's */
+        Bcb->Pinned = TRUE;
+        ExInitializeResourceLite(&Bcb->Lock);
+        InsertTailList(&GapList, &Bcb->BcbEntry);
+    }
+
+    /* Merge: gap, overlapped BCB, gap, ... in ascending order. The gap BCBs
+     * are linked unlocked: a pin that finds one before we lock it simply
+     * goes first, like with any other member. */
+    Cursor = Start;
+    j = 0;
+    for (i = 0; i <= Count; i++)
+    {
+        GapEnd = (i < Count) ? Sorted[i]->PFCB.MappedFileOffset.QuadPart : End;
+        if (GapEnd > Cursor)
+        {
+            ASSERT(!IsListEmpty(&GapList));
+            Bcb = CONTAINING_RECORD(RemoveHeadList(&GapList), INTERNAL_BCB, BcbEntry);
+            Bcb->PFCB.MappedFileOffset.QuadPart = Cursor;
+            Bcb->PFCB.MappedLength = (ULONG)(GapEnd - Cursor);
+            CcRosVacbIncRefCount(Vacb);
+            InsertTailList(&SharedCacheMap->BcbList, &Bcb->BcbEntry);
+            Obcb->Bcbs[j++] = Bcb;
+        }
+
+        if (i < Count)
+        {
+            Bcb = Sorted[i];
+            ++Bcb->RefCount;
+            Obcb->Bcbs[j++] = Bcb;
+            Cursor = Bcb->PFCB.MappedFileOffset.QuadPart + Bcb->PFCB.MappedLength;
+        }
+    }
+    ASSERT(IsListEmpty(&GapList));
+    ASSERT(j == Count + Gaps);
+
+    Obcb->PFCB.NodeTypeCode = CC_NTC_OBCB;
+    Obcb->PFCB.NodeByteSize = 0;
+    Obcb->PFCB.MappedLength = Length;
+    Obcb->PFCB.MappedFileOffset = *FileOffset;
+    Obcb->RefCount = 1;
+    Obcb->Pinned = FALSE;
+    Obcb->Count = j;
+
+    return Obcb;
+}
+
+/* Release one pin's acquisition of every member lock, last first */
+static
+VOID
+CcpUnpinObcbMembers(
+    IN PINTERNAL_OBCB Obcb,
+    IN ULONG Count,
+    IN ERESOURCE_THREAD ResourceThreadId)
+{
+    PROS_SHARED_CACHE_MAP SharedCacheMap = Obcb->Bcbs[0]->Vacb->SharedCacheMap;
+    PINTERNAL_BCB Bcb;
+    BOOLEAN Pinned;
+    KIRQL OldIrql;
+
+    while (Count-- > 0)
+    {
+        Bcb = Obcb->Bcbs[Count];
+
+        /* Same discipline as CcUnpinDataForThread */
+        KeAcquireSpinLock(&SharedCacheMap->BcbSpinLock, &OldIrql);
+        Pinned = (Bcb->PinCount != 0);
+        if (Pinned)
+        {
+            Bcb->PinCount--;
+        }
+        KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
+
+        ASSERT(Pinned);
+        if (Pinned)
+        {
+            ExReleaseResourceForThreadLite(&Bcb->Lock, ResourceThreadId);
+        }
+    }
+}
+
+/* Drop a reference to an overlap BCB; the last one releases the member locks
+ * if the pin still holds them (CcUnpinRepinnedBcb without CcUnpinData, like
+ * the INTERNAL_BCB path), dereferences the members and frees it. */
+static
+VOID
+CcpDereferenceObcb(
+    IN PINTERNAL_OBCB Obcb)
+{
+    PROS_SHARED_CACHE_MAP SharedCacheMap = Obcb->Bcbs[0]->Vacb->SharedCacheMap;
+    ULONG i;
+
+    if (InterlockedDecrement(&Obcb->RefCount) != 0)
+    {
+        return;
+    }
+
+    if (InterlockedExchange(&Obcb->Pinned, FALSE))
+    {
+        CcpUnpinObcbMembers(Obcb, Obcb->Count, (ERESOURCE_THREAD)PsGetCurrentThread());
+    }
+
+    for (i = 0; i < Obcb->Count; i++)
+    {
+        CcpDereferenceBcb(SharedCacheMap, Obcb->Bcbs[i]);
+    }
+
+    ExFreePoolWithTag(Obcb, TAG_BCB);
+}
+
+/* Acquire the member locks in ascending file offset order. Every multi-BCB
+ * pin uses this order, so two of them cannot deadlock each other; a pin that
+ * cannot wait backs out completely. On failure the overlap BCB is gone. */
+static
+BOOLEAN
+CcpAcquireObcb(
+    IN PINTERNAL_OBCB Obcb,
+    IN ULONG Flags)
+{
+    PROS_SHARED_CACHE_MAP SharedCacheMap = Obcb->Bcbs[0]->Vacb->SharedCacheMap;
+    PINTERNAL_BCB Bcb;
+    BOOLEAN Result;
+    KIRQL OldIrql;
+    ULONG i;
+
+    for (i = 0; i < Obcb->Count; i++)
+    {
+        Bcb = Obcb->Bcbs[i];
+
+        if (BooleanFlagOn(Flags, PIN_EXCLUSIVE))
+            Result = ExAcquireResourceExclusiveLite(&Bcb->Lock, BooleanFlagOn(Flags, PIN_WAIT));
+        else
+            Result = ExAcquireSharedStarveExclusive(&Bcb->Lock, BooleanFlagOn(Flags, PIN_WAIT));
+
+        if (!Result)
+        {
+            CcpUnpinObcbMembers(Obcb, i, (ERESOURCE_THREAD)PsGetCurrentThread());
+            CcpDereferenceObcb(Obcb);
+            return FALSE;
+        }
+
+        KeAcquireSpinLock(&SharedCacheMap->BcbSpinLock, &OldIrql);
+        Bcb->PinCount++;
+        KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
+    }
+
+    Obcb->Pinned = TRUE;
+    return TRUE;
+}
+
 static
 BOOLEAN
 CcpPinData(
@@ -247,9 +571,13 @@ CcpPinData(
     OUT	PVOID * Buffer)
 {
     PINTERNAL_BCB NewBcb;
+    PINTERNAL_OBCB Obcb;
+    PPUBLIC_BCB Handle;
+    PROS_VACB Vacb;
     KIRQL OldIrql;
     ULONG VacbOffset;
     NTSTATUS Status;
+    BOOLEAN Retry;
     _SEH2_VOLATILE BOOLEAN Result;
 
     VacbOffset = (ULONG)(FileOffset->QuadPart % VACB_MAPPING_GRANULARITY);
@@ -261,6 +589,7 @@ CcpPinData(
         Length = VACB_MAPPING_GRANULARITY - VacbOffset;
     }
 
+TryAgain:
     KeAcquireSpinLock(&SharedCacheMap->BcbSpinLock, &OldIrql);
     NewBcb = CcpFindBcb(SharedCacheMap, FileOffset, Length, TRUE);
 
@@ -286,11 +615,35 @@ CcpPinData(
         KeAcquireSpinLock(&SharedCacheMap->BcbSpinLock, &OldIrql);
         NewBcb->PinCount++;
         KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
+
+        Handle = &NewBcb->PFCB;
+        Vacb = NewBcb->Vacb;
+    }
+    else if (CcpCountPinnedOverlaps(SharedCacheMap,
+                                    FileOffset->QuadPart,
+                                    FileOffset->QuadPart + Length) != 0)
+    {
+        /* The range partially overlaps pinned BCBs: one overlap BCB over all
+         * of them, so this pin excludes (or shares with) each of their pins */
+        Obcb = CcpCreateObcb(SharedCacheMap, FileOffset, Length, Flags);
+        KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
+
+        if (Obcb == NULL)
+        {
+            return FALSE;
+        }
+
+        if (!CcpAcquireObcb(Obcb, Flags))
+        {
+            return FALSE;
+        }
+
+        Handle = &Obcb->PFCB;
+        Vacb = Obcb->Bcbs[0]->Vacb;
     }
     else
     {
         LONGLONG ROffset;
-        PROS_VACB Vacb;
 
         KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
 
@@ -310,19 +663,27 @@ CcpPinData(
             return FALSE;
         }
 
-        NewBcb = CcpGetAppropriateBcb(SharedCacheMap, Vacb, FileOffset, Length, Flags, TRUE);
+        NewBcb = CcpGetAppropriateBcb(SharedCacheMap, Vacb, FileOffset, Length, Flags, TRUE, &Retry);
         if (NewBcb == NULL)
         {
             CcRosReleaseVacb(SharedCacheMap, Vacb, FALSE, FALSE);
+            if (Retry)
+            {
+                /* A partially overlapping pinned BCB appeared meanwhile */
+                goto TryAgain;
+            }
             return FALSE;
         }
+
+        Handle = &NewBcb->PFCB;
+        Vacb = NewBcb->Vacb;
     }
 
     Result = FALSE;
     _SEH2_TRY
     {
         /* Ensure the pages are resident */
-        Result = CcRosEnsureVacbResident(NewBcb->Vacb,
+        Result = CcRosEnsureVacbResident(Vacb,
                 BooleanFlagOn(Flags, PIN_WAIT),
                 BooleanFlagOn(Flags, PIN_NO_READ),
                 VacbOffset, Length, FALSE);
@@ -333,7 +694,7 @@ CcpPinData(
         {
             CCTRACE(CC_API_DEBUG, "FileObject=%p FileOffset=%p Length=%lu Flags=0x%lx -> FALSE\n",
                             SharedCacheMap->FileObject, FileOffset, Length, Flags);
-            CcUnpinData(&NewBcb->PFCB);
+            CcUnpinData(Handle);
             *Bcb = NULL;
             *Buffer = NULL;
         }
@@ -342,8 +703,8 @@ CcpPinData(
 
     if (Result)
     {
-        *Bcb = &NewBcb->PFCB;
-        *Buffer = (PVOID)((ULONG_PTR)NewBcb->Vacb->BaseAddress + VacbOffset);
+        *Bcb = Handle;
+        *Buffer = (PVOID)((ULONG_PTR)Vacb->BaseAddress + VacbOffset);
     }
 
     return Result;
@@ -368,6 +729,7 @@ CcMapData (
     PROS_SHARED_CACHE_MAP SharedCacheMap;
     ULONG VacbOffset;
     NTSTATUS Status;
+    BOOLEAN Retry;
     _SEH2_VOLATILE BOOLEAN Result;
 
     CCTRACE(CC_API_DEBUG, "CcMapData(FileObject 0x%p, FileOffset 0x%I64x, Length %lu, Flags 0x%lx,"
@@ -414,7 +776,7 @@ CcMapData (
             ExRaiseStatus(Status);
         }
 
-        iBcb = CcpGetAppropriateBcb(SharedCacheMap, Vacb, FileOffset, Length, 0, FALSE);
+        iBcb = CcpGetAppropriateBcb(SharedCacheMap, Vacb, FileOffset, Length, 0, FALSE, &Retry);
         if (iBcb == NULL)
         {
             CcRosReleaseVacb(SharedCacheMap, Vacb, FALSE, FALSE);
@@ -586,15 +948,21 @@ CcSetDirtyPinnedData (
     IN PVOID Bcb,
     IN PLARGE_INTEGER Lsn)
 {
-    PINTERNAL_BCB iBcb = CONTAINING_RECORD(Bcb, INTERNAL_BCB, PFCB);
-    PROS_VACB Vacb = iBcb->Vacb;
+    PPUBLIC_BCB PublicBcb = Bcb;
+    PROS_VACB Vacb;
 
     CCTRACE(CC_API_DEBUG, "Bcb=%p Lsn=%p\n", Bcb, Lsn);
 
+    /* All BCBs of an overlap BCB share the VACB; dirty the pinned range */
+    if (PublicBcb->NodeTypeCode == CC_NTC_OBCB)
+        Vacb = CONTAINING_RECORD(Bcb, INTERNAL_OBCB, PFCB)->Bcbs[0]->Vacb;
+    else
+        Vacb = CONTAINING_RECORD(Bcb, INTERNAL_BCB, PFCB)->Vacb;
+
     /* Tell Mm */
     MmMakeSegmentDirty(Vacb->SharedCacheMap->FileObject->SectionObjectPointer,
-                       iBcb->PFCB.MappedFileOffset.QuadPart,
-                       iBcb->PFCB.MappedLength);
+                       PublicBcb->MappedFileOffset.QuadPart,
+                       PublicBcb->MappedLength);
 
     if (!Vacb->Dirty)
     {
@@ -624,12 +992,29 @@ CcUnpinDataForThread (
     IN	PVOID Bcb,
     IN	ERESOURCE_THREAD ResourceThreadId)
 {
-    PINTERNAL_BCB iBcb = CONTAINING_RECORD(Bcb, INTERNAL_BCB, PFCB);
-    PROS_SHARED_CACHE_MAP SharedCacheMap = iBcb->Vacb->SharedCacheMap;
+    PINTERNAL_BCB iBcb;
+    PROS_SHARED_CACHE_MAP SharedCacheMap;
     KIRQL OldIrql;
     BOOLEAN Pinned;
 
     CCTRACE(CC_API_DEBUG, "Bcb=%p ResourceThreadId=%lu\n", Bcb, ResourceThreadId);
+
+    if (((PPUBLIC_BCB)Bcb)->NodeTypeCode == CC_NTC_OBCB)
+    {
+        PINTERNAL_OBCB Obcb = CONTAINING_RECORD(Bcb, INTERNAL_OBCB, PFCB);
+
+        /* The pin's member locks go once; a repinned overlap BCB stays
+         * referenced until CcUnpinRepinnedBcb */
+        if (InterlockedExchange(&Obcb->Pinned, FALSE))
+        {
+            CcpUnpinObcbMembers(Obcb, Obcb->Count, ResourceThreadId);
+        }
+        CcpDereferenceObcb(Obcb);
+        return;
+    }
+
+    iBcb = CONTAINING_RECORD(Bcb, INTERNAL_BCB, PFCB);
+    SharedCacheMap = iBcb->Vacb->SharedCacheMap;
 
     /* Test-and-decrement PinCount under BcbSpinLock so the counter stays
      * coherent with concurrent pin/unpin on other CPUs. Without this the
@@ -662,12 +1047,21 @@ NTAPI
 CcRepinBcb (
     IN	PVOID Bcb)
 {
-    PINTERNAL_BCB iBcb = CONTAINING_RECORD(Bcb, INTERNAL_BCB, PFCB);
-
+    PINTERNAL_BCB iBcb;
     KIRQL OldIrql;
-    PROS_SHARED_CACHE_MAP SharedCacheMap = iBcb->Vacb->SharedCacheMap;
+    PROS_SHARED_CACHE_MAP SharedCacheMap;
 
     CCTRACE(CC_API_DEBUG, "Bcb=%p\n", Bcb);
+
+    if (((PPUBLIC_BCB)Bcb)->NodeTypeCode == CC_NTC_OBCB)
+    {
+        /* The overlap BCB holds a reference on each member */
+        InterlockedIncrement(&CONTAINING_RECORD(Bcb, INTERNAL_OBCB, PFCB)->RefCount);
+        return;
+    }
+
+    iBcb = CONTAINING_RECORD(Bcb, INTERNAL_BCB, PFCB);
+    SharedCacheMap = iBcb->Vacb->SharedCacheMap;
 
     /* RefCount is always serialized by BcbSpinLock (see CcpDereferenceBcb);
      * an unlocked increment can lose an update against a concurrent
@@ -687,11 +1081,34 @@ CcUnpinRepinnedBcb (
     IN	BOOLEAN WriteThrough,
     IN	PIO_STATUS_BLOCK IoStatus)
 {
-    PINTERNAL_BCB iBcb = CONTAINING_RECORD(Bcb, INTERNAL_BCB, PFCB);
+    PINTERNAL_BCB iBcb;
     KIRQL OldIrql;
     PROS_SHARED_CACHE_MAP SharedCacheMap;
 
     CCTRACE(CC_API_DEBUG, "Bcb=%p WriteThrough=%d\n", Bcb, WriteThrough);
+
+    if (((PPUBLIC_BCB)Bcb)->NodeTypeCode == CC_NTC_OBCB)
+    {
+        PINTERNAL_OBCB Obcb = CONTAINING_RECORD(Bcb, INTERNAL_OBCB, PFCB);
+
+        if (WriteThrough)
+        {
+            CcFlushCache(Obcb->Bcbs[0]->Vacb->SharedCacheMap->FileObject->SectionObjectPointer,
+                         &Obcb->PFCB.MappedFileOffset,
+                         Obcb->PFCB.MappedLength,
+                         IoStatus);
+        }
+        else
+        {
+            IoStatus->Status = STATUS_SUCCESS;
+            IoStatus->Information = 0;
+        }
+
+        CcpDereferenceObcb(Obcb);
+        return;
+    }
+
+    iBcb = CONTAINING_RECORD(Bcb, INTERNAL_BCB, PFCB);
 
     SharedCacheMap = iBcb->Vacb->SharedCacheMap;
     IoStatus->Status = STATUS_SUCCESS;

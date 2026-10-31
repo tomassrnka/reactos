@@ -307,10 +307,25 @@ CcSetBcbOwnerPointer (
 	IN	PVOID	Owner
 	)
 {
-    PINTERNAL_BCB iBcb = CONTAINING_RECORD(Bcb, INTERNAL_BCB, PFCB);
+    PINTERNAL_BCB iBcb;
 
     CCTRACE(CC_API_DEBUG, "Bcb=%p Owner=%p\n",
         Bcb, Owner);
+
+    if (((PPUBLIC_BCB)Bcb)->NodeTypeCode == CC_NTC_OBCB)
+    {
+        PINTERNAL_OBCB Obcb = CONTAINING_RECORD(Bcb, INTERNAL_OBCB, PFCB);
+        ULONG i;
+
+        /* The pin owns one acquisition of every member lock */
+        for (i = 0; i < Obcb->Count; i++)
+        {
+            CcSetBcbOwnerPointer(&Obcb->Bcbs[i]->PFCB, Owner);
+        }
+        return;
+    }
+
+    iBcb = CONTAINING_RECORD(Bcb, INTERNAL_BCB, PFCB);
 
     if (!ExIsResourceAcquiredExclusiveLite(&iBcb->Lock) && !ExIsResourceAcquiredSharedLite(&iBcb->Lock))
     {
