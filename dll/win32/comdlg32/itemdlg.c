@@ -132,6 +132,11 @@ typedef struct FileDialogImpl {
     LPWSTR custom_cancelbutton;
     LPWSTR custom_filenamelabel;
     LPWSTR current_filter;
+#ifdef __REACTOS__
+    /* FOS_PICKFOLDERS: text the dialog itself put in the name box, and whether it names the current folder */
+    WCHAR auto_name[MAX_PATH];
+    BOOL auto_is_current;
+#endif
 
     UINT cctrl_width, cctrl_def_height, cctrls_cols;
     UINT cctrl_indent, dpi_x, dpi_y;
@@ -517,7 +522,12 @@ static void fill_filename_from_selection(FileDialogImpl *This)
                 (!(This->options & FOS_PICKFOLDERS) &&  (attr & SFGAO_FOLDER))))
                 continue;
 
+            #ifdef __REACTOS__
+            /* Windows shows the leaf name of a selected folder, relative to the folder shown */
+            hr = IShellItem_GetDisplayName(psi, SIGDN_PARENTRELATIVEPARSING, &names[valid_count]);
+#else
             hr = IShellItem_GetDisplayName(psi, (This->options & FOS_PICKFOLDERS) ? SIGDN_FILESYSPATH : SIGDN_PARENTRELATIVEPARSING, &names[valid_count]);
+#endif
             if(SUCCEEDED(hr))
             {
                 len_total += lstrlenW(names[valid_count]) + 3;
@@ -530,6 +540,10 @@ static void fill_filename_from_selection(FileDialogImpl *This)
     if(valid_count == 1)
     {
         set_file_name(This, names[0]);
+#ifdef __REACTOS__
+        This->auto_is_current = FALSE;
+        lstrcpynW(This->auto_name, names[0], ARRAY_SIZE(This->auto_name));
+#endif
         CoTaskMemFree(names[0]);
     }
     else if(valid_count > 1)
@@ -550,6 +564,9 @@ static void fill_filename_from_selection(FileDialogImpl *This)
         *(cur_point-1) = '\0';
 
         set_file_name(This, string);
+#ifdef __REACTOS__
+        This->auto_name[0] = 0;
+#endif
         HeapFree(GetProcessHeap(), 0, string);
     }
 
@@ -651,6 +668,134 @@ static BOOL is_registered_extension(LPCWSTR ext)
 }
 #endif
 
+#ifdef __REACTOS__
+/* A message box of the pick-folders dialog, as Windows words it: the dialog's caption, a warning icon,
+ * the name that was typed and then the sentence(s) */
+static void pickfolders_message(FileDialogImpl *This, LPCWSTR name, UINT sentence_id)
+{
+    WCHAR title[128], sentence[256], *text;
+    UINT len;
+
+    GetWindowTextW(This->dlg_hwnd, title, ARRAY_SIZE(title));
+    if(!LoadStringW(COMDLG32_hInstance, sentence_id, sentence, ARRAY_SIZE(sentence)))
+        return;
+    len = lstrlenW(name) + 1 + lstrlenW(sentence) + 1;
+    text = HeapAlloc(GetProcessHeap(), 0, len * sizeof(WCHAR));
+    if(!text)
+        return;
+    lstrcpyW(text, name);
+    lstrcatW(text, L"\n");
+    lstrcatW(text, sentence);
+    MessageBoxW(This->dlg_hwnd, text, title, MB_OK | MB_ICONEXCLAMATION);
+    HeapFree(GetProcessHeap(), 0, text);
+}
+
+/* The folder pidl becomes the result, as for any other accepted choice. S_OK closes the dialog. */
+static HRESULT pickfolders_accept(FileDialogImpl *This, LPITEMIDLIST pidl)
+{
+    IShellFolder *psf_desktop;
+    HRESULT hr;
+
+    hr = SHGetDesktopFolder(&psf_desktop);
+    if(FAILED(hr))
+        return hr;
+
+    if(This->psia_results)
+    {
+        IShellItemArray_Release(This->psia_results);
+        This->psia_results = NULL;
+    }
+    hr = SHCreateShellItemArray(NULL, psf_desktop, 1, (PCUITEMID_CHILD_ARRAY)&pidl, &This->psia_results);
+    IShellFolder_Release(psf_desktop);
+    if(FAILED(hr))
+        return hr;
+
+    return events_OnFileOk(This) == S_OK ? S_OK : E_FAIL;
+}
+
+/* Open in the pick-folders dialog with a single name (or none) in the name box. Measured on Windows 10:
+ * an empty box, or the box showing what the dialog put there for the current folder, returns the current
+ * folder; a name the dialog put there for the selected folder returns that folder; a typed folder is
+ * entered (name box becomes its leaf name) and a second Open returns it; a missing path or a file gets a
+ * message and the dialog stays. Returns S_OK to close the dialog, E_FAIL to keep it open. */
+static HRESULT pickfolders_default_action(FileDialogImpl *This, LPCWSTR name)
+{
+    WCHAR canon[MAX_PATH], leaf[MAX_PATH], shown[MAX_PATH];
+    LPITEMIDLIST current_folder = NULL, pidl;
+    HRESULT hr = E_FAIL;
+    DWORD attrs;
+    BOOL from_dialog;
+
+    if(!This->psi_folder || FAILED(SHGetIDListFromObject((IUnknown*)This->psi_folder, &current_folder)))
+        return E_FAIL;
+
+    from_dialog = This->auto_name[0] && !lstrcmpW(name, This->auto_name);
+    if(!name[0] || (from_dialog && This->auto_is_current))
+    {
+        SFGAOF fs = 0;
+
+        /* the current folder must be a file system folder (Computer, Network...: nothing to return) */
+        if(SUCCEEDED(IShellItem_GetAttributes(This->psi_folder, SFGAO_FILESYSTEM, &fs)) && (fs & SFGAO_FILESYSTEM))
+            hr = pickfolders_accept(This, current_folder);
+        goto done;
+    }
+
+    lstrcpynW(leaf, name, ARRAY_SIZE(leaf));
+    PathRemoveBackslashW(leaf);
+    lstrcpynW(shown, PathFindFileNameW(leaf), ARRAY_SIZE(shown));
+
+    if(wcspbrk(name + (name[0] && name[1] == L':' ? 2 : 0), L"*?\"<>|") ||
+       !COMDLG32_GetCanonicalPath(current_folder, (LPWSTR)name, canon))
+    {
+        pickfolders_message(This, shown, IDS_FOLDER_NAMENOTVALID);
+        goto select_all;
+    }
+
+    attrs = GetFileAttributesW(canon);
+    if(attrs == INVALID_FILE_ATTRIBUTES)
+    {
+        pickfolders_message(This, shown, IDS_FOLDER_PATHNOTEXIST);
+        goto select_all;
+    }
+    if(!(attrs & FILE_ATTRIBUTE_DIRECTORY))
+    {
+        pickfolders_message(This, shown, IDS_FOLDER_NAMENOTVALID);
+        goto select_all;
+    }
+
+    pidl = ILCreateFromPathW(canon);
+    if(!pidl)
+    {
+        pickfolders_message(This, shown, IDS_FOLDER_NAMENOTVALID);
+        goto select_all;
+    }
+
+    if(from_dialog)
+        hr = pickfolders_accept(This, pidl);
+    else if(SUCCEEDED(IExplorerBrowser_BrowseToIDList(This->peb, pidl, SBSP_ABSOLUTE)))
+    {
+        /* typed folder: go into it, the name box shows its name, the next Open returns it */
+        PathRemoveBackslashW(canon);
+        lstrcpynW(This->auto_name, PathFindFileNameW(canon), ARRAY_SIZE(This->auto_name));
+        This->auto_is_current = TRUE;
+        SetDlgItemTextW(This->dlg_hwnd, IDC_FILENAME, This->auto_name);
+        hr = E_FAIL;
+    }
+    ILFree(pidl);
+    goto done;
+
+select_all:
+    {
+        HWND hwnd_edit = GetDlgItem(This->dlg_hwnd, IDC_FILENAME);
+        if(hwnd_edit)
+            SendMessageW(hwnd_edit, EM_SETSEL, 0, -1);
+    }
+done:
+    ILFree(current_folder);
+    return hr;
+}
+#endif
+
 static HRESULT on_default_action(FileDialogImpl *This)
 {
     IShellFolder *psf_parent, *psf_desktop;
@@ -671,6 +816,19 @@ static HRESULT on_default_action(FileDialogImpl *This)
         file_count = COMDLG32_SplitFileNames(tmp_files, len, &files, &size_used);
         CoTaskMemFree(tmp_files);
     }
+#ifdef __REACTOS__
+    /* an empty name box or a single name is handled as Windows does; several names go on below */
+    if((This->options & FOS_PICKFOLDERS) && This->dlg_hwnd && file_count <= 1)
+    {
+        WCHAR one[MAX_PATH];
+
+        one[0] = 0;
+        if(file_count)
+            lstrcpynW(one, files, ARRAY_SIZE(one));
+        HeapFree(GetProcessHeap(), 0, files);
+        return pickfolders_default_action(This, one);
+    }
+#endif
     if(!file_count) return E_FAIL;
 
     hr = SHGetIDListFromObject((IUnknown*)This->psi_folder, &current_folder);

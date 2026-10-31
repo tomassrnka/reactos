@@ -36,6 +36,8 @@ Do you want to replace it?"
     IDS_FILENOTEXISTING     "File does not exist"
     IDS_PATHTOOLONG         "The path is too long.\nTry a shorter name."
     IDS_INVALID_FOLDERNAME  "The selection contains a non-folder object"
+    IDS_FOLDER_PATHNOTEXIST "Path does not exist.\nCheck the path and try again."
+    IDS_FOLDER_NAMENOTVALID "The folder name is not valid."
 }
 
 STRINGTABLE
