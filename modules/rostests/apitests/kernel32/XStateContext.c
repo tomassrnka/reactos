@@ -483,6 +483,45 @@ static void TestMalformed(void)
         }
     }
 
+    /* A CONTEXT_EX that does not describe the CONTEXT in front of it (CONTEXT_XSTATE left in the flags of a context
+       that has none, say) must be refused before anything is read through it. Not run on Windows. */
+    if (is_reactos())
+    {
+        static const struct { const char *Name; int Field; LONG Value; } Fields[] =
+        {
+            { "legacy offset 0",     0, 0 },
+            { "legacy offset +8",    0, 8 },
+            { "legacy length 0",     1, 0 },
+            { "legacy length 0xcc",  1, 0xcc },
+            { "legacy length big",   1, 0x7fffffff },
+            { "all offset 0",        2, 0 },
+            { "all offset -8",       2, -(LONG)sizeof(CONTEXT) - 8 },
+            { "all length 0",        3, 0 },
+            { "all length small",    3, (LONG)(sizeof(CONTEXT) + sizeof(XSC_EX) - 1) },
+        };
+        for (i = 0; i < sizeof(Fields) / sizeof(Fields[0]); i++)
+        {
+            LONG GetStatus, SetStatus;
+            *Ex = Saved;
+            memset(SavedHeader, 0, sizeof(*SavedHeader));
+            SavedHeader->CompactionMask = Compaction;
+            switch (Fields[i].Field)
+            {
+                case 0: Ex->Legacy.Offset = Fields[i].Value; break;
+                case 1: Ex->Legacy.Length = (ULONG)Fields[i].Value; break;
+                case 2: Ex->All.Offset = Fields[i].Value; break;
+                default: Ex->All.Length = (ULONG)Fields[i].Value; break;
+            }
+            Context->ContextFlags = XSC_ALL;
+            GetStatus = pNtGetContextThread(Thread, Context);
+            Context->ContextFlags = XSC_XSTATE;
+            SetStatus = pNtSetContextThread(Thread, Context);
+            ok(GetStatus == (LONG)0xC000000D, "%s: get returned 0x%08lx\n", Fields[i].Name, GetStatus);
+            ok(SetStatus == (LONG)0xC000000D, "%s: set returned 0x%08lx\n", Fields[i].Name, SetStatus);
+        }
+        *Ex = Saved;
+    }
+
     /* Header masks the caller makes up. Bits of features that are not enabled, the legacy bits and a wrong
        compaction mask must not reach the processor (an XRSTOR fault in the kernel). Not run on Windows. */
     if (is_reactos())
@@ -633,6 +672,108 @@ static void TestException(void)
         RunVeh(FALSE, TRUE, TRUE);
     }
 }
+
+/*
+ * An exception raised close to the end of the stack. The frame with the extended state is a few KB larger than the
+ * one without it; when only that part does not fit, the exception has to be dispatched without it, not turned into
+ * a stack overflow. A thread recurses until it is Distance bytes above the end of its stack and raises there. The
+ * results over decreasing distances have to run: with the extended state, without it, stack overflow.
+ */
+#define XSC_DEEP_NONE     0
+#define XSC_DEEP_XSTATE   1
+#define XSC_DEEP_PLAIN    2
+#define XSC_DEEP_OVERFLOW 3
+
+typedef LONG (NTAPI *PFN_NtTerminateThread)(HANDLE, LONG);
+static PFN_NtTerminateThread pNtTerminateThread;
+static volatile LONG g_DeepResult;
+static DWORD g_DeepThreadId;
+
+static LONG CALLBACK DeepVeh(EXCEPTION_POINTERS *Pointers)
+{
+    if (GetCurrentThreadId() != g_DeepThreadId)
+        return EXCEPTION_CONTINUE_SEARCH;
+    if (Pointers->ExceptionRecord->ExceptionCode == (DWORD)0xC00000FD /* STATUS_STACK_OVERFLOW */)
+    {
+        g_DeepResult = XSC_DEEP_OVERFLOW;
+        pNtTerminateThread((HANDLE)(LONG_PTR)-2, 0);
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    if (Pointers->ExceptionRecord->ExceptionCode != (DWORD)0xC000001D)
+        return EXCEPTION_CONTINUE_SEARCH;
+    g_DeepResult = ((Pointers->ContextRecord->ContextFlags & XSC_XSTATE) == XSC_XSTATE) ?
+                   XSC_DEEP_XSTATE : XSC_DEEP_PLAIN;
+    XSC_IP(Pointers->ContextRecord) += 2;
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+static void __attribute__((noinline)) DeepRecurse(PBYTE Base, SIZE_T Distance)
+{
+    volatile BYTE Pad[256];
+    Pad[0] = 1;
+    Pad[255] = 2;
+    if ((SIZE_T)((PBYTE)Pad - Base) > Distance + sizeof(Pad))
+        DeepRecurse(Base, Distance);
+    else
+        __asm__ __volatile__("ud2");
+    Pad[1] = Pad[0];
+}
+
+static DWORD WINAPI DeepThread(PVOID Parameter)
+{
+    MEMORY_BASIC_INFORMATION Info;
+    BYTE Local;
+
+    g_DeepThreadId = GetCurrentThreadId();
+    if (!VirtualQuery(&Local, &Info, sizeof(Info)))
+        return 1;
+    DeepRecurse((PBYTE)Info.AllocationBase, (SIZE_T)Parameter);
+    return 0;
+}
+
+static void TestStackEnd(void)
+{
+    LONG Sequence[200];
+    ULONG Count = 0, i, Xs = 0, Plain = 0, Over = 0;
+    SIZE_T Distance;
+    PVOID Handler;
+    BOOL Ordered = TRUE;
+
+    pNtTerminateThread = (PFN_NtTerminateThread)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtTerminateThread");
+    if (!is_reactos() || !pNtTerminateThread)
+    {
+        skip("the frame sizes of the stack end are ReactOS specific\n");
+        return;
+    }
+    Handler = AddVectoredExceptionHandler(1, DeepVeh);
+    ok(Handler != NULL, "AddVectoredExceptionHandler failed\n");
+    for (Distance = 0x5000; Distance >= 0x400 && Count < 200; Distance -= 0x80)
+    {
+        HANDLE Thread;
+        g_DeepResult = XSC_DEEP_NONE;
+        Thread = CreateThread(NULL, 0x20000, DeepThread, (PVOID)Distance, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
+        if (!Thread)
+            break;
+        WaitForSingleObject(Thread, 10000);
+        CloseHandle(Thread);
+        Sequence[Count++] = g_DeepResult;
+    }
+    RemoveVectoredExceptionHandler(Handler);
+
+    for (i = 0; i < Count; i++)
+    {
+        trace("stack end, distance 0x%lx: %ld\n", (ULONG)(0x5000 - i * 0x80), Sequence[i]);
+        if (Sequence[i] == XSC_DEEP_XSTATE) Xs++;
+        else if (Sequence[i] == XSC_DEEP_PLAIN) Plain++;
+        else Over++;
+        if (i && Sequence[i] < Sequence[i - 1] && Sequence[i - 1] != XSC_DEEP_NONE)
+            Ordered = FALSE;
+    }
+    trace("stack end: %lu with the extended state, %lu without, %lu overflow or none\n", Xs, Plain, Over);
+    ok(Xs != 0, "no exception had room for the extended state\n");
+    ok(Ordered, "the results do not go from the extended state to a plain frame to the overflow\n");
+    ok(Plain != 0, "an exception whose frame fits without the extended state was not dispatched\n");
+}
 #endif /* __GNUC__ */
 
 static void TestConfiguration(void)
@@ -679,8 +820,12 @@ START_TEST(XStateContext)
     else
         skip("no InitializeContext2\n");
     TestMasks();
-    TestMalformed();
+    if (is_reactos())
+        TestMalformed();
+    else
+        skip("malformed CONTEXT_EX descriptions are not probed on Windows\n");
     TestException();
+    TestStackEnd();
 #else
     skip("needs GCC inline assembly\n");
 #endif
