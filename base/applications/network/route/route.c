@@ -663,6 +663,11 @@ AddRoute(
     if ((argc <= start) || !ConvertAddCmdLine(&RowToAdd, argc, argv, start))
         return 1;
 
+    /* The route leaves through the interface that reaches its gateway: the row needs the interface
+       index, and index 0 is no interface (it used to select the first IP entity, the loopback) */
+    if (RowToAdd.dwForwardIfIndex == 0)
+        GetBestInterface(RowToAdd.dwForwardNextHop, &RowToAdd.dwForwardIfIndex);
+
     if (flags & DELETE_FLAG)
         DeleteCustomRoutes();
 
