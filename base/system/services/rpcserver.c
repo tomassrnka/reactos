@@ -885,13 +885,14 @@ Int_EnumDependentServicesW(HKEY hServicesKey,
                     if ((dwCurrentServiceState == dwServiceState) ||
                         (dwServiceState == SERVICE_STATE_ALL))
                     {
-                        /* Calculate the required size */
-                        dwRequiredSize += sizeof(SERVICE_STATUS);
+                        /*
+                         * Calculate the size of this element: the ENUM_SERVICE_STATUSW itself (the name and
+                         * display name pointers, the status, and the padding that follows it on 64-bit)
+                         * and the two strings
+                         */
+                        dwRequiredSize = sizeof(ENUM_SERVICE_STATUSW);
                         dwRequiredSize += (DWORD)((wcslen(lpCurrentService->lpServiceName) + 1) * sizeof(WCHAR));
                         dwRequiredSize += (DWORD)((wcslen(lpCurrentService->lpDisplayName) + 1) * sizeof(WCHAR));
-
-                        /* Add the size for service name and display name pointers */
-                        dwRequiredSize += (2 * sizeof(PVOID));
 
                         /* increase the BytesNeeded size */
                         *pcbBytesNeeded = *pcbBytesNeeded + dwRequiredSize;
@@ -2916,6 +2917,9 @@ REnumDependentServicesW(
 
     *lpServicesReturned = dwServicesReturned;
 
+    /* Nothing is left to be fetched */
+    *pcbBytesNeeded = 0;
+
 Done:
     if (lpServicesArray != NULL)
         HeapFree(GetProcessHeap(), 0, lpServicesArray);
@@ -3972,6 +3976,9 @@ REnumDependentServicesA(
     }
 
     *lpServicesReturned = dwServicesReturned;
+
+    /* Nothing is left to be fetched */
+    *pcbBytesNeeded = 0;
 
 Done:
     if (lpServicesArray)

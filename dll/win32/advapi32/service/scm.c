@@ -1181,7 +1181,7 @@ ScmWow64EnumStatus(const SCM_WOW64_ENUM *pEnum,
     if (dwError != ERROR_MORE_DATA)
         goto Fail;
 
-    /* All of it. The dependents of a service are returned with 4 bytes less than they take up. */
+    /* All of it; a little more room than the SCM says does no harm */
     for (dwTry = 0; ; dwTry++)
     {
         dwBufSize = (dwNeeded > 1024 * 256 - 64) ? 1024 * 256 : dwNeeded + 64;
