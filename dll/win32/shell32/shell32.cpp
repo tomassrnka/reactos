@@ -466,6 +466,8 @@ HINSTANCE   shell32_hInstance;
  * NOTES
  *  calling oleinitialize here breaks sone apps.
  */
+extern DWORD g_dwLinkProcessTls;
+
 STDAPI_(BOOL) DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID fImpLoad)
 {
     TRACE("%p 0x%x %p\n", hInstance, dwReason, fImpLoad);
@@ -473,6 +475,8 @@ STDAPI_(BOOL) DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID fImpLoad)
     {
         shell32_hInstance = hInstance;
         gModule.Init(ObjectMap, hInstance, &LIBID_Shell32);
+
+        g_dwLinkProcessTls = TlsAlloc();
 
         DisableThreadLibraryCalls (hInstance);
 
@@ -492,6 +496,8 @@ STDAPI_(BOOL) DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID fImpLoad)
     else if (dwReason == DLL_PROCESS_DETACH)
     {
         shell32_hInstance = NULL;
+        if (g_dwLinkProcessTls != TLS_OUT_OF_INDEXES)
+            TlsFree(g_dwLinkProcessTls);
         SIC_Destroy();
         FreeChangeNotifications();
         gModule.Term();

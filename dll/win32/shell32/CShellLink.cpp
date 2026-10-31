@@ -3139,22 +3139,33 @@ HRESULT STDMETHODCALLTYPE CShellLink::InvokeCommand(LPCMINVOKECOMMANDINFO lpici)
         return hr;
     }
 
-    /* Of the string verbs, only runas is known; a Unicode verb takes precedence */
+    /* Of the string verbs, only open and runas are known; a Unicode verb takes precedence */
     LPCMINVOKECOMMANDINFOEX iciex = (LPCMINVOKECOMMANDINFOEX)lpici;
     UINT idCmd;
-    BOOL bStringVerb = TRUE, bRunAs = FALSE;
+    BOOL bStringVerb = TRUE, bRunAs = FALSE, bOpen = FALSE;
     if (IsUnicode(*lpici) && !IS_INTRESOURCE(iciex->lpVerbW))
+    {
         bRunAs = !_wcsicmp(iciex->lpVerbW, L"runas");
+        bOpen = !_wcsicmp(iciex->lpVerbW, L"open");
+    }
     else if (!IS_INTRESOURCE(lpici->lpVerb))
+    {
         bRunAs = !lstrcmpiA(lpici->lpVerb, "runas");
+        bOpen = !lstrcmpiA(lpici->lpVerb, "open");
+    }
     else
+    {
         bStringVerb = FALSE;
+    }
 
     if (bStringVerb)
     {
-        if (!bRunAs || !TargetHasRunAs(CMF_EXTENDEDVERBS | CMF_DISABLEDVERBS, FALSE))
+        if (bOpen)
+            idCmd = IDCMD_OPEN;
+        else if (bRunAs && TargetHasRunAs(CMF_EXTENDEDVERBS | CMF_DISABLEDVERBS, FALSE))
+            idCmd = IDCMD_RUNAS;
+        else
             return E_NOTIMPL;
-        idCmd = IDCMD_RUNAS;
     }
     else
     {
@@ -3175,6 +3186,8 @@ HRESULT STDMETHODCALLTYPE CShellLink::InvokeCommand(LPCMINVOKECOMMANDINFO lpici)
     }
 }
 
+extern HANDLE *SH32_GetLinkProcessSlot(VOID); // shlexec.cpp
+
 HRESULT CShellLink::DoOpen(LPCMINVOKECOMMANDINFO lpici, LPCWSTR pszVerb)
 {
     LPCMINVOKECOMMANDINFOEX iciex = (LPCMINVOKECOMMANDINFOEX)lpici;
@@ -3182,7 +3195,27 @@ HRESULT CShellLink::DoOpen(LPCMINVOKECOMMANDINFO lpici, LPCWSTR pszVerb)
 
     CStringW args;
     if (m_sArgs)
-        args = m_sArgs;
+    {
+        // The arguments may contain environment variables, as the target and the working directory can
+        WCHAR szArgs[1024];
+        DWORD cch = ExpandEnvironmentStringsW(m_sArgs, szArgs, _countof(szArgs));
+        if (cch && cch <= _countof(szArgs))
+        {
+            args = szArgs;
+        }
+        else if (cch)
+        {
+            CStringW strExpanded;
+            LPWSTR pszExpanded = strExpanded.GetBuffer(cch);
+            cch = ExpandEnvironmentStringsW(m_sArgs, pszExpanded, cch);
+            strExpanded.ReleaseBuffer(cch ? cch - 1 : 0);
+            args = cch ? strExpanded : CStringW(m_sArgs);
+        }
+        else
+        {
+            args = m_sArgs;
+        }
+    }
 
     if (unicode)
     {
@@ -3246,7 +3279,20 @@ HRESULT CShellLink::DoOpen(LPCMINVOKECOMMANDINFO lpici, LPCWSTR pszVerb)
         sei.dwHotKey = m_Header.wHotKey;
         sei.fMask |= SEE_MASK_HOTKEY;
     }
-    return (ShellExecuteExW(&sei) ? S_OK : E_FAIL);
+
+    // Give the process handle back to a caller of ShellExecuteEx that asked for it (SEE_MASK_NOCLOSEPROCESS)
+    HANDLE *phProcess = SH32_GetLinkProcessSlot();
+    if (phProcess)
+        sei.fMask |= SEE_MASK_NOCLOSEPROCESS;
+    if (!ShellExecuteExW(&sei))
+        return E_FAIL;
+    if (phProcess && sei.hProcess)
+    {
+        if (*phProcess)
+            CloseHandle(*phProcess);
+        *phProcess = sei.hProcess;
+    }
+    return S_OK;
 }
 
 HRESULT STDMETHODCALLTYPE CShellLink::GetCommandString(UINT_PTR idCmd, UINT uType, UINT* pwReserved, LPSTR pszName, UINT cchMax)
@@ -3255,6 +3301,10 @@ HRESULT STDMETHODCALLTYPE CShellLink::GetCommandString(UINT_PTR idCmd, UINT uTyp
         return StringCchCopyW((LPWSTR)pszName, cchMax, L"runas");
     if (idCmd == IDCMD_RUNAS && uType == GCS_VERBA)
         return StringCchCopyA(pszName, cchMax, "runas");
+    if (idCmd == IDCMD_OPEN && uType == GCS_VERBW)
+        return StringCchCopyW((LPWSTR)pszName, cchMax, L"open");
+    if (idCmd == IDCMD_OPEN && uType == GCS_VERBA)
+        return StringCchCopyA(pszName, cchMax, "open");
 
     FIXME("%p %lu %u %p %p %u\n", this, idCmd, uType, pwReserved, pszName, cchMax);
     return E_NOTIMPL;
