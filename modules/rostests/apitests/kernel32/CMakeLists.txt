@@ -92,6 +92,7 @@ list(APPEND SOURCE
     GetQueuedCompletionStatusEx.c
     GetSystemTimePrecise.c
     GetThreadUILanguage.c
+    DiskPerformance.c
     GetVolumeInformation.c
     HandleList.c
     HeapCreateExecute.c

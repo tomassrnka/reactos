@@ -1700,6 +1700,7 @@ PartMgrAddDevice(
     }
     deviceExtension->PhysicalDiskDO = PhysicalDeviceObject;
     KeInitializeEvent(&deviceExtension->SyncEvent, SynchronizationEvent, TRUE);
+    PartMgrIoStatsInit(&deviceExtension->IoStats);
 
     // Update now the device type with the actual underlying device type
     deviceObject->DeviceType = deviceExtension->LowerDevice->DeviceType;
@@ -1776,6 +1777,12 @@ PartMgrDeviceControl(
             break;
         case IOCTL_DISK_GROW_PARTITION:
             status = FdoIoctlDiskGrowPartition(fdoExtension, Irp);
+            break;
+
+        case IOCTL_DISK_PERFORMANCE:
+            status = PartMgrIoctlDiskPerformance(&fdoExtension->IoStats,
+                                                 fdoExtension->DiskData.DeviceNumber,
+                                                 Irp);
             break;
 
         default:
@@ -1867,7 +1874,7 @@ PartMgrReadWrite(
     _In_ PIRP Irp)
 {
     PPARTITION_EXTENSION partExt = DeviceObject->DeviceExtension;
-    PIO_STACK_LOCATION ioStack = IoGetCurrentIrpStackLocation(Irp);
+    PPARTMGR_IO_STATS stats;
 
     if (!partExt->IsFDO)
     {
@@ -1879,14 +1886,20 @@ PartMgrReadWrite(
             IoCompleteRequest(Irp, IO_NO_INCREMENT);
             return STATUS_DEVICE_DOES_NOT_EXIST;
         }
-        else
-        {
-            ioStack->Parameters.Read.ByteOffset.QuadPart += partExt->StartingOffset;
-        }
+        stats = &partExt->IoStats;
+    }
+    else
+    {
+        stats = &((PFDO_EXTENSION)partExt)->IoStats;
     }
 
-    IoSkipCurrentIrpStackLocation(Irp);
-    return IoCallDriver(partExt->LowerDevice, Irp);
+    // the next driver gets the request (a partition's moved to its place on the disk); this
+    // location keeps the original and the time the request started
+    IoCopyCurrentIrpStackLocationToNext(Irp);
+    if (!partExt->IsFDO)
+        IoGetNextIrpStackLocation(Irp)->Parameters.Read.ByteOffset.QuadPart += partExt->StartingOffset;
+
+    return PartMgrIoStatsCallDriver(stats, partExt->LowerDevice, Irp);
 }
 
 DRIVER_DISPATCH PartMgrPower;
