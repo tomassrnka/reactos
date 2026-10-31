@@ -55,6 +55,22 @@ HRESULT schedsvc_run_task(const struct caller *caller, const WCHAR *path, GUID *
 BOOL schedsvc_valid_path(const WCHAR *path);
 LONG schedsvc_log_fault(EXCEPTION_POINTERS *info);
 HRESULT schedsvc_open_xml(const WCHAR *xml, IStream **stream);
+HRESULT schedsvc_task_update_xml(const WCHAR *path, const WCHAR *xml);
+HRESULT schedsvc_task_get_xml(const WCHAR *path, WCHAR **xml);
+BOOL schedsvc_task_running(const WCHAR *path);
+HRESULT schedsvc_get_last_run(const struct caller *caller, const WCHAR *path, SYSTEMTIME *last, DWORD *result);
+HRESULT schedsvc_scheduled_runtimes(const struct caller *caller, const WCHAR *path, const SYSTEMTIME *start,
+                                    const SYSTEMTIME *end, DWORD n_requested, DWORD *n_runtimes,
+                                    SYSTEMTIME **runtimes);
+HRESULT schedsvc_enum_instances(const struct caller *caller, const WCHAR *path, DWORD *n_guids, GUID **guids);
+HRESULT schedsvc_instance_info(const struct caller *caller, const GUID *guid, WCHAR **path, DWORD *state,
+                               WCHAR **action, WCHAR **info, DWORD *n_guids, GUID **guids, DWORD *pid);
+HRESULT schedsvc_stop(const struct caller *caller, const WCHAR *path, const GUID *guid);
+/* the Windows-shaped copy of the task store in the registry (taskcache.c); best effort, never trusted */
+void schedsvc_mirror_registered(const WCHAR *path, const WCHAR *xml);
+void schedsvc_mirror_deleted(const WCHAR *path);
+/* a primary token of the S4U logon of a local account (s4u.c) */
+HANDLE schedsvc_s4u_token(PSID sid);
 #endif
 
 #endif /* __WINE_SCHEDSVC_PRIVATE_H__ */

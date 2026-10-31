@@ -115,6 +115,7 @@ struct task
     PSID registrant;        /* NULL if unknown */
     BOOL privileged;        /* registered by LocalSystem or an administrator */
     BOOL enabled;
+    BOOL s4u;               /* Principal/LogonType S4U: no logged-on user needed, no password */
     WCHAR *user_id;         /* Principal/UserId */
     unsigned int n_triggers;
     unsigned int n_actions;
@@ -383,6 +384,8 @@ static void element_text(struct task *task, const WCHAR **names, unsigned int de
             free(task->user_id);
             task->user_id = strdupW(value);
         }
+        else if (!wcscmp(name, L"LogonType"))
+            task->s4u = !wcsicmp(value, L"S4U");
     }
     else if (depth >= 4 && !wcscmp(names[1], L"Triggers") && (trigger = current_trigger(task)))
     {
@@ -885,7 +888,7 @@ static WCHAR *expand_string(HANDLE token, const WCHAR *str)
     return wcslen(str) < MAX_EXPANDED ? wcsdup(str) : NULL;
 }
 
-static HANDLE start_action(const struct task *task, const struct action *action, HANDLE token)
+static HANDLE start_action(const struct task *task, const struct action *action, HANDLE token, BOOL interactive)
 {
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi;
@@ -934,11 +937,18 @@ static HANDLE start_action(const struct task *task, const struct action *action,
         free(cmdline);
         return NULL;
     }
-    if (token)
+    if (token && interactive)
     {
         si.lpDesktop = L"winsta0\\default";
         ret = CreateProcessAsUserW(token, NULL, cmdline, NULL, NULL, FALSE,
                                    CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_CONSOLE, env,
+                                   directory && *directory ? directory : NULL, &si, &pi);
+    }
+    else if (token)
+    {
+        /* an S4U token has no session of its own to show a window in */
+        ret = CreateProcessAsUserW(token, NULL, cmdline, NULL, NULL, FALSE,
+                                   CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW, env,
                                    directory && *directory ? directory : NULL, &si, &pi);
     }
     else
@@ -1011,6 +1021,7 @@ static HANDLE run_task(struct task *task)
     HANDLE token = NULL, process = NULL, last = NULL;
     PSID sid;
     unsigned int i;
+    BOOL interactive = TRUE;
 
     if (!task->enabled || !task->n_actions) return NULL;
 
@@ -1055,7 +1066,17 @@ static HANDLE run_task(struct task *task)
             WARN("task %s: registered by another user, not running it\n", debugstr_w(task->path));
             goto done;
         }
-        if (!(token = get_user_token(sid)))
+        if (task->s4u)
+        {
+            /* LogonType S4U: the user need not be logged on; the same rules above decide who it may be */
+            interactive = FALSE;
+            if (!(token = schedsvc_s4u_token(sid)))
+            {
+                WARN("task %s: no S4U logon for its user\n", debugstr_w(task->path));
+                goto done;
+            }
+        }
+        else if (!(token = get_user_token(sid)))
         {
             TRACE("task %s: its user is not logged on\n", debugstr_w(task->path));
             goto done;
@@ -1064,7 +1085,7 @@ static HANDLE run_task(struct task *task)
 
     for (i = 0; i < task->n_actions; i++)
     {
-        if (!(process = start_action(task, &task->actions[i], token))) continue;
+        if (!(process = start_action(task, &task->actions[i], token, interactive))) continue;
         if (last) CloseHandle(last);
         last = process;
     }
@@ -1074,6 +1095,8 @@ done:
     LocalFree(sid);
     return last;
 }
+
+static void track_instance(const struct task *task, HANDLE process, GUID *guid);
 
 /* the scheduled start of a task, respecting a still running instance */
 static void start_task(struct task *task)
@@ -1090,7 +1113,11 @@ static void start_task(struct task *task)
         CloseHandle(task->process);
         task->process = NULL;
     }
-    if ((process = run_task(task))) task->process = process;
+    if ((process = run_task(task)))
+    {
+        task->process = process;
+        track_instance(task, process, NULL);
+    }
 }
 
 static void schedule_event_trigger(struct task *task, const struct trigger *trigger, ULONGLONG now)
@@ -1589,7 +1616,8 @@ void schedsvc_folder_forgotten(const WCHAR *path)
 HRESULT schedsvc_task_registered(const struct caller *caller, const WCHAR *path, const WCHAR *xml)
 {
     WCHAR *name;
-    DWORD value;
+    DWORD value, size, last_result = 0;
+    ULONGLONG last_run = 0;
     HKEY cache, key;
     LONG ret;
 
@@ -1599,10 +1627,24 @@ HRESULT schedsvc_task_registered(const struct caller *caller, const WCHAR *path,
     ret = RegCreateKeyExW(HKEY_LOCAL_MACHINE, TASKCACHE_KEY, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &cache, NULL);
     if (!ret)
     {
+        /* an update keeps the last run of the task */
+        if (!RegOpenKeyExW(cache, name, 0, KEY_READ, &key))
+        {
+            size = sizeof(last_run);
+            if (RegQueryValueExW(key, L"LastRun", NULL, NULL, (BYTE *)&last_run, &size)) last_run = 0;
+            size = sizeof(last_result);
+            if (RegQueryValueExW(key, L"LastResult", NULL, NULL, (BYTE *)&last_result, &size)) last_run = 0;
+            RegCloseKey(key);
+        }
         RegDeleteKeyW(cache, name);
         ret = RegCreateKeyExW(cache, name, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &key, NULL);
         if (!ret)
         {
+            if (last_run)
+            {
+                RegSetValueExW(key, L"LastRun", 0, REG_QWORD, (const BYTE *)&last_run, sizeof(last_run));
+                RegSetValueExW(key, L"LastResult", 0, REG_DWORD, (const BYTE *)&last_result, sizeof(last_result));
+            }
             value = caller->privileged;
             ret = RegSetValueExW(key, L"Xml", 0, REG_SZ, (const BYTE *)xml, (wcslen(xml) + 1) * sizeof(WCHAR));
             if (!ret)
@@ -1624,7 +1666,60 @@ HRESULT schedsvc_task_registered(const struct caller *caller, const WCHAR *path,
         ERR("failed to record task %s (%ld)\n", debugstr_w(path), ret);
         return HRESULT_FROM_WIN32(ret);
     }
+    schedsvc_mirror_registered(path, xml);
     return S_OK;
+}
+
+/* the XML of a recorded task as the record has it; the record, never the file, is what the service trusts */
+HRESULT schedsvc_task_get_xml(const WCHAR *path, WCHAR **xml)
+{
+    WCHAR *name;
+    HKEY cache, key;
+    LONG ret;
+
+    *xml = NULL;
+    if (!(name = cache_name(path))) return E_INVALIDARG;
+    ret = RegOpenKeyExW(HKEY_LOCAL_MACHINE, TASKCACHE_KEY, 0, KEY_READ, &cache);
+    if (!ret)
+    {
+        ret = RegOpenKeyExW(cache, name, 0, KEY_READ, &key);
+        if (!ret)
+        {
+            if (!(*xml = reg_get_string(key, L"Xml"))) ret = ERROR_FILE_NOT_FOUND;
+            RegCloseKey(key);
+        }
+        RegCloseKey(cache);
+    }
+    free(name);
+    return ret ? HRESULT_FROM_WIN32(ret) : S_OK;
+}
+
+/*
+ * Replaces the XML of a recorded task and nothing else: the registrant and the Privileged flag stay
+ * those of whoever registered the task, so that an administrator who only enables or disables a
+ * user's task does not become the one who may run it as LocalSystem.
+ */
+HRESULT schedsvc_task_update_xml(const WCHAR *path, const WCHAR *xml)
+{
+    WCHAR *name;
+    HKEY cache, key;
+    LONG ret;
+
+    if (!(name = cache_name(path))) return E_INVALIDARG;
+    ret = RegOpenKeyExW(HKEY_LOCAL_MACHINE, TASKCACHE_KEY, 0, KEY_READ, &cache);
+    if (!ret)
+    {
+        ret = RegOpenKeyExW(cache, name, 0, KEY_SET_VALUE, &key);
+        if (!ret)
+        {
+            ret = RegSetValueExW(key, L"Xml", 0, REG_SZ, (const BYTE *)xml, (wcslen(xml) + 1) * sizeof(WCHAR));
+            RegCloseKey(key);
+        }
+        RegCloseKey(cache);
+    }
+    if (!ret) queue_change(name);
+    free(name);
+    return ret ? HRESULT_FROM_WIN32(ret) : S_OK;
 }
 
 HRESULT schedsvc_task_deleted(const WCHAR *path)
@@ -1641,7 +1736,11 @@ HRESULT schedsvc_task_deleted(const WCHAR *path)
         RegCloseKey(cache);
     }
     if (ret == ERROR_FILE_NOT_FOUND || ret == ERROR_PATH_NOT_FOUND) ret = ERROR_SUCCESS;
-    if (!ret) queue_change(name);
+    if (!ret)
+    {
+        queue_change(name);
+        schedsvc_mirror_deleted(path);
+    }
     free(name);
     if (ret)
     {
@@ -1651,42 +1750,451 @@ HRESULT schedsvc_task_deleted(const WCHAR *path)
     return S_OK;
 }
 
-/* the last instance started by IRegisteredTask::Run of each task, so that Run cannot pile them up */
-static struct { WCHAR *name; HANDLE process; } instances[MAX_INSTANCES];
-
-/* a slot for the task: its own, else an empty or a finished one; -1 if the task still runs or none is free */
-static int find_instance_slot(const WCHAR *name, BOOL *running)
+/*
+ * Running instances. Every start of a task, by a trigger or by IRegisteredTask::Run, is tracked until
+ * its process ends. That gives Run its overlap guard, the Running state, the instances of a task
+ * (SchRpcEnumInstances, SchRpcGetInstanceInfo, SchRpcStop, SchRpcStopInstance) and the last run time
+ * and result of the task, which are kept in its TaskCache record (LastRun, LastResult) so that they
+ * outlive the instance. An instance is dropped when its process is seen to have ended, the next time
+ * anybody looks, so the result is never older than the question.
+ */
+struct instance
 {
-    int i, free_slot = -1;
+    WCHAR *name;        /* TaskCache key name */
+    WCHAR *command;
+    HANDLE process;
+    DWORD pid;
+    GUID guid;
+    FILETIME start;
+};
 
-    *running = FALSE;
+static struct instance instances[MAX_INSTANCES];
+
+static void free_instance(struct instance *inst)
+{
+    free(inst->name);
+    free(inst->command);
+    if (inst->process) CloseHandle(inst->process);
+    memset(inst, 0, sizeof(*inst));
+}
+
+static void set_last_run(const WCHAR *name, const FILETIME *start, DWORD result)
+{
+    HKEY cache, key;
+    ULONGLONG time = ((ULONGLONG)start->dwHighDateTime << 32) | start->dwLowDateTime;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, TASKCACHE_KEY, 0, KEY_READ, &cache)) return;
+    if (!RegOpenKeyExW(cache, name, 0, KEY_SET_VALUE, &key))
+    {
+        RegSetValueExW(key, L"LastRun", 0, REG_QWORD, (const BYTE *)&time, sizeof(time));
+        RegSetValueExW(key, L"LastResult", 0, REG_DWORD, (const BYTE *)&result, sizeof(result));
+        RegCloseKey(key);
+    }
+    RegCloseKey(cache);
+}
+
+/* drops the instances whose process ended, recording their exit code; the store lock is held */
+static void reap_instances(void)
+{
+    DWORD i, code;
+
     for (i = 0; i < MAX_INSTANCES; i++)
     {
-        if (instances[i].name && !wcsicmp(instances[i].name, name))
-        {
-            if (WaitForSingleObject(instances[i].process, 0) == WAIT_TIMEOUT) *running = TRUE;
-            return i;
-        }
+        struct instance *inst = &instances[i];
+
+        if (!inst->name || WaitForSingleObject(inst->process, 0) == WAIT_TIMEOUT) continue;
+        if (!GetExitCodeProcess(inst->process, &code)) code = HRESULT_FROM_WIN32(GetLastError());
+        set_last_run(inst->name, &inst->start, code);
+        free_instance(inst);
     }
+}
+
+/* a live instance of the task, or NULL; the store lock is held */
+static struct instance *find_instance(const WCHAR *name)
+{
+    DWORD i;
+
+    reap_instances();
     for (i = 0; i < MAX_INSTANCES; i++)
+        if (instances[i].name && !wcsicmp(instances[i].name, name)) return &instances[i];
+    return NULL;
+}
+
+static struct instance *find_instance_by_guid(const GUID *guid)
+{
+    DWORD i;
+
+    reap_instances();
+    for (i = 0; i < MAX_INSTANCES; i++)
+        if (instances[i].name && IsEqualGUID(&instances[i].guid, guid)) return &instances[i];
+    return NULL;
+}
+
+static BOOL have_free_instance_slot(void)
+{
+    DWORD i;
+
+    reap_instances();
+    for (i = 0; i < MAX_INSTANCES; i++)
+        if (!instances[i].name) return TRUE;
+    return FALSE;
+}
+
+/* the store lock is held; NULL if all slots are in use (the start then goes untracked) */
+static struct instance *add_instance(const WCHAR *name, const struct task *task, HANDLE process)
+{
+    struct instance *inst = NULL;
+    DWORD i;
+
+    reap_instances();
+    for (i = 0; i < MAX_INSTANCES; i++)
+        if (!instances[i].name) { inst = &instances[i]; break; }
+    if (!inst) return NULL;
+
+    memset(inst, 0, sizeof(*inst));
+    if (!DuplicateHandle(GetCurrentProcess(), process, GetCurrentProcess(), &inst->process, 0, FALSE,
+                         DUPLICATE_SAME_ACCESS))
+        return NULL;
+    inst->name = wcsdup(name);
+    if (task->n_actions && task->actions[task->n_actions - 1].command)
+        inst->command = wcsdup(task->actions[task->n_actions - 1].command);
+    if (!inst->name)
     {
-        if (!instances[i].name) return i;
-        if (free_slot < 0 && WaitForSingleObject(instances[i].process, 0) != WAIT_TIMEOUT) free_slot = i;
+        free_instance(inst);
+        return NULL;
     }
-    return free_slot;
+    inst->pid = GetProcessId(process);
+    UuidCreate(&inst->guid);
+    GetSystemTimeAsFileTime(&inst->start);
+    set_last_run(name, &inst->start, SCHED_S_TASK_RUNNING);
+    return inst;
+}
+
+static void track_instance(const struct task *task, HANDLE process, GUID *guid)
+{
+    WCHAR *name = cache_name(task->path);
+    struct instance *inst;
+
+    if (guid) memset(guid, 0, sizeof(*guid));
+    if (!name) return;
+    schedsvc_lock();
+    if ((inst = add_instance(name, task, process)) && guid) *guid = inst->guid;
+    schedsvc_unlock();
+    free(name);
 }
 
 static void clear_instances(void)
 {
     int i;
 
+    for (i = 0; i < MAX_INSTANCES; i++) free_instance(&instances[i]);
+}
+
+/* the task path ("\Folder\Task") of a TaskCache key name; the caller frees it */
+static WCHAR *name_to_path(const WCHAR *name)
+{
+    WCHAR *path = malloc((wcslen(name) + 2) * sizeof(WCHAR)), *p;
+
+    if (!path) return NULL;
+    path[0] = '\\';
+    wcscpy(path + 1, name);
+    for (p = path; *p; p++) if (*p == '|') *p = '\\';
+    return path;
+}
+
+BOOL schedsvc_task_running(const WCHAR *path)
+{
+    WCHAR *name = cache_name(path);
+    BOOL running;
+
+    if (!name) return FALSE;
+    schedsvc_lock();
+    running = find_instance(name) != NULL;
+    schedsvc_unlock();
+    free(name);
+    return running;
+}
+
+static BOOL task_record_exists(const WCHAR *name)
+{
+    HKEY cache, key;
+    BOOL found = FALSE;
+
+    if (!RegOpenKeyExW(HKEY_LOCAL_MACHINE, TASKCACHE_KEY, 0, KEY_READ, &cache))
+    {
+        if (!RegOpenKeyExW(cache, name, 0, KEY_READ, &key))
+        {
+            found = TRUE;
+            RegCloseKey(key);
+        }
+        RegCloseKey(cache);
+    }
+    return found;
+}
+
+static void filetime_to_local(ULONGLONG time, SYSTEMTIME *local)
+{
+    FILETIME ft;
+    SYSTEMTIME utc;
+
+    ft.dwLowDateTime = (DWORD)time;
+    ft.dwHighDateTime = (DWORD)(time >> 32);
+    if (!FileTimeToSystemTime(&ft, &utc) || !SystemTimeToTzSpecificLocalTime(NULL, &utc, local))
+        memset(local, 0, sizeof(*local));
+}
+
+static BOOL local_to_filetime(const SYSTEMTIME *local, ULONGLONG *time)
+{
+    SYSTEMTIME utc;
+    FILETIME ft;
+
+    if (!TzSpecificLocalTimeToSystemTime(NULL, (SYSTEMTIME *)local, &utc) || !SystemTimeToFileTime(&utc, &ft))
+        return FALSE;
+    *time = ((ULONGLONG)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    return TRUE;
+}
+
+/* the last start of a task (local time) and its result; a task that never ran has a zero time and SCHED_S_TASK_HAS_NOT_RUN */
+HRESULT schedsvc_get_last_run(const struct caller *caller, const WCHAR *path, SYSTEMTIME *last, DWORD *result)
+{
+    WCHAR *name;
+    HKEY cache, key;
+    ULONGLONG time = 0;
+    DWORD size, code = SCHED_S_TASK_HAS_NOT_RUN;
+    HRESULT hr;
+
+    memset(last, 0, sizeof(*last));
+    *result = SCHED_S_TASK_HAS_NOT_RUN;
+    if (!(name = cache_name(path))) return E_INVALIDARG;
+
+    schedsvc_lock();
+    hr = schedsvc_check_owner(caller, path);
+    if (hr == S_OK && !task_record_exists(name)) hr = HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+    if (hr == S_OK)
+    {
+        reap_instances();
+        if (!RegOpenKeyExW(HKEY_LOCAL_MACHINE, TASKCACHE_KEY, 0, KEY_READ, &cache))
+        {
+            if (!RegOpenKeyExW(cache, name, 0, KEY_READ, &key))
+            {
+                size = sizeof(time);
+                if (RegQueryValueExW(key, L"LastRun", NULL, NULL, (BYTE *)&time, &size)) time = 0;
+                size = sizeof(code);
+                if (!time || RegQueryValueExW(key, L"LastResult", NULL, NULL, (BYTE *)&code, &size))
+                    code = SCHED_S_TASK_HAS_NOT_RUN;
+                RegCloseKey(key);
+            }
+            RegCloseKey(cache);
+        }
+        if (time) filetime_to_local(time, last);
+        *result = time ? code : SCHED_S_TASK_HAS_NOT_RUN;
+    }
+    schedsvc_unlock();
+    free(name);
+    return hr;
+}
+
+#define MAX_RUNTIMES 256
+
+/* the next start times of the triggers in [start, end] (local times), at most n_requested of them */
+HRESULT schedsvc_scheduled_runtimes(const struct caller *caller, const WCHAR *path, const SYSTEMTIME *start,
+                                    const SYSTEMTIME *end, DWORD n_requested, DWORD *n_runtimes,
+                                    SYSTEMTIME **runtimes)
+{
+    struct task *task = NULL;
+    SYSTEMTIME *list;
+    ULONGLONG after, limit = NO_TIME, next, t;
+    WCHAR *name;
+    HKEY cache;
+    DWORD n = 0, i;
+    HRESULT hr;
+
+    *n_runtimes = 0;
+    *runtimes = NULL;
+    if (!(name = cache_name(path))) return E_INVALIDARG;
+
+    schedsvc_lock();
+    hr = schedsvc_check_owner(caller, path);
+    if (hr == S_OK && !RegOpenKeyExW(HKEY_LOCAL_MACHINE, TASKCACHE_KEY, 0, KEY_READ, &cache))
+    {
+        task = load_task(cache, name);
+        RegCloseKey(cache);
+    }
+    schedsvc_unlock();
+    free(name);
+    if (hr != S_OK) return hr;
+    if (!task) return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+
+    if (!n_requested || n_requested > MAX_RUNTIMES) n_requested = MAX_RUNTIMES;
+    after = get_time();
+    if (start)
+    {
+        if (!local_to_filetime(start, &after)) after = get_time();
+        else if (after) after--;    /* the start itself counts */
+    }
+    if (end && (!local_to_filetime(end, &limit))) limit = NO_TIME;
+
+    if (task->enabled && (list = malloc(n_requested * sizeof(*list))))
+    {
+        while (n < n_requested)
+        {
+            next = NO_TIME;
+            for (i = 0; i < task->n_triggers; i++)
+                if ((t = trigger_next_run(&task->triggers[i], after)) < next) next = t;
+            if (next == NO_TIME || next > limit) break;
+            filetime_to_local(next, &list[n++]);
+            after = next;
+        }
+        if (n) *runtimes = list;
+        else free(list);
+        *n_runtimes = n;
+    }
+    free_task(task);
+    return S_OK;
+}
+
+/* the instances of one task, or of all tasks the caller may see (path NULL) */
+HRESULT schedsvc_enum_instances(const struct caller *caller, const WCHAR *path, DWORD *n_guids, GUID **guids)
+{
+    WCHAR *name = NULL, *task_path;
+    GUID *list;
+    DWORD i, n = 0;
+    HRESULT hr = S_OK;
+
+    *n_guids = 0;
+    *guids = NULL;
+    if (path && !(name = cache_name(path))) return E_INVALIDARG;
+    if (!(list = malloc(MAX_INSTANCES * sizeof(*list)))) { free(name); return E_OUTOFMEMORY; }
+
+    schedsvc_lock();
+    if (path) hr = schedsvc_check_owner(caller, path);
+    if (hr == S_OK)
+    {
+        reap_instances();
+        for (i = 0; i < MAX_INSTANCES; i++)
+        {
+            if (!instances[i].name) continue;
+            if (name && wcsicmp(instances[i].name, name)) continue;
+            if (!name)
+            {
+                if (!(task_path = name_to_path(instances[i].name))) continue;
+                hr = schedsvc_check_owner(caller, task_path);
+                free(task_path);
+                if (hr != S_OK) { hr = S_OK; continue; }
+            }
+            list[n++] = instances[i].guid;
+        }
+    }
+    schedsvc_unlock();
+    free(name);
+    if (hr != S_OK || !n) free(list);
+    else
+    {
+        *guids = list;
+        *n_guids = n;
+    }
+    return hr;
+}
+
+HRESULT schedsvc_instance_info(const struct caller *caller, const GUID *guid, WCHAR **path, DWORD *state,
+                               WCHAR **action, WCHAR **info, DWORD *n_guids, GUID **guids, DWORD *pid)
+{
+    struct instance *inst;
+    WCHAR *task_path;
+    HRESULT hr = S_OK;
+    DWORD i, n = 0;
+
+    *path = *action = *info = NULL;
+    *n_guids = 0;
+    *guids = NULL;
+    *state = TASK_STATE_UNKNOWN;
+    *pid = 0;
+
+    schedsvc_lock();
+    if (!(inst = find_instance_by_guid(guid))) hr = SCHED_E_TASK_NOT_RUNNING;
+    else if (!(task_path = name_to_path(inst->name))) hr = E_OUTOFMEMORY;
+    else
+    {
+        if ((hr = schedsvc_check_owner(caller, task_path)) == S_OK)
+        {
+            *path = task_path;
+            *action = wcsdup(inst->command ? inst->command : L"");
+            *info = wcsdup(L"");
+            *guids = malloc(MAX_INSTANCES * sizeof(GUID));
+            if (!*action || !*info || !*guids) hr = E_OUTOFMEMORY;
+            else
+            {
+                for (i = 0; i < MAX_INSTANCES; i++)
+                    if (instances[i].name && !wcsicmp(instances[i].name, inst->name))
+                        (*guids)[n++] = instances[i].guid;
+                *n_guids = n;
+                *state = TASK_STATE_RUNNING;
+                *pid = inst->pid;
+            }
+        }
+        else free(task_path);
+    }
+    schedsvc_unlock();
+    if (hr != S_OK)
+    {
+        free(*path);
+        free(*action);
+        free(*info);
+        free(*guids);
+        *path = *action = *info = NULL;
+        *guids = NULL;
+        *n_guids = 0;
+    }
+    return hr;
+}
+
+/*
+ * Ends the instances of a task (or the one with the GUID), only the registrant's or an administrator's.
+ * The process is terminated, as Windows does for a task that does not end by itself.
+ */
+HRESULT schedsvc_stop(const struct caller *caller, const WCHAR *path, const GUID *guid)
+{
+    HANDLE processes[MAX_INSTANCES];
+    WCHAR *name = NULL, *task_path;
+    DWORD i, n = 0;
+    HRESULT hr = S_OK;
+
+    if (path && !(name = cache_name(path))) return E_INVALIDARG;
+
+    schedsvc_lock();
+    if (name && (hr = schedsvc_check_owner(caller, path)) != S_OK) goto done;
+    reap_instances();
     for (i = 0; i < MAX_INSTANCES; i++)
     {
-        free(instances[i].name);
-        if (instances[i].process) CloseHandle(instances[i].process);
-        instances[i].name = NULL;
-        instances[i].process = NULL;
+        struct instance *inst = &instances[i];
+
+        if (!inst->name) continue;
+        if (name && wcsicmp(inst->name, name)) continue;
+        if (guid && !IsEqualGUID(&inst->guid, guid)) continue;
+        if (!name)
+        {
+            /* all of them (or the one by GUID): only those the caller may touch */
+            if (!(task_path = name_to_path(inst->name))) continue;
+            hr = schedsvc_check_owner(caller, task_path);
+            free(task_path);
+            if (hr != S_OK) { hr = guid ? E_ACCESSDENIED : S_OK; continue; }
+        }
+        if (DuplicateHandle(GetCurrentProcess(), inst->process, GetCurrentProcess(), &processes[n], 0, FALSE,
+                            DUPLICATE_SAME_ACCESS))
+            n++;
     }
+    if (hr == S_OK && !n) hr = SCHED_E_TASK_NOT_RUNNING;
+    for (i = 0; i < n; i++)
+    {
+        TerminateProcess(processes[i], ERROR_PROCESS_ABORTED);
+        WaitForSingleObject(processes[i], 5000);
+        CloseHandle(processes[i]);
+    }
+    if (n) reap_instances();
+done:
+    schedsvc_unlock();
+    free(name);
+    return hr;
 }
 
 /* IRegisteredTask::Run: only the registering user or an administrator may start a task */
@@ -1696,9 +2204,7 @@ HRESULT schedsvc_run_task(const struct caller *caller, const WCHAR *path, GUID *
     WCHAR *name;
     HANDLE process;
     HKEY cache;
-    BOOL running;
     HRESULT hr;
-    int slot;
 
     memset(guid, 0, sizeof(*guid));
     if (!(name = cache_name(path))) return E_INVALIDARG;
@@ -1725,22 +2231,23 @@ HRESULT schedsvc_run_task(const struct caller *caller, const WCHAR *path, GUID *
     }
 
     schedsvc_lock();
-    slot = find_instance_slot(name, &running);
-    if (running)
+    if (find_instance(name))
         hr = SCHED_E_ALREADY_RUNNING;
-    else if (slot < 0)
+    else if (!have_free_instance_slot())
         hr = HRESULT_FROM_WIN32(ERROR_BUSY);
     else if (!(process = run_task(task)))
         hr = E_FAIL;
     else
     {
-        if (instances[slot].process) CloseHandle(instances[slot].process);
-        free(instances[slot].name);
-        instances[slot].name = name;
-        instances[slot].process = process;
-        name = NULL;
+        add_instance(name, task, process);
+        CloseHandle(process);
         UuidCreate(guid);
         hr = S_OK;
+        /* the GUID the caller gets names the instance */
+        {
+            struct instance *inst = find_instance(name);
+            if (inst) *guid = inst->guid;
+        }
     }
     schedsvc_unlock();
 

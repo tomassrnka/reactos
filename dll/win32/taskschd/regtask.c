@@ -179,8 +179,11 @@ static HRESULT WINAPI regtask_get_Enabled(IRegisteredTask *iface, VARIANT_BOOL *
 
 static HRESULT WINAPI regtask_put_Enabled(IRegisteredTask *iface, VARIANT_BOOL enabled)
 {
-    FIXME("%p,%d: stub\n", iface, enabled);
-    return S_OK;
+    RegisteredTask *regtask = impl_from_IRegisteredTask(iface);
+
+    TRACE("%p,%d\n", iface, enabled);
+
+    return SchRpcEnableTask(regtask->path, enabled != VARIANT_FALSE);
 }
 
 static HRESULT WINAPI regtask_Run(IRegisteredTask *iface, VARIANT params, IRunningTask **task)
@@ -207,11 +210,12 @@ static HRESULT WINAPI regtask_RunEx(IRegisteredTask *iface, VARIANT params, LONG
     return E_NOTIMPL;
 }
 
-/* the service does not track running instances: an empty collection */
+/* the instances of a task as the service counted them; IRunningTask objects are not provided */
 typedef struct
 {
     IRunningTaskCollection IRunningTaskCollection_iface;
     LONG ref;
+    LONG count;
 } RunningTaskCollection;
 
 static inline RunningTaskCollection *impl_from_IRunningTaskCollection(IRunningTaskCollection *iface)
@@ -284,11 +288,13 @@ static HRESULT WINAPI running_tasks_Invoke(IRunningTaskCollection *iface, DISPID
 
 static HRESULT WINAPI running_tasks_get_Count(IRunningTaskCollection *iface, LONG *count)
 {
+    RunningTaskCollection *tasks = impl_from_IRunningTaskCollection(iface);
+
     TRACE("%p,%p\n", iface, count);
 
     if (!count) return E_POINTER;
 
-    *count = 0;
+    *count = tasks->count;
     return S_OK;
 }
 
@@ -324,15 +330,25 @@ static const IRunningTaskCollectionVtbl RunningTaskCollection_vtbl =
 
 static HRESULT WINAPI regtask_GetInstances(IRegisteredTask *iface, LONG flags, IRunningTaskCollection **tasks)
 {
+    RegisteredTask *regtask = impl_from_IRegisteredTask(iface);
     RunningTaskCollection *collection;
+    DWORD count = 0;
+    GUID *guids = NULL;
+    HRESULT hr;
 
     TRACE("%p,%lx,%p\n", iface, flags, tasks);
 
     if (!tasks) return E_POINTER;
+    if (flags) return E_INVALIDARG;
+
+    hr = SchRpcEnumInstances(regtask->path, 0, &count, &guids);
+    if (FAILED(hr)) return hr;
+    MIDL_user_free(guids);
 
     if (!(collection = malloc(sizeof(*collection)))) return E_OUTOFMEMORY;
     collection->IRunningTaskCollection_iface.lpVtbl = &RunningTaskCollection_vtbl;
     collection->ref = 1;
+    collection->count = count;
 
     *tasks = &collection->IRunningTaskCollection_iface;
     return S_OK;
@@ -340,26 +356,82 @@ static HRESULT WINAPI regtask_GetInstances(IRegisteredTask *iface, LONG flags, I
 
 static HRESULT WINAPI regtask_get_LastRunTime(IRegisteredTask *iface, DATE *date)
 {
-    FIXME("%p,%p: stub\n", iface, date);
-    return SCHED_S_TASK_HAS_NOT_RUN;
+    RegisteredTask *regtask = impl_from_IRegisteredTask(iface);
+    SYSTEMTIME last;
+    DWORD result;
+    HRESULT hr;
+
+    TRACE("%p,%p\n", iface, date);
+
+    if (!date) return E_POINTER;
+
+    *date = 0;
+    hr = SchRpcGetLastRunInfo(regtask->path, &last, &result);
+    if (FAILED(hr)) return hr;
+    /* a task that never ran: a zero date and the success code of the API */
+    if (!last.wYear || !SystemTimeToVariantTime(&last, date))
+    {
+        *date = 0;
+        return SCHED_S_TASK_HAS_NOT_RUN;
+    }
+    return S_OK;
 }
 
 static HRESULT WINAPI regtask_get_LastTaskResult(IRegisteredTask *iface, LONG *result)
 {
-    FIXME("%p,%p: stub\n", iface, result);
-    return E_NOTIMPL;
+    RegisteredTask *regtask = impl_from_IRegisteredTask(iface);
+    SYSTEMTIME last;
+    DWORD code;
+    HRESULT hr;
+
+    TRACE("%p,%p\n", iface, result);
+
+    if (!result) return E_POINTER;
+
+    *result = 0;
+    hr = SchRpcGetLastRunInfo(regtask->path, &last, &code);
+    if (FAILED(hr)) return hr;
+    *result = code;
+    return S_OK;
 }
 
 static HRESULT WINAPI regtask_get_NumberOfMissedRuns(IRegisteredTask *iface, LONG *runs)
 {
-    FIXME("%p,%p: stub\n", iface, runs);
-    return E_NOTIMPL;
+    RegisteredTask *regtask = impl_from_IRegisteredTask(iface);
+    DWORD missed = 0;
+    HRESULT hr;
+
+    TRACE("%p,%p\n", iface, runs);
+
+    if (!runs) return E_POINTER;
+
+    hr = SchRpcGetNumberOfMissedRuns(regtask->path, &missed);
+    *runs = FAILED(hr) ? 0 : missed;
+    return hr;
 }
 
 static HRESULT WINAPI regtask_get_NextRunTime(IRegisteredTask *iface, DATE *date)
 {
-    FIXME("%p,%p: stub\n", iface, date);
-    return E_NOTIMPL;
+    RegisteredTask *regtask = impl_from_IRegisteredTask(iface);
+    SYSTEMTIME *times = NULL;
+    DWORD count = 0;
+    HRESULT hr;
+
+    TRACE("%p,%p\n", iface, date);
+
+    if (!date) return E_POINTER;
+
+    *date = 0;
+    hr = SchRpcScheduledRuntimes(regtask->path, NULL, NULL, 0, 1, &count, &times);
+    if (FAILED(hr)) return hr;
+    if (!count || !times || !SystemTimeToVariantTime(&times[0], date))
+    {
+        *date = 0;
+        MIDL_user_free(times);
+        return SCHED_S_TASK_NO_VALID_TRIGGERS;
+    }
+    MIDL_user_free(times);
+    return S_OK;
 }
 
 static HRESULT WINAPI regtask_get_Definition(IRegisteredTask *iface, ITaskDefinition **task)
@@ -401,15 +473,42 @@ static HRESULT WINAPI regtask_SetSecurityDescriptor(IRegisteredTask *iface, BSTR
 
 static HRESULT WINAPI regtask_Stop(IRegisteredTask *iface, LONG flags)
 {
-    FIXME("%p,%lx: stub\n", iface, flags);
-    return E_NOTIMPL;
+    RegisteredTask *regtask = impl_from_IRegisteredTask(iface);
+
+    TRACE("%p,%lx\n", iface, flags);
+
+    return SchRpcStop(regtask->path, flags);
 }
 
 static HRESULT WINAPI regtask_GetRunTimes(IRegisteredTask *iface, const LPSYSTEMTIME start, const LPSYSTEMTIME end,
                                           DWORD *count, LPSYSTEMTIME *time)
 {
-    FIXME("%p,%p.%p,%p,%p: stub\n", iface, start, end, count, time);
-    return E_NOTIMPL;
+    RegisteredTask *regtask = impl_from_IRegisteredTask(iface);
+    SYSTEMTIME *times = NULL, *copy;
+    DWORD n = 0;
+    HRESULT hr;
+
+    TRACE("%p,%p.%p,%p,%p\n", iface, start, end, count, time);
+
+    if (!count || !time) return E_POINTER;
+
+    *time = NULL;
+    hr = SchRpcScheduledRuntimes(regtask->path, start, end, 0, *count, &n, &times);
+    if (FAILED(hr)) return hr;
+    *count = n;
+    if (n)
+    {
+        if (!(copy = CoTaskMemAlloc(n * sizeof(*copy))))
+        {
+            MIDL_user_free(times);
+            *count = 0;
+            return E_OUTOFMEMORY;
+        }
+        memcpy(copy, times, n * sizeof(*copy));
+        *time = copy;
+    }
+    MIDL_user_free(times);
+    return S_OK;
 }
 
 static const IRegisteredTaskVtbl RegisteredTask_vtbl =

@@ -15,6 +15,8 @@ add_library(schedsvc MODULE
     schedsvc.c
     schrpc.c
     taskrun.c
+    taskcache.c
+    s4u.c
     schedsvc.rc
     ${CMAKE_CURRENT_BINARY_DIR}/atsvc_s.c
     ${CMAKE_CURRENT_BINARY_DIR}/schrpc_s.c
@@ -23,5 +25,6 @@ add_library(schedsvc MODULE
 set_module_type(schedsvc win32dll UNICODE)
 target_link_libraries(schedsvc uuid wine pseh)
 add_dependencies(schedsvc wineheaders) # schrpc.h
+add_delay_importlibs(schedsvc secur32)
 add_importlibs(schedsvc advapi32 netapi32 rpcrt4 ole32 oleaut32 xmllite userenv msvcrt kernel32_vista kernel32 ntdll)
 add_cd_file(TARGET schedsvc DESTINATION reactos/system32 FOR all)
