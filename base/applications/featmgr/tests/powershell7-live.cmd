@@ -34,7 +34,8 @@ call :present "I1 powershell-7 listed by /list"
 %FM% /query powershell-7 > %O%\q.txt 2>&1
 find "ArtifactSHA256: " %O%\q.txt >nul
 call :rc0 "I2 manifest pins a SHA-256"
-if exist C:\Windows\System32\pwrshplugin.dll (call :fail "I3 no pwrshplugin.dll faked (found one)") else (call :pass "I3 no pwrshplugin.dll faked")
+reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\WSMAN\Plugin\Microsoft.PowerShell" >nul 2>&1
+call :rc1 "I3 no WSMan PowerShell plugin registered (pwrshplugin.dll is only the failing stub)"
 
 rem --- wrong SHA-256 must be refused after the download: nothing installed, no record
 copy /y %FX%\fmt-ps7bad.ini %R%\Catalog\ >nul

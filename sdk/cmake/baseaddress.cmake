@@ -482,3 +482,4 @@ set(baseaddress_wevtapi                        0x70120000) # manually added
 set(baseaddress_prntvpt                        0x6e8b0000) # manually added
 set(baseaddress_windows.data.pdf               0x6e8f0000) # manually added
 set(baseaddress_pwrshsip                        0x6e8d0000)
+set(baseaddress_pwrshplugin                     0x6e8c0000)
