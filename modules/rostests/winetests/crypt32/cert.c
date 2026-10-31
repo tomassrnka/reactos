@@ -1092,6 +1092,205 @@ static BYTE iTunesSerialNum[] = {
 0x8d,0xf6,0x6a,0xdf,0xd2,0x40,0xfe,0xb6,0xa6,0x61,0x9b,0x9b,
 0xe0,0xa0,0x1a,0x0f };
 
+#ifndef CERT_FIND_HASH_STR
+#define CERT_FIND_HASH_STR 0x140000
+#endif
+
+static BOOL same_cert(PCCERT_CONTEXT a, PCCERT_CONTEXT b)
+{
+    return a && b && a->cbCertEncoded == b->cbCertEncoded &&
+     !memcmp(a->pbCertEncoded, b->pbCertEncoded, a->cbCertEncoded);
+}
+
+static WCHAR hex_digit(const BYTE *hash, DWORD index)
+{
+    return L"0123456789abcdef"[(hash[index / 2] >> (index & 1 ? 0 : 4)) & 0xf];
+}
+
+static void test_find_hash_str(void)
+{
+    static const struct
+    {
+        const char *name;
+        const WCHAR *prefix;  /* put before the digits of the hash */
+        const WCHAR *sep;     /* between the bytes */
+        const WCHAR *suffix;  /* after the digits */
+        BOOL upper;
+        BOOL found;
+    } tests[] =
+    {
+        { "lower case",            L"",       L"",   L"",     FALSE, TRUE },
+        { "upper case",            L"",       L"",   L"",     TRUE,  TRUE },
+        { "space separated",       L"",       L" ",  L"",     FALSE, TRUE },
+        { "two spaces",            L"",       L"  ", L"",     FALSE, TRUE },
+        { "tab separated",         L"",       L"\t", L"",     FALSE, TRUE },
+        { "dash separated",        L"",       L"-",  L"",     FALSE, TRUE },
+        { "comma separated",       L"",       L",",  L"",     FALSE, TRUE },
+        { "leading space",         L" ",      L"",   L"",     FALSE, TRUE },
+        { "trailing space",        L"",       L"",   L" ",    FALSE, TRUE },
+        { "leading tab",           L"\t",     L"",   L"",     FALSE, TRUE },
+        { "trailing line break",   L"",       L"",   L"\r\n", FALSE, TRUE },
+        { "byte order mark",       L"\xfeff", L"",   L"",     FALSE, TRUE },
+        { "space dash space",      L"",       L" - ", L"",    FALSE, TRUE },
+        { "line break separated",  L"",       L"\r\n", L"",   FALSE, TRUE },
+        { "double dash",           L"",       L"--", L"",     FALSE, TRUE },
+        { "leading dash",          L"-",      L"",   L"",     FALSE, TRUE },
+        { "trailing comma",        L"",       L"",   L",",    FALSE, TRUE },
+        { "byte order mark, space", L"\xfeff ", L"", L"",    FALSE, TRUE },
+        { "two byte order marks",  L"\xfeff\xfeff", L"", L"", FALSE, FALSE },
+        { "space, byte order mark", L" \xfeff", L"", L"",    FALSE, FALSE },
+        { "form feed separated",   L"",       L"\f", L"",    FALSE, FALSE },
+        { "leading form feed",     L"\f",    L"",   L"",     FALSE, FALSE },
+        { "trailing colon",        L"",       L"",   L":",    FALSE, FALSE },
+        { "colon separated",       L"",       L":",  L"",     FALSE, FALSE },
+        { "0x prefix",             L"0x",     L"",   L"",     FALSE, FALSE },
+        { "left-to-right mark",    L"\x200e", L"",   L"",     FALSE, FALSE },
+        { "no-break space",        L"\xa0",   L"",   L"",     FALSE, FALSE },
+        { "braces",                L"{",      L"",   L"}",    FALSE, FALSE },
+        { "trailing non-hex",      L"",       L"",   L"gg",   FALSE, FALSE },
+        { "trailing digit",        L"",       L"",   L"0",    FALSE, FALSE },
+        { "trailing zero byte",    L"",       L"",   L"00",   FALSE, FALSE },
+        { "leading zero byte",     L"00",     L"",   L"",     FALSE, FALSE },
+    };
+    static const WCHAR *bad[] =
+    {
+        L"", L" ", L"0", L"g", L"zz",
+        L"6e30907 15fd9",              /* a space inside a byte */
+        L"6e 30 90 71 5f d9 6",
+    };
+    BYTE hash[20];
+    WCHAR str[200];
+    CRYPT_HASH_BLOB blob;
+    PCCERT_CONTEXT context, found;
+    HCERTSTORE store;
+    DWORD size, i, j, k;
+    BOOL ret;
+
+    store = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0, CERT_STORE_CREATE_NEW_FLAG, NULL);
+    ok(store != NULL, "CertOpenStore failed: %08lx\n", GetLastError());
+    if (!store) return;
+    ret = CertAddEncodedCertificateToStore(store, X509_ASN_ENCODING, bigCert, sizeof(bigCert),
+     CERT_STORE_ADD_NEW, &context);
+    ok(ret, "CertAddEncodedCertificateToStore failed: %08lx\n", GetLastError());
+    ret = CertAddEncodedCertificateToStore(store, X509_ASN_ENCODING, bigCert2, sizeof(bigCert2),
+     CERT_STORE_ADD_NEW, NULL);
+    ok(ret, "CertAddEncodedCertificateToStore failed: %08lx\n", GetLastError());
+
+    size = sizeof(hash);
+    ret = CertGetCertificateContextProperty(context, CERT_SHA1_HASH_PROP_ID, hash, &size);
+    ok(ret && size == 20, "got %d, %lu\n", ret, size);
+    ok(!memcmp(hash, bigCertHash, sizeof(bigCertHash)), "unexpected hash\n");
+
+    /* the string is the SHA-1 hash in hex, the same certificate as CERT_FIND_SHA1_HASH finds */
+    blob.pbData = hash;
+    blob.cbData = sizeof(hash);
+    found = CertFindCertificateInStore(store, X509_ASN_ENCODING, 0, CERT_FIND_SHA1_HASH, &blob, NULL);
+    ok(same_cert(found, context), "expected the first certificate, got %p\n", found);
+    CertFreeCertificateContext(found);
+
+    for (i = 0; i < ARRAY_SIZE(tests); i++)
+    {
+        WCHAR *p = str;
+
+        lstrcpyW(p, tests[i].prefix);
+        p += lstrlenW(p);
+        for (j = 0; j < sizeof(hash); j++)
+        {
+            static const WCHAR lower[] = L"0123456789abcdef", upper[] = L"0123456789ABCDEF";
+            const WCHAR *digits = tests[i].upper ? upper : lower;
+            *p++ = digits[hash[j] >> 4];
+            *p++ = digits[hash[j] & 0xf];
+            if (j < sizeof(hash) - 1)
+            {
+                lstrcpyW(p, tests[i].sep);
+                p += lstrlenW(p);
+            }
+        }
+        lstrcpyW(p, tests[i].suffix);
+
+        for (k = 0; k < 2; k++)
+        {
+            SetLastError(0xdeadbeef);
+            found = CertFindCertificateInStore(store, k ? 0 : X509_ASN_ENCODING, 0, CERT_FIND_HASH_STR, str, NULL);
+            if (tests[i].found)
+            {
+                ok(same_cert(found, context), "%s: expected the first certificate, got %p, error %08lx\n",
+                 tests[i].name, found, GetLastError());
+                if (found)
+                {
+                    /* the search frees the previous context */
+                    PCCERT_CONTEXT next = CertFindCertificateInStore(store, X509_ASN_ENCODING, 0,
+                     CERT_FIND_HASH_STR, str, CertDuplicateCertificateContext(found));
+                    ok(!next, "%s: expected one certificate only\n", tests[i].name);
+                    if (next) CertFreeCertificateContext(next);
+                }
+            }
+            else
+            {
+                ok(!found, "%s: unexpected match\n", tests[i].name);
+                ok(GetLastError() == CRYPT_E_NOT_FOUND, "%s: got error %08lx\n", tests[i].name, GetLastError());
+            }
+            if (found) CertFreeCertificateContext(found);
+        }
+    }
+
+    /* the digits must make up exactly the 20 byte hash */
+    for (i = 1; i < sizeof(hash) * 2 + 3; i++)
+    {
+        BOOL expect = (i == sizeof(hash) * 2);
+
+        for (j = 0; j < i; j++)
+            str[j] = j < sizeof(hash) * 2 ? hex_digit(hash, j) : '0';
+        str[i] = 0;
+        found = CertFindCertificateInStore(store, X509_ASN_ENCODING, 0, CERT_FIND_HASH_STR, str, NULL);
+        ok(!!found == expect, "%lu digits: got %p\n", i, found);
+        if (found) CertFreeCertificateContext(found);
+    }
+    /* the hash of another kind: MD5 (16 bytes) and SHA-256 (32 bytes) strings do not match */
+    {
+        BYTE other[32];
+
+        size = 16;
+        ret = CertGetCertificateContextProperty(context, CERT_MD5_HASH_PROP_ID, other, &size);
+        ok(ret, "got %08lx\n", GetLastError());
+        for (j = 0; j < 32; j++) str[j] = hex_digit(other, j);
+        str[32] = 0;
+        found = CertFindCertificateInStore(store, X509_ASN_ENCODING, 0, CERT_FIND_HASH_STR, str, NULL);
+        ok(!found, "MD5 string matched\n");
+        if (found) CertFreeCertificateContext(found);
+    }
+
+    for (i = 0; i < ARRAY_SIZE(bad); i++)
+    {
+        SetLastError(0xdeadbeef);
+        found = CertFindCertificateInStore(store, X509_ASN_ENCODING, 0, CERT_FIND_HASH_STR, bad[i], NULL);
+        ok(!found, "%s: unexpected match\n", wine_dbgstr_w(bad[i]));
+        ok(GetLastError() == CRYPT_E_NOT_FOUND, "%s: got error %08lx\n", wine_dbgstr_w(bad[i]), GetLastError());
+        if (found) CertFreeCertificateContext(found);
+    }
+
+    /* non-hex characters anywhere */
+    for (j = 0; j < 40; j += 13)
+    {
+        for (k = 0; k < 40; k++) str[k] = hex_digit(hash, k);
+        str[40] = 0;
+        str[j] = 'g';
+        found = CertFindCertificateInStore(store, X509_ASN_ENCODING, 0, CERT_FIND_HASH_STR, str, NULL);
+        ok(!found, "non-hex digit at %lu matched\n", j);
+        if (found) CertFreeCertificateContext(found);
+    }
+
+    /* a NULL string matches nothing, unlike the NULL name of CERT_FIND_ISSUER_STR */
+    SetLastError(0xdeadbeef);
+    found = CertFindCertificateInStore(store, X509_ASN_ENCODING, 0, CERT_FIND_HASH_STR, NULL, NULL);
+    ok(!found, "NULL string matched\n");
+    ok(GetLastError() == CRYPT_E_NOT_FOUND, "got error %08lx\n", GetLastError());
+    if (found) CertFreeCertificateContext(found);
+
+    CertFreeCertificateContext(context);
+    CertCloseStore(store, 0);
+}
+
 static void testFindCert(void)
 {
     HCERTSTORE store;
@@ -4520,6 +4719,7 @@ START_TEST(cert)
     testCreateCert();
     testDupCert();
     testFindCert();
+    test_find_hash_str();
     testGetSubjectCert();
     testGetIssuerCert();
     testLinkCert();
