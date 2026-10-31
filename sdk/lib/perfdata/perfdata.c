@@ -214,6 +214,8 @@ struct pdh_process
 #define PDH_SYSINFO_PERFORMANCE   2
 #define PDH_SYSINFO_PROCESS       5
 #define PDH_SYSINFO_CPU_PERF      8
+#define PDH_CPU_RECORD_MIN        44
+#define PDH_CPU_RECORD_MAX        48
 
 LONG NTAPI NtQuerySystemInformation( ULONG, PVOID, ULONG, PULONG );
 
@@ -316,8 +318,9 @@ static DWORD cpu_count(void)
 
 static BOOL ensure_cpu( BOOL force )
 {
-    DWORD n;
-    ULONG len;
+    DWORD n, i, stride;
+    ULONG len = 0;
+    BYTE *raw;
 
     if (!force && snap_cpu.gen == cur_gen) return snap_cpu.cpu != NULL;
     free( snap_cpu.cpu );
@@ -326,14 +329,37 @@ static BOOL ensure_cpu( BOOL force )
     snap_cpu.gen = cur_gen;
     n = cpu_count();
     if (!(snap_cpu.cpu = calloc( n, sizeof(*snap_cpu.cpu) ))) return FALSE;
-    if (query_sysinfo( PDH_SYSINFO_CPU_PERF, snap_cpu.cpu, n * sizeof(*snap_cpu.cpu), &len ) < 0)
+
+    /* The records are 48 bytes on Windows and on a 64-bit kernel (a WoW64 client gets them
+     * unchanged), but 44 on a 32-bit ReactOS kernel, where GCC aligns the 64-bit fields of
+     * the structure to 4: this code's own struct has that size when it is built for i386.
+     * Ask with room for the larger record and take the stride from the returned length. */
+    if (!(raw = calloc( n, PDH_CPU_RECORD_MAX ))) goto fail;
+    if (query_sysinfo( PDH_SYSINFO_CPU_PERF, raw, n * PDH_CPU_RECORD_MAX, &len ) < 0 || !len)
     {
-        free( snap_cpu.cpu );
-        snap_cpu.cpu = NULL;
-        return FALSE;
+        free( raw );
+        goto fail;
     }
+    stride = len / n;
+    if (stride < PDH_CPU_RECORD_MIN || stride > PDH_CPU_RECORD_MAX) stride = PDH_CPU_RECORD_MAX;
+    for (i = 0; i < n; i++)
+    {
+        const BYTE *r = raw + i * stride;
+        memcpy( &snap_cpu.cpu[i].IdleTime, r, 8 );
+        memcpy( &snap_cpu.cpu[i].KernelTime, r + 8, 8 );
+        memcpy( &snap_cpu.cpu[i].UserTime, r + 16, 8 );
+        memcpy( &snap_cpu.cpu[i].DpcTime, r + 24, 8 );
+        memcpy( &snap_cpu.cpu[i].InterruptTime, r + 32, 8 );
+        memcpy( &snap_cpu.cpu[i].InterruptCount, r + 40, 4 );
+    }
+    free( raw );
     snap_cpu.count = n;
     return TRUE;
+
+fail:
+    free( snap_cpu.cpu );
+    snap_cpu.cpu = NULL;
+    return FALSE;
 }
 
 static void append_letter( WCHAR *name, DWORD size, WCHAR letter )
