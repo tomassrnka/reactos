@@ -2527,6 +2527,9 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
             if (NT_SUCCESS(Status) && !NativeSystemInformation)
                 ((SYSTEM_PROCESSOR_INFORMATION *)P(1))->ProcessorArchitecture = PROCESSOR_ARCHITECTURE_INTEL;
             return Status;
+        case SystemNumaProcessorMap:
+            /* The same layout for both: two ULONGs, then the ULONGLONG affinity mask of each node */
+            return NtQuerySystemInformation(a[0], P(1), a[2], P(3));
         case SystemRangeStartInformation:
             /* The end of the guest's user range, as on Windows WoW64 (measured on Server 2008 R2
              * and Windows 10: 0x7fff0000 for an image that is not large address aware) */
