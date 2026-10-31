@@ -28,6 +28,11 @@ typedef struct _LSA_SAM_PWD_DATA
     LSA_SAM_NETLOGON_TYPE LogonType;
     LANMAN_SESSION_KEY LanmanSessionKey;
     USER_SESSION_KEY UserSessionKey;
+
+    /* S4U logon (MsV1_0S4ULogon): no password is checked, the account
+       restrictions are those of a logon without credentials */
+    BOOL IsS4U;
+    BOOL CheckLogonHours;
 } LSA_SAM_PWD_DATA, *PLSA_SAM_PWD_DATA;
 
 /**

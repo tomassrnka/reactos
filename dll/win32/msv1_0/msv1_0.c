@@ -1554,6 +1554,251 @@ LsaApLogonUserEx2_Network(
 }
 
 /*
+ * Handle an S4U logon (MsV1_0S4ULogon): the account is looked up and checked,
+ * but no password is involved. The caller has to be trusted (lsasrv decides
+ * the impersonation level of the token from that).
+ */
+static
+BOOLEAN
+FixupS4UString(
+    _Inout_ PUNICODE_STRING String,
+    _In_ PVOID ProtocolSubmitBuffer,
+    _In_ PVOID ClientBufferBase,
+    _In_ ULONG SubmitBufferSize)
+{
+    ULONG_PTR Offset;
+
+    if (String->Length == 0)
+    {
+        String->Buffer = NULL;
+        String->MaximumLength = 0;
+        return TRUE;
+    }
+
+    if ((String->Length & 1) != 0)
+        return FALSE;
+
+    /* The pointer is either an address in the client's copy of the buffer or
+       (as Windows also accepts) an offset from the start of the buffer */
+    Offset = (ULONG_PTR)String->Buffer;
+    if (Offset >= (ULONG_PTR)ClientBufferBase &&
+        Offset - (ULONG_PTR)ClientBufferBase <= SubmitBufferSize)
+        Offset -= (ULONG_PTR)ClientBufferBase;
+
+    /* The string has to lie inside the submit buffer */
+    if (Offset > SubmitBufferSize || String->Length > SubmitBufferSize - Offset)
+        return FALSE;
+
+    String->Buffer = (PWSTR)((ULONG_PTR)ProtocolSubmitBuffer + Offset);
+    String->MaximumLength = String->Length;
+    return TRUE;
+}
+
+
+static
+NTSTATUS
+BuildS4ULogonProfileBuffer(
+    _In_ PLSA_CLIENT_REQUEST ClientRequest,
+    _In_ PUNICODE_STRING ComputerName,
+    _In_ ULONG Flags,
+    _Out_ PMSV1_0_LM20_LOGON_PROFILE *ProfileBuffer,
+    _Out_ PULONG ProfileBufferLength)
+{
+    PMSV1_0_LM20_LOGON_PROFILE LocalBuffer = NULL;
+    PVOID ClientBaseAddress = NULL;
+    ULONG BufferLength, StringLength;
+    PBYTE LocalString, ClientString;
+    NTSTATUS Status;
+
+    *ProfileBuffer = NULL;
+    *ProfileBufferLength = 0;
+
+    /* The domain and the server name (both the computer name), each zero terminated */
+    StringLength = ComputerName->Length + sizeof(WCHAR);
+    BufferLength = sizeof(MSV1_0_LM20_LOGON_PROFILE) + 2 * StringLength;
+
+    LocalBuffer = DispatchTable.AllocateLsaHeap(BufferLength);
+    if (LocalBuffer == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    RtlZeroMemory(LocalBuffer, BufferLength);
+
+    Status = DispatchTable.AllocateClientBuffer(ClientRequest,
+                                                BufferLength,
+                                                &ClientBaseAddress);
+    if (!NT_SUCCESS(Status))
+    {
+        TRACE("DispatchTable.AllocateClientBuffer failed (Status 0x%08lx)\n", Status);
+        goto done;
+    }
+
+    LocalBuffer->MessageType = MsV1_0Lm20LogonProfile;
+    if (Flags & MSV1_0_S4U_LOGON_FLAG_CHECK_LOGONHOURS)
+    {
+        LocalBuffer->KickOffTime.QuadPart = MAXLONGLONG;
+        LocalBuffer->LogoffTime.QuadPart = MAXLONGLONG;
+    }
+    LocalBuffer->UserFlags = LOGON_EXTRA_SIDS;
+
+    /* The pointers in the profile are those of the client */
+    LocalString = (PBYTE)(LocalBuffer + 1);
+    ClientString = (PBYTE)ClientBaseAddress + sizeof(MSV1_0_LM20_LOGON_PROFILE);
+
+    RtlCopyMemory(LocalString, ComputerName->Buffer, ComputerName->Length);
+    LocalBuffer->LogonDomainName.Buffer = (PWSTR)ClientString;
+    LocalBuffer->LogonDomainName.Length = ComputerName->Length;
+    LocalBuffer->LogonDomainName.MaximumLength = (USHORT)StringLength;
+
+    LocalString += StringLength;
+    ClientString += StringLength;
+
+    RtlCopyMemory(LocalString, ComputerName->Buffer, ComputerName->Length);
+    LocalBuffer->LogonServer.Buffer = (PWSTR)ClientString;
+    LocalBuffer->LogonServer.Length = ComputerName->Length;
+    LocalBuffer->LogonServer.MaximumLength = (USHORT)StringLength;
+
+    Status = DispatchTable.CopyToClientBuffer(ClientRequest,
+                                              BufferLength,
+                                              ClientBaseAddress,
+                                              LocalBuffer);
+    if (!NT_SUCCESS(Status))
+    {
+        TRACE("DispatchTable.CopyToClientBuffer failed (Status 0x%08lx)\n", Status);
+        goto done;
+    }
+
+    *ProfileBuffer = (PMSV1_0_LM20_LOGON_PROFILE)ClientBaseAddress;
+    *ProfileBufferLength = BufferLength;
+
+done:
+    DispatchTable.FreeLsaHeap(LocalBuffer);
+
+    if (!NT_SUCCESS(Status) && ClientBaseAddress != NULL)
+        DispatchTable.FreeClientBuffer(ClientRequest, ClientBaseAddress);
+
+    return Status;
+}
+
+
+static
+NTSTATUS
+LsaApLogonUserEx2_S4U(
+    _In_ PLSA_CLIENT_REQUEST ClientRequest,
+    _In_ SECURITY_LOGON_TYPE LogonType,
+    _In_ PVOID ProtocolSubmitBuffer,
+    _In_ PVOID ClientBufferBase,
+    _In_ ULONG SubmitBufferSize,
+    _In_ PUNICODE_STRING ComputerName,
+    _Out_ PUNICODE_STRING* LogonUserRef,
+    _Out_ PUNICODE_STRING* LogonDomainRef,
+    _Inout_ PLSA_SAM_PWD_DATA LogonPwdData,
+    _Out_ SAMPR_HANDLE* UserHandlePtr,
+    _Out_ PSAMPR_USER_INFO_BUFFER* UserInfoPtr,
+    _Out_ PRPC_SID* AccountDomainSidPtr,
+    _Out_ PBOOL SpecialAccount,
+    _Out_ PMSV1_0_LM20_LOGON_PROFILE *LogonProfile,
+    _Out_ PULONG LogonProfileSize,
+    _Out_ PNTSTATUS SubStatus)
+{
+    static const UNICODE_STRING LocalDomainU = RTL_CONSTANT_STRING(L".");
+    PMSV1_0_S4U_LOGON LogonInfo = ProtocolSubmitBuffer;
+    NTSTATUS Status;
+
+    *LogonProfile = NULL;
+    *LogonProfileSize = 0;
+    *UserInfoPtr = NULL;
+    *AccountDomainSidPtr = NULL;
+    *UserHandlePtr = NULL;
+    *SpecialAccount = FALSE;
+
+    if (SubmitBufferSize < sizeof(MSV1_0_S4U_LOGON))
+    {
+        ERR("Invalid SubmitBufferSize %lu\n", SubmitBufferSize);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /* Only a network logon is supported. Like Windows, a batch logon is not
+       granted without the right (rights are not checked here, so it is refused) */
+    switch (LogonType)
+    {
+        case Network:
+            break;
+
+        case Batch:
+            return STATUS_LOGON_TYPE_NOT_GRANTED;
+
+        case NewCredentials:
+            return STATUS_INVALID_LOGON_TYPE;
+
+        default:
+            return STATUS_BAD_VALIDATION_CLASS;
+    }
+
+    /* A user name that has no buffer at all is invalid, an empty one is a failed logon (see below) */
+    if (LogonInfo->UserPrincipalName.Length == 0 && LogonInfo->UserPrincipalName.Buffer == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    if (!FixupS4UString(&LogonInfo->DomainName, ProtocolSubmitBuffer, ClientBufferBase, SubmitBufferSize) ||
+        !FixupS4UString(&LogonInfo->UserPrincipalName, ProtocolSubmitBuffer, ClientBufferBase, SubmitBufferSize))
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /* Only local accounts: the domain is the computer name or "." */
+    if (!RtlEqualUnicodeString(&LogonInfo->DomainName, ComputerName, TRUE) &&
+        !RtlEqualUnicodeString(&LogonInfo->DomainName, &LocalDomainU, TRUE))
+    {
+        TRACE("S4U domain %wZ is not local\n", &LogonInfo->DomainName);
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    if (LogonInfo->UserPrincipalName.Length == 0)
+        return STATUS_LOGON_FAILURE;
+
+    LogonPwdData->IsNetwork = FALSE;
+    LogonPwdData->PlainPwd = NULL;
+    LogonPwdData->ComputerName = ComputerName;
+    LogonPwdData->IsS4U = TRUE;
+    LogonPwdData->CheckLogonHours = (LogonInfo->Flags & MSV1_0_S4U_LOGON_FLAG_CHECK_LOGONHOURS) != 0;
+
+    Status = SamValidateUser(LogonType,
+                             &LogonInfo->UserPrincipalName,
+                             ComputerName,
+                             LogonPwdData,
+                             ComputerName,
+                             SpecialAccount,
+                             AccountDomainSidPtr,
+                             UserHandlePtr,
+                             UserInfoPtr,
+                             SubStatus);
+    if (!NT_SUCCESS(Status))
+    {
+        ERR("SamValidateUser failed with 0x%lx\n", Status);
+
+        /* The caller is not told whether the account exists */
+        if (Status == STATUS_NO_SUCH_USER)
+            Status = STATUS_LOGON_FAILURE;
+        return Status;
+    }
+
+    Status = BuildS4ULogonProfileBuffer(ClientRequest,
+                                        ComputerName,
+                                        LogonInfo->Flags,
+                                        LogonProfile,
+                                        LogonProfileSize);
+    if (!NT_SUCCESS(Status))
+    {
+        ERR("BuildS4ULogonProfileBuffer failed with 0x%lx\n", Status);
+        return Status;
+    }
+
+    *LogonUserRef = &LogonInfo->UserPrincipalName;
+    *LogonDomainRef = ComputerName;
+
+    return STATUS_SUCCESS;
+}
+
+
+/*
  * @implemented
  */
 NTSTATUS
@@ -1590,6 +1835,7 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
     UCHAR LogonPassHash;
     PUNICODE_STRING ErasePassword = NULL;
     PLOGON_LIST_ENTRY LogonEntry = NULL;
+    BOOLEAN UserValidated = FALSE;
 
     TRACE("LsaApLogonUserEx2()\n");
 
@@ -1613,7 +1859,33 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
     RtlInitUnicodeString(&ComputerName, ComputerNameData);
 
     /* Parameters validation */
-    if (LogonType == Interactive ||
+    if (SubmitBufferSize >= sizeof(ULONG) &&
+        ProtocolSubmitBuffer != NULL &&
+        *(PULONG)ProtocolSubmitBuffer == MsV1_0S4ULogon)
+    {
+        /* The user is validated by the handler, without a password */
+        Status = LsaApLogonUserEx2_S4U(ClientRequest,
+                                       LogonType,
+                                       ProtocolSubmitBuffer,
+                                       ClientBufferBase,
+                                       SubmitBufferSize,
+                                       &ComputerName,
+                                       &LogonUserName,
+                                       &LogonDomain,
+                                       &LogonPwdData,
+                                       &UserHandle,
+                                       &UserInfo,
+                                       &AccountDomainSid,
+                                       &SpecialAccount,
+                                       (PMSV1_0_LM20_LOGON_PROFILE*)ProfileBuffer,
+                                       ProfileBufferSize,
+                                       SubStatus);
+        if (!NT_SUCCESS(Status))
+            goto done;
+
+        UserValidated = TRUE;
+    }
+    else if (LogonType == Interactive ||
         LogonType == Batch ||
         LogonType == Service ||
         LogonType == NetworkCleartext)
@@ -1753,18 +2025,21 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
     }
     // TODO: Add other LogonType validity checks.
 
-    Status = SamValidateUser(LogonType,
-                             LogonUserName,
-                             LogonDomain,
-                             &LogonPwdData,
-                             &ComputerName,
-                             &SpecialAccount,
-                             &AccountDomainSid,
-                             &UserHandle,
-                             &UserInfo,
-                             SubStatus);
-    if (!NT_SUCCESS(Status))
-        goto done;
+    if (!UserValidated)
+    {
+        Status = SamValidateUser(LogonType,
+                                 LogonUserName,
+                                 LogonDomain,
+                                 &LogonPwdData,
+                                 &ComputerName,
+                                 &SpecialAccount,
+                                 &AccountDomainSid,
+                                 &UserHandle,
+                                 &UserInfo,
+                                 SubStatus);
+        if (!NT_SUCCESS(Status))
+            goto done;
+    }
 
     /* Return logon information */
 
@@ -1822,7 +2097,11 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
         RtlReleaseResource(&LogonListResource);
     }
 
-    if (LogonType == Interactive || LogonType == Batch || LogonType == Service ||
+    if (UserValidated)
+    {
+        /* The profile buffer of an S4U logon has been built already */
+    }
+    else if (LogonType == Interactive || LogonType == Batch || LogonType == Service ||
         LogonType == NetworkCleartext)
     {
         /* Build and fill the interactive profile buffer */

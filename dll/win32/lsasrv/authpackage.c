@@ -1418,6 +1418,7 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
 
     PUNICODE_STRING UserName = NULL;
     PUNICODE_STRING LogonDomainName = NULL;
+    BOOLEAN IsS4ULogon = FALSE;
 //    UNICODE_STRING LogonServer;
 
 
@@ -1458,6 +1459,17 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
             RtlFreeHeap(RtlGetProcessHeap(), 0, LocalAuthInfo);
             return Status;
         }
+    }
+
+    /* Is it an S4U logon of the MSV1_0 package (a logon without credentials)? */
+    if (LocalAuthInfo != NULL &&
+        RequestMsg->LogonUser.Request.AuthenticationInformationLength >= sizeof(ULONG) &&
+        *(PULONG)LocalAuthInfo == MsV1_0S4ULogon &&
+        Package->Name != NULL &&
+        Package->Name->Length == sizeof(MSV1_0_PACKAGE_NAME) - sizeof(CHAR) &&
+        _strnicmp(Package->Name->Buffer, MSV1_0_PACKAGE_NAME, Package->Name->Length) == 0)
+    {
+        IsS4ULogon = TRUE;
     }
 
     if (RequestMsg->LogonUser.Request.LocalGroupsCount > 0)
@@ -1534,7 +1546,7 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
         goto done;
     }
 
-    if (LocalGroups->GroupCount > 0)
+    if (LocalGroups != NULL && LocalGroups->GroupCount > 0)
     {
         /* Add local groups to the token information */
         Status = LsapAddLocalGroups(TokenInformation,
@@ -1644,7 +1656,9 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
         }
 
         Qos.Length = sizeof(SECURITY_QUALITY_OF_SERVICE);
-        Qos.ImpersonationLevel = SecurityImpersonation;
+        /* A caller without SeTcbPrivilege gets only an identification token of an S4U logon */
+        Qos.ImpersonationLevel = (IsS4ULogon && !LogonContext->TrustedCaller) ?
+                                 SecurityIdentification : SecurityImpersonation;
         Qos.ContextTrackingMode = SECURITY_DYNAMIC_TRACKING;
         Qos.EffectiveOnly = FALSE;
 
@@ -1693,6 +1707,12 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
     {
         UserName = &((PMSV1_0_INTERACTIVE_LOGON)LocalAuthInfo)->UserName;
         LogonDomainName = &((PMSV1_0_INTERACTIVE_LOGON)LocalAuthInfo)->LogonDomainName;
+    }
+    else if (AccountName != NULL && AuthenticatingAuthority != NULL)
+    {
+        /* The names the package authenticated (a network or S4U logon) */
+        UserName = AccountName;
+        LogonDomainName = AuthenticatingAuthority;
     }
     else
     {

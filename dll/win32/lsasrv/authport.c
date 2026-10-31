@@ -38,20 +38,43 @@ LsapDeregisterLogonProcess(PLSA_API_MSG RequestMsg,
 static
 BOOL
 LsapIsTrustedClient(
-    _In_ HANDLE ProcessHandle)
+    _In_ HANDLE ProcessHandle,
+    _In_ PCLIENT_ID ClientId)
 {
     LUID TcbPrivilege = {SE_TCB_PRIVILEGE, 0};
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE ThreadHandle = NULL;
     HANDLE TokenHandle = NULL;
     PTOKEN_PRIVILEGES Privileges = NULL;
     ULONG Size, i;
     BOOL Trusted = FALSE;
     NTSTATUS Status;
 
-    Status = NtOpenProcessToken(ProcessHandle,
-                                TOKEN_QUERY,
-                                &TokenHandle);
-    if (!NT_SUCCESS(Status))
-        goto done;
+    /* As on Windows, a thread that impersonates is judged by the token it impersonates */
+    InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
+    Status = NtOpenThread(&ThreadHandle,
+                          THREAD_QUERY_INFORMATION,
+                          &ObjectAttributes,
+                          ClientId);
+    if (NT_SUCCESS(Status))
+    {
+        Status = NtOpenThreadTokenEx(ThreadHandle,
+                                     TOKEN_QUERY,
+                                     TRUE,
+                                     0,
+                                     &TokenHandle);
+        if (!NT_SUCCESS(Status))
+            TokenHandle = NULL;
+    }
+
+    if (TokenHandle == NULL)
+    {
+        Status = NtOpenProcessToken(ProcessHandle,
+                                    TOKEN_QUERY,
+                                    &TokenHandle);
+        if (!NT_SUCCESS(Status))
+            goto done;
+    }
 
     Status = NtQueryInformationToken(TokenHandle,
                                      TokenPrivileges,
@@ -88,6 +111,9 @@ done:
 
     if (TokenHandle != NULL)
         NtClose(TokenHandle);
+
+    if (ThreadHandle != NULL)
+        NtClose(ThreadHandle);
 
     return Trusted;
 }
@@ -148,7 +174,7 @@ LsapCheckLogonProcess(PLSA_API_MSG RequestMsg,
 
         case CHECK:
         default:
-            Context->TrustedCaller = LsapIsTrustedClient(ProcessHandle);
+            Context->TrustedCaller = LsapIsTrustedClient(ProcessHandle, &RequestMsg->h.ClientId);
             break;
     }
 
