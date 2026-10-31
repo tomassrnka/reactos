@@ -314,6 +314,25 @@ WINECRYPT_CERTSTORE *CRYPT_CollectionOpenStore(HCRYPTPROV hCryptProv,
  DWORD dwFlags, const void *pvPara);
 WINECRYPT_CERTSTORE *CRYPT_ProvCreateStore(DWORD dwFlags,
  WINECRYPT_CERTSTORE *memStore, const CERT_STORE_PROV_INFO *pProvInfo);
+/* A provider store that sets this in CERT_STORE_PROV_INFO.dwStoreProvFlags is told,
+ * before each enumeration of its contents begins once CERT_STORE_CTRL_AUTO_RESYNC has
+ * succeeded, to look for outside changes: the control CRYPT_STORE_CTRL_RESYNC_IF_CHANGED.
+ */
+#define CRYPT_PROV_STORE_AUTO_RESYNC_CHECK 0x80000000
+#define CRYPT_STORE_CTRL_RESYNC_IF_CHANGED 0x80000001
+
+/* Context types for the provider store's property notifications */
+#define CRYPT_PROV_CONTEXT_CERT 0
+#define CRYPT_PROV_CONTEXT_CRL  1
+#define CRYPT_PROV_CONTEXT_CTL  2
+/* Called before and after a property of a context changes.  If the context
+ * belongs to a provider store that persists property changes, the first
+ * fails (with E_ACCESSDENIED) when the store is read-only, and the second
+ * hands the change to the provider.
+ */
+BOOL CRYPT_ProvStoreCanSetProperty(DWORD type, context_t *context);
+void CRYPT_ProvStoreSetProperty(DWORD type, context_t *context, DWORD propID,
+ DWORD flags, const void *data);
 WINECRYPT_CERTSTORE *CRYPT_ProvOpenStore(LPCSTR lpszStoreProvider,
  DWORD dwEncodingType, HCRYPTPROV hCryptProv, DWORD dwFlags,
  const void *pvPara);

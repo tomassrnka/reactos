@@ -677,7 +677,12 @@ BOOL WINAPI CertSetCRLContextProperty(PCCRL_CONTEXT pCRLContext,
         SetLastError(E_INVALIDARG);
         return FALSE;
     }
+    if (!CRYPT_ProvStoreCanSetProperty(CRYPT_PROV_CONTEXT_CRL, &crl_from_ptr(pCRLContext)->base))
+        return FALSE;
     ret = CRLContext_SetProperty(crl_from_ptr(pCRLContext), dwPropId, dwFlags, pvData);
+    if (ret)
+        CRYPT_ProvStoreSetProperty(CRYPT_PROV_CONTEXT_CRL, &crl_from_ptr(pCRLContext)->base,
+         dwPropId, dwFlags, pvData);
     TRACE("returning %d\n", ret);
     return ret;
 }

@@ -27,23 +27,18 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(crypt);
 
-typedef struct _WINE_HASH_TO_DELETE
-{
-    BYTE        hash[20];
-    struct list entry;
-} WINE_HASH_TO_DELETE;
-
 typedef struct _WINE_REGSTOREINFO
 {
     DWORD            dwOpenFlags;
     HCERTSTORE       memStore;
     HKEY             key;
     BOOL             dirty;
+    DWORD            resyncThread;
+    HANDLE           changeEvent;
     CRITICAL_SECTION cs;
-    struct list      certsToDelete;
-    struct list      crlsToDelete;
-    struct list      ctlsToDelete;
 } WINE_REGSTOREINFO;
+
+static const WCHAR * const regSubKeys[] = { L"Certificates", L"CRLs", L"CTLs" };
 
 static void CRYPT_HashToStr(const BYTE *hash, LPWSTR asciiHash)
 {
@@ -237,48 +232,67 @@ BOOL CRYPT_SerializeContextsToReg(HKEY key, DWORD flags,
     return ret;
 }
 
+/* Serializes a single context and writes it under the store's subkey
+ * regSubKeys[type] (type indexes certs, CRLs and CTLs).
+ */
+static BOOL CRYPT_RegWriteOneContext(WINE_REGSTOREINFO *store, DWORD type,
+ const WINE_CONTEXT_INTERFACE *contextInterface, const void *context)
+{
+    BYTE hash[20];
+    DWORD hashSize = sizeof(hash), size = 0;
+    LPBYTE buf = NULL;
+    HKEY key;
+    LONG rc;
+    BOOL ret;
+
+    ret = contextInterface->getProp(context, CERT_HASH_PROP_ID, hash, &hashSize);
+    if (!ret)
+        return FALSE;
+    ret = contextInterface->serialize(context, 0, NULL, &size);
+    if (ret && size)
+        buf = CryptMemAlloc(size);
+    if (!buf)
+    {
+        if (ret)
+            SetLastError(ERROR_OUTOFMEMORY);
+        return FALSE;
+    }
+    ret = contextInterface->serialize(context, 0, buf, &size);
+    if (ret)
+    {
+        rc = RegCreateKeyExW(store->key, regSubKeys[type], 0, NULL, 0,
+         KEY_ALL_ACCESS, NULL, &key, NULL);
+        if (!rc)
+        {
+            ret = CRYPT_WriteSerializedToReg(key, 0, hash, buf, size);
+            RegCloseKey(key);
+        }
+        else
+        {
+            SetLastError(rc);
+            ret = FALSE;
+        }
+    }
+    CryptMemFree(buf);
+    return ret;
+}
+
+/* Writes all the contexts of the in-memory store to the registry. */
 static BOOL CRYPT_RegWriteToReg(WINE_REGSTOREINFO *store)
 {
-    static const WCHAR * const subKeys[] = { L"Certificates", L"CRLs", L"CTLs" };
     const WINE_CONTEXT_INTERFACE * const interfaces[] = { pCertInterface,
      pCRLInterface, pCTLInterface };
-    struct list *listToDelete[] = { &store->certsToDelete, &store->crlsToDelete,
-     &store->ctlsToDelete };
     BOOL ret = TRUE;
     DWORD i;
 
-    for (i = 0; ret && i < ARRAY_SIZE(subKeys); i++)
+    for (i = 0; ret && i < ARRAY_SIZE(regSubKeys); i++)
     {
         HKEY key;
-        LONG rc = RegCreateKeyExW(store->key, subKeys[i], 0, NULL, 0,
+        LONG rc = RegCreateKeyExW(store->key, regSubKeys[i], 0, NULL, 0,
          KEY_ALL_ACCESS, NULL, &key, NULL);
 
         if (!rc)
         {
-            if (listToDelete[i])
-            {
-                WINE_HASH_TO_DELETE *toDelete, *next;
-                WCHAR asciiHash[20 * 2 + 1];
-
-                EnterCriticalSection(&store->cs);
-                LIST_FOR_EACH_ENTRY_SAFE(toDelete, next, listToDelete[i],
-                 WINE_HASH_TO_DELETE, entry)
-                {
-                    LONG rc;
-
-                    CRYPT_HashToStr(toDelete->hash, asciiHash);
-                    TRACE("Removing %s\n", debugstr_w(asciiHash));
-                    rc = RegDeleteKeyW(key, asciiHash);
-                    if (rc != ERROR_SUCCESS && rc != ERROR_FILE_NOT_FOUND)
-                    {
-                        SetLastError(rc);
-                        ret = FALSE;
-                    }
-                    list_remove(&toDelete->entry);
-                    CryptMemFree(toDelete);
-                }
-                LeaveCriticalSection(&store->cs);
-            }
             ret = CRYPT_SerializeContextsToReg(key, 0, interfaces[i], store->memStore);
             RegCloseKey(key);
         }
@@ -291,8 +305,87 @@ static BOOL CRYPT_RegWriteToReg(WINE_REGSTOREINFO *store)
     return ret;
 }
 
-/* If force is true or the registry store is dirty, writes the contents of the
- * store to the registry.
+/* Rewrites the registry entry of a context if the entry exists (under key,
+ * the subkey of the context's type) and differs from the context's current
+ * serialization.  An entry that is gone (removed through another handle) is
+ * not recreated.
+ */
+static BOOL CRYPT_RegUpdateContext(HKEY key,
+ const WINE_CONTEXT_INTERFACE *contextInterface, const void *context)
+{
+    BYTE hash[20];
+    DWORD hashSize = sizeof(hash), size = 0, regSize = 0;
+    WCHAR asciiHash[20 * 2 + 1];
+    HKEY subKey;
+    LPBYTE buf, regBuf = NULL;
+    BOOL ret = TRUE, same = FALSE;
+
+    if (!contextInterface->getProp(context, CERT_HASH_PROP_ID, hash, &hashSize))
+        return TRUE;
+    CRYPT_HashToStr(hash, asciiHash);
+    if (RegOpenKeyExW(key, asciiHash, 0, KEY_READ, &subKey))
+        return TRUE;
+    if (!contextInterface->serialize(context, 0, NULL, &size) || !size)
+    {
+        RegCloseKey(subKey);
+        return TRUE;
+    }
+    buf = CryptMemAlloc(size);
+    if (!buf)
+    {
+        RegCloseKey(subKey);
+        return TRUE;
+    }
+    if (contextInterface->serialize(context, 0, buf, &size))
+    {
+        if (!RegQueryValueExW(subKey, L"Blob", NULL, NULL, NULL, &regSize) &&
+         regSize == size && (regBuf = CryptMemAlloc(regSize)))
+        {
+            if (!RegQueryValueExW(subKey, L"Blob", NULL, NULL, regBuf, &regSize))
+                same = regSize == size && !memcmp(regBuf, buf, size);
+            CryptMemFree(regBuf);
+        }
+        RegCloseKey(subKey);
+        subKey = NULL;
+        if (!same)
+            ret = CRYPT_WriteSerializedToReg(key, 0, hash, buf, size);
+    }
+    if (subKey)
+        RegCloseKey(subKey);
+    CryptMemFree(buf);
+    return ret;
+}
+
+/* Adds, deletes and replacements are already in the registry when they
+ * return.  This brings the registry up to date with the changes made to the
+ * contexts since (their properties).
+ */
+static BOOL CRYPT_RegUpdateChanged(WINE_REGSTOREINFO *store)
+{
+    const WINE_CONTEXT_INTERFACE * const interfaces[] = { pCertInterface,
+     pCRLInterface, pCTLInterface };
+    BOOL ret = TRUE;
+    DWORD i;
+
+    for (i = 0; ret && i < ARRAY_SIZE(regSubKeys); i++)
+    {
+        HKEY key;
+        const void *context = NULL;
+
+        if (RegOpenKeyExW(store->key, regSubKeys[i], 0, KEY_ALL_ACCESS, &key))
+            continue;
+        while (ret && (context = interfaces[i]->enumContextsInStore(store->memStore, context)))
+            ret = CRYPT_RegUpdateContext(key, interfaces[i], context);
+        if (context)
+            Context_Release(context_from_ptr(context));
+        RegCloseKey(key);
+    }
+    return ret;
+}
+
+/* If force is true, writes the contents of the store to the registry.
+ * Otherwise, if anything was added or removed through this handle, brings
+ * the registry up to date with later changes to the contexts.
  */
 static BOOL CRYPT_RegFlushStore(WINE_REGSTOREINFO *store, BOOL force)
 {
@@ -300,86 +393,107 @@ static BOOL CRYPT_RegFlushStore(WINE_REGSTOREINFO *store, BOOL force)
 
     TRACE("(%p, %d)\n", store, force);
 
-    if (store->dirty || force)
-    {
+    if (force)
         ret = CRYPT_RegWriteToReg(store);
-        if (ret)
-            store->dirty = FALSE;
-    }
+    else if (store->dirty && !(store->dwOpenFlags & CERT_STORE_READONLY_FLAG))
+        ret = CRYPT_RegUpdateChanged(store);
     else
         ret = TRUE;
+    if (ret)
+        store->dirty = FALSE;
     return ret;
 }
 
 static void WINAPI CRYPT_RegCloseStore(HCERTSTORE hCertStore, DWORD dwFlags)
 {
     WINE_REGSTOREINFO *store = hCertStore;
+    DWORD err;
 
     TRACE("(%p, %08lx)\n", store, dwFlags);
     if (dwFlags)
         FIXME("Unimplemented flags: %08lx\n", dwFlags);
 
+    /* Closing a store does not change the last error, which the enumeration
+     * in the flush does. */
+    err = GetLastError();
     CRYPT_RegFlushStore(store, FALSE);
+    SetLastError(err);
     RegCloseKey(store->key);
+    if (store->changeEvent)
+        CloseHandle(store->changeEvent);
     store->cs.DebugInfo->Spare[0] = 0;
     DeleteCriticalSection(&store->cs);
     CryptMemFree(store);
 }
 
-static BOOL CRYPT_RegWriteContext(WINE_REGSTOREINFO *store,
- const void *context, DWORD dwFlags)
+/* Like Windows, additions are written to the registry immediately, so other
+ * handles on the same store and other processes see them without this
+ * handle being committed or closed.
+ */
+static BOOL CRYPT_RegWriteContext(WINE_REGSTOREINFO *store, DWORD type,
+ const void *context, const WINE_CONTEXT_INTERFACE *contextInterface,
+ DWORD dwFlags)
 {
     BOOL ret;
 
-    if (dwFlags & CERT_STORE_PROV_WRITE_ADD_FLAG)
+    if (!(dwFlags & CERT_STORE_PROV_WRITE_ADD_FLAG))
+        return FALSE;
+    if (store->resyncThread == GetCurrentThreadId())
+        return TRUE;
+    if (store->dwOpenFlags & CERT_STORE_READONLY_FLAG)
     {
-        store->dirty = TRUE;
-        ret = TRUE;
+        SetLastError(E_ACCESSDENIED);
+        return FALSE;
     }
-    else
-        ret = FALSE;
+    EnterCriticalSection(&store->cs);
+    ret = CRYPT_RegWriteOneContext(store, type, contextInterface, context);
+    if (ret)
+        store->dirty = TRUE;
+    LeaveCriticalSection(&store->cs);
     return ret;
 }
 
-static BOOL CRYPT_RegDeleteContext(WINE_REGSTOREINFO *store,
- struct list *deleteList, const void *context,
- const WINE_CONTEXT_INTERFACE *contextInterface)
+/* Removes the context's registry entry immediately.  An entry that is already
+ * gone (removed through another handle) is not an error.
+ */
+static BOOL CRYPT_RegDeleteContext(WINE_REGSTOREINFO *store, DWORD type,
+ const void *context, const WINE_CONTEXT_INTERFACE *contextInterface)
 {
-    BOOL ret;
+    BYTE hash[20];
+    DWORD size = sizeof(hash);
+    WCHAR asciiHash[20 * 2 + 1];
+    HKEY key;
+    LONG rc;
 
+    if (store->resyncThread == GetCurrentThreadId())
+        return TRUE;
     if (store->dwOpenFlags & CERT_STORE_READONLY_FLAG)
     {
-        SetLastError(ERROR_ACCESS_DENIED);
-        ret = FALSE;
+        SetLastError(E_ACCESSDENIED);
+        return FALSE;
     }
-    else
+    if (!contextInterface->getProp(context, CERT_HASH_PROP_ID, hash, &size))
+        return FALSE;
+    CRYPT_HashToStr(hash, asciiHash);
+    EnterCriticalSection(&store->cs);
+    rc = RegOpenKeyExW(store->key, regSubKeys[type], 0, KEY_ALL_ACCESS, &key);
+    if (!rc)
     {
-        WINE_HASH_TO_DELETE *toDelete = CryptMemAlloc(sizeof(WINE_HASH_TO_DELETE));
-
-        if (toDelete)
-        {
-            DWORD size = sizeof(toDelete->hash);
-
-            ret = contextInterface->getProp(context, CERT_HASH_PROP_ID,
-             toDelete->hash, &size);
-            if (ret)
-            {
-                EnterCriticalSection(&store->cs);
-                list_add_tail(deleteList, &toDelete->entry);
-                LeaveCriticalSection(&store->cs);
-            }
-            else
-            {
-                CryptMemFree(toDelete);
-                ret = FALSE;
-            }
-        }
-        else
-            ret = FALSE;
-        if (ret)
-            store->dirty = TRUE;
+        TRACE("Removing %s\n", debugstr_w(asciiHash));
+        rc = RegDeleteKeyW(key, asciiHash);
+        RegCloseKey(key);
     }
-    return ret;
+    if (rc == ERROR_FILE_NOT_FOUND)
+        rc = ERROR_SUCCESS;
+    if (!rc)
+        store->dirty = TRUE;
+    LeaveCriticalSection(&store->cs);
+    if (rc)
+    {
+        SetLastError(rc);
+        return FALSE;
+    }
+    return TRUE;
 }
 
 static BOOL WINAPI CRYPT_RegWriteCert(HCERTSTORE hCertStore,
@@ -389,7 +503,7 @@ static BOOL WINAPI CRYPT_RegWriteCert(HCERTSTORE hCertStore,
 
     TRACE("(%p, %p, %ld)\n", hCertStore, cert, dwFlags);
 
-    return CRYPT_RegWriteContext(store, cert, dwFlags);
+    return CRYPT_RegWriteContext(store, 0, cert, pCertInterface, dwFlags);
 }
 
 static BOOL WINAPI CRYPT_RegDeleteCert(HCERTSTORE hCertStore,
@@ -399,8 +513,7 @@ static BOOL WINAPI CRYPT_RegDeleteCert(HCERTSTORE hCertStore,
 
     TRACE("(%p, %p, %08lx)\n", store, pCertContext, dwFlags);
 
-    return CRYPT_RegDeleteContext(store, &store->certsToDelete, pCertContext,
-     pCertInterface);
+    return CRYPT_RegDeleteContext(store, 0, pCertContext, pCertInterface);
 }
 
 static BOOL WINAPI CRYPT_RegWriteCRL(HCERTSTORE hCertStore,
@@ -410,7 +523,7 @@ static BOOL WINAPI CRYPT_RegWriteCRL(HCERTSTORE hCertStore,
 
     TRACE("(%p, %p, %ld)\n", hCertStore, crl, dwFlags);
 
-    return CRYPT_RegWriteContext(store, crl, dwFlags);
+    return CRYPT_RegWriteContext(store, 1, crl, pCRLInterface, dwFlags);
 }
 
 static BOOL WINAPI CRYPT_RegDeleteCRL(HCERTSTORE hCertStore,
@@ -420,8 +533,7 @@ static BOOL WINAPI CRYPT_RegDeleteCRL(HCERTSTORE hCertStore,
 
     TRACE("(%p, %p, %08lx)\n", store, pCrlContext, dwFlags);
 
-    return CRYPT_RegDeleteContext(store, &store->crlsToDelete, pCrlContext,
-     pCRLInterface);
+    return CRYPT_RegDeleteContext(store, 1, pCrlContext, pCRLInterface);
 }
 
 static BOOL WINAPI CRYPT_RegWriteCTL(HCERTSTORE hCertStore,
@@ -431,7 +543,7 @@ static BOOL WINAPI CRYPT_RegWriteCTL(HCERTSTORE hCertStore,
 
     TRACE("(%p, %p, %ld)\n", hCertStore, ctl, dwFlags);
 
-    return CRYPT_RegWriteContext(store, ctl, dwFlags);
+    return CRYPT_RegWriteContext(store, 2, ctl, pCTLInterface, dwFlags);
 }
 
 static BOOL WINAPI CRYPT_RegDeleteCTL(HCERTSTORE hCertStore,
@@ -441,8 +553,82 @@ static BOOL WINAPI CRYPT_RegDeleteCTL(HCERTSTORE hCertStore,
 
     TRACE("(%p, %p, %08lx)\n", store, pCtlContext, dwFlags);
 
-    return CRYPT_RegDeleteContext(store, &store->ctlsToDelete, pCtlContext,
-     pCTLInterface);
+    return CRYPT_RegDeleteContext(store, 2, pCtlContext, pCTLInterface);
+}
+
+/* Like Windows, a property change is written to the registry immediately. */
+static BOOL CRYPT_RegSetContextProperty(WINE_REGSTOREINFO *store, DWORD type,
+ const void *context, const WINE_CONTEXT_INTERFACE *contextInterface)
+{
+    HKEY key;
+    BOOL ret = TRUE;
+
+    if (store->dwOpenFlags & CERT_STORE_READONLY_FLAG || store->resyncThread == GetCurrentThreadId())
+        return TRUE;
+    EnterCriticalSection(&store->cs);
+    if (!RegOpenKeyExW(store->key, regSubKeys[type], 0, KEY_ALL_ACCESS, &key))
+    {
+        ret = CRYPT_RegUpdateContext(key, contextInterface, context);
+        RegCloseKey(key);
+    }
+    /* If it could not be written, the next flush tries again. */
+    if (!ret)
+        store->dirty = TRUE;
+    LeaveCriticalSection(&store->cs);
+    return ret;
+}
+
+static BOOL WINAPI CRYPT_RegSetCertProperty(HCERTSTORE hCertStore,
+ PCCERT_CONTEXT cert, DWORD dwPropId, DWORD dwFlags, const void *pvData)
+{
+    TRACE("(%p, %p, %ld, %08lx, %p)\n", hCertStore, cert, dwPropId, dwFlags, pvData);
+
+    return CRYPT_RegSetContextProperty(hCertStore, 0, cert, pCertInterface);
+}
+
+static BOOL WINAPI CRYPT_RegSetCRLProperty(HCERTSTORE hCertStore,
+ PCCRL_CONTEXT crl, DWORD dwPropId, DWORD dwFlags, const void *pvData)
+{
+    TRACE("(%p, %p, %ld, %08lx, %p)\n", hCertStore, crl, dwPropId, dwFlags, pvData);
+
+    return CRYPT_RegSetContextProperty(hCertStore, 1, crl, pCRLInterface);
+}
+
+static BOOL WINAPI CRYPT_RegSetCTLProperty(HCERTSTORE hCertStore,
+ PCCTL_CONTEXT ctl, DWORD dwPropId, DWORD dwFlags, const void *pvData)
+{
+    TRACE("(%p, %p, %ld, %08lx, %p)\n", hCertStore, ctl, dwPropId, dwFlags, pvData);
+
+    return CRYPT_RegSetContextProperty(hCertStore, 2, ctl, pCTLInterface);
+}
+
+/* Has changeEvent signalled when anything under the store's key changes. */
+static BOOL CRYPT_RegWatch(WINE_REGSTOREINFO *store)
+{
+    LONG rc = RegNotifyChangeKeyValue(store->key, TRUE,
+     REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_THREAD_AGNOSTIC,
+     store->changeEvent, TRUE);
+
+    if (rc)
+        SetLastError(rc);
+    return !rc;
+}
+
+/* Replaces the cached contents with what the registry holds. */
+static void CRYPT_RegResync(WINE_REGSTOREINFO *store)
+{
+    HCERTSTORE memStore = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0,
+     CERT_STORE_CREATE_NEW_FLAG, NULL);
+
+    CRYPT_RegFlushStore(store, FALSE);
+    CRYPT_RegReadFromReg(store->key, memStore, CERT_STORE_ADD_REPLACE_EXISTING);
+    /* Replacing the contents of the cache must not touch the registry, which
+     * is where the new contents come from: contexts handed out by the store
+     * would write their removal through. */
+    store->resyncThread = GetCurrentThreadId();
+    I_CertUpdateStore(store->memStore, memStore, 0, 0);
+    store->resyncThread = 0;
+    CertCloseStore(memStore, 0);
 }
 
 static BOOL WINAPI CRYPT_RegControl(HCERTSTORE hCertStore, DWORD dwFlags,
@@ -457,22 +643,34 @@ static BOOL WINAPI CRYPT_RegControl(HCERTSTORE hCertStore, DWORD dwFlags,
     switch (dwCtrlType)
     {
     case CERT_STORE_CTRL_RESYNC:
-    {
-        HCERTSTORE memStore = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0,
-         CERT_STORE_CREATE_NEW_FLAG, NULL);
-
-        CRYPT_RegFlushStore(store, FALSE);
-        CRYPT_RegReadFromReg(store->key, memStore, CERT_STORE_ADD_REPLACE_EXISTING);
-        I_CertUpdateStore(store->memStore, memStore, 0, 0);
-        CertCloseStore(memStore, 0);
+        CRYPT_RegResync(store);
         break;
-    }
+    case CRYPT_STORE_CTRL_RESYNC_IF_CHANGED:
+        if (store->changeEvent && WaitForSingleObject(store->changeEvent, 0) == WAIT_OBJECT_0)
+        {
+            /* Watch again before reading, so a change made meanwhile is not lost. */
+            ResetEvent(store->changeEvent);
+            CRYPT_RegWatch(store);
+            CRYPT_RegResync(store);
+        }
+        break;
     case CERT_STORE_CTRL_COMMIT:
         ret = CRYPT_RegFlushStore(store,
          dwFlags & CERT_STORE_CTRL_COMMIT_FORCE_FLAG);
         break;
     case CERT_STORE_CTRL_AUTO_RESYNC:
-        FIXME("CERT_STORE_CTRL_AUTO_RESYNC: stub\n");
+        /* From now on the contents are brought up to date when they are enumerated */
+        if (!store->changeEvent)
+        {
+            store->changeEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+            if (!store->changeEvent || !CRYPT_RegWatch(store))
+            {
+                if (store->changeEvent)
+                    CloseHandle(store->changeEvent);
+                store->changeEvent = NULL;
+                ret = FALSE;
+            }
+        }
         break;
     case CERT_STORE_CTRL_NOTIFY_CHANGE:
         FIXME("CERT_STORE_CTRL_NOTIFY_CHANGE: stub\n");
@@ -489,15 +687,15 @@ static void *regProvFuncs[] = {
     NULL, /* CERT_STORE_PROV_READ_CERT_FUNC */
     CRYPT_RegWriteCert,
     CRYPT_RegDeleteCert,
-    NULL, /* CERT_STORE_PROV_SET_CERT_PROPERTY_FUNC */
+    CRYPT_RegSetCertProperty,
     NULL, /* CERT_STORE_PROV_READ_CRL_FUNC */
     CRYPT_RegWriteCRL,
     CRYPT_RegDeleteCRL,
-    NULL, /* CERT_STORE_PROV_SET_CRL_PROPERTY_FUNC */
+    CRYPT_RegSetCRLProperty,
     NULL, /* CERT_STORE_PROV_READ_CTL_FUNC */
     CRYPT_RegWriteCTL,
     CRYPT_RegDeleteCTL,
-    NULL, /* CERT_STORE_PROV_SET_CTL_PROPERTY_FUNC */
+    CRYPT_RegSetCTLProperty,
     CRYPT_RegControl,
 };
 
@@ -547,12 +745,12 @@ WINECRYPT_CERTSTORE *CRYPT_RegOpenStore(HCRYPTPROV hCryptProv, DWORD dwFlags,
                     regInfo->key = key;
                     InitializeCriticalSectionEx(&regInfo->cs, 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO);
                     regInfo->cs.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": PWINE_REGSTOREINFO->cs");
-                    list_init(&regInfo->certsToDelete);
-                    list_init(&regInfo->crlsToDelete);
-                    list_init(&regInfo->ctlsToDelete);
                     CRYPT_RegReadFromReg(regInfo->key, regInfo->memStore, CERT_STORE_ADD_ALWAYS);
                     regInfo->dirty = FALSE;
+                    regInfo->resyncThread = 0;
+                    regInfo->changeEvent = NULL;
                     provInfo.cbSize = sizeof(provInfo);
+                    provInfo.dwStoreProvFlags = CRYPT_PROV_STORE_AUTO_RESYNC_CHECK;
                     provInfo.cStoreProvFunc = ARRAY_SIZE(regProvFuncs);
                     provInfo.rgpvStoreProvFunc = regProvFuncs;
                     provInfo.hStoreProv = regInfo;

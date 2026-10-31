@@ -265,6 +265,11 @@ static BOOL Collection_deleteCert(WINECRYPT_CERTSTORE *store, context_t *context
     TRACE("(%p, %p)\n", store, cert);
 
     linked = (cert_t*)context->linked;
+    /* CertDeleteCertificateFromStore releases a reference to the context it is given, but the one this
+     * link context holds on its linked context is released when the link is
+     * freed.  Take another one for the call to consume.
+     */
+    Context_AddRef(&linked->base);
     return CertDeleteCertificateFromStore(&linked->ctx);
 }
 
@@ -333,6 +338,11 @@ static BOOL Collection_deleteCRL(WINECRYPT_CERTSTORE *store, context_t *context)
     TRACE("(%p, %p)\n", store, crl);
 
     linked = (crl_t*)context->linked;
+    /* CertDeleteCRLFromStore releases a reference to the context it is given, but the one this
+     * link context holds on its linked context is released when the link is
+     * freed.  Take another one for the call to consume.
+     */
+    Context_AddRef(&linked->base);
     return CertDeleteCRLFromStore(&linked->ctx);
 }
 
@@ -401,6 +411,11 @@ static BOOL Collection_deleteCTL(WINECRYPT_CERTSTORE *store, context_t *context)
     TRACE("(%p, %p)\n", store, ctl);
 
     linked = (ctl_t*)context->linked;
+    /* CertDeleteCTLFromStore releases a reference to the context it is given, but the one this
+     * link context holds on its linked context is released when the link is
+     * freed.  Take another one for the call to consume.
+     */
+    Context_AddRef(&linked->base);
     return CertDeleteCTLFromStore(&linked->ctx);
 }
 
