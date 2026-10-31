@@ -1987,6 +1987,25 @@ static enum wined3d_pci_device wined3d_guess_card(enum wined3d_feature_level fea
     enum wined3d_pci_device device;
     unsigned int i;
 
+    /* ReactOS: no hardware GPU behind GL (llvmpipe, softpipe, swrast). Report what
+     * Windows reports when no display driver is installed, the Microsoft Basic Render
+     * Driver (1414:008c), instead of inventing an NVIDIA card. Applications keep their
+     * Direct3D device; those that check for a hardware GPU (Chromium's software
+     * rendering list) choose their software path as they do on such a Windows machine.
+     * HW_VENDOR_SOFTWARE alone is not enough: it is every Mesa driver whose renderer
+     * has no AMD/Intel name (zink on NVIDIA, panfrost, v3d), so also check the renderer. */
+    if (*card_vendor == HW_VENDOR_SOFTWARE
+            && (strstr(gl_renderer, "llvmpipe")
+            || strstr(gl_renderer, "softpipe")
+            || strstr(gl_renderer, "swrast")
+            || strstr(gl_renderer, "Software Rasterizer")))
+    {
+        TRACE("Software GL renderer %s, reporting the Microsoft Basic Render Driver.\n",
+                debugstr_a(gl_renderer));
+        *card_vendor = HW_VENDOR_MICROSOFT;
+        return CARD_MICROSOFT_BASIC_RENDER;
+    }
+
     for (i = 0; i < ARRAY_SIZE(card_vendor_table); ++i)
     {
         if (card_vendor_table[i].card_vendor != *card_vendor)

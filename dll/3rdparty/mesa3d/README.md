@@ -121,9 +121,10 @@ without a stall, but i386 was not retried.
   the Windows directory, so `syssetup` (`RegisterVulkanIcds`, in `InstallReactOS`) writes the value for
   `%SystemRoot%\system32\lvp_icd.json` when that file exists. An application that registers its own ICD as well
   (SwiftShader of Claude Desktop) makes the loader list two devices; remove that value to make lavapipe the one.
-* The loader of Chromium/ANGLE still wants a DXGI factory before it accepts a registry ICD, and nitro's wined3d-based
-  DXGI only creates one headless: Claude's per-app `HKCU\Software\Wine\AppDefaults\<app>.exe\Direct3D renderer=no3d` stays
-  necessary (with the default OpenGL driver now at 4.6 it is still not enough on its own).
+* Chromium and Electron do not use this driver for their windows: wined3d reports llvmpipe (its OpenGL renderer) as the
+  Microsoft Basic Render Driver (1414:008c), as Windows does without a display driver, and Chromium's software
+  rendering list then disables GPU compositing, so they composite in software and present with GDI. No per-app
+  `Wine\AppDefaults\<app>.exe\Direct3D renderer=no3d` key is needed any more.
 
 Checksums of the artifacts of the amd64 build (Mesa 26.2.4, LLVM 19.1.7, Ubuntu 24.04 mingw-w64 GCC 13-win32):
 

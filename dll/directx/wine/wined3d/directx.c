@@ -326,6 +326,9 @@ static const struct driver_version_information driver_version_table[] =
     /* VMware */
     {DRIVER_VMWARE,             DRIVER_MODEL_NT5X,  "vm3dum.dll",       1, 1134},
 
+    /* Microsoft */
+    {DRIVER_MICROSOFT_BASIC_RENDER, DRIVER_MODEL_GENERIC, "d3d10warp.dll", 0, 0},
+
     /* Wine */
     {DRIVER_WINE,               DRIVER_MODEL_GENERIC, "wined3d.dll",    0,    0},
 };
@@ -579,6 +582,10 @@ static const struct wined3d_gpu_description gpu_description_table[] =
 
     /* VMware */
     {HW_VENDOR_VMWARE,     CARD_VMWARE_SVGA3D,             "VMware SVGA 3D (Microsoft Corporation - WDDM)",             DRIVER_VMWARE,        1024},
+
+    /* Microsoft. The adapter Windows reports when no display driver is installed
+     * (software rendering only); 1280 MB is what wined3d used to report for llvmpipe. */
+    {HW_VENDOR_MICROSOFT,  CARD_MICROSOFT_BASIC_RENDER,    "Microsoft Basic Render Driver",                             DRIVER_MICROSOFT_BASIC_RENDER, 1280},
 
     /* Intel cards */
     {HW_VENDOR_INTEL,      CARD_INTEL_830M,                "Intel(R) 82830M Graphics Controller",                       DRIVER_INTEL_GMA800,  32 },
