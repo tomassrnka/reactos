@@ -1358,9 +1358,10 @@ done:
 PDH_STATUS WINAPI PdhMakeCounterPathW( PDH_COUNTER_PATH_ELEMENTS_W *e, LPWSTR buffer,
                                        LPDWORD buflen, DWORD flags )
 {
-    WCHAR path[PDH_MAX_COUNTER_NAME], instance[16];
+    WCHAR instance[16], *path, *p;
     PDH_STATUS ret = ERROR_SUCCESS;
-    DWORD len;
+    BOOL machine_prefix = FALSE, index = FALSE;
+    size_t len;
 
     TRACE("%p %p %p 0x%08lx\n", e, buffer, buflen, flags);
 
@@ -1369,37 +1370,68 @@ PDH_STATUS WINAPI PdhMakeCounterPathW( PDH_COUNTER_PATH_ELEMENTS_W *e, LPWSTR bu
     if (!e || !e->szCounterName || !e->szObjectName || !buflen)
         return PDH_INVALID_ARGUMENT;
 
-    path[0] = 0;
+    /* the length first: the elements are of any size */
+    len = 1 + lstrlenW( e->szObjectName ) + 1 + lstrlenW( e->szCounterName ) + 1;
     if (e->szMachineName)
     {
-        if (e->szMachineName[0] != '\\' || e->szMachineName[1] != '\\') lstrcatW(path, L"\\\\");
-        lstrcatW(path, e->szMachineName);
+        machine_prefix = e->szMachineName[0] != '\\' || e->szMachineName[1] != '\\';
+        len += (machine_prefix ? 2 : 0) + lstrlenW( e->szMachineName );
     }
-    lstrcatW(path, L"\\");
-    lstrcatW(path, e->szObjectName);
     if (e->szInstanceName)
     {
-        lstrcatW(path, L"(");
+        len += 2 + lstrlenW( e->szInstanceName );
+        if (e->szParentInstance) len += 1 + lstrlenW( e->szParentInstance );
+        if ((index = e->dwInstanceIndex && e->dwInstanceIndex != ~0u))
+        {
+            swprintf( instance, ARRAY_SIZE(instance), L"#%u", e->dwInstanceIndex );
+            len += lstrlenW( instance );
+        }
+    }
+
+    if (!(path = malloc( len * sizeof(WCHAR) ))) return PDH_MEMORY_ALLOCATION_FAILURE;
+    p = path;
+    if (e->szMachineName)
+    {
+        if (machine_prefix) { *p++ = '\\'; *p++ = '\\'; }
+        lstrcpyW( p, e->szMachineName );
+        p += lstrlenW( p );
+    }
+    *p++ = '\\';
+    lstrcpyW( p, e->szObjectName );
+    p += lstrlenW( p );
+    if (e->szInstanceName)
+    {
+        *p++ = '(';
         if (e->szParentInstance)
         {
-            lstrcatW(path, e->szParentInstance);
-            lstrcatW(path, L"/");
+            lstrcpyW( p, e->szParentInstance );
+            p += lstrlenW( p );
+            *p++ = '/';
         }
-        lstrcatW(path, e->szInstanceName);
-        if (e->dwInstanceIndex && e->dwInstanceIndex != ~0u)
+        lstrcpyW( p, e->szInstanceName );
+        p += lstrlenW( p );
+        if (index)
         {
-            swprintf(instance, ARRAY_SIZE(instance), L"#%u", e->dwInstanceIndex);
-            lstrcatW(path, instance);
+            lstrcpyW( p, instance );
+            p += lstrlenW( p );
         }
-        lstrcatW(path, L")");
+        *p++ = ')';
     }
-    lstrcatW(path, L"\\");
-    lstrcatW(path, e->szCounterName);
+    *p++ = '\\';
+    lstrcpyW( p, e->szCounterName );
 
-    len = lstrlenW(path) + 1;
-    if (*buflen >= len) lstrcpyW(buffer, path);
-    else ret = PDH_MORE_DATA;
+    if (buffer && *buflen >= len) lstrcpyW( buffer, path );
+    else
+    {
+        ret = PDH_MORE_DATA;
+        if (buffer && *buflen)  /* Windows fills what fits */
+        {
+            memcpy( buffer, path, (*buflen - 1) * sizeof(WCHAR) );
+            buffer[*buflen - 1] = 0;
+        }
+    }
     *buflen = len;
+    free( path );
     return ret;
 }
 

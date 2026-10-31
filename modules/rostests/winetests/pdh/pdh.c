@@ -1028,6 +1028,50 @@ static void test_PdhMakeCounterPath_machine(void)
     ok(!lstrcmpW( buffer, L"\\\\machine\\object(instance)\\counter" ), "got %s\n", debugstr_w(buffer));
 }
 
+static void test_PdhMakeCounterPathW_long(void)
+{
+    PDH_COUNTER_PATH_ELEMENTS_W e;
+    WCHAR *name, *buffer;
+    DWORD size, i;
+    PDH_STATUS ret;
+
+    name = malloc( 2001 * sizeof(WCHAR) );
+    buffer = malloc( 4096 * sizeof(WCHAR) );
+    for (i = 0; i < 2000; i++) name[i] = 'a';
+    name[2000] = 0;
+
+    memset( &e, 0, sizeof(e) );
+    e.szObjectName = (WCHAR *)L"Memory";
+    e.szCounterName = name;
+
+    size = 0;
+    ret = PdhMakeCounterPathW( &e, NULL, &size, 0 );
+    ok(ret == PDH_MORE_DATA, "PdhMakeCounterPathW failed 0x%08lx\n", ret);
+    ok(size == 2009, "got %lu\n", size);
+
+    size = 100;
+    ret = PdhMakeCounterPathW( &e, buffer, &size, 0 );
+    ok(ret == PDH_MORE_DATA, "PdhMakeCounterPathW failed 0x%08lx\n", ret);
+    ok(size == 2009, "got %lu\n", size);
+
+    size = 4096;
+    ret = PdhMakeCounterPathW( &e, buffer, &size, 0 );
+    ok(ret == ERROR_SUCCESS, "PdhMakeCounterPathW failed 0x%08lx\n", ret);
+    ok(size == 2009 && lstrlenW( buffer ) == 2008, "got %lu, length %d\n", size, lstrlenW( buffer ));
+    ok(!memcmp( buffer, L"\\Memory\\aaa", 11 * sizeof(WCHAR) ), "got %s\n", debugstr_wn( buffer, 16 ));
+
+    e.szMachineName = (WCHAR *)L"HOST";
+    e.szInstanceName = name;
+    e.dwInstanceIndex = 3;
+    size = 4096;
+    ret = PdhMakeCounterPathW( &e, buffer, &size, 0 );
+    ok(ret == ERROR_SUCCESS, "PdhMakeCounterPathW failed 0x%08lx\n", ret);
+    ok(size == 4019 && lstrlenW( buffer ) == 4018, "got %lu, length %d\n", size, lstrlenW( buffer ));
+
+    free( name );
+    free( buffer );
+}
+
 static void test_PdhGetDllVersion(void)
 {
     PDH_STATUS ret;
@@ -1504,6 +1548,7 @@ START_TEST(pdh)
     test_PdhCollectQueryDataEx();
     test_PdhMakeCounterPathA();
     test_PdhMakeCounterPath_machine();
+    test_PdhMakeCounterPathW_long();
     test_PdhGetDllVersion();
 
     init_computer_prefix();

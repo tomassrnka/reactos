@@ -419,7 +419,7 @@ static BOOL ensure_net( BOOL force )
             {
                 DWORD k = 2;
                 WCHAR base[128];
-                lstrcpyW( base, snap_net.net[n].name );
+                lstrcpynW( base, snap_net.net[n].name, ARRAY_SIZE(base) - 16 );
                 do
                 {
                     WCHAR num[16];
