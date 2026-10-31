@@ -25,6 +25,7 @@
 @ stdcall BroadcastSystemMessageW(long ptr long long long)
 @ stdcall BuildReasonArray(ptr)
 @ stdcall CalcMenuBar(long long long long long) NtUserCalcMenuBar
+@ stdcall -version=0x601+ CalculatePopupWindowPosition(ptr ptr long ptr ptr)
 @ stdcall CallMsgFilter(ptr long) CallMsgFilterA
 @ stdcall CallMsgFilterA(ptr long)
 @ stdcall CallMsgFilterW(ptr long)

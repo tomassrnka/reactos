@@ -56,6 +56,7 @@ list(APPEND SOURCE
     windows/message.c
     windows/nonclient.c
     windows/paint.c
+    windows/popuppos.c
     windows/prop.c
     windows/rect.c
     windows/spy.c
