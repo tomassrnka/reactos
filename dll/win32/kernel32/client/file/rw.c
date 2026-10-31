@@ -269,9 +269,11 @@ WriteFileEx(IN HANDLE hFile,
 {
     LARGE_INTEGER Offset;
     NTSTATUS Status;
+    ULONG_PTR OldInternal;
 
     Offset.u.LowPart = lpOverlapped->Offset;
     Offset.u.HighPart = lpOverlapped->OffsetHigh;
+    OldInternal = lpOverlapped->Internal;
     lpOverlapped->Internal = STATUS_PENDING;
 
     Status = NtWriteFile(hFile,
@@ -286,6 +288,10 @@ WriteFileEx(IN HANDLE hFile,
 
     if (!NT_SUCCESS(Status))
     {
+        /* A request refused before it was queued (a handle with a completion port, a bad
+           handle) leaves the OVERLAPPED as it was; a failed IRP has written its status */
+        if ((NTSTATUS)lpOverlapped->Internal == STATUS_PENDING)
+            lpOverlapped->Internal = OldInternal;
         BaseSetLastNTError(Status);
         return FALSE;
     }
@@ -306,9 +312,11 @@ ReadFileEx(IN HANDLE hFile,
 {
     LARGE_INTEGER Offset;
     NTSTATUS Status;
+    ULONG_PTR OldInternal;
 
     Offset.u.LowPart = lpOverlapped->Offset;
     Offset.u.HighPart = lpOverlapped->OffsetHigh;
+    OldInternal = lpOverlapped->Internal;
     lpOverlapped->Internal = STATUS_PENDING;
 
     Status = NtReadFile(hFile,
@@ -323,6 +331,10 @@ ReadFileEx(IN HANDLE hFile,
 
     if (!NT_SUCCESS(Status))
     {
+        /* A request refused before it was queued (a handle with a completion port, a bad
+           handle) leaves the OVERLAPPED as it was; a failed IRP has written its status */
+        if ((NTSTATUS)lpOverlapped->Internal == STATUS_PENDING)
+            lpOverlapped->Internal = OldInternal;
         BaseSetLastNTError(Status);
         return FALSE;
     }
