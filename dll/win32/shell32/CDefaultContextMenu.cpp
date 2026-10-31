@@ -1459,6 +1459,8 @@ CDefaultContextMenu::TryToBrowse(
     return hr;
 }
 
+extern HANDLE *SH32_GetLinkProcessSlot(VOID); // shlexec.cpp
+
 HRESULT
 CDefaultContextMenu::InvokePidl(LPCMINVOKECOMMANDINFOEX lpcmi, LPCITEMIDLIST pidl, PStaticShellEntry pEntry)
 {
@@ -1513,7 +1515,18 @@ CDefaultContextMenu::InvokePidl(LPCMINVOKECOMMANDINFOEX lpcmi, LPCITEMIDLIST pid
     if (!sei.lpClass && (lpcmi->fMask & (CMIC_MASK_HASLINKNAME | CMIC_MASK_HASTITLE)) && unicode)
         sei.lpClass = lpcmi->lpTitleW; // Forward .lnk path from CShellLink::DoOpen (for consrv STARTF_TITLEISLINKNAME)
 
+    // A shortcut launch passes on the request for the process handle (see CShellLink::DoOpen)
+    HANDLE *phProcess = SH32_GetLinkProcessSlot();
+    if (phProcess)
+        sei.fMask |= SEE_MASK_NOCLOSEPROCESS;
+
     HRESULT hr = ShellExecuteExW(&sei) ? S_OK : HResultFromWin32(GetLastError());
+    if (phProcess && SUCCEEDED(hr) && sei.hProcess)
+    {
+        if (*phProcess)
+            CloseHandle(*phProcess);
+        *phProcess = sei.hProcess;
+    }
     ILFree(pidlFull);
     return hr;
 }

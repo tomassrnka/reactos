@@ -356,6 +356,25 @@ wWinMain(
         return 0;
     }
 
+    if (GetEnvironmentVariableW(LNK_MARKER_VARIABLE, szMarker, _countof(szMarker)))
+    {
+        WCHAR szDir[MAX_PATH], szVar[MAX_PATH], szLine[MAX_PATH * 4];
+        DWORD cbWritten;
+        if (!GetCurrentDirectoryW(_countof(szDir), szDir))
+            szDir[0] = UNICODE_NULL;
+        if (!GetEnvironmentVariableW(L"LNKTEST_VAR", szVar, _countof(szVar)))
+            StringCchCopyW(szVar, _countof(szVar), L"(unset)");
+        StringCchPrintfW(szLine, _countof(szLine), L"%s|%d|%s|%s\n", szDir, nCmdShow, lpCmdLine, szVar);
+        HANDLE hFile = CreateFileW(szMarker, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                                   OPEN_ALWAYS, 0, NULL);
+        if (hFile != INVALID_HANDLE_VALUE)
+        {
+            WriteFile(hFile, szLine, lstrlenW(szLine) * sizeof(WCHAR), &cbWritten, NULL);
+            CloseHandle(hFile);
+        }
+        return 0;
+    }
+
     if (lstrcmpiW(lpCmdLine, L"") == 0 || lstrcmpiW(lpCmdLine, L"TEST") == 0)
         return 0;
 

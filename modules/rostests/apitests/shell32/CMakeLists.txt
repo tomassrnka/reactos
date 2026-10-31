@@ -64,6 +64,7 @@ list(APPEND SOURCE
     #ShellExec_RunDLL.cpp # Broke on Windows
     #ShellExecCmdLine.cpp # Broke on Windows
     ShellExecuteEx.cpp
+    ShellExecuteExLnk.cpp
     ShellExecuteLinkDir.cpp
     #ShellExecuteW.cpp # Broke on Windows
     ShellFolder.cpp

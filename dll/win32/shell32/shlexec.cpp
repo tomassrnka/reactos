@@ -69,6 +69,38 @@ static int Win32ErrFromHInst(HINSTANCE hInst)
     return -1;
 }
 
+/* The IContextMenu::InvokeCommand interface cannot return the process handle that SEE_MASK_NOCLOSEPROCESS
+ * asks for, so a shortcut launch hands it back through a per-thread slot (see CShellLink::DoOpen). */
+DWORD g_dwLinkProcessTls = TLS_OUT_OF_INDEXES;
+
+/* The slot of the ShellExecuteEx call in progress on this thread that wants a process handle, or NULL */
+HANDLE *SH32_GetLinkProcessSlot(VOID)
+{
+    if (g_dwLinkProcessTls == TLS_OUT_OF_INDEXES)
+        return NULL;
+    return (HANDLE *)TlsGetValue(g_dwLinkProcessTls);
+}
+
+class CLinkProcessSlot
+{
+    HANDLE *m_pPrev;
+    BOOL m_bSet;
+public:
+    CLinkProcessSlot(HANDLE *phProcess) : m_pPrev(NULL), m_bSet(g_dwLinkProcessTls != TLS_OUT_OF_INDEXES)
+    {
+        if (m_bSet)
+        {
+            m_pPrev = (HANDLE *)TlsGetValue(g_dwLinkProcessTls);
+            TlsSetValue(g_dwLinkProcessTls, phProcess);
+        }
+    }
+    ~CLinkProcessSlot()
+    {
+        if (m_bSet)
+            TlsSetValue(g_dwLinkProcessTls, m_pPrev);
+    }
+};
+
 // Is the current process a rundll32.exe?
 static BOOL SHELL_InRunDllProcess(VOID)
 {
@@ -1719,10 +1751,23 @@ static HRESULT shellex_run_context_menu_default(IShellExtInit *obj,
 
         TRACE("menu %d %s %08x %08lx %08x %08x\n", i, debugstr_w(string),
               info.fState, info.dwItemData, info.fType, info.wID);
-        if ((!sei->lpVerb && (info.fState & MFS_DEFAULT)) ||
-            (sei->lpVerb && !lstrcmpiW(sei->lpVerb, string)))
+        BOOL bMatch = !sei->lpVerb && (info.fState & MFS_DEFAULT);
+        if (sei->lpVerb && !bMatch)
         {
-            def = i;
+            // The verb is the canonical name, not the (localized, accelerated) menu text
+            WCHAR szVerb[80];
+            szVerb[0] = UNICODE_NULL;
+            if (info.wID >= 0x20 &&
+                SUCCEEDED(cm->GetCommandString(info.wID - 0x20, GCS_VERBW, NULL, (LPSTR)szVerb, _countof(szVerb))))
+            {
+                bMatch = !lstrcmpiW(sei->lpVerb, szVerb);
+            }
+            if (!bMatch)
+                bMatch = !lstrcmpiW(sei->lpVerb, string);
+        }
+        if (bMatch)
+        {
+            def = (info.wID >= 0x20) ? (INT)(info.wID - 0x20) : i;
             break;
         }
     }
@@ -2428,10 +2473,14 @@ static BOOL SHELL_execute(LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc)
 
     if ((sei_tmp.fMask & SEE_MASK_INVOKEIDLIST) == SEE_MASK_INVOKEIDLIST)
     {
-        hr = ShellExecute_ContextMenuVerb(&sei_tmp);
+        {
+            CLinkProcessSlot slot((sei_tmp.fMask & SEE_MASK_NOCLOSEPROCESS) ? &sei_tmp.hProcess : NULL);
+            hr = ShellExecute_ContextMenuVerb(&sei_tmp);
+        }
         if (SUCCEEDED(hr))
         {
             sei->hInstApp = (HINSTANCE)42;
+            sei->hProcess = sei_tmp.hProcess;
             return TRUE;
         }
         UINT err = HRESULT_FACILITY(hr) == FACILITY_WIN32 ? HRESULT_CODE(hr) : GetLastError();
@@ -2439,9 +2488,15 @@ static BOOL SHELL_execute(LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc)
         return ExecuteFailed(retval, *sei, NULL, FALSE) > 32;
     }
 
-    if (ERROR_SUCCESS == ShellExecute_FromContextMenuHandlers(&sei_tmp))
+    LONG lHandlers;
+    {
+        CLinkProcessSlot slot((sei_tmp.fMask & SEE_MASK_NOCLOSEPROCESS) ? &sei_tmp.hProcess : NULL);
+        lHandlers = ShellExecute_FromContextMenuHandlers(&sei_tmp);
+    }
+    if (ERROR_SUCCESS == lHandlers)
     {
         sei->hInstApp = (HINSTANCE) 33;
+        sei->hProcess = sei_tmp.hProcess;
         return TRUE;
     }
 
