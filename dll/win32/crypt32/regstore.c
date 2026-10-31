@@ -34,6 +34,7 @@ typedef struct _WINE_REGSTOREINFO
     HKEY             key;
     BOOL             dirty;
     DWORD            resyncThread;
+    HANDLE           changeEvent;
     CRITICAL_SECTION cs;
 } WINE_REGSTOREINFO;
 
@@ -418,6 +419,8 @@ static void WINAPI CRYPT_RegCloseStore(HCERTSTORE hCertStore, DWORD dwFlags)
     CRYPT_RegFlushStore(store, FALSE);
     SetLastError(err);
     RegCloseKey(store->key);
+    if (store->changeEvent)
+        CloseHandle(store->changeEvent);
     store->cs.DebugInfo->Spare[0] = 0;
     DeleteCriticalSection(&store->cs);
     CryptMemFree(store);
@@ -599,6 +602,35 @@ static BOOL WINAPI CRYPT_RegSetCTLProperty(HCERTSTORE hCertStore,
     return CRYPT_RegSetContextProperty(hCertStore, 2, ctl, pCTLInterface);
 }
 
+/* Has changeEvent signalled when anything under the store's key changes. */
+static BOOL CRYPT_RegWatch(WINE_REGSTOREINFO *store)
+{
+    LONG rc = RegNotifyChangeKeyValue(store->key, TRUE,
+     REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_THREAD_AGNOSTIC,
+     store->changeEvent, TRUE);
+
+    if (rc)
+        SetLastError(rc);
+    return !rc;
+}
+
+/* Replaces the cached contents with what the registry holds. */
+static void CRYPT_RegResync(WINE_REGSTOREINFO *store)
+{
+    HCERTSTORE memStore = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0,
+     CERT_STORE_CREATE_NEW_FLAG, NULL);
+
+    CRYPT_RegFlushStore(store, FALSE);
+    CRYPT_RegReadFromReg(store->key, memStore, CERT_STORE_ADD_REPLACE_EXISTING);
+    /* Replacing the contents of the cache must not touch the registry, which
+     * is where the new contents come from: contexts handed out by the store
+     * would write their removal through. */
+    store->resyncThread = GetCurrentThreadId();
+    I_CertUpdateStore(store->memStore, memStore, 0, 0);
+    store->resyncThread = 0;
+    CertCloseStore(memStore, 0);
+}
+
 static BOOL WINAPI CRYPT_RegControl(HCERTSTORE hCertStore, DWORD dwFlags,
  DWORD dwCtrlType, void const *pvCtrlPara)
 {
@@ -611,27 +643,34 @@ static BOOL WINAPI CRYPT_RegControl(HCERTSTORE hCertStore, DWORD dwFlags,
     switch (dwCtrlType)
     {
     case CERT_STORE_CTRL_RESYNC:
-    {
-        HCERTSTORE memStore = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0,
-         CERT_STORE_CREATE_NEW_FLAG, NULL);
-
-        CRYPT_RegFlushStore(store, FALSE);
-        CRYPT_RegReadFromReg(store->key, memStore, CERT_STORE_ADD_REPLACE_EXISTING);
-        /* Replacing the contents of the cache must not touch the registry, which
-         * is where the new contents come from: contexts handed out by the store
-         * would write their removal through. */
-        store->resyncThread = GetCurrentThreadId();
-        I_CertUpdateStore(store->memStore, memStore, 0, 0);
-        store->resyncThread = 0;
-        CertCloseStore(memStore, 0);
+        CRYPT_RegResync(store);
         break;
-    }
+    case CRYPT_STORE_CTRL_RESYNC_IF_CHANGED:
+        if (store->changeEvent && WaitForSingleObject(store->changeEvent, 0) == WAIT_OBJECT_0)
+        {
+            /* Watch again before reading, so a change made meanwhile is not lost. */
+            ResetEvent(store->changeEvent);
+            CRYPT_RegWatch(store);
+            CRYPT_RegResync(store);
+        }
+        break;
     case CERT_STORE_CTRL_COMMIT:
         ret = CRYPT_RegFlushStore(store,
          dwFlags & CERT_STORE_CTRL_COMMIT_FORCE_FLAG);
         break;
     case CERT_STORE_CTRL_AUTO_RESYNC:
-        FIXME("CERT_STORE_CTRL_AUTO_RESYNC: stub\n");
+        /* From now on the contents are brought up to date when they are enumerated */
+        if (!store->changeEvent)
+        {
+            store->changeEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+            if (!store->changeEvent || !CRYPT_RegWatch(store))
+            {
+                if (store->changeEvent)
+                    CloseHandle(store->changeEvent);
+                store->changeEvent = NULL;
+                ret = FALSE;
+            }
+        }
         break;
     case CERT_STORE_CTRL_NOTIFY_CHANGE:
         FIXME("CERT_STORE_CTRL_NOTIFY_CHANGE: stub\n");
@@ -709,7 +748,9 @@ WINECRYPT_CERTSTORE *CRYPT_RegOpenStore(HCRYPTPROV hCryptProv, DWORD dwFlags,
                     CRYPT_RegReadFromReg(regInfo->key, regInfo->memStore, CERT_STORE_ADD_ALWAYS);
                     regInfo->dirty = FALSE;
                     regInfo->resyncThread = 0;
+                    regInfo->changeEvent = NULL;
                     provInfo.cbSize = sizeof(provInfo);
+                    provInfo.dwStoreProvFlags = CRYPT_PROV_STORE_AUTO_RESYNC_CHECK;
                     provInfo.cStoreProvFunc = ARRAY_SIZE(regProvFuncs);
                     provInfo.rgpvStoreProvFunc = regProvFuncs;
                     provInfo.hStoreProv = regInfo;

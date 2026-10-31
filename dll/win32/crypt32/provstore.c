@@ -44,6 +44,7 @@ typedef struct _WINE_PROVIDERSTORE
     PFN_CERT_STORE_PROV_SET_CERT_PROPERTY provSetCertProp;
     PFN_CERT_STORE_PROV_SET_CRL_PROPERTY  provSetCrlProp;
     PFN_CERT_STORE_PROV_SET_CTL_PROPERTY  provSetCtlProp;
+    BOOL                            autoResync;
 } WINE_PROVIDERSTORE;
 
 static void ProvStore_addref(WINECRYPT_CERTSTORE *store)
@@ -140,11 +141,20 @@ static BOOL ProvStore_addCert(WINECRYPT_CERTSTORE *store, context_t *cert,
     return ret;
 }
 
+/* Before an enumeration starts, give a provider that watches for outside
+ * changes (CERT_STORE_CTRL_AUTO_RESYNC) the chance to update the cache. */
+static void ProvStore_autoResync(WINE_PROVIDERSTORE *ps, context_t *prev)
+{
+    if (!prev && ps->autoResync && ps->provControl)
+        ps->provControl(ps->hStoreProv, 0, CRYPT_STORE_CTRL_RESYNC_IF_CHANGED, NULL);
+}
+
 static context_t *ProvStore_enumCert(WINECRYPT_CERTSTORE *store, context_t *prev)
 {
     WINE_PROVIDERSTORE *ps = (WINE_PROVIDERSTORE*)store;
     cert_t *ret;
 
+    ProvStore_autoResync(ps, prev);
     ret = (cert_t*)ps->memStore->vtbl->certs.enumContext(ps->memStore, prev);
     if (!ret)
         return NULL;
@@ -220,6 +230,7 @@ static context_t *ProvStore_enumCRL(WINECRYPT_CERTSTORE *store, context_t *prev)
     WINE_PROVIDERSTORE *ps = (WINE_PROVIDERSTORE*)store;
     crl_t *ret;
 
+    ProvStore_autoResync(ps, prev);
     ret = (crl_t*)ps->memStore->vtbl->crls.enumContext(ps->memStore, prev);
     if (!ret)
         return NULL;
@@ -295,6 +306,7 @@ static context_t *ProvStore_enumCTL(WINECRYPT_CERTSTORE *store, context_t *prev)
     WINE_PROVIDERSTORE *ps = (WINE_PROVIDERSTORE*)store;
     ctl_t *ret;
 
+    ProvStore_autoResync(ps, prev);
     ret = (ctl_t*)ps->memStore->vtbl->ctls.enumContext(ps->memStore, prev);
     if (!ret)
         return NULL;
@@ -331,6 +343,9 @@ static BOOL ProvStore_control(WINECRYPT_CERTSTORE *cert_store, DWORD dwFlags, DW
     if (store->provControl)
         ret = store->provControl(store->hStoreProv, dwFlags, dwCtrlType,
          pvCtrlPara);
+    if (ret && dwCtrlType == CERT_STORE_CTRL_AUTO_RESYNC &&
+     (store->dwStoreProvFlags & CRYPT_PROV_STORE_AUTO_RESYNC_CHECK))
+        store->autoResync = TRUE;
     return ret;
 }
 
@@ -370,6 +385,7 @@ WINECRYPT_CERTSTORE *CRYPT_ProvCreateStore(DWORD dwFlags,
         }
         else
             ret->memStore = memStore;
+        ret->autoResync = FALSE;
         ret->hStoreProv = pProvInfo->hStoreProv;
         if (pProvInfo->cStoreProvFunc > CERT_STORE_PROV_CLOSE_FUNC)
             ret->provCloseStore =
