@@ -114,6 +114,7 @@ list(APPEND SOURCE
     NtQuerySection.c
     NtQuerySystemEnvironmentValue.c
     NtQuerySystemInformation.c
+    NtQuerySystemProcessorPerformance.c
     NtQuerySystemProcessInformationTail.c
     NtQueryValueKey.c
     NtQueryVirtualMemory.c
