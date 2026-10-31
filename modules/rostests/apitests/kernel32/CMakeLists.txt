@@ -59,6 +59,7 @@ list(APPEND SOURCE
     CompareObjectHandles.c
     CancelSynchronousIo.c
     IsWow64Process2.c
+    VirtualAllocExNuma.c
     DeviceIoControl.c
     DllInitParentPrecondition.c
     dosdev.c
