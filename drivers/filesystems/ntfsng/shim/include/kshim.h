@@ -417,15 +417,16 @@ unsigned int bitmap_weight(const unsigned long *a, unsigned int bits);
  * Real NT-backed locks.  spinlock_t is a KSPIN_LOCK (raises to DISPATCH_LEVEL,
  * the IRQL to restore is kept in the lock since only one holder exists).
  * rwlock_t spins with a yield at the caller's IRQL because fs/ntfs nests
- * read_lock on size_lock.  mutex is a synchronization KEVENT (no owner, not
- * recursive: Linux semantics); rw_semaphore is a counter pair guarded by a
+ * read_lock on size_lock.  mutex is a count of holders and waiters with a
+ * synchronization KEVENT that is waited on and set only under contention, like
+ * a FAST_MUTEX (no owner, not recursive: Linux semantics); rw_semaphore is a counter pair guarded by a
  * spin lock with a notification KEVENT for waiters.  Static initializers are
  * lazily completed on first use.
  */
 struct lock_class_key { int dummy; };
 typedef struct { uintptr_t lock; unsigned char irql; } spinlock_t;
 typedef struct { volatile long cnt; } rwlock_t;
-struct mutex { struct ngos_ev ev; volatile int state; };
+struct mutex { struct ngos_ev ev; volatile int state; volatile long count; };
 struct rw_semaphore { uintptr_t sl; int readers; int writer; struct ngos_ev wake; volatile int state; };
 typedef struct { unsigned seq; } seqlock_t;
 #define DEFINE_MUTEX(m) struct mutex m = { .state = 0 }

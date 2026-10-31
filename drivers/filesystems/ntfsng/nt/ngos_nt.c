@@ -195,12 +195,17 @@ static BOOLEAN NgIsFlushOptional(PDEVICE_OBJECT Device)
     return Found;
 }
 
+/*
+ * The waiter gets the boost a disk completion gives the thread of a synchronous request on Windows
+ * (IO_DISK_INCREMENT): stopping completion here also stops the I/O manager from applying it, and
+ * without it the waiter queued behind every busy thread of its priority after each transfer.
+ */
 static IO_COMPLETION_ROUTINE NgReadCompletion;
 static NTSTATUS NTAPI NgReadCompletion(PDEVICE_OBJECT DeviceObject, PIRP Irp, PVOID Context)
 {
     UNREFERENCED_PARAMETER(DeviceObject);
     UNREFERENCED_PARAMETER(Irp);
-    KeSetEvent((PKEVENT)Context, IO_NO_INCREMENT, FALSE);
+    KeSetEvent((PKEVENT)Context, IO_DISK_INCREMENT, FALSE);
     return STATUS_MORE_PROCESSING_REQUIRED;
 }
 
