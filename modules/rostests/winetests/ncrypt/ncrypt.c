@@ -1112,6 +1112,162 @@ static void test_ecc_keys(void)
     NCryptFreeObject(prov);
 }
 
+static void check_export(const char *ctx, NCRYPT_KEY_HANDLE key, const WCHAR *type, SECURITY_STATUS expected)
+{
+    BYTE buffer[1024];
+    DWORD size = 0;
+    SECURITY_STATUS ret;
+
+    ret = NCryptExportKey(key, 0, type, NULL, NULL, 0, &size, 0);
+    ok(ret == expected, "%s %s: got %#lx, expected %#lx\n", ctx, wine_dbgstr_w(type), ret, expected);
+    ret = NCryptExportKey(key, 0, type, NULL, buffer, sizeof(buffer), &size, 0);
+    ok(ret == expected, "%s %s: got %#lx, expected %#lx\n", ctx, wine_dbgstr_w(type), ret, expected);
+}
+
+static void check_exports(const char *ctx, NCRYPT_KEY_HANDLE key, BOOL rsa, BOOL plaintext)
+{
+    SECURITY_STATUS priv = plaintext ? ERROR_SUCCESS : NTE_NOT_SUPPORTED;
+
+    check_export(ctx, key, BCRYPT_PUBLIC_KEY_BLOB, ERROR_SUCCESS);
+    check_export(ctx, key, rsa ? BCRYPT_RSAPUBLIC_BLOB : BCRYPT_ECCPUBLIC_BLOB, ERROR_SUCCESS);
+    check_export(ctx, key, rsa ? BCRYPT_ECCPUBLIC_BLOB : BCRYPT_RSAPUBLIC_BLOB, NTE_BAD_TYPE);
+    check_export(ctx, key, BCRYPT_PRIVATE_KEY_BLOB, priv);
+    check_export(ctx, key, NCRYPT_PKCS8_PRIVATE_KEY_BLOB, priv);
+    check_export(ctx, key, rsa ? BCRYPT_RSAPRIVATE_BLOB : BCRYPT_ECCPRIVATE_BLOB, priv);
+    check_export(ctx, key, rsa ? BCRYPT_ECCPRIVATE_BLOB : BCRYPT_RSAPRIVATE_BLOB, NTE_BAD_TYPE);
+    if (rsa) check_export(ctx, key, BCRYPT_RSAFULLPRIVATE_BLOB, priv);
+}
+
+static void test_export_policy(void)
+{
+    static const WCHAR *algs[] = { BCRYPT_RSA_ALGORITHM, BCRYPT_ECDSA_P256_ALGORITHM };
+    NCRYPT_PROV_HANDLE prov;
+    NCRYPT_KEY_HANDLE key;
+    SECURITY_STATUS ret;
+    DWORD policy, i;
+
+    NCryptOpenStorageProvider(&prov, MS_KEY_STORAGE_PROVIDER, 0);
+    for (i = 0; i < ARRAY_SIZE(algs); i++)
+    {
+        BOOL rsa = i == 0;
+
+        winetest_push_context("%s", wine_dbgstr_w(algs[i]));
+        ret = NCryptCreatePersistedKey(prov, &key, algs[i], NULL, 0, 0);
+        ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+        check_key_dword(key, NCRYPT_EXPORT_POLICY_PROPERTY, 0);
+        check_export("unfinalized", key, BCRYPT_PUBLIC_KEY_BLOB, NTE_BAD_KEY_STATE);
+        check_export("unfinalized", key, NCRYPT_PKCS8_PRIVATE_KEY_BLOB, NTE_BAD_KEY_STATE);
+
+        policy = NCRYPT_ALLOW_EXPORT_FLAG;
+        ret = NCryptSetProperty(key, NCRYPT_EXPORT_POLICY_PROPERTY, (BYTE *)&policy, sizeof(policy), 0);
+        ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+        ret = NCryptFinalizeKey(key, 0);
+        ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+
+        /* the right to export is not the right to export in plaintext */
+        check_exports("allow export", key, rsa, FALSE);
+
+        /* the policy can be changed after the key is finalized, and is read when the key is exported */
+        policy = NCRYPT_ALLOW_PLAINTEXT_EXPORT_FLAG;
+        ret = NCryptSetProperty(key, NCRYPT_EXPORT_POLICY_PROPERTY, (BYTE *)&policy, sizeof(policy), 0);
+        ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+        check_key_dword(key, NCRYPT_EXPORT_POLICY_PROPERTY, NCRYPT_ALLOW_PLAINTEXT_EXPORT_FLAG);
+        check_exports("allow plaintext export", key, rsa, TRUE);
+        policy = 0;
+        ret = NCryptSetProperty(key, NCRYPT_EXPORT_POLICY_PROPERTY, (BYTE *)&policy, sizeof(policy), 0);
+        ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+        check_exports("no policy", key, rsa, FALSE);
+
+        /* archiving implies exporting */
+        policy = NCRYPT_ALLOW_ARCHIVING_FLAG;
+        ret = NCryptSetProperty(key, NCRYPT_EXPORT_POLICY_PROPERTY, (BYTE *)&policy, sizeof(policy), 0);
+        ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+        check_key_dword(key, NCRYPT_EXPORT_POLICY_PROPERTY, NCRYPT_ALLOW_ARCHIVING_FLAG | NCRYPT_ALLOW_EXPORT_FLAG);
+        check_exports("archiving", key, rsa, FALSE);
+        policy = NCRYPT_ALLOW_PLAINTEXT_ARCHIVING_FLAG;
+        ret = NCryptSetProperty(key, NCRYPT_EXPORT_POLICY_PROPERTY, (BYTE *)&policy, sizeof(policy), 0);
+        ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+        check_key_dword(key, NCRYPT_EXPORT_POLICY_PROPERTY,
+                        NCRYPT_ALLOW_PLAINTEXT_ARCHIVING_FLAG | NCRYPT_ALLOW_PLAINTEXT_EXPORT_FLAG);
+        check_exports("plaintext archiving", key, rsa, TRUE);
+
+        /* invalid values leave the policy alone */
+        policy = 0x10;
+        ret = NCryptSetProperty(key, NCRYPT_EXPORT_POLICY_PROPERTY, (BYTE *)&policy, sizeof(policy), 0);
+        ok(ret == NTE_NOT_SUPPORTED, "got %#lx\n", ret);
+        policy = 0xffffffff;
+        ret = NCryptSetProperty(key, NCRYPT_EXPORT_POLICY_PROPERTY, (BYTE *)&policy, sizeof(policy), 0);
+        ok(ret == NTE_NOT_SUPPORTED, "got %#lx\n", ret);
+        ret = NCryptSetProperty(key, NCRYPT_EXPORT_POLICY_PROPERTY, (BYTE *)&policy, 2, 0);
+        ok(ret == NTE_BAD_DATA, "got %#lx\n", ret);
+        ret = NCryptSetProperty(key, NCRYPT_EXPORT_POLICY_PROPERTY, (BYTE *)&policy, 8, 0);
+        ok(ret == NTE_BAD_DATA, "got %#lx\n", ret);
+        check_key_dword(key, NCRYPT_EXPORT_POLICY_PROPERTY,
+                        NCRYPT_ALLOW_PLAINTEXT_ARCHIVING_FLAG | NCRYPT_ALLOW_PLAINTEXT_EXPORT_FLAG);
+        NCryptFreeObject(key);
+        winetest_pop_context();
+    }
+    NCryptFreeObject(prov);
+}
+
+static void test_pkcs8_ec_without_public_key(void)
+{
+    /* PrivateKeyInfo of a P-256 key with d = 2, the ECPrivateKey has neither parameters nor a public key */
+    static const BYTE pkcs8[] =
+    {
+        0x30, 0x41, 0x02, 0x01, 0x00, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01,
+        0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x04, 0x27, 0x30, 0x25, 0x02, 0x01,
+        0x01, 0x04, 0x20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 2,
+    };
+    /* 2G */
+    static const BYTE x[] = {0x7c,0xf2,0x7b,0x18,0x8d,0x03,0x4f,0x7e,0x8a,0x52,0x38,0x03,0x04,0xb5,0x1a,0xc3,
+                             0xc0,0x89,0x69,0xe2,0x77,0xf2,0x1b,0x35,0xa6,0x0b,0x48,0xfc,0x47,0x66,0x99,0x78};
+    static const BYTE y[] = {0x07,0x77,0x55,0x10,0xdb,0x8e,0xd0,0x40,0x29,0x3d,0x9a,0xc6,0x9f,0x74,0x30,0xdb,
+                             0xba,0x7d,0xad,0xe6,0x3c,0xe9,0x82,0x29,0x9e,0x04,0xb7,0x9d,0x22,0x78,0x73,0xd1};
+    BYTE data[sizeof(pkcs8) + 1], blob[256];
+    NCRYPT_PROV_HANDLE prov;
+    NCRYPT_KEY_HANDLE key;
+    SECURITY_STATUS ret;
+    DWORD size;
+
+    NCryptOpenStorageProvider(&prov, MS_KEY_STORAGE_PROVIDER, 0);
+    ret = NCryptImportKey(prov, 0, NCRYPT_PKCS8_PRIVATE_KEY_BLOB, NULL, &key, (BYTE *)pkcs8, sizeof(pkcs8), 0);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    if (!ret)
+    {
+        check_key_dword(key, NCRYPT_LENGTH_PROPERTY, 256);
+        ret = NCryptExportKey(key, 0, BCRYPT_PUBLIC_KEY_BLOB, NULL, blob, sizeof(blob), &size, 0);
+        ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+        ok(size == sizeof(BCRYPT_ECCKEY_BLOB) + 64, "got size %lu\n", size);
+        ok(!memcmp(blob + sizeof(BCRYPT_ECCKEY_BLOB), x, 32) && !memcmp(blob + sizeof(BCRYPT_ECCKEY_BLOB) + 32, y, 32),
+           "the public key was not derived\n");
+        NCryptFreeObject(key);
+    }
+
+    /* data after the key is ignored */
+    memcpy(data, pkcs8, sizeof(pkcs8));
+    data[sizeof(pkcs8)] = 0;
+    ret = NCryptImportKey(prov, 0, NCRYPT_PKCS8_PRIVATE_KEY_BLOB, NULL, &key, data, sizeof(data), 0);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    if (!ret) NCryptFreeObject(key);
+
+    /* a version other than 0 is not accepted for an EC key */
+    memcpy(data, pkcs8, sizeof(pkcs8));
+    data[6] = 1;
+    ret = NCryptImportKey(prov, 0, NCRYPT_PKCS8_PRIVATE_KEY_BLOB, NULL, &key, data, sizeof(pkcs8), 0);
+    ok(ret == CRYPT_E_BAD_ENCODE, "got %#lx\n", ret);
+    if (!ret) NCryptFreeObject(key);
+
+    /* an invalid private key */
+    memcpy(data, pkcs8, sizeof(pkcs8));
+    data[sizeof(pkcs8) - 1] = 0;
+    ret = NCryptImportKey(prov, 0, NCRYPT_PKCS8_PRIVATE_KEY_BLOB, NULL, &key, data, sizeof(pkcs8), 0);
+    ok(ret == NTE_INVALID_PARAMETER, "got %#lx\n", ret);
+    if (!ret) NCryptFreeObject(key);
+    NCryptFreeObject(prov);
+}
+
 START_TEST(ncrypt)
 {
     test_key_import_rsa();
@@ -1127,4 +1283,6 @@ START_TEST(ncrypt)
     test_NCryptDecrypt();
     test_rsa_import_export();
     test_ecc_keys();
+    test_export_policy();
+    test_pkcs8_ec_without_public_key();
 }
