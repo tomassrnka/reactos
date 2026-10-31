@@ -744,3 +744,62 @@
 @ lstrlen
 @ lstrlenA
 @ lstrlenW
+
+# Exports parity (EXPORTS-kernelbase-missing, 2026-10-31): names Windows kernelbase exports that kernel32 implements.
+@ AddSIDToBoundaryDescriptor -version=0x600+
+@ ClosePackageInfo
+@ ClosePrivateNamespace -version=0x600+
+@ CopyContext -version=0x601+ -arch=i386,x86_64
+@ CreatePrivateNamespaceW -version=0x600+
+@ DeleteBoundaryDescriptor -version=0x600+
+@ FindNLSStringEx -version=0x600+
+@ FindPackagesByPackageFamily
+@ FormatApplicationUserModelId
+@ GetApplicationRecoveryCallback -version=0x600+
+@ GetApplicationUserModelId
+@ GetApplicationUserModelIdFromToken
+@ GetConsoleAliasesA
+@ GetConsoleAliasesW
+@ GetConsoleAliasExesA
+@ GetConsoleAliasExesW
+@ GetConsoleHistoryInfo -version=0x600+
+@ GetConsoleSelectionInfo
+@ GetCurrentApplicationUserModelId
+@ GetEnabledXStateFeatures -version=0x601+ -arch=i386,x86_64
+@ GetPackageFamilyNameFromToken
+@ GetPackageFullNameFromToken
+@ GetPackageId
+@ GetPackageInfo
+@ GetPackagePath
+@ GetThreadIdealProcessorEx -version=0x600+
+@ GetThreadInformation
+@ GetXStateFeaturesMask -version=0x601+ -arch=i386,x86_64
+@ InitializeContext -version=0x601+ -arch=i386,x86_64
+@ InitializeContext2 -version=0x601+ -arch=i386,x86_64
+@ IsTimeZoneRedirectionEnabled
+@ LocateXStateFeature -version=0x601+ -arch=i386,x86_64
+@ OpenPackageInfoByFullName
+@ OpenPrivateNamespaceW -version=0x600+
+@ PackageFamilyNameFromFullName
+@ PackageFamilyNameFromId
+@ PackageFullNameFromId
+@ PackageNameAndPublisherIdFromFamilyName
+@ ParseApplicationUserModelId
+@ RegisterApplicationRestart -version=0x600+
+@ ResolveDelayLoadedAPI
+@ SetClientTimeZoneInformation
+@ SetConsoleHistoryInfo -version=0x600+
+@ SetConsoleNumberOfCommandsA
+@ SetConsoleNumberOfCommandsW
+@ SetThreadIdealProcessorEx -version=0x600+
+@ SetXStateFeaturesMask -version=0x601+ -arch=i386,x86_64
+@ UnregisterApplicationRestart -version=0x600+
+@ VerifyApplicationUserModelId
+@ VerifyPackageFamilyName
+@ VerifyPackageFullName
+@ VerifyPackageId
+@ VerifyPackageRelativeApplicationId
+@ WerRegisterFile -version=0x600+
+@ WerRegisterMemoryBlock -version=0x600+
+@ WerUnregisterFile -version=0x600+
+@ WerUnregisterMemoryBlock -version=0x600+
