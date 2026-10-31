@@ -12,7 +12,7 @@
 @ stub PdhBrowseCountersHW
 @ stub PdhBrowseCountersW
 @ stdcall PdhCalculateCounterFromRawValue(ptr long ptr ptr ptr)
-@ stub PdhCloseLog
+@ stdcall PdhCloseLog(ptr long)
 @ stdcall PdhCloseQuery(ptr)
 @ stdcall PdhCollectQueryData(ptr)
 @ stdcall PdhCollectQueryDataWithTime(ptr ptr)
@@ -24,23 +24,23 @@
 @ stub PdhCreateSQLTablesW
 @ stub PdhEnumLogSetNamesA
 @ stub PdhEnumLogSetNamesW
-@ stub PdhEnumMachinesA
-@ stub PdhEnumMachinesHA
-@ stub PdhEnumMachinesHW
-@ stub PdhEnumMachinesW
+@ stdcall PdhEnumMachinesA(str ptr ptr)
+@ stdcall PdhEnumMachinesHA(ptr ptr ptr)
+@ stdcall PdhEnumMachinesHW(ptr ptr ptr)
+@ stdcall PdhEnumMachinesW(wstr ptr ptr)
 @ stdcall PdhEnumObjectItemsA(str str str ptr ptr ptr ptr long long)
-@ stub PdhEnumObjectItemsHA
-@ stub PdhEnumObjectItemsHW
+@ stdcall PdhEnumObjectItemsHA(ptr str str ptr ptr ptr ptr long long)
+@ stdcall PdhEnumObjectItemsHW(ptr wstr wstr ptr ptr ptr ptr long long)
 @ stdcall PdhEnumObjectItemsW(wstr wstr wstr ptr ptr ptr ptr long long)
-@ stub PdhEnumObjectsA
-@ stub PdhEnumObjectsHA
-@ stub PdhEnumObjectsHW
-@ stub PdhEnumObjectsW
+@ stdcall PdhEnumObjectsA(str str ptr ptr long long)
+@ stdcall PdhEnumObjectsHA(ptr str ptr ptr long long)
+@ stdcall PdhEnumObjectsHW(ptr wstr ptr ptr long long)
+@ stdcall PdhEnumObjectsW(wstr wstr ptr ptr long long)
 @ stdcall PdhExpandCounterPathA(str ptr ptr)
 @ stdcall PdhExpandCounterPathW(wstr ptr ptr)
 @ stdcall PdhExpandWildCardPathA(str str ptr ptr long)
-@ stub PdhExpandWildCardPathHA
-@ stub PdhExpandWildCardPathHW
+@ stdcall PdhExpandWildCardPathHA(ptr str ptr ptr long)
+@ stdcall PdhExpandWildCardPathHW(ptr wstr ptr ptr long)
 @ stdcall PdhExpandWildCardPathW(wstr wstr ptr ptr long)
 @ stub PdhFormatFromRawValue
 @ stdcall PdhGetCounterInfoA(ptr long ptr ptr)
@@ -85,10 +85,10 @@
 @ stub PdhOpenLogW
 @ stdcall PdhOpenQuery(wstr long ptr) PdhOpenQueryW
 @ stdcall PdhOpenQueryA(str long ptr)
-@ stub PdhOpenQueryH
+@ stdcall PdhOpenQueryH(ptr long ptr)
 @ stdcall PdhOpenQueryW(wstr long ptr)
-@ stub PdhParseCounterPathA
-@ stub PdhParseCounterPathW
+@ stdcall PdhParseCounterPathA(str ptr ptr long)
+@ stdcall PdhParseCounterPathW(wstr ptr ptr long)
 @ stub PdhParseInstanceNameA
 @ stub PdhParseInstanceNameW
 @ stub PdhPlaAddItemA
