@@ -11,12 +11,14 @@ list(APPEND SOURCE
     failure.c
     misc.c
     name.c
+    privs.c
     print.c
     query.c
     sc.c
     sdset.c
     sdshow.c
     start.c
+    triggerinfo.c
     usage.c
     sc.h)
 

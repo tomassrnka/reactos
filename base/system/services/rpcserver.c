@@ -885,13 +885,14 @@ Int_EnumDependentServicesW(HKEY hServicesKey,
                     if ((dwCurrentServiceState == dwServiceState) ||
                         (dwServiceState == SERVICE_STATE_ALL))
                     {
-                        /* Calculate the required size */
-                        dwRequiredSize += sizeof(SERVICE_STATUS);
+                        /*
+                         * Calculate the size of this element: the ENUM_SERVICE_STATUSW itself (the name and
+                         * display name pointers, the status, and the padding that follows it on 64-bit)
+                         * and the two strings
+                         */
+                        dwRequiredSize = sizeof(ENUM_SERVICE_STATUSW);
                         dwRequiredSize += (DWORD)((wcslen(lpCurrentService->lpServiceName) + 1) * sizeof(WCHAR));
                         dwRequiredSize += (DWORD)((wcslen(lpCurrentService->lpDisplayName) + 1) * sizeof(WCHAR));
-
-                        /* Add the size for service name and display name pointers */
-                        dwRequiredSize += (2 * sizeof(PVOID));
 
                         /* increase the BytesNeeded size */
                         *pcbBytesNeeded = *pcbBytesNeeded + dwRequiredSize;
@@ -2916,6 +2917,9 @@ REnumDependentServicesW(
 
     *lpServicesReturned = dwServicesReturned;
 
+    /* Nothing is left to be fetched */
+    *pcbBytesNeeded = 0;
+
 Done:
     if (lpServicesArray != NULL)
         HeapFree(GetProcessHeap(), 0, lpServicesArray);
@@ -3308,7 +3312,7 @@ RQueryServiceLockStatusW(
 {
     LPQUERY_SERVICE_LOCK_STATUSW lpLockStatus = (LPQUERY_SERVICE_LOCK_STATUSW)lpBuf;
     PMANAGER_HANDLE hMgr;
-    DWORD dwRequiredSize;
+    DWORD dwRequiredSize, dwError;
 
     if (!lpLockStatus || !pcbBytesNeeded)
         return ERROR_INVALID_PARAMETER;
@@ -3327,16 +3331,10 @@ RQueryServiceLockStatusW(
         return ERROR_ACCESS_DENIED;
     }
 
-    /* FIXME: we need to compute instead the real length of the owner name */
-    dwRequiredSize = sizeof(QUERY_SERVICE_LOCK_STATUSW) + sizeof(WCHAR);
+    /* The owner's name is part of what is returned, so the size is worked out with it */
+    dwError = ScmQueryServiceLockStatusW(lpLockStatus, cbBufSize, &dwRequiredSize);
     *pcbBytesNeeded = dwRequiredSize;
-
-    if (cbBufSize < dwRequiredSize)
-        return ERROR_INSUFFICIENT_BUFFER;
-
-    ScmQueryServiceLockStatusW(lpLockStatus);
-
-    return ERROR_SUCCESS;
+    return dwError;
 }
 
 
@@ -3973,6 +3971,9 @@ REnumDependentServicesA(
 
     *lpServicesReturned = dwServicesReturned;
 
+    /* Nothing is left to be fetched */
+    *pcbBytesNeeded = 0;
+
 Done:
     if (lpServicesArray)
         HeapFree(GetProcessHeap(), 0, lpServicesArray);
@@ -4412,7 +4413,7 @@ RQueryServiceLockStatusA(
 {
     LPQUERY_SERVICE_LOCK_STATUSA lpLockStatus = (LPQUERY_SERVICE_LOCK_STATUSA)lpBuf;
     PMANAGER_HANDLE hMgr;
-    DWORD dwRequiredSize;
+    DWORD dwRequiredSize, dwError;
 
     if (!lpLockStatus || !pcbBytesNeeded)
         return ERROR_INVALID_PARAMETER;
@@ -4431,16 +4432,10 @@ RQueryServiceLockStatusA(
         return ERROR_ACCESS_DENIED;
     }
 
-    /* FIXME: we need to compute instead the real length of the owner name */
-    dwRequiredSize = sizeof(QUERY_SERVICE_LOCK_STATUSA) + sizeof(CHAR);
+    /* The owner's name is part of what is returned, so the size is worked out with it */
+    dwError = ScmQueryServiceLockStatusA(lpLockStatus, cbBufSize, &dwRequiredSize);
     *pcbBytesNeeded = dwRequiredSize;
-
-    if (cbBufSize < dwRequiredSize)
-        return ERROR_INSUFFICIENT_BUFFER;
-
-    ScmQueryServiceLockStatusA(lpLockStatus);
-
-    return ERROR_SUCCESS;
+    return dwError;
 }
 
 
@@ -5107,7 +5102,8 @@ Done:
 
 /*
  * The levels of the service configuration the controller keeps: description, failure actions,
- * delayed automatic start, the failure actions flag, the service SID type and the preshutdown timeout
+ * delayed automatic start, the failure actions flag, the service SID type, the required privileges,
+ * the preshutdown timeout and the triggers
  */
 static BOOL
 ScmIsSupportedConfigLevel(DWORD dwInfoLevel)
@@ -5117,7 +5113,9 @@ ScmIsSupportedConfigLevel(DWORD dwInfoLevel)
            dwInfoLevel == SERVICE_CONFIG_DELAYED_AUTO_START_INFO ||
            dwInfoLevel == SERVICE_CONFIG_FAILURE_ACTIONS_FLAG ||
            dwInfoLevel == SERVICE_CONFIG_SERVICE_SID_INFO ||
-           dwInfoLevel == SERVICE_CONFIG_PRESHUTDOWN_INFO;
+           dwInfoLevel == SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO ||
+           dwInfoLevel == SERVICE_CONFIG_PRESHUTDOWN_INFO ||
+           dwInfoLevel == SERVICE_CONFIG_TRIGGER_INFO;
 }
 
 
@@ -5172,6 +5170,534 @@ ScmQueryDwordConfig(HKEY hServiceKey,
 }
 
 
+/*
+ * SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO is kept as the REG_MULTI_SZ value RequiredPrivileges, and
+ * SERVICE_CONFIG_TRIGGER_INFO as the key TriggerInfo of the service key, as Windows does:
+ *
+ *   TriggerInfo\<n>      Type (DWORD), Action (DWORD), Guid (the 16 bytes of the subtype), and for each
+ *                        data item <i>: Data<i> (REG_BINARY) and DataType<i> (DWORD)
+ */
+/* Declared for Vista and later only, the services do not build for it; advapi32_vista has it */
+LSTATUS WINAPI RegDeleteTreeW(_In_ HKEY, _In_opt_ LPCWSTR);
+
+#define SCM_TRIGGER_KEY             L"TriggerInfo"
+#define SCM_MAX_TRIGGERS            64
+#define SCM_MAX_TRIGGER_DATA_ITEMS  64
+#define SCM_MAX_TRIGGER_DATA        1024
+
+/* Subtypes of the network endpoint trigger: an RPC interface, and a named pipe */
+static const GUID ScmRpcInterfaceEventGuid =
+    {0xbc90d167, 0x9470, 0x4139, {0xa9, 0xba, 0xbe, 0x0b, 0xbb, 0xf5, 0xb7, 0x4d}};
+static const GUID ScmNamedPipeEventGuid =
+    {0x1f81d131, 0x3fac, 0x4537, {0x9e, 0x0c, 0x7e, 0x7b, 0x0c, 0x2f, 0x4b, 0x55}};
+
+typedef enum _SCM_PRIVILEGES_ACTION
+{
+    ScmPrivilegesIgnore,
+    ScmPrivilegesDelete,
+    ScmPrivilegesStore
+} SCM_PRIVILEGES_ACTION;
+
+
+/*
+ * What a ChangeServiceConfig2 call with a list of required privileges does, as Windows does it:
+ * the list ends with the first empty string, an empty list removes the setting, and a list with a
+ * privilege that is not known leaves the setting as it is, without an error (Windows does the same
+ * with one that has others that are known). It looks the names up, so the caller must not hold the
+ * service database. *pcchNames is the length of the names with the terminators of each of them
+ * (not of the list).
+ */
+static DWORD
+ScmCheckRequiredPrivileges(const SERVICE_RPC_REQUIRED_PRIVILEGES_INFO *pInfo,
+                           SCM_PRIVILEGES_ACTION *pAction,
+                           PDWORD pcchNames)
+{
+    PCWSTR pszList = (PCWSTR)pInfo->pRequiredPrivileges;
+    DWORD cchList = (pszList != NULL) ? pInfo->cbRequiredPrivileges / sizeof(WCHAR) : 0;
+    DWORD i = 0, cchName, dwNames = 0, dwKnown = 0;
+    LUID Luid;
+
+    *pAction = ScmPrivilegesIgnore;
+    *pcchNames = 0;
+
+    while (i < cchList && pszList[i] != 0)
+    {
+        for (cchName = 0; i + cchName < cchList && pszList[i + cchName] != 0; cchName++)
+            ;
+        if (i + cchName >= cchList)
+            return ERROR_INVALID_PARAMETER;   /* the last name has no terminator */
+
+        dwNames++;
+        if (LookupPrivilegeValueW(NULL, pszList + i, &Luid))
+            dwKnown++;
+        i += cchName + 1;
+    }
+
+    if (dwNames == 0)
+    {
+        *pAction = ScmPrivilegesDelete;
+        return ERROR_SUCCESS;
+    }
+
+    if (dwKnown != dwNames)
+        return ERROR_SUCCESS;
+
+    *pAction = ScmPrivilegesStore;
+    *pcchNames = i;
+    return ERROR_SUCCESS;
+}
+
+
+static DWORD
+ScmSetRequiredPrivileges(HKEY hServiceKey,
+                         const SERVICE_RPC_REQUIRED_PRIVILEGES_INFO *pInfo,
+                         SCM_PRIVILEGES_ACTION Action,
+                         DWORD cchNames)
+{
+    PWSTR pszValue;
+    DWORD dwError;
+
+    if (Action == ScmPrivilegesDelete)
+    {
+        dwError = RegDeleteValueW(hServiceKey, L"RequiredPrivileges");
+        return (dwError == ERROR_FILE_NOT_FOUND) ? ERROR_SUCCESS : dwError;
+    }
+
+    if (Action != ScmPrivilegesStore)
+        return ERROR_SUCCESS;
+
+    /* The names, then the empty string that ends the list */
+    pszValue = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (cchNames + 1) * sizeof(WCHAR));
+    if (pszValue == NULL)
+        return ERROR_NOT_ENOUGH_MEMORY;
+
+    RtlCopyMemory(pszValue, pInfo->pRequiredPrivileges, cchNames * sizeof(WCHAR));
+    dwError = RegSetValueExW(hServiceKey,
+                             L"RequiredPrivileges",
+                             0,
+                             REG_MULTI_SZ,
+                             (LPBYTE)pszValue,
+                             (cchNames + 1) * sizeof(WCHAR));
+    HeapFree(GetProcessHeap(), 0, pszValue);
+    return dwError;
+}
+
+
+/*
+ * The required privileges for QueryServiceConfig2: a SERVICE_REQUIRED_PRIVILEGES_INFO whose pointer holds
+ * the offset of the multi-string, which follows it, the caller makes the pointer. Without the setting the
+ * pointer is NULL. The size needed is that of the Unicode string for both the Unicode and the ANSI call,
+ * as Windows has it.
+ */
+static DWORD
+ScmQueryRequiredPrivileges(HKEY hServiceKey,
+                           BOOL bUnicode,
+                           LPBYTE lpBuffer,
+                           DWORD cbBufSize,
+                           LPBOUNDED_DWORD_8K pcbBytesNeeded)
+{
+    PWSTR pszValue = NULL;
+    DWORD dwType, dwSize = 0, cchList = 0, cbData = 0, i;
+    DWORD dwError;
+
+    dwError = RegQueryValueExW(hServiceKey, L"RequiredPrivileges", NULL, &dwType, NULL, &dwSize);
+    if (dwError == ERROR_SUCCESS && dwType == REG_MULTI_SZ && dwSize >= sizeof(WCHAR))
+    {
+        pszValue = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dwSize + 2 * sizeof(WCHAR));
+        if (pszValue == NULL)
+            return ERROR_NOT_ENOUGH_MEMORY;
+
+        if (RegQueryValueExW(hServiceKey, L"RequiredPrivileges", NULL, &dwType,
+                             (LPBYTE)pszValue, &dwSize) == ERROR_SUCCESS)
+        {
+            /* The list ends with the first empty string, which is part of it */
+            for (i = 0; i < dwSize / sizeof(WCHAR) && pszValue[i] != 0; i += wcslen(pszValue + i) + 1)
+                ;
+            if (i > 0)
+                cchList = i + 1;
+        }
+    }
+
+    cbData = cchList * sizeof(WCHAR);
+
+    *pcbBytesNeeded = sizeof(SERVICE_REQUIRED_PRIVILEGES_INFOW) + cbData;
+    if (cbBufSize < *pcbBytesNeeded)
+    {
+        if (pszValue != NULL)
+            HeapFree(GetProcessHeap(), 0, pszValue);
+        return ERROR_INSUFFICIENT_BUFFER;
+    }
+
+    ((LPSERVICE_REQUIRED_PRIVILEGES_INFOW)lpBuffer)->pmszRequiredPrivileges =
+        cbData ? (LPWSTR)(ULONG_PTR)sizeof(SERVICE_REQUIRED_PRIVILEGES_INFOW) : NULL;
+    if (cbData)
+    {
+        if (bUnicode)
+            RtlCopyMemory(lpBuffer + sizeof(SERVICE_REQUIRED_PRIVILEGES_INFOW), pszValue, cbData);
+        else
+            WideCharToMultiByte(CP_ACP, 0, pszValue, cchList,
+                                (LPSTR)(lpBuffer + sizeof(SERVICE_REQUIRED_PRIVILEGES_INFOW)), cchList * sizeof(WCHAR), NULL, NULL);
+    }
+
+    if (pszValue != NULL)
+        HeapFree(GetProcessHeap(), 0, pszValue);
+    return ERROR_SUCCESS;
+}
+
+
+/*
+ * Checks a trigger list as Windows does. A trigger needs a subtype, a start or stop action and one of the
+ * types the SCM knows; the data items are binary, string, or the level and keyword filters of an ETW
+ * provider (one byte, and eight); a device trigger takes strings, a group policy trigger takes no data and
+ * an endpoint trigger an RPC interface or a pipe with its name.
+ */
+static DWORD
+ScmCheckTriggerInfo(const SERVICE_TRIGGER_INFO *pInfo)
+{
+    DWORD i, j;
+
+    if (pInfo->cTriggers > SCM_MAX_TRIGGERS ||
+        (pInfo->cTriggers != 0 && pInfo->pTriggers == NULL))
+        return ERROR_INVALID_PARAMETER;
+
+    for (i = 0; i < pInfo->cTriggers; i++)
+    {
+        const SERVICE_TRIGGER *pTrigger = &pInfo->pTriggers[i];
+
+        switch (pTrigger->dwTriggerType)
+        {
+            case SERVICE_TRIGGER_TYPE_DEVICE_INTERFACE_ARRIVAL:
+            case SERVICE_TRIGGER_TYPE_IP_ADDRESS_AVAILABILITY:
+            case SERVICE_TRIGGER_TYPE_DOMAIN_JOIN:
+            case SERVICE_TRIGGER_TYPE_FIREWALL_PORT_EVENT:
+            case SERVICE_TRIGGER_TYPE_GROUP_POLICY:
+            case SERVICE_TRIGGER_TYPE_NETWORK_ENDPOINT:
+            case SERVICE_TRIGGER_TYPE_CUSTOM:
+                break;
+
+            default:
+                return ERROR_INVALID_PARAMETER;
+        }
+
+        if (pTrigger->dwAction != SERVICE_TRIGGER_ACTION_SERVICE_START &&
+            pTrigger->dwAction != SERVICE_TRIGGER_ACTION_SERVICE_STOP)
+            return ERROR_INVALID_PARAMETER;
+
+        if (pTrigger->pTriggerSubtype == NULL)
+            return ERROR_INVALID_PARAMETER;
+
+        if (pTrigger->cDataItems > SCM_MAX_TRIGGER_DATA_ITEMS ||
+            (pTrigger->cDataItems != 0 && pTrigger->pDataItems == NULL))
+            return ERROR_INVALID_PARAMETER;
+
+        for (j = 0; j < pTrigger->cDataItems; j++)
+        {
+            const SERVICE_TRIGGER_SPECIFIC_DATA_ITEM *pItem = &pTrigger->pDataItems[j];
+
+            if (pItem->dwDataType < SERVICE_TRIGGER_DATA_TYPE_BINARY ||
+                pItem->dwDataType > SERVICE_TRIGGER_DATA_TYPE_KEYWORD_ALL ||
+                pItem->cbData == 0 || pItem->cbData > SCM_MAX_TRIGGER_DATA ||
+                pItem->pData == NULL)
+                return ERROR_INVALID_PARAMETER;
+
+            if ((pItem->dwDataType == SERVICE_TRIGGER_DATA_TYPE_LEVEL && pItem->cbData != sizeof(BYTE)) ||
+                ((pItem->dwDataType == SERVICE_TRIGGER_DATA_TYPE_KEYWORD_ANY ||
+                  pItem->dwDataType == SERVICE_TRIGGER_DATA_TYPE_KEYWORD_ALL) && pItem->cbData != sizeof(ULONGLONG)))
+                return ERROR_INVALID_PARAMETER;
+
+            if (pTrigger->dwTriggerType == SERVICE_TRIGGER_TYPE_DEVICE_INTERFACE_ARRIVAL &&
+                pItem->dwDataType != SERVICE_TRIGGER_DATA_TYPE_STRING)
+                return ERROR_INVALID_PARAMETER;
+        }
+
+        if (pTrigger->dwTriggerType == SERVICE_TRIGGER_TYPE_GROUP_POLICY && pTrigger->cDataItems != 0)
+            return ERROR_NOT_SUPPORTED;
+
+        if (pTrigger->dwTriggerType == SERVICE_TRIGGER_TYPE_NETWORK_ENDPOINT)
+        {
+            if (!IsEqualGUID(pTrigger->pTriggerSubtype, &ScmRpcInterfaceEventGuid) &&
+                !IsEqualGUID(pTrigger->pTriggerSubtype, &ScmNamedPipeEventGuid))
+                return ERROR_NOT_FOUND;
+
+            /* The endpoint is named by the data, and Windows has no better word for its absence */
+            if (pTrigger->cDataItems == 0)
+                return ERROR_ALREADY_EXISTS;
+        }
+    }
+
+    return ERROR_SUCCESS;
+}
+
+
+/* The trigger list is checked. No triggers delete them, which is an error when there are none. */
+static DWORD
+ScmSetTriggerInfo(HKEY hServiceKey,
+                  const SERVICE_TRIGGER_INFO *pInfo)
+{
+    HKEY hTriggersKey = NULL, hTriggerKey;
+    WCHAR szName[32];
+    DWORD i, j, dwError;
+
+    if (pInfo->cTriggers == 0)
+    {
+        dwError = RegOpenKeyExW(hServiceKey, SCM_TRIGGER_KEY, 0, KEY_READ, &hTriggersKey);
+        if (dwError != ERROR_SUCCESS)
+            return ERROR_INVALID_PARAMETER;
+
+        RegCloseKey(hTriggersKey);
+        return RegDeleteTreeW(hServiceKey, SCM_TRIGGER_KEY);
+    }
+
+    /* The new list replaces the old one */
+    dwError = RegDeleteTreeW(hServiceKey, SCM_TRIGGER_KEY);
+    if (dwError != ERROR_SUCCESS && dwError != ERROR_FILE_NOT_FOUND)
+        return dwError;
+
+    dwError = RegCreateKeyExW(hServiceKey, SCM_TRIGGER_KEY, 0, NULL, REG_OPTION_NON_VOLATILE,
+                              KEY_CREATE_SUB_KEY | KEY_SET_VALUE, NULL, &hTriggersKey, NULL);
+    if (dwError != ERROR_SUCCESS)
+        return dwError;
+
+    for (i = 0; i < pInfo->cTriggers && dwError == ERROR_SUCCESS; i++)
+    {
+        const SERVICE_TRIGGER *pTrigger = &pInfo->pTriggers[i];
+
+        StringCchPrintfW(szName, ARRAYSIZE(szName), L"%lu", i);
+        dwError = RegCreateKeyExW(hTriggersKey, szName, 0, NULL, REG_OPTION_NON_VOLATILE,
+                                  KEY_SET_VALUE, NULL, &hTriggerKey, NULL);
+        if (dwError != ERROR_SUCCESS)
+            break;
+
+        dwError = RegSetValueExW(hTriggerKey, L"Type", 0, REG_DWORD,
+                                 (LPBYTE)&pTrigger->dwTriggerType, sizeof(DWORD));
+        if (dwError == ERROR_SUCCESS)
+            dwError = RegSetValueExW(hTriggerKey, L"Action", 0, REG_DWORD,
+                                     (LPBYTE)&pTrigger->dwAction, sizeof(DWORD));
+        if (dwError == ERROR_SUCCESS)
+            dwError = RegSetValueExW(hTriggerKey, L"Guid", 0, REG_BINARY,
+                                     (LPBYTE)pTrigger->pTriggerSubtype, sizeof(GUID));
+
+        for (j = 0; j < pTrigger->cDataItems && dwError == ERROR_SUCCESS; j++)
+        {
+            const SERVICE_TRIGGER_SPECIFIC_DATA_ITEM *pItem = &pTrigger->pDataItems[j];
+
+            StringCchPrintfW(szName, ARRAYSIZE(szName), L"Data%lu", j);
+            dwError = RegSetValueExW(hTriggerKey, szName, 0, REG_BINARY, pItem->pData, pItem->cbData);
+            if (dwError == ERROR_SUCCESS)
+            {
+                StringCchPrintfW(szName, ARRAYSIZE(szName), L"DataType%lu", j);
+                dwError = RegSetValueExW(hTriggerKey, szName, 0, REG_DWORD,
+                                         (LPBYTE)&pItem->dwDataType, sizeof(DWORD));
+            }
+        }
+
+        RegCloseKey(hTriggerKey);
+    }
+
+    RegCloseKey(hTriggersKey);
+
+    /* Not a half list */
+    if (dwError != ERROR_SUCCESS)
+        RegDeleteTreeW(hServiceKey, SCM_TRIGGER_KEY);
+
+    return dwError;
+}
+
+
+typedef struct _SCM_TRIGGER_DATA
+{
+    DWORD dwType;
+    DWORD dwAction;
+    GUID Guid;
+    DWORD cItems;
+    DWORD dwItemType[SCM_MAX_TRIGGER_DATA_ITEMS];
+    DWORD cbItem[SCM_MAX_TRIGGER_DATA_ITEMS];
+    PBYTE pItem[SCM_MAX_TRIGGER_DATA_ITEMS];
+} SCM_TRIGGER_DATA, *PSCM_TRIGGER_DATA;
+
+
+/* Reads a trigger of the registry; FALSE when there is no such trigger or it is incomplete */
+static BOOL
+ScmReadTrigger(HKEY hTriggersKey,
+               DWORD dwIndex,
+               PSCM_TRIGGER_DATA pTrigger)
+{
+    HKEY hTriggerKey;
+    WCHAR szName[32];
+    DWORD dwSize, dwType, j;
+    BOOL bResult = FALSE;
+
+    StringCchPrintfW(szName, ARRAYSIZE(szName), L"%lu", dwIndex);
+    if (RegOpenKeyExW(hTriggersKey, szName, 0, KEY_READ, &hTriggerKey) != ERROR_SUCCESS)
+        return FALSE;
+
+    RtlZeroMemory(pTrigger, sizeof(*pTrigger));
+
+    dwSize = sizeof(DWORD);
+    if (RegQueryValueExW(hTriggerKey, L"Type", NULL, &dwType, (LPBYTE)&pTrigger->dwType, &dwSize) != ERROR_SUCCESS ||
+        dwType != REG_DWORD)
+        goto done;
+
+    dwSize = sizeof(DWORD);
+    if (RegQueryValueExW(hTriggerKey, L"Action", NULL, &dwType, (LPBYTE)&pTrigger->dwAction, &dwSize) != ERROR_SUCCESS ||
+        dwType != REG_DWORD)
+        goto done;
+
+    dwSize = sizeof(GUID);
+    if (RegQueryValueExW(hTriggerKey, L"Guid", NULL, &dwType, (LPBYTE)&pTrigger->Guid, &dwSize) != ERROR_SUCCESS ||
+        dwType != REG_BINARY || dwSize != sizeof(GUID))
+        goto done;
+
+    for (j = 0; j < SCM_MAX_TRIGGER_DATA_ITEMS; j++)
+    {
+        PBYTE pData;
+        DWORD cbData = 0, dwTypeSize = sizeof(DWORD);
+
+        StringCchPrintfW(szName, ARRAYSIZE(szName), L"Data%lu", j);
+        if (RegQueryValueExW(hTriggerKey, szName, NULL, &dwType, NULL, &cbData) != ERROR_SUCCESS)
+            break;
+        if (dwType != REG_BINARY || cbData == 0 || cbData > SCM_MAX_TRIGGER_DATA)
+            goto done;
+
+        pData = HeapAlloc(GetProcessHeap(), 0, cbData);
+        if (pData == NULL)
+            goto done;
+        if (RegQueryValueExW(hTriggerKey, szName, NULL, &dwType, pData, &cbData) != ERROR_SUCCESS)
+        {
+            HeapFree(GetProcessHeap(), 0, pData);
+            goto done;
+        }
+
+        StringCchPrintfW(szName, ARRAYSIZE(szName), L"DataType%lu", j);
+        if (RegQueryValueExW(hTriggerKey, szName, NULL, &dwType,
+                             (LPBYTE)&pTrigger->dwItemType[j], &dwTypeSize) != ERROR_SUCCESS)
+            pTrigger->dwItemType[j] = SERVICE_TRIGGER_DATA_TYPE_BINARY;
+
+        pTrigger->pItem[j] = pData;
+        pTrigger->cbItem[j] = cbData;
+        pTrigger->cItems = j + 1;
+    }
+
+    bResult = TRUE;
+
+done:
+    RegCloseKey(hTriggerKey);
+    if (!bResult)
+    {
+        for (j = 0; j < pTrigger->cItems; j++)
+            HeapFree(GetProcessHeap(), 0, pTrigger->pItem[j]);
+        pTrigger->cItems = 0;
+    }
+    return bResult;
+}
+
+
+/*
+ * The triggers for QueryServiceConfig2, in the layout Windows uses: the SERVICE_TRIGGER_INFO, the array of
+ * triggers, then the data items and the subtype of each trigger, and last the data of the items, the last
+ * item first. All pointers hold the offset in the buffer; the caller makes them pointers. The size is
+ * that of the 64-bit layout on 64-bit.
+ */
+static DWORD
+ScmQueryTriggerInfo(HKEY hServiceKey,
+                    LPBYTE lpBuffer,
+                    DWORD cbBufSize,
+                    LPBOUNDED_DWORD_8K pcbBytesNeeded)
+{
+    HKEY hTriggersKey = NULL;
+    PSCM_TRIGGER_DATA pTriggers = NULL;
+    DWORD dwCount = 0, dwSize, dwOffset, i, j;
+    SERVICE_TRIGGER_INFO *pInfo;
+    SERVICE_TRIGGER *pOut;
+    DWORD dwError = ERROR_SUCCESS;
+
+    if (RegOpenKeyExW(hServiceKey, SCM_TRIGGER_KEY, 0, KEY_READ, &hTriggersKey) == ERROR_SUCCESS)
+    {
+        pTriggers = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, SCM_MAX_TRIGGERS * sizeof(SCM_TRIGGER_DATA));
+        if (pTriggers == NULL)
+        {
+            RegCloseKey(hTriggersKey);
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+
+        while (dwCount < SCM_MAX_TRIGGERS && ScmReadTrigger(hTriggersKey, dwCount, &pTriggers[dwCount]))
+            dwCount++;
+
+        RegCloseKey(hTriggersKey);
+    }
+
+    dwSize = sizeof(SERVICE_TRIGGER_INFO) + dwCount * sizeof(SERVICE_TRIGGER);
+    for (i = 0; i < dwCount; i++)
+    {
+        dwSize += pTriggers[i].cItems * sizeof(SERVICE_TRIGGER_SPECIFIC_DATA_ITEM) + sizeof(GUID);
+        for (j = 0; j < pTriggers[i].cItems; j++)
+            dwSize += pTriggers[i].cbItem[j];
+    }
+
+    *pcbBytesNeeded = dwSize;
+    if (cbBufSize < dwSize)
+    {
+        dwError = ERROR_INSUFFICIENT_BUFFER;
+        goto done;
+    }
+
+    pInfo = (SERVICE_TRIGGER_INFO *)lpBuffer;
+    pInfo->cTriggers = dwCount;
+    pInfo->pTriggers = NULL;
+    pInfo->pReserved = NULL;
+    if (dwCount == 0)
+        goto done;
+
+    pOut = (SERVICE_TRIGGER *)(lpBuffer + sizeof(SERVICE_TRIGGER_INFO));
+    pInfo->pTriggers = (PSERVICE_TRIGGER)(ULONG_PTR)sizeof(SERVICE_TRIGGER_INFO);
+    dwOffset = sizeof(SERVICE_TRIGGER_INFO) + dwCount * sizeof(SERVICE_TRIGGER);
+
+    for (i = 0; i < dwCount; i++)
+    {
+        pOut[i].dwTriggerType = pTriggers[i].dwType;
+        pOut[i].dwAction = pTriggers[i].dwAction;
+        pOut[i].cDataItems = pTriggers[i].cItems;
+        pOut[i].pDataItems = NULL;
+
+        if (pTriggers[i].cItems != 0)
+        {
+            pOut[i].pDataItems = (PSERVICE_TRIGGER_SPECIFIC_DATA_ITEM)(ULONG_PTR)dwOffset;
+            dwOffset += pTriggers[i].cItems * sizeof(SERVICE_TRIGGER_SPECIFIC_DATA_ITEM);
+        }
+
+        pOut[i].pTriggerSubtype = (GUID *)(ULONG_PTR)dwOffset;
+        RtlCopyMemory(lpBuffer + dwOffset, &pTriggers[i].Guid, sizeof(GUID));
+        dwOffset += sizeof(GUID);
+    }
+
+    for (i = dwCount; i-- > 0;)
+    {
+        SERVICE_TRIGGER_SPECIFIC_DATA_ITEM *pItems = (SERVICE_TRIGGER_SPECIFIC_DATA_ITEM *)
+            (lpBuffer + (ULONG_PTR)pOut[i].pDataItems);
+
+        for (j = pTriggers[i].cItems; j-- > 0;)
+        {
+            pItems[j].dwDataType = pTriggers[i].dwItemType[j];
+            pItems[j].cbData = pTriggers[i].cbItem[j];
+            pItems[j].pData = (PBYTE)(ULONG_PTR)dwOffset;
+            RtlCopyMemory(lpBuffer + dwOffset, pTriggers[i].pItem[j], pTriggers[i].cbItem[j]);
+            dwOffset += pTriggers[i].cbItem[j];
+        }
+    }
+
+done:
+    if (pTriggers != NULL)
+    {
+        for (i = 0; i < dwCount; i++)
+            for (j = 0; j < pTriggers[i].cItems; j++)
+                HeapFree(GetProcessHeap(), 0, pTriggers[i].pItem[j]);
+        HeapFree(GetProcessHeap(), 0, pTriggers);
+    }
+
+    return dwError;
+}
+
+
 /* Function 36 */
 DWORD
 WINAPI
@@ -5180,6 +5706,7 @@ RChangeServiceConfig2A(
     SC_RPC_CONFIG_INFOA Info)
 {
     SC_RPC_CONFIG_INFOW InfoW = { 0 };
+    SERVICE_RPC_REQUIRED_PRIVILEGES_INFO PrivilegesW;
     DWORD dwRet, dwLength;
     PVOID ptr = NULL;
 
@@ -5342,6 +5869,37 @@ RChangeServiceConfig2A(
         }
     }
 
+    else if (Info.dwInfoLevel == SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO)
+    {
+        /* The list of privileges is converted to Unicode; the bytes are characters */
+        if (Info.psrp && Info.psrp->pRequiredPrivileges)
+        {
+            LPWSTR lpPrivilegesW;
+
+            dwLength = Info.psrp->cbRequiredPrivileges;
+            lpPrivilegesW = HeapAlloc(GetProcessHeap(),
+                                      HEAP_ZERO_MEMORY,
+                                      (dwLength + 1) * sizeof(WCHAR));
+            if (!lpPrivilegesW)
+                return ERROR_NOT_ENOUGH_MEMORY;
+
+            if (dwLength != 0)
+            {
+                MultiByteToWideChar(CP_ACP,
+                                    0,
+                                    (LPCSTR)Info.psrp->pRequiredPrivileges,
+                                    dwLength,
+                                    lpPrivilegesW,
+                                    dwLength);
+            }
+
+            PrivilegesW.cbRequiredPrivileges = dwLength * sizeof(WCHAR);
+            PrivilegesW.pRequiredPrivileges = (PBYTE)lpPrivilegesW;
+            ptr = lpPrivilegesW;
+            InfoW.psrp = &PrivilegesW;
+        }
+    }
+
     if (InfoW.dwInfoLevel == SERVICE_CONFIG_FAILURE_ACTIONS_FLAG)
         InfoW.psfaf = Info.psfaf;
     else if (InfoW.dwInfoLevel == SERVICE_CONFIG_DELAYED_AUTO_START_INFO)
@@ -5350,6 +5908,8 @@ RChangeServiceConfig2A(
         InfoW.pssid = Info.pssid;
     else if (InfoW.dwInfoLevel == SERVICE_CONFIG_PRESHUTDOWN_INFO)
         InfoW.psps = Info.psps;
+    else if (InfoW.dwInfoLevel == SERVICE_CONFIG_TRIGGER_INFO)
+        InfoW.psti = Info.psti;
 
     dwRet = RChangeServiceConfig2W(hService, InfoW);
 
@@ -5605,6 +6165,8 @@ RChangeServiceConfig2W(
     PSERVICE lpService = NULL;
     HKEY hServiceKey = NULL;
     ACCESS_MASK RequiredAccess = SERVICE_CHANGE_CONFIG;
+    SCM_PRIVILEGES_ACTION PrivilegesAction = ScmPrivilegesIgnore;
+    DWORD cchPrivileges = 0;
 
     DPRINT("RChangeServiceConfig2W() called\n");
     DPRINT("dwInfoLevel = %lu\n", Info.dwInfoLevel);
@@ -5656,6 +6218,20 @@ RChangeServiceConfig2W(
             return ERROR_CANNOT_DETECT_DRIVER_FAILURE;
     }
 
+    /* Check what is going to be stored before the database is locked: the privileges are looked up in the LSA */
+    if (Info.dwInfoLevel == SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO && Info.psrp != NULL)
+    {
+        dwError = ScmCheckRequiredPrivileges(Info.psrp, &PrivilegesAction, &cchPrivileges);
+        if (dwError != ERROR_SUCCESS)
+            return dwError;
+    }
+    else if (Info.dwInfoLevel == SERVICE_CONFIG_TRIGGER_INFO && Info.psti != NULL)
+    {
+        dwError = ScmCheckTriggerInfo(Info.psti);
+        if (dwError != ERROR_SUCCESS)
+            return dwError;
+    }
+
     /* Lock the service database exclusively */
     ScmLockDatabaseExclusive();
 
@@ -5668,7 +6244,7 @@ RChangeServiceConfig2W(
 
     /* Open the service key */
     dwError = ScmOpenServiceKey(lpService->szServiceName,
-                                KEY_READ | KEY_SET_VALUE,
+                                KEY_READ | KEY_SET_VALUE | KEY_CREATE_SUB_KEY,
                                 &hServiceKey);
     if (dwError != ERROR_SUCCESS)
         goto done;
@@ -5727,6 +6303,18 @@ RChangeServiceConfig2W(
             if (dwError == ERROR_SUCCESS)
                 lpService->bFailureOnNonCrash = (dwFlag != 0);
         }
+    }
+    else if (Info.dwInfoLevel == SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO)
+    {
+        /* Without a structure there is nothing to change */
+        if (Info.psrp != NULL)
+            dwError = ScmSetRequiredPrivileges(hServiceKey, Info.psrp, PrivilegesAction, cchPrivileges);
+    }
+    else if (Info.dwInfoLevel == SERVICE_CONFIG_TRIGGER_INFO)
+    {
+        /* Without a structure there is nothing to change */
+        if (Info.psti != NULL)
+            dwError = ScmSetTriggerInfo(hServiceKey, Info.psti);
     }
     else if (Info.dwInfoLevel == SERVICE_CONFIG_DELAYED_AUTO_START_INFO ||
              Info.dwInfoLevel == SERVICE_CONFIG_SERVICE_SID_INFO ||
@@ -5995,6 +6583,22 @@ RQueryServiceConfig2A(
         lpFlag->fFailureActionsOnNonCrashFailures = (dwFlag != 0);
         dwError = ERROR_SUCCESS;
     }
+    else if (dwInfoLevel == SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO)
+    {
+        dwError = ScmQueryRequiredPrivileges(hServiceKey,
+                                             FALSE,
+                                             lpBuffer,
+                                             cbBufSize,
+                                             pcbBytesNeeded);
+    }
+    else if (dwInfoLevel == SERVICE_CONFIG_TRIGGER_INFO)
+    {
+        /* The data items are binary, there is no character set to convert */
+        dwError = ScmQueryTriggerInfo(hServiceKey,
+                                      lpBuffer,
+                                      cbBufSize,
+                                      pcbBytesNeeded);
+    }
     else
     {
         /* The remaining supported levels are a single DWORD, the same in both character sets */
@@ -6222,6 +6826,22 @@ RQueryServiceConfig2W(
 
         lpFlag->fFailureActionsOnNonCrashFailures = (dwFlag != 0);
         dwError = ERROR_SUCCESS;
+    }
+    else if (dwInfoLevel == SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO)
+    {
+        dwError = ScmQueryRequiredPrivileges(hServiceKey,
+                                             TRUE,
+                                             lpBuffer,
+                                             cbBufSize,
+                                             pcbBytesNeeded);
+    }
+    else if (dwInfoLevel == SERVICE_CONFIG_TRIGGER_INFO)
+    {
+        /* The data items are binary, there is no character set to convert */
+        dwError = ScmQueryTriggerInfo(hServiceKey,
+                                      lpBuffer,
+                                      cbBufSize,
+                                      pcbBytesNeeded);
     }
     else
     {

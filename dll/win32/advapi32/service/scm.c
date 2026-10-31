@@ -249,6 +249,7 @@ ChangeServiceConfig2A(SC_HANDLE hService,
                       LPVOID lpInfo)
 {
     SC_RPC_CONFIG_INFOA Info;
+    SERVICE_RPC_REQUIRED_PRIVILEGES_INFO RpcPrivileges;
     DWORD dwError;
 
     TRACE("ChangeServiceConfig2A(%p %lu %p)\n",
@@ -282,6 +283,27 @@ ChangeServiceConfig2A(SC_HANDLE hService,
 
         case SERVICE_CONFIG_PRESHUTDOWN_INFO:
             Info.psps = lpInfo;
+            break;
+
+        case SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO:
+            {
+                LPCSTR lpPrivileges = ((LPSERVICE_REQUIRED_PRIVILEGES_INFOA)lpInfo)->pmszRequiredPrivileges;
+
+                /* Without a list there is nothing to change */
+                if (lpPrivileges == NULL) return TRUE;
+
+                /* The list of strings ends with an empty one, which is part of what is sent */
+                for (RpcPrivileges.cbRequiredPrivileges = 1;
+                     lpPrivileges[0] != 0;
+                     lpPrivileges += strlen(lpPrivileges) + 1)
+                    RpcPrivileges.cbRequiredPrivileges += (DWORD)strlen(lpPrivileges) + 1;
+                RpcPrivileges.pRequiredPrivileges = (PBYTE)((LPSERVICE_REQUIRED_PRIVILEGES_INFOA)lpInfo)->pmszRequiredPrivileges;
+                Info.psrp = &RpcPrivileges;
+            }
+            break;
+
+        case SERVICE_CONFIG_TRIGGER_INFO:
+            Info.psti = lpInfo;
             break;
 
         default:
@@ -323,6 +345,7 @@ ChangeServiceConfig2W(SC_HANDLE hService,
                       LPVOID lpInfo)
 {
     SC_RPC_CONFIG_INFOW Info;
+    SERVICE_RPC_REQUIRED_PRIVILEGES_INFO RpcPrivileges;
     DWORD dwError;
 
     TRACE("ChangeServiceConfig2W(%p %lu %p)\n",
@@ -356,6 +379,27 @@ ChangeServiceConfig2W(SC_HANDLE hService,
 
         case SERVICE_CONFIG_PRESHUTDOWN_INFO:
             Info.psps = lpInfo;
+            break;
+
+        case SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO:
+            {
+                LPCWSTR lpPrivileges = ((LPSERVICE_REQUIRED_PRIVILEGES_INFOW)lpInfo)->pmszRequiredPrivileges;
+
+                /* Without a list there is nothing to change */
+                if (lpPrivileges == NULL) return TRUE;
+
+                /* The list of strings ends with an empty one, which is part of what is sent */
+                for (RpcPrivileges.cbRequiredPrivileges = sizeof(WCHAR);
+                     lpPrivileges[0] != 0;
+                     lpPrivileges += wcslen(lpPrivileges) + 1)
+                    RpcPrivileges.cbRequiredPrivileges += (DWORD)(wcslen(lpPrivileges) + 1) * sizeof(WCHAR);
+                RpcPrivileges.pRequiredPrivileges = (PBYTE)((LPSERVICE_REQUIRED_PRIVILEGES_INFOW)lpInfo)->pmszRequiredPrivileges;
+                Info.psrp = &RpcPrivileges;
+            }
+            break;
+
+        case SERVICE_CONFIG_TRIGGER_INFO:
+            Info.psti = lpInfo;
             break;
 
         default:
@@ -988,6 +1032,11 @@ DeleteService(SC_HANDLE hService)
  *       48 bytes per element (56 with the process information), 36 and 44 in the 32-bit layout
  *   QUERY_SERVICE_LOCK_STATUS:     fIsLocked (0) lpLockOwner (8) dwLockDuration (16), 24 bytes (12)
  *   SERVICE_DESCRIPTION:           lpDescription (0), 8 bytes (4)
+ *   SERVICE_REQUIRED_PRIVILEGES_INFO: pmszRequiredPrivileges (0), 8 bytes (4)
+ *   SERVICE_TRIGGER_INFO:          cTriggers (0) pTriggers (8) pReserved (16), 24 bytes (12); a trigger
+ *                                  dwTriggerType (0) dwAction (4) pTriggerSubtype (8) cDataItems (16)
+ *                                  pDataItems (24), 32 bytes (20); a data item dwDataType (0) cbData (4)
+ *                                  pData (8), 16 bytes (12)
  *   SERVICE_FAILURE_ACTIONS:       dwResetPeriod (0) lpRebootMsg (8) lpCommand (16) cActions (24)
  *                                  lpsaActions (32), 40 bytes (20)
  *
@@ -1181,7 +1230,7 @@ ScmWow64EnumStatus(const SCM_WOW64_ENUM *pEnum,
     if (dwError != ERROR_MORE_DATA)
         goto Fail;
 
-    /* All of it. The dependents of a service are returned with 4 bytes less than they take up. */
+    /* All of it; a little more room than the SCM says does no harm */
     for (dwTry = 0; ; dwTry++)
     {
         dwBufSize = (dwNeeded > 1024 * 256 - 64) ? 1024 * 256 : dwNeeded + 64;
@@ -2905,11 +2954,12 @@ QueryServiceConfigW(SC_HANDLE hService,
 
 #ifdef SYSWOW64_GUEST
 /*
- * QueryServiceConfig2A/W for the levels with pointer members: SERVICE_DESCRIPTION and
- * SERVICE_FAILURE_ACTIONS. The SCM fills a buffer in the 64-bit layout, which is larger by dwDelta bytes
- * than the 32-bit header; give it that much more room than the caller has, and move what it returns,
- * the strings and the actions that follow the header, down by dwDelta bytes.
- * Called only after the info level is known to be one of the two.
+ * QueryServiceConfig2A/W for the levels with pointer members: SERVICE_DESCRIPTION,
+ * SERVICE_REQUIRED_PRIVILEGES_INFO and SERVICE_FAILURE_ACTIONS. The SCM fills a buffer in the 64-bit
+ * layout, which is larger by dwDelta bytes than the 32-bit header; give it that much more room than the
+ * caller has, and move what it returns, the strings and the actions that follow the header, down by
+ * dwDelta bytes.
+ * Called only after the info level is known to be one of the three.
  */
 static BOOL
 ScmWow64QueryServiceConfig2(SC_HANDLE hService,
@@ -2926,7 +2976,9 @@ ScmWow64QueryServiceConfig2(SC_HANDLE hService,
     PVOID pPointers[3] = { NULL, NULL, NULL };
     int i;
 
-    if (dwInfoLevel == SERVICE_CONFIG_DESCRIPTION)
+    /* The privileges, like the description, are a pointer to a string that follows it */
+    if (dwInfoLevel == SERVICE_CONFIG_DESCRIPTION ||
+        dwInfoLevel == SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO)
     {
         dwHeader64 = 8;
         dwHeader32 = 4;
@@ -2987,7 +3039,8 @@ ScmWow64QueryServiceConfig2(SC_HANDLE hService,
     /* The caller's buffer is dwDelta bytes shorter than the SCM's */
     RtlCopyMemory(lpBuffer + dwHeader32, lpTemp + dwHeader64, dwBufSize - dwHeader64);
 
-    if (dwInfoLevel == SERVICE_CONFIG_DESCRIPTION)
+    if (dwInfoLevel == SERVICE_CONFIG_DESCRIPTION ||
+        dwInfoLevel == SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO)
     {
         RtlCopyMemory(&ullPointers[0], lpTemp, sizeof(ULONG64));
         if (ullPointers[0] != 0)
@@ -3019,6 +3072,172 @@ ScmWow64QueryServiceConfig2(SC_HANDLE hService,
     HeapFree(GetProcessHeap(), 0, lpTemp);
     return TRUE;
 }
+
+/*
+ * QueryServiceConfig2A/W for the triggers. The SCM returns SERVICE_TRIGGER_INFO in the 64-bit layout, as
+ * the sizes above say, with the pointers as offsets into the buffer: the header, the array of triggers,
+ * then for each trigger the array of its data items and its subtype, and last the data of the items,
+ * the last item first. The 32-bit layout has the same order with smaller structures, so it is built from
+ * the SCM's, with all of it taken from the SCM (the request is bounded by 8 KB) and the size reported in
+ * terms of the 32-bit layout.
+ */
+static BOOL
+ScmWow64QueryTriggerInfo(SC_HANDLE hService,
+                         BOOL bUnicode,
+                         LPBYTE lpBuffer,
+                         DWORD cbBufSize,
+                         LPDWORD pcbBytesNeeded)
+{
+    const DWORD dwBufSize = 8 * 1024;
+    DWORD dwNeeded64 = 0, dwNeeded32, dwError, cTriggers, cItems, i, j, dwOffset, dwData;
+    ULONG64 ullTriggers = 0, ullItems, ullData, ullSubtype;
+    LPBYTE lpTemp, lpTrigger64, lpItem64;
+    PSERVICE_TRIGGER_INFO pInfo;
+    PSERVICE_TRIGGER pTriggers;
+
+    lpTemp = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dwBufSize);
+    if (lpTemp == NULL)
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+
+    RpcTryExcept
+    {
+        if (bUnicode)
+            dwError = RQueryServiceConfig2W((SC_RPC_HANDLE)hService,
+                                            SERVICE_CONFIG_TRIGGER_INFO,
+                                            lpTemp,
+                                            dwBufSize,
+                                            &dwNeeded64);
+        else
+            dwError = RQueryServiceConfig2A((SC_RPC_HANDLE)hService,
+                                            SERVICE_CONFIG_TRIGGER_INFO,
+                                            lpTemp,
+                                            dwBufSize,
+                                            &dwNeeded64);
+    }
+    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+    {
+        dwError = ScmRpcStatusToWinError(RpcExceptionCode());
+    }
+    RpcEndExcept;
+
+    if (dwError != ERROR_SUCCESS)
+    {
+        /* Too many triggers for the request: all the size there is to report is the SCM's */
+        if (dwError == ERROR_INSUFFICIENT_BUFFER && pcbBytesNeeded != NULL)
+            *pcbBytesNeeded = dwNeeded64;
+        HeapFree(GetProcessHeap(), 0, lpTemp);
+        SetLastError(dwError);
+        return FALSE;
+    }
+
+    /* The offsets of the SCM's buffer are not to be trusted further than the buffer */
+#define SCM64_FITS(off, len) ((ULONG64)(off) <= dwNeeded64 && (ULONG64)(len) <= dwNeeded64 - (ULONG64)(off))
+
+    if (dwNeeded64 < 24 || dwNeeded64 > dwBufSize)
+        goto Invalid;
+
+    RtlCopyMemory(&cTriggers, lpTemp, sizeof(DWORD));
+    RtlCopyMemory(&ullTriggers, lpTemp + 8, sizeof(ULONG64));
+    if (cTriggers > 64 || (cTriggers != 0 && !SCM64_FITS(ullTriggers, cTriggers * 32)))
+        goto Invalid;
+
+    /* The size of the 32-bit layout */
+    dwNeeded32 = sizeof(SERVICE_TRIGGER_INFO) + cTriggers * sizeof(SERVICE_TRIGGER);
+    for (i = 0; i < cTriggers; i++)
+    {
+        lpTrigger64 = lpTemp + (ULONG)ullTriggers + i * 32;
+        RtlCopyMemory(&cItems, lpTrigger64 + 16, sizeof(DWORD));
+        RtlCopyMemory(&ullItems, lpTrigger64 + 24, sizeof(ULONG64));
+        if (cItems > 64 || (cItems != 0 && !SCM64_FITS(ullItems, cItems * 16)))
+            goto Invalid;
+
+        dwNeeded32 += cItems * sizeof(SERVICE_TRIGGER_SPECIFIC_DATA_ITEM) + sizeof(GUID);
+        for (j = 0; j < cItems; j++)
+        {
+            lpItem64 = lpTemp + (ULONG)ullItems + j * 16;
+            RtlCopyMemory(&dwData, lpItem64 + 4, sizeof(DWORD));
+            dwNeeded32 += dwData;
+        }
+    }
+
+    if (lpBuffer == NULL || cbBufSize < dwNeeded32)
+    {
+        if (pcbBytesNeeded != NULL)
+            *pcbBytesNeeded = dwNeeded32;
+        HeapFree(GetProcessHeap(), 0, lpTemp);
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+
+    pInfo = (PSERVICE_TRIGGER_INFO)lpBuffer;
+    pInfo->cTriggers = cTriggers;
+    pInfo->pTriggers = NULL;
+    pInfo->pReserved = NULL;
+    if (cTriggers != 0)
+    {
+        pTriggers = (PSERVICE_TRIGGER)(lpBuffer + sizeof(SERVICE_TRIGGER_INFO));
+        pInfo->pTriggers = pTriggers;
+        dwOffset = sizeof(SERVICE_TRIGGER_INFO) + cTriggers * sizeof(SERVICE_TRIGGER);
+
+        for (i = 0; i < cTriggers; i++)
+        {
+            lpTrigger64 = lpTemp + (ULONG)ullTriggers + i * 32;
+            RtlCopyMemory(&pTriggers[i].dwTriggerType, lpTrigger64 + 0, sizeof(DWORD));
+            RtlCopyMemory(&pTriggers[i].dwAction, lpTrigger64 + 4, sizeof(DWORD));
+            RtlCopyMemory(&ullSubtype, lpTrigger64 + 8, sizeof(ULONG64));
+            RtlCopyMemory(&cItems, lpTrigger64 + 16, sizeof(DWORD));
+            pTriggers[i].cDataItems = cItems;
+            pTriggers[i].pDataItems = NULL;
+            if (cItems != 0)
+            {
+                pTriggers[i].pDataItems = (PSERVICE_TRIGGER_SPECIFIC_DATA_ITEM)(lpBuffer + dwOffset);
+                dwOffset += cItems * sizeof(SERVICE_TRIGGER_SPECIFIC_DATA_ITEM);
+            }
+
+            if (!SCM64_FITS(ullSubtype, sizeof(GUID)))
+                goto Invalid;
+            pTriggers[i].pTriggerSubtype = (GUID *)(lpBuffer + dwOffset);
+            RtlCopyMemory(lpBuffer + dwOffset, lpTemp + (ULONG)ullSubtype, sizeof(GUID));
+            dwOffset += sizeof(GUID);
+        }
+
+        for (i = cTriggers; i-- > 0;)
+        {
+            lpTrigger64 = lpTemp + (ULONG)ullTriggers + i * 32;
+            RtlCopyMemory(&ullItems, lpTrigger64 + 24, sizeof(ULONG64));
+
+            for (j = pTriggers[i].cDataItems; j-- > 0;)
+            {
+                PSERVICE_TRIGGER_SPECIFIC_DATA_ITEM pItem = &pTriggers[i].pDataItems[j];
+
+                lpItem64 = lpTemp + (ULONG)ullItems + j * 16;
+                RtlCopyMemory(&pItem->dwDataType, lpItem64 + 0, sizeof(DWORD));
+                RtlCopyMemory(&pItem->cbData, lpItem64 + 4, sizeof(DWORD));
+                RtlCopyMemory(&ullData, lpItem64 + 8, sizeof(ULONG64));
+                if (!SCM64_FITS(ullData, pItem->cbData))
+                    goto Invalid;
+
+                pItem->pData = lpBuffer + dwOffset;
+                RtlCopyMemory(lpBuffer + dwOffset, lpTemp + (ULONG)ullData, pItem->cbData);
+                dwOffset += pItem->cbData;
+            }
+        }
+    }
+
+#undef SCM64_FITS
+
+    HeapFree(GetProcessHeap(), 0, lpTemp);
+    return TRUE;
+
+Invalid:
+    HeapFree(GetProcessHeap(), 0, lpTemp);
+    SetLastError(ERROR_INVALID_DATA);
+    return FALSE;
+}
+
 
 /*
  * QueryServiceLockStatusA/W: the SCM's QUERY_SERVICE_LOCK_STATUS is dwDelta (12) bytes larger than the
@@ -3096,6 +3315,63 @@ ScmWow64QueryServiceLockStatus(SC_HANDLE hSCManager,
 }
 #endif
 
+/*
+ * The triggers the SCM returns hold offsets for pointers, from the start of the buffer. Makes them
+ * pointers; FALSE if one of them leads out of the buffer, of the size the SCM was told.
+ */
+static BOOL
+ScmFixupTriggerInfo(LPBYTE lpBase,
+                    DWORD cbSize)
+{
+    PSERVICE_TRIGGER_INFO pInfo = (PSERVICE_TRIGGER_INFO)lpBase;
+    PSERVICE_TRIGGER pTrigger;
+    DWORD i, j;
+
+#define SCM_FITS(off, len) ((ULONG_PTR)(off) <= cbSize && (ULONG_PTR)(len) <= cbSize - (ULONG_PTR)(off))
+
+    if (pInfo->cTriggers == 0)
+        return TRUE;
+
+    if (pInfo->cTriggers > 64 ||
+        !SCM_FITS(pInfo->pTriggers, pInfo->cTriggers * sizeof(SERVICE_TRIGGER)))
+        return FALSE;
+    pInfo->pTriggers = (PSERVICE_TRIGGER)(lpBase + (ULONG_PTR)pInfo->pTriggers);
+
+    for (i = 0; i < pInfo->cTriggers; i++)
+    {
+        pTrigger = &pInfo->pTriggers[i];
+
+        if (!SCM_FITS(pTrigger->pTriggerSubtype, sizeof(GUID)))
+            return FALSE;
+        pTrigger->pTriggerSubtype = (GUID *)(lpBase + (ULONG_PTR)pTrigger->pTriggerSubtype);
+
+        if (pTrigger->cDataItems == 0)
+        {
+            pTrigger->pDataItems = NULL;
+            continue;
+        }
+
+        if (pTrigger->cDataItems > 64 ||
+            !SCM_FITS(pTrigger->pDataItems, pTrigger->cDataItems * sizeof(SERVICE_TRIGGER_SPECIFIC_DATA_ITEM)))
+            return FALSE;
+        pTrigger->pDataItems = (PSERVICE_TRIGGER_SPECIFIC_DATA_ITEM)(lpBase + (ULONG_PTR)pTrigger->pDataItems);
+
+        for (j = 0; j < pTrigger->cDataItems; j++)
+        {
+            PSERVICE_TRIGGER_SPECIFIC_DATA_ITEM pItem = &pTrigger->pDataItems[j];
+
+            if (!SCM_FITS(pItem->pData, pItem->cbData))
+                return FALSE;
+            pItem->pData = lpBase + (ULONG_PTR)pItem->pData;
+        }
+    }
+
+#undef SCM_FITS
+
+    return TRUE;
+}
+
+
 /**********************************************************************
  *  QueryServiceConfig2A
  *
@@ -3114,15 +3390,21 @@ QueryServiceConfig2A(SC_HANDLE hService,
     BOOL bUseTempBuffer = FALSE;
     DWORD dwBufferSize;
     DWORD dwError;
+    DWORD dwTriggerNeeded = 0;
+    LPDWORD pcbRpcNeeded = pcbBytesNeeded;
 
     TRACE("QueryServiceConfig2A(%p %lu %p %lu %p)\n",
           hService, dwInfoLevel, lpBuffer, cbBufSize, pcbBytesNeeded);
 
 #ifdef SYSWOW64_GUEST
     if (dwInfoLevel == SERVICE_CONFIG_DESCRIPTION ||
-        dwInfoLevel == SERVICE_CONFIG_FAILURE_ACTIONS)
+        dwInfoLevel == SERVICE_CONFIG_FAILURE_ACTIONS ||
+        dwInfoLevel == SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO)
         return ScmWow64QueryServiceConfig2(hService, dwInfoLevel, FALSE,
                                            lpBuffer, cbBufSize, pcbBytesNeeded);
+    if (dwInfoLevel == SERVICE_CONFIG_TRIGGER_INFO)
+        return ScmWow64QueryTriggerInfo(hService, FALSE,
+                                        lpBuffer, cbBufSize, pcbBytesNeeded);
 #endif
 
     lpTempBuffer = lpBuffer;
@@ -3169,6 +3451,26 @@ QueryServiceConfig2A(SC_HANDLE hService,
             }
             break;
 
+        case SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO:
+            if ((lpBuffer == NULL) || (cbBufSize < sizeof(SERVICE_REQUIRED_PRIVILEGES_INFOA)))
+            {
+                lpTempBuffer = (LPBYTE)&ServiceFailureActions;
+                dwBufferSize = sizeof(SERVICE_REQUIRED_PRIVILEGES_INFOA);
+                bUseTempBuffer = TRUE;
+            }
+            break;
+
+        /* The size needed comes back only when the buffer is too small */
+        case SERVICE_CONFIG_TRIGGER_INFO:
+            if ((lpBuffer == NULL) || (cbBufSize < sizeof(SERVICE_TRIGGER_INFO)))
+            {
+                lpTempBuffer = (LPBYTE)&ServiceFailureActions;
+                dwBufferSize = sizeof(SERVICE_TRIGGER_INFO);
+                bUseTempBuffer = TRUE;
+            }
+            pcbRpcNeeded = &dwTriggerNeeded;
+            break;
+
         default:
             WARN("Unknown info level 0x%lx\n", dwInfoLevel);
             SetLastError(ERROR_INVALID_LEVEL);
@@ -3181,7 +3483,7 @@ QueryServiceConfig2A(SC_HANDLE hService,
                                         dwInfoLevel,
                                         lpTempBuffer,
                                         dwBufferSize,
-                                        pcbBytesNeeded);
+                                        pcbRpcNeeded);
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -3192,6 +3494,9 @@ QueryServiceConfig2A(SC_HANDLE hService,
     if (dwError != ERROR_SUCCESS)
     {
         TRACE("RQueryServiceConfig2A() failed (Error %lu)\n", dwError);
+        if (pcbRpcNeeded != pcbBytesNeeded && pcbBytesNeeded != NULL &&
+            dwError == ERROR_INSUFFICIENT_BUFFER)
+            *pcbBytesNeeded = dwTriggerNeeded;
         SetLastError(dwError);
         return FALSE;
     }
@@ -3233,6 +3538,24 @@ QueryServiceConfig2A(SC_HANDLE hService,
                         (LPSC_ACTION)((ULONG_PTR)lpPtr + (ULONG_PTR)lpPtr->lpsaActions);
             }
             break;
+
+        case SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO:
+            {
+                LPSERVICE_REQUIRED_PRIVILEGES_INFOA lpPtr = (LPSERVICE_REQUIRED_PRIVILEGES_INFOA)lpTempBuffer;
+
+                if (lpPtr->pmszRequiredPrivileges != NULL)
+                    lpPtr->pmszRequiredPrivileges =
+                        (LPSTR)((ULONG_PTR)lpPtr + (ULONG_PTR)lpPtr->pmszRequiredPrivileges);
+            }
+            break;
+
+        case SERVICE_CONFIG_TRIGGER_INFO:
+            if (!ScmFixupTriggerInfo(lpTempBuffer, dwBufferSize))
+            {
+                SetLastError(ERROR_INVALID_DATA);
+                return FALSE;
+            }
+            break;
     }
 
     TRACE("QueryServiceConfig2A() done\n");
@@ -3259,15 +3582,21 @@ QueryServiceConfig2W(SC_HANDLE hService,
     BOOL bUseTempBuffer = FALSE;
     DWORD dwBufferSize;
     DWORD dwError;
+    DWORD dwTriggerNeeded = 0;
+    LPDWORD pcbRpcNeeded = pcbBytesNeeded;
 
     TRACE("QueryServiceConfig2W(%p %lu %p %lu %p)\n",
           hService, dwInfoLevel, lpBuffer, cbBufSize, pcbBytesNeeded);
 
 #ifdef SYSWOW64_GUEST
     if (dwInfoLevel == SERVICE_CONFIG_DESCRIPTION ||
-        dwInfoLevel == SERVICE_CONFIG_FAILURE_ACTIONS)
+        dwInfoLevel == SERVICE_CONFIG_FAILURE_ACTIONS ||
+        dwInfoLevel == SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO)
         return ScmWow64QueryServiceConfig2(hService, dwInfoLevel, TRUE,
                                            lpBuffer, cbBufSize, pcbBytesNeeded);
+    if (dwInfoLevel == SERVICE_CONFIG_TRIGGER_INFO)
+        return ScmWow64QueryTriggerInfo(hService, TRUE,
+                                        lpBuffer, cbBufSize, pcbBytesNeeded);
 #endif
 
     lpTempBuffer = lpBuffer;
@@ -3314,6 +3643,26 @@ QueryServiceConfig2W(SC_HANDLE hService,
             }
             break;
 
+        case SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO:
+            if ((lpBuffer == NULL) || (cbBufSize < sizeof(SERVICE_REQUIRED_PRIVILEGES_INFOW)))
+            {
+                lpTempBuffer = (LPBYTE)&ServiceFailureActions;
+                dwBufferSize = sizeof(SERVICE_REQUIRED_PRIVILEGES_INFOW);
+                bUseTempBuffer = TRUE;
+            }
+            break;
+
+        /* The size needed comes back only when the buffer is too small */
+        case SERVICE_CONFIG_TRIGGER_INFO:
+            if ((lpBuffer == NULL) || (cbBufSize < sizeof(SERVICE_TRIGGER_INFO)))
+            {
+                lpTempBuffer = (LPBYTE)&ServiceFailureActions;
+                dwBufferSize = sizeof(SERVICE_TRIGGER_INFO);
+                bUseTempBuffer = TRUE;
+            }
+            pcbRpcNeeded = &dwTriggerNeeded;
+            break;
+
         default:
             WARN("Unknown info level 0x%lx\n", dwInfoLevel);
             SetLastError(ERROR_INVALID_LEVEL);
@@ -3326,7 +3675,7 @@ QueryServiceConfig2W(SC_HANDLE hService,
                                         dwInfoLevel,
                                         lpTempBuffer,
                                         dwBufferSize,
-                                        pcbBytesNeeded);
+                                        pcbRpcNeeded);
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -3337,6 +3686,9 @@ QueryServiceConfig2W(SC_HANDLE hService,
     if (dwError != ERROR_SUCCESS)
     {
         TRACE("RQueryServiceConfig2W() failed (Error %lu)\n", dwError);
+        if (pcbRpcNeeded != pcbBytesNeeded && pcbBytesNeeded != NULL &&
+            dwError == ERROR_INSUFFICIENT_BUFFER)
+            *pcbBytesNeeded = dwTriggerNeeded;
         SetLastError(dwError);
         return FALSE;
     }
@@ -3376,6 +3728,24 @@ QueryServiceConfig2W(SC_HANDLE hService,
                 if (lpPtr->lpsaActions != NULL)
                     lpPtr->lpsaActions =
                         (LPSC_ACTION)((ULONG_PTR)lpPtr + (ULONG_PTR)lpPtr->lpsaActions);
+            }
+            break;
+
+        case SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO:
+            {
+                LPSERVICE_REQUIRED_PRIVILEGES_INFOW lpPtr = (LPSERVICE_REQUIRED_PRIVILEGES_INFOW)lpTempBuffer;
+
+                if (lpPtr->pmszRequiredPrivileges != NULL)
+                    lpPtr->pmszRequiredPrivileges =
+                        (LPWSTR)((ULONG_PTR)lpPtr + (ULONG_PTR)lpPtr->pmszRequiredPrivileges);
+            }
+            break;
+
+        case SERVICE_CONFIG_TRIGGER_INFO:
+            if (!ScmFixupTriggerInfo(lpTempBuffer, dwBufferSize))
+            {
+                SetLastError(ERROR_INVALID_DATA);
+                return FALSE;
             }
             break;
     }

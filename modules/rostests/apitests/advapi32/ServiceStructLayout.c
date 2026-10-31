@@ -277,16 +277,6 @@ static void TestEnumAll(void)
 
 /* ------------------------------------------------------------------ dependents */
 
-/*
- * The native 64-bit SCM sizes an element of the dependents as 44 bytes and writes 48, so a buffer of
- * exactly the size it reports is 4 bytes short for a single dependent and the last string is cut. The
- * 32-bit callers get the size of their own layout, which is exact.
- */
-static DWORD DependentsSlack(void)
-{
-    return (is_reactos() && sizeof(PVOID) == 8) ? 8 : 0;
-}
-
 static BOOL CallDeps(BOOL Unicode, SC_HANDLE Service, BYTE *Buffer, DWORD Size, DWORD *Needed, DWORD *Count)
 {
     if (Unicode)
@@ -329,7 +319,8 @@ static BOOL TestDependentsOf(SC_HANDLE Manager, PCWSTR Parent, BOOL Unicode, DWO
     ok(Needed2 == Needed, "%ls: Needed %lu with a small buffer, %lu with none\n", Parent, Needed2, Needed);
     HeapFree(GetProcessHeap(), 0, Buffer);
 
-    Size = Needed + DependentsSlack();
+    /* the size it asked for is enough, also for the native 64-bit SCM, whose elements are 48 bytes */
+    Size = Needed;
     Buffer = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Size);
     Count = 0;
     SetLastError(0xdeadbeef);
@@ -583,12 +574,6 @@ static void CheckLockStatus(SC_HANDLE Manager, BOOL ExpectLocked)
     LockA = (LPQUERY_SERVICE_LOCK_STATUSA)BufA;
     ok(LockW->fIsLocked == (DWORD)ExpectLocked, "W: fIsLocked %lu\n", LockW->fIsLocked);
     ok(LockA->fIsLocked == (DWORD)ExpectLocked, "A: fIsLocked %lu\n", LockA->fIsLocked);
-    if (ExpectLocked && is_reactos() && !LockW->lpLockOwner && !LockA->lpLockOwner)
-    {
-        /* the SCM does not look the owner up yet */
-        skip("No lock owner name\n");
-        goto checked;
-    }
     ok(LockW->lpLockOwner != NULL && InBuffer(LockW->lpLockOwner, BufW, NeededW + 0x1000) &&
        (BYTE *)LockW->lpLockOwner >= BufW + sizeof(*LockW), "W: lpLockOwner %p (buffer %p)\n", LockW->lpLockOwner, BufW);
     ok(LockA->lpLockOwner != NULL && InBuffer(LockA->lpLockOwner, BufA, NeededA + 0x1000) &&
@@ -605,7 +590,6 @@ static void CheckLockStatus(SC_HANDLE Manager, BOOL ExpectLocked)
                wine_dbgstr_w(OwnerA), wine_dbgstr_w(LockW->lpLockOwner));
         }
     }
-checked:
     if (ExpectLocked)
         ok(LockW->dwLockDuration < 600, "dwLockDuration %lu\n", LockW->dwLockDuration);
 
@@ -761,11 +745,11 @@ static void TestOwnService(void)
             ok(!(i ? EnumDependentServicesA(Service, SERVICE_STATE_ALL, NULL, 0, &Needed, &Count)
                    : EnumDependentServicesW(Service, SERVICE_STATE_ALL, NULL, 0, &Needed, &Count)) &&
                GetLastError() == ERROR_MORE_DATA, "%lu: error %lu\n", i, GetLastError());
-            /* the status, two pointers and two strings, which are counted in WCHARs for both A and W */
-            ok(Needed == sizeof(SERVICE_STATUS) + 2 * sizeof(PVOID) + sizeof(OWN_DEPENDENT) +
+            /* the element, with the padding after the status on 64-bit, and two strings, which are counted in WCHARs for both A and W */
+            ok(Needed == sizeof(ENUM_SERVICE_STATUSW) + sizeof(OWN_DEPENDENT) +
                          sizeof(L"Struct layout test dependent"),
                "%lu: Needed %lu\n", i, Needed);
-            Size = Needed + DependentsSlack();
+            Size = Needed;
             Buffer = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Size);
             if (Buffer && (i ? EnumDependentServicesA(Service, SERVICE_STATE_ALL, (LPENUM_SERVICE_STATUSA)Buffer, Size, &Needed, &Count)
                              : EnumDependentServicesW(Service, SERVICE_STATE_ALL, (LPENUM_SERVICE_STATUSW)Buffer, Size, &Needed, &Count)))

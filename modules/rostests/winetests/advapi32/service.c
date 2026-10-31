@@ -3028,6 +3028,182 @@ static void run_service(void)
     StartServiceCtrlDispatcherA(table);
 }
 
+/* Not in the header of this Wine; the layouts are those of the Windows SDK */
+#define WT_CONFIG_REQUIRED_PRIVILEGES_INFO  6
+#define WT_CONFIG_TRIGGER_INFO              8
+#define WT_TRIGGER_TYPE_IP_ADDRESS          2
+#define WT_TRIGGER_TYPE_CUSTOM              20
+#define WT_TRIGGER_DATA_TYPE_BINARY         1
+#define WT_TRIGGER_ACTION_START             1
+#define WT_TRIGGER_ACTION_STOP              2
+
+typedef struct { LPSTR pmszRequiredPrivileges; } WT_PRIVILEGES_INFOA;
+typedef struct { DWORD dwDataType; DWORD cbData; BYTE *pData; } WT_TRIGGER_ITEM;
+typedef struct { DWORD dwTriggerType; DWORD dwAction; GUID *pTriggerSubtype; DWORD cDataItems; WT_TRIGGER_ITEM *pDataItems; } WT_TRIGGER;
+typedef struct { DWORD cTriggers; WT_TRIGGER *pTriggers; BYTE *pReserved; } WT_TRIGGER_INFO;
+
+static void test_queryconfig2_privileges_triggers(void)
+{
+    static const CHAR servicename[] = "winetest_query_config2_levels";
+    static const CHAR pathname[]    = "we_dont_care.exe";
+    static const CHAR privileges[]  = "SeChangeNotifyPrivilege\0SeImpersonatePrivilege\0";
+    static const GUID ip_guid = {0x4f27f2de, 0x14e2, 0x430b, {0xa5, 0x49, 0x7c, 0xd4, 0x8c, 0xbc, 0x82, 0x45}};
+    static const GUID custom_guid = {0x11111111, 0x2222, 0x3333, {0x44, 0x44, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55}};
+    static BYTE data[3] = {1, 2, 3};
+    WT_PRIVILEGES_INFOA privileges_info;
+    WT_TRIGGER_ITEM item;
+    WT_TRIGGER triggers[2];
+    WT_TRIGGER_INFO trigger_info;
+    WT_TRIGGER_INFO *queried;
+    SC_HANDLE scm_handle, svc_handle;
+    DWORD needed, expected;
+    BYTE *buffer;
+    BOOL ret;
+
+    if (!pQueryServiceConfig2A || !pChangeServiceConfig2A)
+    {
+        win_skip("QueryServiceConfig2A or ChangeServiceConfig2A not present\n");
+        return;
+    }
+
+    scm_handle = OpenSCManagerA(NULL, NULL, GENERIC_ALL);
+    if (!scm_handle)
+    {
+        skip("Could not get a handle to the manager: %ld\n", GetLastError());
+        return;
+    }
+
+    svc_handle = CreateServiceA(scm_handle, servicename, servicename, GENERIC_ALL, SERVICE_WIN32_OWN_PROCESS,
+                                SERVICE_DISABLED, SERVICE_ERROR_IGNORE, pathname, NULL, NULL, NULL, NULL, NULL);
+    if (!svc_handle && GetLastError() == ERROR_SERVICE_EXISTS)
+        svc_handle = OpenServiceA(scm_handle, servicename, GENERIC_ALL);
+    ok(svc_handle != NULL, "Could not create the service: %ld\n", GetLastError());
+    if (!svc_handle)
+    {
+        CloseServiceHandle(scm_handle);
+        return;
+    }
+
+    /* required privileges: only a pointer to begin with */
+    needed = 0xdeadbeef;
+    SetLastError(0xdeadbeef);
+    ret = pQueryServiceConfig2A(svc_handle, WT_CONFIG_REQUIRED_PRIVILEGES_INFO, NULL, 0, &needed);
+    ok(!ret && GetLastError() == ERROR_INSUFFICIENT_BUFFER, "got %d, error %ld\n", ret, GetLastError());
+    ok(needed == sizeof(WT_PRIVILEGES_INFOA), "got %ld\n", needed);
+
+    privileges_info.pmszRequiredPrivileges = (LPSTR)privileges;
+    SetLastError(0xdeadbeef);
+    ret = pChangeServiceConfig2A(svc_handle, WT_CONFIG_REQUIRED_PRIVILEGES_INFO, &privileges_info);
+    ok(ret, "ChangeServiceConfig2A failed: %ld\n", GetLastError());
+
+    /* the size of the Unicode string, for the ANSI call as well */
+    expected = sizeof(WT_PRIVILEGES_INFOA) + sizeof(privileges) * sizeof(WCHAR);
+    needed = 0xdeadbeef;
+    SetLastError(0xdeadbeef);
+    ret = pQueryServiceConfig2A(svc_handle, WT_CONFIG_REQUIRED_PRIVILEGES_INFO, NULL, 0, &needed);
+    ok(!ret && GetLastError() == ERROR_INSUFFICIENT_BUFFER, "got %d, error %ld\n", ret, GetLastError());
+    ok(needed == expected, "got %ld, expected %ld\n", needed, expected);
+    buffer = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, needed);
+    ret = pQueryServiceConfig2A(svc_handle, WT_CONFIG_REQUIRED_PRIVILEGES_INFO, buffer, needed, &needed);
+    ok(ret, "QueryServiceConfig2A failed: %ld\n", GetLastError());
+    if (ret)
+    {
+        WT_PRIVILEGES_INFOA * info = (WT_PRIVILEGES_INFOA *)buffer;
+
+        ok(info->pmszRequiredPrivileges > (LPSTR)buffer && info->pmszRequiredPrivileges < (LPSTR)buffer + needed,
+           "got %p, buffer %p\n", info->pmszRequiredPrivileges, buffer);
+        ok(!memcmp(info->pmszRequiredPrivileges, privileges, sizeof(privileges)), "wrong privileges\n");
+    }
+    HeapFree(GetProcessHeap(), 0, buffer);
+
+    privileges_info.pmszRequiredPrivileges = (LPSTR)"";
+    ret = pChangeServiceConfig2A(svc_handle, WT_CONFIG_REQUIRED_PRIVILEGES_INFO, &privileges_info);
+    ok(ret, "ChangeServiceConfig2A failed: %ld\n", GetLastError());
+
+    /* triggers: none to begin with, the structure of the size of its members */
+    needed = 0xdeadbeef;
+    SetLastError(0xdeadbeef);
+    ret = pQueryServiceConfig2A(svc_handle, WT_CONFIG_TRIGGER_INFO, NULL, 0, &needed);
+    ok(!ret && GetLastError() == ERROR_INSUFFICIENT_BUFFER, "got %d, error %ld\n", ret, GetLastError());
+    ok(needed == sizeof(WT_TRIGGER_INFO), "got %ld\n", needed);
+
+    memset(triggers, 0, sizeof(triggers));
+    item.dwDataType = WT_TRIGGER_DATA_TYPE_BINARY;
+    item.cbData = sizeof(data);
+    item.pData = data;
+    triggers[0].dwTriggerType = WT_TRIGGER_TYPE_IP_ADDRESS;
+    triggers[0].dwAction = WT_TRIGGER_ACTION_START;
+    triggers[0].pTriggerSubtype = (GUID *)&ip_guid;
+    triggers[1].dwTriggerType = WT_TRIGGER_TYPE_CUSTOM;
+    triggers[1].dwAction = WT_TRIGGER_ACTION_STOP;
+    triggers[1].pTriggerSubtype = (GUID *)&custom_guid;
+    triggers[1].cDataItems = 1;
+    triggers[1].pDataItems = &item;
+    trigger_info.cTriggers = 2;
+    trigger_info.pTriggers = triggers;
+    trigger_info.pReserved = NULL;
+    SetLastError(0xdeadbeef);
+    ret = pChangeServiceConfig2A(svc_handle, WT_CONFIG_TRIGGER_INFO, &trigger_info);
+    ok(ret, "ChangeServiceConfig2A failed: %ld\n", GetLastError());
+
+    expected = sizeof(WT_TRIGGER_INFO) + 2 * sizeof(WT_TRIGGER) + 2 * sizeof(GUID) +
+               sizeof(WT_TRIGGER_ITEM) + sizeof(data);
+    needed = 0xdeadbeef;
+    SetLastError(0xdeadbeef);
+    ret = pQueryServiceConfig2A(svc_handle, WT_CONFIG_TRIGGER_INFO, NULL, 0, &needed);
+    ok(!ret && GetLastError() == ERROR_INSUFFICIENT_BUFFER, "got %d, error %ld\n", ret, GetLastError());
+    ok(needed == expected, "got %ld, expected %ld\n", needed, expected);
+    buffer = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, expected);
+    needed = 0xdeadbeef;
+    ret = pQueryServiceConfig2A(svc_handle, WT_CONFIG_TRIGGER_INFO, buffer, expected, &needed);
+    ok(ret, "QueryServiceConfig2A failed: %ld\n", GetLastError());
+    ok(needed == 0xdeadbeef, "the size needed is set on success: %ld\n", needed);
+    if (ret)
+    {
+        queried = (WT_TRIGGER_INFO *)buffer;
+        ok(queried->cTriggers == 2, "got %ld\n", queried->cTriggers);
+        if (queried->cTriggers == 2)
+        {
+            ok(queried->pTriggers[0].dwTriggerType == WT_TRIGGER_TYPE_IP_ADDRESS, "got %ld\n",
+               queried->pTriggers[0].dwTriggerType);
+            ok(queried->pTriggers[0].dwAction == WT_TRIGGER_ACTION_START, "got %ld\n",
+               queried->pTriggers[0].dwAction);
+            ok(IsEqualGUID(queried->pTriggers[0].pTriggerSubtype, &ip_guid), "wrong subtype\n");
+            ok(queried->pTriggers[0].cDataItems == 0, "got %ld\n", queried->pTriggers[0].cDataItems);
+            ok(queried->pTriggers[1].dwTriggerType == WT_TRIGGER_TYPE_CUSTOM, "got %ld\n",
+               queried->pTriggers[1].dwTriggerType);
+            ok(queried->pTriggers[1].dwAction == WT_TRIGGER_ACTION_STOP, "got %ld\n",
+               queried->pTriggers[1].dwAction);
+            ok(IsEqualGUID(queried->pTriggers[1].pTriggerSubtype, &custom_guid), "wrong subtype\n");
+            ok(queried->pTriggers[1].cDataItems == 1, "got %ld\n", queried->pTriggers[1].cDataItems);
+            if (queried->pTriggers[1].cDataItems == 1)
+            {
+                ok(queried->pTriggers[1].pDataItems[0].dwDataType == WT_TRIGGER_DATA_TYPE_BINARY, "got %ld\n",
+                   queried->pTriggers[1].pDataItems[0].dwDataType);
+                ok(queried->pTriggers[1].pDataItems[0].cbData == sizeof(data), "got %ld\n",
+                   queried->pTriggers[1].pDataItems[0].cbData);
+                ok(!memcmp(queried->pTriggers[1].pDataItems[0].pData, data, sizeof(data)), "wrong data\n");
+            }
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, buffer);
+
+    /* no triggers remove them; a second time there are none to remove */
+    trigger_info.cTriggers = 0;
+    trigger_info.pTriggers = NULL;
+    SetLastError(0xdeadbeef);
+    ret = pChangeServiceConfig2A(svc_handle, WT_CONFIG_TRIGGER_INFO, &trigger_info);
+    ok(ret, "ChangeServiceConfig2A failed: %ld\n", GetLastError());
+    SetLastError(0xdeadbeef);
+    ret = pChangeServiceConfig2A(svc_handle, WT_CONFIG_TRIGGER_INFO, &trigger_info);
+    ok(!ret && GetLastError() == ERROR_INVALID_PARAMETER, "got %d, error %ld\n", ret, GetLastError());
+
+    ret = DeleteService(svc_handle);
+    ok(ret, "DeleteService failed: %ld\n", GetLastError());
+    CloseServiceHandle(svc_handle);
+    CloseServiceHandle(scm_handle);
+}
+
 START_TEST(service)
 {
     SC_HANDLE scm_handle;
@@ -3078,6 +3254,7 @@ START_TEST(service)
     /* Test the creation, querying and deletion of a service */
     test_sequence();
     test_queryconfig2();
+    test_queryconfig2_privileges_triggers();
     test_start_stop();
     /* The main reason for this test is to check if any refcounting is used
      * and what the rules are
