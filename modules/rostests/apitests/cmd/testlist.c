@@ -10,6 +10,7 @@ extern void func_exit(void);
 extern void func_exitb(void);
 extern void func_fc(void);
 extern void func_mklink(void);
+extern void func_mkdir(void);
 extern void func_pipe(void);
 extern void func_ftype(void);
 extern void func_pushd(void);
@@ -27,6 +28,7 @@ const struct test winetest_testlist[] =
     { "exitb", func_exitb },
     { "fc", func_fc },
     { "mklink", func_mklink },
+    { "mkdir", func_mkdir },
     { "pipe", func_pipe },
     { "ftype", func_ftype },
     { "pushd", func_pushd },

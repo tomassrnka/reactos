@@ -9,6 +9,7 @@ list(APPEND SOURCE
     pipe.c
     ftype.c
     mklink.c
+    mkdir.c
     start.c
     testlist.c)
 
