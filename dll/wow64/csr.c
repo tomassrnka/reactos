@@ -225,8 +225,12 @@ static NTSTATUS Connect(ULONG *a, BOOLEAN *Reported)
     if (!Length || !a[2]) return STATUS_INVALID_PARAMETER;
     if (a[1] == BASESRV_SERVERDLL_INDEX)
     {
-        if (*Length != sizeof(BASESRV_API_CONNECTINFO)) return STATUS_INFO_LENGTH_MISMATCH;
-        Status = CsrClientConnectToServer(PTR32(a[0]), a[1], PTR32(a[2]), Length, &InServer);
+        /* The connection code sizes its capture and its copy back by this length:
+         * hand it a native copy of the checked value, then return its result */
+        ULONG NativeLength = *Length;
+        if (NativeLength != sizeof(BASESRV_API_CONNECTINFO)) return STATUS_INFO_LENGTH_MISMATCH;
+        Status = CsrClientConnectToServer(PTR32(a[0]), a[1], PTR32(a[2]), &NativeLength, &InServer);
+        *Length = NativeLength;
         if (NT_SUCCESS(Status)) Status = CopyBaseData();
     }
     else if (a[1] == CONSRV_SERVERDLL_INDEX)
@@ -1021,12 +1025,15 @@ static NTSTATUS Call(ULONG *a, BOOLEAN *Reported)
         WOW64_CONSOLE_START *GuestStart;
         CONSOLE_START_INFO NativeStart = {0};
         PCSR_CAPTURE_BUFFER Capture;
+        ULONG StartInfo;
         if (a[3] != sizeof(*Guest)) return STATUS_INFO_LENGTH_MISMATCH;
-        /* The guest start info lives in the guest's capture buffer; the reply is written there. */
-        if (!Guest->ConsoleStartInfo ||
-            (ULONG64)Guest->ConsoleStartInfo + sizeof(*GuestStart) > (ULONG64)Wow64HighestUserAddress + 1)
+        /* The guest start info lives in the guest's capture buffer; the reply is written there.
+         * Read its address once: the range check and every use see the same pointer. */
+        StartInfo = *(volatile ULONG *)&Guest->ConsoleStartInfo;
+        if (!StartInfo ||
+            (ULONG64)StartInfo + sizeof(*GuestStart) > (ULONG64)Wow64HighestUserAddress + 1)
             return STATUS_INVALID_PARAMETER;
-        GuestStart = PTR32(Guest->ConsoleStartInfo);
+        GuestStart = PTR32(StartInfo);
         {
             volatile UCHAR *Bytes = (volatile UCHAR *)GuestStart;
             ULONG i;
@@ -1068,16 +1075,18 @@ static NTSTATUS Call(ULONG *a, BOOLEAN *Reported)
         WOW64_CONSOLE_GETPROCESSLIST *Guest = (PVOID)Data;
         CONSOLE_GETPROCESSLIST *List = &Message.Data.GetProcessListRequest;
         PCSR_CAPTURE_BUFFER Capture;
-        ULONG Count, Copy;
+        ULONG Count, Copy, IdsList;
         if (a[3] != sizeof(*Guest)) return STATUS_INFO_LENGTH_MISMATCH;
-        Count = Guest->ProcessCount;
+        Count = *(volatile ULONG *)&Guest->ProcessCount;
         /* The id array lives in the guest capture buffer and is written back: it must lie in the
-         * guest range and be writable before the server is asked */
-        if (!Guest->ProcessIdsList || Count > 0x10000 ||
-            (ULONG64)Guest->ProcessIdsList + (ULONG64)Count * sizeof(ULONG) > (ULONG64)Wow64HighestUserAddress + 1)
+         * guest range and be writable before the server is asked. Its address is read once, so
+         * the check, the touch and the copy back all use the same one. */
+        IdsList = *(volatile ULONG *)&Guest->ProcessIdsList;
+        if (!IdsList || Count > 0x10000 ||
+            (ULONG64)IdsList + (ULONG64)Count * sizeof(ULONG) > (ULONG64)Wow64HighestUserAddress + 1)
             return STATUS_INVALID_PARAMETER;
         {
-            volatile UCHAR *Bytes = PTR32(Guest->ProcessIdsList);
+            volatile UCHAR *Bytes = PTR32(IdsList);
             ULONG i;
             for (i = 0; i < Count * sizeof(ULONG); ++i) Bytes[i] = Bytes[i];
         }
@@ -1093,7 +1102,7 @@ static NTSTATUS Call(ULONG *a, BOOLEAN *Reported)
             /* The server returns the total; only the first Count ids were stored */
             Guest->ProcessCount = List->ProcessCount;
             Copy = min(List->ProcessCount, Count);
-            RtlCopyMemory(PTR32(Guest->ProcessIdsList), List->ProcessIdsList, Copy * sizeof(ULONG));
+            RtlCopyMemory(PTR32(IdsList), List->ProcessIdsList, Copy * sizeof(ULONG));
         }
         CsrFreeCaptureBuffer(Capture);
         return Status;
@@ -1130,10 +1139,18 @@ static NTSTATUS Call(ULONG *a, BOOLEAN *Reported)
 
 NTSTATUS Wow64CsrDispatch(ULONG Operation, ULONG *Arguments, BOOLEAN *Reported)
 {
+    /* The argument array is guest memory: Connect and Call use a copy read once
+     * (csrlib passes five and four ULONGs) */
+    ULONG Captured[5];
     switch (Operation)
     {
-    case 0: return Connect(Arguments, Reported);
-    case 1: return Call(Arguments, Reported);
+    case 0:
+        RtlCopyMemory(Captured, Arguments, 5 * sizeof(ULONG));
+        return Connect(Captured, Reported);
+    case 1:
+        RtlCopyMemory(Captured, Arguments, 4 * sizeof(ULONG));
+        Captured[4] = 0;
+        return Call(Captured, Reported);
     case 2: return CsrNewThread();
     default: return Wow64Unsupported(WOW64_SERVICE_CSR, WOW64_UNSUPPORTED_OPERATION, Operation, Reported);
     }

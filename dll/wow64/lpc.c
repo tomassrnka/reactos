@@ -177,16 +177,24 @@ static BOOLEAN InGuest(ULONG Address, ULONG64 Size)
 NTSTATUS Wow64LpcConnect(ULONG Number, const ULONG *a, HANDLE *Handle, BOOLEAN *Reported)
 {
     UNICODE_STRING Name, Lsa;
+    WCHAR NameBuffer[sizeof(LSA_PORT_NAME) / sizeof(WCHAR)];
+    WOW64_STRING Guest;
     NTSTATUS Status;
 
     if (!a[1] || !InGuest(a[1], sizeof(WOW64_STRING)))
         return STATUS_ACCESS_VIOLATION;
-    Name.Length = ((WOW64_STRING *)PTR32(a[1]))->Length;
-    Name.MaximumLength = ((WOW64_STRING *)PTR32(a[1]))->MaximumLength;
-    Name.Buffer = PTR32(((WOW64_STRING *)PTR32(a[1]))->Buffer);
-    if (Name.Length > Name.MaximumLength || !InGuest((ULONG)(ULONG_PTR)Name.Buffer, Name.Length))
+    Guest = *(volatile WOW64_STRING *)PTR32(a[1]);
+    if (Guest.Length > Guest.MaximumLength || !InGuest(Guest.Buffer, Guest.Length))
         return STATUS_ACCESS_VIOLATION;
     RtlInitUnicodeString(&Lsa, LSA_PORT_NAME);
+    /* Only the LSA port is allowed. Compare a native copy of the name and connect with that
+     * same copy, so the name that passed the check is the one the kernel opens. */
+    if (Guest.Length != Lsa.Length)
+        return Wow64Unsupported(Number, WOW64_UNSUPPORTED_SERVICE, 0, Reported);
+    RtlCopyMemory(NameBuffer, PTR32(Guest.Buffer), Guest.Length);
+    Name.Length = Guest.Length;
+    Name.MaximumLength = sizeof(NameBuffer);
+    Name.Buffer = NameBuffer;
     if (!RtlEqualUnicodeString(&Name, &Lsa, TRUE))
         return Wow64Unsupported(Number, WOW64_UNSUPPORTED_SERVICE, 0, Reported);
     /* The views carry native pointers and sizes; the LSA port uses neither */

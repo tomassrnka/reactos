@@ -20,6 +20,32 @@ static const char *ServiceNames[] =
 #undef WOW64_SYSCALL
 };
 
+/* The number of 32-bit argument slots of each service */
+static const UCHAR ServiceSlots[] =
+{
+#define WOW64_SYSCALL(Name, Source, Target, SourceSlots, TargetSlots, Flags) SourceSlots,
+#include <reactos/wow64/nt32to64.inc>
+#undef WOW64_SYSCALL
+};
+
+/* Large enough for every service (the most is 17) */
+#define WOW64_MAX_ARGUMENTS 24
+
+static ULONG ServiceArgumentCount(ULONG Number)
+{
+    ULONG Count;
+    if (Number < RTL_NUMBER_OF(ServiceSlots)) Count = ServiceSlots[Number];
+    else switch (Number)
+    {
+    case WOW64_SERVICE_CSR: Count = 2; break;            /* CsrWow64Call@8 */
+    case 0x10001: Count = 4; break;                      /* RtlpWow64GetNativeSystemInformation@16 */
+    case 0x10002: Count = 2; break;                      /* RtlpWow64EnableFsRedirectionEx@8 */
+    case WOW64_SERVICE_CREATE_PROCESS: Count = 1; break; /* RtlWow64CreateProcess@4 */
+    default: Count = 0; break;
+    }
+    return min(Count, WOW64_MAX_ARGUMENTS);
+}
+
 static const char *ServiceName(ULONG Service)
 {
     if (Service < RTL_NUMBER_OF(ServiceNames)) return ServiceNames[Service];
@@ -726,7 +752,7 @@ static NTSTATUS GuestArrayCount(ULONG Address, ULONG ElementSize, PULONG Count)
 
 /* NtFilterToken: SidsToDisable and RestrictedSids hold SID pointers; TOKEN_PRIVILEGES
  * has the same layout for both sizes and goes through as is. */
-static NTSTATUS FilterToken32(ULONG *a, WOW64_CLEANUP *Cleanup)
+static NTSTATUS FilterToken32(const ULONG *a, WOW64_CLEANUP *Cleanup)
 {
     ULONG DisableCount, RestrictCount, PrivilegeCount;
     SIZE_T Bytes = 1;
@@ -766,7 +792,10 @@ KeyViewAccess(const OBJECT_ATTRIBUTES *Attributes, ACCESS_MASK Access)
     return Access;
 }
 
-static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
+/* a is Wow64SystemService's local copy of the guest argument list: counts and pointers
+ * read from it (e.g. the NtWaitForMultipleObjects and NtRaiseHardError counts) cannot
+ * change between their check and their use. What they point to is still guest memory. */
+static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
 {
     NTSTATUS Status;
     OBJECT_ATTRIBUTES Attributes;
@@ -1070,11 +1099,14 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
     case W64_NtQueryInstallUILanguage: return NtQueryInstallUILanguage(P(0));
     case W64_NtDelayExecution: return NtDelayExecution(a[0], P(1));
     case W64_NtWaitForSingleObject: return NtWaitForSingleObject(H(0), a[1], P(2));
+    /* NtWaitForMultipleObjects32 (0x127) has no thunk on purpose: the guest ntdll calls 0x118 for
+     * NtWaitForMultipleObjects and nothing in this tree uses the 0x127 export, so a direct call is "unsupported". */
     case W64_NtWaitForMultipleObjects:
     {
         HANDLE Handles[MAXIMUM_WAIT_OBJECTS];
         ULONG i;
-        if (!a[0] || a[0] > MAXIMUM_WAIT_OBJECTS) return STATUS_INVALID_PARAMETER;
+        /* The kernel's own status for a bad count, as an i386 caller gets it */
+        if (!a[0] || a[0] > MAXIMUM_WAIT_OBJECTS) return STATUS_INVALID_PARAMETER_1;
         for (i = 0; i < a[0]; ++i) Handles[i] = HANDLE32(((ULONG *)P(1))[i]);
         return NtWaitForMultipleObjects(a[0], Handles, a[2], a[3], P(4));
     }
@@ -1218,10 +1250,16 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         PROBE(0);
         ATTR(2); Status = NtOpenSymbolicLinkObject(&Cleanup->Handle, a[1], OA(2)); RETURN_HANDLE();
     case W64_NtQuerySymbolicLinkObject:
-        String32(&Name, P(1));
+    {
+        WOW64_STRING *Target = P(1);
+        /* No descriptor to translate: the kernel gets the NULL an i386 caller would pass
+         * and fails the call the same way, never a descriptor left uninitialised here */
+        if (!Target) return NtQuerySymbolicLinkObject(H(0), NULL, P(2));
+        String32(&Name, Target);
         Status = NtQuerySymbolicLinkObject(H(0), &Name, P(2));
-        ((WOW64_STRING *)P(1))->Length = Name.Length;
+        Target->Length = Name.Length;
         return Status;
+    }
     case W64_NtQueryDirectoryObject:
     {
         typedef struct { WOW64_STRING Name, TypeName; } DIRECTORY32;
@@ -2652,6 +2690,10 @@ NTSTATUS NTAPI Wow64SystemService(ULONG Number, ULONG *Arguments)
     NTSTATUS Status;
     WOW64_CLEANUP Cleanup = {0};
     WOW64_CPU_STATE *Cpu = NtCurrentTeb()->TlsSlots[WOW64_TLS_CPU];
+    /* The argument list is on the guest stack, where other guest threads can change it.
+     * The NT thunks see only this copy, read once, so a value they checked stays the
+     * value they use. */
+    ULONG Captured[WOW64_MAX_ARGUMENTS] = {0};
     /* Assembly has finished every save, including EAX and FXSAVE. Keep the
      * flag set outside this routine: that also covers the low-address gate,
      * the instructions following CALL and the final IRET itself. */
@@ -2661,8 +2703,13 @@ NTSTATUS NTAPI Wow64SystemService(ULONG Number, ULONG *Arguments)
      * NT errors; no untyped 32-bit argument list is sent to the kernel. */
     _SEH2_TRY
     {
-        Status = (Number >= 0x1000 && Number < 0x2000) ?
-            Wow64WinSystemService(Number, Arguments) : Dispatch(Number, Arguments, &Cleanup);
+        if (Number >= 0x1000 && Number < 0x2000)
+            Status = Wow64WinSystemService(Number, Arguments);
+        else
+        {
+            RtlCopyMemory(Captured, Arguments, ServiceArgumentCount(Number) * sizeof(ULONG));
+            Status = Dispatch(Number, Captured, &Cleanup);
+        }
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
