@@ -162,11 +162,13 @@ struct dxgi_adapter
     struct wined3d_adapter *wined3d_adapter;
     struct wined3d_private_store private_store;
     UINT ordinal;
+    BOOL warp;
     struct dxgi_factory *factory;
 };
 
 HRESULT dxgi_adapter_create(struct dxgi_factory *factory, UINT ordinal,
         struct dxgi_adapter **adapter);
+HRESULT dxgi_adapter_create_warp(struct dxgi_factory *factory, struct dxgi_adapter **adapter);
 struct dxgi_adapter *unsafe_impl_from_IDXGIAdapter(IDXGIAdapter *iface);
 
 /* IDXGISwapChain */

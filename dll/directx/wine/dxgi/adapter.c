@@ -138,7 +138,8 @@ static HRESULT STDMETHODCALLTYPE dxgi_adapter_EnumOutputs(IWineDXGIAdapter *ifac
     if (!output)
         return E_INVALIDARG;
 
-    output_count = wined3d_adapter_get_output_count(adapter->wined3d_adapter);
+    /* The WARP adapter drives no display. */
+    output_count = adapter->warp ? 0 : wined3d_adapter_get_output_count(adapter->wined3d_adapter);
     if (output_idx >= output_count)
     {
         *output = NULL;
@@ -156,6 +157,35 @@ static HRESULT STDMETHODCALLTYPE dxgi_adapter_EnumOutputs(IWineDXGIAdapter *ifac
     TRACE("Returning output %p.\n", *output);
 
     return S_OK;
+}
+
+/* The LUID of the WARP adapter is not the one of the adapter that implements it: Windows lists them as two
+ * adapters. LocallyUniqueIds count up from small values, so a high bit keeps it clear of those. */
+static LUID dxgi_adapter_warp_luid(LUID luid)
+{
+    luid.LowPart ^= 0x40000000;
+    return luid;
+}
+
+/* What Windows reports for its software rasterizer (the Microsoft Basic Render Driver as WARP). */
+static void dxgi_adapter_get_warp_desc(DXGI_ADAPTER_DESC3 *desc)
+{
+    static const WCHAR description[] = L"Microsoft Basic Render Driver";
+
+    memset(desc->Description, 0, sizeof(desc->Description));
+    memcpy(desc->Description, description, sizeof(description));
+    desc->VendorId = 0x1414;
+    desc->DeviceId = 0x008c;
+    desc->SubSysId = 0;
+    desc->Revision = 0;
+    /* A software adapter has no memory of its own. */
+    desc->SharedSystemMemory += desc->DedicatedVideoMemory;
+    desc->DedicatedVideoMemory = 0;
+    desc->DedicatedSystemMemory = 0;
+    desc->AdapterLuid = dxgi_adapter_warp_luid(desc->AdapterLuid);
+    desc->Flags = DXGI_ADAPTER_FLAG3_SOFTWARE;
+    desc->GraphicsPreemptionGranularity = DXGI_GRAPHICS_PREEMPTION_INSTRUCTION_BOUNDARY;
+    desc->ComputePreemptionGranularity = DXGI_COMPUTE_PREEMPTION_INSTRUCTION_BOUNDARY;
 }
 
 static HRESULT dxgi_adapter_get_desc(struct dxgi_adapter *adapter, DXGI_ADAPTER_DESC3 *desc)
@@ -189,6 +219,9 @@ static HRESULT dxgi_adapter_get_desc(struct dxgi_adapter *adapter, DXGI_ADAPTER_
     desc->Flags = 0;
     desc->GraphicsPreemptionGranularity = 0; /* FIXME */
     desc->ComputePreemptionGranularity = 0; /* FIXME */
+
+    if (adapter->warp)
+        dxgi_adapter_get_warp_desc(desc);
 
     return hr;
 }
@@ -379,7 +412,7 @@ static HRESULT STDMETHODCALLTYPE dxgi_adapter_get_adapter_info(IWineDXGIAdapter 
         info->device_uuid = adapter_id.device_uuid;
         info->vendor_id = adapter_id.vendor_id;
         info->device_id = adapter_id.device_id;
-        info->luid = adapter_id.adapter_luid;
+        info->luid = adapter->warp ? dxgi_adapter_warp_luid(adapter_id.adapter_luid) : adapter_id.adapter_luid;
     }
 
     return hr;
@@ -441,6 +474,7 @@ static void dxgi_adapter_init(struct dxgi_adapter *adapter, struct dxgi_factory 
     adapter->wined3d_adapter = wined3d_get_adapter(factory->wined3d, ordinal);
     wined3d_private_store_init(&adapter->private_store);
     adapter->ordinal = ordinal;
+    adapter->warp = FALSE;
     adapter->factory = factory;
     IWineDXGIFactory_AddRef(&adapter->factory->IWineDXGIFactory_iface);
 }
@@ -451,5 +485,18 @@ HRESULT dxgi_adapter_create(struct dxgi_factory *factory, UINT ordinal, struct d
         return E_OUTOFMEMORY;
 
     dxgi_adapter_init(*adapter, factory, ordinal);
+    return S_OK;
+}
+
+/* The WARP adapter is implemented by the first adapter of wined3d and reports the identity of the Microsoft
+ * Basic Render Driver as a software adapter, as the second adapter of a Windows system does. */
+HRESULT dxgi_adapter_create_warp(struct dxgi_factory *factory, struct dxgi_adapter **adapter)
+{
+    HRESULT hr;
+
+    if (FAILED(hr = dxgi_adapter_create(factory, 0, adapter)))
+        return hr;
+
+    (*adapter)->warp = TRUE;
     return S_OK;
 }
