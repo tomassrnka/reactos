@@ -69,7 +69,8 @@ HRESULT schedsvc_stop(const struct caller *caller, const WCHAR *path, const GUID
 /* the Windows-shaped copy of the task store in the registry (taskcache.c); best effort, never trusted */
 void schedsvc_mirror_registered(const WCHAR *path, const WCHAR *xml);
 void schedsvc_mirror_deleted(const WCHAR *path);
-
+/* a primary token of the S4U logon of a local account (s4u.c) */
+HANDLE schedsvc_s4u_token(PSID sid);
 #endif
 
 #endif /* __WINE_SCHEDSVC_PRIVATE_H__ */

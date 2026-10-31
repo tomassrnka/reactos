@@ -115,6 +115,7 @@ struct task
     PSID registrant;        /* NULL if unknown */
     BOOL privileged;        /* registered by LocalSystem or an administrator */
     BOOL enabled;
+    BOOL s4u;               /* Principal/LogonType S4U: no logged-on user needed, no password */
     WCHAR *user_id;         /* Principal/UserId */
     unsigned int n_triggers;
     unsigned int n_actions;
@@ -383,6 +384,8 @@ static void element_text(struct task *task, const WCHAR **names, unsigned int de
             free(task->user_id);
             task->user_id = strdupW(value);
         }
+        else if (!wcscmp(name, L"LogonType"))
+            task->s4u = !wcsicmp(value, L"S4U");
     }
     else if (depth >= 4 && !wcscmp(names[1], L"Triggers") && (trigger = current_trigger(task)))
     {
@@ -885,7 +888,7 @@ static WCHAR *expand_string(HANDLE token, const WCHAR *str)
     return wcslen(str) < MAX_EXPANDED ? wcsdup(str) : NULL;
 }
 
-static HANDLE start_action(const struct task *task, const struct action *action, HANDLE token)
+static HANDLE start_action(const struct task *task, const struct action *action, HANDLE token, BOOL interactive)
 {
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi;
@@ -934,11 +937,18 @@ static HANDLE start_action(const struct task *task, const struct action *action,
         free(cmdline);
         return NULL;
     }
-    if (token)
+    if (token && interactive)
     {
         si.lpDesktop = L"winsta0\\default";
         ret = CreateProcessAsUserW(token, NULL, cmdline, NULL, NULL, FALSE,
                                    CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_CONSOLE, env,
+                                   directory && *directory ? directory : NULL, &si, &pi);
+    }
+    else if (token)
+    {
+        /* an S4U token has no session of its own to show a window in */
+        ret = CreateProcessAsUserW(token, NULL, cmdline, NULL, NULL, FALSE,
+                                   CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW, env,
                                    directory && *directory ? directory : NULL, &si, &pi);
     }
     else
@@ -1011,6 +1021,7 @@ static HANDLE run_task(struct task *task)
     HANDLE token = NULL, process = NULL, last = NULL;
     PSID sid;
     unsigned int i;
+    BOOL interactive = TRUE;
 
     if (!task->enabled || !task->n_actions) return NULL;
 
@@ -1055,7 +1066,17 @@ static HANDLE run_task(struct task *task)
             WARN("task %s: registered by another user, not running it\n", debugstr_w(task->path));
             goto done;
         }
-        if (!(token = get_user_token(sid)))
+        if (task->s4u)
+        {
+            /* LogonType S4U: the user need not be logged on; the same rules above decide who it may be */
+            interactive = FALSE;
+            if (!(token = schedsvc_s4u_token(sid)))
+            {
+                WARN("task %s: no S4U logon for its user\n", debugstr_w(task->path));
+                goto done;
+            }
+        }
+        else if (!(token = get_user_token(sid)))
         {
             TRACE("task %s: its user is not logged on\n", debugstr_w(task->path));
             goto done;
@@ -1064,7 +1085,7 @@ static HANDLE run_task(struct task *task)
 
     for (i = 0; i < task->n_actions; i++)
     {
-        if (!(process = start_action(task, &task->actions[i], token))) continue;
+        if (!(process = start_action(task, &task->actions[i], token, interactive))) continue;
         if (last) CloseHandle(last);
         last = process;
     }
