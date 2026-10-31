@@ -1509,6 +1509,55 @@ static BOOL compare_cert_by_sha1_hash(PCCERT_CONTEXT pCertContext, DWORD dwType,
     return ret;
 }
 
+static BOOL is_hash_str_separator(WCHAR c)
+{
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '-' || c == ',';
+}
+
+static int hash_str_digit(WCHAR c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Windows reads the string as hex digit pairs, with any number of spaces,
+ * tabs, line breaks, '-' and ',' before, between and after the pairs, and
+ * skips one leading byte order mark.  A digit may not be split from its
+ * partner. */
+static BOOL compare_cert_by_sha1_hash_str(PCCERT_CONTEXT pCertContext, DWORD dwType,
+ DWORD dwFlags, const void *pvPara)
+{
+    const WCHAR *str = pvPara;
+    BYTE hash[20], parsed[20];
+    DWORD size = sizeof(hash), count = 0;
+    int hi, lo;
+
+    if (!str)
+        return FALSE;
+    if (*str == 0xfeff)
+        str++;
+    for (;;)
+    {
+        while (is_hash_str_separator(*str))
+            str++;
+        if (!*str)
+            break;
+        if ((hi = hash_str_digit(str[0])) < 0 || (lo = hash_str_digit(str[1])) < 0 ||
+         count == sizeof(parsed))
+            return FALSE;
+        parsed[count++] = (hi << 4) | lo;
+        str += 2;
+    }
+    if (count != sizeof(hash))
+        return FALSE;
+    if (!CertGetCertificateContextProperty(pCertContext, CERT_SHA1_HASH_PROP_ID,
+     hash, &size))
+        return FALSE;
+    return size == sizeof(hash) && !memcmp(parsed, hash, size);
+}
+
 static BOOL compare_cert_by_name(PCCERT_CONTEXT pCertContext, DWORD dwType,
  DWORD dwFlags, const void *pvPara)
 {
@@ -1914,6 +1963,9 @@ PCCERT_CONTEXT WINAPI CertFindCertificateInStore(HCERTSTORE hCertStore,
         break;
     case CERT_COMPARE_SIGNATURE_HASH:
         compare = compare_cert_by_signature_hash;
+        break;
+    case CERT_COMPARE_HASH_STR:
+        compare = compare_cert_by_sha1_hash_str;
         break;
     default:
         FIXME("find type %08lx unimplemented\n", dwType);
