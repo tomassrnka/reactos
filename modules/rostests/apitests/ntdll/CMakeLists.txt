@@ -74,6 +74,7 @@ list(APPEND SOURCE
     NtCreateSectionSize.c
     NtCreateThread.c
     NtDeleteKey.c
+    NtDelayExecution.c
     NtDuplicateObject.c
     NtDuplicateToken.c
     NtExtendSection.c
