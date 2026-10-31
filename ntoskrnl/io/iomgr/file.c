@@ -4466,6 +4466,9 @@ IopCancelApcNormalRoutine(IN PVOID NormalContext,
                             CancelApc->PortOnly);
     KeLowerIrql(OldIrql);
 
+    /* An exiting thread runs this after IoCancelThreadIo, which detached its port-only requests */
+    IopCancelDetachedIrps(PsGetCurrentProcess(), CancelApc->FileObject, CancelApc->IoRequestToCancel);
+
     /* Defer: the last deref must not run IopDeleteFile inside this cancel APC */
     ObDereferenceObjectDeferDelete(CancelApc->FileObject);
     ExFreePoolWithTag(CancelApc, TAG_IO);
@@ -4474,7 +4477,8 @@ IopCancelApcNormalRoutine(IN PVOID NormalContext,
 /*
  * Cancels the matching requests of every thread of Process on FileObject:
  * the current thread's right away, the others' from a kernel APC queued to
- * each of them (only the owning thread walks its IRP list to cancel).
+ * each of them (only the owning thread walks its IRP list to cancel), and
+ * the port-only requests that outlived their thread right away.
  */
 NTSTATUS
 NTAPI
@@ -4501,6 +4505,10 @@ IopCancelProcessFileIrps(IN PEPROCESS Process,
             *Found = TRUE;
         KeLowerIrql(OldIrql);
     }
+
+    /* Port-only requests whose thread has exited belong to no thread (all are port-only) */
+    if (IopCancelDetachedIrps(Process, FileObject, IoRequestToCancel))
+        *Found = TRUE;
 
     /* Other threads with matching requests cancel them from a kernel APC */
     for (Thread = PsGetNextProcessThread(Process, NULL);
@@ -4538,11 +4546,21 @@ IopCancelProcessFileIrps(IN PEPROCESS Process,
 
         if (!KeInsertQueueApc(&CancelApc->Apc, NULL, NULL, IO_NO_INCREMENT))
         {
-            /* The thread is exiting, and its I/O is cancelled by IoCancelThreadIo */
+            /* The thread is exiting: IoCancelThreadIo cancels its I/O or detaches it (rescanned below) */
             ObDereferenceObject(FileObject);
             ExFreePoolWithTag(CancelApc, TAG_IO);
         }
     }
+
+    /*
+     * A thread that exited meanwhile detached its port-only requests instead of
+     * cancelling them. PspExitThread clears ApcQueueable only after
+     * IoCancelThreadIo: a thread that refused the APC has detached already (this
+     * look finds it), one that took it detaches before it can run the APC, whose
+     * routine looks again (IopCancelApcNormalRoutine).
+     */
+    if (IopCancelDetachedIrps(Process, FileObject, IoRequestToCancel))
+        *Found = TRUE;
 
     return Status;
 }

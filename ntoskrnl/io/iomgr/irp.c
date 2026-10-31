@@ -308,24 +308,23 @@ IopWriteDeferredPortIosb(IN PIRP Irp)
     ObDereferenceObject(Thread);
 }
 
+/*
+ * Completes Irp in the context of the process that issued it: normally the
+ * completion APC on the issuing thread, Issuer; for a port-only request whose
+ * thread has exited, a worker attached to the process (IopCompleteDetachedIrp).
+ */
+static
 VOID
-NTAPI
-IopCompleteRequest(IN PKAPC Apc,
-                   IN PKNORMAL_ROUTINE* NormalRoutine,
-                   IN PVOID* NormalContext,
-                   IN PVOID* SystemArgument1,
-                   IN PVOID* SystemArgument2)
+IopCompleteIrp(IN PIRP Irp,
+               IN PFILE_OBJECT FileObject,
+               IN PVOID DataBuffer,
+               IN PETHREAD Issuer)
 {
-    PFILE_OBJECT FileObject;
-    PIRP Irp;
     PMDL Mdl, NextMdl;
     PVOID Port = NULL, Key = NULL;
     BOOLEAN SignaledCreateRequest = FALSE;
     BOOLEAN DeferIosb = FALSE;
 
-    /* Get data from the APC */
-    FileObject = (PFILE_OBJECT)*SystemArgument1;
-    Irp = CONTAINING_RECORD(Apc, IRP, Tail.Apc);
     IOTRACE(IO_IRP_DEBUG,
             "%s - Completing IRP %p for %p\n",
             __FUNCTION__,
@@ -336,7 +335,7 @@ IopCompleteRequest(IN PKAPC Apc,
     ASSERT(Irp->IoStatus.Status != (NTSTATUS)0xFFFFFFFF);
 
     /* Check if we have a file object */
-    if (*SystemArgument2)
+    if (DataBuffer)
     {
         /* Check if we're reparsing */
         if ((Irp->IoStatus.Status == STATUS_REPARSE) &&
@@ -344,7 +343,7 @@ IopCompleteRequest(IN PKAPC Apc,
         {
             PREPARSE_DATA_BUFFER ReparseData;
 
-            ReparseData = (PREPARSE_DATA_BUFFER)*SystemArgument2;
+            ReparseData = (PREPARSE_DATA_BUFFER)DataBuffer;
 
             ASSERT(ReparseData->ReparseTag == IO_REPARSE_TAG_MOUNT_POINT);
             ASSERT(ReparseData->ReparseDataLength < MAXIMUM_REPARSE_DATA_BUFFER_SIZE);
@@ -545,7 +544,7 @@ IopCompleteRequest(IN PKAPC Apc,
              */
             if (DeferIosb)
             {
-                Irp->Tail.Overlay.Thread = PsGetCurrentThread();
+                Irp->Tail.Overlay.Thread = Issuer;
                 ObReferenceObject(Irp->Tail.Overlay.Thread);
             }
             else
@@ -628,6 +627,399 @@ IopCompleteRequest(IN PKAPC Apc,
 
         /* Free the IRP as well */
         IoFreeIrp(Irp);
+    }
+}
+
+VOID
+NTAPI
+IopCompleteRequest(IN PKAPC Apc,
+                   IN PKNORMAL_ROUTINE* NormalRoutine,
+                   IN PVOID* NormalContext,
+                   IN PVOID* SystemArgument1,
+                   IN PVOID* SystemArgument2)
+{
+    /* The completion APC runs on the issuing thread */
+    IopCompleteIrp(CONTAINING_RECORD(Apc, IRP, Tail.Apc),
+                   (PFILE_OBJECT)*SystemArgument1,
+                   *SystemArgument2,
+                   PsGetCurrentThread());
+}
+
+/*
+ * Port-only requests that outlive the thread that issued them.
+ *
+ * Since Vista, Windows does not cancel a pending request on a handle
+ * associated with a completion port when the thread that issued it exits,
+ * provided only the port reports its completion (no event, no APC routine,
+ * an APC context for the packet): it stays pending and completes through the
+ * port as usual. Requests with an event or an APC routine, and those on a
+ * handle without a port, are still cancelled. The requests are cancelled
+ * when the process exits, and CancelIoEx (not CancelIo) from any thread of
+ * the process still cancels them.
+ *
+ * IoCancelThreadIo moves such a request from the thread's IRP list to a
+ * detached table, keeping a reference to the thread (drivers may still look
+ * at Tail.Overlay.Thread, e.g. IoGetRequestorProcess). When the request
+ * completes, IofCompleteRequest cannot queue the completion APC to the dead
+ * thread: it hands the request to a worker, which attaches to the process
+ * to copy buffered data back, write the status block and queue the packet
+ * (IopCompleteIrp, as the APC would). The last thread of the process cancels
+ * the detached requests of the process and waits for them, so no worker
+ * touches the address space after it is gone.
+ *
+ * Detach and the final IofCompleteRequest race; the detach never writes
+ * anything a driver writes (drivers update Irp->Flags without interlocking,
+ * e.g. npfs on a pending read). IofCompleteRequest sets
+ * IRP_COMPLETION_CLAIMED (a bit no WDK flag uses; the I/O manager owns the
+ * IRP from there on), then reads whether the issuing thread is terminated.
+ * The exiting thread sets its Terminated flag first, and IoCancelThreadIo
+ * reads the claim under IopDetachedIrpLock, both sides with full barriers
+ * in between, so at least one of them sees the other: either the detach
+ * backs off (the APC goes to the still living thread, which waits for it),
+ * or the completion sees the thread terminated and looks for the entry under
+ * the lock. IRPs of threads that are not terminated never take the lock.
+ *
+ * The lookup key is the IRP address, which is recycled as soon as the IRP is
+ * released. So the entry leaves the hash table, under the lock, in the same
+ * step that marks it Completed and before the IRP can be released; from then
+ * on it is only a rundown counter (on the list of all entries) and its Irp
+ * pointer is never used again.
+ */
+typedef struct _IOP_DETACHED_IRP
+{
+    LIST_ENTRY Links;               /* in the bucket of Irp until Completed */
+    LIST_ENTRY AllLinks;            /* in IopDetachedIrpAll until the worker is done */
+    PIRP Irp;                       /* not valid once Completed (recycled address) */
+    PVOID DataBuffer;               /* what IofCompleteRequest saved for the completion */
+    PETHREAD Thread;                /* the issuing thread, referenced */
+    PEPROCESS Process;
+    PFILE_OBJECT FileObject;
+    PIO_STATUS_BLOCK UserIosb;
+    WORK_QUEUE_ITEM WorkItem;
+    LONG CancelBusy;                /* IoCancelIrp callers using Irp */
+    BOOLEAN Completed;              /* IofCompleteRequest queued the worker */
+    BOOLEAN CancelSent;             /* the exiting process cancelled it */
+    BOOLEAN Orphaned;               /* the process is gone: no user memory */
+} IOP_DETACHED_IRP, *PIOP_DETACHED_IRP;
+
+#define IOP_DETACHED_IRP_BUCKETS 64
+static LIST_ENTRY IopDetachedIrpBuckets[IOP_DETACHED_IRP_BUCKETS];
+static LIST_ENTRY IopDetachedIrpAll;
+static KSPIN_LOCK IopDetachedIrpLock;
+static volatile LONG IopDetachedIrpCount;
+
+CODE_SEG("INIT")
+VOID
+NTAPI
+IopInitializeDetachedIrps(VOID)
+{
+    ULONG i;
+
+    KeInitializeSpinLock(&IopDetachedIrpLock);
+    for (i = 0; i < IOP_DETACHED_IRP_BUCKETS; i++)
+        InitializeListHead(&IopDetachedIrpBuckets[i]);
+    InitializeListHead(&IopDetachedIrpAll);
+}
+
+static
+PLIST_ENTRY
+IopDetachedIrpBucket(IN PIRP Irp)
+{
+    ULONG_PTR Value = (ULONG_PTR)Irp;
+    return &IopDetachedIrpBuckets[((Value >> 4) ^ (Value >> 12)) % IOP_DETACHED_IRP_BUCKETS];
+}
+
+/* Called with IopDetachedIrpLock held; completed entries are not in the table */
+static
+PIOP_DETACHED_IRP
+IopFindDetachedIrp(IN PIRP Irp)
+{
+    PLIST_ENTRY Head, Entry;
+    PIOP_DETACHED_IRP Detached;
+
+    Head = IopDetachedIrpBucket(Irp);
+    for (Entry = Head->Flink; Entry != Head; Entry = Entry->Flink)
+    {
+        Detached = CONTAINING_RECORD(Entry, IOP_DETACHED_IRP, Links);
+        ASSERT(!Detached->Completed);
+        if (Detached->Irp == Irp) return Detached;
+    }
+    return NULL;
+}
+
+/* A request on the current thread's list that only the completion port reports */
+static
+BOOLEAN
+IopIsDetachableIrp(IN PIRP Irp)
+{
+    PFILE_OBJECT FileObject = Irp->Tail.Overlay.OriginalFileObject;
+
+    return (FileObject != NULL) &&
+           (FileObject->CompletionContext != NULL) &&
+           !(FileObject->Flags & FO_SYNCHRONOUS_IO) &&
+           (Irp->RequestorMode == UserMode) &&
+           !(Irp->Flags & (IRP_SYNCHRONOUS_API | IRP_PAGING_IO | IRP_ASSOCIATED_IRP |
+                           IRP_CREATE_OPERATION | IRP_CLOSE_OPERATION)) &&
+           (Irp->UserEvent == NULL) &&
+           (Irp->Overlay.AsynchronousParameters.UserApcRoutine == NULL) &&
+           (Irp->Overlay.AsynchronousParameters.UserApcContext != NULL);
+}
+
+/*
+ * Moves Irp from the current (exiting) thread's list to the detached table.
+ * Fails if its completion has already started (the APC will run on this
+ * thread before it exits), if the process is exiting, or without memory.
+ * Called at APC_LEVEL.
+ */
+static
+BOOLEAN
+IopDetachThreadIrp(IN PETHREAD Thread,
+                   IN PIRP Irp)
+{
+    PIOP_DETACHED_IRP Detached;
+    PEPROCESS Process = PsGetThreadProcess(Thread);
+    KIRQL OldIrql;
+
+    /* IofCompleteRequest only looks for detached requests of terminated threads */
+    if (!(Thread->CrossThreadFlags & CT_TERMINATED_BIT)) return FALSE;
+
+    Detached = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Detached), TAG_IO);
+    if (!Detached) return FALSE;
+    RtlZeroMemory(Detached, sizeof(*Detached));
+    Detached->Irp = Irp;
+    Detached->Thread = Thread;
+    Detached->Process = Process;
+    Detached->FileObject = Irp->Tail.Overlay.OriginalFileObject;
+    Detached->UserIosb = Irp->UserIosb;
+
+    KeAcquireSpinLock(&IopDetachedIrpLock, &OldIrql);
+
+    /* The last thread drains the table for the process; nothing may be added after that */
+    if (Process->ProcessDelete)
+    {
+        KeReleaseSpinLock(&IopDetachedIrpLock, OldIrql);
+        ExFreePoolWithTag(Detached, TAG_IO);
+        return FALSE;
+    }
+
+    /* Did IofCompleteRequest claim the IRP? Then its APC goes to this thread (see above) */
+    if (*(volatile ULONG *)&Irp->Flags & IRP_COMPLETION_CLAIMED)
+    {
+        KeReleaseSpinLock(&IopDetachedIrpLock, OldIrql);
+        ExFreePoolWithTag(Detached, TAG_IO);
+        return FALSE;
+    }
+
+    /* From now on the request belongs to no thread */
+    ObReferenceObject(Thread);
+    KeAcquireSpinLockAtDpcLevel(IopGetThreadIrpListLock(Thread));
+    RemoveEntryList(&Irp->ThreadListEntry);
+    InitializeListHead(&Irp->ThreadListEntry);
+    KeReleaseSpinLockFromDpcLevel(IopGetThreadIrpListLock(Thread));
+    InsertTailList(IopDetachedIrpBucket(Irp), &Detached->Links);
+    InsertTailList(&IopDetachedIrpAll, &Detached->AllLinks);
+    InterlockedIncrement(&IopDetachedIrpCount);
+
+    KeReleaseSpinLock(&IopDetachedIrpLock, OldIrql);
+    IOTRACE(IO_IRP_DEBUG, "%s - Detached IRP %p from %p\n", __FUNCTION__, Irp, Thread);
+    return TRUE;
+}
+
+static
+VOID
+NTAPI
+IopCompleteDetachedIrp(IN PVOID Context)
+{
+    PIOP_DETACHED_IRP Detached = Context;
+    PIRP Irp = Detached->Irp;
+    PFILE_OBJECT FileObject = Irp->Tail.Overlay.OriginalFileObject;
+    LARGE_INTEGER Interval;
+    KAPC_STATE ApcState;
+    BOOLEAN Orphaned;
+    KIRQL OldIrql;
+
+    /* Wait until no canceller uses the IRP any more */
+    Interval.QuadPart = -10000;
+    KeAcquireSpinLock(&IopDetachedIrpLock, &OldIrql);
+    while (Detached->CancelBusy)
+    {
+        KeReleaseSpinLock(&IopDetachedIrpLock, OldIrql);
+        KeDelayExecutionThread(KernelMode, FALSE, &Interval);
+        KeAcquireSpinLock(&IopDetachedIrpLock, &OldIrql);
+    }
+    Orphaned = Detached->Orphaned;
+    KeReleaseSpinLock(&IopDetachedIrpLock, OldIrql);
+
+    if (!Orphaned)
+    {
+        /* Complete it as the completion APC would have, in the issuing process */
+        KeStackAttachProcess(&Detached->Process->Pcb, &ApcState);
+        KeRaiseIrql(APC_LEVEL, &OldIrql);
+        IopCompleteIrp(Irp, FileObject, Detached->DataBuffer, Detached->Thread);
+        KeLowerIrql(OldIrql);
+        KeUnstackDetachProcess(&ApcState);
+    }
+    else
+    {
+        /* The address space is gone: free everything without reporting */
+        IopCleanupIrp(Irp, FileObject);
+    }
+
+    /* Only now may the exiting process go on */
+    KeAcquireSpinLock(&IopDetachedIrpLock, &OldIrql);
+    RemoveEntryList(&Detached->AllLinks);
+    InterlockedDecrement(&IopDetachedIrpCount);
+    KeReleaseSpinLock(&IopDetachedIrpLock, OldIrql);
+
+    ObDereferenceObject(Detached->Thread);
+    ExFreePoolWithTag(Detached, TAG_IO);
+}
+
+/*
+ * IofCompleteRequest, after setting IRP_COMPLETION_CLAIMED and seeing the
+ * thread of Irp terminated: if IoCancelThreadIo detached Irp, queue its
+ * completion to a worker. Any IRQL up to DISPATCH_LEVEL.
+ */
+static
+BOOLEAN
+IopCompleteDetachedIrpLater(IN PIRP Irp,
+                            IN PVOID DataBuffer)
+{
+    PIOP_DETACHED_IRP Detached;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&IopDetachedIrpLock, &OldIrql);
+    Detached = IopFindDetachedIrp(Irp);
+    if (Detached)
+    {
+        /* Out of the table before the IRP can be released and its address reused */
+        Detached->Completed = TRUE;
+        Detached->DataBuffer = DataBuffer;
+        RemoveEntryList(&Detached->Links);
+        InitializeListHead(&Detached->Links);
+    }
+    KeReleaseSpinLock(&IopDetachedIrpLock, OldIrql);
+    if (!Detached) return FALSE;
+
+    ExInitializeWorkItem(&Detached->WorkItem, IopCompleteDetachedIrp, Detached);
+    ExQueueWorkItem(&Detached->WorkItem, DelayedWorkQueue);
+    return TRUE;
+}
+
+/*
+ * Cancels Detached->Irp, which has not completed yet. Called with
+ * IopDetachedIrpLock held, returns with it held; drops it around IoCancelIrp
+ * (a cancel routine may complete the IRP), during which the worker waits
+ * and the entry stays in its bucket.
+ */
+static
+VOID
+IopCancelDetachedIrp(IN PIOP_DETACHED_IRP Detached,
+                     IN OUT PKIRQL OldIrql)
+{
+    ASSERT(!Detached->Completed);
+    Detached->CancelBusy++;
+    KeReleaseSpinLock(&IopDetachedIrpLock, *OldIrql);
+    IoCancelIrp(Detached->Irp);
+    KeAcquireSpinLock(&IopDetachedIrpLock, OldIrql);
+    Detached->CancelBusy--;
+}
+
+/* CancelIoEx and the close of a handle: the detached requests of Process on FileObject */
+BOOLEAN
+NTAPI
+IopCancelDetachedIrps(IN PEPROCESS Process,
+                      IN PFILE_OBJECT FileObject,
+                      IN PIO_STATUS_BLOCK IoRequestToCancel OPTIONAL)
+{
+    PLIST_ENTRY Entry;
+    PIOP_DETACHED_IRP Detached;
+    BOOLEAN Found = FALSE;
+    KIRQL OldIrql;
+
+    /*
+     * Unlocked early-out. A thread of Process that detaches later increments
+     * the count before it can leave IoCancelThreadIo, and the callers look
+     * again after their cancel APC has run on, or could not be queued to, each
+     * thread, so they cannot miss it.
+     */
+    if (!IopDetachedIrpCount) return FALSE;
+
+    KeAcquireSpinLock(&IopDetachedIrpLock, &OldIrql);
+    for (Entry = IopDetachedIrpAll.Flink; Entry != &IopDetachedIrpAll; Entry = Entry->Flink)
+    {
+        Detached = CONTAINING_RECORD(Entry, IOP_DETACHED_IRP, AllLinks);
+        if ((Detached->Process != Process) ||
+            (Detached->FileObject != FileObject) ||
+            ((IoRequestToCancel) && (Detached->UserIosb != IoRequestToCancel)) ||
+            (Detached->Completed) ||
+            (Detached->Orphaned))
+        {
+            continue;
+        }
+
+        Found = TRUE;
+        IopCancelDetachedIrp(Detached, &OldIrql);
+    }
+    KeReleaseSpinLock(&IopDetachedIrpLock, OldIrql);
+
+    return Found;
+}
+
+/*
+ * The last thread of Process is exiting: cancel the detached requests of
+ * the process and wait until their workers are done with its address space.
+ * A request a broken driver never completes is orphaned after a while; its
+ * worker then frees it without touching user memory.
+ */
+VOID
+NTAPI
+IopRundownDetachedIrps(IN PEPROCESS Process)
+{
+    PLIST_ENTRY Entry;
+    PIOP_DETACHED_IRP Detached;
+    LARGE_INTEGER Interval;
+    ULONG Retries = 30000;
+    BOOLEAN Pending;
+    KIRQL OldIrql;
+
+    /* Wait 10 milliseconds between looks */
+    Interval.QuadPart = -100000;
+
+    for (;;)
+    {
+        /*
+         * Always under the lock: a thread of the process that detaches
+         * concurrently either did so before this look (and is seen), or sees
+         * ProcessDelete under the same lock and cancels its requests instead.
+         */
+        Pending = FALSE;
+        KeAcquireSpinLock(&IopDetachedIrpLock, &OldIrql);
+        for (Entry = IopDetachedIrpAll.Flink; Entry != &IopDetachedIrpAll; Entry = Entry->Flink)
+        {
+            Detached = CONTAINING_RECORD(Entry, IOP_DETACHED_IRP, AllLinks);
+            if ((Detached->Process != Process) || (Detached->Orphaned)) continue;
+
+            if (!Detached->Completed && !Detached->CancelSent)
+            {
+                Detached->CancelSent = TRUE;
+                IopCancelDetachedIrp(Detached, &OldIrql);
+            }
+
+            if (!Detached->Completed && !Retries)
+            {
+                /* Broken driver: give up on this one */
+                DPRINT1("Broken driver did not complete detached IRP %p!\n", Detached->Irp);
+                Detached->Orphaned = TRUE;
+                continue;
+            }
+            Pending = TRUE;
+        }
+        KeReleaseSpinLock(&IopDetachedIrpLock, OldIrql);
+
+        if (!Pending) break;
+        if (Retries) Retries--;
+        KeDelayExecutionThread(KernelMode, FALSE, &Interval);
     }
 }
 
@@ -1237,10 +1629,12 @@ IoCancelThreadIo(IN PETHREAD Thread)
     LARGE_INTEGER Interval;
     PLIST_ENTRY ListHead, NextEntry;
     PIRP Irp;
+    PEPROCESS Process;
     PAGED_CODE();
 
     /* Windows isn't using given thread, but using current. */
     Thread = PsGetCurrentThread();
+    Process = PsGetThreadProcess(Thread);
 
     IOTRACE(IO_IRP_DEBUG,
             "%s - Canceling IRPs for Thread %p\n",
@@ -1250,19 +1644,23 @@ IoCancelThreadIo(IN PETHREAD Thread)
     /* Raise to APC to protect the IrpList */
     KeRaiseIrql(APC_LEVEL, &OldIrql);
 
-    /* Start by cancelling all the IRPs in the current thread queue. */
+    /*
+     * Start by cancelling all the IRPs in the current thread queue, except
+     * the port-only requests, which outlive the thread unless the process
+     * is exiting (see IopDetachThreadIrp).
+     */
     ListHead = &Thread->IrpList;
     NextEntry = ListHead->Flink;
     while (ListHead != NextEntry)
     {
-        /* Get the IRP */
+        /* Get the IRP and move to the next entry, detaching may unlink it */
         Irp = CONTAINING_RECORD(NextEntry, IRP, ThreadListEntry);
-
-        /* Cancel it */
-        IoCancelIrp(Irp);
-
-        /* Move to the next entry */
         NextEntry = NextEntry->Flink;
+
+        /* Leave it pending without the thread, or cancel it */
+        if (!Process->ProcessDelete && IopIsDetachableIrp(Irp) && IopDetachThreadIrp(Thread, Irp))
+            continue;
+        IoCancelIrp(Irp);
     }
 
      /* Wait 100 milliseconds */
@@ -1643,6 +2041,22 @@ IofCompleteRequest(IN PIRP Irp,
     /* Get the thread and file object */
     Thread = Irp->Tail.Overlay.Thread;
     FileObject = Irp->Tail.Overlay.OriginalFileObject;
+
+    /*
+     * Claim the completion. If the thread exited and left a port-only
+     * request behind (IoCancelThreadIo), no APC can go to it: a worker
+     * completes the request in its process instead.
+     */
+    if (Thread)
+    {
+        /* The full barrier orders the claim before the read of the flag */
+        InterlockedOr((PLONG)&Irp->Flags, IRP_COMPLETION_CLAIMED);
+        if ((Thread->CrossThreadFlags & CT_TERMINATED_BIT) &&
+            IopCompleteDetachedIrpLater(Irp, DataBuffer))
+        {
+            return;
+        }
+    }
 
     /* Make sure the IRP isn't canceled */
     if (!Irp->Cancel)

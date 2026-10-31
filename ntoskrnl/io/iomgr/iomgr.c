@@ -571,6 +571,7 @@ IoInitSystem(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
     KeInitializeSpinLock(&DriverBootReinitListLock);
     KeInitializeSpinLock(&ShutdownListLock);
     KeInitializeSpinLock(&IopLogListLock);
+    IopInitializeDetachedIrps();
 
     /* Initialize PnP notifications */
     PiInitializeNotifications();

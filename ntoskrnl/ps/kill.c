@@ -785,8 +785,12 @@ PspExitThread(IN NTSTATUS ExitStatus)
         KeBugCheckEx(KERNEL_STACK_LOCKED_AT_EXIT, 0, 0, 0, 0);
     }
 
-    /* Cancel I/O for the thread. */
+    /* Cancel I/O for the thread, or leave its port-only requests pending (IopDetachThreadIrp) */
+    PspSetCrossThreadFlag(Thread, CT_TERMINATED_BIT);
     IoCancelThreadIo(Thread);
+
+    /* The last thread also ends the requests that outlived the others, before the address space goes */
+    if (Last) IopRundownDetachedIrps(CurrentProcess);
 
     /* Rundown Timers */
     ExTimerRundown();
