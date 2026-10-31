@@ -1582,12 +1582,13 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         case IOCTL_AFD_GET_PEER_NAME:
         case IOCTL_AFD_SET_CONTEXT:
         case IOCTL_AFD_GET_CONTEXT_SIZE:
+            break;
         case IOCTL_AFD_GET_CONTEXT: /* opaque socket-context blob; output only, symmetric of SET_CONTEXT. */
-            /* The guest's own SOCK_SHARED_INFO size gets AFD's current structure, converted. */
+            /* The guest's own SOCK_SHARED_INFO size gets AFD's current structure, converted.
+             * Only this ioctl code: other requests may carry a 140-byte output buffer too. */
             if (a[9] == WOW64_SOCK_SHARED_INFO_SIZE && !a[2] && !a[3] && a[8])
                 return AfdGetContext32(a);
-        /* Not AFD: these must stay below the check above, which would take a request
-         * with a 140-byte output buffer for AFD_GET_CONTEXT. */
+            break;
         case IOCTL_MOUNTMGR_QUERY_DOS_VOLUME_PATH:
         case IOCTL_TCP_QUERY_INFORMATION_EX: /* TCP captures the guest context offset. */
         case IOCTL_TCP_SET_INFORMATION_EX: /* setsockopt partner: TDIObjectID + BufferSize + inline bytes, no pointers. */
