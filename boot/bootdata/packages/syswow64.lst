@@ -220,6 +220,10 @@ SysWOW64/msftedit.dll
 @0x600 SysWOW64/d3dcompiler_39.dll
 @0x600 SysWOW64/d3dcompiler_47.dll
 
+# d3d12.dll for 32-bit modules that import D3D12CreateDevice: the stub of dll/win32/d3d12 (built below export
+# level 0xA00), which loads and has no adapter.
+SysWOW64/d3d12.dll
+
 # UI Automation client (uiautomationcore.dll: the 7 Uia* functions the 32-bit WordCraft imports).
 # Imports shlwapi, oleaut32, ole32, oleacc, combase and user32, all listed above.
 SysWOW64/uiautomationcore.dll
