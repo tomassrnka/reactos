@@ -2720,6 +2720,7 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         case SystemTimeOfDayInformation:
         case SystemPerformanceInformation: /* LARGE_INTEGER/ULONG counters, no pointers, same layout. */
         case SystemTimeAdjustmentInformation: /* { ULONG, ULONG, BOOLEAN }, no pointers. */
+        case SystemProcessorPerformanceInformation: /* an array of 48-byte records of LARGE_INTEGER and ULONG fields, no pointers; Windows WoW64 returns the native records too. */
             return NtQuerySystemInformation(a[0], P(1), a[2], P(3));
         default: UNSUPPORTED(CLASS, a[0]);
         }
