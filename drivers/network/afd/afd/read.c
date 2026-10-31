@@ -153,6 +153,29 @@ static NTSTATUS TryToSatisfyRecvRequestFromBuffer( PAFD_FCB FCB,
     return STATUS_SUCCESS;
 }
 
+/* Completes the pending receives of a stream socket with STATUS_CONNECTION_ABORTED: its
+ * connection is being aborted (closesocket with a zero linger time). The state lock is held. */
+VOID AfdAbortPendingReceives( PAFD_FCB FCB ) {
+    PLIST_ENTRY NextIrpEntry;
+    PIRP NextIrp;
+    PIO_STACK_LOCATION NextIrpSp;
+    PAFD_RECV_INFO RecvReq;
+
+    while( !IsListEmpty( &FCB->PendingIrpList[FUNCTION_RECV] ) ) {
+        NextIrpEntry = RemoveHeadList(&FCB->PendingIrpList[FUNCTION_RECV]);
+        NextIrp = CONTAINING_RECORD(NextIrpEntry, IRP, Tail.Overlay.ListEntry);
+        NextIrpSp = IoGetCurrentIrpStackLocation( NextIrp );
+        RecvReq = GetLockedData(NextIrp, NextIrpSp);
+
+        UnlockBuffers( RecvReq->BufferArray, RecvReq->BufferCount, FALSE );
+        NextIrp->IoStatus.Status = STATUS_CONNECTION_ABORTED;
+        NextIrp->IoStatus.Information = 0;
+        if( NextIrp->MdlAddress ) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
+        AfdClearCancelRoutine(NextIrp);
+        IoCompleteRequest( NextIrp, IO_NETWORK_INCREMENT );
+    }
+}
+
 static NTSTATUS ReceiveActivity( PAFD_FCB FCB, PIRP Irp ) {
     PLIST_ENTRY NextIrpEntry;
     PIRP NextIrp;

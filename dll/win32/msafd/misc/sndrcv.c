@@ -443,7 +443,9 @@ WSPRecv(SOCKET Handle,
             Event = lpOverlapped->hEvent;
             
             APCFunction = NULL;
-            if (Event)
+            /* As Windows: the overlapped is the completion key of a completion port even
+             * when an event is given; only an event with the low bit set suppresses the packet */
+            if ((ULONG_PTR)Event & 1)
             {
                 APCContext = NULL;
             }
@@ -722,7 +724,9 @@ MsafdRecvFrom(SOCKET Handle,
             Event = lpOverlapped->hEvent;
             
             APCFunction = NULL;
-            if (Event)
+            /* As Windows: the overlapped is the completion key of a completion port even
+             * when an event is given; only an event with the low bit set suppresses the packet */
+            if ((ULONG_PTR)Event & 1)
             {
                 APCContext = NULL;
             }
@@ -1051,7 +1055,9 @@ WSPSend(SOCKET Handle,
             }
 
             APCFunction = NULL;
-            if (Event)
+            /* As Windows: the overlapped is the completion key of a completion port even
+             * when an event is given; only an event with the low bit set suppresses the packet */
+            if ((ULONG_PTR)Event & 1)
             {
                 APCContext = NULL;
             }
@@ -1306,7 +1312,9 @@ WSPSendTo(SOCKET Handle,
             Event = lpOverlapped->hEvent;
             
             APCFunction = NULL;
-            if (Event)
+            /* As Windows: the overlapped is the completion key of a completion port even
+             * when an event is given; only an event with the low bit set suppresses the packet */
+            if ((ULONG_PTR)Event & 1)
             {
                 APCContext = NULL;
             }

@@ -12,6 +12,10 @@
  * A request on a handle without a port is cancelled, and its status block written, when its thread exits.
  *
  * A port only request is not cancelled when the thread that issued it exits: see IocpThreadExit.
+ *
+ * ReadFileEx and WriteFileEx leave the OVERLAPPED as it was when the request is refused before it is
+ * queued: on a handle associated with a completion port (an APC routine cannot be used with one,
+ * ERROR_INVALID_PARAMETER) and on an invalid handle. Only the plain ReadFile writes STATUS_PENDING first.
  */
 
 #include "precomp.h"
@@ -284,6 +288,77 @@ TestUdpCancel(_In_ const char *Label, _In_ int How)
     pWSACleanup();
 }
 
+static
+VOID CALLBACK
+ExApc(_In_ DWORD Error, _In_ DWORD Bytes, _In_ LPOVERLAPPED Ov)
+{
+}
+
+static
+VOID
+CheckExRefused(_In_ const char *Label, _In_ BOOL Ret, _In_ DWORD Error, _In_ DWORD Expected, _In_ OVERLAPPED *Ov)
+{
+    ok(!Ret, "%s: succeeded\n", Label);
+    ok(Error == Expected, "%s: error %lu, expected %lu\n", Label, Error, Expected);
+    ok(Ov->Internal == (ULONG_PTR)0xcccccccc, "%s: Internal is %Ix\n", Label, Ov->Internal);
+    ok(Ov->InternalHigh == (ULONG_PTR)0xcccccccc, "%s: InternalHigh is %Ix\n", Label, Ov->InternalHigh);
+}
+
+static
+VOID
+TestExRefusedLeavesOverlapped(VOID)
+{
+    HANDLE Server, Client, Port;
+    OVERLAPPED Ov;
+    CHAR Buffer[16] = { 0 };
+    BOOL Ret;
+    DWORD Error;
+
+    if (!CreatePipePair(&Server, &Client))
+    {
+        skip("Pipe creation failed: %lu\n", GetLastError());
+        return;
+    }
+    Port = CreateIoCompletionPort(Server, NULL, 0x4321, 0);
+    ok(Port != NULL, "CreateIoCompletionPort failed: %lu\n", GetLastError());
+
+    InitOverlapped(&Ov, NULL);
+    SetLastError(0xdeadbeef);
+    Ret = ReadFileEx(Server, Buffer, sizeof(Buffer), &Ov, ExApc);
+    Error = GetLastError();
+    CheckExRefused("ReadFileEx, port", Ret, Error, ERROR_INVALID_PARAMETER, &Ov);
+
+    InitOverlapped(&Ov, NULL);
+    SetLastError(0xdeadbeef);
+    Ret = WriteFileEx(Server, Buffer, sizeof(Buffer), &Ov, ExApc);
+    Error = GetLastError();
+    CheckExRefused("WriteFileEx, port", Ret, Error, ERROR_INVALID_PARAMETER, &Ov);
+
+    InitOverlapped(&Ov, NULL);
+    SetLastError(0xdeadbeef);
+    Ret = ReadFileEx((HANDLE)(ULONG_PTR)0x1234, Buffer, sizeof(Buffer), &Ov, ExApc);
+    Error = GetLastError();
+    CheckExRefused("ReadFileEx, bad handle", Ret, Error, ERROR_INVALID_HANDLE, &Ov);
+
+    InitOverlapped(&Ov, NULL);
+    SetLastError(0xdeadbeef);
+    Ret = WriteFileEx((HANDLE)(ULONG_PTR)0x1234, Buffer, sizeof(Buffer), &Ov, ExApc);
+    Error = GetLastError();
+    CheckExRefused("WriteFileEx, bad handle", Ret, Error, ERROR_INVALID_HANDLE, &Ov);
+
+    /* The plain ReadFile does write the status first */
+    InitOverlapped(&Ov, NULL);
+    SetLastError(0xdeadbeef);
+    Ret = ReadFile((HANDLE)(ULONG_PTR)0x1234, Buffer, sizeof(Buffer), NULL, &Ov);
+    Error = GetLastError();
+    ok(!Ret && Error == ERROR_INVALID_HANDLE, "ReadFile, bad handle: %d, error %lu\n", Ret, Error);
+    ok((ULONG)Ov.Internal == ST_PENDING, "ReadFile, bad handle: Internal is %Ix\n", Ov.Internal);
+
+    CloseHandle(Port);
+    CloseHandle(Client);
+    CloseHandle(Server);
+}
+
 START_TEST(IocpCancelStatus)
 {
     pCancelIoEx = (FN_CancelIoEx *)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "CancelIoEx");
@@ -298,4 +373,5 @@ START_TEST(IocpCancelStatus)
     TestThreadExitEvent();
     TestUdpCancel("udp CancelIoEx", CANCEL_IOEX);
     TestUdpCancel("udp CancelIo", CANCEL_IO);
+    TestExRefusedLeavesOverlapped();
 }

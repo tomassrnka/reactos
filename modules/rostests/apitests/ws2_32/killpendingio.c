@@ -249,6 +249,103 @@ KillChild(PROCESS_INFORMATION *Child, int *Killed)
     (*Killed)++;
 }
 
+/*
+ * A receive with an event, on a socket associated with a completion port, that is pending when the thread
+ * that issued it exits is cancelled (Windows 10 22H2, x86 and x64): the event is signalled and the port
+ * gets a packet for the overlapped with ERROR_OPERATION_ABORTED. An event with the low bit set asks for
+ * no packet.
+ */
+static SOCKET ExitSocket;
+static OVERLAPPED ExitOverlapped;
+static char ExitBuffer[16];
+
+static
+DWORD
+WINAPI
+ExitIssuerThread(LPVOID Parameter)
+{
+    WSABUF Buf = { sizeof(ExitBuffer), ExitBuffer };
+    DWORD Flags = 0;
+
+    /* Leave with the receive pending */
+    WSARecv(ExitSocket, &Buf, 1, NULL, &Flags, &ExitOverlapped, NULL);
+    return 0;
+}
+
+static
+void
+TestThreadExitEventPort(const char *Label, BOOL LowBit)
+{
+    SOCKET Listener, Client;
+    struct sockaddr_in Addr = { 0 };
+    int Len = sizeof(Addr);
+    HANDLE Port, Event, Thread;
+    DWORD Bytes = 0xdeadbeef, Error;
+    ULONG_PTR Key = 0;
+    OVERLAPPED *Got = NULL;
+    BOOL Result;
+
+    Addr.sin_family = AF_INET;
+    Addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    Listener = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+    Client = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+    if (Listener == INVALID_SOCKET || Client == INVALID_SOCKET ||
+        bind(Listener, (struct sockaddr *)&Addr, sizeof(Addr)) || listen(Listener, 1) ||
+        getsockname(Listener, (struct sockaddr *)&Addr, &Len) ||
+        connect(Client, (struct sockaddr *)&Addr, sizeof(Addr)))
+    {
+        skip("%s: socket setup failed: %d\n", Label, WSAGetLastError());
+        goto Done;
+    }
+    ExitSocket = accept(Listener, NULL, NULL);
+    ok(ExitSocket != INVALID_SOCKET, "%s: accept failed: %d\n", Label, WSAGetLastError());
+    if (ExitSocket == INVALID_SOCKET)
+        goto Done;
+
+    Port = CreateIoCompletionPort((HANDLE)ExitSocket, NULL, 0x99, 0);
+    ok(Port != NULL, "%s: CreateIoCompletionPort failed: %lu\n", Label, GetLastError());
+    Event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ZeroMemory(&ExitOverlapped, sizeof(ExitOverlapped));
+    ExitOverlapped.Internal = 0xcccccccc;
+    ExitOverlapped.hEvent = LowBit ? (HANDLE)((ULONG_PTR)Event | 1) : Event;
+
+    Thread = CreateThread(NULL, 0, ExitIssuerThread, NULL, 0, NULL);
+    ok(Thread != NULL, "%s: CreateThread failed: %lu\n", Label, GetLastError());
+    if (Thread)
+    {
+        WaitForSingleObject(Thread, INFINITE);
+        CloseHandle(Thread);
+    }
+    Sleep(200);
+
+    ok(WaitForSingleObject(Event, 1000) == WAIT_OBJECT_0, "%s: the event is not signalled\n", Label);
+    ok((ULONG)ExitOverlapped.Internal == 0xC0000120, "%s: Internal is %08lx\n", Label, (ULONG)ExitOverlapped.Internal);
+    SetLastError(0xdeadbeef);
+    Result = GetQueuedCompletionStatus(Port, &Bytes, &Key, &Got, LowBit ? 300 : 2000);
+    Error = GetLastError();
+    if (LowBit)
+    {
+        ok(!Result && Got == NULL && Error == WAIT_TIMEOUT, "%s: GetQueuedCompletionStatus %d, %p, error %lu\n", Label, Result, Got, Error);
+    }
+    else
+    {
+        ok(!Result && Got == &ExitOverlapped, "%s: GetQueuedCompletionStatus %d, %p\n", Label, Result, Got);
+        ok(Error == ERROR_OPERATION_ABORTED, "%s: error %lu\n", Label, Error);
+        ok(Key == 0x99, "%s: key %Ix\n", Label, Key);
+        ok(Bytes == 0, "%s: bytes %lu\n", Label, Bytes);
+    }
+
+    CloseHandle(Event);
+    if (Port)
+        CloseHandle(Port);
+    closesocket(ExitSocket);
+Done:
+    if (Client != INVALID_SOCKET)
+        closesocket(Client);
+    if (Listener != INVALID_SOCKET)
+        closesocket(Listener);
+}
+
 START_TEST(killpendingio)
 {
     WSADATA WsaData;
@@ -268,6 +365,8 @@ START_TEST(killpendingio)
     }
 
     ok_int(WSAStartup(MAKEWORD(2, 2), &WsaData), 0);
+    TestThreadExitEventPort("thread exit, port+event", FALSE);
+    TestThreadExitEventPort("thread exit, port+event|1", TRUE);
     ListenSocket = socket(AF_INET, SOCK_STREAM, 0);
     Address.sin_family = AF_INET;
     Address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
