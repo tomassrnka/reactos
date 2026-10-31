@@ -689,10 +689,60 @@ BOOL WINAPI wglMakeCurrent(HDC hdc, HGLRC hglrc)
         if(InterlockedCompareExchange(&ctx->thread_id, thread_id, 0) != 0)
         {
             /* Already current for a thread. Maybe it's us ? */
-            release_dc_data(dc_data);
             if(ctx->thread_id != thread_id)
+            {
+                release_dc_data(dc_data);
                 SetLastError(ERROR_BUSY);
-            return (ctx->thread_id == thread_id);
+                return FALSE;
+            }
+
+            /* The context is current on this thread. Windows binds it to the new DC when it differs:
+             * wined3d makes the context of a swap chain current again on the DC of the window it presents to,
+             * and SwapBuffers needs the driver to know that window. */
+            if(IntGetCurrentRC() == hglrc && (IntGetCurrentDC() != hdc || IntGetCurrentDcData() != dc_data))
+            {
+                if(IntGetCurrentDcData() != dc_data)
+                {
+                    if(ctx->icd_data)
+                    {
+                        ctx->icd_data->DrvReleaseContext(ctx->dhglrc);
+                        apiTable = ctx->icd_data->DrvSetContext(hdc, ctx->dhglrc, set_api_table);
+                        if(!apiTable)
+                        {
+                            ERR("DrvSetContext failed!\n");
+                            InterlockedExchange(&ctx->thread_id, 0);
+                            IntMakeCurrent(NULL, NULL, NULL);
+                            IntSetCurrentDispatchTable(NULL);
+                            release_dc_data(dc_data);
+                            SetLastError(ERROR_INVALID_PARAMETER);
+                            return FALSE;
+                        }
+                        set_api_table(apiTable);
+                        IntMakeCurrent(hglrc, hdc, dc_data);
+                    }
+                    else
+                    {
+                        sw_ReleaseContext(ctx->dhglrc);
+                        IntMakeCurrent(hglrc, hdc, dc_data);
+                        if(!sw_SetContext(dc_data, ctx->dhglrc))
+                        {
+                            ERR("sw_SetContext failed!\n");
+                            IntMakeCurrent(NULL, NULL, NULL);
+                            InterlockedExchange(&ctx->thread_id, 0);
+                            release_dc_data(dc_data);
+                            SetLastError(ERROR_INVALID_PARAMETER);
+                            return FALSE;
+                        }
+                    }
+                }
+                else
+                {
+                    /* The same window: only the DC handle changes */
+                    IntMakeCurrent(hglrc, hdc, dc_data);
+                }
+            }
+            release_dc_data(dc_data);
+            return TRUE;
         }
 
         if(old_ctx)
