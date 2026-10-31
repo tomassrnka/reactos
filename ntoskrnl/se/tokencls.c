@@ -57,89 +57,104 @@ static const INFORMATION_CLASS_INFO SeTokenInformationClass[] = {
     IQS_SAME(TOKEN_ORIGIN, ULONG, ICIF_QUERY | ICIF_SET),
     /* TokenElevationType */
     IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
-    /* TokenLinkedToken */
-    IQS_NONE,
-    /* TokenElevation */
-    IQS_SAME(TOKEN_ELEVATION, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
+    /* TokenLinkedToken: Windows insists on the exact size of a handle */
+    IQS_SAME(HANDLE, ULONG, ICIF_QUERY),
+    /* TokenElevation: Windows insists on the exact size, unlike TokenElevationType */
+    IQS_SAME(TOKEN_ELEVATION, ULONG, ICIF_QUERY),
     /* TokenHasRestrictions */
     IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
     /* TokenAccessInformation */
     IQS_NONE,
     /* TokenVirtualizationAllowed */
-    IQS_NONE,
+    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
     /* TokenVirtualizationEnabled */
-    IQS_NONE,
+    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
     /* TokenIntegrityLevel */
     IQS_SAME(TOKEN_MANDATORY_LABEL, ULONG, ICIF_QUERY | ICIF_SET | ICIF_SIZE_VARIABLE),
     /* TokenUIAccess */
-    IQS_NONE,
+    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
     /* TokenMandatoryPolicy */
-    IQS_NONE,
+    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
     /* TokenLogonSid */
     IQS_SAME(TOKEN_GROUPS, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
+    /* TokenIsAppContainer */
+    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
 };
 
 /* TOKEN_ELEVATION_TYPE values (the enum is declared in user-mode headers only) */
 #define SEP_ELEVATION_TYPE_DEFAULT  1 /* TokenElevationTypeDefault */
-#define SEP_ELEVATION_TYPE_FULL     2 /* TokenElevationTypeFull */
-#define SEP_ELEVATION_TYPE_LIMITED  3 /* TokenElevationTypeLimited */
+
+/* TOKEN_MANDATORY_POLICY of every token: no write up, new process minimum */
+#define SEP_MANDATORY_POLICY_DEFAULT (TOKEN_MANDATORY_POLICY_NO_WRITE_UP | TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN)
+
+/**
+ * Privileges that make a token elevated even without the Administrators
+ * group, enabled or not. Measured on Windows 7 (Server 2008 R2) with UAC off
+ * by restricting an administrator's token down to one privilege at a time;
+ * on Windows 10 the service tokens that hold SeImpersonatePrivilege report
+ * the same, and the ones that do not, do not.
+ */
+static const ULONG SepElevatingPrivileges[] =
+{
+    SE_CREATE_TOKEN_PRIVILEGE,
+    SE_TCB_PRIVILEGE,
+    SE_TAKE_OWNERSHIP_PRIVILEGE,
+    SE_LOAD_DRIVER_PRIVILEGE,
+    SE_BACKUP_PRIVILEGE,
+    SE_RESTORE_PRIVILEGE,
+    SE_DEBUG_PRIVILEGE,
+    SE_IMPERSONATE_PRIVILEGE,
+    SE_RELABEL_PRIVILEGE,
+};
 
 /**
  * @brief
- * Derives the elevation state of a token. The caller must hold the token lock.
+ * Tells whether TokenElevation reports the token as elevated. The caller
+ * must hold the token lock.
  *
- * ReactOS has no linked (split) tokens, so the state is derived from what a
- * token carries:
+ * ReactOS has no UAC, so no token is split into a filtered and a full one,
+ * and there are no linked tokens. This is what Windows reports with UAC
+ * disabled (EnableLUA = 0, measured on Windows 10 22H2 and Windows 7): the
+ * elevation type is always TokenElevationTypeDefault, whatever the groups,
+ * privileges and integrity level, and TokenIsElevated is 1 when:
  *
- * - Elevated: the Administrators group is present and enabled (not disabled
- *   and not deny-only) and the integrity level is High or above.
- * - Limited: Administrators is among the token's groups (so the user is an
- *   administrator) but the token is not elevated, i.e. the group is disabled
- *   or deny-only, or the integrity level is below High. This is what the
- *   filtered half of a UAC split token looks like.
- * - Default: everything else (a standard-user token, or an unsplit token),
- *   which is what a Windows system without a UAC split reports.
+ * - the Administrators group is in the token and is not deny-only, or
+ * - the token holds one of SepElevatingPrivileges.
  *
- * TOKEN_HAS_ADMIN_GROUP is not used: it is set when the group is merely
- * present at creation, even if it is deny-only. The token's actual group
- * attributes are what decide.
- *
- * TokenElevationTypeFull is not reported since there is no linked token to
- * distinguish the full half of a split pair from an unsplit admin token.
+ * The integrity level and the user account do not count. Windows 10 also
+ * keeps a restricted copy of an elevated token elevated (a stored property
+ * that CreateRestrictedToken inherits, except with LUA_TOKEN); this derives
+ * the answer from what the token holds, so such a copy reads as not elevated
+ * once its Administrators group is deny-only and its privileges are gone.
  */
 static
-VOID
-SepQueryTokenElevation(
-    _In_ PTOKEN Token,
-    _Out_ PULONG IsElevated,
-    _Out_ PULONG ElevationType)
+ULONG
+SepIsTokenElevated(
+    _In_ PTOKEN Token)
 {
-    BOOLEAN HasAdminGroup = FALSE, AdminEnabled = FALSE;
-    ULONG i;
+    ULONG i, j;
 
     for (i = 1; i < Token->UserAndGroupCount; i++)
     {
-        if (RtlEqualSid(Token->UserAndGroups[i].Sid, SeAliasAdminsSid))
+        if (!(Token->UserAndGroups[i].Attributes & SE_GROUP_USE_FOR_DENY_ONLY) &&
+            RtlEqualSid(Token->UserAndGroups[i].Sid, SeAliasAdminsSid))
         {
-            HasAdminGroup = TRUE;
-            if ((Token->UserAndGroups[i].Attributes & SE_GROUP_ENABLED) &&
-                !(Token->UserAndGroups[i].Attributes & SE_GROUP_USE_FOR_DENY_ONLY))
-            {
-                AdminEnabled = TRUE;
-            }
+            return TRUE;
         }
     }
 
-    if (AdminEnabled && Token->IntegrityLevel >= SECURITY_MANDATORY_HIGH_RID)
+    for (i = 0; i < Token->PrivilegeCount; i++)
     {
-        *IsElevated = 1;
-        *ElevationType = SEP_ELEVATION_TYPE_DEFAULT;
+        if (Token->Privileges[i].Luid.HighPart != 0)
+            continue;
+        for (j = 0; j < RTL_NUMBER_OF(SepElevatingPrivileges); j++)
+        {
+            if (Token->Privileges[i].Luid.LowPart == SepElevatingPrivileges[j])
+                return TRUE;
+        }
     }
-    else
-    {
-        *IsElevated = 0;
-        *ElevationType = HasAdminGroup ? SEP_ELEVATION_TYPE_LIMITED : SEP_ELEVATION_TYPE_DEFAULT;
-    }
+
+    return FALSE;
 }
 
 /* PUBLIC FUNCTIONS *****************************************************************/
@@ -497,7 +512,6 @@ SeQueryInformationToken(
         case TokenElevationType:
         {
             PULONG tet;
-            ULONG UnusedElevated;
 
             DPRINT("SeQueryInformationToken(TokenElevationType)\n");
             tet = ExAllocatePoolWithTag(PagedPool, sizeof(*tet), TAG_SE);
@@ -507,7 +521,7 @@ SeQueryInformationToken(
                 break;
             }
 
-            SepQueryTokenElevation(Token, &UnusedElevated, tet);
+            *tet = SEP_ELEVATION_TYPE_DEFAULT;
             *TokenInformation = tet;
             Status = STATUS_SUCCESS;
             break;
@@ -516,7 +530,6 @@ SeQueryInformationToken(
         case TokenElevation:
         {
             PTOKEN_ELEVATION te;
-            ULONG UnusedType;
 
             DPRINT("SeQueryInformationToken(TokenElevation)\n");
             te = ExAllocatePoolWithTag(PagedPool, sizeof(*te), TAG_SE);
@@ -526,7 +539,7 @@ SeQueryInformationToken(
                 break;
             }
 
-            SepQueryTokenElevation(Token, &te->TokenIsElevated, &UnusedType);
+            te->TokenIsElevated = SepIsTokenElevated(Token);
             *TokenInformation = te;
             Status = STATUS_SUCCESS;
             break;
@@ -628,6 +641,24 @@ NtQueryInformationToken(
     if (!NT_SUCCESS(Status))
     {
         DPRINT("NtQueryInformationToken() failed, Status: 0x%x\n", Status);
+
+        /* Windows reports the size these two classes insist on, along with the mismatch */
+        if (Status == STATUS_INFO_LENGTH_MISMATCH &&
+            (TokenInformationClass == TokenElevation || TokenInformationClass == TokenLinkedToken))
+        {
+            _SEH2_TRY
+            {
+                if (PreviousMode != KernelMode)
+                    ProbeForWriteUlong(ReturnLength);
+                *ReturnLength = SeTokenInformationClass[TokenInformationClass].RequiredSizeQUERY;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+        }
+
         return Status;
     }
 
@@ -1195,17 +1226,48 @@ NtQueryInformationToken(
                 break;
             }
 
+            /*
+             * Classes that report a single ULONG. Without UAC every token has the
+             * default elevation type, UI access and virtualization are token
+             * flags (never set here), the mandatory policy is the same for all
+             * tokens and no token belongs to an AppContainer.
+             */
             case TokenElevationType:
             case TokenElevation:
+            case TokenVirtualizationAllowed:
+            case TokenVirtualizationEnabled:
+            case TokenUIAccess:
+            case TokenMandatoryPolicy:
+            case TokenIsAppContainer:
             {
-                ULONG IsElevated;
-                ULONG ElevationType;
                 ULONG Value;
 
-                DPRINT("NtQueryInformationToken(TokenElevation[Type])\n");
+                DPRINT("NtQueryInformationToken(%d)\n", TokenInformationClass);
                 RequiredLength = sizeof(ULONG);
-                SepQueryTokenElevation(Token, &IsElevated, &ElevationType);
-                Value = (TokenInformationClass == TokenElevation) ? IsElevated : ElevationType;
+                switch (TokenInformationClass)
+                {
+                    case TokenElevationType:
+                        Value = SEP_ELEVATION_TYPE_DEFAULT;
+                        break;
+                    case TokenElevation:
+                        Value = SepIsTokenElevated(Token);
+                        break;
+                    case TokenVirtualizationAllowed:
+                        Value = !!(Token->TokenFlags & TOKEN_VIRTUALIZE_ALLOWED);
+                        break;
+                    case TokenVirtualizationEnabled:
+                        Value = !!(Token->TokenFlags & TOKEN_VIRTUALIZE_ENABLED);
+                        break;
+                    case TokenUIAccess:
+                        Value = !!(Token->TokenFlags & TOKEN_UIACCESS);
+                        break;
+                    case TokenMandatoryPolicy:
+                        Value = SEP_MANDATORY_POLICY_DEFAULT;
+                        break;
+                    default:
+                        Value = FALSE;
+                        break;
+                }
 
                 _SEH2_TRY
                 {
@@ -1219,6 +1281,28 @@ NtQueryInformationToken(
                     }
 
                     *ReturnLength = RequiredLength;
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    Status = _SEH2_GetExceptionCode();
+                }
+                _SEH2_END;
+
+                break;
+            }
+
+            /*
+             * Only a UAC split token has a linked token. Windows answers
+             * STATUS_NO_SUCH_LOGON_SESSION for any other, which is every token here.
+             */
+            case TokenLinkedToken:
+            {
+                DPRINT("NtQueryInformationToken(TokenLinkedToken)\n");
+
+                _SEH2_TRY
+                {
+                    *ReturnLength = sizeof(HANDLE);
+                    Status = STATUS_NO_SUCH_LOGON_SESSION;
                 }
                 _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
                 {
