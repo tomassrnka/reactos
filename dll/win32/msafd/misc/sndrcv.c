@@ -360,6 +360,19 @@ WSPRecv(SOCKET Handle,
             *lpErrno = WSAEINVAL;
         return SOCKET_ERROR;
     }
+    if (Socket->SharedData->ReceiveShutdown)
+    {
+        /* After shutdown(SD_RECEIVE) a new receive fails, as on Windows, which leaves the
+         * status of its OVERLAPPED pending */
+        if (lpOverlapped)
+        {
+            ((PIO_STATUS_BLOCK)lpOverlapped)->Status = STATUS_PENDING;
+            ((PIO_STATUS_BLOCK)lpOverlapped)->Information = 0;
+        }
+        if (lpErrno)
+            *lpErrno = WSAESHUTDOWN;
+        return SOCKET_ERROR;
+    }
 
     memset(&RecvInfo, 0, sizeof(RecvInfo));
 
@@ -587,6 +600,19 @@ MsafdRecvFrom(SOCKET Handle,
     {
         if (lpErrno)
             *lpErrno = WSAEINVAL;
+        return SOCKET_ERROR;
+    }
+    if (Socket->SharedData->ReceiveShutdown)
+    {
+        /* After shutdown(SD_RECEIVE) a new receive fails, as on Windows, which leaves the
+         * status of its OVERLAPPED pending */
+        if (lpOverlapped)
+        {
+            ((PIO_STATUS_BLOCK)lpOverlapped)->Status = STATUS_PENDING;
+            ((PIO_STATUS_BLOCK)lpOverlapped)->Information = 0;
+        }
+        if (lpErrno)
+            *lpErrno = WSAESHUTDOWN;
         return SOCKET_ERROR;
     }
 
@@ -954,6 +980,13 @@ WSPSend(SOCKET Handle,
     {
         if (lpErrno)
             *lpErrno = WSAEFAULT;
+        return SOCKET_ERROR;
+    }
+    if (Socket->SharedData->SendShutdown)
+    {
+        /* After shutdown(SD_SEND) a send fails, as on Windows */
+        if (lpErrno)
+            *lpErrno = WSAESHUTDOWN;
         return SOCKET_ERROR;
     }
 
