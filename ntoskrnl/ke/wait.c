@@ -327,8 +327,14 @@ KeDelayExecutionThread(IN KPROCESSOR_MODE WaitMode,
        must not end before the interval has passed, so count it from now: add
        the time since the last clock interrupt. The timer then expires with the
        first clock interrupt at or after the interval. Kernel mode callers keep
-       the tick granular delay: they poll and pace (memory manager retries, the
-       boot animation), and with the longer delay the boot takes seconds longer. */
+       the tick granular delay: counted from now, a request just under the clock
+       interval (15 ms on the 15.6 ms clock) takes two ticks instead of one. The
+       boot does not depend on the boot animation, as once thought: on the harness
+       VM it took 1.1 s longer with kernel mode included, 0.9 s of that from
+       floppy.sys (the head settle delay of 15 ms, 60 times during boot) and 0.2 s
+       from the 13 steps of 15 ms of the boot logo fade-in; the thread that rotates
+       the progress bar makes no difference. Include kernel mode when these callers
+       no longer cost the boot a second. */
     if ((Interval->QuadPart < 0) && (WaitMode != KernelMode))
     {
         LONGLONG Phase = KiQueryClockPhase();
