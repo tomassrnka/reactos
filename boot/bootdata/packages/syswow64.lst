@@ -210,8 +210,9 @@ SysWOW64/msftedit.dll
 @0x600 SysWOW64/opengl32.dll
 @0x600 SysWOW64/win32u.dll
 
-# The Mesa3D OpenGL driver (i386 build of dll/3rdparty/mesa3d) and its licence notices, so that the opengl32 above
-# gives 32-bit programs OpenGL 3.3 instead of the built-in 1.1. Registered in the 32-bit view by hivesft_amd64.inf.
+# The Mesa3D OpenGL driver (i386 llvmpipe from dll/3rdparty/mesa3d/i386-llvm, else the in-tree softpipe) and its
+# licence notices, so that the opengl32 above gives 32-bit programs OpenGL 4.6 (3.3 with softpipe) instead of the
+# built-in 1.1. Registered in the 32-bit view by hivesft_amd64.inf.
 @0x600 SysWOW64/libgallium_wgl.dll
 @0x600 SysWOW64/mesa3d-licenses.txt
 

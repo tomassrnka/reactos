@@ -1,3 +1,6 @@
 # Staged at configure time by stage-amd64-llvm.sh (fetched from S3, never committed; 66-69 MB DLLs).
 /amd64-llvm/
 /.stage-amd64-llvm.lock
+# Staged at configure time by stage-i386-llvm.sh for SysWOW64 (fetched from S3, never committed; 73 MB DLL).
+/i386-llvm/
+/.stage-i386-llvm.lock
