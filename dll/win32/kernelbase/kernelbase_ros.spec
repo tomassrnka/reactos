@@ -171,7 +171,7 @@
 #@ stdcall CopyFile2(wstr wstr ptr)
 #@ stdcall CopyFileExW(wstr wstr ptr ptr ptr long)
 #@ stdcall CopyFileW(wstr wstr long)
-#@ stdcall -arch=x86_64 CopyMemoryNonTemporal(ptr ptr long) ntdll.RtlCopyMemoryNonTemporal
+#@ stdcall -version=0x600+ -arch=x86_64 CopyMemoryNonTemporal(ptr ptr long) ntdll.RtlCopyMemoryNonTemporal
 #@ stdcall CopySid(long ptr ptr)
 # #@ stub CouldMultiUserAppsBehaviorBePossibleForPackage
 #@ stdcall CreateActCtxW(ptr)
@@ -260,7 +260,7 @@
 # #@ stub DeleteStateAtomValue
 # #@ stub DeleteStateContainer
 # #@ stub DeleteStateContainerValue
-# #@ stub DeleteSynchronizationBarrier
+#@ stdcall -version=0x600+ DeleteSynchronizationBarrier(long) ntdll.RtlDeleteBarrier
 #@ stdcall DeleteTimerQueueEx(long long)
 #@ stdcall DeleteTimerQueueTimer(long long long)
 #@ stdcall DeleteVolumeMountPointW(wstr)
@@ -268,7 +268,7 @@
 #@ stdcall DeviceIoControl(long long ptr long ptr long ptr ptr)
 #@ stdcall DisablePredefinedHandleTableInternal(long)
 #@ stdcall DisableThreadLibraryCalls(long)
-#@ stdcall DisassociateCurrentThreadFromCallback(ptr) ntdll.TpDisassociateCallback
+@ stdcall -version=0x600+ DisassociateCurrentThreadFromCallback(ptr) ntdll.TpDisassociateCallback
 #@ stdcall DiscardVirtualMemory(ptr long)
 #@ stdcall DisconnectNamedPipe(long)
 #@ stdcall DnsHostnameToComputerNameExW(wstr ptr ptr)
@@ -331,16 +331,16 @@
 #@ stdcall EqualPrefixSid(ptr ptr)
 #@ stdcall EqualSid(ptr ptr)
 #@ stdcall EscapeCommFunction(long long)
-#@ stdcall EventActivityIdControl(long ptr) ntdll.EtwEventActivityIdControl
-#@ stdcall EventEnabled(int64 ptr) ntdll.EtwEventEnabled
-#@ stdcall EventProviderEnabled(int64 long int64) ntdll.EtwEventProviderEnabled
-#@ stdcall EventRegister(ptr ptr ptr ptr) ntdll.EtwEventRegister
-#@ stdcall EventSetInformation(int64 long ptr long) ntdll.EtwEventSetInformation
-#@ stdcall EventUnregister(int64) ntdll.EtwEventUnregister
-#@ stdcall EventWrite(int64 ptr long ptr) ntdll.EtwEventWrite
+#@ stdcall -version=0x600+ EventActivityIdControl(long ptr) ntdll.EtwEventActivityIdControl
+@ stdcall -version=0x600+ EventEnabled(int64 ptr) ntdll.EtwEventEnabled
+@ stdcall -version=0x600+ EventProviderEnabled(int64 long int64) ntdll.EtwEventProviderEnabled
+@ stdcall -version=0x600+ EventRegister(ptr ptr ptr ptr) ntdll.EtwEventRegister
+@ stdcall -version=0x601+ EventSetInformation(int64 long ptr long) ntdll.EtwEventSetInformation
+@ stdcall -version=0x600+ EventUnregister(int64) ntdll.EtwEventUnregister
+@ stdcall -version=0x600+ EventWrite(int64 ptr long ptr) ntdll.EtwEventWrite
 # #@ stub EventWriteEx
-#@ stdcall EventWriteString(int64 long int64 ptr) ntdll.EtwEventWriteString
-#@ stdcall EventWriteTransfer(int64 ptr ptr ptr long ptr) ntdll.EtwEventWriteTransfer
+@ stdcall -version=0x600+ EventWriteString(int64 long int64 wstr) ntdll.EtwEventWriteString
+@ stdcall -version=0x600+ EventWriteTransfer(int64 ptr ptr ptr long ptr) ntdll.EtwEventWriteTransfer
 #@ stdcall ExitProcess(long) ntdll.RtlExitUserProcess
 #@ stdcall ExitThread(long) ntdll.RtlExitUserThread
 #@ stdcall ExpandEnvironmentStringsA(str ptr long)
@@ -388,7 +388,7 @@
 #@ stdcall FlushConsoleInputBuffer(long)
 #@ stdcall FlushFileBuffers(long)
 #@ stdcall FlushInstructionCache(long long long)
-#@ stdcall FlushProcessWriteBuffers() ntdll.NtFlushProcessWriteBuffers
+@ stdcall -version=0x600+ FlushProcessWriteBuffers() ntdll.NtFlushProcessWriteBuffers
 #@ stdcall FlushViewOfFile(ptr long)
 #@ stdcall FoldStringW(long wstr long ptr long)
 # #@ stub ForceSyncFgPolicyInternal
@@ -402,7 +402,7 @@
 # #@ stub FreeGPOListInternalW
 #@ stdcall FreeLibrary(long)
 #@ stdcall FreeLibraryAndExitThread(long long)
-#@ stdcall FreeLibraryWhenCallbackReturns(ptr ptr) ntdll.TpCallbackUnloadDllOnCompletion
+@ stdcall -version=0x600+ FreeLibraryWhenCallbackReturns(ptr ptr) ntdll.TpCallbackUnloadDllOnCompletion
 #@ stdcall FreeResource(long)
 #@ stdcall FreeSid(ptr)
 #@ stdcall FreeUserPhysicalPages(long ptr ptr)
@@ -766,9 +766,9 @@
 #@ stdcall GetTimeZoneInformation(ptr)
 #@ stdcall GetTimeZoneInformationForYear(long ptr ptr)
 #@ stdcall GetTokenInformation(long long ptr long ptr)
-#@ stdcall GetTraceEnableFlags(int64) ntdll.EtwGetTraceEnableFlags
-#@ stdcall GetTraceEnableLevel(int64) ntdll.EtwGetTraceEnableLevel
-#@ stdcall -ret64 GetTraceLoggerHandle(ptr) ntdll.EtwGetTraceLoggerHandle
+@ stdcall GetTraceEnableFlags(double) ntdll.EtwGetTraceEnableFlags
+@ stdcall GetTraceEnableLevel(double) ntdll.EtwGetTraceEnableLevel
+@ stdcall GetTraceLoggerHandle(ptr) ntdll.EtwGetTraceLoggerHandle
 #@ stub GetUILanguageInfo
 # #@ stub GetUnicodeStringToEightBitSizeRoutine
 # #@ stub GetUnicodeStringToEightBitStringRoutine
@@ -857,7 +857,7 @@
 #@ stdcall InterlockedPopEntrySList(ptr) ntdll.RtlInterlockedPopEntrySList
 #@ stdcall InterlockedPushEntrySList(ptr ptr) ntdll.RtlInterlockedPushEntrySList
 #@ stdcall -fastcall InterlockedPushListSList(ptr ptr ptr long) ntdll.RtlInterlockedPushListSList
-#@ stdcall InterlockedPushListSListEx(ptr ptr ptr long) ntdll.RtlInterlockedPushListSListEx
+@ stdcall InterlockedPushListSListEx(ptr ptr ptr long) ntdll.RtlInterlockedPushListSListEx
 #@ stub InternalLcidToName
 #@ stdcall Internal_EnumCalendarInfo(ptr long long long long long long long)
 #@ stdcall Internal_EnumDateFormats(ptr long long long long long long)
@@ -955,7 +955,7 @@
 #@ stdcall LCMapStringW(long long wstr long ptr long)
 # #@ stub LeaveCriticalPolicySectionInternal
 @ stdcall LeaveCriticalSection(ptr) kernel32.LeaveCriticalSection
-#@ stdcall LeaveCriticalSectionWhenCallbackReturns(ptr ptr) ntdll.TpCallbackLeaveCriticalSectionOnCompletion
+@ stdcall -version=0x600+ LeaveCriticalSectionWhenCallbackReturns(ptr ptr) ntdll.TpCallbackLeaveCriticalSectionOnCompletion
 #@ stdcall LoadAppInitDlls()
 # #@ stub LoadEnclaveData
 #@ stdcall LoadLibraryA(str)
@@ -1358,15 +1358,15 @@
 # #@ stub RegisterGPNotificationInternal
 # #@ stub RegisterStateChangeNotification
 # #@ stub RegisterStateLock
-#@ stdcall RegisterTraceGuidsW(ptr ptr ptr long ptr wstr wstr ptr) ntdll.EtwRegisterTraceGuidsW
+@ stdcall RegisterTraceGuidsW(ptr ptr ptr long ptr wstr wstr ptr) ntdll.EtwRegisterTraceGuidsW
 #@ stdcall RegisterWaitForSingleObjectEx(long ptr ptr long long)
 #@ stdcall ReleaseActCtx(ptr)
 @ stdcall ReleaseMutex(long) kernel32.ReleaseMutex
-#@ stdcall ReleaseMutexWhenCallbackReturns(ptr long) ntdll.TpCallbackReleaseMutexOnCompletion
+@ stdcall -version=0x600+ ReleaseMutexWhenCallbackReturns(ptr ptr) ntdll.TpCallbackReleaseMutexOnCompletion
 @ stdcall -version=0x600+ ReleaseSRWLockExclusive(ptr) kernel32.ReleaseSRWLockExclusive
 @ stdcall -version=0x600+ ReleaseSRWLockShared(ptr) kernel32.ReleaseSRWLockShared
 @ stdcall ReleaseSemaphore(long long ptr) kernel32.ReleaseSemaphore
-#@ stdcall ReleaseSemaphoreWhenCallbackReturns(ptr long long) ntdll.TpCallbackReleaseSemaphoreOnCompletion
+@ stdcall -version=0x600+ ReleaseSemaphoreWhenCallbackReturns(ptr ptr long) ntdll.TpCallbackReleaseSemaphoreOnCompletion
 # #@ stub ReleaseStateLock
 #@ stdcall RemapPredefinedHandleInternal(long long)
 #@ stdcall RemoveDirectoryA(str)
@@ -1470,7 +1470,7 @@
 #@ stdcall SetEnvironmentVariableW(wstr wstr)
 #@ stdcall SetErrorMode(long)
 @ stdcall SetEvent(long) kernel32.SetEvent
-#@ stdcall SetEventWhenCallbackReturns(ptr long) ntdll.TpCallbackSetEventOnCompletion
+@ stdcall -version=0x600+ SetEventWhenCallbackReturns(ptr ptr) ntdll.TpCallbackSetEventOnCompletion
 #@ stdcall SetFileApisToANSI()
 #@ stdcall SetFileApisToOEM()
 #@ stdcall SetFileAttributesA(str long)
@@ -1644,8 +1644,8 @@
 #@ stdcall TlsFree(long)
 #@ stdcall TlsGetValue(long)
 #@ stdcall TlsSetValue(long ptr)
-#@ stdcall TraceEvent(int64 ptr) ntdll.EtwLogTraceEvent
-#@ varargs TraceMessage(int64 long ptr long) ntdll.EtwTraceMessage
+#@ stdcall -version=0x600+ TraceEvent(int64 ptr) ntdll.EtwLogTraceEvent
+@ varargs TraceMessage(int64 long ptr long) ntdll.EtwTraceMessage
 #@ stdcall TraceMessageVa(int64 long ptr long ptr) ntdll.EtwTraceMessageVa
 #@ stdcall TransactNamedPipe(long ptr long ptr long ptr ptr)
 #@ stdcall TransmitCommChar(long long)
@@ -1665,7 +1665,7 @@
 # #@ stub UnregisterGPNotificationInternal
 # #@ stub UnregisterStateChangeNotification
 # #@ stub UnregisterStateLock
-#@ stdcall UnregisterTraceGuids(int64) ntdll.EtwUnregisterTraceGuids
+@ stdcall UnregisterTraceGuids(double) ntdll.EtwUnregisterTraceGuids
 #@ stdcall UnregisterWaitEx(long long)
 # #@ stub UnsubscribeEdpEnabledStateChange
 # #@ stub UnsubscribeStateChangeNotification
@@ -1786,10 +1786,10 @@
 # #@ stub _AddMUIStringToCache
 # #@ stub _GetMUIStringFromCache
 # #@ stub _OpenMuiStringCache
-#@ stdcall -arch=!i386 -private __C_specific_handler(ptr long ptr ptr) ntdll.__C_specific_handler
-#@ cdecl -arch=!i386 -norelay __chkstk() ntdll.__chkstk
+@ cdecl -arch=x86_64,arm,arm64 -private __C_specific_handler(ptr long ptr ptr) ntdll.__C_specific_handler
+@ cdecl -arch=x86_64,arm,arm64 -private __chkstk() ntdll.__chkstk
 # #@ stub __dllonexit3
-#@ stub __misaligned_access
+#@ cdecl -version=0x600+ -arch=x86_64 -private __misaligned_access() ntdll.__misaligned_access
 # #@ stub __wgetmainargs
 # #@ stub _amsg_exit
 # #@ stub _c_exit
@@ -1798,7 +1798,7 @@
 # #@ stub _initterm
 # #@ stub _initterm_e
 # #@ stub _invalid_parameter
-#@ stdcall -arch=x86_64 -private _local_unwind(ptr ptr) ntdll._local_unwind
+@ cdecl -arch=x86_64 -private _local_unwind() ntdll._local_unwind
 # #@ stub _onexit
 # #@ stub _purecall
 # #@ stub _time64
