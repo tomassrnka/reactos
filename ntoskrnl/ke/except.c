@@ -312,6 +312,13 @@ NtContinue(
     /* i386 stores this link in Edx, which context restoration overwrites. */
     LinkedTrapFrame = KiGetLinkedTrapFrame(TrapFrame);
 
+#ifdef _M_AMD64
+    /* The service returns STATUS_SUCCESS in RAX, as on Windows, unless the context
+       brings a value of its own (CONTEXT_INTEGER). Without it RAX would be what the
+       system call left in the trap frame. */
+    TrapFrame->Rax = STATUS_SUCCESS;
+#endif
+
     /* Continue from this point on */
     Status = KiContinue(Context, ExceptionFrame, TrapFrame);
     if (!NT_SUCCESS(Status))

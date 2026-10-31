@@ -181,6 +181,7 @@ list(APPEND SOURCE
     WriteFile.c
     XState.c
     XStateContext.c
+    PartialContext.c
     ReadProcessMemory.c
     WriteProcessMemory.c
     SetFileInformationByHandle.c

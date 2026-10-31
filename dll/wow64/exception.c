@@ -153,15 +153,43 @@ NTSTATUS Wow64Continue(const WOW64_CONTEXT *Context, BOOLEAN TestAlert)
     WOW64_CPU_STATE *Cpu = NtCurrentTeb()->TlsSlots[WOW64_TLS_CPU];
     WOW64_APC_FRAME *Apc = Cpu->ApcFrame;
     NTSTATUS Status;
-    if ((Context->ContextFlags & WOW64_CONTEXT_FULL) != WOW64_CONTEXT_FULL ||
-        (Context->ContextFlags & ~(WOW64_CONTEXT_ALL | WOW64_XSTATE_FLAG)))
+    WOW64_CONTEXT Merged;
+    const WOW64_CONTEXT *Caller = Context;
+    ULONG Flags = Context->ContextFlags, Groups = Flags & 0x3f;
+    if ((Flags & WOW64_CONTEXT_i386) == 0 || (Flags & ~(WOW64_CONTEXT_ALL | WOW64_XSTATE_FLAG)))
         return STATUS_NOT_SUPPORTED;
-    if ((Context->ContextFlags & WOW64_XSTATE_FLAG) && Wow64XStateEnabled())
+    if ((Flags & WOW64_CONTEXT_FULL) != WOW64_CONTEXT_FULL)
+    {
+        /* A context that names only some register groups restores those and leaves the others as the
+         * system call found them (the saved CPU state), as Windows does. Without the control group the
+         * call returns to its caller. In both cases EAX takes the value of the context's, whatever
+         * groups it names. The extended state chunk of a context without the control group is not loaded. */
+        InterlockedExchange(&Cpu->InTransition, 1);
+        if ((Groups & 1) == 0)
+        {
+            Wow64ContextToCpu(Cpu, Context);
+            Cpu->Eax = Context->Eax;
+            Cpu->ContextEaxChanged = TRUE;
+            if (TestAlert) NtTestAlert();
+            return STATUS_SUCCESS;
+        }
+        Wow64CpuToContext(&Merged, Cpu);
+        Wow64CopyContext(&Merged, Context, Groups);
+        if ((Groups & 8) && !(Groups & 32))
+            Wow64LegacyToFloat((XMM_SAVE_AREA32 *)Merged.ExtendedRegisters, &Merged.FloatSave);
+        /* The flags of the control group are restored along with the integer or the extended registers only */
+        if ((Groups & (2 | 32)) == 0) Merged.EFlags = Cpu->EFlags;
+        Merged.Eax = Context->Eax;
+        /* The float and debug registers are restored only when the context names them */
+        Merged.ContextFlags = WOW64_CONTEXT_FULL | ((Groups & (8 | 32)) ? 32 : 0) | (Groups & 16);
+        Context = &Merged;
+    }
+    if ((Flags & WOW64_XSTATE_FLAG) && Wow64XStateEnabled())
     {
         PUCHAR GuestChunk;
         ULONG Length;
 
-        Status = Wow64BuildXStateContext(Context, XBuffer, TRUE, &GuestChunk, &Length);
+        Status = Wow64BuildXStateContext(Caller, XBuffer, TRUE, &GuestChunk, &Length);
         if (!NT_SUCCESS(Status)) return Status;
         (VOID)GuestChunk;
         (VOID)Length;
