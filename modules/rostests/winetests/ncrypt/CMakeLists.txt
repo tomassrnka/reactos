@@ -1,3 +1,5 @@
+add_definitions(-DUSE_WINE_TODOS)
+
 
 add_executable(ncrypt_winetest ncrypt.c)
 set_module_type(ncrypt_winetest win32cui)

@@ -235,57 +235,57 @@ static void _check_properties(int line, NCRYPT_PROV_HANDLE prov, NCRYPT_KEY_HAND
     struct expected_property properties[] =
     {
         /* NCrypt properties */
-        {NCRYPT_NAME_PROPERTY, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
-        {NCRYPT_UNIQUE_NAME_PROPERTY, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
+        {NCRYPT_NAME_PROPERTY, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
+        {NCRYPT_UNIQUE_NAME_PROPERTY, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
         {NCRYPT_ALGORITHM_PROPERTY, {'R', 0, 'S', 0, 'A', 0}, sizeof(L"RSA"), ERROR_SUCCESS},
         {NCRYPT_LENGTH_PROPERTY, {0, 0x4} /* 1024 */, sizeof(DWORD)},
         {NCRYPT_LENGTHS_PROPERTY, {0, 0x2, 0, 0, 0, 0x40, 0, 0, 0x8, 0, 0, 0, 0, 0x4, 0, 0}, sizeof(DWORD) * 4 /* NCRYPT_SUPPORTED_LENGTHS */, ERROR_SUCCESS, FALSE, ERROR_SUCCESS, {0, 0x2, 0, 0, 0, 0x40, 0, 0, 0x40, 0, 0, 0, 0, 0x4, 0, 0}},
         {NCRYPT_BLOCK_LENGTH_PROPERTY, {0x80, 0, 0, 0}, sizeof(DWORD), ERROR_SUCCESS},
-        {NCRYPT_UI_POLICY_PROPERTY, {0}, sizeof(NCRYPT_UI_POLICY), NTE_NOT_FOUND, TRUE},
+        {NCRYPT_UI_POLICY_PROPERTY, {0}, sizeof(NCRYPT_UI_POLICY), NTE_NOT_FOUND, FALSE},
         {NCRYPT_EXPORT_POLICY_PROPERTY, {0}, sizeof(DWORD), ERROR_SUCCESS},
-        {NCRYPT_WINDOW_HANDLE_PROPERTY, {0}, 0, NTE_NOT_FOUND, TRUE},
-        {NCRYPT_USE_CONTEXT_PROPERTY, {0}, 0, NTE_NOT_FOUND, TRUE},
-        {NCRYPT_IMPL_TYPE_PROPERTY, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
+        {NCRYPT_WINDOW_HANDLE_PROPERTY, {0}, 0, NTE_NOT_FOUND, FALSE},
+        {NCRYPT_USE_CONTEXT_PROPERTY, {0}, 0, NTE_NOT_FOUND, FALSE},
+        {NCRYPT_IMPL_TYPE_PROPERTY, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
         {NCRYPT_KEY_USAGE_PROPERTY, {0xff, 0xff, 0xff, 0} /* NCRYPT_ALLOW_ALL_USAGES */, sizeof(DWORD), ERROR_SUCCESS},
         {NCRYPT_KEY_TYPE_PROPERTY, {0}, sizeof(DWORD), ERROR_SUCCESS},
-        {NCRYPT_VERSION_PROPERTY, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
-        {NCRYPT_SECURITY_DESCR_SUPPORT_PROPERTY, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
-        {NCRYPT_SECURITY_DESCR_PROPERTY, {0}, 0, NTE_BAD_FLAGS, TRUE},
-        {NCRYPT_USE_COUNT_ENABLED_PROPERTY, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
-        {NCRYPT_USE_COUNT_PROPERTY, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
-        {NCRYPT_LAST_MODIFIED_PROPERTY, {0}, sizeof(FILETIME), NTE_NOT_FOUND, TRUE},
-        {NCRYPT_WINDOW_HANDLE_PROPERTY, {0}, 0, NTE_NOT_FOUND, TRUE},
-        {NCRYPT_MAX_NAME_LENGTH_PROPERTY, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
+        {NCRYPT_VERSION_PROPERTY, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
+        {NCRYPT_SECURITY_DESCR_SUPPORT_PROPERTY, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
+        {NCRYPT_SECURITY_DESCR_PROPERTY, {0}, 0, NTE_BAD_FLAGS, FALSE},
+        {NCRYPT_USE_COUNT_ENABLED_PROPERTY, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
+        {NCRYPT_USE_COUNT_PROPERTY, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
+        {NCRYPT_LAST_MODIFIED_PROPERTY, {0}, sizeof(FILETIME), NTE_NOT_FOUND, FALSE},
+        {NCRYPT_WINDOW_HANDLE_PROPERTY, {0}, 0, NTE_NOT_FOUND, FALSE},
+        {NCRYPT_MAX_NAME_LENGTH_PROPERTY, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
         {NCRYPT_ALGORITHM_GROUP_PROPERTY, {'R', 0, 'S', 0, 'A', 0}, sizeof(L"RSA")},
         {NCRYPT_PROVIDER_HANDLE_PROPERTY, {0}, sizeof(NCRYPT_PROV_HANDLE), ERROR_SUCCESS},
-        {NCRYPT_PIN_PROPERTY, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
-        {NCRYPT_READER_PROPERTY, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
-        {NCRYPT_SMARTCARD_GUID_PROPERTY, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
-        {NCRYPT_CERTIFICATE_PROPERTY, {0}, 0, NTE_NOT_FOUND, TRUE, NTE_NOT_SUPPORTED /* Win 7 */},
-        {NCRYPT_PIN_PROMPT_PROPERTY, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
-        {NCRYPT_USER_CERTSTORE_PROPERTY, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
-        {NCRYPT_ROOT_CERTSTORE_PROPERTY, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
-        {NCRYPT_SECURE_PIN_PROPERTY, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
-        {NCRYPT_ASSOCIATED_ECDH_KEY, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
-        {NCRYPT_SCARD_PIN_ID, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
-        {NCRYPT_SCARD_PIN_INFO, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
+        {NCRYPT_PIN_PROPERTY, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
+        {NCRYPT_READER_PROPERTY, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
+        {NCRYPT_SMARTCARD_GUID_PROPERTY, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
+        {NCRYPT_CERTIFICATE_PROPERTY, {0}, 0, NTE_NOT_FOUND, FALSE, NTE_NOT_SUPPORTED /* Win 7 */},
+        {NCRYPT_PIN_PROMPT_PROPERTY, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
+        {NCRYPT_USER_CERTSTORE_PROPERTY, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
+        {NCRYPT_ROOT_CERTSTORE_PROPERTY, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
+        {NCRYPT_SECURE_PIN_PROPERTY, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
+        {NCRYPT_ASSOCIATED_ECDH_KEY, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
+        {NCRYPT_SCARD_PIN_ID, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
+        {NCRYPT_SCARD_PIN_INFO, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
         /* BCrypt properties */
-        {BCRYPT_ALGORITHM_NAME, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
-        {BCRYPT_AUTH_TAG_LENGTH, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
-        {BCRYPT_BLOCK_LENGTH, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
-        {BCRYPT_BLOCK_SIZE_LIST, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
-        {BCRYPT_CHAINING_MODE, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
-        {BCRYPT_EFFECTIVE_KEY_LENGTH, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
-        {BCRYPT_HASH_BLOCK_LENGTH, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
-        {BCRYPT_HASH_LENGTH, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
-        {BCRYPT_HASH_OID_LIST, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
-        {BCRYPT_KEY_LENGTH, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
-        {BCRYPT_KEY_LENGTHS, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
-        {BCRYPT_KEY_OBJECT_LENGTH, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
-        {BCRYPT_KEY_STRENGTH, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
-        {BCRYPT_OBJECT_LENGTH, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
-        {BCRYPT_PADDING_SCHEMES, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
-        {BCRYPT_PROVIDER_HANDLE, {0}, 0, NTE_NOT_SUPPORTED, TRUE},
+        {BCRYPT_ALGORITHM_NAME, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
+        {BCRYPT_AUTH_TAG_LENGTH, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
+        {BCRYPT_BLOCK_LENGTH, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
+        {BCRYPT_BLOCK_SIZE_LIST, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
+        {BCRYPT_CHAINING_MODE, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
+        {BCRYPT_EFFECTIVE_KEY_LENGTH, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
+        {BCRYPT_HASH_BLOCK_LENGTH, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
+        {BCRYPT_HASH_LENGTH, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
+        {BCRYPT_HASH_OID_LIST, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
+        {BCRYPT_KEY_LENGTH, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
+        {BCRYPT_KEY_LENGTHS, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
+        {BCRYPT_KEY_OBJECT_LENGTH, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
+        {BCRYPT_KEY_STRENGTH, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
+        {BCRYPT_OBJECT_LENGTH, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
+        {BCRYPT_PADDING_SCHEMES, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
+        {BCRYPT_PROVIDER_HANDLE, {0}, 0, NTE_NOT_SUPPORTED, FALSE},
         {BCRYPT_SIGNATURE_LENGTH, {0x80, 0, 0, 0} /* 128 */, sizeof(DWORD), ERROR_SUCCESS, FALSE, NTE_NOT_SUPPORTED /* <= Win 8 */},
         {BCRYPT_PUBLIC_KEY_LENGTH, {0, 0x4} /* 1024 */, sizeof(DWORD), ERROR_SUCCESS, FALSE, NTE_NOT_SUPPORTED /* <= Win 8 */},
     };
@@ -431,11 +431,8 @@ static void test_set_property(void)
     ret = NCryptSetProperty(0, NCRYPT_LENGTH_PROPERTY, (BYTE *)&keylength, sizeof(keylength), 0);
     ok(ret == NTE_INVALID_HANDLE, "got %#lx\n", ret);
 
-    todo_wine
-    {
     ret = NCryptSetProperty(key, NCRYPT_NAME_PROPERTY, (BYTE *)L"Key name", sizeof(L"Key name"), 0);
     ok(ret == NTE_NOT_SUPPORTED, "got %#lx\n", ret);
-    }
     NCryptFreeObject(key);
 
     key = 0;
@@ -450,14 +447,11 @@ static void test_set_property(void)
     ret = NCryptSetProperty(key, NCRYPT_PROVIDER_HANDLE_PROPERTY, (BYTE *)&prov, sizeof(prov), 0);
     ok(ret == NTE_NOT_SUPPORTED, "got %#lx\n", ret);
 
-    todo_wine
-    {
     ret = NCryptSetProperty(key, NCRYPT_NAME_PROPERTY, (BYTE *)L"Key name", sizeof(L"Key name"), 0);
     ok(ret == NTE_NOT_SUPPORTED, "got %#lx\n", ret);
 
     ret = NCryptSetProperty(key, L"My Custom Property", (BYTE *)L"value", sizeof(L"value"), 0);
     ok(ret == NTE_NOT_SUPPORTED, "got %#lx\n", ret);
-    }
     NCryptFreeObject(key);
     NCryptFreeObject(prov);
 }
@@ -754,7 +748,6 @@ static void test_NCryptEncrypt(void)
     /* Test encrypt with a non finalized key */
     ret = NCryptEncrypt(key, data_to_encrypt, sizeof(data_to_encrypt), NULL, NULL, 0,
                         &output_size, NCRYPT_PAD_PKCS1_FLAG);
-    todo_wine
     ok(ret == NTE_BAD_KEY_STATE, "got %lx\n", ret);
 
     NCryptFinalizeKey(key, 0);
@@ -840,6 +833,285 @@ static void test_NCryptExportKey(void)
     NCryptFreeObject(prov);
 }
 
+static void check_key_dword(NCRYPT_HANDLE key, const WCHAR *name, DWORD expected)
+{
+    DWORD value = 0xdeadbeef, size = 0;
+    SECURITY_STATUS ret;
+
+    ret = NCryptGetProperty(key, name, (BYTE *)&value, sizeof(value), &size, 0);
+    ok(ret == ERROR_SUCCESS, "%s: got %#lx\n", wine_dbgstr_w(name), ret);
+    ok(size == sizeof(DWORD) && value == expected, "%s: got %lu, size %lu, expected %lu\n", wine_dbgstr_w(name),
+       value, size, expected);
+}
+
+static void check_key_string(NCRYPT_HANDLE key, const WCHAR *name, const WCHAR *expected)
+{
+    WCHAR value[64];
+    DWORD size = 0;
+    SECURITY_STATUS ret;
+
+    ret = NCryptGetProperty(key, name, (BYTE *)value, sizeof(value), &size, 0);
+    ok(ret == ERROR_SUCCESS, "%s: got %#lx\n", wine_dbgstr_w(name), ret);
+    ok(size == (lstrlenW(expected) + 1) * sizeof(WCHAR) && !lstrcmpW(value, expected), "%s: got %s\n",
+       wine_dbgstr_w(name), ret ? "" : wine_dbgstr_w(value));
+}
+
+static void check_sign_verify(NCRYPT_KEY_HANDLE key, BOOL rsa, DWORD expected_size)
+{
+    BCRYPT_PKCS1_PADDING_INFO pkcs1 = {BCRYPT_SHA256_ALGORITHM};
+    BCRYPT_PSS_PADDING_INFO pss = {BCRYPT_SHA256_ALGORITHM, 32};
+    BYTE sig[1024];
+    DWORD size = 0;
+    SECURITY_STATUS ret;
+
+    ret = NCryptSignHash(key, rsa ? &pkcs1 : NULL, sha256_hash, sizeof(sha256_hash), NULL, 0, &size,
+                         rsa ? NCRYPT_PAD_PKCS1_FLAG : 0);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    ok(size == expected_size, "got size %lu, expected %lu\n", size, expected_size);
+    ret = NCryptSignHash(key, rsa ? &pkcs1 : NULL, sha256_hash, sizeof(sha256_hash), sig, sizeof(sig), &size,
+                         rsa ? NCRYPT_PAD_PKCS1_FLAG : 0);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    ret = NCryptVerifySignature(key, rsa ? &pkcs1 : NULL, sha256_hash, sizeof(sha256_hash), sig, size,
+                                rsa ? NCRYPT_PAD_PKCS1_FLAG : 0);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    sig[0] ^= 1;
+    ret = NCryptVerifySignature(key, rsa ? &pkcs1 : NULL, sha256_hash, sizeof(sha256_hash), sig, size,
+                                rsa ? NCRYPT_PAD_PKCS1_FLAG : 0);
+    ok(ret == NTE_BAD_SIGNATURE, "got %#lx\n", ret);
+    if (!rsa) return;
+    ret = NCryptSignHash(key, &pss, sha256_hash, sizeof(sha256_hash), sig, sizeof(sig), &size, NCRYPT_PAD_PSS_FLAG);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    ret = NCryptVerifySignature(key, &pss, sha256_hash, sizeof(sha256_hash), sig, size, NCRYPT_PAD_PSS_FLAG);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+}
+
+static void test_NCryptDecrypt(void)
+{
+    BCRYPT_OAEP_PADDING_INFO oaep = {BCRYPT_SHA256_ALGORITHM, NULL, 0};
+    NCRYPT_PROV_HANDLE prov;
+    NCRYPT_KEY_HANDLE key;
+    SECURITY_STATUS ret;
+    BYTE encrypted[256], decrypted[256];
+    DWORD size, size2;
+
+    NCryptOpenStorageProvider(&prov, NULL, 0);
+    NCryptCreatePersistedKey(prov, &key, BCRYPT_RSA_ALGORITHM, NULL, 0, 0);
+    ret = NCryptDecrypt(key, encrypted, 128, NULL, decrypted, sizeof(decrypted), &size, NCRYPT_PAD_PKCS1_FLAG);
+    ok(ret == NTE_INVALID_HANDLE, "got %#lx\n", ret);
+    NCryptFinalizeKey(key, 0);
+
+    ret = NCryptEncrypt(key, data_to_encrypt, sizeof(data_to_encrypt), NULL, encrypted, sizeof(encrypted), &size,
+                        NCRYPT_PAD_PKCS1_FLAG);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    size2 = 0;
+    ret = NCryptDecrypt(key, encrypted, size, NULL, NULL, 0, &size2, NCRYPT_PAD_PKCS1_FLAG);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    ok(size2 >= sizeof(data_to_encrypt), "got size %lu\n", size2);
+    ret = NCryptDecrypt(key, encrypted, size, NULL, decrypted, sizeof(decrypted), &size2, NCRYPT_PAD_PKCS1_FLAG);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    ok(size2 == sizeof(data_to_encrypt) && !memcmp(decrypted, data_to_encrypt, size2), "wrong data, size %lu\n", size2);
+
+    ret = NCryptEncrypt(key, data_to_encrypt, sizeof(data_to_encrypt), &oaep, encrypted, sizeof(encrypted), &size,
+                        NCRYPT_PAD_OAEP_FLAG);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    ret = NCryptDecrypt(key, encrypted, size, &oaep, decrypted, sizeof(decrypted), &size2, NCRYPT_PAD_OAEP_FLAG);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    ok(size2 == sizeof(data_to_encrypt) && !memcmp(decrypted, data_to_encrypt, size2), "wrong data, size %lu\n", size2);
+
+    ret = NCryptDecrypt(prov, encrypted, size, &oaep, decrypted, sizeof(decrypted), &size2, NCRYPT_PAD_OAEP_FLAG);
+    ok(ret == NTE_INVALID_HANDLE, "got %#lx\n", ret);
+
+    NCryptFreeObject(key);
+    NCryptFreeObject(prov);
+}
+
+static void test_rsa_import_export(void)
+{
+    static BYTE blob[2048], pkcs8[2048];
+    DWORD policy = NCRYPT_ALLOW_EXPORT_FLAG | NCRYPT_ALLOW_PLAINTEXT_EXPORT_FLAG, size, pkcs8_size;
+    NCRYPT_PROV_HANDLE prov;
+    NCRYPT_KEY_HANDLE key, imported;
+    SECURITY_STATUS ret;
+    BYTE value;
+
+    NCryptOpenStorageProvider(&prov, MS_KEY_STORAGE_PROVIDER, 0);
+    ok(NCryptIsKeyHandle(prov) == FALSE, "provider is a key handle\n");
+    check_key_string(prov, NCRYPT_NAME_PROPERTY, MS_KEY_STORAGE_PROVIDER);
+    check_key_dword(prov, NCRYPT_IMPL_TYPE_PROPERTY, NCRYPT_IMPL_SOFTWARE_FLAG);
+
+    NCryptCreatePersistedKey(prov, &key, BCRYPT_RSA_ALGORITHM, NULL, 0, 0);
+    size = 2048;
+    NCryptSetProperty(key, NCRYPT_LENGTH_PROPERTY, (BYTE *)&size, sizeof(size), 0);
+    NCryptSetProperty(key, NCRYPT_EXPORT_POLICY_PROPERTY, (BYTE *)&policy, sizeof(policy), 0);
+    ret = NCryptFinalizeKey(key, 0);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    ok(NCryptIsKeyHandle(key) == TRUE, "not a key handle\n");
+    check_key_dword(key, NCRYPT_LENGTH_PROPERTY, 2048);
+    check_key_dword(key, NCRYPT_BLOCK_LENGTH_PROPERTY, 256);
+    check_key_dword(key, BCRYPT_SIGNATURE_LENGTH, 256);
+    check_sign_verify(key, TRUE, 256);
+
+    /* what RSACng.ImportParameters does */
+    ret = NCryptExportKey(key, 0, BCRYPT_RSAPRIVATE_BLOB, NULL, blob, sizeof(blob), &size, 0);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    ret = NCryptImportKey(prov, 0, BCRYPT_RSAPRIVATE_BLOB, NULL, &imported, blob, size, 0);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    check_key_dword(imported, NCRYPT_LENGTH_PROPERTY, 2048);
+    check_key_dword(imported, NCRYPT_EXPORT_POLICY_PROPERTY, 0);
+    ret = NCryptSetProperty(imported, NCRYPT_EXPORT_POLICY_PROPERTY, (BYTE *)&policy, sizeof(policy), 0);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    ret = NCryptExportKey(imported, 0, BCRYPT_RSAFULLPRIVATE_BLOB, NULL, NULL, 0, &size, 0);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    check_sign_verify(imported, TRUE, 256);
+
+    /* the custom properties of .NET */
+    value = 1;
+    ret = NCryptSetProperty(imported, L"CLR IsEphemeral", &value, 1, NCRYPT_PERSIST_ONLY_FLAG);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    value = 0;
+    size = 0;
+    ret = NCryptGetProperty(imported, L"CLR IsEphemeral", &value, 1, &size, NCRYPT_PERSIST_ONLY_FLAG);
+    ok(ret == ERROR_SUCCESS && size == 1 && value == 1, "got %#lx, size %lu, value %u\n", ret, size, value);
+    ret = NCryptGetProperty(imported, L"CLR IsEphemeral", &value, 1, &size, 0);
+    ok(ret == NTE_NOT_SUPPORTED, "got %#lx\n", ret);
+    NCryptFreeObject(imported);
+
+    /* PKCS #8 */
+    pkcs8_size = 0;
+    ret = NCryptExportKey(key, 0, NCRYPT_PKCS8_PRIVATE_KEY_BLOB, NULL, NULL, 0, &pkcs8_size, 0);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    ok(pkcs8_size > 1200 && pkcs8_size < 1230, "got size %lu\n", pkcs8_size);
+    ret = NCryptExportKey(key, 0, NCRYPT_PKCS8_PRIVATE_KEY_BLOB, NULL, pkcs8, 16, &size, 0);
+    ok(ret == HRESULT_FROM_WIN32(ERROR_MORE_DATA), "got %#lx\n", ret);
+    ret = NCryptExportKey(key, 0, NCRYPT_PKCS8_PRIVATE_KEY_BLOB, NULL, pkcs8, sizeof(pkcs8), &pkcs8_size, 0);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    ok(pkcs8[0] == 0x30 && pkcs8[1] == 0x82, "got %02x %02x\n", pkcs8[0], pkcs8[1]);
+    ret = NCryptImportKey(prov, 0, NCRYPT_PKCS8_PRIVATE_KEY_BLOB, NULL, &imported, pkcs8, pkcs8_size, 0);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    check_key_string(imported, NCRYPT_ALGORITHM_GROUP_PROPERTY, NCRYPT_RSA_ALGORITHM_GROUP);
+    check_key_dword(imported, NCRYPT_LENGTH_PROPERTY, 2048);
+    check_sign_verify(imported, TRUE, 256);
+    NCryptFreeObject(imported);
+    ret = NCryptImportKey(prov, 0, NCRYPT_PKCS8_PRIVATE_KEY_BLOB, NULL, &imported, pkcs8, pkcs8_size - 1, 0);
+    ok(ret == CRYPT_E_BAD_ENCODE, "got %#lx\n", ret);
+
+    /* an imported key that is not finalized yet */
+    ret = NCryptExportKey(key, 0, BCRYPT_RSAPRIVATE_BLOB, NULL, blob, sizeof(blob), &size, 0);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    ret = NCryptImportKey(prov, 0, BCRYPT_RSAPRIVATE_BLOB, NULL, &imported, blob, size, NCRYPT_DO_NOT_FINALIZE_FLAG);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    ret = NCryptSetProperty(imported, NCRYPT_EXPORT_POLICY_PROPERTY, (BYTE *)&policy, sizeof(policy), 0);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    ret = NCryptFinalizeKey(imported, 0);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    ret = NCryptExportKey(imported, 0, BCRYPT_RSAFULLPRIVATE_BLOB, NULL, NULL, 0, &size, 0);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    NCryptFreeObject(imported);
+
+    NCryptFreeObject(key);
+    NCryptFreeObject(prov);
+}
+
+static void test_ecc_keys(void)
+{
+    static const struct
+    {
+        const WCHAR *alg;
+        const WCHAR *group;
+        DWORD bits;
+        DWORD sig_size;
+        DWORD blob_size;
+    }
+    tests[] =
+    {
+        { BCRYPT_ECDSA_P256_ALGORITHM, NCRYPT_ECDSA_ALGORITHM_GROUP, 256, 64, 104 },
+        { BCRYPT_ECDSA_P384_ALGORITHM, NCRYPT_ECDSA_ALGORITHM_GROUP, 384, 96, 152 },
+        { BCRYPT_ECDSA_P521_ALGORITHM, NCRYPT_ECDSA_ALGORITHM_GROUP, 521, 132, 206 },
+        { BCRYPT_ECDH_P256_ALGORITHM, NCRYPT_ECDH_ALGORITHM_GROUP, 256, 0, 104 },
+    };
+    static BYTE blob[512], pkcs8[512];
+    DWORD policy = NCRYPT_ALLOW_EXPORT_FLAG | NCRYPT_ALLOW_PLAINTEXT_EXPORT_FLAG, size, pkcs8_size;
+    NCRYPT_PROV_HANDLE prov;
+    NCRYPT_KEY_HANDLE key, imported;
+    NCRYPT_SUPPORTED_LENGTHS lengths;
+    SECURITY_STATUS ret;
+    unsigned int i;
+
+    NCryptOpenStorageProvider(&prov, MS_KEY_STORAGE_PROVIDER, 0);
+    for (i = 0; i < ARRAY_SIZE(tests); i++)
+    {
+        winetest_push_context("%s", wine_dbgstr_w(tests[i].alg));
+        ret = NCryptCreatePersistedKey(prov, &key, tests[i].alg, NULL, 0, 0);
+        ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+        if (ret)
+        {
+            winetest_pop_context();
+            continue;
+        }
+        NCryptSetProperty(key, NCRYPT_EXPORT_POLICY_PROPERTY, (BYTE *)&policy, sizeof(policy), 0);
+        ret = NCryptFinalizeKey(key, 0);
+        ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+        check_key_string(key, NCRYPT_ALGORITHM_PROPERTY, tests[i].alg);
+        check_key_string(key, NCRYPT_ALGORITHM_GROUP_PROPERTY, tests[i].group);
+        check_key_dword(key, NCRYPT_LENGTH_PROPERTY, tests[i].bits);
+        check_key_dword(key, BCRYPT_PUBLIC_KEY_LENGTH, tests[i].bits);
+        ret = NCryptGetProperty(key, NCRYPT_LENGTHS_PROPERTY, (BYTE *)&lengths, sizeof(lengths), &size, 0);
+        ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+        ok(lengths.dwMinLength == tests[i].bits && lengths.dwMaxLength == tests[i].bits && !lengths.dwIncrement &&
+           lengths.dwDefaultLength == tests[i].bits, "got %lu %lu %lu %lu\n", lengths.dwMinLength,
+           lengths.dwMaxLength, lengths.dwIncrement, lengths.dwDefaultLength);
+        ret = NCryptGetProperty(key, BCRYPT_ECC_CURVE_NAME, blob, sizeof(blob), &size, 0);
+        ok(ret == NTE_NOT_FOUND, "got %#lx\n", ret);
+        if (tests[i].sig_size)
+        {
+            check_key_dword(key, BCRYPT_SIGNATURE_LENGTH, tests[i].sig_size);
+            check_sign_verify(key, FALSE, tests[i].sig_size);
+        }
+
+        ret = NCryptExportKey(key, 0, BCRYPT_ECCPRIVATE_BLOB, NULL, blob, sizeof(blob), &size, 0);
+        ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+        ok(size == tests[i].blob_size, "got size %lu\n", size);
+        ret = NCryptImportKey(prov, 0, BCRYPT_ECCPRIVATE_BLOB, NULL, &imported, blob, size, 0);
+        ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+        if (!ret)
+        {
+            check_key_string(imported, NCRYPT_ALGORITHM_PROPERTY, tests[i].alg);
+            check_key_dword(imported, NCRYPT_LENGTH_PROPERTY, tests[i].bits);
+            if (tests[i].sig_size) check_sign_verify(imported, FALSE, tests[i].sig_size);
+            NCryptFreeObject(imported);
+        }
+
+        pkcs8_size = 0;
+        ret = NCryptExportKey(key, 0, NCRYPT_PKCS8_PRIVATE_KEY_BLOB, NULL, pkcs8, sizeof(pkcs8), &pkcs8_size, 0);
+        ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+        ret = NCryptImportKey(prov, 0, NCRYPT_PKCS8_PRIVATE_KEY_BLOB, NULL, &imported, pkcs8, pkcs8_size, 0);
+        ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+        if (!ret)
+        {
+            check_key_dword(imported, NCRYPT_LENGTH_PROPERTY, tests[i].bits);
+            if (tests[i].sig_size) check_sign_verify(imported, FALSE, tests[i].sig_size);
+            NCryptFreeObject(imported);
+        }
+        NCryptFreeObject(key);
+        winetest_pop_context();
+    }
+
+    /* the generic algorithm takes the curve from a property */
+    ret = NCryptCreatePersistedKey(prov, &key, BCRYPT_ECDSA_ALGORITHM, NULL, 0, 0);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    ret = NCryptSetProperty(key, BCRYPT_ECC_CURVE_NAME, (BYTE *)L"nistP384", sizeof(L"nistP384"), 0);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    ret = NCryptFinalizeKey(key, 0);
+    ok(ret == ERROR_SUCCESS, "got %#lx\n", ret);
+    check_key_string(key, NCRYPT_ALGORITHM_PROPERTY, BCRYPT_ECDSA_ALGORITHM);
+    check_key_string(key, BCRYPT_ECC_CURVE_NAME, L"nistP384");
+    check_key_dword(key, NCRYPT_LENGTH_PROPERTY, 384);
+    check_sign_verify(key, FALSE, 96);
+    NCryptFreeObject(key);
+
+    NCryptFreeObject(prov);
+}
+
 START_TEST(ncrypt)
 {
     test_key_import_rsa();
@@ -852,4 +1124,7 @@ START_TEST(ncrypt)
     test_NCryptIsAlgSupported();
     test_NCryptEncrypt();
     test_NCryptExportKey();
+    test_NCryptDecrypt();
+    test_rsa_import_export();
+    test_ecc_keys();
 }

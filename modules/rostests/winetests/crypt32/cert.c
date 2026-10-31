@@ -29,6 +29,7 @@
 #include <winerror.h>
 #include <wincrypt.h>
 #include <bcrypt.h>
+#include <ncrypt.h>
 
 #include "wine/test.h"
 
@@ -4712,6 +4713,267 @@ static void test_VerifySignature(void)
 #endif
 }
 
+static SECURITY_STATUS (WINAPI *pNCryptOpenStorageProvider)(NCRYPT_PROV_HANDLE *, const WCHAR *, DWORD);
+static SECURITY_STATUS (WINAPI *pNCryptCreatePersistedKey)(NCRYPT_PROV_HANDLE, NCRYPT_KEY_HANDLE *, const WCHAR *,
+                                                          const WCHAR *, DWORD, DWORD);
+static SECURITY_STATUS (WINAPI *pNCryptFinalizeKey)(NCRYPT_KEY_HANDLE, DWORD);
+static SECURITY_STATUS (WINAPI *pNCryptFreeObject)(NCRYPT_HANDLE);
+static SECURITY_STATUS (WINAPI *pNCryptGetProperty)(NCRYPT_HANDLE, const WCHAR *, BYTE *, DWORD, DWORD *, DWORD);
+
+static NCRYPT_KEY_HANDLE create_ncrypt_key(NCRYPT_PROV_HANDLE prov)
+{
+    NCRYPT_KEY_HANDLE key = 0;
+    SECURITY_STATUS status;
+
+    status = pNCryptCreatePersistedKey(prov, &key, BCRYPT_RSA_ALGORITHM, NULL, 0, 0);
+    ok(!status, "NCryptCreatePersistedKey failed %#lx\n", status);
+    status = pNCryptFinalizeKey(key, 0);
+    ok(!status, "NCryptFinalizeKey failed %#lx\n", status);
+    return key;
+}
+
+/* the key handle still works (the certificate did not release it) */
+static BOOL ncrypt_key_alive(NCRYPT_KEY_HANDLE key)
+{
+    WCHAR group[16];
+    DWORD size;
+
+    return !pNCryptGetProperty(key, L"Algorithm Group", (BYTE *)group, sizeof(group), &size, 0);
+}
+
+static NCRYPT_KEY_HANDLE get_ncrypt_key_prop(PCCERT_CONTEXT cert, DWORD id, DWORD *err)
+{
+    NCRYPT_KEY_HANDLE value = 0;
+    DWORD size = sizeof(value);
+
+    SetLastError(0xdeadbeef);
+    if (!CertGetCertificateContextProperty(cert, id, &value, &size))
+    {
+        *err = GetLastError();
+        return 0;
+    }
+    ok(size == sizeof(value), "got size %lu\n", size);
+    *err = 0;
+    return value;
+}
+
+static void test_ncrypt_key_handle(void)
+{
+    static const DWORD cache_flags[] = { CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG | CRYPT_ACQUIRE_CACHE_FLAG,
+        CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG | CRYPT_ACQUIRE_USE_PROV_INFO_FLAG,
+        CRYPT_ACQUIRE_PREFER_NCRYPT_KEY_FLAG | CRYPT_ACQUIRE_CACHE_FLAG,
+        CRYPT_ACQUIRE_ALLOW_NCRYPT_KEY_FLAG | CRYPT_ACQUIRE_CACHE_FLAG };
+    static const DWORD nocache_flags[] = { 0, CRYPT_ACQUIRE_CACHE_FLAG, CRYPT_ACQUIRE_USE_PROV_INFO_FLAG,
+        CRYPT_ACQUIRE_ALLOW_NCRYPT_KEY_FLAG, CRYPT_ACQUIRE_PREFER_NCRYPT_KEY_FLAG, CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG };
+    HMODULE ncrypt = LoadLibraryA("ncrypt.dll");
+    NCRYPT_PROV_HANDLE prov;
+    NCRYPT_KEY_HANDLE key, key2, value;
+    HCRYPTPROV_OR_NCRYPT_KEY_HANDLE handle;
+    PCCERT_CONTEXT cert, dup, copy;
+    CERT_KEY_CONTEXT keyContext;
+    CRYPT_KEY_PROV_INFO info;
+    DWORD size, size_plain, spec, err, id;
+    SECURITY_STATUS status;
+    HCERTSTORE store;
+    BOOL ret, callerFree;
+    unsigned int i;
+
+    pNCryptOpenStorageProvider = (void *)GetProcAddress(ncrypt, "NCryptOpenStorageProvider");
+    pNCryptCreatePersistedKey = (void *)GetProcAddress(ncrypt, "NCryptCreatePersistedKey");
+    pNCryptFinalizeKey = (void *)GetProcAddress(ncrypt, "NCryptFinalizeKey");
+    pNCryptFreeObject = (void *)GetProcAddress(ncrypt, "NCryptFreeObject");
+    pNCryptGetProperty = (void *)GetProcAddress(ncrypt, "NCryptGetProperty");
+    if (!pNCryptOpenStorageProvider)
+    {
+        win_skip("ncrypt is not available\n");
+        return;
+    }
+    status = pNCryptOpenStorageProvider(&prov, MS_KEY_STORAGE_PROVIDER, 0);
+    ok(!status, "NCryptOpenStorageProvider failed %#lx\n", status);
+
+    cert = CertCreateCertificateContext(X509_ASN_ENCODING, selfSignedCert, sizeof(selfSignedCert));
+    ok(cert != NULL, "CertCreateCertificateContext failed %lu\n", GetLastError());
+    value = get_ncrypt_key_prop(cert, CERT_NCRYPT_KEY_HANDLE_PROP_ID, &err);
+    ok(!value && err == CRYPT_E_NOT_FOUND, "got %#Ix, error %#lx\n", value, err);
+    size_plain = 0;
+    ret = CertSerializeCertificateStoreElement(cert, 0, NULL, &size_plain);
+    ok(ret, "CertSerializeCertificateStoreElement failed %lu\n", GetLastError());
+
+    /* the handle itself is the property value (what .NET does for an ephemeral CNG key) */
+    key = create_ncrypt_key(prov);
+    ret = CertSetCertificateContextProperty(cert, CERT_NCRYPT_KEY_HANDLE_PROP_ID,
+     CERT_SET_PROPERTY_INHIBIT_PERSIST_FLAG, (void *)key);
+    ok(ret, "CertSetCertificateContextProperty failed %lu\n", GetLastError());
+    id = CertEnumCertificateContextProperties(cert, 0);
+    ok(id == CERT_KEY_CONTEXT_PROP_ID, "got property %lu\n", id);
+    ok(!CertEnumCertificateContextProperties(cert, id), "expected one property\n");
+    value = get_ncrypt_key_prop(cert, CERT_NCRYPT_KEY_HANDLE_PROP_ID, &err);
+    ok(value == key, "got %#Ix, error %#lx\n", value, err);
+    value = get_ncrypt_key_prop(cert, CERT_HCRYPTPROV_OR_NCRYPT_KEY_HANDLE_PROP_ID, &err);
+    ok(value == key, "got %#Ix, error %#lx\n", value, err);
+    value = get_ncrypt_key_prop(cert, CERT_KEY_PROV_HANDLE_PROP_ID, &err);
+    ok(!value && err == CRYPT_E_NOT_FOUND, "got %#Ix, error %#lx\n", value, err);
+    size = sizeof(keyContext);
+    ret = CertGetCertificateContextProperty(cert, CERT_KEY_CONTEXT_PROP_ID, &keyContext, &size);
+    ok(ret, "CertGetCertificateContextProperty failed %lu\n", GetLastError());
+    ok(size == sizeof(keyContext) && keyContext.cbSize == sizeof(keyContext), "got size %lu/%lu\n", size, keyContext.cbSize);
+    ok(keyContext.hCryptProv == key, "got %#Ix\n", keyContext.hCryptProv);
+    ok(keyContext.dwKeySpec == CERT_NCRYPT_KEY_SPEC, "got %#lx\n", keyContext.dwKeySpec);
+    size = sizeof(spec);
+    ret = CertGetCertificateContextProperty(cert, CERT_KEY_SPEC_PROP_ID, &spec, &size);
+    ok(ret && spec == CERT_NCRYPT_KEY_SPEC, "got %d, %#lx\n", ret, spec);
+    size = 0;
+    ret = CertGetCertificateContextProperty(cert, CERT_KEY_PROV_INFO_PROP_ID, NULL, &size);
+    ok(!ret && GetLastError() == CRYPT_E_NOT_FOUND, "got %d, error %#lx\n", ret, GetLastError());
+    /* the key context is never serialized */
+    size = 0;
+    ret = CertSerializeCertificateStoreElement(cert, 0, NULL, &size);
+    ok(ret && size == size_plain, "got %d, size %lu, expected %lu\n", ret, size, size_plain);
+
+    /* without the key provider info only the cached key is returned, only to NCrypt callers */
+    for (i = 0; i < ARRAY_SIZE(nocache_flags); i++)
+    {
+        handle = 0xdeadbeef;
+        spec = 0xdeadbeef;
+        callerFree = 7;
+        SetLastError(0xdeadbeef);
+        ret = CryptAcquireCertificatePrivateKey(cert, nocache_flags[i], NULL, &handle, &spec, &callerFree);
+        ok(!ret && GetLastError() == CRYPT_E_NO_KEY_PROPERTY, "%#lx: got %d, error %#lx\n", nocache_flags[i], ret, GetLastError());
+        ok(!handle, "%#lx: got handle %#Ix\n", nocache_flags[i], handle);
+        ok(!spec && !callerFree, "%#lx: got spec %#lx, callerFree %d\n", nocache_flags[i], spec, callerFree);
+    }
+    for (i = 0; i < ARRAY_SIZE(cache_flags); i++)
+    {
+        handle = 0;
+        spec = 0;
+        callerFree = TRUE;
+        ret = CryptAcquireCertificatePrivateKey(cert, cache_flags[i], NULL, &handle, &spec, &callerFree);
+        ok(ret, "%#lx: CryptAcquireCertificatePrivateKey failed %#lx\n", cache_flags[i], GetLastError());
+        ok(handle == key, "%#lx: got handle %#Ix\n", cache_flags[i], handle);
+        ok(spec == CERT_NCRYPT_KEY_SPEC, "%#lx: got spec %#lx\n", cache_flags[i], spec);
+        ok(!callerFree, "%#lx: expected the certificate to keep the key\n", cache_flags[i]);
+    }
+    ok(ncrypt_key_alive(key), "key released\n");
+
+    /* duplicates share it, a copy in a store does not get it, a link does */
+    dup = CertDuplicateCertificateContext(cert);
+    ok(dup == cert, "got %p\n", dup);
+    CertFreeCertificateContext(dup);
+    ok(ncrypt_key_alive(key), "key released\n");
+    store = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0, 0, NULL);
+    ret = CertAddCertificateContextToStore(store, cert, CERT_STORE_ADD_ALWAYS, &copy);
+    ok(ret, "CertAddCertificateContextToStore failed %lu\n", GetLastError());
+    value = get_ncrypt_key_prop(copy, CERT_NCRYPT_KEY_HANDLE_PROP_ID, &err);
+    ok(!value && err == CRYPT_E_NOT_FOUND, "got %#Ix, error %#lx\n", value, err);
+    size = sizeof(keyContext);
+    ret = CertGetCertificateContextProperty(copy, CERT_KEY_CONTEXT_PROP_ID, &keyContext, &size);
+    ok(!ret && GetLastError() == CRYPT_E_NOT_FOUND, "got %d, error %#lx\n", ret, GetLastError());
+    CertFreeCertificateContext(copy);
+    ret = CertAddCertificateLinkToStore(store, cert, CERT_STORE_ADD_ALWAYS, &copy);
+    ok(ret, "CertAddCertificateLinkToStore failed %lu\n", GetLastError());
+    value = get_ncrypt_key_prop(copy, CERT_NCRYPT_KEY_HANDLE_PROP_ID, &err);
+    ok(value == key, "got %#Ix, error %#lx\n", value, err);
+    CertFreeCertificateContext(copy);
+    CertCloseStore(store, 0);
+    ok(ncrypt_key_alive(key), "key released\n");
+
+    /* the certificate releases the key with itself */
+    CertFreeCertificateContext(cert);
+    ok(!ncrypt_key_alive(key), "key not released\n");
+
+    /* ... unless asked not to */
+    cert = CertCreateCertificateContext(X509_ASN_ENCODING, selfSignedCert, sizeof(selfSignedCert));
+    key = create_ncrypt_key(prov);
+    ret = CertSetCertificateContextProperty(cert, CERT_NCRYPT_KEY_HANDLE_PROP_ID, CERT_STORE_NO_CRYPT_RELEASE_FLAG,
+     (void *)key);
+    ok(ret, "CertSetCertificateContextProperty failed %lu\n", GetLastError());
+    CertFreeCertificateContext(cert);
+    ok(ncrypt_key_alive(key), "key released\n");
+    pNCryptFreeObject(key);
+
+    /* replacing or removing the key releases it */
+    cert = CertCreateCertificateContext(X509_ASN_ENCODING, selfSignedCert, sizeof(selfSignedCert));
+    key = create_ncrypt_key(prov);
+    key2 = create_ncrypt_key(prov);
+    CertSetCertificateContextProperty(cert, CERT_NCRYPT_KEY_HANDLE_PROP_ID, 0, (void *)key);
+    ret = CertSetCertificateContextProperty(cert, CERT_NCRYPT_KEY_HANDLE_PROP_ID, 0, (void *)key2);
+    ok(ret, "CertSetCertificateContextProperty failed %lu\n", GetLastError());
+    ok(!ncrypt_key_alive(key), "first key not released\n");
+    ok(ncrypt_key_alive(key2), "second key released\n");
+    ret = CertSetCertificateContextProperty(cert, CERT_NCRYPT_KEY_HANDLE_PROP_ID, 0, NULL);
+    ok(ret, "CertSetCertificateContextProperty failed %lu\n", GetLastError());
+    ok(!ncrypt_key_alive(key2), "second key not released\n");
+    value = get_ncrypt_key_prop(cert, CERT_NCRYPT_KEY_HANDLE_PROP_ID, &err);
+    ok(!value && err == CRYPT_E_NOT_FOUND, "got %#Ix, error %#lx\n", value, err);
+    key = create_ncrypt_key(prov);
+    CertSetCertificateContextProperty(cert, CERT_NCRYPT_KEY_HANDLE_PROP_ID, 0, (void *)key);
+    ret = CertSetCertificateContextProperty(cert, CERT_KEY_CONTEXT_PROP_ID, 0, NULL);
+    ok(ret, "CertSetCertificateContextProperty failed %lu\n", GetLastError());
+    ok(!ncrypt_key_alive(key), "key not released\n");
+
+    /* a key context with CERT_NCRYPT_KEY_SPEC is the same thing */
+    key = create_ncrypt_key(prov);
+    keyContext.cbSize = sizeof(keyContext);
+    keyContext.hCryptProv = key;
+    keyContext.dwKeySpec = CERT_NCRYPT_KEY_SPEC;
+    ret = CertSetCertificateContextProperty(cert, CERT_KEY_CONTEXT_PROP_ID, 0, &keyContext);
+    ok(ret, "CertSetCertificateContextProperty failed %lu\n", GetLastError());
+    value = get_ncrypt_key_prop(cert, CERT_NCRYPT_KEY_HANDLE_PROP_ID, &err);
+    ok(value == key, "got %#Ix, error %#lx\n", value, err);
+
+    /* the transfer property hands the key over */
+    value = get_ncrypt_key_prop(cert, CERT_NCRYPT_KEY_HANDLE_TRANSFER_PROP_ID, &err);
+    ok(value == key, "got %#Ix, error %#lx\n", value, err);
+    ok(!CertEnumCertificateContextProperties(cert, 0), "expected no property\n");
+    CertFreeCertificateContext(cert);
+    ok(ncrypt_key_alive(key), "key released\n");
+    pNCryptFreeObject(key);
+
+    /* a CNG key provider info needs an NCrypt flag; the cached key is returned with the cache flag */
+    memset(&info, 0, sizeof(info));
+    info.pwszContainerName = (WCHAR *)L"wine-crypt32-test-nonexistent-key";
+    info.pwszProvName = (WCHAR *)MS_KEY_STORAGE_PROVIDER;
+    cert = CertCreateCertificateContext(X509_ASN_ENCODING, selfSignedCert, sizeof(selfSignedCert));
+    ret = CertSetCertificateContextProperty(cert, CERT_KEY_PROV_INFO_PROP_ID, 0, &info);
+    ok(ret, "CertSetCertificateContextProperty failed %lu\n", GetLastError());
+    SetLastError(0xdeadbeef);
+    ret = CryptAcquireCertificatePrivateKey(cert, 0, NULL, &handle, &spec, &callerFree);
+    ok(!ret && GetLastError() == NTE_BAD_PROV_TYPE, "got %d, error %#lx\n", ret, GetLastError());
+    SetLastError(0xdeadbeef);
+    ret = CryptAcquireCertificatePrivateKey(cert, CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG, NULL, &handle, &spec, &callerFree);
+    ok(!ret && GetLastError() == NTE_BAD_KEYSET, "got %d, error %#lx\n", ret, GetLastError());
+    ok(spec == CERT_NCRYPT_KEY_SPEC, "got spec %#lx\n", spec);
+    key = create_ncrypt_key(prov);
+    CertSetCertificateContextProperty(cert, CERT_NCRYPT_KEY_HANDLE_PROP_ID, 0, (void *)key);
+    size = 0;
+    ret = CertGetCertificateContextProperty(cert, CERT_KEY_PROV_INFO_PROP_ID, NULL, &size);
+    ok(ret, "the key provider info is gone\n");
+    handle = 0;
+    ret = CryptAcquireCertificatePrivateKey(cert, CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG | CRYPT_ACQUIRE_CACHE_FLAG, NULL,
+     &handle, &spec, &callerFree);
+    ok(ret && handle == key && spec == CERT_NCRYPT_KEY_SPEC && !callerFree, "got %d, %#Ix, %#lx, %d\n", ret, handle,
+     spec, callerFree);
+    SetLastError(0xdeadbeef);
+    ret = CryptAcquireCertificatePrivateKey(cert, CRYPT_ACQUIRE_CACHE_FLAG, NULL, &handle, &spec, &callerFree);
+    ok(!ret && GetLastError() == NTE_BAD_PROV_TYPE, "got %d, error %#lx\n", ret, GetLastError());
+    CertFreeCertificateContext(cert);
+    ok(!ncrypt_key_alive(key), "key not released\n");
+
+    /* a CryptoAPI key asked for as an NCrypt key only */
+    info.pwszProvName = (WCHAR *)MS_ENH_RSA_AES_PROV_W;
+    info.dwProvType = PROV_RSA_AES;
+    info.dwKeySpec = AT_KEYEXCHANGE;
+    cert = CertCreateCertificateContext(X509_ASN_ENCODING, selfSignedCert, sizeof(selfSignedCert));
+    CertSetCertificateContextProperty(cert, CERT_KEY_PROV_INFO_PROP_ID, 0, &info);
+    SetLastError(0xdeadbeef);
+    ret = CryptAcquireCertificatePrivateKey(cert, CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG, NULL, &handle, &spec, &callerFree);
+    ok(!ret && GetLastError() == NTE_BAD_KEYSET, "got %d, error %#lx\n", ret, GetLastError());
+    CertFreeCertificateContext(cert);
+
+    pNCryptFreeObject(prov);
+    FreeLibrary(ncrypt);
+}
+
 START_TEST(cert)
 {
     testAddCert();
@@ -4745,4 +5007,5 @@ START_TEST(cert)
     testGetPublicKeyLength();
     testIsRDNAttrsInCertificateName();
     test_VerifySignature();
+    test_ncrypt_key_handle();
 }
