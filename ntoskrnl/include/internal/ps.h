@@ -121,6 +121,11 @@
 #define PSP_JOB_TERMINATING     0x00000080
 
 //
+// Maximum depth of a job hierarchy (nested jobs), the root job included
+//
+#define PSP_JOB_MAX_NESTING     32
+
+//
 // Thread "Set/Get Context" Context Structure
 //
 typedef struct _GET_SET_CTX_CONTEXT
@@ -473,6 +478,14 @@ NTAPI
 PspAssignProcessToJob(
     _In_ PEPROCESS Process,
     _In_ PEJOB Job
+);
+
+NTSTATUS
+NTAPI
+PspSelectJobForNewProcess(
+    _In_ PEJOB ParentJob,
+    _In_ BOOLEAN Breakaway,
+    _Out_ PEJOB *TargetJob
 );
 
 VOID
