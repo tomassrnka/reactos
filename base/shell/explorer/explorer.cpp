@@ -148,6 +148,47 @@ IsExplorerSystemShell()
 }
 
 #if !WIN7_COMPAT_MODE
+/* "explorer.exe <file>" runs the file (a shortcut starts its target) instead of browsing to it */
+static BOOL
+TryExecuteNonFolder(IN const EXPLORER_CMDLINE_PARSE_RESULTS *pResults, OUT PBOOL pbResult)
+{
+    if (!pResults->pidlPath ||
+        (pResults->dwFlags & (SH_EXPLORER_CMDLINE_FLAG_SELECT | SH_EXPLORER_CMDLINE_FLAG_EMBED |
+                              SH_EXPLORER_CMDLINE_FLAG_INPROC)))
+    {
+        return FALSE;
+    }
+
+    SFGAOF attrs = SFGAO_FOLDER | SFGAO_FILESYSTEM;
+    {
+        CComPtr<IShellFolder> psfParent;
+        PCUITEMID_CHILD pidlChild;
+        if (FAILED(SHBindToParent(pResults->pidlPath, IID_PPV_ARG(IShellFolder, &psfParent), &pidlChild)) ||
+            FAILED(psfParent->GetAttributesOf(1, &pidlChild, &attrs)) || (attrs & SFGAO_FOLDER))
+        {
+            return FALSE;
+        }
+    }
+
+    WCHAR szPath[MAX_PATH];
+    SHELLEXECUTEINFOW sei = { sizeof(sei) };
+    sei.fMask = SEE_MASK_NOASYNC;
+    sei.nShow = SW_SHOWNORMAL;
+    if ((attrs & SFGAO_FILESYSTEM) && SHGetPathFromIDListW(pResults->pidlPath, szPath))
+    {
+        sei.lpFile = szPath;
+    }
+    else
+    {
+        sei.fMask |= SEE_MASK_INVOKEIDLIST;
+        sei.lpIDList = const_cast<LPITEMIDLIST>(pResults->pidlPath);
+    }
+    OleInitialize(NULL);
+    *pbResult = ShellExecuteExW(&sei);
+    OleUninitialize();
+    return TRUE;
+}
+
 static INT
 StartWithCommandLine(IN HINSTANCE hInstance)
 {
@@ -155,7 +196,10 @@ StartWithCommandLine(IN HINSTANCE hInstance)
     EXPLORER_CMDLINE_PARSE_RESULTS parseResults = { 0 };
 
     if (SHExplorerParseCmdLine(&parseResults))
-        b = SHCreateFromDesktop(&parseResults);
+    {
+        if (!TryExecuteNonFolder(&parseResults, &b))
+            b = SHCreateFromDesktop(&parseResults);
+    }
 
     if (parseResults.strPath)
         SHFree(parseResults.strPath);
