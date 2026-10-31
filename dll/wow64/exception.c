@@ -505,15 +505,21 @@ NTSTATUS Wow64RaiseException(const EXCEPTION_RECORD32 *Record, const WOW64_CONTE
 {
     EXCEPTION_RECORD NativeRecord = {0};
     CONTEXT NativeContext;
-    ULONG i;
-    if (Record->NumberParameters > EXCEPTION_MAXIMUM_PARAMETERS) return STATUS_INVALID_PARAMETER;
+    ULONG i, Count;
+    /* The record is guest memory: read the count once and bound the copy by that value.
+     * A larger count is not an error for a 32-bit caller on Windows: the exception is raised
+     * with the parameters a record holds. Clamp it, as the native kernel takes no more. */
+    Count = *(volatile const ULONG *)&Record->NumberParameters;
+    /* Deliberate divergence: the handler is passed this clamped count (at most 15), not the raw
+     * guest count that Windows passes through to the handler. */
+    if (Count > EXCEPTION_MAXIMUM_PARAMETERS) Count = EXCEPTION_MAXIMUM_PARAMETERS;
     RtlCaptureContext(&NativeContext);
     Wow64ContextToNative(&NativeContext, Context);
     NativeRecord.ExceptionCode = Record->ExceptionCode;
     NativeRecord.ExceptionFlags = Record->ExceptionFlags;
     NativeRecord.ExceptionAddress = PTR32(Record->ExceptionAddress);
-    NativeRecord.NumberParameters = Record->NumberParameters;
-    for (i = 0; i < Record->NumberParameters; ++i)
+    NativeRecord.NumberParameters = Count;
+    for (i = 0; i < Count; ++i)
         NativeRecord.ExceptionInformation[i] = Record->ExceptionInformation[i];
     InterlockedExchange(&((WOW64_CPU_STATE *)NtCurrentTeb()->TlsSlots[WOW64_TLS_CPU])->InTransition, 1);
     return NtRaiseException(&NativeRecord, &NativeContext, FirstChance);

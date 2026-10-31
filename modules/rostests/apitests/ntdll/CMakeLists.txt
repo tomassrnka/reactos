@@ -66,6 +66,7 @@ list(APPEND SOURCE
     NtConnectPortTerminate.c
     NtContinue.c
     Wow64Continue.c
+    Wow64ServiceArguments.c
     NtCreateDirectoryObject.c
     NtCreateFile.c
     NtCreateKey.c
