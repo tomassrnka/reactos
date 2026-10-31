@@ -250,8 +250,7 @@ static void test_if_table2(IF_TABLE2 *Table)
         if (Row->OperStatus == OPER_UP)
             ok(Row->MediaConnectState == MEDIA_CONNECTED, "Row %lu: up but media state %d\n",
                i, Row->MediaConnectState);
-        if (!is_loopback(Row))
-            ok(Row->InterfaceIndex != 0, "Row %lu has no index\n", i);
+        ok(Row->InterfaceIndex != 0, "Row %lu has no index\n", i);
 
         if (is_loopback(Row))
         {
@@ -338,8 +337,6 @@ static void test_if_entry2(const IF_TABLE2 *Table)
         ok(!memcmp(&ByLuid.InterfaceGuid, &Expected->InterfaceGuid, sizeof(GUID)), "Guid differs\n");
         ok(ByLuid.OperStatus == Expected->OperStatus, "Oper status differs\n");
 
-        if (!Expected->InterfaceIndex)
-            continue;
         memset(&Row, 0, sizeof(Row));
         Row.InterfaceIndex = Expected->InterfaceIndex;
         Error = pGetIfEntry2(&Row);
@@ -782,6 +779,266 @@ static void test_names(const IF_TABLE2 *IfTable)
     ok(Error == ERROR_INVALID_PARAMETER, "ConvertInterfaceLuidToIndex(NULL): %lu\n", Error);
 }
 
+#ifndef GAA_FLAG_INCLUDE_ALL_INTERFACES
+#define GAA_FLAG_INCLUDE_ALL_INTERFACES 0x100
+#endif
+#define LOOPBACK_INDEX 1
+
+/* The loopback interface is index 1 with the luid 0x0018000000000000 in every table, as on Windows 10 */
+static void test_loopback_index(const IF_TABLE2 *IfTable)
+{
+    const IF_ROW2 *Loop = NULL;
+    IF_ROW2 Row;
+    MIB_IFTABLE *Old = NULL;
+    MIB_IFROW OldRow;
+    NET_LUID Luid;
+    ULONG i, j, Index, Size, Count;
+    DWORD Error;
+    char Name[64];
+
+    for (i = 0; i < IfTable->NumEntries; i++)
+    {
+        if (is_loopback(&IfTable->Table[i]))
+        {
+            ok(Loop == NULL, "More than one loopback interface\n");
+            Loop = &IfTable->Table[i];
+        }
+    }
+    ok(Loop != NULL, "No loopback interface in GetIfTable2\n");
+    if (!Loop)
+        return;
+    ok(Loop->InterfaceIndex == LOOPBACK_INDEX, "GetIfTable2: loopback index %lu\n", Loop->InterfaceIndex);
+    ok(Loop->InterfaceLuid.Value == LOOPBACK_LUID, "GetIfTable2: loopback luid %I64x\n", Loop->InterfaceLuid.Value);
+
+    /* GetIfEntry2 by index, and the two failure modes */
+    memset(&Row, 0, sizeof(Row));
+    Row.InterfaceIndex = LOOPBACK_INDEX;
+    Error = pGetIfEntry2(&Row);
+    ok(Error == NO_ERROR, "GetIfEntry2(index 1): %lu\n", Error);
+    ok(Row.InterfaceLuid.Value == LOOPBACK_LUID, "GetIfEntry2(index 1): luid %I64x\n", Row.InterfaceLuid.Value);
+    ok(Row.Type == IF_TYPE_SOFTWARE_LOOPBACK, "GetIfEntry2(index 1): type %lu\n", Row.Type);
+    ok(Row.InterfaceIndex == LOOPBACK_INDEX, "GetIfEntry2(index 1): index %lu\n", Row.InterfaceIndex);
+    ok(Row.OperStatus == OPER_UP, "GetIfEntry2(index 1): oper status %d\n", Row.OperStatus);
+    ok(Row.Mtu > 0, "GetIfEntry2(index 1): MTU\n");
+    memset(&Row, 0, sizeof(Row));
+    Error = pGetIfEntry2(&Row);
+    ok(Error == ERROR_INVALID_PARAMETER, "GetIfEntry2(index 0, luid 0): %lu\n", Error);
+
+    /* the conversions */
+    memset(&Luid, 0x55, sizeof(Luid));
+    Error = pConvertInterfaceIndexToLuid(LOOPBACK_INDEX, &Luid);
+    ok(Error == NO_ERROR, "ConvertInterfaceIndexToLuid(1): %lu\n", Error);
+    ok(Luid.Value == LOOPBACK_LUID, "ConvertInterfaceIndexToLuid(1): %I64x\n", Luid.Value);
+    Error = pConvertInterfaceIndexToLuid(0, &Luid);
+    ok(Error == ERROR_FILE_NOT_FOUND, "ConvertInterfaceIndexToLuid(0): %lu\n", Error);
+    Luid.Value = LOOPBACK_LUID;
+    Index = 0x55555555;
+    Error = pConvertInterfaceLuidToIndex(&Luid, &Index);
+    ok(Error == NO_ERROR && Index == LOOPBACK_INDEX, "ConvertInterfaceLuidToIndex: %lu, index %lu\n", Error, Index);
+    Error = pConvertInterfaceLuidToNameA(&Luid, Name, sizeof(Name));
+    ok(Error == NO_ERROR && !strcmp(Name, "loopback_0"), "ConvertInterfaceLuidToNameA: %lu, %s\n", Error, Name);
+    memset(&Luid, 0, sizeof(Luid));
+    Error = pConvertInterfaceNameToLuidA("loopback_0", &Luid);
+    ok(Error == NO_ERROR && Luid.Value == LOOPBACK_LUID, "ConvertInterfaceNameToLuidA: %lu, %I64x\n", Error, Luid.Value);
+    ok(pif_nametoindex("loopback_0") == LOOPBACK_INDEX, "if_nametoindex(loopback_0): %lu\n", pif_nametoindex("loopback_0"));
+    Name[0] = 0;
+    ok(pif_indextoname(LOOPBACK_INDEX, Name) != NULL && !strcmp(Name, "loopback_0"), "if_indextoname(1): %s\n", Name);
+
+    /* GetIfTable and GetIfEntry */
+    Size = 0;
+    Error = GetIfTable(NULL, &Size, FALSE);
+    ok(Error == ERROR_INSUFFICIENT_BUFFER, "GetIfTable(size): %lu\n", Error);
+    Old = malloc(Size ? Size : 1);
+    Error = Old ? GetIfTable(Old, &Size, FALSE) : ERROR_NOT_ENOUGH_MEMORY;
+    ok(Error == NO_ERROR, "GetIfTable: %lu\n", Error);
+    if (Error == NO_ERROR)
+    {
+        BOOL Found = FALSE;
+
+        for (i = 0; i < Old->dwNumEntries; i++)
+        {
+            ok(Old->table[i].dwIndex != 0, "GetIfTable row %lu has index 0\n", i);
+            for (j = i + 1; j < Old->dwNumEntries; j++)
+                ok(Old->table[i].dwIndex != Old->table[j].dwIndex, "GetIfTable rows %lu and %lu share index %lu\n",
+                   i, j, Old->table[i].dwIndex);
+            if (Old->table[i].dwType == IF_TYPE_SOFTWARE_LOOPBACK)
+            {
+                Found = TRUE;
+                ok(Old->table[i].dwIndex == LOOPBACK_INDEX, "GetIfTable: loopback index %lu\n", Old->table[i].dwIndex);
+                ok(Old->table[i].dwOperStatus == IF_OPER_STATUS_OPERATIONAL, "GetIfTable: loopback status %lu\n",
+                   Old->table[i].dwOperStatus);
+            }
+            /* the two tables list the same interfaces */
+            for (j = 0; j < IfTable->NumEntries; j++)
+                if (IfTable->Table[j].InterfaceIndex == Old->table[i].dwIndex)
+                    break;
+            ok(j < IfTable->NumEntries, "GetIfTable index %lu is not in GetIfTable2\n", Old->table[i].dwIndex);
+        }
+        ok(Found, "No loopback row in GetIfTable\n");
+        ok(Old->dwNumEntries == IfTable->NumEntries, "GetIfTable has %lu rows, GetIfTable2 %lu\n",
+           Old->dwNumEntries, IfTable->NumEntries);
+    }
+    memset(&OldRow, 0, sizeof(OldRow));
+    OldRow.dwIndex = LOOPBACK_INDEX;
+    Error = GetIfEntry(&OldRow);
+    ok(Error == NO_ERROR, "GetIfEntry(1): %lu\n", Error);
+    ok(OldRow.dwType == IF_TYPE_SOFTWARE_LOOPBACK, "GetIfEntry(1): type %lu\n", OldRow.dwType);
+    memset(&OldRow, 0, sizeof(OldRow));
+    Error = GetIfEntry(&OldRow);
+    ok(Error != NO_ERROR, "GetIfEntry(0) succeeded\n");
+
+    /* GetAdaptersAddresses lists it too */
+    {
+        PIP_ADAPTER_ADDRESSES Buffer = NULL, Adapter;
+        BOOL Found = FALSE;
+
+        Size = 0;
+        Error = ERROR_BUFFER_OVERFLOW;
+        for (i = 0; i < 3 && Error == ERROR_BUFFER_OVERFLOW; i++)
+        {
+            free(Buffer);
+            Buffer = Size ? malloc(Size) : NULL;
+            Error = GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_INCLUDE_ALL_INTERFACES, NULL, Buffer, &Size);
+        }
+        ok(Error == NO_ERROR, "GetAdaptersAddresses(all interfaces): %lu\n", Error);
+        for (Adapter = Error == NO_ERROR ? Buffer : NULL; Adapter; Adapter = Adapter->Next)
+        {
+            IP_ADAPTER_ADDRESSES_LH *Lh = (IP_ADAPTER_ADDRESSES_LH *)Adapter;
+
+            ok(Adapter->IfIndex != 0, "Adapter %s has index 0\n", Adapter->AdapterName);
+            if (Adapter->IfType != IF_TYPE_SOFTWARE_LOOPBACK)
+                continue;
+            Found = TRUE;
+            ok(Adapter->IfIndex == LOOPBACK_INDEX, "GetAdaptersAddresses: loopback index %lu\n", Adapter->IfIndex);
+            if (Adapter->Length >= FIELD_OFFSET(IP_ADAPTER_ADDRESSES_LH, Luid) + sizeof(NET_LUID))
+                ok(Lh->Luid.Value == LOOPBACK_LUID, "GetAdaptersAddresses: loopback luid %I64x\n", Lh->Luid.Value);
+            ok(adapter_has_address(Adapter, LOOPBACK_INDEX, htonl(INADDR_LOOPBACK)),
+               "GetAdaptersAddresses: no 127.0.0.1 on the loopback adapter\n");
+        }
+        ok(Found, "GetAdaptersAddresses(all interfaces) has no loopback adapter\n");
+        free(Buffer);
+    }
+
+    /* the IP interface and address tables */
+    {
+        IPIF_TABLE *Interfaces = SENTINEL;
+        UNI_TABLE *Addresses = SENTINEL;
+        BOOL Found = FALSE;
+
+        Error = pGetIpInterfaceTable(AF_INET, &Interfaces);
+        ok(Error == NO_ERROR, "GetIpInterfaceTable: %lu\n", Error);
+        if (Error == NO_ERROR)
+        {
+            for (i = 0; i < Interfaces->NumEntries; i++)
+            {
+                ok(Interfaces->Table[i].InterfaceIndex != 0, "IP interface row %lu has index 0\n", i);
+                if (Interfaces->Table[i].InterfaceLuid.Value == LOOPBACK_LUID)
+                {
+                    Found = TRUE;
+                    ok(Interfaces->Table[i].InterfaceIndex == LOOPBACK_INDEX, "GetIpInterfaceTable: loopback index %lu\n",
+                       Interfaces->Table[i].InterfaceIndex);
+                }
+            }
+            ok(Found, "GetIpInterfaceTable has no loopback\n");
+            pFreeMibTable(Interfaces);
+        }
+        memset(&Row, 0, sizeof(Row));
+        {
+            IPIF_ROW IpRow;
+
+            pInitializeIpInterfaceEntry(&IpRow);
+            IpRow.Family = AF_INET;
+            IpRow.InterfaceIndex = LOOPBACK_INDEX;
+            Error = pGetIpInterfaceEntry(&IpRow);
+            ok(Error == NO_ERROR, "GetIpInterfaceEntry(v4, index 1): %lu\n", Error);
+            ok(IpRow.InterfaceLuid.Value == LOOPBACK_LUID, "GetIpInterfaceEntry(index 1): luid %I64x\n",
+               IpRow.InterfaceLuid.Value);
+        }
+
+        Found = FALSE;
+        Error = pGetUnicastIpAddressTable(AF_INET, &Addresses);
+        ok(Error == NO_ERROR, "GetUnicastIpAddressTable: %lu\n", Error);
+        if (Error == NO_ERROR)
+        {
+            for (i = 0; i < Addresses->NumEntries; i++)
+            {
+                ok(Addresses->Table[i].InterfaceIndex != 0, "Unicast row %lu has index 0\n", i);
+                if (Addresses->Table[i].Address.Ipv4.sin_addr.s_addr == htonl(INADDR_LOOPBACK))
+                {
+                    Found = TRUE;
+                    ok(Addresses->Table[i].InterfaceIndex == LOOPBACK_INDEX, "127.0.0.1 is on index %lu\n",
+                       Addresses->Table[i].InterfaceIndex);
+                    ok(Addresses->Table[i].InterfaceLuid.Value == LOOPBACK_LUID, "127.0.0.1 is on luid %I64x\n",
+                       Addresses->Table[i].InterfaceLuid.Value);
+                }
+            }
+            ok(Found, "GetUnicastIpAddressTable has no 127.0.0.1\n");
+            pFreeMibTable(Addresses);
+        }
+    }
+
+    /* the address table, the routes and the best interface: the same indexes as the interface table */
+    {
+        MIB_IPADDRTABLE *Addrs = NULL;
+        MIB_IPFORWARDTABLE *Routes = NULL;
+        DWORD Best = 0x55555555;
+        IPAddr Loopback = htonl(INADDR_LOOPBACK);
+        BOOL Found = FALSE;
+
+        Size = 0;
+        GetIpAddrTable(NULL, &Size, FALSE);
+        Addrs = malloc(Size ? Size : 1);
+        Error = Addrs ? GetIpAddrTable(Addrs, &Size, FALSE) : ERROR_NOT_ENOUGH_MEMORY;
+        ok(Error == NO_ERROR, "GetIpAddrTable: %lu\n", Error);
+        for (i = 0; Error == NO_ERROR && i < Addrs->dwNumEntries; i++)
+        {
+            for (j = 0; j < IfTable->NumEntries; j++)
+                if (IfTable->Table[j].InterfaceIndex == Addrs->table[i].dwIndex)
+                    break;
+            ok(j < IfTable->NumEntries, "GetIpAddrTable index %lu is not in GetIfTable2\n", Addrs->table[i].dwIndex);
+            if (Addrs->table[i].dwAddr == Loopback)
+            {
+                Found = TRUE;
+                ok(Addrs->table[i].dwIndex == LOOPBACK_INDEX, "GetIpAddrTable: 127.0.0.1 on index %lu\n",
+                   Addrs->table[i].dwIndex);
+            }
+        }
+        ok(Found, "GetIpAddrTable has no 127.0.0.1\n");
+        free(Addrs);
+
+        Size = 0;
+        GetIpForwardTable(NULL, &Size, FALSE);
+        Routes = malloc(Size ? Size : 1);
+        Error = Routes ? GetIpForwardTable(Routes, &Size, FALSE) : ERROR_NOT_ENOUGH_MEMORY;
+        ok(Error == NO_ERROR, "GetIpForwardTable: %lu\n", Error);
+        Count = 0;
+        for (i = 0; Error == NO_ERROR && i < Routes->dwNumEntries; i++)
+        {
+            const MIB_IPFORWARDROW *Route = &Routes->table[i];
+
+            for (j = 0; j < IfTable->NumEntries; j++)
+                if (IfTable->Table[j].InterfaceIndex == Route->dwForwardIfIndex)
+                    break;
+            ok(j < IfTable->NumEntries, "Route %08lx has index %lu, which is not in GetIfTable2\n",
+               Route->dwForwardDest, Route->dwForwardIfIndex);
+            /* a route that covers 127.0.0.1 and leaves through the loopback address: the /8, /32 or both
+               (Windows has 127.0.0.0/8, 127.0.0.1/32 and the broadcast, the stack here the /8) */
+            if ((Loopback & Route->dwForwardMask) == Route->dwForwardDest && Route->dwForwardMask != 0 &&
+                Route->dwForwardNextHop == Loopback)
+            {
+                Count++;
+                ok(Route->dwForwardIfIndex == LOOPBACK_INDEX, "Route to 127.0.0.1: index %lu\n", Route->dwForwardIfIndex);
+            }
+        }
+        ok(Count >= 1, "No route to 127.0.0.1\n");
+        free(Routes);
+
+        Error = GetBestInterface(Loopback, &Best);
+        ok(Error == NO_ERROR, "GetBestInterface(127.0.0.1): %lu\n", Error);
+        ok(Best == LOOPBACK_INDEX, "GetBestInterface(127.0.0.1): %lu\n", Best);
+    }
+}
+
 START_TEST(IpInterface)
 {
     HMODULE hIphlpapi = GetModuleHandleW(L"iphlpapi.dll");
@@ -867,6 +1124,7 @@ START_TEST(IpInterface)
     test_adapters_addresses();
     test_unicast(IfTable);
     test_names(IfTable);
+    test_loopback_index(IfTable);
 
     pFreeMibTable(IfTable);
 }

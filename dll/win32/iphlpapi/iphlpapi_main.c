@@ -3025,7 +3025,7 @@ DWORD WINAPI SetIpNetEntry(PMIB_IPNETROW pArpEntry)
   if (!NT_SUCCESS(openTcpFile( &tcpFile, FILE_READ_DATA | FILE_WRITE_DATA )))
       return ERROR_NOT_SUPPORTED;
 
-  if (!NT_SUCCESS(getNthIpEntity( tcpFile, pArpEntry->dwIndex, &id )))
+  if (!NT_SUCCESS(getIpEntityByIfIndex( tcpFile, pArpEntry->dwIndex, &id )))
   {
       closeTcpFile(tcpFile);
       return ERROR_INVALID_PARAMETER;
