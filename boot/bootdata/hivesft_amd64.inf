@@ -1,0 +1,15 @@
+[Version]
+Signature = "$Windows NT$"
+
+[AddReg]
+
+; The 32-bit view of the Mesa3D OpenGL driver registration of hivesft.inf. HKLM\SOFTWARE is redirected to
+; SOFTWARE\Wow6432Node for 32-bit processes and neither key is shared, so without these the opengl32 of SysWOW64
+; finds no driver and gives 32-bit programs the built-in OpenGL 1.1. libgallium_wgl.dll resolves to the i386
+; driver in SysWOW64 (boot/bootdata/packages/syswow64.lst), as Windows registers 32-bit ICDs.
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers\Mesa3D","Dll",0x00000000,"libgallium_wgl.dll"
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers\Mesa3D","Version",0x00010001,0x00000001
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers\Mesa3D","DriverVersion",0x00010001,0x00000001
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers\Mesa3D","Flags",0x00010001,0x00000001
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers\Mesa3D","RequiresSSE2",0x00010001,0x00000001
+HKLM,"SOFTWARE\Wow6432Node\ReactOS\OpenGL",,0x00000000,"Mesa3D"

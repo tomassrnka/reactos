@@ -26,6 +26,11 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/hivevcrt_${ARCH}.inf)
     add_registry_inf(hivevcrt_${ARCH}.inf)
 endif()
 
+# Software hive keys of the architecture (amd64: the 32-bit view of system registrations)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/hivesft_${ARCH}.inf)
+    add_registry_inf(hivesft_${ARCH}.inf)
+endif()
+
 # Regtest
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/bootcdregtest/regtest.cmd DESTINATION reactos/bin FOR all)
 
