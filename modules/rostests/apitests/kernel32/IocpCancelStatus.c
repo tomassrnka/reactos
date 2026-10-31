@@ -11,8 +11,7 @@
  * until then OVERLAPPED.Internal is still STATUS_PENDING and HasOverlappedIoCompleted is FALSE.
  * A request on a handle without a port is cancelled, and its status block written, when its thread exits.
  *
- * Not tested, because reactos-nitro still differs: Windows does not cancel a port only request when the
- * thread that issued it exits (it stays pending and completes later as usual); nitro cancels it.
+ * A port only request is not cancelled when the thread that issued it exits: see IocpThreadExit.
  */
 
 #include "precomp.h"

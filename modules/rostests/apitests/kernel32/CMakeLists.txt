@@ -16,6 +16,7 @@ list(APPEND SOURCE
     BindIoCompletionCallback.c
     CancelIoEx.c
     IocpCancelStatus.c
+    IocpThreadExit.c
     ApplicationRestart.c
     AppModel.c
     CalendarInfo.c

@@ -19,6 +19,11 @@
 #define IRP_WOW64_IO_STATUS 0x80000000
 #endif
 
+/* Private I/O-manager IRP flag: set (interlocked) by the final
+ * IofCompleteRequest of an IRP that has a thread. IoCancelThreadIo does not
+ * detach a port-only request whose completion has started (irp.c). */
+#define IRP_COMPLETION_CLAIMED  0x20000000
+
 //
 // Define this if you want debugging support
 //
@@ -1069,6 +1074,14 @@ VOID
 NTAPI
 IopWriteDeferredPortIosb(
     IN PIRP Irp
+);
+
+BOOLEAN
+NTAPI
+IopCancelDetachedIrps(
+    IN PEPROCESS Process,
+    IN PFILE_OBJECT FileObject,
+    IN PIO_STATUS_BLOCK IoRequestToCancel OPTIONAL
 );
 
 //

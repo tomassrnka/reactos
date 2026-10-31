@@ -19,6 +19,7 @@ extern void func_ActCtxWithXmlNamespaces(void);
 extern void func_BindIoCompletionCallback(void);
 extern void func_CancelIoEx(void);
 extern void func_IocpCancelStatus(void);
+extern void func_IocpThreadExit(void);
 extern void func_ApplicationRestart(void);
 extern void func_AppModel(void);
 extern void func_CalendarInfo(void);
@@ -210,6 +211,7 @@ const struct test winetest_testlist[] =
     { "BindIoCompletionCallback",    func_BindIoCompletionCallback },
     { "CancelIoEx",                  func_CancelIoEx },
     { "IocpCancelStatus",            func_IocpCancelStatus },
+    { "IocpThreadExit",              func_IocpThreadExit },
     { "ApplicationRestart",          func_ApplicationRestart },
     { "AppModel",                    func_AppModel },
     { "CalendarInfo",                func_CalendarInfo },
