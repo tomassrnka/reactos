@@ -28,5 +28,8 @@ UserEmptyClipboard(VOID);
 VOID NTAPI
 UserEmptyClipboardData(struct _WINSTATION_OBJECT *pWinSta);
 
+VOID NTAPI
+UserClipboardFreeListeners(struct _WINSTATION_OBJECT *pWinSta);
+
 HANDLE NTAPI
 UserSetClipboardData(UINT fmt, HANDLE hData, PSETCLIPBDATA scd);

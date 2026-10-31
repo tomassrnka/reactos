@@ -140,6 +140,103 @@ IntIsClipboardOpenByMe(PWINSTATION_OBJECT pWinSta)
             pWinSta->ptiClipLock == PsGetCurrentThreadWin32Thread());
 }
 
+/* A window registered with AddClipboardFormatListener. The entry holds a reference
+   on the window and a back-pointer to the window station it belongs to (the one of the
+   window's desktop). All entries live in one list, newest first, so that a window can be
+   unregistered when it is freed without going through its desktop (which may already be
+   gone) and regardless of the clipboard access of the freeing thread. The list is
+   protected by the USER lock. Entries never outlive their window station:
+   UserClipboardFreeListeners drains them when it is deleted. */
+typedef struct _CLIPBOARD_LISTENER
+{
+    LIST_ENTRY ListEntry;
+    PWND pwnd;
+    PWINSTATION_OBJECT pWinSta;
+} CLIPBOARD_LISTENER, *PCLIPBOARD_LISTENER;
+
+static LIST_ENTRY gClipboardListenerList = { &gClipboardListenerList, &gClipboardListenerList };
+
+/* Find the entry of a window; pWinSta may be NULL to match any window station */
+static PCLIPBOARD_LISTENER FASTCALL
+IntFindClipboardListener(PWINSTATION_OBJECT pWinSta, PWND pWindow)
+{
+    PLIST_ENTRY pEntry;
+    PCLIPBOARD_LISTENER pListener;
+
+    for (pEntry = gClipboardListenerList.Flink;
+         pEntry != &gClipboardListenerList;
+         pEntry = pEntry->Flink)
+    {
+        pListener = CONTAINING_RECORD(pEntry, CLIPBOARD_LISTENER, ListEntry);
+        if (pListener->pwnd == pWindow && (!pWinSta || pListener->pWinSta == pWinSta))
+            return pListener;
+    }
+
+    return NULL;
+}
+
+static VOID FASTCALL
+IntFreeClipboardListener(PCLIPBOARD_LISTENER pListener)
+{
+    RemoveEntryList(&pListener->ListEntry);
+    UserDereferenceObject(pListener->pwnd);
+    ExFreePoolWithTag(pListener, USERTAG_CLIPBOARD);
+}
+
+/* Windows 10 registers only windows of the calling process. For any other window it
+   returns ERROR_ACCESS_DENIED as the result without setting the last error and
+   without registering it (measured on 22H2, including the desktop window). A window
+   outside the caller's window station gets the same answer. */
+static BOOL FASTCALL
+IntIsClipboardListenerCandidate(PWINSTATION_OBJECT pWinSta, PWND pWindow)
+{
+    return pWindow->head.pti &&
+           pWindow->head.pti->ppi == PsGetCurrentProcessWin32Process() &&
+           pWindow->head.rpdesk &&
+           pWindow->head.rpdesk->rpwinstaParent == pWinSta;
+}
+
+/* A clipboard change is announced as on Windows: WM_DRAWCLIPBOARD (wParam = the
+   clipboard owner) to the head of the viewer chain first, then WM_CLIPBOARDUPDATE
+   (wParam = number of formats) posted to every listener, newest registration first. */
+static VOID FASTCALL
+co_IntNotifyClipboardChange(PWINSTATION_OBJECT pWinSta)
+{
+    PLIST_ENTRY pEntry;
+    PCLIPBOARD_LISTENER pListener;
+    HWND hWndOwner = NULL;
+    DWORD dwLastError;
+
+    if (pWinSta->spwndClipOwner)
+        hWndOwner = UserHMGetHandle(pWinSta->spwndClipOwner);
+
+    if (pWinSta->spwndClipViewer)
+    {
+        TRACE("Clipboard: sending WM_DRAWCLIPBOARD to %p\n", UserHMGetHandle(pWinSta->spwndClipViewer));
+        // For 32-bit applications this message is sent as a notification
+        co_IntSendMessageNoWait(UserHMGetHandle(pWinSta->spwndClipViewer), WM_DRAWCLIPBOARD, (WPARAM)hWndOwner, 0);
+    }
+
+    /* The send above may have called back into user mode, so walk the list only now.
+       Posting does not call back: the list cannot change while it is walked. The post
+       must not clobber the last error of the caller (CloseClipboard and friends). */
+    dwLastError = EngGetLastError();
+    for (pEntry = gClipboardListenerList.Flink;
+         pEntry != &gClipboardListenerList;
+         pEntry = pEntry->Flink)
+    {
+        pListener = CONTAINING_RECORD(pEntry, CLIPBOARD_LISTENER, ListEntry);
+        if (pListener->pWinSta != pWinSta)
+            continue;
+        if ((pListener->pwnd->state & WNDS_DESTROYED) ||
+            (pListener->pwnd->head.pti &&
+             (pListener->pwnd->head.pti->TIF_flags & TIF_INCLEANUP)))
+            continue;
+        UserPostMessage(UserHMGetHandle(pListener->pwnd), WM_CLIPBOARDUPDATE, pWinSta->cNumClipFormats, 0);
+    }
+    EngSetLastError(dwLastError);
+}
+
 static VOID NTAPI
 IntSynthesizeDib(
     PWINSTATION_OBJECT pWinStaObj,
@@ -359,6 +456,22 @@ IntAddSynthesizedFormats(PWINSTATION_OBJECT pWinStaObj)
         IntSynthesizeDib(pWinStaObj, IntGetFormatElement(pWinStaObj, CF_BITMAP)->hData);
 }
 
+/* The clipboard was changed and is released: add the synthesized formats (each one
+   advances the sequence number, as on Windows) and announce the change */
+static VOID FASTCALL
+co_IntClipboardChangeDone(PWINSTATION_OBJECT pWinStaObj)
+{
+    DWORD cFormats = pWinStaObj->cNumClipFormats;
+
+    /* Add synthesized formats - they are rendered later */
+    IntAddSynthesizedFormats(pWinStaObj);
+    if (pWinStaObj->cNumClipFormats > cFormats)
+        pWinStaObj->iClipSequenceNumber += pWinStaObj->cNumClipFormats - cFormats;
+
+    pWinStaObj->fClipboardChanged = FALSE;
+    co_IntNotifyClipboardChange(pWinStaObj);
+}
+
 VOID NTAPI
 UserEmptyClipboardData(PWINSTATION_OBJECT pWinSta)
 {
@@ -401,21 +514,31 @@ UserClipboardRelease(PWND pWindow)
     }
 
     if (pWinStaObj->fClipboardChanged)
-    {
-        /* Add synthesized formats - they are rendered later */
-        IntAddSynthesizedFormats(pWinStaObj);
-
-        /* Notify viewer windows in chain */
-        pWinStaObj->fClipboardChanged = FALSE;
-        if (pWinStaObj->spwndClipViewer)
-        {
-            TRACE("Clipboard: sending WM_DRAWCLIPBOARD to %p\n", UserHMGetHandle(pWinStaObj->spwndClipViewer));
-            // For 32-bit applications this message is sent as a notification
-            co_IntSendMessageNoWait(UserHMGetHandle(pWinStaObj->spwndClipViewer), WM_DRAWCLIPBOARD, 0, 0);
-        }
-    }
+        co_IntClipboardChangeDone(pWinStaObj);
 
     ObDereferenceObject(pWinStaObj);
+}
+
+/* Forget a window that is being freed in a window station's clipboard state */
+static VOID FASTCALL
+IntClipboardForgetWindow(PWINSTATION_OBJECT pWinSta, PWND pWindow)
+{
+    if (pWindow == pWinSta->spwndClipOwner)
+    {
+        /* The owner window was destroyed */
+        pWinSta->spwndClipOwner = NULL;
+    }
+
+    /* Check if clipboard is not locked by this window, if yes, unlock it */
+    if (pWindow == pWinSta->spwndClipOpen)
+    {
+        /* The window that opens the clipboard was destroyed */
+        pWinSta->spwndClipOpen = NULL;
+        pWinSta->ptiClipLock = NULL;
+    }
+    /* Remove window from window chain */
+    if (pWindow == pWinSta->spwndClipViewer)
+        pWinSta->spwndClipViewer = NULL;
 }
 
 /* UserClipboardFreeWindow is called from co_UserFreeWindow in window.c */
@@ -423,27 +546,31 @@ VOID FASTCALL
 UserClipboardFreeWindow(PWND pWindow)
 {
     PWINSTATION_OBJECT pWinStaObj;
+    PWINSTATION_OBJECT pWinStaOwn = NULL;
+    PCLIPBOARD_LISTENER pListener;
 
+    /* Drop the window from the listeners, whichever window station it was registered in */
+    pListener = IntFindClipboardListener(NULL, pWindow);
+    if (pListener)
+        IntFreeClipboardListener(pListener);
+
+    /* Clear the clipboard pointers of the window's own window station. This must not
+       depend on the window station or the access of the thread that frees the window:
+       a thread that switched its window station or lacks WINSTA_ACCESSCLIPBOARD would
+       leave stale owner/open/viewer pointers behind. */
+    if (pWindow->head.rpdesk)
+        pWinStaOwn = pWindow->head.rpdesk->rpwinstaParent;
+    if (pWinStaOwn)
+        IntClipboardForgetWindow(pWinStaOwn, pWindow);
+
+    /* The thread's own window station may hold the window too (a window of another
+       window station can be passed to OpenClipboard) */
     pWinStaObj = IntGetWinStaForCbAccess();
     if (!pWinStaObj)
         return;
 
-    if (pWindow == pWinStaObj->spwndClipOwner)
-    {
-        /* The owner window was destroyed */
-        pWinStaObj->spwndClipOwner = NULL;
-    }
-
-    /* Check if clipboard is not locked by this window, if yes, unlock it */
-    if (pWindow == pWinStaObj->spwndClipOpen)
-    {
-        /* The window that opens the clipboard was destroyed */
-        pWinStaObj->spwndClipOpen = NULL;
-        pWinStaObj->ptiClipLock = NULL;
-    }
-    /* Remove window from window chain */
-    if (pWindow == pWinStaObj->spwndClipViewer)
-        pWinStaObj->spwndClipViewer = NULL;
+    if (pWinStaObj != pWinStaOwn)
+        IntClipboardForgetWindow(pWinStaObj, pWindow);
 
     ObDereferenceObject(pWinStaObj);
 }
@@ -573,19 +700,7 @@ UserCloseClipboard(VOID)
     bRet = TRUE;
 
     if (pWinStaObj->fClipboardChanged)
-    {
-        /* Add synthesized formats - they are rendered later */
-        IntAddSynthesizedFormats(pWinStaObj);
-
-        /* Notify viewer windows in chain */
-        pWinStaObj->fClipboardChanged = FALSE;
-        if (pWinStaObj->spwndClipViewer)
-        {
-            TRACE("Clipboard: sending WM_DRAWCLIPBOARD to %p\n", UserHMGetHandle(pWinStaObj->spwndClipViewer));
-            // For 32-bit applications this message is sent as a notification
-            co_IntSendMessageNoWait(UserHMGetHandle(pWinStaObj->spwndClipViewer), WM_DRAWCLIPBOARD, 0, 0);
-        }
-    }
+        co_IntClipboardChangeDone(pWinStaObj);
 
 cleanup:
     if (pWinStaObj)
@@ -633,7 +748,7 @@ BOOL APIENTRY
 NtUserChangeClipboardChain(HWND hWndRemove, HWND hWndNewNext)
 {
     BOOL bRet = FALSE;
-    PWND pWindowRemove;
+    PWND pWindowRemove, pWindowNewNext;
     PWINSTATION_OBJECT pWinStaObj;
 
     TRACE("NtUserChangeClipboardChain(%p, %p)\n", hWndRemove, hWndNewNext);
@@ -644,12 +759,21 @@ NtUserChangeClipboardChain(HWND hWndRemove, HWND hWndNewNext)
     if (!pWinStaObj)
         goto cleanup;
 
+    /* Both windows are validated before the chain changes: an invalid next window
+       fails with ERROR_INVALID_WINDOW_HANDLE and leaves the viewer in place */
     pWindowRemove = UserGetWindowObject(hWndRemove);
+    pWindowNewNext = NULL;
+    if (pWindowRemove && hWndNewNext)
+    {
+        pWindowNewNext = UserGetWindowObject(hWndNewNext);
+        if (!pWindowNewNext)
+            pWindowRemove = NULL;
+    }
 
     if (pWindowRemove && pWinStaObj->spwndClipViewer)
     {
         if (pWindowRemove == pWinStaObj->spwndClipViewer)
-            pWinStaObj->spwndClipViewer = UserGetWindowObject(hWndNewNext);
+            pWinStaObj->spwndClipViewer = pWindowNewNext;
 
         if (pWinStaObj->spwndClipViewer)
             bRet = (BOOL)co_IntSendMessage(UserHMGetHandle(pWinStaObj->spwndClipViewer), WM_CHANGECBCHAIN, (WPARAM)hWndRemove, (LPARAM)hWndNewNext);
@@ -702,14 +826,15 @@ UserEmptyClipboard(VOID)
         goto cleanup;
     }
 
-    UserEmptyClipboardData(pWinStaObj);
-
+    /* The owner still sees the formats it is about to lose, as on Windows */
     if (pWinStaObj->spwndClipOwner)
     {
         TRACE("Clipboard: WM_DESTROYCLIPBOARD to %p\n", UserHMGetHandle(pWinStaObj->spwndClipOwner));
         // For 32-bit applications this message is sent as a notification
         co_IntSendMessage(UserHMGetHandle(pWinStaObj->spwndClipOwner), WM_DESTROYCLIPBOARD, 0, 0);
     }
+
+    UserEmptyClipboardData(pWinStaObj);
 
     pWinStaObj->spwndClipOwner = pWinStaObj->spwndClipOpen;
 
@@ -1033,6 +1158,8 @@ UserSetClipboardData(UINT fmt, HANDLE hData, PSETCLIPBDATA scd)
 {
     HANDLE hRet = NULL;
     PWINSTATION_OBJECT pWinStaObj;
+    PCLIP pElement;
+    BOOL bChange;
 
     pWinStaObj = IntGetWinStaForCbAccess();
     if (!pWinStaObj)
@@ -1045,8 +1172,11 @@ UserSetClipboardData(UINT fmt, HANDLE hData, PSETCLIPBDATA scd)
         goto cleanup;
     }
 
-    if (scd->fIncSerialNumber)
-        pWinStaObj->iClipSerialNumber++;
+    /* An application's SetClipboardData (user32 sets fIncSerialNumber) changes the
+       clipboard, with data or for delayed rendering. Data rendered for WM_RENDERFORMAT
+       and formats user32 caches after synthesizing them are not changes: on Windows
+       they leave the sequence number alone and notify nobody. */
+    bChange = scd->fIncSerialNumber && !pWinStaObj->fInDelayedRendering;
 
     /* Is it a delayed rendering? */
     if (hData)
@@ -1059,22 +1189,23 @@ UserSetClipboardData(UINT fmt, HANDLE hData, PSETCLIPBDATA scd)
         }
 
         /* Save data in the clipboard */
-        IntAddFormatedData(pWinStaObj, fmt, hData, scd->fGlobalHandle, FALSE);
+        pElement = IntAddFormatedData(pWinStaObj, fmt, hData, scd->fGlobalHandle, FALSE);
         TRACE("hData stored\n");
-
-        /* If the serial number was increased, increase also the sequence number */
-        if (scd->fIncSerialNumber)
-            pWinStaObj->iClipSequenceNumber++;
-
-        pWinStaObj->fClipboardChanged = TRUE;
 
         /* Note: Synthesized formats are added in NtUserCloseClipboard */
     }
     else
     {
         /* This is a delayed rendering */
-        IntAddFormatedData(pWinStaObj, fmt, DATA_DELAYED, FALSE, FALSE);
+        pElement = IntAddFormatedData(pWinStaObj, fmt, DATA_DELAYED, FALSE, FALSE);
         TRACE("SetClipboardData delayed format: %u\n", fmt);
+    }
+
+    if (pElement && bChange)
+    {
+        pWinStaObj->iClipSerialNumber++;
+        pWinStaObj->iClipSequenceNumber++;
+        pWinStaObj->fClipboardChanged = TRUE;
     }
 
     /* Return hData on success */
@@ -1147,14 +1278,9 @@ NtUserSetClipboardViewer(HWND hWndNewViewer)
     /* Set new viewer window */
     pWinStaObj->spwndClipViewer = pWindow;
 
-    /* Notify viewer windows in chain */
+    /* Notify the new viewer; Windows also posts WM_CLIPBOARDUPDATE to the listeners */
     pWinStaObj->fClipboardChanged = FALSE;
-    if (pWinStaObj->spwndClipViewer)
-    {
-        TRACE("Clipboard: sending WM_DRAWCLIPBOARD to %p\n", UserHMGetHandle(pWinStaObj->spwndClipViewer));
-        // For 32-bit applications this message is sent as a notification
-        co_IntSendMessageNoWait(UserHMGetHandle(pWinStaObj->spwndClipViewer), WM_DRAWCLIPBOARD, 0, 0);
-    }
+    co_IntNotifyClipboardChange(pWinStaObj);
 
 cleanup:
     if (pWinStaObj)
@@ -1292,6 +1418,188 @@ cleanup:
     UserLeave();
 
     return Status;
+}
+
+/* Window station deletion: windows unregister when they are freed, so none should be
+   left by now. Drain defensively; the entries reference windows, so the USER lock is
+   needed (the object delete callback does not necessarily run with it). */
+VOID NTAPI
+UserClipboardFreeListeners(PWINSTATION_OBJECT pWinSta)
+{
+    PLIST_ENTRY pEntry, pNext;
+    PCLIPBOARD_LISTENER pListener;
+    BOOL bLocked = UserIsEnteredExclusive();
+
+    if (!bLocked)
+        UserEnterExclusive();
+
+    for (pEntry = gClipboardListenerList.Flink; pEntry != &gClipboardListenerList; pEntry = pNext)
+    {
+        pNext = pEntry->Flink;
+        pListener = CONTAINING_RECORD(pEntry, CLIPBOARD_LISTENER, ListEntry);
+        if (pListener->pWinSta == pWinSta)
+        {
+            ERR("Clipboard listener left on a deleted window station\n");
+            IntFreeClipboardListener(pListener);
+        }
+    }
+
+    if (!bLocked)
+        UserLeave();
+}
+
+BOOL APIENTRY
+NtUserAddClipboardFormatListener(HWND hwnd)
+{
+    BOOL bRet = FALSE;
+    PWND pWindow;
+    PWINSTATION_OBJECT pWinStaObj = NULL;
+    PCLIPBOARD_LISTENER pListener;
+
+    UserEnterExclusive();
+
+    pWindow = UserGetWindowObject(hwnd);
+    if (!pWindow)
+        goto cleanup;
+
+    pWinStaObj = IntGetWinStaForCbAccess();
+    if (!pWinStaObj)
+        goto cleanup;
+
+    if (!IntIsClipboardListenerCandidate(pWinStaObj, pWindow))
+    {
+        bRet = ERROR_ACCESS_DENIED;
+        goto cleanup;
+    }
+
+    if (IntFindClipboardListener(pWinStaObj, pWindow))
+    {
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+        goto cleanup;
+    }
+
+    pListener = ExAllocatePoolWithTag(PagedPool, sizeof(*pListener), USERTAG_CLIPBOARD);
+    if (!pListener)
+    {
+        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        goto cleanup;
+    }
+
+    UserReferenceObject(pWindow);
+    pListener->pwnd = pWindow;
+    pListener->pWinSta = pWinStaObj;
+    InsertHeadList(&gClipboardListenerList, &pListener->ListEntry);
+    bRet = TRUE;
+
+cleanup:
+    if (pWinStaObj)
+        ObDereferenceObject(pWinStaObj);
+
+    UserLeave();
+
+    return bRet;
+}
+
+BOOL APIENTRY
+NtUserRemoveClipboardFormatListener(HWND hwnd)
+{
+    BOOL bRet = FALSE;
+    PWND pWindow;
+    PWINSTATION_OBJECT pWinStaObj = NULL;
+    PCLIPBOARD_LISTENER pListener;
+
+    UserEnterExclusive();
+
+    pWindow = UserGetWindowObject(hwnd);
+    if (!pWindow)
+        goto cleanup;
+
+    pWinStaObj = IntGetWinStaForCbAccess();
+    if (!pWinStaObj)
+        goto cleanup;
+
+    if (!IntIsClipboardListenerCandidate(pWinStaObj, pWindow))
+    {
+        bRet = ERROR_ACCESS_DENIED;
+        goto cleanup;
+    }
+
+    pListener = IntFindClipboardListener(pWinStaObj, pWindow);
+    if (!pListener)
+    {
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+        goto cleanup;
+    }
+
+    IntFreeClipboardListener(pListener);
+    bRet = TRUE;
+
+cleanup:
+    if (pWinStaObj)
+        ObDereferenceObject(pWinStaObj);
+
+    UserLeave();
+
+    return bRet;
+}
+
+/* The formats the clipboard holds, in clipboard order; the clipboard need not be open.
+   Windows 10: ERROR_NOACCESS without a count pointer, or without a buffer for a
+   non-zero size; ERROR_INSUFFICIENT_BUFFER with the needed count otherwise. */
+BOOL APIENTRY
+NtUserGetUpdatedClipboardFormats(PUINT lpuiFormats, UINT cFormats, PUINT pcFormatsOut)
+{
+    BOOL bRet = FALSE;
+    DWORD i, cCurrent;
+    PWINSTATION_OBJECT pWinStaObj;
+
+    UserEnterShared();
+
+    pWinStaObj = IntGetWinStaForCbAccess();
+    if (!pWinStaObj)
+        goto cleanup;
+
+    cCurrent = pWinStaObj->cNumClipFormats;
+
+    _SEH2_TRY
+    {
+        ProbeForWrite(pcFormatsOut, sizeof(*pcFormatsOut), 1);
+        *pcFormatsOut = cCurrent;
+
+        if (cCurrent == 0)
+        {
+            bRet = TRUE;
+        }
+        else if (!lpuiFormats && cFormats)
+        {
+            EngSetLastError(ERROR_NOACCESS);
+        }
+        else if (cFormats < cCurrent)
+        {
+            EngSetLastError(ERROR_INSUFFICIENT_BUFFER);
+        }
+        else
+        {
+            /* cCurrent <= cFormats, and cCurrent counts kernel pool entries: no overflow */
+            ProbeForWrite(lpuiFormats, cCurrent * sizeof(UINT), 1);
+            for (i = 0; i < cCurrent; ++i)
+                lpuiFormats[i] = pWinStaObj->pClipBase[i].fmt;
+            bRet = TRUE;
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        SetLastNtError(_SEH2_GetExceptionCode());
+        bRet = FALSE;
+    }
+    _SEH2_END;
+
+    ObDereferenceObject(pWinStaObj);
+
+cleanup:
+    UserLeave();
+
+    return bRet;
 }
 
 /* EOF */

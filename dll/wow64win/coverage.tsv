@@ -1,5 +1,6 @@
 name	class	implementation	detail
 NtUserActivateKeyboardLayout	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserAddClipboardFormatListener	A	generated	typed arguments; handle policy; measured layouts
 NtUserAlterWindowStyle	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserAssociateInputContext	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserAttachThreadInput	A	generated	typed arguments; handle policy; measured layouts
@@ -140,6 +141,7 @@ NtUserGetThreadState	D+S	manual	see user.c, userextra.c, gdi.c and the bucket fi
 NtUserGetTitleBarInfo	B	generated	typed arguments; handle policy; measured layouts
 NtUserGetUpdateRect	B	generated	typed arguments; handle policy; measured layouts
 NtUserGetUpdateRgn	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserGetUpdatedClipboardFormats	B	generated	typed arguments; handle policy; measured layouts
 NtUserGetWindowDC	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserGetWindowPlacement	B	generated	typed arguments; handle policy; measured layouts
 NtUserGetWOWClass	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
@@ -202,6 +204,7 @@ NtUserRemoteConnect	A	generated	typed arguments; handle policy; measured layouts
 NtUserRemoteRedrawRectangle	A	generated	typed arguments; handle policy; measured layouts
 NtUserRemoteRedrawScreen	A	generated	typed arguments; handle policy; measured layouts
 NtUserRemoteStopScreenUpdates	A	generated	typed arguments; handle policy; measured layouts
+NtUserRemoveClipboardFormatListener	A	generated	typed arguments; handle policy; measured layouts
 NtUserRemoveMenu	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserRemoveProp	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserResolveDesktop	C	manual	see user.c, userextra.c, gdi.c and the bucket files

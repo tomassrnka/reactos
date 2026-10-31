@@ -751,3 +751,6 @@
     SVC_(GdiGetFontFileData, 5)
     SVC_(GdiGetFontFileInfo, 5)
     SVC_(GdiGetFontRealizationInfo, 2)
+    SVC_(UserAddClipboardFormatListener, 1)
+    SVC_(UserRemoveClipboardFormatListener, 1)
+    SVC_(UserGetUpdatedClipboardFormats, 3)

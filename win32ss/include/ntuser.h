@@ -2256,6 +2256,23 @@ NtUserGetClipboardViewer(VOID);
 
 BOOL
 NTAPI
+NtUserAddClipboardFormatListener(
+    HWND hwnd);
+
+BOOL
+NTAPI
+NtUserRemoveClipboardFormatListener(
+    HWND hwnd);
+
+BOOL
+NTAPI
+NtUserGetUpdatedClipboardFormats(
+    PUINT lpuiFormats,
+    UINT cFormats,
+    PUINT pcFormatsOut);
+
+BOOL
+NTAPI
 NtUserGetClipCursor(
     RECT *lpRect);
 
