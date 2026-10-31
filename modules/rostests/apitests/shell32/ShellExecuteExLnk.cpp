@@ -18,6 +18,9 @@ static WCHAR s_WorkDir[MAX_PATH];   // "<root>\work dir"
 static WCHAR s_SubCopy[MAX_PATH];   // "<root>\shell32_apitest_sub.exe"
 static WCHAR s_Marker[MAX_PATH];
 
+/* expected show command: not checked */
+#define SHOW_ANY (-1)
+
 static void
 MakeLink(
     _In_ PCWSTR LinkPath,
@@ -123,6 +126,15 @@ CheckLine(
     ok((pchBar - Line) == (pchExpectedBar - Expected) &&
        !_wcsnicmp(Line, Expected, pchBar - Line), "%s: directory is \"%.*ls\", expected \"%ls\"\n",
        Case, (int)(pchBar - Line), Line, ExpectedDir);
+    if (ExpectedShow == SHOW_ANY)
+    {
+        /* skip "|<show command>" on both sides */
+        pchBar = wcschr(pchBar + 1, L'|');
+        pchExpectedBar = wcschr(pchExpectedBar + 1, L'|');
+        ok(pchBar != NULL, "%s: no arguments in the record (\"%ls\")\n", Case, Line);
+        if (!pchBar)
+            return;
+    }
     ok(!wcsncmp(pchBar, pchExpectedBar, wcslen(pchExpectedBar)), "%s: got \"%ls\", expected \"%ls...\"\n",
        Case, pchBar, pchExpectedBar);
 }
@@ -247,6 +259,12 @@ TestOtherLaunchers(void)
         skip("No shell window, not testing explorer.exe\n");
         return;
     }
+    /* Windows hands the link to the running shell, which starts it without this process's environment:
+       the marker file is named in the link arguments. It also starts it with SW_SHOWDEFAULT (10) where
+       ShellExecuteEx gives the link's own SW_SHOWNORMAL, so the show command is not compared here */
+    WCHAR Arguments[2 * MAX_PATH];
+    StringCchPrintfW(Arguments, _countof(Arguments), LNK_MARKER_ARGUMENT L"%s\" one \"two three\"", s_Marker);
+    MakeLink(LinkPath, s_SubCopy, Arguments, s_WorkDir, SW_SHOWNORMAL);
     WCHAR ExplorerPath[MAX_PATH];
     GetWindowsDirectoryW(ExplorerPath, _countof(ExplorerPath));
     StringCchPrintfW(CommandLine, _countof(CommandLine), L"\"%s\\explorer.exe\" \"%s\"", ExplorerPath, LinkPath);
@@ -260,7 +278,7 @@ TestOtherLaunchers(void)
         CloseHandle(pi.hProcess);
     }
     ReadMarker(Line, _countof(Line), 20 * 1000);
-    CheckLine("explorer.exe <link>", Line, s_WorkDir, SW_SHOWNORMAL, L"one \"two three\"|");
+    CheckLine("explorer.exe <link>", Line, s_WorkDir, SHOW_ANY, L"one \"two three\"|");
 }
 
 START_TEST(ShellExecuteExLnk)

@@ -332,6 +332,25 @@ static LRESULT CALLBACK SubWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARA
     return 0;
 }
 
+/* Take  /lnkmarker="<file>"  off the front of the command line */
+static BOOL
+GetLnkMarkerArgument(_Inout_ LPWSTR *ppszCmdLine, _Out_ PWSTR pszMarker, _In_ UINT cchMarker)
+{
+    const SIZE_T cchPrefix = _countof(LNK_MARKER_ARGUMENT) - 1;
+    LPWSTR pszCmdLine = *ppszCmdLine;
+    if (_wcsnicmp(pszCmdLine, LNK_MARKER_ARGUMENT, cchPrefix) != 0)
+        return FALSE;
+    PCWSTR pchEnd = wcschr(pszCmdLine + cchPrefix, L'"');
+    if (!pchEnd || (SIZE_T)(pchEnd - (pszCmdLine + cchPrefix)) >= cchMarker)
+        return FALSE;
+    StringCchCopyNW(pszMarker, cchMarker, pszCmdLine + cchPrefix, pchEnd - (pszCmdLine + cchPrefix));
+    pszCmdLine = (LPWSTR)pchEnd + 1;
+    while (*pszCmdLine == L' ')
+        ++pszCmdLine;
+    *ppszCmdLine = pszCmdLine;
+    return TRUE;
+}
+
 INT APIENTRY
 wWinMain(
     HINSTANCE hInstance,
@@ -356,7 +375,8 @@ wWinMain(
         return 0;
     }
 
-    if (GetEnvironmentVariableW(LNK_MARKER_VARIABLE, szMarker, _countof(szMarker)))
+    if (GetLnkMarkerArgument(&lpCmdLine, szMarker, _countof(szMarker)) ||
+        GetEnvironmentVariableW(LNK_MARKER_VARIABLE, szMarker, _countof(szMarker)))
     {
         WCHAR szDir[MAX_PATH], szVar[MAX_PATH], szLine[MAX_PATH * 4];
         DWORD cbWritten;

@@ -17,6 +17,11 @@
    file and exits */
 #define LNK_MARKER_VARIABLE L"SHELL32_APITEST_LNK_MARKER"
 
+/* ShellExecuteExLnk: the same, with the marker file named in the arguments instead of the environment. A program
+   that the shell of the session starts (explorer.exe <link> on Windows) does not have the caller's environment.
+   The arguments are  /lnkmarker="<file>" <the real arguments>  and the real arguments are what is recorded. */
+#define LNK_MARKER_ARGUMENT L"/lnkmarker=\""
+
 #define NUM_STAGE 10
 
 static inline BOOL FindSubProgram(LPWSTR pszSubProgram, DWORD cchSubProgram)
