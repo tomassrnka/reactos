@@ -4401,59 +4401,6 @@ BOOL CRYPT_AsnEncodeCMSSignedInfo(CRYPT_SIGNED_INFO *signedInfo, void *pvData,
      items, cItem, 0, NULL, pvData, pcbData);
 }
 
-static BOOL WINAPI CRYPT_AsnEncodeRecipientInfo(DWORD dwCertEncodingType,
- LPCSTR lpszStructType, const void *pvStructInfo, DWORD dwFlags,
- PCRYPT_ENCODE_PARA pEncodePara, BYTE *pbEncoded, DWORD *pcbEncoded)
-{
-    const CMSG_KEY_TRANS_RECIPIENT_INFO *info = pvStructInfo;
-    struct AsnEncodeSequenceItem items[] = {
-     { &info->dwVersion, CRYPT_AsnEncodeInt, 0 },
-     { &info->RecipientId.IssuerSerialNumber,
-       CRYPT_AsnEncodeIssuerSerialNumber, 0 },
-     { &info->KeyEncryptionAlgorithm,
-       CRYPT_AsnEncodeAlgorithmIdWithNullParams, 0 },
-     { &info->EncryptedKey, CRYPT_AsnEncodeOctets, 0 },
-    };
-
-    return CRYPT_AsnEncodeSequence(dwCertEncodingType, items,
-     ARRAY_SIZE(items), dwFlags, pEncodePara, pbEncoded, pcbEncoded);
-}
-
-static BOOL WINAPI CRYPT_AsnEncodeEncryptedContentInfo(DWORD dwCertEncodingType,
- LPCSTR lpszStructType, const void *pvStructInfo, DWORD dwFlags,
- PCRYPT_ENCODE_PARA pEncodePara, BYTE *pbEncoded, DWORD *pcbEncoded)
-{
-    const CRYPT_ENCRYPTED_CONTENT_INFO *info = pvStructInfo;
-    struct AsnEncodeTagSwappedItem swapped = { ASN_CONTEXT | 0,
-     &info->encryptedContent, CRYPT_AsnEncodeOctets };
-    struct AsnEncodeSequenceItem items[] = {
-     { info->contentType, CRYPT_AsnEncodeOid, 0 },
-     { &info->contentEncryptionAlgorithm,
-       CRYPT_AsnEncodeAlgorithmIdWithNullParams, 0 },
-     { &swapped, CRYPT_AsnEncodeSwapTag, 0 },
-    };
-
-    return CRYPT_AsnEncodeSequence(dwCertEncodingType, items,
-     ARRAY_SIZE(items), dwFlags, pEncodePara, pbEncoded, pcbEncoded);
-}
-
-BOOL CRYPT_AsnEncodePKCSEnvelopedData(const CRYPT_ENVELOPED_DATA *envelopedData,
- void *pvData, DWORD *pcbData)
-{
-    struct DERSetDescriptor recipientInfosSet = { envelopedData->cRecipientInfo,
-     envelopedData->rgRecipientInfo, sizeof(CMSG_KEY_TRANS_RECIPIENT_INFO), 0,
-     CRYPT_AsnEncodeRecipientInfo };
-    struct AsnEncodeSequenceItem items[] = {
-     { &envelopedData->version, CRYPT_AsnEncodeInt, 0 },
-     { &recipientInfosSet, CRYPT_DEREncodeItemsAsSet, 0 },
-     { &envelopedData->encryptedContentInfo,
-       CRYPT_AsnEncodeEncryptedContentInfo, 0 },
-    };
-
-    return CRYPT_AsnEncodeSequence(X509_ASN_ENCODING, items,
-     ARRAY_SIZE(items), 0, NULL, pvData, pcbData);
-}
-
 static BOOL WINAPI CRYPT_AsnEncodeCertId(DWORD dwCertEncodingType,
  LPCSTR lpszStructType, const void *pvStructInfo, DWORD dwFlags,
  PCRYPT_ENCODE_PARA pEncodePara, BYTE *pbEncoded, DWORD *pcbEncoded)
@@ -4673,6 +4620,44 @@ static BOOL WINAPI CRYPT_AsnEncodeOCSPSignedRequest(DWORD dwCertEncodingType,
     return ret;
 }
 
+/* PKCS_RC2_CBC_PARAMETERS: SEQUENCE { INTEGER version, OCTET STRING iv OPTIONAL } */
+static BOOL WINAPI CRYPT_AsnEncodeRC2CBCParams(DWORD dwCertEncodingType,
+ LPCSTR lpszStructType, const void *pvStructInfo, DWORD dwFlags,
+ PCRYPT_ENCODE_PARA pEncodePara, BYTE *pbEncoded, DWORD *pcbEncoded)
+{
+    BOOL ret;
+
+    __TRY
+    {
+        const CRYPT_RC2_CBC_PARAMETERS *params = pvStructInfo;
+        CRYPT_DATA_BLOB iv;
+        struct AsnEncodeSequenceItem items[2];
+        DWORD cItems = 1;
+
+        items[0].pvStructInfo = &params->dwVersion;
+        items[0].encodeFunc = CRYPT_AsnEncodeInt;
+        items[0].size = 0;
+        if (params->fIV)
+        {
+            iv.cbData = sizeof(params->rgbIV);
+            iv.pbData = (BYTE *)params->rgbIV;
+            items[1].pvStructInfo = &iv;
+            items[1].encodeFunc = CRYPT_AsnEncodeOctets;
+            items[1].size = 0;
+            cItems = 2;
+        }
+        ret = CRYPT_AsnEncodeSequence(dwCertEncodingType, items, cItems,
+         dwFlags, pEncodePara, pbEncoded, pcbEncoded);
+    }
+    __EXCEPT_PAGE_FAULT
+    {
+        SetLastError(STATUS_ACCESS_VIOLATION);
+        ret = FALSE;
+    }
+    __ENDTRY
+    return ret;
+}
+
 static CryptEncodeObjectExFunc CRYPT_GetBuiltinEncoder(DWORD dwCertEncodingType,
  LPCSTR lpszStructType)
 {
@@ -4791,6 +4776,9 @@ static CryptEncodeObjectExFunc CRYPT_GetBuiltinEncoder(DWORD dwCertEncodingType,
             break;
         case LOWORD(PKCS_ATTRIBUTES):
             encodeFunc = CRYPT_AsnEncodePKCSAttributes;
+            break;
+        case LOWORD(PKCS_RC2_CBC_PARAMETERS):
+            encodeFunc = CRYPT_AsnEncodeRC2CBCParams;
             break;
         case LOWORD(X509_ISSUING_DIST_POINT):
             encodeFunc = CRYPT_AsnEncodeIssuingDistPoint;

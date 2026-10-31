@@ -38,6 +38,7 @@ list(APPEND SOURCE
     store.c
     str.c
     reactos/bcryptkey.c
+    reactos/cmsenv.c
     reactos/pkcs12.c
     reactos/store.c
     reactos/timestamp.c

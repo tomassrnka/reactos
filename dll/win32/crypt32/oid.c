@@ -1251,6 +1251,9 @@ static const struct OIDInfoConstructor {
  { 1, szOID_NIST_sha512,               CALG_SHA_512,  L"sha512", NULL },
 
  { 2, szOID_OIWSEC_desCBC,             CALG_DES,      L"des", NULL },
+ { 2, "2.16.840.1.101.3.4.1.2",        (DWORD)-1,    L"aes128", NULL },
+ { 2, "2.16.840.1.101.3.4.1.22",       (DWORD)-1,    L"aes192", NULL },
+ { 2, "2.16.840.1.101.3.4.1.42",       (DWORD)-1,    L"aes256", NULL },
  { 2, szOID_RSA_DES_EDE3_CBC,          CALG_3DES,     L"3des", NULL },
  { 2, szOID_RSA_RC2CBC,                CALG_RC2,      L"rc2", NULL },
  { 2, szOID_RSA_RC4,                   CALG_RC4,      L"rc4", NULL },
