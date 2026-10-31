@@ -41,12 +41,35 @@ typedef struct _WINE_PROVIDERSTORE
     PFN_CERT_STORE_PROV_WRITE_CTL   provWriteCtl;
     PFN_CERT_STORE_PROV_DELETE_CTL  provDeleteCtl;
     PFN_CERT_STORE_PROV_CONTROL     provControl;
+    PFN_CERT_STORE_PROV_SET_CERT_PROPERTY provSetCertProp;
+    PFN_CERT_STORE_PROV_SET_CRL_PROPERTY  provSetCrlProp;
+    PFN_CERT_STORE_PROV_SET_CTL_PROPERTY  provSetCtlProp;
 } WINE_PROVIDERSTORE;
 
 static void ProvStore_addref(WINECRYPT_CERTSTORE *store)
 {
     LONG ref = InterlockedIncrement(&store->ref);
     TRACE("ref = %ld\n", ref);
+}
+
+/* A context that outlives the store is left pointing at the freed provider
+ * store (see below, the "dirty trick"); point those still in the store back
+ * at the memory store that keeps them alive.
+ */
+static void ProvStore_detachContexts(WINE_PROVIDERSTORE *ps)
+{
+    DWORD err = GetLastError();
+    context_t *context;
+
+    context = NULL;
+    while ((context = ps->memStore->vtbl->certs.enumContext(ps->memStore, context)))
+        ((cert_t *)context)->ctx.hCertStore = ps->memStore;
+    while ((context = ps->memStore->vtbl->crls.enumContext(ps->memStore, context)))
+        ((crl_t *)context)->ctx.hCertStore = ps->memStore;
+    while ((context = ps->memStore->vtbl->ctls.enumContext(ps->memStore, context)))
+        ((ctl_t *)context)->ctx.hCertStore = ps->memStore;
+    /* Closing a store does not change the last error, which the enumerations do. */
+    SetLastError(err);
 }
 
 static DWORD ProvStore_release(WINECRYPT_CERTSTORE *cert_store, DWORD flags)
@@ -66,7 +89,10 @@ static DWORD ProvStore_release(WINECRYPT_CERTSTORE *cert_store, DWORD flags)
     if (store->provCloseStore)
         store->provCloseStore(store->hStoreProv, flags);
     if (!(store->dwStoreProvFlags & CERT_STORE_PROV_EXTERNAL_FLAG))
+    {
+        ProvStore_detachContexts(store);
         store->memStore->vtbl->release(store->memStore, flags);
+    }
     CRYPT_FreeStore(&store->hdr);
     return ERROR_SUCCESS;
 }
@@ -167,7 +193,7 @@ static BOOL ProvStore_addCRL(WINECRYPT_CERTSTORE *store, context_t *crl,
     {
         if (ps->hdr.dwOpenFlags & CERT_STORE_READONLY_FLAG)
         {
-            SetLastError(ERROR_ACCESS_DENIED);
+            SetLastError(E_ACCESSDENIED);
             ret = FALSE;
         }
         else
@@ -242,7 +268,7 @@ static BOOL ProvStore_addCTL(WINECRYPT_CERTSTORE *store, context_t *ctl,
     {
         if (ps->hdr.dwOpenFlags & CERT_STORE_READONLY_FLAG)
         {
-            SetLastError(ERROR_ACCESS_DENIED);
+            SetLastError(E_ACCESSDENIED);
             ret = FALSE;
         }
         else
@@ -387,6 +413,24 @@ WINECRYPT_CERTSTORE *CRYPT_ProvCreateStore(DWORD dwFlags,
         else
             ret->provDeleteCtl = NULL;
         if (pProvInfo->cStoreProvFunc >
+         CERT_STORE_PROV_SET_CERT_PROPERTY_FUNC)
+            ret->provSetCertProp = pProvInfo->rgpvStoreProvFunc[
+             CERT_STORE_PROV_SET_CERT_PROPERTY_FUNC];
+        else
+            ret->provSetCertProp = NULL;
+        if (pProvInfo->cStoreProvFunc >
+         CERT_STORE_PROV_SET_CRL_PROPERTY_FUNC)
+            ret->provSetCrlProp = pProvInfo->rgpvStoreProvFunc[
+             CERT_STORE_PROV_SET_CRL_PROPERTY_FUNC];
+        else
+            ret->provSetCrlProp = NULL;
+        if (pProvInfo->cStoreProvFunc >
+         CERT_STORE_PROV_SET_CTL_PROPERTY_FUNC)
+            ret->provSetCtlProp = pProvInfo->rgpvStoreProvFunc[
+             CERT_STORE_PROV_SET_CTL_PROPERTY_FUNC];
+        else
+            ret->provSetCtlProp = NULL;
+        if (pProvInfo->cStoreProvFunc >
          CERT_STORE_PROV_CONTROL_FUNC)
             ret->provControl = pProvInfo->rgpvStoreProvFunc[
              CERT_STORE_PROV_CONTROL_FUNC];
@@ -394,6 +438,68 @@ WINECRYPT_CERTSTORE *CRYPT_ProvCreateStore(DWORD dwFlags,
             ret->provControl = NULL;
     }
     return (WINECRYPT_CERTSTORE*)ret;
+}
+
+/* The provider store that holds a context, if there is one: contexts are
+ * links, so follow them (from a collection's, to the provider's memory store's,
+ * to the one the caller added) until one is marked with a provider store.
+ * *context is set to that context.
+ */
+static WINE_PROVIDERSTORE *CRYPT_ContextProvStore(DWORD type, context_t **context)
+{
+    for (;;)
+    {
+        WINECRYPT_CERTSTORE *store;
+
+        switch (type)
+        {
+        case CRYPT_PROV_CONTEXT_CERT: store = ((cert_t *)*context)->ctx.hCertStore; break;
+        case CRYPT_PROV_CONTEXT_CRL:  store = ((crl_t *)*context)->ctx.hCertStore; break;
+        default:                      store = ((ctl_t *)*context)->ctx.hCertStore; break;
+        }
+        if (store && store->dwMagic == WINE_CRYPTCERTSTORE_MAGIC && store->type == StoreTypeProvider)
+            return (WINE_PROVIDERSTORE *)store;
+        if (!(*context)->linked)
+            return NULL;
+        *context = (*context)->linked;
+    }
+}
+
+BOOL CRYPT_ProvStoreCanSetProperty(DWORD type, context_t *context)
+{
+    WINE_PROVIDERSTORE *ps = CRYPT_ContextProvStore(type, &context);
+
+    if (ps && (ps->hdr.dwOpenFlags & CERT_STORE_READONLY_FLAG) &&
+     (type == CRYPT_PROV_CONTEXT_CERT ? ps->provSetCertProp :
+      type == CRYPT_PROV_CONTEXT_CRL ? (void *)ps->provSetCrlProp : (void *)ps->provSetCtlProp))
+    {
+        SetLastError(E_ACCESSDENIED);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+void CRYPT_ProvStoreSetProperty(DWORD type, context_t *context, DWORD propID,
+ DWORD flags, const void *data)
+{
+    WINE_PROVIDERSTORE *ps = CRYPT_ContextProvStore(type, &context);
+
+    if (!ps)
+        return;
+    switch (type)
+    {
+    case CRYPT_PROV_CONTEXT_CERT:
+        if (ps->provSetCertProp)
+            ps->provSetCertProp(ps->hStoreProv, context_ptr(context), propID, flags, data);
+        break;
+    case CRYPT_PROV_CONTEXT_CRL:
+        if (ps->provSetCrlProp)
+            ps->provSetCrlProp(ps->hStoreProv, context_ptr(context), propID, flags, data);
+        break;
+    default:
+        if (ps->provSetCtlProp)
+            ps->provSetCtlProp(ps->hStoreProv, context_ptr(context), propID, flags, data);
+    }
 }
 
 WINECRYPT_CERTSTORE *CRYPT_ProvOpenStore(LPCSTR lpszStoreProvider,

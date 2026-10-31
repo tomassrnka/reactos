@@ -873,8 +873,13 @@ BOOL WINAPI CertSetCertificateContextProperty(PCCERT_CONTEXT pCertContext,
         SetLastError(E_INVALIDARG);
         return FALSE;
     }
+    if (!CRYPT_ProvStoreCanSetProperty(CRYPT_PROV_CONTEXT_CERT, &cert_from_ptr(pCertContext)->base))
+        return FALSE;
     ret = CertContext_SetProperty(cert_from_ptr(pCertContext), dwPropId, dwFlags,
      pvData);
+    if (ret)
+        CRYPT_ProvStoreSetProperty(CRYPT_PROV_CONTEXT_CERT, &cert_from_ptr(pCertContext)->base,
+         dwPropId, dwFlags, pvData);
     TRACE("returning %d\n", ret);
     return ret;
 }

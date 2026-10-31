@@ -702,7 +702,12 @@ BOOL WINAPI CertSetCTLContextProperty(PCCTL_CONTEXT pCTLContext,
         SetLastError(E_INVALIDARG);
         return FALSE;
     }
+    if (!CRYPT_ProvStoreCanSetProperty(CRYPT_PROV_CONTEXT_CTL, &ctl_from_ptr(pCTLContext)->base))
+        return FALSE;
     ret = CTLContext_SetProperty(ctl_from_ptr(pCTLContext), dwPropId, dwFlags, pvData);
+    if (ret)
+        CRYPT_ProvStoreSetProperty(CRYPT_PROV_CONTEXT_CTL, &ctl_from_ptr(pCTLContext)->base,
+         dwPropId, dwFlags, pvData);
     TRACE("returning %d\n", ret);
     return ret;
 }

@@ -336,6 +336,18 @@ WINECRYPT_CERTSTORE *CRYPT_CollectionOpenStore(HCRYPTPROV hCryptProv,
  DWORD dwFlags, const void *pvPara);
 WINECRYPT_CERTSTORE *CRYPT_ProvCreateStore(DWORD dwFlags,
  WINECRYPT_CERTSTORE *memStore, const CERT_STORE_PROV_INFO *pProvInfo);
+/* Context types for the provider store's property notifications */
+#define CRYPT_PROV_CONTEXT_CERT 0
+#define CRYPT_PROV_CONTEXT_CRL  1
+#define CRYPT_PROV_CONTEXT_CTL  2
+/* Called before and after a property of a context changes.  If the context
+ * belongs to a provider store that persists property changes, the first
+ * fails (with E_ACCESSDENIED) when the store is read-only, and the second
+ * hands the change to the provider.
+ */
+BOOL CRYPT_ProvStoreCanSetProperty(DWORD type, context_t *context);
+void CRYPT_ProvStoreSetProperty(DWORD type, context_t *context, DWORD propID,
+ DWORD flags, const void *data);
 WINECRYPT_CERTSTORE *CRYPT_ProvOpenStore(LPCSTR lpszStoreProvider,
  DWORD dwEncodingType, HCRYPTPROV hCryptProv, DWORD dwFlags,
  const void *pvPara);

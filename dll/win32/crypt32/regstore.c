@@ -304,11 +304,60 @@ static BOOL CRYPT_RegWriteToReg(WINE_REGSTOREINFO *store)
     return ret;
 }
 
+/* Rewrites the registry entry of a context if the entry exists (under key,
+ * the subkey of the context's type) and differs from the context's current
+ * serialization.  An entry that is gone (removed through another handle) is
+ * not recreated.
+ */
+static BOOL CRYPT_RegUpdateContext(HKEY key,
+ const WINE_CONTEXT_INTERFACE *contextInterface, const void *context)
+{
+    BYTE hash[20];
+    DWORD hashSize = sizeof(hash), size = 0, regSize = 0;
+    WCHAR asciiHash[20 * 2 + 1];
+    HKEY subKey;
+    LPBYTE buf, regBuf = NULL;
+    BOOL ret = TRUE, same = FALSE;
+
+    if (!contextInterface->getProp(context, CERT_HASH_PROP_ID, hash, &hashSize))
+        return TRUE;
+    CRYPT_HashToStr(hash, asciiHash);
+    if (RegOpenKeyExW(key, asciiHash, 0, KEY_READ, &subKey))
+        return TRUE;
+    if (!contextInterface->serialize(context, 0, NULL, &size) || !size)
+    {
+        RegCloseKey(subKey);
+        return TRUE;
+    }
+    buf = CryptMemAlloc(size);
+    if (!buf)
+    {
+        RegCloseKey(subKey);
+        return TRUE;
+    }
+    if (contextInterface->serialize(context, 0, buf, &size))
+    {
+        if (!RegQueryValueExW(subKey, L"Blob", NULL, NULL, NULL, &regSize) &&
+         regSize == size && (regBuf = CryptMemAlloc(regSize)))
+        {
+            if (!RegQueryValueExW(subKey, L"Blob", NULL, NULL, regBuf, &regSize))
+                same = regSize == size && !memcmp(regBuf, buf, size);
+            CryptMemFree(regBuf);
+        }
+        RegCloseKey(subKey);
+        subKey = NULL;
+        if (!same)
+            ret = CRYPT_WriteSerializedToReg(key, 0, hash, buf, size);
+    }
+    if (subKey)
+        RegCloseKey(subKey);
+    CryptMemFree(buf);
+    return ret;
+}
+
 /* Adds, deletes and replacements are already in the registry when they
- * return.  This brings the registry up to date with changes made to the
- * contexts afterwards (properties): a context whose registry entry exists
- * and differs from its current serialization is rewritten.  Entries that are
- * gone (removed through another handle) are not recreated.
+ * return.  This brings the registry up to date with the changes made to the
+ * contexts since (their properties).
  */
 static BOOL CRYPT_RegUpdateChanged(WINE_REGSTOREINFO *store)
 {
@@ -325,46 +374,7 @@ static BOOL CRYPT_RegUpdateChanged(WINE_REGSTOREINFO *store)
         if (RegOpenKeyExW(store->key, regSubKeys[i], 0, KEY_ALL_ACCESS, &key))
             continue;
         while (ret && (context = interfaces[i]->enumContextsInStore(store->memStore, context)))
-        {
-            BYTE hash[20];
-            DWORD hashSize = sizeof(hash), size = 0;
-            WCHAR asciiHash[20 * 2 + 1];
-            HKEY subKey;
-            LPBYTE buf;
-
-            if (!interfaces[i]->getProp(context, CERT_HASH_PROP_ID, hash, &hashSize))
-                continue;
-            CRYPT_HashToStr(hash, asciiHash);
-            if (RegOpenKeyExW(key, asciiHash, 0, KEY_READ, &subKey))
-                continue;
-            RegCloseKey(subKey);
-            if (!interfaces[i]->serialize(context, 0, NULL, &size) || !size)
-                continue;
-            buf = CryptMemAlloc(size);
-            if (!buf)
-                continue;
-            if (interfaces[i]->serialize(context, 0, buf, &size))
-            {
-                BOOL same = FALSE;
-                DWORD regSize = 0;
-                LPBYTE regBuf;
-
-                if (!RegOpenKeyExW(key, asciiHash, 0, KEY_READ, &subKey))
-                {
-                    if (!RegQueryValueExW(subKey, L"Blob", NULL, NULL, NULL, &regSize) &&
-                     regSize == size && (regBuf = CryptMemAlloc(regSize)))
-                    {
-                        if (!RegQueryValueExW(subKey, L"Blob", NULL, NULL, regBuf, &regSize))
-                            same = regSize == size && !memcmp(regBuf, buf, size);
-                        CryptMemFree(regBuf);
-                    }
-                    RegCloseKey(subKey);
-                }
-                if (!same)
-                    ret = CRYPT_WriteSerializedToReg(key, 0, hash, buf, size);
-            }
-            CryptMemFree(buf);
-        }
+            ret = CRYPT_RegUpdateContext(key, interfaces[i], context);
         if (context)
             Context_Release(context_from_ptr(context));
         RegCloseKey(key);
@@ -543,6 +553,52 @@ static BOOL WINAPI CRYPT_RegDeleteCTL(HCERTSTORE hCertStore,
     return CRYPT_RegDeleteContext(store, 2, pCtlContext, pCTLInterface);
 }
 
+/* Like Windows, a property change is written to the registry immediately. */
+static BOOL CRYPT_RegSetContextProperty(WINE_REGSTOREINFO *store, DWORD type,
+ const void *context, const WINE_CONTEXT_INTERFACE *contextInterface)
+{
+    HKEY key;
+    BOOL ret = TRUE;
+
+    if (store->dwOpenFlags & CERT_STORE_READONLY_FLAG || store->resyncThread == GetCurrentThreadId())
+        return TRUE;
+    EnterCriticalSection(&store->cs);
+    if (!RegOpenKeyExW(store->key, regSubKeys[type], 0, KEY_ALL_ACCESS, &key))
+    {
+        ret = CRYPT_RegUpdateContext(key, contextInterface, context);
+        RegCloseKey(key);
+    }
+    /* If it could not be written, the next flush tries again. */
+    if (!ret)
+        store->dirty = TRUE;
+    LeaveCriticalSection(&store->cs);
+    return ret;
+}
+
+static BOOL WINAPI CRYPT_RegSetCertProperty(HCERTSTORE hCertStore,
+ PCCERT_CONTEXT cert, DWORD dwPropId, DWORD dwFlags, const void *pvData)
+{
+    TRACE("(%p, %p, %ld, %08lx, %p)\n", hCertStore, cert, dwPropId, dwFlags, pvData);
+
+    return CRYPT_RegSetContextProperty(hCertStore, 0, cert, pCertInterface);
+}
+
+static BOOL WINAPI CRYPT_RegSetCRLProperty(HCERTSTORE hCertStore,
+ PCCRL_CONTEXT crl, DWORD dwPropId, DWORD dwFlags, const void *pvData)
+{
+    TRACE("(%p, %p, %ld, %08lx, %p)\n", hCertStore, crl, dwPropId, dwFlags, pvData);
+
+    return CRYPT_RegSetContextProperty(hCertStore, 1, crl, pCRLInterface);
+}
+
+static BOOL WINAPI CRYPT_RegSetCTLProperty(HCERTSTORE hCertStore,
+ PCCTL_CONTEXT ctl, DWORD dwPropId, DWORD dwFlags, const void *pvData)
+{
+    TRACE("(%p, %p, %ld, %08lx, %p)\n", hCertStore, ctl, dwPropId, dwFlags, pvData);
+
+    return CRYPT_RegSetContextProperty(hCertStore, 2, ctl, pCTLInterface);
+}
+
 static BOOL WINAPI CRYPT_RegControl(HCERTSTORE hCertStore, DWORD dwFlags,
  DWORD dwCtrlType, void const *pvCtrlPara)
 {
@@ -592,15 +648,15 @@ static void *regProvFuncs[] = {
     NULL, /* CERT_STORE_PROV_READ_CERT_FUNC */
     CRYPT_RegWriteCert,
     CRYPT_RegDeleteCert,
-    NULL, /* CERT_STORE_PROV_SET_CERT_PROPERTY_FUNC */
+    CRYPT_RegSetCertProperty,
     NULL, /* CERT_STORE_PROV_READ_CRL_FUNC */
     CRYPT_RegWriteCRL,
     CRYPT_RegDeleteCRL,
-    NULL, /* CERT_STORE_PROV_SET_CRL_PROPERTY_FUNC */
+    CRYPT_RegSetCRLProperty,
     NULL, /* CERT_STORE_PROV_READ_CTL_FUNC */
     CRYPT_RegWriteCTL,
     CRYPT_RegDeleteCTL,
-    NULL, /* CERT_STORE_PROV_SET_CTL_PROPERTY_FUNC */
+    CRYPT_RegSetCTLProperty,
     CRYPT_RegControl,
 };
 
