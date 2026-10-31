@@ -397,6 +397,7 @@ static UINT STDMETHODCALLTYPE dxgi_factory_GetCreationFlags(IWineDXGIFactory *if
 static HRESULT STDMETHODCALLTYPE dxgi_factory_EnumAdapterByLuid(IWineDXGIFactory *iface,
         LUID luid, REFIID iid, void **adapter)
 {
+    struct dxgi_adapter *warp_adapter;
     unsigned int adapter_index;
     DXGI_ADAPTER_DESC1 desc;
     IDXGIAdapter1 *adapter1;
@@ -432,6 +433,19 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_EnumAdapterByLuid(IWineDXGIFactory
     if (hr != DXGI_ERROR_NOT_FOUND)
         WARN("Failed to enumerate adapters, hr %#lx.\n", hr);
 
+    /* The WARP adapter comes after the others, as on Windows. */
+    if (SUCCEEDED(hr = dxgi_adapter_create_warp(impl_from_IWineDXGIFactory(iface), &warp_adapter)))
+    {
+        if (SUCCEEDED(hr = IWineDXGIAdapter_GetDesc1(&warp_adapter->IWineDXGIAdapter_iface, &desc))
+                && desc.AdapterLuid.LowPart == luid.LowPart && desc.AdapterLuid.HighPart == luid.HighPart)
+            hr = IWineDXGIAdapter_QueryInterface(&warp_adapter->IWineDXGIAdapter_iface, iid, adapter);
+        else
+            hr = DXGI_ERROR_NOT_FOUND;
+        IWineDXGIAdapter_Release(&warp_adapter->IWineDXGIAdapter_iface);
+        if (hr != DXGI_ERROR_NOT_FOUND)
+            return hr;
+    }
+
     WARN("Adapter could not be found.\n");
     return DXGI_ERROR_NOT_FOUND;
 }
@@ -439,9 +453,23 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_EnumAdapterByLuid(IWineDXGIFactory
 static HRESULT STDMETHODCALLTYPE dxgi_factory_EnumWarpAdapter(IWineDXGIFactory *iface,
         REFIID iid, void **adapter)
 {
-    FIXME("iface %p, iid %s, adapter %p stub!\n", iface, debugstr_guid(iid), adapter);
+    struct dxgi_adapter *warp_adapter;
+    HRESULT hr;
 
-    return E_NOTIMPL;
+    TRACE("iface %p, iid %s, adapter %p.\n", iface, debugstr_guid(iid), adapter);
+
+    if (!adapter)
+        return DXGI_ERROR_INVALID_CALL;
+
+    if (FAILED(hr = dxgi_adapter_create_warp(impl_from_IWineDXGIFactory(iface), &warp_adapter)))
+    {
+        *adapter = NULL;
+        return hr;
+    }
+
+    hr = IWineDXGIAdapter_QueryInterface(&warp_adapter->IWineDXGIAdapter_iface, iid, adapter);
+    IWineDXGIAdapter_Release(&warp_adapter->IWineDXGIAdapter_iface);
+    return hr;
 }
 
 static HRESULT STDMETHODCALLTYPE dxgi_factory_CheckFeatureSupport(IWineDXGIFactory *iface,
