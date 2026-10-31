@@ -157,10 +157,6 @@ static DECLSPEC_NOINLINE NTSTATUS RaiseOnce(PEXCEPTION_RECORD Record)
     if (!Raised)
     {
         Raised = 1;
-#ifdef _M_IX86
-        /* what the capture holds, as Windows' RtlCaptureContext reports it */
-        Capture.Context.ContextFlags = CONTEXT_FULL;
-#endif
         Status = NtRaiseException(Record, &Capture.Context, TRUE);
     }
     return Status;
@@ -292,8 +288,38 @@ static void TestConsoleProcessList(void)
     ok(Ids[1] == 0xdeadbeef, "GetConsoleProcessList(1) wrote past the list\n");
 }
 
+#ifdef _M_IX86
+/* A 32-bit RtlCaptureContext sets the flags itself, whatever the context held (Windows 10:
+ * CONTEXT_i386 | CONTROL | INTEGER | SEGMENTS) */
+static DECLSPEC_NOINLINE void CaptureWith(PCONTEXT Context, ULONG Flags)
+{
+    RtlFillMemory(Context, sizeof(*Context), 0xCC);
+    Context->ContextFlags = Flags;
+    RtlCaptureContext(Context);
+}
+
+static void TestCaptureContextFlags(void)
+{
+    static const ULONG Initial[] = { 0, CONTEXT_CONTROL, 0xFFFFFFFF, 0xCCCCCCCC };
+    CONTEXT Context;
+    ULONG i;
+
+    for (i = 0; i < RTL_NUMBER_OF(Initial); i++)
+    {
+        CaptureWith(&Context, Initial[i]);
+        ok(Context.ContextFlags == 0x00010007, "flags 0x%08lx before: not 0x00010007 (0x%08lx)\n",
+           Initial[i], Context.ContextFlags);
+        ok((Context.SegCs & 0xFFFF) != 0xCCCC, "flags 0x%08lx before: SegCs not captured\n", Initial[i]);
+        ok(Context.Eip != 0xCCCCCCCC && Context.Esp != 0xCCCCCCCC, "flags 0x%08lx before: control not captured\n", Initial[i]);
+    }
+}
+#endif
+
 START_TEST(Wow64ServiceArguments)
 {
+#ifdef _M_IX86
+    TestCaptureContextFlags();
+#endif
     TestWaitForMultiple();
     TestRaiseHardErrorCount();
     TestQuerySymbolicLink();

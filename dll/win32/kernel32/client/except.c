@@ -1217,10 +1217,6 @@ RaiseFailFastException(
             Context.SegSs = KGDT_R3_DATA | RPL_MASK;
 #else
             RtlCaptureContext(&Context);
-#if defined(_M_IX86)
-            /* The x86 capture leaves the flags to the caller */
-            Context.ContextFlags = CONTEXT_FULL;
-#endif
 #endif
             pContextRecord = &Context;
         }
