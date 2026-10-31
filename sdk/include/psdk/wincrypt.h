@@ -787,7 +787,7 @@ typedef struct _CRYPT_X942_OTHER_INFO {
 typedef struct _CRYPT_RC2_CBC_PARAMETERS {
     DWORD    dwVersion;
     BOOL     fIV;
-    BYTE     rgbIV[4];
+    BYTE     rgbIV[8];
 } CRYPT_RC2_CBC_PARAMETERS, *PCRYPT_RC2_CBC_PARAMETERS;
 
 #define CRYPT_RC2_40BIT_VERSION    160
