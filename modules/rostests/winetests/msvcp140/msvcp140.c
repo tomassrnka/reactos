@@ -17,6 +17,7 @@
  */
 
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <locale.h>
 #include <share.h>
@@ -2651,6 +2652,137 @@ static void test_time_put(void)
     }
 }
 
+/* The money facets are not part of msvcp140.dll: the headers of Visual C++ define moneypunct, money_get
+ * and money_put as templates, and std::use_facet creates one itself (the inline _Getcat) when the locale
+ * holds none. The DLL exports only the std::locale::id objects and the moneypunct::intl constants. What
+ * a program needs from the DLL to build these facets is tested here: the ids, the constants, the
+ * monetary data of the "C" locale, and that the default locale does not already hold a money facet. */
+#ifdef __i386__
+#define MONEY_NAME(x86, x64) x86
+#else
+#define MONEY_NAME(x86, x64) x64
+#endif
+
+typedef struct {
+    locale_facet facet;
+    locale_facet **facetvec;
+    MSVCP_size_t facetcount;
+    int catmask;
+    MSVCP_bool transparent;
+} test_locimp;
+
+#ifdef __i386__
+#define LOCINFO_SIZE 52
+#else
+#define LOCINFO_SIZE 104
+#endif
+
+static void test_money_facets(void)
+{
+    static const struct {
+        const char *id_name;
+        const char *intl_name;
+        int intl;
+    } facets[] = {
+        { "?id@?$moneypunct@D$00@std@@2V0locale@2@A", "?intl@?$moneypunct@D$00@std@@2_NB", 1 },
+        { "?id@?$moneypunct@D$0A@@std@@2V0locale@2@A", "?intl@?$moneypunct@D$0A@@std@@2_NB", 0 },
+        { "?id@?$moneypunct@G$00@std@@2V0locale@2@A", "?intl@?$moneypunct@G$00@std@@2_NB", 1 },
+        { "?id@?$moneypunct@G$0A@@std@@2V0locale@2@A", "?intl@?$moneypunct@G$0A@@std@@2_NB", 0 },
+        { "?id@?$moneypunct@_W$00@std@@2V0locale@2@A", "?intl@?$moneypunct@_W$00@std@@2_NB", 1 },
+        { "?id@?$moneypunct@_W$0A@@std@@2V0locale@2@A", "?intl@?$moneypunct@_W$0A@@std@@2_NB", 0 },
+        { "?id@?$money_get@DV?$istreambuf_iterator@DU?$char_traits@D@std@@@std@@@std@@2V0locale@2@A", NULL, 0 },
+        { "?id@?$money_get@GV?$istreambuf_iterator@GU?$char_traits@G@std@@@std@@@std@@2V0locale@2@A", NULL, 0 },
+        { "?id@?$money_get@_WV?$istreambuf_iterator@_WU?$char_traits@_W@std@@@std@@@std@@2V0locale@2@A", NULL, 0 },
+        { "?id@?$money_put@DV?$ostreambuf_iterator@DU?$char_traits@D@std@@@std@@@std@@2V0locale@2@A", NULL, 0 },
+        { "?id@?$money_put@GV?$ostreambuf_iterator@GU?$char_traits@G@std@@@std@@@std@@2V0locale@2@A", NULL, 0 },
+        { "?id@?$money_put@_WV?$ostreambuf_iterator@_WU?$char_traits@_W@std@@@std@@@std@@2V0locale@2@A", NULL, 0 },
+    };
+    MSVCP_size_t (__thiscall *p_id_operator_size_t)(void*);
+    void* (__thiscall *p_Locinfo_ctor_cstr)(void*, const char*);
+    void (__thiscall *p_Locinfo_dtor)(void*);
+    const struct lconv* (__thiscall *p_Locinfo__Getlconv)(const void*);
+    void* (__cdecl *p_locale__Init)(MSVCP_bool);
+    MSVCP_size_t ids[ARRAY_SIZE(facets)], again;
+    const struct lconv *lc;
+    test_locimp *locimp;
+    unsigned char *buf;
+    const void *data;
+    int i, j, last;
+
+    SET(p_id_operator_size_t, MONEY_NAME("??Bid@locale@std@@QAEIXZ", "??Bid@locale@std@@QEAA_KXZ"));
+    SET(p_Locinfo_ctor_cstr, MONEY_NAME("??0_Locinfo@std@@QAE@PBD@Z", "??0_Locinfo@std@@QEAA@PEBD@Z"));
+    SET(p_Locinfo_dtor, MONEY_NAME("??1_Locinfo@std@@QAE@XZ", "??1_Locinfo@std@@QEAA@XZ"));
+    SET(p_Locinfo__Getlconv, MONEY_NAME("?_Getlconv@_Locinfo@std@@QBEPBUlconv@@XZ", "?_Getlconv@_Locinfo@std@@QEBAPEBUlconv@@XZ"));
+    SET(p_locale__Init, MONEY_NAME("?_Init@locale@std@@CAPAV_Locimp@12@_N@Z", "?_Init@locale@std@@CAPEAV_Locimp@12@_N@Z"));
+    if(!p_id_operator_size_t || !p_Locinfo_ctor_cstr || !p_Locinfo_dtor || !p_Locinfo__Getlconv || !p_locale__Init)
+        return;
+
+    /* every facet has an id of its own, and an id never changes */
+    for(i = 0; i < ARRAY_SIZE(facets); i++) {
+        const void *id = GetProcAddress(msvcp, facets[i].id_name);
+        ok(id != NULL, "%d: id '%s' not exported\n", i, facets[i].id_name);
+        ids[i] = 0;
+        if(!id) continue;
+        ids[i] = (MSVCP_size_t)call_func1(p_id_operator_size_t, (void*)id);
+        ok(ids[i] != 0, "%d: id is 0\n", i);
+        again = (MSVCP_size_t)call_func1(p_id_operator_size_t, (void*)id);
+        ok(again == ids[i], "%d: id changed from %Iu to %Iu\n", i, ids[i], again);
+        for(j = 0; j < i; j++)
+            ok(!ids[i] || ids[j] != ids[i], "%d and %d share the id %Iu\n", j, i, ids[i]);
+    }
+
+    /* moneypunct<_Elem, _Intl>::intl is the template argument */
+    for(i = 0; i < 6; i++) {
+        data = GetProcAddress(msvcp, facets[i].intl_name);
+        ok(data != NULL, "%d: '%s' not exported\n", i, facets[i].intl_name);
+        if(data)
+            ok(*(const MSVCP_bool*)data == facets[i].intl, "%d: intl is %d, expected %d\n",
+                    i, *(const MSVCP_bool*)data, facets[i].intl);
+    }
+
+    /* the default locale holds no money facet: a program creates its own */
+    locimp = p_locale__Init(FALSE);
+    ok(locimp != NULL, "locale::_Init returned NULL\n");
+    if(locimp) {
+        for(i = 0; i < ARRAY_SIZE(facets); i++)
+            ok(!ids[i] || ids[i] >= locimp->facetcount || !locimp->facetvec[ids[i]],
+                    "%d: the default locale holds a facet with the id %Iu\n", i, ids[i]);
+    }
+
+    /* monetary data of the "C" locale: what moneypunct reads from the _Locinfo */
+    buf = HeapAlloc(GetProcessHeap(), 0, 2 * LOCINFO_SIZE);
+    memset(buf, 0xa5, 2 * LOCINFO_SIZE);
+    call_func2(p_Locinfo_ctor_cstr, buf, "C");
+    for(last = 2 * LOCINFO_SIZE - 1; last >= 0 && buf[last] == 0xa5; last--);
+    ok(last < LOCINFO_SIZE, "_Locinfo constructor wrote %d bytes, the size is %d\n", last + 1, LOCINFO_SIZE);
+    lc = call_func1(p_Locinfo__Getlconv, buf);
+    ok(lc != NULL, "_Getlconv returned NULL\n");
+    if(lc) {
+        ok(!strcmp(lc->decimal_point, "."), "decimal_point is '%s'\n", lc->decimal_point);
+        ok(!strcmp(lc->thousands_sep, ""), "thousands_sep is '%s'\n", lc->thousands_sep);
+        ok(!strcmp(lc->grouping, ""), "grouping is '%s'\n", lc->grouping);
+        ok(!strcmp(lc->int_curr_symbol, ""), "int_curr_symbol is '%s'\n", lc->int_curr_symbol);
+        ok(!strcmp(lc->currency_symbol, ""), "currency_symbol is '%s'\n", lc->currency_symbol);
+        ok(!strcmp(lc->mon_decimal_point, ""), "mon_decimal_point is '%s'\n", lc->mon_decimal_point);
+        ok(!strcmp(lc->mon_thousands_sep, ""), "mon_thousands_sep is '%s'\n", lc->mon_thousands_sep);
+        ok(!strcmp(lc->mon_grouping, ""), "mon_grouping is '%s'\n", lc->mon_grouping);
+        ok(!strcmp(lc->positive_sign, ""), "positive_sign is '%s'\n", lc->positive_sign);
+        ok(!strcmp(lc->negative_sign, ""), "negative_sign is '%s'\n", lc->negative_sign);
+        ok(lc->int_frac_digits == CHAR_MAX, "int_frac_digits is %d\n", lc->int_frac_digits);
+        ok(lc->frac_digits == CHAR_MAX, "frac_digits is %d\n", lc->frac_digits);
+        ok(lc->p_cs_precedes == CHAR_MAX, "p_cs_precedes is %d\n", lc->p_cs_precedes);
+        ok(lc->p_sep_by_space == CHAR_MAX, "p_sep_by_space is %d\n", lc->p_sep_by_space);
+        ok(lc->n_cs_precedes == CHAR_MAX, "n_cs_precedes is %d\n", lc->n_cs_precedes);
+        ok(lc->n_sep_by_space == CHAR_MAX, "n_sep_by_space is %d\n", lc->n_sep_by_space);
+        ok(lc->p_sign_posn == CHAR_MAX, "p_sign_posn is %d\n", lc->p_sign_posn);
+        ok(lc->n_sign_posn == CHAR_MAX, "n_sign_posn is %d\n", lc->n_sign_posn);
+    }
+    call_func1(p_Locinfo_dtor, buf);
+    for(last = 2 * LOCINFO_SIZE - 1; last >= 0 && buf[last] == 0xa5; last--);
+    ok(last < LOCINFO_SIZE, "_Locinfo destructor wrote %d bytes, the size is %d\n", last + 1, LOCINFO_SIZE);
+    HeapFree(GetProcessHeap(), 0, buf);
+}
+
 START_TEST(msvcp140)
 {
     if(!init()) return;
@@ -2685,5 +2817,6 @@ START_TEST(msvcp140)
     test_exception_pointer();
     test_GetNextAsyncId();
     test_time_put();
+    test_money_facets();
     FreeLibrary(msvcp);
 }

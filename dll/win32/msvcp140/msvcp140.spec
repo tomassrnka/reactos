@@ -2697,12 +2697,12 @@
 @ cdecl -arch=arm ?init@?$basic_ios@_WU?$char_traits@_W@std@@@std@@IAAXPAV?$basic_streambuf@_WU?$char_traits@_W@std@@@2@_N@Z(ptr ptr long) basic_ios_wchar_init
 @ thiscall -arch=i386 ?init@?$basic_ios@_WU?$char_traits@_W@std@@@std@@IAEXPAV?$basic_streambuf@_WU?$char_traits@_W@std@@@2@_N@Z(ptr ptr long) basic_ios_wchar_init
 @ cdecl -arch=win64 ?init@?$basic_ios@_WU?$char_traits@_W@std@@@std@@IEAAXPEAV?$basic_streambuf@_WU?$char_traits@_W@std@@@2@_N@Z(ptr ptr long) basic_ios_wchar_init
-# extern ?intl@?$moneypunct@D$00@std@@2_NB
-# extern ?intl@?$moneypunct@D$0A@@std@@2_NB
-# extern ?intl@?$moneypunct@G$00@std@@2_NB
-# extern ?intl@?$moneypunct@G$0A@@std@@2_NB
-# extern ?intl@?$moneypunct@_W$00@std@@2_NB
-# extern ?intl@?$moneypunct@_W$0A@@std@@2_NB
+@ extern ?intl@?$moneypunct@D$00@std@@2_NB moneypunct_char_true_intl
+@ extern ?intl@?$moneypunct@D$0A@@std@@2_NB moneypunct_char_false_intl
+@ extern ?intl@?$moneypunct@G$00@std@@2_NB moneypunct_short_true_intl
+@ extern ?intl@?$moneypunct@G$0A@@std@@2_NB moneypunct_short_false_intl
+@ extern ?intl@?$moneypunct@_W$00@std@@2_NB moneypunct_wchar_true_intl
+@ extern ?intl@?$moneypunct@_W$0A@@std@@2_NB moneypunct_wchar_false_intl
 @ cdecl -arch=arm ?ipfx@?$basic_istream@DU?$char_traits@D@std@@@std@@QAA_N_N@Z(ptr long) basic_istream_char_ipfx
 @ thiscall -arch=i386 ?ipfx@?$basic_istream@DU?$char_traits@D@std@@@std@@QAE_N_N@Z(ptr long) basic_istream_char_ipfx
 @ cdecl -arch=win64 ?ipfx@?$basic_istream@DU?$char_traits@D@std@@@std@@QEAA_N_N@Z(ptr long) basic_istream_char_ipfx
