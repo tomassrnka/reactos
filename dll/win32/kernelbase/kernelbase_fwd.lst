@@ -108,6 +108,7 @@
 @ DeleteTimerQueueEx
 @ DeleteTimerQueueTimer
 @ DeleteVolumeMountPointW
+@ DeriveCapabilitySidsFromName -version=0x601+
 @ DeviceIoControl
 @ DisableThreadLibraryCalls
 @ DiscardVirtualMemory -version=0x601+
