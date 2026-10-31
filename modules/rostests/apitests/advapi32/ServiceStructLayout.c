@@ -574,12 +574,6 @@ static void CheckLockStatus(SC_HANDLE Manager, BOOL ExpectLocked)
     LockA = (LPQUERY_SERVICE_LOCK_STATUSA)BufA;
     ok(LockW->fIsLocked == (DWORD)ExpectLocked, "W: fIsLocked %lu\n", LockW->fIsLocked);
     ok(LockA->fIsLocked == (DWORD)ExpectLocked, "A: fIsLocked %lu\n", LockA->fIsLocked);
-    if (ExpectLocked && is_reactos() && !LockW->lpLockOwner && !LockA->lpLockOwner)
-    {
-        /* the SCM does not look the owner up yet */
-        skip("No lock owner name\n");
-        goto checked;
-    }
     ok(LockW->lpLockOwner != NULL && InBuffer(LockW->lpLockOwner, BufW, NeededW + 0x1000) &&
        (BYTE *)LockW->lpLockOwner >= BufW + sizeof(*LockW), "W: lpLockOwner %p (buffer %p)\n", LockW->lpLockOwner, BufW);
     ok(LockA->lpLockOwner != NULL && InBuffer(LockA->lpLockOwner, BufA, NeededA + 0x1000) &&
@@ -596,7 +590,6 @@ static void CheckLockStatus(SC_HANDLE Manager, BOOL ExpectLocked)
                wine_dbgstr_w(OwnerA), wine_dbgstr_w(LockW->lpLockOwner));
         }
     }
-checked:
     if (ExpectLocked)
         ok(LockW->dwLockDuration < 600, "dwLockDuration %lu\n", LockW->dwLockDuration);
 

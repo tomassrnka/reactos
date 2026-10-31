@@ -3331,16 +3331,10 @@ RQueryServiceLockStatusW(
         return ERROR_ACCESS_DENIED;
     }
 
-    /* FIXME: we need to compute instead the real length of the owner name */
-    dwRequiredSize = sizeof(QUERY_SERVICE_LOCK_STATUSW) + sizeof(WCHAR);
+    /* The owner's name is part of what is returned, so the size is worked out with it */
+    dwError = ScmQueryServiceLockStatusW(lpLockStatus, cbBufSize, &dwRequiredSize);
     *pcbBytesNeeded = dwRequiredSize;
-
-    if (cbBufSize < dwRequiredSize)
-        return ERROR_INSUFFICIENT_BUFFER;
-
-    ScmQueryServiceLockStatusW(lpLockStatus);
-
-    return ERROR_SUCCESS;
+    return dwError;
 }
 
 
@@ -4438,16 +4432,10 @@ RQueryServiceLockStatusA(
         return ERROR_ACCESS_DENIED;
     }
 
-    /* FIXME: we need to compute instead the real length of the owner name */
-    dwRequiredSize = sizeof(QUERY_SERVICE_LOCK_STATUSA) + sizeof(CHAR);
+    /* The owner's name is part of what is returned, so the size is worked out with it */
+    dwError = ScmQueryServiceLockStatusA(lpLockStatus, cbBufSize, &dwRequiredSize);
     *pcbBytesNeeded = dwRequiredSize;
-
-    if (cbBufSize < dwRequiredSize)
-        return ERROR_INSUFFICIENT_BUFFER;
-
-    ScmQueryServiceLockStatusA(lpLockStatus);
-
-    return ERROR_SUCCESS;
+    return dwError;
 }
 
 
