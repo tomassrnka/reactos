@@ -218,6 +218,10 @@ typedef struct _AFD_FCB {
     AFD_RECV_PKTINFO RecvPktInfo; /* AddressFrom->Options: filled in by the transport per datagram */
     AFD_TDI_OBJECT AddressFile, Connection;
     AFD_IN_FLIGHT_REQUEST ConnectIrp, ListenIrp, ReceiveIrp, SendIrp, DisconnectIrp;
+    /* SendComplete runs in a loop: a send the transport finishes inside the call that starts it is handed on */
+    BOOLEAN SendCompleteActive, SendDeferred;
+    NTSTATUS SendDeferredStatus;
+    ULONG_PTR SendDeferredBytes;
     PIRP AcceptIrp;
     AFD_DATA_WINDOW Send, Recv;
     KMUTEX Mutex;

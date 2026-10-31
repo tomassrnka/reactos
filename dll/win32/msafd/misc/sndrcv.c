@@ -1039,7 +1039,11 @@ WSPSend(SOCKET Handle,
             // .NET expects APCContext to be a pointer to lpOverlapped, because it adds some additional metadata past OVERLAPPED structure
             // Do not use APC when there is no completion context
             Event = lpOverlapped->hEvent;
-            
+
+            /* A stream send is completed whole by AFD: nothing here can continue it later */
+            if (dwBufferCount != 0 && MsafdSendStreamWhole(Socket, iFlags))
+                SendInfo.AfdFlags |= AFD_SEND_WHOLE;
+
             APCFunction = NULL;
             if (Event)
             {
