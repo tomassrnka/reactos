@@ -1315,6 +1315,15 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         Status = NtProtectVirtualMemory(H(0), &Base, &Size, a[3], P(4));
         if (NT_SUCCESS(Status)) { U(1) = PtrToUlong(Base); U(2) = Size; }
         return Status;
+    case W64_NtFlushVirtualMemory:
+        /* FlushViewOfFile: the base and size are updated (rounded to pages) like NtProtectVirtualMemory's, and
+         * the block describes the write that was started */
+        PROBE(1); PROBE(2);
+        Base = PTR32(U(1)); Size = U(2);
+        Status = NtFlushVirtualMemory(H(0), &Base, &Size, IoBegin(a[3], &Io));
+        IoEnd(a[3], &Io);
+        if (NT_SUCCESS(Status)) { U(1) = PtrToUlong(Base); U(2) = Size; }
+        return Status;
     case W64_NtQueryVirtualMemory:
     {
         MEMORY_BASIC_INFORMATION Info;
