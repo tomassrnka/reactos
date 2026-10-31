@@ -174,12 +174,20 @@ typedef struct
     BOOLEAN Reported; /* an unsupported request, already reported once */
 } WOW64_CLEANUP;
 
+/* The records of the classes that carry a target name: FileRenameInformation, FileLinkInformation,
+ * FileMoveClusterInformation and the Ex and bypass variants. Flags is a BOOLEAN ReplaceIfExists
+ * (a cluster count for FileMoveClusterInformation) in the classic classes and a ULONG in the Ex ones. */
 typedef struct
 {
-    BOOLEAN Replace;
-    ULONG Root, Length;
+    ULONG Flags, Root, Length;
     WCHAR Name[1];
 } WOW64_RENAME_INFORMATION;
+C_ASSERT(sizeof(WOW64_RENAME_INFORMATION) == 16);
+
+typedef struct { ULONG Port, Key; } WOW64_COMPLETION_INFORMATION;
+typedef struct { ULONG Handle, Flags; } WOW64_HANDLE_FLAGS_INFORMATION;
+typedef struct { ULONG Pointer, Length; } WOW64_POINTER_LENGTH_INFORMATION;
+typedef struct { ULONG DestinationFile, Length; UCHAR Data[1]; } WOW64_TRACKING_INFORMATION;
 
 typedef struct
 {
@@ -790,6 +798,174 @@ KeyViewAccess(const OBJECT_ATTRIBUTES *Attributes, ACCESS_MASK Access)
     if (!(Access & KEY_WOW64_RES) && (!Attributes || !Attributes->RootDirectory))
         Access |= KEY_WOW64_32KEY;
     return Access;
+}
+
+/* The IO_STATUS_BLOCK of a request that is over when the call returns. The guest's block is probed
+ * first (the kernel only sees a local one) and is the starting point of the local one: the kernel
+ * writes it only for a request it started, and a request refused before that leaves the guest's
+ * block as it was, as on Windows. A NULL block is for the kernel to judge. */
+static IO_STATUS_BLOCK *IoBegin(ULONG Address, IO_STATUS_BLOCK *Io)
+{
+    const volatile WOW64_IOSB *From = PTR32(Address);
+    if (!Address) return NULL;
+    ProbeOutput(Address, sizeof(WOW64_IOSB));
+    Io->Status = (NTSTATUS)From->Status;
+    Io->Information = From->Information;
+    return Io;
+}
+
+static VOID IoEnd(ULONG Address, const IO_STATUS_BLOCK *Io)
+{
+    if (Address) StoreIo(Address, Io);
+}
+
+/* NtSetInformationFile. A record is converted when its 32-bit layout differs from the native one
+ * (it holds a handle or a pointer); every field is read from the guest once, and name lengths are
+ * checked against the guest buffer before anything is copied. All other classes have the same
+ * layout in both ABIs, so the kernel judges them (class, length, contents) itself. */
+static NTSTATUS Wow64SetInformationFile(const ULONG *a, WOW64_CLEANUP *Cleanup)
+{
+    HANDLE File = HANDLE32(a[0]);
+    ULONG Class = a[4], Length = a[3];
+    PVOID Guest = PTR32(a[2]);
+    IO_STATUS_BLOCK Io, *Iosb;
+    NTSTATUS Status;
+
+    switch (Class)
+    {
+    /* The access check bypass variants are for kernel callers: Windows refuses them (as the I/O manager
+     * does for any class it does not know) before it looks at the length or the buffer. */
+    case FileRenameInformationBypassAccessCheck:
+    case FileLinkInformationBypassAccessCheck:
+    case FileRenameInformationExBypassAccessCheck:
+    case FileLinkInformationExBypassAccessCheck:
+        return STATUS_INVALID_INFO_CLASS;
+    case FileRenameInformation:
+    case FileLinkInformation:
+    case FileMoveClusterInformation:
+    case FileRenameInformationEx:
+    case FileLinkInformationEx:
+    {
+        const WOW64_RENAME_INFORMATION *From = Guest;
+        typedef struct { ULONG Flags; HANDLE Root; ULONG Length; WCHAR Name[1]; } NATIVE;
+        UNICODE_STRING Name;
+        OBJECT_ATTRIBUTES Attributes;
+        PVOID Redirected = NULL;
+        NATIVE *To;
+        ULONG Bytes, Flags, Root;
+        if (Length < sizeof(*From)) return STATUS_INFO_LENGTH_MISMATCH;
+        Flags = From->Flags;
+        Root = From->Root;
+        Bytes = From->Length;
+        if (Bytes > Length - FIELD_OFFSET(WOW64_RENAME_INFORMATION, Name) ||
+            Bytes > MAXUSHORT || (Bytes & 1))
+            return STATUS_INVALID_PARAMETER;
+        Iosb = IoBegin(a[1], &Io);
+        /* The classic classes read a BOOLEAN (or a cluster count) */
+        if (Class == FileRenameInformation || Class == FileLinkInformation) Flags = (UCHAR)Flags;
+        Name.Buffer = (PWSTR)From->Name;
+        Name.Length = Name.MaximumLength = Bytes;
+        InitializeObjectAttributes(&Attributes, &Name, 0, HANDLE32(Root), NULL);
+        _SEH2_TRY
+        {
+            Status = Wow64RedirectFile(&Attributes, &Name, &Redirected);
+            if (NT_SUCCESS(Status))
+            {
+                Bytes = sizeof(*To) + Name.Length;
+                To = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, Bytes);
+                if (!To) Status = STATUS_NO_MEMORY;
+                else
+                {
+                    To->Flags = Flags;
+                    To->Root = Attributes.RootDirectory;
+                    To->Length = Name.Length;
+                    RtlCopyMemory(To->Name, Name.Buffer, Name.Length);
+                    Status = NtSetInformationFile(File, Iosb, To, Bytes, Class);
+                    IoEnd(a[1], &Io);
+                }
+            }
+        }
+        _SEH2_FINALLY
+        {
+            if (Redirected) RtlFreeHeap(RtlGetProcessHeap(), 0, Redirected);
+        }
+        _SEH2_END;
+        return Status;
+    }
+    case FileCompletionInformation:
+    case FileReplaceCompletionInformation:
+    {
+        const WOW64_COMPLETION_INFORMATION *From = Guest;
+        FILE_COMPLETION_INFORMATION To;
+        if (Length < sizeof(*From)) return STATUS_INFO_LENGTH_MISMATCH;
+        Iosb = IoBegin(a[1], &Io);
+        To.Port = HANDLE32(From->Port);
+        To.Key = PTR32(From->Key);
+        Status = NtSetInformationFile(File, Iosb, &To, sizeof(To), Class);
+        IoEnd(a[1], &Io);
+        return Status;
+    }
+    case FileMemoryPartitionInformation:
+    {
+        const WOW64_HANDLE_FLAGS_INFORMATION *From = Guest;
+        struct { HANDLE Handle; ULONG Flags; } To = {0};
+        if (Length < sizeof(*From)) return STATUS_INFO_LENGTH_MISMATCH;
+        Iosb = IoBegin(a[1], &Io);
+        To.Handle = HANDLE32(From->Handle);
+        To.Flags = From->Flags;
+        Status = NtSetInformationFile(File, Iosb, &To, sizeof(To), Class);
+        IoEnd(a[1], &Io);
+        return Status;
+    }
+    case FileIoStatusBlockRangeInformation:
+    {
+        const WOW64_POINTER_LENGTH_INFORMATION *From = Guest;
+        struct { PVOID Pointer; ULONG Length; } To = {0};
+        if (Length < sizeof(*From)) return STATUS_INFO_LENGTH_MISMATCH;
+        Iosb = IoBegin(a[1], &Io);
+        To.Pointer = PTR32(From->Pointer);
+        To.Length = From->Length;
+        Status = NtSetInformationFile(File, Iosb, &To, sizeof(To), Class);
+        IoEnd(a[1], &Io);
+        return Status;
+    }
+    case FileMailslotSetInformation:
+    {
+        PVOID To; /* FILE_MAILSLOT_SET_INFORMATION: a pointer to the read timeout */
+        if (Length < sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+        Iosb = IoBegin(a[1], &Io);
+        To = PTR32(*(const ULONG *)Guest);
+        Status = NtSetInformationFile(File, Iosb, &To, sizeof(To), Class);
+        IoEnd(a[1], &Io);
+        return Status;
+    }
+    case FileTrackingInformation:
+    {
+        const WOW64_TRACKING_INFORMATION *From = Guest;
+        typedef struct { HANDLE DestinationFile; ULONG Length; UCHAR Data[1]; } NATIVE;
+        NATIVE *To;
+        ULONG Bytes, Destination, Count;
+        if (Length < sizeof(*From)) return STATUS_INFO_LENGTH_MISMATCH;
+        Destination = From->DestinationFile;
+        Count = From->Length;
+        Bytes = Length - FIELD_OFFSET(WOW64_TRACKING_INFORMATION, Data); /* the data the guest gave */
+        Iosb = IoBegin(a[1], &Io);
+        To = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY,
+                                               sizeof(*To) + Bytes);
+        if (!To) return STATUS_NO_MEMORY;
+        To->DestinationFile = HANDLE32(Destination);
+        To->Length = Count;
+        RtlCopyMemory(To->Data, From->Data, Bytes);
+        Status = NtSetInformationFile(File, Iosb, To, FIELD_OFFSET(NATIVE, Data) + Bytes, Class);
+        IoEnd(a[1], &Io);
+        return Status;
+    }
+    default:
+        Iosb = IoBegin(a[1], &Io);
+        Status = NtSetInformationFile(File, Iosb, Guest, Length, Class);
+        IoEnd(a[1], &Io);
+        return Status;
+    }
 }
 
 /* a is Wow64SystemService's local copy of the guest argument list: counts and pointers
@@ -1888,129 +2064,33 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         return Status;
     }
     case W64_NtSetInformationFile:
-        switch (a[4])
-        {
-        case FileRenameInformation:
-        case FileLinkInformation:
-        {
-            WOW64_RENAME_INFORMATION *From = P(2);
-            FILE_RENAME_INFORMATION *To;
-            PVOID Redirected = NULL;
-            ULONG Bytes;
-            BOOLEAN Replace;
-            if (a[3] < FIELD_OFFSET(WOW64_RENAME_INFORMATION, Name))
-                return STATUS_INFO_LENGTH_MISMATCH;
-            Bytes = From->Length;
-            if (Bytes > a[3] - FIELD_OFFSET(WOW64_RENAME_INFORMATION, Name) ||
-                Bytes > MAXUSHORT || (Bytes & 1))
-                return STATUS_INVALID_PARAMETER;
-            ProbeOutput(a[1], sizeof(WOW64_IOSB));
-            Replace = From->Replace;
-            Name.Buffer = From->Name;
-            Name.Length = Name.MaximumLength = Bytes;
-            InitializeObjectAttributes(&Attributes, &Name, 0, HANDLE32(From->Root), NULL);
-            _SEH2_TRY
-            {
-                Status = Wow64RedirectFile(&Attributes, &Name, &Redirected);
-                if (NT_SUCCESS(Status))
-                {
-                    Bytes = sizeof(*To) + Name.Length;
-                    To = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, Bytes);
-                    if (!To) Status = STATUS_NO_MEMORY;
-                    else
-                    {
-                        To->ReplaceIfExists = Replace;
-                        To->RootDirectory = Attributes.RootDirectory;
-                        To->FileNameLength = Name.Length;
-                        RtlCopyMemory(To->FileName, Name.Buffer, Name.Length);
-                        Status = NtSetInformationFile(H(0), &Io, To, Bytes, a[4]);
-                        StoreIo(a[1], &Io);
-                    }
-                }
-            }
-            _SEH2_FINALLY
-            {
-                if (Redirected) RtlFreeHeap(RtlGetProcessHeap(), 0, Redirected);
-            }
-            _SEH2_END;
-            return Status;
-        }
-        case FileCompletionInformation:
-        {
-            FILE_COMPLETION_INFORMATION Completion;
-            if (a[3] != 2 * sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
-            ProbeOutput(a[1], sizeof(WOW64_IOSB));
-            Completion.Port = HANDLE32(((ULONG *)P(2))[0]);
-            Completion.Key = PTR32(((ULONG *)P(2))[1]);
-            Status = NtSetInformationFile(H(0), &Io, &Completion, sizeof(Completion), a[4]);
-            StoreIo(a[1], &Io);
-            return Status;
-        }
-        case FileIoCompletionNotificationInformation:
-        {
-            ULONG Modes; /* a single ULONG, same in both layouts */
-            if (a[3] != sizeof(Modes)) return STATUS_INFO_LENGTH_MISMATCH;
-            ProbeOutput(a[1], sizeof(WOW64_IOSB));
-            Modes = *(ULONG *)P(2);
-            Status = NtSetInformationFile(H(0), &Io, &Modes, sizeof(Modes), a[4]);
-            StoreIo(a[1], &Io);
-            return Status;
-        }
-        case FileBasicInformation: case FileDispositionInformation:
-        case FilePositionInformation: case FileEndOfFileInformation:
-        case FileAllocationInformation: case FilePipeInformation:
-            ProbeOutput(a[1], sizeof(WOW64_IOSB));
-            Status = NtSetInformationFile(H(0), &Io, P(2), a[3], a[4]);
-            StoreIo(a[1], &Io); return Status;
-        default: UNSUPPORTED(CLASS, a[4]);
-        }
+        return Wow64SetInformationFile(a, Cleanup);
     case W64_NtQueryInformationFile:
-        /* Only fixed-width layouts used by the loader and console startup. */
-        switch (a[4])
-        {
-        case FileBasicInformation: case FileStandardInformation: case FilePositionInformation:
-        case FileNameInformation: case FileModeInformation: case FileInternalInformation:
-        case FileAlignmentInformation: case FileNetworkOpenInformation:
-        case FileAttributeTagInformation: case FileAllInformation:
-        case FilePipeLocalInformation:
-        case FileEaInformation: /* a single ULONG EaSize */
-        case FileStreamInformation: /* ULONG, ULONG, two LARGE_INTEGERs and a name: same in both layouts */
-            ProbeOutput(a[1], sizeof(WOW64_IOSB));
-            Status = NtQueryInformationFile(H(0), &Io, P(2), a[3], a[4]);
-            StoreIo(a[1], &Io); return Status;
-        default: UNSUPPORTED(CLASS, a[4]);
-        }
+        /* No class has a handle or a pointer in a query result, so all of them have the same layout in both ABIs. */
+        Status = NtQueryInformationFile(H(0), IoBegin(a[1], &Io), P(2), a[3], a[4]);
+        IoEnd(a[1], &Io); return Status;
     case W64_NtQueryDirectoryFile:
-    {
-        FILE_MODE_INFORMATION Mode;
-        if (a[1] || a[2] || a[3]) UNSUPPORTED(MODE, 1);
-        Status = NtQueryInformationFile(H(0), &Io, &Mode, sizeof(Mode), FileModeInformation);
-        if (!NT_SUCCESS(Status)) return Status;
-        if (!(Mode.Mode & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)))
-            UNSUPPORTED(MODE, 2);
-        switch (a[7])
+        /* Directory entries have the same layout in both ABIs. The entries are written by the file system before
+         * the call returns, but an asynchronous handle may be given a pending request: the guest block is only
+         * written after it completed. The APC routine and context belong to the guest (they would need the
+         * completion to call back into it). */
+        if (a[2] || a[3]) UNSUPPORTED(MODE, 1);
+        Status = NtQueryDirectoryFile(H(0), H(1), NULL, NULL, IoBegin(a[4], &Io), P(5), a[6], a[7],
+                                       (BOOLEAN)a[8], String32(&Name, P(9)), (BOOLEAN)a[10]);
+        if (Status == STATUS_PENDING && a[4])
         {
-        case FileDirectoryInformation: case FileFullDirectoryInformation:
-        case FileBothDirectoryInformation: case FileNamesInformation:
-        case FileIdBothDirectoryInformation: case FileIdFullDirectoryInformation:
-            ProbeOutput(a[4], sizeof(WOW64_IOSB));
-            Status = NtQueryDirectoryFile(H(0), NULL, NULL, NULL, &Io, P(5), a[6], a[7],
-                                           a[8], String32(&Name, P(9)), a[10]);
-            StoreIo(a[4], &Io); return Status;
-        default: UNSUPPORTED(CLASS, a[7]);
+            Status = NtWaitForSingleObject(a[1] ? H(1) : H(0), FALSE, NULL);
+            if (NT_SUCCESS(Status)) Status = Io.Status;
         }
-    }
+        IoEnd(a[4], &Io); return Status;
     case W64_NtQueryVolumeInformationFile:
-        switch (a[4])
-        {
-        case FileFsDeviceInformation: case FileFsVolumeInformation: case FileFsSizeInformation:
-        case FileFsFullSizeInformation:
-        case FileFsAttributeInformation:
-            ProbeOutput(a[1], sizeof(WOW64_IOSB));
-            Status = NtQueryVolumeInformationFile(H(0), &Io, P(2), a[3], a[4]);
-            StoreIo(a[1], &Io); return Status;
-        default: UNSUPPORTED(CLASS, a[4]);
-        }
+    case W64_NtSetVolumeInformationFile:
+        /* The volume records have the same layout in both ABIs */
+        if (Number == W64_NtQueryVolumeInformationFile)
+            Status = NtQueryVolumeInformationFile(H(0), IoBegin(a[1], &Io), P(2), a[3], a[4]);
+        else
+            Status = NtSetVolumeInformationFile(H(0), IoBegin(a[1], &Io), P(2), a[3], a[4]);
+        IoEnd(a[1], &Io); return Status;
     case W64_NtReadFile:
     case W64_NtWriteFile:
     {
@@ -2730,7 +2810,6 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         case W64_NtSetSystemInformation: Length = a[0]; break;
         case W64_NtQueryInformationJobObject: case W64_NtQueryInformationPort:
         case W64_NtSetInformationKey: case W64_NtSetInformationDebugObject: Length = a[1]; break;
-        case W64_NtSetVolumeInformationFile: Length = a[4]; break;
         default: Length = 0; break;
         }
         UNSUPPORTED(SERVICE, Length);
