@@ -381,7 +381,7 @@
 @ cdecl _cputs(str)
 @ cdecl _cputws(wstr)
 @ cdecl _creat(str long)
-@ cdecl -version=0x602+ _create_locale(long str)
+@ cdecl -version=0x601+ _create_locale(long str)
 # stub -version=0x600+ _crtAssertBusy
 # stub -version=0x600+ _crtBreakAlloc
 # stub -version=0x600+ _crtDbgFlag
@@ -470,7 +470,7 @@
 @ cdecl _fputchar(long)
 @ cdecl _fputwchar(long)
 # stub -version=0x600+ _free_dbg(ptr long)
-@ cdecl -version=0x602+ _free_locale(ptr)
+@ cdecl -version=0x601+ _free_locale(ptr)
 # stub -version=0x600+ _freea(ptr)
 # stub -version=0x600+ _freea_s
 @ varargs -version=0x600+ _fscanf_l(ptr str ptr)
@@ -504,7 +504,7 @@
 @ varargs -version=0x600+ _fwscanf_s_l(ptr wstr ptr)
 @ cdecl _gcvt(double long str)
 @ cdecl -version=0x600+ _gcvt_s(ptr long double long)
-@ cdecl -version=0x602+ _get_current_locale()
+@ cdecl -version=0x601+ _get_current_locale()
 @ cdecl -version=0x600+ _get_doserrno(ptr)
 @ cdecl -version=0x600+ _get_environ(ptr)
 @ cdecl -version=0x600+ _get_errno(ptr)
