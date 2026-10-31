@@ -31,6 +31,7 @@
 #include "winbase.h"
 #include "wincrypt.h"
 #include "bcrypt.h"
+#include "ncrypt.h"
 #include "snmp.h"
 #include "crypt32_private.h"
 #include "reactos/pkcs12.h"
@@ -201,6 +202,35 @@ static HCRYPTPROV import_key( struct imported_key *key, DWORD flags )
     return prov;
 }
 
+/* An ephemeral key asked for with the CNG key storage flags becomes an NCrypt key the certificate
+ * owns (CERT_NCRYPT_KEY_HANDLE_PROP_ID), as on Windows: .NET reaches EphemeralKeySet keys that way. */
+static BOOL set_ncrypt_key( const void *ctx, const BYTE *pkcs8, DWORD len, DWORD flags )
+{
+    NCRYPT_PROV_HANDLE prov;
+    NCRYPT_KEY_HANDLE key;
+    /* as on Windows an exportable key can be exported by PFXExportCertStoreEx, not in plaintext */
+    DWORD policy = (flags & CRYPT_EXPORTABLE) ? NCRYPT_ALLOW_EXPORT_FLAG : 0;
+    SECURITY_STATUS status;
+
+    if ((status = NCryptOpenStorageProvider( &prov, MS_KEY_STORAGE_PROVIDER, 0 ))) return FALSE;
+    status = NCryptImportKey( prov, 0, NCRYPT_PKCS8_PRIVATE_KEY_BLOB, NULL, &key, (BYTE *)pkcs8, len,
+                              NCRYPT_DO_NOT_FINALIZE_FLAG );
+    NCryptFreeObject( prov );
+    if (status)
+    {
+        WARN( "NCryptImportKey failed %08lx\n", status );
+        return FALSE;
+    }
+    if (NCryptSetProperty( key, NCRYPT_EXPORT_POLICY_PROPERTY, (BYTE *)&policy, sizeof(policy), 0 ) ||
+        NCryptFinalizeKey( key, 0 ) ||
+        !CertSetCertificateContextProperty( ctx, CERT_NCRYPT_KEY_HANDLE_PROP_ID, 0, (void *)key ))
+    {
+        NCryptFreeObject( key );
+        return FALSE;
+    }
+    return TRUE;
+}
+
 static BOOL set_key_context( const void *ctx, HCRYPTPROV prov )
 {
     CERT_KEY_CONTEXT key_ctx;
@@ -277,8 +307,8 @@ HCERTSTORE WINAPI PFXImportCertStore( CRYPT_DATA_BLOB *pfx, const WCHAR *passwor
         SetLastError( CRYPT_E_BAD_ENCODE );
         return NULL;
     }
-    /* CNG key storage is not available for imported keys yet (see the NCrypt key handle work): RSA keys
-     * go to a CryptoAPI container. Windows uses the type 1 enhanced provider here, but that one cannot
+    /* There is no persisted CNG key storage: persisted RSA keys go to a CryptoAPI container (ephemeral
+     * keys asked for with the CNG flags become NCrypt keys, see set_ncrypt_key). Windows uses the type 1 enhanced provider here, but that one cannot
      * sign with SHA-2, which is what callers that reach the key through the CSP interface (.NET
      * falling back from CNG) need; the AES provider is the same key store with the hashes. */
     if (flags & (PKCS12_PREFER_CNG_KSP | PKCS12_ALWAYS_CNG_KSP))
@@ -334,7 +364,23 @@ HCERTSTORE WINAPI PFXImportCertStore( CRYPT_DATA_BLOB *pfx, const WCHAR *passwor
             name.cbData = (len + 1) * sizeof(WCHAR);
             CertSetCertificateContextProperty( ctx, CERT_FRIENDLY_NAME_PROP_ID, 0, &name );
         }
-        if (k >= 0 && keys[k].blob)
+        /* the key goes on the context of the store: an NCrypt key is not copied with a context */
+        {
+            PCCERT_CONTEXT added;
+
+            if (!CertAddCertificateContextToStore( store, ctx, CERT_STORE_ADD_ALWAYS, &added ))
+            {
+                err = GetLastError();
+                CertFreeCertificateContext( ctx );
+                break;
+            }
+            CertFreeCertificateContext( ctx );
+            ctx = added;
+        }
+        if (k >= 0 && (flags & PKCS12_NO_PERSIST_KEY) && (flags & (PKCS12_PREFER_CNG_KSP | PKCS12_ALWAYS_CNG_KSP)) &&
+            set_ncrypt_key( ctx, contents.keys[k].data, contents.keys[k].len, flags ))
+            ;
+        else if (k >= 0 && keys[k].blob)
         {
             if (flags & PKCS12_NO_PERSIST_KEY)
             {
@@ -359,10 +405,6 @@ HCERTSTORE WINAPI PFXImportCertStore( CRYPT_DATA_BLOB *pfx, const WCHAR *passwor
             if (!ok) err = GetLastError();
         }
         else if (k >= 0) WARN( "key of certificate %Iu is not an RSA key, importing the certificate only\n", i );
-        if (ok && !CertAddCertificateContextToStore( store, ctx, CERT_STORE_ADD_ALWAYS, NULL ))
-        {
-            err = GetLastError();
-        }
         CertFreeCertificateContext( ctx );
     }
 
@@ -402,6 +444,8 @@ typedef LONG (WINAPI *PNCryptOpenStorageProvider)( ULONG_PTR *, LPCWSTR, DWORD )
 typedef LONG (WINAPI *PNCryptOpenKey)( ULONG_PTR, ULONG_PTR *, LPCWSTR, DWORD, DWORD );
 typedef LONG (WINAPI *PNCryptExportKey)( ULONG_PTR, ULONG_PTR, LPCWSTR, void *, BYTE *, DWORD, DWORD *, DWORD );
 typedef LONG (WINAPI *PNCryptFreeObject)( ULONG_PTR );
+typedef LONG (WINAPI *PNCryptGetProperty)( ULONG_PTR, LPCWSTR, BYTE *, DWORD, DWORD *, DWORD );
+typedef LONG (WINAPI *PNCryptSetProperty)( ULONG_PTR, LPCWSTR, BYTE *, DWORD, DWORD );
 
 /* PKCS #8 PrivateKeyInfo of a CNG key, from a key handle or a provider/key name */
 static BOOL export_cng_key( ULONG_PTR key, const WCHAR *prov_name, const WCHAR *key_name, DWORD flags,
@@ -412,7 +456,10 @@ static BOOL export_cng_key( ULONG_PTR key, const WCHAR *prov_name, const WCHAR *
     PNCryptOpenKey open_key;
     PNCryptExportKey export_key;
     PNCryptFreeObject free_object;
+    PNCryptGetProperty get_property;
+    PNCryptSetProperty set_property;
     ULONG_PTR provider = 0, opened = 0;
+    DWORD policy = 0, size, raised = FALSE;
     BOOL ret = FALSE;
 
     if (!mod) return FALSE;
@@ -420,7 +467,9 @@ static BOOL export_cng_key( ULONG_PTR key, const WCHAR *prov_name, const WCHAR *
     open_key = (PNCryptOpenKey)GetProcAddress( mod, "NCryptOpenKey" );
     export_key = (PNCryptExportKey)GetProcAddress( mod, "NCryptExportKey" );
     free_object = (PNCryptFreeObject)GetProcAddress( mod, "NCryptFreeObject" );
-    if (!open_provider || !open_key || !export_key || !free_object) goto done;
+    get_property = (PNCryptGetProperty)GetProcAddress( mod, "NCryptGetProperty" );
+    set_property = (PNCryptSetProperty)GetProcAddress( mod, "NCryptSetProperty" );
+    if (!open_provider || !open_key || !export_key || !free_object || !get_property || !set_property) goto done;
 
     if (!key)
     {
@@ -428,17 +477,24 @@ static BOOL export_cng_key( ULONG_PTR key, const WCHAR *prov_name, const WCHAR *
             goto done;
         key = opened;
     }
+    /* A key that may be exported is read here for the PFX, whatever it allows an application to do with it:
+     * the plaintext export right is added for the time of the export. */
+    if (!get_property( key, L"Export Policy", (BYTE *)&policy, sizeof(policy), &size, 0 ) && (policy & 1) &&
+        !(policy & 2))
+        raised = !set_property( key, L"Export Policy", (BYTE *)&(DWORD){ policy | 2 }, sizeof(DWORD), 0 );
     *len = 0;
     if (export_key( key, 0, L"PKCS8_PRIVATEKEY", NULL, NULL, 0, len, 0 ) || !*len) goto done;
     if (!(*pkcs8 = CryptMemAlloc( *len ))) goto done;
     if (export_key( key, 0, L"PKCS8_PRIVATEKEY", NULL, *pkcs8, *len, len, 0 ))
     {
+        SecureZeroMemory( *pkcs8, *len );
         CryptMemFree( *pkcs8 );
         *pkcs8 = NULL;
         goto done;
     }
     ret = TRUE;
 done:
+    if (raised) set_property( key, L"Export Policy", (BYTE *)&policy, sizeof(policy), 0 );
     if (opened) free_object( opened );
     if (provider) free_object( provider );
     FreeLibrary( mod );

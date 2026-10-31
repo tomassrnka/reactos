@@ -29,6 +29,7 @@
 #include "wincrypt.h"
 #include "snmp.h"
 #include "bcrypt.h"
+#include "ncrypt.h"
 #include "winnls.h"
 #include "rpc.h"
 #include "wine/debug.h"
@@ -433,6 +434,52 @@ void CRYPT_ConvertKeyContext(const struct store_CERT_KEY_CONTEXT *src, CERT_KEY_
     dst->dwKeySpec = src->dwKeySpec;
 }
 
+void CRYPT_ReleaseNCryptKeyContext(const CRYPT_DATA_BLOB *blob)
+{
+    const struct ncrypt_key_context *ctx = (const struct ncrypt_key_context *)blob->pbData;
+
+    if (!CRYPT_IsNCryptKeyContext(blob) || blob->cbData < sizeof(*ctx) || !ctx->ctx.hCryptProv ||
+     (ctx->dwFlags & CERT_STORE_NO_CRYPT_RELEASE_FLAG))
+        return;
+    TRACE("releasing NCrypt key %#I64x\n", ctx->ctx.hCryptProv);
+    NCryptFreeObject((NCRYPT_KEY_HANDLE)ctx->ctx.hCryptProv);
+}
+
+/* Removes the key context of a certificate. An NCrypt key the context owns is released when
+ * release is set, otherwise (CERT_NCRYPT_KEY_HANDLE_TRANSFER_PROP_ID) it is handed to the caller. */
+static void CertContext_RemoveKeyContext(cert_t *cert, BOOL release)
+{
+    struct ncrypt_key_context ctx;
+    CRYPT_DATA_BLOB blob;
+    BOOL found = FALSE;
+
+    memset(&ctx, 0, sizeof(ctx));
+    if (ContextPropertyList_FindProperty(cert->base.properties, CERT_KEY_CONTEXT_PROP_ID, &blob))
+    {
+        memcpy(&ctx, blob.pbData, min(blob.cbData, sizeof(ctx)));
+        found = TRUE;
+    }
+    ContextPropertyList_RemoveProperty(cert->base.properties, CERT_KEY_CONTEXT_PROP_ID);
+    if (found && release)
+    {
+        blob.pbData = (BYTE *)&ctx;
+        blob.cbData = sizeof(ctx);
+        CRYPT_ReleaseNCryptKeyContext(&blob);
+    }
+}
+
+/* Returns the NCrypt key handle of the key context, 0 when there is none. */
+static NCRYPT_KEY_HANDLE CertContext_GetNCryptKey(cert_t *cert)
+{
+    CRYPT_DATA_BLOB blob;
+
+    if (cert->base.properties &&
+     ContextPropertyList_FindProperty(cert->base.properties, CERT_KEY_CONTEXT_PROP_ID, &blob) &&
+     CRYPT_IsNCryptKeyContext(&blob))
+        return (NCRYPT_KEY_HANDLE)((const struct store_CERT_KEY_CONTEXT *)blob.pbData)->hCryptProv;
+    return 0;
+}
+
 /*
  * Fix offsets in a continuous block of memory of CRYPT_KEY_PROV_INFO with
  * its associated data.
@@ -633,15 +680,55 @@ BOOL WINAPI CertGetCertificateContextProperty(PCCERT_CONTEXT pCertContext,
         ret = CertGetStoreProperty(cert->ctx.hCertStore, dwPropId, pvData, pcbData);
         break;
     case CERT_KEY_PROV_HANDLE_PROP_ID:
+    case CERT_NCRYPT_KEY_HANDLE_PROP_ID:
+    case CERT_HCRYPTPROV_OR_NCRYPT_KEY_HANDLE_PROP_ID:
+    case CERT_KEY_SPEC_PROP_ID:
     {
         CERT_KEY_CONTEXT keyContext;
         DWORD size = sizeof(keyContext);
 
+        if (dwPropId == CERT_KEY_SPEC_PROP_ID &&
+         CertContext_GetProperty(cert, dwPropId, pvData, pcbData))
+        {
+            ret = TRUE;
+            break;
+        }
         ret = CertContext_GetProperty(cert,
          CERT_KEY_CONTEXT_PROP_ID, &keyContext, &size);
-        if (ret)
+        /* the CryptoAPI handle and the NCrypt key handle are only returned for their own kind */
+        if (ret && ((dwPropId == CERT_KEY_PROV_HANDLE_PROP_ID && keyContext.dwKeySpec == CERT_NCRYPT_KEY_SPEC) ||
+         (dwPropId == CERT_NCRYPT_KEY_HANDLE_PROP_ID && keyContext.dwKeySpec != CERT_NCRYPT_KEY_SPEC)))
+        {
+            SetLastError(CRYPT_E_NOT_FOUND);
+            ret = FALSE;
+        }
+        if (ret && dwPropId == CERT_KEY_SPEC_PROP_ID)
+            ret = CertContext_CopyParam(pvData, pcbData, &keyContext.dwKeySpec,
+             sizeof(keyContext.dwKeySpec));
+        else if (ret && dwPropId == CERT_KEY_PROV_HANDLE_PROP_ID)
             ret = CertContext_CopyParam(pvData, pcbData, &keyContext.hCryptProv,
              sizeof(keyContext.hCryptProv));
+        else if (ret)
+            ret = CertContext_CopyParam(pvData, pcbData, &keyContext.hCryptProv,
+             sizeof(NCRYPT_KEY_HANDLE));
+        break;
+    }
+    case CERT_NCRYPT_KEY_HANDLE_TRANSFER_PROP_ID:
+    {
+        /* hands the NCrypt key over to the caller: the context forgets it */
+        NCRYPT_KEY_HANDLE key = CertContext_GetNCryptKey(cert);
+
+        if (!key)
+        {
+            SetLastError(CRYPT_E_NOT_FOUND);
+            ret = FALSE;
+        }
+        else
+        {
+            ret = CertContext_CopyParam(pvData, pcbData, &key, sizeof(key));
+            if (ret && pvData)
+                CertContext_RemoveKeyContext(cert, FALSE);
+        }
         break;
     }
     case CERT_KEY_PROV_INFO_PROP_ID:
@@ -691,17 +778,40 @@ static BOOL CertContext_SetKeyProvInfoProperty(CONTEXT_PROPERTY_LIST *properties
     return ret;
 }
 
-static BOOL CertContext_SetKeyContextProperty(CONTEXT_PROPERTY_LIST *properties,
- const CERT_KEY_CONTEXT *keyContext)
+static BOOL CertContext_SetKeyContextProperty(cert_t *cert,
+ const CERT_KEY_CONTEXT *keyContext, DWORD dwFlags)
 {
-    struct store_CERT_KEY_CONTEXT ctx;
+    struct ncrypt_key_context ctx, old;
+    CRYPT_DATA_BLOB blob;
+    BOOL ret, replaced = FALSE;
+    DWORD size = sizeof(ctx.ctx);
 
-    ctx.cbSize = sizeof(ctx);
-    ctx.hCryptProv = keyContext->hCryptProv;
-    ctx.dwKeySpec = keyContext->dwKeySpec;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.ctx.cbSize = sizeof(ctx.ctx);
+    ctx.ctx.hCryptProv = keyContext->hCryptProv;
+    ctx.ctx.dwKeySpec = keyContext->dwKeySpec;
+    if (ctx.ctx.dwKeySpec == CERT_NCRYPT_KEY_SPEC)
+    {
+        ctx.dwFlags = dwFlags & CERT_STORE_NO_CRYPT_RELEASE_FLAG;
+        size = sizeof(ctx);
+    }
 
-    return ContextPropertyList_SetProperty(properties, CERT_KEY_CONTEXT_PROP_ID,
-     (const BYTE *)&ctx, ctx.cbSize);
+    memset(&old, 0, sizeof(old));
+    if (ContextPropertyList_FindProperty(cert->base.properties, CERT_KEY_CONTEXT_PROP_ID, &blob) &&
+     CRYPT_IsNCryptKeyContext(&blob))
+    {
+        memcpy(&old, blob.pbData, min(blob.cbData, sizeof(old)));
+        replaced = old.ctx.hCryptProv != ctx.ctx.hCryptProv || ctx.ctx.dwKeySpec != CERT_NCRYPT_KEY_SPEC;
+    }
+    ret = ContextPropertyList_SetProperty(cert->base.properties, CERT_KEY_CONTEXT_PROP_ID,
+     (const BYTE *)&ctx, size);
+    if (ret && replaced)
+    {
+        blob.pbData = (BYTE *)&old;
+        blob.cbData = sizeof(old);
+        CRYPT_ReleaseNCryptKeyContext(&blob);
+    }
+    return ret;
 }
 
 static BOOL CertContext_SetProperty(cert_t *cert, DWORD dwPropId,
@@ -786,13 +896,36 @@ static BOOL CertContext_SetProperty(cert_t *cert, DWORD dwPropId,
                     ret = FALSE;
                 }
                 else
-                    ret = CertContext_SetKeyContextProperty(cert->base.properties, pvData);
+                    ret = CertContext_SetKeyContextProperty(cert, pvData, dwFlags);
             }
             else
             {
-                ContextPropertyList_RemoveProperty(cert->base.properties, dwPropId);
+                CertContext_RemoveKeyContext(cert, TRUE);
                 ret = TRUE;
             }
+            break;
+        case CERT_NCRYPT_KEY_HANDLE_PROP_ID:
+            /* pvData is the NCRYPT_KEY_HANDLE itself; the context takes it over */
+            if (pvData)
+            {
+                CERT_KEY_CONTEXT keyContext;
+
+                keyContext.cbSize = sizeof(keyContext);
+                keyContext.hCryptProv = (HCRYPTPROV)pvData;
+                keyContext.dwKeySpec = CERT_NCRYPT_KEY_SPEC;
+                ret = CertContext_SetKeyContextProperty(cert, &keyContext, dwFlags);
+            }
+            else
+            {
+                CertContext_RemoveKeyContext(cert, TRUE);
+                ret = TRUE;
+            }
+            break;
+        case CERT_NCRYPT_KEY_HANDLE_TRANSFER_PROP_ID:
+            /* Windows succeeds and does not transfer the key (getting the property does that). It
+             * lists a property of its own afterwards, which is not kept here: serializing it would
+             * go through the transferring getter. */
+            ret = TRUE;
             break;
         case CERT_KEY_PROV_INFO_PROP_ID:
             if (pvData)
@@ -810,11 +943,15 @@ static BOOL CertContext_SetProperty(cert_t *cert, DWORD dwPropId,
 
             ret = CertContext_GetProperty(cert, CERT_KEY_CONTEXT_PROP_ID,
              &keyContext, &size);
-            if (ret)
+            if (ret && keyContext.dwKeySpec == CERT_NCRYPT_KEY_SPEC)
+                keyContext.dwKeySpec = 0; /* the NCrypt key is released when it is replaced */
+            else if (ret)
             {
                 if (!(dwFlags & CERT_STORE_NO_CRYPT_RELEASE_FLAG))
                     CryptReleaseContext(keyContext.hCryptProv, 0);
             }
+            else
+                keyContext.dwKeySpec = 0;
             keyContext.cbSize = sizeof(keyContext);
             if (pvData)
                 keyContext.hCryptProv = *(const HCRYPTPROV *)pvData;
@@ -887,9 +1024,12 @@ BOOL WINAPI CertSetCertificateContextProperty(PCCERT_CONTEXT pCertContext,
 /* Acquires the private key using the key provider info, retrieving info from
  * the certificate if info is NULL.  The acquired provider is returned in
  * *phCryptProv, and the key spec for the provider is returned in *pdwKeySpec.
+ * A key of a CNG key storage provider (dwProvType 0) is opened with NCrypt when
+ * the caller accepts NCrypt keys; a CryptoAPI key is opened with NCrypt when the
+ * caller accepts nothing else.
  */
 static BOOL CRYPT_AcquirePrivateKeyFromProvInfo(PCCERT_CONTEXT pCert, DWORD dwFlags,
- PCRYPT_KEY_PROV_INFO info, HCRYPTPROV *phCryptProv, DWORD *pdwKeySpec)
+ PCRYPT_KEY_PROV_INFO info, HCRYPTPROV_OR_NCRYPT_KEY_HANDLE *phCryptProv, DWORD *pdwKeySpec)
 {
     DWORD size = 0;
     BOOL allocated = FALSE, ret = TRUE;
@@ -916,19 +1056,47 @@ static BOOL CRYPT_AcquirePrivateKeyFromProvInfo(PCCERT_CONTEXT pCert, DWORD dwFl
         else
             SetLastError(CRYPT_E_NO_KEY_PROPERTY);
     }
-#ifdef __REACTOS__
-    /* The caller insists on a CNG key. A CryptoAPI provider handle is not one and would be misused
-     * as an NCRYPT_KEY_HANDLE; failing lets callers such as .NET fall back to the CSP interface. */
-    if (ret && (dwFlags & 0x00040000 /* CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG */) && info->dwProvType)
+    if (ret && (!info->dwProvType || (dwFlags & CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG)))
     {
-        SetLastError(NTE_NOT_SUPPORTED);
-        ret = FALSE;
+        NCRYPT_PROV_HANDLE prov;
+        NCRYPT_KEY_HANDLE key = 0;
+        SECURITY_STATUS status;
+        DWORD flags = 0;
+
+        if (!(dwFlags & CRYPT_ACQUIRE_NCRYPT_KEY_FLAGS_MASK))
+            status = NTE_BAD_PROV_TYPE;
+        else
+        {
+            status = NCryptOpenStorageProvider(&prov,
+             info->dwProvType || !info->pwszProvName ? MS_KEY_STORAGE_PROVIDER : info->pwszProvName, 0);
+            if (!status)
+            {
+                if (info->dwFlags & CRYPT_MACHINE_KEYSET)
+                    flags |= NCRYPT_MACHINE_KEY_FLAG;
+                if (dwFlags & CRYPT_ACQUIRE_SILENT_FLAG)
+                    flags |= NCRYPT_SILENT_FLAG;
+                status = NCryptOpenKey(prov, &key, info->pwszContainerName, info->dwKeySpec, flags);
+                NCryptFreeObject(prov);
+            }
+        }
+        if (!status)
+        {
+            *phCryptProv = key;
+            *pdwKeySpec = CERT_NCRYPT_KEY_SPEC;
+        }
+        else
+        {
+            if (status != NTE_BAD_PROV_TYPE)
+                *pdwKeySpec = CERT_NCRYPT_KEY_SPEC;
+            SetLastError(status);
+            ret = FALSE;
+        }
     }
-    else
-#endif
-    if (ret)
+    else if (ret)
     {
-        ret = CryptAcquireContextW(phCryptProv, info->pwszContainerName,
+        HCRYPTPROV prov;
+
+        ret = CryptAcquireContextW(&prov, info->pwszContainerName,
          info->pwszProvName, info->dwProvType, (dwFlags & CRYPT_ACQUIRE_SILENT_FLAG) ? CRYPT_SILENT : 0);
         if (ret)
         {
@@ -936,10 +1104,11 @@ static BOOL CRYPT_AcquirePrivateKeyFromProvInfo(PCCERT_CONTEXT pCert, DWORD dwFl
 
             for (i = 0; i < info->cProvParam; i++)
             {
-                CryptSetProvParam(*phCryptProv,
+                CryptSetProvParam(prov,
                  info->rgProvParam[i].dwParam, info->rgProvParam[i].pbData,
                  info->rgProvParam[i].dwFlags);
             }
+            *phCryptProv = prov;
             *pdwKeySpec = info->dwKeySpec;
         }
         else
@@ -954,14 +1123,20 @@ BOOL WINAPI CryptAcquireCertificatePrivateKey(PCCERT_CONTEXT pCert,
  DWORD dwFlags, void *pvReserved, HCRYPTPROV_OR_NCRYPT_KEY_HANDLE *phCryptProv,
  DWORD *pdwKeySpec, BOOL *pfCallerFreeProv)
 {
-    BOOL ret = FALSE, cache = FALSE;
+    BOOL ret = FALSE, cache = FALSE, use_cache, ncrypt_cached = FALSE;
     PCRYPT_KEY_PROV_INFO info = NULL;
     CERT_KEY_CONTEXT keyContext;
-    DWORD size;
+    DWORD size, ncrypt = dwFlags & CRYPT_ACQUIRE_NCRYPT_KEY_FLAGS_MASK;
     PCCERT_CONTEXT cert_in_store = NULL;
 
     TRACE("(%p, %08lx, %p, %p, %p, %p)\n", pCert, dwFlags, pvReserved,
      phCryptProv, pdwKeySpec, pfCallerFreeProv);
+
+    /* Windows clears the outputs, even when it fails */
+    if (pdwKeySpec)
+        *pdwKeySpec = 0;
+    if (pfCallerFreeProv)
+        *pfCallerFreeProv = FALSE;
 
     if (dwFlags & CRYPT_ACQUIRE_USE_PROV_INFO_FLAG)
     {
@@ -1008,12 +1183,19 @@ BOOL WINAPI CryptAcquireCertificatePrivateKey(PCCERT_CONTEXT pCert,
     else if (dwFlags & CRYPT_ACQUIRE_CACHE_FLAG)
         cache = TRUE;
     *phCryptProv = 0;
-    if (cache)
+    /* A cached NCrypt key (CERT_NCRYPT_KEY_HANDLE_PROP_ID) is returned with CRYPT_ACQUIRE_CACHE_FLAG
+     * or CRYPT_ACQUIRE_USE_PROV_INFO_FLAG to callers that accept NCrypt keys, a cached CryptoAPI
+     * provider to callers that accept it. */
+    use_cache = cache || (ncrypt && (dwFlags & (CRYPT_ACQUIRE_CACHE_FLAG | CRYPT_ACQUIRE_USE_PROV_INFO_FLAG)));
+    if (use_cache)
     {
         size = sizeof(keyContext);
         ret = CertGetCertificateContextProperty(pCert, CERT_KEY_CONTEXT_PROP_ID,
          &keyContext, &size);
-        if (ret)
+        /* the cached NCrypt key belongs to the certificate even if this caller cannot use it */
+        ncrypt_cached = ret && keyContext.dwKeySpec == CERT_NCRYPT_KEY_SPEC;
+        if (ret && (ncrypt_cached ? ncrypt :
+         cache && !(dwFlags & CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG)))
         {
             *phCryptProv = keyContext.hCryptProv;
             if (pdwKeySpec)
@@ -1024,14 +1206,19 @@ BOOL WINAPI CryptAcquireCertificatePrivateKey(PCCERT_CONTEXT pCert,
     }
     if (!*phCryptProv)
     {
+        keyContext.dwKeySpec = 0;
         ret = CRYPT_AcquirePrivateKeyFromProvInfo(pCert, dwFlags, info,
          &keyContext.hCryptProv, &keyContext.dwKeySpec);
+        if (!ret && pdwKeySpec)
+            *pdwKeySpec = keyContext.dwKeySpec;
         if (ret)
         {
             *phCryptProv = keyContext.hCryptProv;
             if (pdwKeySpec)
                 *pdwKeySpec = keyContext.dwKeySpec;
-            if (cache)
+            /* caching the key would replace, and so free, the NCrypt key an earlier caller was handed
+             * without a duty to free it: the caller of a CryptoAPI key gets that key to free instead */
+            if (cache && !(ncrypt_cached && keyContext.dwKeySpec != CERT_NCRYPT_KEY_SPEC))
             {
                 keyContext.cbSize = sizeof(keyContext);
                 if (CertSetCertificateContextProperty(pCert,
@@ -1040,6 +1227,8 @@ BOOL WINAPI CryptAcquireCertificatePrivateKey(PCCERT_CONTEXT pCert,
                     if (pfCallerFreeProv)
                         *pfCallerFreeProv = FALSE;
                 }
+                else if (pfCallerFreeProv)
+                    *pfCallerFreeProv = TRUE;
             }
             else
             {

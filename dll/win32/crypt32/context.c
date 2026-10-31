@@ -94,6 +94,10 @@ void Context_Free(context_t *context)
     assert(!context->ref);
 
     if (!context->linked) {
+        CRYPT_DATA_BLOB blob;
+
+        if (ContextPropertyList_FindProperty(context->properties, CERT_KEY_CONTEXT_PROP_ID, &blob))
+            CRYPT_ReleaseNCryptKeyContext(&blob);
         ContextPropertyList_Free(context->properties);
         context->vtbl->free(context);
     }else {
@@ -123,9 +127,41 @@ void Context_Release(context_t *context)
 void Context_CopyProperties(const void *to, const void *from)
 {
     CONTEXT_PROPERTY_LIST *toProperties, *fromProperties;
+    CRYPT_DATA_BLOB blob;
+    BYTE *saved = NULL;
+    DWORD saved_size = 0;
+    BOOL ncrypt_from, ncrypt_to, copies_key_context;
 
     toProperties = context_from_ptr(to)->properties;
     fromProperties = context_from_ptr(from)->properties;
     assert(toProperties && fromProperties);
+
+    /* An NCrypt key stays with the context that owns it: a key context of the source that holds one
+     * is not copied, and the destination's own NCrypt key is kept. A CryptoAPI key context of the
+     * source replaces the destination's NCrypt key, which is released with it. */
+    copies_key_context = ContextPropertyList_FindProperty(fromProperties, CERT_KEY_CONTEXT_PROP_ID, &blob);
+    ncrypt_from = copies_key_context && CRYPT_IsNCryptKeyContext(&blob);
+    ncrypt_to = FALSE;
+    if (copies_key_context && ContextPropertyList_FindProperty(toProperties, CERT_KEY_CONTEXT_PROP_ID, &blob) &&
+     (saved = CryptMemAlloc(blob.cbData)))
+    {
+        memcpy(saved, blob.pbData, blob.cbData);
+        saved_size = blob.cbData;
+        ncrypt_to = CRYPT_IsNCryptKeyContext(&blob);
+    }
     ContextPropertyList_Copy(toProperties, fromProperties);
+    if (ncrypt_from)
+    {
+        if (saved)
+            ContextPropertyList_SetProperty(toProperties, CERT_KEY_CONTEXT_PROP_ID, saved, saved_size);
+        else
+            ContextPropertyList_RemoveProperty(toProperties, CERT_KEY_CONTEXT_PROP_ID);
+    }
+    else if (ncrypt_to)
+    {
+        blob.pbData = saved;
+        blob.cbData = saved_size;
+        CRYPT_ReleaseNCryptKeyContext(&blob);
+    }
+    CryptMemFree(saved);
 }

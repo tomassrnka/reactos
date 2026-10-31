@@ -27,12 +27,21 @@ enum algid
     DSA,
     ECDSA,
     ECDSA_P256,
+    ECDSA_P384,
+    ECDSA_P521,
+    ECDH,
+    ECDH_P256,
+    ECDH_P384,
+    ECDH_P521,
 };
 
 struct key
 {
     enum algid algid;
     BCRYPT_KEY_HANDLE bcrypt_key;
+    const struct key_alg *alg;  /* algorithm of the key material (a named curve for generic ECC keys) */
+    DWORD bits;
+    BOOL finalized;
 };
 
 struct storage_provider
@@ -55,8 +64,11 @@ struct object_property
     void *value;
 };
 
+#define NCRYPT_OBJECT_MAGIC 0x4e43524f /* 'NCRO' */
+
 struct object
 {
+    DWORD magic;
     enum object_type type;
     LONG refs;
     DWORD num_properties;

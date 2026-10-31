@@ -5578,6 +5578,108 @@ static void test_CHACHA20_POLY1305(void)
     ok(status == STATUS_SUCCESS, "got %#lx\n", status);
 }
 
+static void test_oaep_pss_hash(void)
+{
+    BCRYPT_OAEP_PADDING_INFO oaep[] = { {NULL, NULL, 0}, {(WCHAR *)L"FOO", NULL, 0}, {(WCHAR *)BCRYPT_SHA1_ALGORITHM, NULL, 0} };
+    BCRYPT_PSS_PADDING_INFO pss[] = { {NULL, 16}, {(WCHAR *)L"FOO", 16}, {(WCHAR *)BCRYPT_SHA256_ALGORITHM, 16} };
+    BYTE input[10] = "oaep test", encrypted[128], decrypted[128], hash[32] = {1, 2, 3}, sig[128];
+    BCRYPT_ALG_HANDLE alg;
+    BCRYPT_KEY_HANDLE key;
+    ULONG size, i;
+    NTSTATUS status;
+
+    status = BCryptOpenAlgorithmProvider(&alg, BCRYPT_RSA_ALGORITHM, NULL, 0);
+    ok(!status, "got %#lx\n", status);
+    status = BCryptGenerateKeyPair(alg, &key, 1024, 0);
+    ok(!status, "got %#lx\n", status);
+    status = BCryptFinalizeKeyPair(key, 0);
+    ok(!status, "got %#lx\n", status);
+
+    /* a missing or unknown hash is rejected, as is missing padding information */
+    for (i = 0; i < ARRAY_SIZE(oaep); i++)
+    {
+        winetest_push_context("oaep %lu", i);
+        size = 0;
+        status = BCryptEncrypt(key, input, sizeof(input), &oaep[i], NULL, 0, NULL, 0, &size, BCRYPT_PAD_OAEP);
+        ok(status == STATUS_SUCCESS && size == 128, "got %#lx, size %lu\n", status, size);
+        status = BCryptEncrypt(key, input, sizeof(input), &oaep[i], NULL, 0, encrypted, sizeof(encrypted), &size,
+                               BCRYPT_PAD_OAEP);
+        ok(status == (i == 2 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER), "got %#lx\n", status);
+        if (i == 2)
+        {
+            status = BCryptDecrypt(key, encrypted, size, &oaep[0], NULL, 0, decrypted, sizeof(decrypted), &size,
+                                   BCRYPT_PAD_OAEP);
+            ok(status == STATUS_INVALID_PARAMETER, "got %#lx\n", status);
+            status = BCryptDecrypt(key, encrypted, 128, &oaep[1], NULL, 0, decrypted, sizeof(decrypted), &size,
+                                   BCRYPT_PAD_OAEP);
+            ok(status == STATUS_INVALID_PARAMETER, "got %#lx\n", status);
+            status = BCryptDecrypt(key, encrypted, 128, &oaep[2], NULL, 0, decrypted, sizeof(decrypted), &size,
+                                   BCRYPT_PAD_OAEP);
+            ok(status == STATUS_SUCCESS && size == sizeof(input), "got %#lx, size %lu\n", status, size);
+        }
+        winetest_pop_context();
+    }
+    status = BCryptEncrypt(key, input, sizeof(input), NULL, NULL, 0, encrypted, sizeof(encrypted), &size,
+                           BCRYPT_PAD_OAEP);
+    ok(status == STATUS_INVALID_PARAMETER, "got %#lx\n", status);
+
+    for (i = 0; i < ARRAY_SIZE(pss); i++)
+    {
+        winetest_push_context("pss %lu", i);
+        size = 0;
+        status = BCryptSignHash(key, &pss[i], hash, sizeof(hash), sig, sizeof(sig), &size, BCRYPT_PAD_PSS);
+        ok(status == (i == 2 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER), "got %#lx\n", status);
+        status = BCryptVerifySignature(key, &pss[i], hash, sizeof(hash), sig, sizeof(sig), BCRYPT_PAD_PSS);
+        ok(status == (i == 2 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER), "got %#lx\n", status);
+        winetest_pop_context();
+    }
+    BCryptDestroyKey(key);
+    BCryptCloseAlgorithmProvider(alg, 0);
+}
+
+static void test_ecc_private_key_without_public_key(void)
+{
+    static const BYTE gx[] = {0x6b,0x17,0xd1,0xf2,0xe1,0x2c,0x42,0x47,0xf8,0xbc,0xe6,0xe5,0x63,0xa4,0x40,0xf2,
+                              0x77,0x03,0x7d,0x81,0x2d,0xeb,0x33,0xa0,0xf4,0xa1,0x39,0x45,0xd8,0x98,0xc2,0x96};
+    static const BYTE gy[] = {0x4f,0xe3,0x42,0xe2,0xfe,0x1a,0x7f,0x9b,0x8e,0xe7,0xeb,0x4a,0x7c,0x0f,0x9e,0x16,
+                              0x2b,0xce,0x33,0x57,0x6b,0x31,0x5e,0xce,0xcb,0xb6,0x40,0x68,0x37,0xbf,0x51,0xf5};
+    BYTE blob[sizeof(BCRYPT_ECCKEY_BLOB) + 96], out[sizeof(blob)];
+    BCRYPT_ECCKEY_BLOB *header = (BCRYPT_ECCKEY_BLOB *)blob;
+    BCRYPT_ALG_HANDLE alg;
+    BCRYPT_KEY_HANDLE key;
+    NTSTATUS status;
+    ULONG size;
+
+    status = BCryptOpenAlgorithmProvider(&alg, BCRYPT_ECDSA_P256_ALGORITHM, NULL, 0);
+    ok(!status, "got %#lx\n", status);
+
+    /* the public key of a private key blob is derived from the private key when it is all zeros */
+    memset(blob, 0, sizeof(blob));
+    header->dwMagic = BCRYPT_ECDSA_PRIVATE_P256_MAGIC;
+    header->cbKey = 32;
+    blob[sizeof(blob) - 1] = 1;
+    status = BCryptImportKeyPair(alg, NULL, BCRYPT_ECCPRIVATE_BLOB, &key, blob, sizeof(blob), 0);
+    ok(status == STATUS_SUCCESS, "got %#lx\n", status);
+    if (!status)
+    {
+        status = BCryptExportKey(key, NULL, BCRYPT_ECCPRIVATE_BLOB, out, sizeof(out), &size, 0);
+        ok(status == STATUS_SUCCESS && size == sizeof(out), "got %#lx, size %lu\n", status, size);
+        ok(!memcmp(out + sizeof(*header), gx, 32) && !memcmp(out + sizeof(*header) + 32, gy, 32),
+           "the public key is not the generator\n");
+        BCryptDestroyKey(key);
+    }
+
+    /* a private key of zero is not a key, with or without its public key */
+    blob[sizeof(blob) - 1] = 0;
+    status = BCryptImportKeyPair(alg, NULL, BCRYPT_ECCPRIVATE_BLOB, &key, blob, sizeof(blob), 0);
+    ok(status == STATUS_INVALID_PARAMETER, "got %#lx\n", status);
+    memcpy(blob + sizeof(*header), gx, 32);
+    memcpy(blob + sizeof(*header) + 32, gy, 32);
+    status = BCryptImportKeyPair(alg, NULL, BCRYPT_ECCPRIVATE_BLOB, &key, blob, sizeof(blob), 0);
+    ok(status == STATUS_INVALID_PARAMETER, "got %#lx\n", status);
+    BCryptCloseAlgorithmProvider(alg, 0);
+}
+
 START_TEST(bcrypt)
 {
     HMODULE module;
@@ -5621,6 +5723,8 @@ START_TEST(bcrypt)
     test_TLS_PRF();
     test_HKDF();
     test_CHACHA20_POLY1305();
+    test_oaep_pss_hash();
+    test_ecc_private_key_without_public_key();
 
     FreeLibrary(module);
 }

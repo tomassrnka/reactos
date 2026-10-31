@@ -385,7 +385,24 @@ struct store_CERT_KEY_CONTEXT
     DWORD64 hCryptProv;
     DWORD   dwKeySpec;
 };
+/* The in-memory property value of a key context that holds an NCrypt key. It is never serialized,
+ * so its flags stay out of store_CERT_KEY_CONTEXT, whose size is part of the stored format. */
+struct ncrypt_key_context
+{
+    struct store_CERT_KEY_CONTEXT ctx;
+    DWORD   dwFlags; /* CERT_STORE_NO_CRYPT_RELEASE_FLAG given with the key */
+};
 void CRYPT_ConvertKeyContext(const struct store_CERT_KEY_CONTEXT *src, CERT_KEY_CONTEXT *dst);
+
+/* An NCRYPT_KEY_HANDLE in a key context (CERT_NCRYPT_KEY_HANDLE_PROP_ID) belongs to the context
+ * it was set on: it is never copied to another context, never serialized, and is released with
+ * NCryptFreeObject when it is replaced, removed or the context is freed. */
+static inline BOOL CRYPT_IsNCryptKeyContext(const CRYPT_DATA_BLOB *blob)
+{
+    return blob->cbData >= FIELD_OFFSET(struct store_CERT_KEY_CONTEXT, dwKeySpec) + sizeof(DWORD) &&
+     ((const struct store_CERT_KEY_CONTEXT *)blob->pbData)->dwKeySpec == CERT_NCRYPT_KEY_SPEC;
+}
+void CRYPT_ReleaseNCryptKeyContext(const CRYPT_DATA_BLOB *blob);
 
 /**
  *  String functions
