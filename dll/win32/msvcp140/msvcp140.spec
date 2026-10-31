@@ -361,9 +361,9 @@
 @ cdecl -arch=arm ??0task_continuation_context@Concurrency@@AAA@XZ(ptr) task_continuation_context_ctor
 @ thiscall -arch=i386 ??0task_continuation_context@Concurrency@@AAE@XZ(ptr) task_continuation_context_ctor
 @ cdecl -arch=win64 ??0task_continuation_context@Concurrency@@AEAA@XZ(ptr) task_continuation_context_ctor
-@ stub -arch=arm ??0time_base@std@@QAA@I@Z
-@ stub -arch=i386 ??0time_base@std@@QAE@I@Z
-@ stub -arch=win64 ??0time_base@std@@QEAA@_K@Z
+@ cdecl -arch=arm ??0time_base@std@@QAA@I@Z(ptr long) time_base_ctor_refs
+@ thiscall -arch=i386 ??0time_base@std@@QAE@I@Z(ptr long) time_base_ctor_refs
+@ cdecl -arch=win64 ??0time_base@std@@QEAA@_K@Z(ptr long) time_base_ctor_refs
 @ cdecl -arch=arm ??1?$_Yarn@D@std@@QAA@XZ(ptr) _Yarn_char_dtor
 @ thiscall -arch=i386 ??1?$_Yarn@D@std@@QAE@XZ(ptr) _Yarn_char_dtor
 @ cdecl -arch=win64 ??1?$_Yarn@D@std@@QEAA@XZ(ptr) _Yarn_char_dtor
@@ -517,15 +517,14 @@
 @ cdecl -arch=arm ??1ios_base@std@@UAA@XZ(ptr) ios_base_dtor
 @ thiscall -arch=i386 ??1ios_base@std@@UAE@XZ(ptr) ios_base_dtor
 @ cdecl -arch=win64 ??1ios_base@std@@UEAA@XZ(ptr) ios_base_dtor
-@ stub -arch=arm ??1time_base@std@@UAA@XZ
-@ stub -arch=i386 ??1time_base@std@@UAE@XZ
-@ stub -arch=win64 ??1time_base@std@@UEAA@XZ
+@ cdecl -arch=arm ??1time_base@std@@UAA@XZ(ptr) time_base_dtor
+@ thiscall -arch=i386 ??1time_base@std@@UAE@XZ(ptr) time_base_dtor
+@ cdecl -arch=win64 ??1time_base@std@@UEAA@XZ(ptr) time_base_dtor
 @ stub -arch=arm ??4?$_Iosb@H@std@@QAAAAV01@ABV01@@Z
 @ stub -arch=i386 ??4?$_Iosb@H@std@@QAEAAV01@ABV01@@Z
 @ stub -arch=arm ??4?$_Iosb@H@std@@QAAAAV01@$$QAV01@@Z
 @ stub -arch=i386 ??4?$_Iosb@H@std@@QAEAAV01@$$QAV01@@Z
-@ stub -arch=win64 ??4?$_Iosb@H@std@@QAEAAV01@$$QAV01@@Z
-@ stub -arch=arm ??4?$_Iosb@H@std@@QEAAAEAV01@$$QEAV01@@Z
+@ stub -arch=win64 ??4?$_Iosb@H@std@@QEAAAEAV01@$$QEAV01@@Z
 @ stub -arch=win64 ??4?$_Iosb@H@std@@QEAAAEAV01@AEBV01@@Z
 @ cdecl -arch=arm ??4?$_Yarn@D@std@@QAAAAV01@ABV01@@Z(ptr ptr) _Yarn_char_op_assign
 @ thiscall -arch=i386 ??4?$_Yarn@D@std@@QAEAAV01@ABV01@@Z(ptr ptr) _Yarn_char_op_assign
@@ -950,7 +949,7 @@
 @ extern ??_7?$num_put@GV?$ostreambuf_iterator@GU?$char_traits@G@std@@@std@@@std@@6B@ num_put_short_vtable
 @ extern ??_7?$num_put@_WV?$ostreambuf_iterator@_WU?$char_traits@_W@std@@@std@@@std@@6B@ num_put_wchar_vtable
 @ extern ??_7?$time_get@DV?$istreambuf_iterator@DU?$char_traits@D@std@@@std@@@std@@6B@ time_get_char_vtable
-# extern ??_7?$time_get@GV?$istreambuf_iterator@GU?$char_traits@G@std@@@std@@@std@@6B@
+@ extern ??_7?$time_get@GV?$istreambuf_iterator@GU?$char_traits@G@std@@@std@@@std@@6B@ time_get_short_vtable
 @ extern ??_7?$time_get@_WV?$istreambuf_iterator@_WU?$char_traits@_W@std@@@std@@@std@@6B@ time_get_wchar_vtable
 @ extern ??_7?$time_put@DV?$ostreambuf_iterator@DU?$char_traits@D@std@@@std@@@std@@6B@ time_put_char_vtable
 @ extern ??_7?$time_put@GV?$ostreambuf_iterator@GU?$char_traits@G@std@@@std@@@std@@6B@ time_put_short_vtable
@@ -961,7 +960,7 @@
 @ extern ??_7ctype_base@std@@6B@ ctype_base_vtable
 @ extern ??_7facet@locale@std@@6B@ locale_facet_vtable
 @ extern ??_7ios_base@std@@6B@ ios_base_vtable
-# extern ??_7time_base@std@@6B@
+@ extern ??_7time_base@std@@6B@ time_base_vtable
 @ extern ??_8?$basic_iostream@DU?$char_traits@D@std@@@std@@7B?$basic_istream@DU?$char_traits@D@std@@@1@@ basic_iostream_char_vbtable1
 @ extern ??_8?$basic_iostream@DU?$char_traits@D@std@@@std@@7B?$basic_ostream@DU?$char_traits@D@std@@@1@@ basic_iostream_char_vbtable2
 @ extern ??_8?$basic_iostream@GU?$char_traits@G@std@@@std@@7B?$basic_istream@GU?$char_traits@G@std@@@1@@ basic_iostream_wchar_vbtable1
@@ -1079,9 +1078,9 @@
 @ cdecl -arch=arm ??_Fid@locale@std@@QAAXXZ(ptr) locale_id_ctor
 @ thiscall -arch=i386 ??_Fid@locale@std@@QAEXXZ(ptr) locale_id_ctor
 @ cdecl -arch=win64 ??_Fid@locale@std@@QEAAXXZ(ptr) locale_id_ctor
-@ stub -arch=arm ??_Ftime_base@std@@QAAXXZ
-@ stub -arch=i386 ??_Ftime_base@std@@QAEXXZ
-@ stub -arch=win64 ??_Ftime_base@std@@QEAAXXZ
+@ cdecl -arch=arm ??_Ftime_base@std@@QAAXXZ(ptr) time_base_ctor
+@ thiscall -arch=i386 ??_Ftime_base@std@@QAEXXZ(ptr) time_base_ctor
+@ cdecl -arch=win64 ??_Ftime_base@std@@QEAAXXZ(ptr) time_base_ctor
 @ stub -arch=win32 ?CaptureCallstack@platform@details@Concurrency@@YAIPAPAXII@Z
 @ stub -arch=win64 ?CaptureCallstack@platform@details@Concurrency@@YA_KPEAPEAX_K1@Z
 @ cdecl ?GetCurrentThreadId@platform@details@Concurrency@@YAJXZ() kernel32.GetCurrentThreadId
@@ -1414,7 +1413,7 @@
 @ cdecl -arch=win32 ?_Init@locale@std@@CAPAV_Locimp@12@_N@Z(long) locale__Init_ref
 @ cdecl -arch=win64 ?_Init@locale@std@@CAPEAV_Locimp@12@_N@Z(long) locale__Init_ref
 @ extern ?_Init_cnt@Init@ios_base@std@@0HA ios_base_Init__Init_cnt
-# extern ?_Init_cnt@_UShinit@std@@0HA
+@ extern ?_Init_cnt@_UShinit@std@@0HA _UShinit__Init_cnt
 @ extern ?_Init_cnt@_Winit@std@@0HA _Winit__Init_cnt
 @ cdecl -arch=win32 ?_Init_cnt_func@Init@ios_base@std@@CAAAHXZ() ios_base_Init__Init_cnt_func
 @ cdecl -arch=win64 ?_Init_cnt_func@Init@ios_base@std@@CAAEAHXZ() ios_base_Init__Init_cnt_func
@@ -2523,7 +2522,7 @@
 @ cdecl -arch=arm ?get_monthname@?$time_get@_WV?$istreambuf_iterator@_WU?$char_traits@_W@std@@@std@@@std@@QBA?AV?$istreambuf_iterator@_WU?$char_traits@_W@std@@@2@V32@0AAVios_base@2@AAHPAUtm@@@Z(ptr ptr ptr long ptr long ptr ptr ptr) time_get_wchar_get_monthname
 @ thiscall -arch=i386 ?get_monthname@?$time_get@_WV?$istreambuf_iterator@_WU?$char_traits@_W@std@@@std@@@std@@QBE?AV?$istreambuf_iterator@_WU?$char_traits@_W@std@@@2@V32@0AAVios_base@2@AAHPAUtm@@@Z(ptr ptr ptr long ptr long ptr ptr ptr) time_get_wchar_get_monthname
 @ cdecl -arch=win64 ?get_monthname@?$time_get@_WV?$istreambuf_iterator@_WU?$char_traits@_W@std@@@std@@@std@@QEBA?AV?$istreambuf_iterator@_WU?$char_traits@_W@std@@@2@V32@0AEAVios_base@2@AEAHPEAUtm@@@Z(ptr ptr ptr ptr ptr ptr ptr) time_get_wchar_get_monthname
-@ stub -arch=arm ?get_new_handler@std@@YAP6AXXZXZ
+@ cdecl ?get_new_handler@std@@YAP6AXXZXZ() get_new_handler
 @ cdecl -arch=arm ?get_time@?$time_get@DV?$istreambuf_iterator@DU?$char_traits@D@std@@@std@@@std@@QBA?AV?$istreambuf_iterator@DU?$char_traits@D@std@@@2@V32@0AAVios_base@2@AAHPAUtm@@@Z(ptr ptr ptr long ptr long ptr ptr ptr) time_get_char_get_time
 @ thiscall -arch=i386 ?get_time@?$time_get@DV?$istreambuf_iterator@DU?$char_traits@D@std@@@std@@@std@@QBE?AV?$istreambuf_iterator@DU?$char_traits@D@std@@@2@V32@0AAVios_base@2@AAHPAUtm@@@Z(ptr ptr ptr long ptr long ptr ptr ptr) time_get_char_get_time
 @ cdecl -arch=win64 ?get_time@?$time_get@DV?$istreambuf_iterator@DU?$char_traits@D@std@@@std@@@std@@QEBA?AV?$istreambuf_iterator@DU?$char_traits@D@std@@@2@V32@0AEAVios_base@2@AEAHPEAUtm@@@Z(ptr ptr ptr ptr ptr ptr ptr) time_get_char_get_time
@@ -2604,9 +2603,9 @@
 @ extern ?id@?$ctype@D@std@@2V0locale@2@A ctype_char_id
 @ extern ?id@?$ctype@G@std@@2V0locale@2@A ctype_short_id
 @ extern ?id@?$ctype@_W@std@@2V0locale@2@A ctype_wchar_id
-# extern ?id@?$messages@D@std@@2V0locale@2@A
-# extern ?id@?$messages@G@std@@2V0locale@2@A
-# extern ?id@?$messages@_W@std@@2V0locale@2@A
+@ extern ?id@?$messages@D@std@@2V0locale@2@A messages_char_id
+@ extern ?id@?$messages@G@std@@2V0locale@2@A messages_short_id
+@ extern ?id@?$messages@_W@std@@2V0locale@2@A messages_wchar_id
 @ extern ?id@?$money_get@DV?$istreambuf_iterator@DU?$char_traits@D@std@@@std@@@std@@2V0locale@2@A money_get_char_id
 @ extern ?id@?$money_get@GV?$istreambuf_iterator@GU?$char_traits@G@std@@@std@@@std@@2V0locale@2@A money_get_short_id
 @ extern ?id@?$money_get@_WV?$istreambuf_iterator@_WU?$char_traits@_W@std@@@std@@@std@@2V0locale@2@A money_get_wchar_id
@@ -2629,7 +2628,7 @@
 @ extern ?id@?$numpunct@G@std@@2V0locale@2@A numpunct_short_id
 @ extern ?id@?$numpunct@_W@std@@2V0locale@2@A numpunct_wchar_id
 @ extern ?id@?$time_get@DV?$istreambuf_iterator@DU?$char_traits@D@std@@@std@@@std@@2V0locale@2@A time_get_char_id
-# extern ?id@?$time_get@GV?$istreambuf_iterator@GU?$char_traits@G@std@@@std@@@std@@2V0locale@2@A
+@ extern ?id@?$time_get@GV?$istreambuf_iterator@GU?$char_traits@G@std@@@std@@@std@@2V0locale@2@A time_get_short_id
 @ extern ?id@?$time_get@_WV?$istreambuf_iterator@_WU?$char_traits@_W@std@@@std@@@std@@2V0locale@2@A time_get_wchar_id
 @ extern ?id@?$time_put@DV?$ostreambuf_iterator@DU?$char_traits@D@std@@@std@@@std@@2V0locale@2@A time_put_char_id
 @ extern ?id@?$time_put@GV?$ostreambuf_iterator@GU?$char_traits@G@std@@@std@@@std@@2V0locale@2@A time_put_short_id
