@@ -21,6 +21,7 @@ list(APPEND SOURCE
     getsockname.c
     handleinherit.c
     sendwhole.c
+    tcpnodelay.c
     inheritedsocket.c
     helpers.c
     iocpskip.c

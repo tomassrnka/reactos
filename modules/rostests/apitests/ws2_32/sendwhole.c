@@ -4,7 +4,8 @@
  * PURPOSE:     A send of a blocking stream socket is sent whole: send() returns the whole length and an
  *              overlapped WSASend completes with it, whether it completes through a completion routine,
  *              an event or a completion port (OpenSSH's sshd-session treats a short completion as a
- *              broken assumption and loses the rest of the data)
+ *              broken assumption and loses the rest of the data). An overlapped WSASend completes whole
+ *              also on a socket in non-blocking mode (FIONBIO) and with SO_SNDBUF 0.
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  *
  * The expected values are what Windows 10 22H2 does.
@@ -83,7 +84,8 @@ static void OverlappedSend(SOCKET Client, ULONG Length)
     HeapFree(GetProcessHeap(), 0, Data);
 }
 
-static void MakePair(SOCKET *Client, SOCKET *Server)
+/* Client: overlapped; SendBuf < 0 leaves SO_SNDBUF alone; NonBlocking puts the client in FIONBIO mode */
+static void MakePairEx(SOCKET *Client, SOCKET *Server, int SendBuf, BOOL NonBlocking)
 {
     SOCKET Listener = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in Addr;
@@ -96,10 +98,18 @@ static void MakePair(SOCKET *Client, SOCKET *Server)
     ok(getsockname(Listener, (struct sockaddr *)&Addr, &Length) == 0, "getsockname failed\n");
     ok(listen(Listener, 1) == 0, "listen failed\n");
     *Client = WSASocketW(AF_INET, SOCK_STREAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
+    if (SendBuf >= 0)
+        ok(setsockopt(*Client, SOL_SOCKET, SO_SNDBUF, (char *)&SendBuf, sizeof(SendBuf)) == 0,
+           "SO_SNDBUF %d failed: %d\n", SendBuf, WSAGetLastError());
     ok(connect(*Client, (struct sockaddr *)&Addr, sizeof(Addr)) == 0, "connect failed: %d\n", WSAGetLastError());
     *Server = accept(Listener, NULL, NULL);
     ok(*Server != INVALID_SOCKET, "accept failed\n");
     closesocket(Listener);
+    if (NonBlocking)
+    {
+        u_long One = 1;
+        ok(ioctlsocket(*Client, FIONBIO, &One) == 0, "FIONBIO failed: %d\n", WSAGetLastError());
+    }
 }
 
 typedef struct _SEND
@@ -168,7 +178,7 @@ static void IocpFinish(HANDLE Port, SEND *Send, SEND *Expected, ULONG_PTR Expect
 }
 
 /* Sends on a fresh connection, then checks the reader got everything in order */
-static void StreamCase(BOOL UseIocp)
+static void StreamCase(BOOL UseIocp, BOOL NonBlocking, int SendBuf)
 {
     SOCKET Client, Server;
     HANDLE Thread, Port = NULL;
@@ -181,7 +191,7 @@ static void StreamCase(BOOL UseIocp)
     Received = 0;
     Corrupt = 0;
     ReaderDone = 0;
-    MakePair(&Client, &Server);
+    MakePairEx(&Client, &Server, SendBuf, NonBlocking);
     if (UseIocp)
     {
         Port = CreateIoCompletionPort((HANDLE)Client, NULL, 7, 0);
@@ -229,45 +239,64 @@ static void StreamCase(BOOL UseIocp)
     closesocket(Server);
 }
 
-START_TEST(sendwhole)
+/* A completion routine, and the plain blocking send unless the socket is in non-blocking mode */
+static void RoutineCase(BOOL NonBlocking, int SendBuf)
 {
-    WSADATA Data;
     SOCKET Client, Server;
     int Sent;
     HANDLE Thread;
     char *Large;
-    ULONG Start;
+    ULONG Total;
 
-    ok(WSAStartup(MAKEWORD(2, 2), &Data) == 0, "WSAStartup failed\n");
-
-    /* A completion routine and the plain blocking send */
     Received = 0;
     Corrupt = 0;
-    MakePair(&Client, &Server);
+    ReaderDone = 0;
+    MakePairEx(&Client, &Server, SendBuf, NonBlocking);
     Thread = CreateThread(NULL, 0, Reader, (LPVOID)(ULONG_PTR)Server, 0, NULL);
 
     OverlappedSend(Client, SMALL_LEN);
     OverlappedSend(Client, LARGE_LEN);
     OverlappedSend(Client, HUGE_LEN);
+    Total = SMALL_LEN + LARGE_LEN + HUGE_LEN;
 
-    Large = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, HUGE_LEN);
-    Sent = send(Client, Large, LARGE_LEN, 0);
-    ok(Sent == LARGE_LEN, "send(%d) returned %d\n", LARGE_LEN, Sent);
-    Sent = send(Client, Large, HUGE_LEN, 0);
-    ok(Sent == HUGE_LEN, "send(%d) returned %d\n", HUGE_LEN, Sent);
-    HeapFree(GetProcessHeap(), 0, Large);
+    if (!NonBlocking)
+    {
+        Large = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, HUGE_LEN);
+        Sent = send(Client, Large, LARGE_LEN, 0);
+        ok(Sent == LARGE_LEN, "send(%d) returned %d\n", LARGE_LEN, Sent);
+        Sent = send(Client, Large, HUGE_LEN, 0);
+        ok(Sent == HUGE_LEN, "send(%d) returned %d\n", HUGE_LEN, Sent);
+        HeapFree(GetProcessHeap(), 0, Large);
+        Total += LARGE_LEN + HUGE_LEN;
+    }
 
     shutdown(Client, SD_SEND);
     ok(WaitForSingleObject(Thread, 60000) == WAIT_OBJECT_0, "the reader did not finish\n");
-    Start = SMALL_LEN + LARGE_LEN + HUGE_LEN + LARGE_LEN + HUGE_LEN;
-    ok(Received == Start, "the reader got %I64d bytes, expected %lu\n", (LONG64)Received, Start);
+    ok(Received == Total, "the reader got %I64d bytes, expected %lu\n", (LONG64)Received, Total);
     CloseHandle(Thread);
     closesocket(Client);
     closesocket(Server);
+}
 
-    /* An event, and a completion port */
-    StreamCase(FALSE);
-    StreamCase(TRUE);
+START_TEST(sendwhole)
+{
+    WSADATA Data;
+    int NonBlocking, SendBuf;
+
+    ok(WSAStartup(MAKEWORD(2, 2), &Data) == 0, "WSAStartup failed\n");
+
+    /* Blocking and non-blocking sockets, the default send buffer and SO_SNDBUF 0 (nothing buffered
+     * by the socket: the oracle completes at once, still with the whole length) */
+    for (NonBlocking = 0; NonBlocking < 2; NonBlocking++)
+    {
+        for (SendBuf = -1; SendBuf <= 0; SendBuf++)
+        {
+            trace("non-blocking %d, SO_SNDBUF %d\n", NonBlocking, SendBuf);
+            RoutineCase(NonBlocking, SendBuf);
+            StreamCase(FALSE, NonBlocking, SendBuf);
+            StreamCase(TRUE, NonBlocking, SendBuf);
+        }
+    }
 
     WSACleanup();
 }

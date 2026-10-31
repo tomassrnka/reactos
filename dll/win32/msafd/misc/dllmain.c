@@ -1994,6 +1994,7 @@ WSPAccept(
     AcceptSocketInfo->SharedData->State = SocketConnected;
     AcceptSocketInfo->SharedData->ConnectTime = GetCurrentTimeInSeconds();
     AcceptSocketInfo->SharedData->NonBlocking = Socket->SharedData->NonBlocking;
+    AcceptSocketInfo->SharedData->TcpNoDelay = Socket->SharedData->TcpNoDelay;
     AcceptSocketInfo->SharedData->RecvTimeout = Socket->SharedData->RecvTimeout;
     AcceptSocketInfo->SharedData->SendTimeout = Socket->SharedData->SendTimeout;
 
@@ -3230,6 +3231,25 @@ WSPGetSockOpt(IN SOCKET Handle,
         return NO_ERROR;
     }
 
+    /* TCP_NODELAY: kept with the socket (the helper cannot read it back). Windows answers with a
+     * one byte BOOLEAN whatever the size of the buffer, and refuses it on a socket that is not a stream */
+    if (Level == IPPROTO_TCP && OptionName == TCP_NODELAY)
+    {
+        if (Socket->SharedData->SocketType != SOCK_STREAM)
+        {
+            if (lpErrno) *lpErrno = WSAEINVAL;
+            return SOCKET_ERROR;
+        }
+        if (*OptionLength < (INT)sizeof(BOOLEAN))
+        {
+            if (lpErrno) *lpErrno = WSAEFAULT;
+            return SOCKET_ERROR;
+        }
+        *(BOOLEAN *)OptionValue = Socket->SharedData->TcpNoDelay ? TRUE : FALSE;
+        *OptionLength = sizeof(BOOLEAN);
+        return NO_ERROR;
+    }
+
     switch (Level)
     {
         case SOL_SOCKET:
@@ -3555,6 +3575,35 @@ WSPSetSockOpt(
             return SOCKET_ERROR;
         }
         Socket->SharedData->IpPktInfo = (*(DWORD *)optval != 0) ? 1 : 0;
+        return NO_ERROR;
+    }
+
+    /* TCP_NODELAY: a one byte switch on a stream socket (the value is read from the first byte of
+     * the buffer, whatever its size), also kept with the socket for getsockopt */
+    if (level == IPPROTO_TCP && optname == TCP_NODELAY)
+    {
+        if (Socket->SharedData->SocketType != SOCK_STREAM)
+        {
+            if (lpErrno) *lpErrno = WSAEINVAL;
+            return SOCKET_ERROR;
+        }
+        if (optlen < (INT)sizeof(BOOLEAN))
+        {
+            if (lpErrno) *lpErrno = WSAEFAULT;
+            return SOCKET_ERROR;
+        }
+        Errno = Socket->HelperData->WSHSetSocketInformation(Socket->HelperContext,
+                                                            s,
+                                                            Socket->TdiAddressHandle,
+                                                            Socket->TdiConnectionHandle,
+                                                            level,
+                                                            optname,
+                                                            (PCHAR)optval,
+                                                            optlen);
+        if (lpErrno) *lpErrno = Errno;
+        if (Errno != NO_ERROR)
+            return SOCKET_ERROR;
+        Socket->SharedData->TcpNoDelay = (*(BOOLEAN *)optval != 0) ? 1 : 0;
         return NO_ERROR;
     }
 
