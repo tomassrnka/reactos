@@ -156,6 +156,7 @@ list(APPEND SOURCE
     SetUnhandledExceptionFilter.c
     SuspendThreadContext.c
     SetWaitableTimerEx.c
+    SleepNeverEarly.c
     SystemFirmware.c
     Toolhelp32.c
     TerminateProcess.c

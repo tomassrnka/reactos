@@ -18,7 +18,119 @@ LONG KiTickOffset;
 ULONG KeTimeAdjustment;
 BOOLEAN KiTimeAdjustmentEnabled = FALSE;
 
+/* How the time of the last clock interrupt relates to the interrupt time, for
+   KiQueryClockPhase. The interrupt time moves in steps at clock interrupts; the
+   performance counter value taken at an interrupt (KiClockStamp) is later than
+   the time the interrupt time stands for by the latency of that interrupt, and
+   that latency is not known. What is known is how much later than the least
+   latency seen so far this interrupt was (KiClockLateness, in 100 ns units):
+   each interrupt adds the difference between the time the counter measured since
+   the last one and the interrupt time it moved, and the sum does not go below
+   zero. It is written by the clock interrupt of the boot processor only, and
+   read with the sequence number, which is odd while it is written. */
+#define KI_CLOCK_SETTLE_UPDATES 16
+
+/* Clock interrupts can arrive earlier than the earliest one seen so far; half a
+   millisecond (in 100 ns units) is added to the time counted from the last one */
+#define KI_CLOCK_PHASE_MARGIN 5000
+
+/* Clock interrupts can be delayed by more than a period (a virtual processor
+   that is not running); the time counted from the last one is not cut before
+   this many periods */
+#define KI_CLOCK_PHASE_LIMIT 4
+static volatile ULONG KiClockSequence;
+static volatile ULONGLONG KiClockStamp;
+static volatile LONGLONG KiClockLateness;
+
 /* FUNCTIONS ******************************************************************/
+
+FORCEINLINE
+LONGLONG
+KiScaleCounterDelta(IN ULONGLONG Delta, IN LONGLONG Frequency)
+{
+    /* Counter ticks to 100 ns; two seconds at most, so that the product fits */
+    if (Delta > (ULONGLONG)(2 * Frequency)) Delta = 2 * Frequency;
+    return (LONGLONG)((Delta * 10000000ULL) / (ULONGLONG)Frequency);
+}
+
+static
+VOID
+NTAPI
+KiRecordClockInterrupt(IN ULONG Increment)
+{
+    LARGE_INTEGER Now, Frequency;
+    LONGLONG Lateness, Diff;
+    ULONGLONG Stamp;
+
+    Now = KeQueryPerformanceCounter(&Frequency);
+    Stamp = KiClockStamp;
+    Lateness = KiClockLateness;
+
+    if (!Stamp || (Frequency.QuadPart <= 0))
+    {
+        /* The first interrupt, nothing to compare with */
+        Lateness = 0;
+    }
+    else if ((ULONGLONG)Now.QuadPart <= Stamp)
+    {
+        /* The counter did not move forward: the safe side is the longest delay */
+        Lateness = KeMaximumIncrement;
+    }
+    else
+    {
+        /* Lateness gained against the interrupt time, forgetting slowly so that
+           a difference between the counter and the clock cannot add up */
+        Diff = KiScaleCounterDelta(Now.QuadPart - Stamp, Frequency.QuadPart) - (LONGLONG)Increment;
+        Lateness = Lateness - (Lateness >> 6) + Diff;
+        if (Lateness < 0) Lateness = 0;
+        if (Lateness > (LONGLONG)KeMaximumIncrement) Lateness = KeMaximumIncrement;
+    }
+
+    KiClockSequence++;
+    _ReadWriteBarrier();
+    KiClockStamp = Now.QuadPart;
+    KiClockLateness = Lateness;
+    _ReadWriteBarrier();
+    KiClockSequence++;
+}
+
+LONGLONG
+NTAPI
+KiQueryClockPhase(VOID)
+{
+    LARGE_INTEGER Now, Frequency;
+    ULONGLONG Stamp;
+    LONGLONG Lateness, Phase;
+    ULONG Sequence;
+
+    /* Read the record consistently */
+    for (;;)
+    {
+        Sequence = KiClockSequence;
+        _ReadWriteBarrier();
+        Stamp = KiClockStamp;
+        Lateness = KiClockLateness;
+        _ReadWriteBarrier();
+        if (!(Sequence & 1) && (Sequence == KiClockSequence)) break;
+        YieldProcessor();
+    }
+
+    /* While the record settles, or when the counter cannot be related to it,
+       assume the longest delay: the safe side, a delay ends later */
+    Now = KeQueryPerformanceCounter(&Frequency);
+    if ((Sequence < (2 * KI_CLOCK_SETTLE_UPDATES)) || (Frequency.QuadPart <= 0) ||
+        ((ULONGLONG)Now.QuadPart < Stamp))
+    {
+        return KeMaximumIncrement;
+    }
+
+    /* The time since that interrupt, and how late the interrupt was; a delay
+       counted from the interrupt time is then not shorter than requested */
+    Phase = KiScaleCounterDelta(Now.QuadPart - Stamp, Frequency.QuadPart) + Lateness +
+            KI_CLOCK_PHASE_MARGIN;
+    return (Phase < (LONGLONG)(KI_CLOCK_PHASE_LIMIT * KeMaximumIncrement)) ?
+           Phase : (LONGLONG)(KI_CLOCK_PHASE_LIMIT * KeMaximumIncrement);
+}
 
 FORCEINLINE
 VOID
@@ -79,6 +191,9 @@ KeUpdateSystemTime(IN PKTRAP_FRAME TrapFrame,
     InterruptTime.QuadPart = *(ULONGLONG*)&SharedUserData->InterruptTime;
     InterruptTime.QuadPart += Increment;
     KiWriteSystemTime(&SharedUserData->InterruptTime, InterruptTime);
+
+    /* Remember when that was, for KiQueryClockPhase */
+    KiRecordClockInterrupt(Increment);
 
     /* Check for timer expiration */
     KiCheckForTimerExpiration(Prcb, TrapFrame, InterruptTime, KeTickCount.LowPart);

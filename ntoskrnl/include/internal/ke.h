@@ -181,6 +181,13 @@ extern ULONG KeTimeIncrement;
 extern ULONG KeTimeAdjustment;
 extern BOOLEAN KiTimeAdjustmentEnabled;
 extern LONG KiTickOffset;
+
+/* Time in 100 ns units that has passed since the time the interrupt time stands
+   for, a few clock intervals at most; a delay of this much more than requested,
+   counted from the interrupt time, ends no earlier than the request */
+LONGLONG
+NTAPI
+KiQueryClockPhase(VOID);
 extern ULONG KiFreezeFlag;
 extern ULONG KiDPCTimeout;
 extern PGDI_BATCHFLUSH_ROUTINE KeGdiFlushUserBatch;

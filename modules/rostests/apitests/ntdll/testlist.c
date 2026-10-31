@@ -61,6 +61,7 @@ extern void func_NtCreateSectionSize(void);
 extern void func_NtCreateThread(void);
 extern void func_NtGetNextThread(void);
 extern void func_NtDeleteKey(void);
+extern void func_NtDelayExecution(void);
 extern void func_NtDuplicateObject(void);
 extern void func_NtDuplicateToken(void);
 extern void func_NtExtendSection(void);
@@ -267,6 +268,7 @@ const struct test winetest_testlist[] =
     { "NtCreateThread",                 func_NtCreateThread },
     { "NtGetNextThread",                func_NtGetNextThread },
     { "NtDeleteKey",                    func_NtDeleteKey },
+    { "NtDelayExecution",               func_NtDelayExecution },
     { "NtDuplicateObject",              func_NtDuplicateObject },
     { "NtDuplicateToken",               func_NtDuplicateToken },
     { "NtExtendSection",                func_NtExtendSection },
