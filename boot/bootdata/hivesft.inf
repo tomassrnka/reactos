@@ -247,6 +247,17 @@ HKLM,"SOFTWARE\Policies\Google",,0x00000012
 HKLM,"SOFTWARE\Policies\Google\Chrome",,0x00000012
 HKLM,"SOFTWARE\Policies\Google\Chrome","HardwareAccelerationModeEnabled",0x00010001,0
 
+; Visual Studio Code (Electron/Chromium) has the same limit as Chrome: its GPU process logs "Failed to
+; load dcomp.dll" and the window is never painted (verified: --disable-gpu, --disable-gpu-compositing and
+; --use-angle=swiftshader all paint). Code has no policy switch, so use the per-app Direct3D option, as
+; the Claude Desktop feature does: with wined3d in no3d mode the GPU process fails fast and Chromium
+; falls back to software compositing (GDI present). Applies to every launch path and every user.
+HKLM,"SOFTWARE\Wine",,0x00000012
+HKLM,"SOFTWARE\Wine\AppDefaults",,0x00000012
+HKLM,"SOFTWARE\Wine\AppDefaults\Code.exe",,0x00000012
+HKLM,"SOFTWARE\Wine\AppDefaults\Code.exe\Direct3D",,0x00000012
+HKLM,"SOFTWARE\Wine\AppDefaults\Code.exe\Direct3D","renderer",0,"no3d"
+
 ; Application compatibility
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\ShellCompatibility",,0x00000012
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\ShellCompatibility\Applications",,0x00000012
