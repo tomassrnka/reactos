@@ -235,6 +235,74 @@ static void TestWarpAdapter(IDXGIFactory4 *Factory, IDXGIFactory1 *Factory1)
     IDXGIAdapter1_Release(Warp);
 }
 
+/* the adapter the factory lists first is usable: a device made on it reports it back, with the same identity */
+static void TestAdapterZeroDevice(IDXGIFactory1 *Factory1)
+{
+    HMODULE D3d11 = LoadLibraryW(L"d3d11.dll");
+    PFN_D3D11_CREATE_DEVICE pCreateDevice = D3d11 ? (PFN_D3D11_CREATE_DEVICE)GetProcAddress(D3d11, "D3D11CreateDevice") : NULL;
+    IDXGIAdapter1 *Adapter = NULL;
+    IDXGIAdapter *DevAdapter = NULL;
+    IDXGIDevice *DxgiDevice = NULL;
+    IUnknown *Device = NULL;
+    DXGI_ADAPTER_DESC1 Desc1;
+    DXGI_ADAPTER_DESC Desc0;
+    HRESULT hr;
+
+    hr = IDXGIFactory1_EnumAdapters1(Factory1, 0, &Adapter);
+    ok(hr == S_OK, "EnumAdapters1(0) returned %08lx\n", hr);
+    if (!Adapter)
+        return;
+
+    hr = IDXGIAdapter1_GetDesc1(Adapter, &Desc1);
+    ok(hr == S_OK, "GetDesc1 returned %08lx\n", hr);
+    ok(Desc1.VendorId != 0 || Desc1.Description[0] != 0, "adapter 0 has no identity\n");
+
+    if (!pCreateDevice)
+    {
+        skip("no d3d11.dll\n");
+        IDXGIAdapter1_Release(Adapter);
+        return;
+    }
+
+    /* D3D_DRIVER_TYPE_UNKNOWN, D3D11_SDK_VERSION */
+    hr = pCreateDevice((IDXGIAdapter *)Adapter, 0, NULL, 0, NULL, 0, 7, (void **)&Device, NULL, NULL);
+    ok(hr == S_OK, "D3D11CreateDevice on adapter 0 returned %08lx\n", hr);
+    if (Device)
+    {
+        hr = IUnknown_QueryInterface(Device, &IID_IDXGIDevice, (void **)&DxgiDevice);
+        ok(hr == S_OK, "QueryInterface(IDXGIDevice) returned %08lx\n", hr);
+        if (DxgiDevice)
+        {
+            hr = IDXGIDevice_GetAdapter(DxgiDevice, &DevAdapter);
+            ok(hr == S_OK, "GetAdapter returned %08lx\n", hr);
+            if (DevAdapter)
+            {
+                hr = IDXGIAdapter_GetDesc(DevAdapter, &Desc0);
+                ok(hr == S_OK && SameLuid(Desc0.AdapterLuid, Desc1.AdapterLuid),
+                   "the device is on another adapter (LUID %08lx:%08lx)\n",
+                   Desc0.AdapterLuid.HighPart, Desc0.AdapterLuid.LowPart);
+                ok(Desc0.VendorId == Desc1.VendorId && Desc0.DeviceId == Desc1.DeviceId,
+                   "the device adapter is %04x:%04x, not %04x:%04x\n",
+                   Desc0.VendorId, Desc0.DeviceId, Desc1.VendorId, Desc1.DeviceId);
+                IDXGIAdapter_Release(DevAdapter);
+            }
+            IDXGIDevice_Release(DxgiDevice);
+        }
+        IUnknown_Release(Device);
+    }
+    IDXGIAdapter1_Release(Adapter);
+}
+
+/* a 32-bit process on 64-bit ReactOS has the same 3D stack as a 64-bit one */
+static BOOL IsWow64(void)
+{
+    BOOL (WINAPI *pIsWow64Process)(HANDLE, PBOOL) =
+        (void *)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "IsWow64Process");
+    BOOL Wow64 = FALSE;
+
+    return pIsWow64Process && pIsWow64Process(GetCurrentProcess(), &Wow64) && Wow64;
+}
+
 START_TEST(EnumWarpAdapter)
 {
     HMODULE Dxgi = LoadLibraryW(L"dxgi.dll");
@@ -256,9 +324,9 @@ START_TEST(EnumWarpAdapter)
         return;
 
     hr = pCreateFactory1(&IID_IDXGIFactory1, (void **)&Factory1);
-    if (hr == DXGI_ERROR_UNSUPPORTED)
+    if (hr == DXGI_ERROR_UNSUPPORTED && !IsWow64())
     {
-        /* ReactOS: no 3D adapter (a 32-bit process on 64-bit ReactOS has none yet) */
+        /* ReactOS: no 3D adapter. Not acceptable under WoW64, where SysWOW64 ships its own GL driver */
         skip("no DXGI factory, CreateDXGIFactory1 returned %08lx\n", hr);
         return;
     }
@@ -273,6 +341,7 @@ START_TEST(EnumWarpAdapter)
         TestWarpAdapter(Factory4, Factory1);
         IDXGIFactory4_Release(Factory4);
     }
+    TestAdapterZeroDevice(Factory1);
     IDXGIFactory1_Release(Factory1);
 
     /* the factory of CreateDXGIFactory is the same */
