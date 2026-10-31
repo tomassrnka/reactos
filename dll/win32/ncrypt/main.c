@@ -645,9 +645,16 @@ static void dbuf_add(struct dbuf *b, const void *data, DWORD len)
     if (b->failed) return;
     if (b->len + len > b->size)
     {
+        /* the buffer holds private key material: the old one is wiped, not left behind by realloc */
         DWORD size = max(b->size * 2, b->len + len + 64);
-        BYTE *tmp = realloc(b->data, size);
+        BYTE *tmp = malloc(size);
         if (!tmp) { b->failed = TRUE; return; }
+        if (b->data)
+        {
+            memcpy(tmp, b->data, b->len);
+            SecureZeroMemory(b->data, b->len);
+            free(b->data);
+        }
         b->data = tmp;
         b->size = size;
     }
@@ -674,6 +681,7 @@ static void dbuf_add_tlv(struct dbuf *b, BYTE tag, struct dbuf *content)
     if (content->failed) b->failed = TRUE;
     dbuf_add_header(b, tag, content->len);
     dbuf_add(b, content->data, content->len);
+    if (content->data) SecureZeroMemory(content->data, content->len);
     free(content->data);
     memset(content, 0, sizeof(*content));
 }
@@ -722,7 +730,7 @@ static DWORD bit_length(const struct der *value)
 static SECURITY_STATUS import_pkcs8(NCRYPT_PROV_HANDLE provider, enum algid ecc_group, const BYTE *data, DWORD size,
                                     struct object **ret)
 {
-    struct der in = {data, size}, info, alg, oid, params, key, priv, n, e, p, q, version;
+    struct der in = {data, size}, info, alg, oid, params, key, priv, n, e, p, q, version, info_version;
     const struct key_alg *key_alg = NULL;
     SECURITY_STATUS status = NTE_BAD_DATA;
     struct object *object;
@@ -731,7 +739,7 @@ static SECURITY_STATUS import_pkcs8(NCRYPT_PROV_HANDLE provider, enum algid ecc_
     const WCHAR *blob_type;
     unsigned int i;
 
-    if (!der_get(&in, 0x30, &info) || !der_get_uint(&info, &version) || !der_get(&info, 0x30, &alg) ||
+    if (!der_get(&in, 0x30, &info) || !der_get_uint(&info, &info_version) || !der_get(&info, 0x30, &alg) ||
         !der_get(&alg, 0x06, &oid) || !der_get(&info, 0x04, &key))
         return CRYPT_E_BAD_ENCODE;
 
@@ -766,6 +774,8 @@ static SECURITY_STATUS import_pkcs8(NCRYPT_PROV_HANDLE provider, enum algid ecc_
         struct der ec, curve = {NULL, 0}, pub = {NULL, 0}, tagged;
         DWORD bits = 0, cb;
 
+        /* unlike for RSA keys, a PrivateKeyInfo version other than 0 is rejected */
+        if (info_version.len != 1 || info_version.data[0]) return CRYPT_E_BAD_ENCODE;
         if (der_get(&alg, 0x06, &params)) curve = params;
         if (!der_get(&key, 0x30, &ec) || !der_get_uint(&ec, &version) || !der_get(&ec, 0x04, &priv))
             return CRYPT_E_BAD_ENCODE;
@@ -781,15 +791,18 @@ static SECURITY_STATUS import_pkcs8(NCRYPT_PROV_HANDLE provider, enum algid ecc_
         key_alg = find_named_curve_by_bits(ecc_group, bits);
         cb = (bits + 7) / 8;
         /* the public key is an uncompressed point: unused-bits byte, 0x04, X, Y */
-        if (pub.len != 2 + 2 * cb || pub.data[0] || pub.data[1] != 4) return CRYPT_E_BAD_ENCODE;
+        if (pub.data && (pub.len != 2 + 2 * cb || pub.data[0] || pub.data[1] != 4)) return CRYPT_E_BAD_ENCODE;
         blob_size = sizeof(*hdr) + 3 * cb;
         if (!(blob = malloc(blob_size))) return NTE_NO_MEMORY;
         hdr = (BCRYPT_ECCKEY_BLOB *)blob;
         hdr->dwMagic = key_alg->private_magic;
         hdr->cbKey = cb;
-        memcpy(blob + sizeof(*hdr), pub.data + 2, 2 * cb);
+        /* the optional public key is left out: an all-zero point makes bcrypt derive it from the private key */
+        if (pub.data) memcpy(blob + sizeof(*hdr), pub.data + 2, 2 * cb);
+        else memset(blob + sizeof(*hdr), 0, 2 * cb);
         if (!put_be(blob + sizeof(*hdr) + 2 * cb, cb, &priv))
         {
+            SecureZeroMemory(blob, blob_size);
             free(blob);
             return CRYPT_E_BAD_ENCODE;
         }
@@ -832,6 +845,7 @@ static SECURITY_STATUS export_pkcs8(struct object *object, BYTE *output, DWORD o
         if (!(blob = malloc(size))) return NTE_NO_MEMORY;
         if ((status = map_ntstatus(BCryptExportKey(key->bcrypt_key, NULL, BCRYPT_RSAFULLPRIVATE_BLOB, blob, size, &size, 0))))
         {
+            SecureZeroMemory(blob, size);
             free(blob);
             return status;
         }
@@ -870,6 +884,7 @@ static SECURITY_STATUS export_pkcs8(struct object *object, BYTE *output, DWORD o
         if (!(blob = malloc(size))) return NTE_NO_MEMORY;
         if ((status = map_ntstatus(BCryptExportKey(key->bcrypt_key, NULL, BCRYPT_ECCPRIVATE_BLOB, blob, size, &size, 0))))
         {
+            SecureZeroMemory(blob, size);
             free(blob);
             return status;
         }
@@ -936,7 +951,15 @@ static SECURITY_STATUS import_key_blob(struct object *object, const WCHAR *type,
         object->key.bcrypt_key = NULL;
         return map_ntstatus(status);
     }
-    if (object->key.algid == RSA) bits = ((const BCRYPT_RSAKEY_BLOB *)data)->BitLength;
+    if (object->key.algid == RSA)
+    {
+        const BCRYPT_RSAKEY_BLOB *hdr = (const BCRYPT_RSAKEY_BLOB *)data;
+
+        /* the BitLength of the blob is only taken as the length if the modulus has the room for exactly
+         * that many bits: it is not trusted otherwise */
+        bits = hdr->cbModulus * 8;
+        if (hdr->BitLength <= bits && hdr->BitLength > bits - 8) bits = hdr->BitLength;
+    }
     else bits = object->key.alg->bits;
     set_key_length_properties(object, bits);
     return ERROR_SUCCESS;
@@ -1067,6 +1090,13 @@ SECURITY_STATUS WINAPI NCryptImportKey(NCRYPT_PROV_HANDLE provider, NCRYPT_KEY_H
     return ERROR_SUCCESS;
 }
 
+static DWORD get_export_policy(struct object *object)
+{
+    const struct object_property *property = get_object_property(object, NCRYPT_EXPORT_POLICY_PROPERTY);
+
+    return property && property->value_size == sizeof(DWORD) ? *(const DWORD *)property->value : 0;
+}
+
 SECURITY_STATUS WINAPI NCryptExportKey(NCRYPT_KEY_HANDLE key, NCRYPT_KEY_HANDLE encrypt_key, const WCHAR *type,
                                        NCryptBufferDesc *params, BYTE *output, DWORD output_len, DWORD *ret_len,
                                        DWORD flags)
@@ -1094,12 +1124,24 @@ SECURITY_STATUS WINAPI NCryptExportKey(NCRYPT_KEY_HANDLE key, NCRYPT_KEY_HANDLE 
     if (!type || !ret_len) return NTE_INVALID_PARAMETER;
     if (!object->key.finalized) return NTE_BAD_KEY_STATE;
 
-    if (!wcscmp(type, NCRYPT_PKCS8_PRIVATE_KEY_BLOB)) return export_pkcs8(object, output, output_len, ret_len);
     if (!wcscmp(type, BCRYPT_PUBLIC_KEY_BLOB))
         type = object->key.algid == RSA ? BCRYPT_RSAPUBLIC_BLOB : BCRYPT_ECCPUBLIC_BLOB;
     else if (!wcscmp(type, BCRYPT_PRIVATE_KEY_BLOB))
         type = object->key.algid == RSA ? BCRYPT_RSAPRIVATE_BLOB : BCRYPT_ECCPRIVATE_BLOB;
 
+    /* a blob of another kind of key */
+    if (object->key.algid == RSA ? (!wcscmp(type, BCRYPT_ECCPUBLIC_BLOB) || !wcscmp(type, BCRYPT_ECCPRIVATE_BLOB)) :
+        (!wcscmp(type, BCRYPT_RSAPUBLIC_BLOB) || !wcscmp(type, BCRYPT_RSAPRIVATE_BLOB) ||
+         !wcscmp(type, BCRYPT_RSAFULLPRIVATE_BLOB)))
+        return NTE_BAD_TYPE;
+
+    /* the private key is only handed out in plaintext if the export policy allows it */
+    if ((!wcscmp(type, NCRYPT_PKCS8_PRIVATE_KEY_BLOB) || !wcscmp(type, BCRYPT_RSAPRIVATE_BLOB) ||
+         !wcscmp(type, BCRYPT_RSAFULLPRIVATE_BLOB) || !wcscmp(type, BCRYPT_ECCPRIVATE_BLOB)) &&
+        !(get_export_policy(object) & NCRYPT_ALLOW_PLAINTEXT_EXPORT_FLAG))
+        return NTE_NOT_SUPPORTED;
+
+    if (!wcscmp(type, NCRYPT_PKCS8_PRIVATE_KEY_BLOB)) return export_pkcs8(object, output, output_len, ret_len);
     return map_ntstatus(BCryptExportKey(object->key.bcrypt_key, NULL, type, output, output_len, ret_len, 0));
 }
 
@@ -1212,7 +1254,25 @@ SECURITY_STATUS WINAPI NCryptSetProperty(NCRYPT_HANDLE handle, const WCHAR *name
         return set_object_property(object, custom, input, insize);
     }
     for (i = 0; i < ARRAYSIZE(settable); i++)
-        if (!wcscmp(name, settable[i])) return set_object_property(object, name, input, insize);
+    {
+        if (wcscmp(name, settable[i])) continue;
+        if (!wcscmp(name, NCRYPT_EXPORT_POLICY_PROPERTY) && object->type == KEY)
+        {
+            DWORD policy;
+
+            /* the policy can be changed after the key is finalized: it is read when the key is exported */
+            if (insize != sizeof(policy)) return NTE_BAD_DATA;
+            memcpy(&policy, input, sizeof(policy));
+            if (policy & ~(NCRYPT_ALLOW_EXPORT_FLAG | NCRYPT_ALLOW_PLAINTEXT_EXPORT_FLAG |
+                           NCRYPT_ALLOW_ARCHIVING_FLAG | NCRYPT_ALLOW_PLAINTEXT_ARCHIVING_FLAG))
+                return NTE_NOT_SUPPORTED;
+            /* archiving implies the matching export right */
+            if (policy & NCRYPT_ALLOW_ARCHIVING_FLAG) policy |= NCRYPT_ALLOW_EXPORT_FLAG;
+            if (policy & NCRYPT_ALLOW_PLAINTEXT_ARCHIVING_FLAG) policy |= NCRYPT_ALLOW_PLAINTEXT_EXPORT_FLAG;
+            return set_object_property(object, name, (const BYTE *)&policy, sizeof(policy));
+        }
+        return set_object_property(object, name, input, insize);
+    }
     return NTE_NOT_SUPPORTED;
 }
 

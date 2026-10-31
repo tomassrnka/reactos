@@ -1954,8 +1954,7 @@ static NTSTATUS decrypt_rsa( const struct key *key, const UCHAR *input, ULONG in
         const BCRYPT_OAEP_PADDING_INFO *pad = padding;
         const SYMCRYPT_HASH *hash_desc;
 
-        if (!pad) return STATUS_INVALID_PARAMETER;
-        hash_desc = get_hash_from_str( pad->pszAlgId );
+        if (!pad || !(hash_desc = get_hash_from_str( pad->pszAlgId ))) return STATUS_INVALID_PARAMETER;
 
         if (SymCryptRsaOaepDecrypt( key->a.rsa.handle, input, input_len, SYMCRYPT_NUMBER_FORMAT_MSB_FIRST, hash_desc,
                                     pad->pbLabel, pad->cbLabel, 0, output, output_len, &size ))
@@ -2287,17 +2286,10 @@ static NTSTATUS encrypt_rsa( const struct key *key, const UCHAR *input, ULONG in
     else if (flags == BCRYPT_PAD_OAEP)
     {
         const BCRYPT_OAEP_PADDING_INFO *pad = padding;
-        const SYMCRYPT_HASH *hash_desc = SymCryptSha1Algorithm;
-        const BYTE *label = NULL;
-        SIZE_T label_len = 0;
+        const SYMCRYPT_HASH *hash_desc;
 
-        if (pad)
-        {
-            hash_desc = get_hash_from_str( pad->pszAlgId );
-            label = pad->pbLabel;
-            label_len = pad->cbLabel;
-        }
-        if (SymCryptRsaOaepEncrypt( key->a.rsa.handle, input, input_len, hash_desc, label, label_len, 0,
+        if (!pad || !(hash_desc = get_hash_from_str( pad->pszAlgId ))) return STATUS_INVALID_PARAMETER;
+        if (SymCryptRsaOaepEncrypt( key->a.rsa.handle, input, input_len, hash_desc, pad->pbLabel, pad->cbLabel, 0,
                                     SYMCRYPT_NUMBER_FORMAT_MSB_FIRST, output, size, &size ))
             return STATUS_INTERNAL_ERROR;
         *ret_len = size;
@@ -3248,13 +3240,25 @@ static NTSTATUS import_ecc_key( enum alg_id alg, enum ecc_curve_id curve, const 
     }
 
     pub_size = SymCryptEckeySizeofPublicKey( key->a.ecc.handle, SYMCRYPT_ECPOINT_FORMAT_XY );
-    if (key_flags & KEY_FLAG_PRIVATE) priv_size = SymCryptEckeySizeofPrivateKey( key->a.ecc.handle );
+    if (key_flags & KEY_FLAG_PRIVATE)
+    {
+        ULONG i;
+
+        priv_size = SymCryptEckeySizeofPrivateKey( key->a.ecc.handle );
+        /* like Windows, a private key blob whose public key is all zeros has it derived from the private key */
+        for (i = 0; i < blob->cbKey * 2 && !pub[i]; i++) ;
+        if (i == blob->cbKey * 2)
+        {
+            pub = NULL;
+            pub_size = 0;
+        }
+    }
 
     if (SymCryptEckeySetValue( priv, priv_size, pub, pub_size, SYMCRYPT_NUMBER_FORMAT_MSB_FIRST,
                                SYMCRYPT_ECPOINT_FORMAT_XY, set_flags, key->a.ecc.handle ))
     {
         destroy_key( key );
-        return STATUS_INTERNAL_ERROR;
+        return STATUS_INVALID_PARAMETER; /* an invalid private key (zero, or none for the public one) */
     }
 
     *ret_key = key;
@@ -3859,6 +3863,7 @@ static NTSTATUS sign_hash_rsa( const struct key *key, const void *padding, const
         const SYMCRYPT_HASH *hash_desc = get_hash_from_str( pad->pszAlgId );
         SIZE_T size;
 
+        if (!hash_desc) return STATUS_INVALID_PARAMETER;
         if (SymCryptRsaPssSign( key->a.rsa.handle, hash, hash_len, hash_desc, pad->cbSalt, 0,
                                 SYMCRYPT_NUMBER_FORMAT_MSB_FIRST, signature, required_len, &size ))
             return STATUS_INTERNAL_ERROR;
@@ -3974,6 +3979,7 @@ static NTSTATUS verify_signature_rsa( const struct key *key, const void *padding
         const BCRYPT_PSS_PADDING_INFO *pad = padding;
         const SYMCRYPT_HASH *hash_desc = get_hash_from_str( pad->pszAlgId );
 
+        if (!hash_desc) return STATUS_INVALID_PARAMETER;
         error = SymCryptRsaPssVerify( key->a.rsa.handle, hash, hash_len, signature, signature_len,
                                       SYMCRYPT_NUMBER_FORMAT_MSB_FIRST, hash_desc, pad->cbSalt, 0 );
     }
