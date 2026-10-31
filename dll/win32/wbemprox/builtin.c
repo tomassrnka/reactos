@@ -1106,8 +1106,17 @@ static const struct column col_qualifier[] =
 };
 static const struct column col_quickfixengineering[] =
 {
-    { prop_captionW,  CIM_STRING },
-    { prop_hotfixidW, CIM_STRING|COL_FLAG_KEY }
+    { prop_captionW,  CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"CSName", CIM_STRING|COL_FLAG_DYNAMIC },
+    { prop_descriptionW, CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"FixComments", CIM_STRING },
+    { prop_hotfixidW, CIM_STRING|COL_FLAG_DYNAMIC|COL_FLAG_KEY },
+    { L"InstallDate", CIM_DATETIME },
+    { L"InstalledBy", CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"InstalledOn", CIM_STRING|COL_FLAG_DYNAMIC },
+    { prop_nameW, CIM_STRING },
+    { L"ServicePackInEffect", CIM_STRING|COL_FLAG_KEY },
+    { L"Status", CIM_STRING }
 };
 static const struct column col_service[] =
 {
@@ -1302,10 +1311,6 @@ static const WCHAR os_serialnumberW[] =
     {'1','2','3','4','5','-','O','E','M','-','1','2','3','4','5','6','7','-','1','2','3','4','5',0};
 static const WCHAR physicalmedia_tagW[] =
     {'\\','\\','.','\\','P','H','Y','S','I','C','A','L','D','R','I','V','E','0',0};
-static const WCHAR quickfixengineering_captionW[] =
-    {'h','t','t','p',':','/','/','w','i','n','e','h','q','.','o','r','g',0};
-static const WCHAR quickfixengineering_hotfixidW[] =
-    {'K','B','1','2','3','4','5','6','7',0};
 static const WCHAR sounddevice_productnameW[] =
     {'W','i','n','e',' ','A','u','d','i','o',' ','D','e','v','i','c','e',0};
 static const WCHAR systemenclosure_systemenclosureW[] =
@@ -1904,7 +1909,16 @@ struct record_qualifier
 struct record_quickfixengineering
 {
     const WCHAR *caption;
+    const WCHAR *csname;
+    const WCHAR *description;
+    const WCHAR *fixcomments;
     const WCHAR *hotfixid;
+    const WCHAR *installdate;
+    const WCHAR *installedby;
+    const WCHAR *installedon;
+    const WCHAR *name;
+    const WCHAR *servicepackineffect;
+    const WCHAR *status;
 };
 struct record_service
 {
@@ -2130,10 +2144,6 @@ static const struct record_qualifier data_qualifier[] =
 {
     { class_process_getowner_outW, param_userW, CIM_SINT32, FLAVOR_ID, prop_idW, 0 },
     { class_process_getowner_outW, param_domainW, CIM_SINT32, FLAVOR_ID, prop_idW, 1 }
-};
-static const struct record_quickfixengineering data_quickfixengineering[] =
-{
-    { quickfixengineering_captionW, quickfixengineering_hotfixidW },
 };
 static const struct record_sounddevice data_sounddevice[] =
 {
@@ -5644,6 +5654,255 @@ static enum fill_status fill_environment( struct table *table, const struct expr
 }
 #endif
 
+/* Win32_QuickFixEngineering: the installed updates of the servicing stack. Windows lists the
+ * packages of HKLM\...\Component Based Servicing\Packages that are installed (CurrentState 0x70),
+ * with the KB number, the release type and the support URL read from the package manifest in
+ * %SystemRoot%\servicing\Packages. A system without servicing packages has no entries. */
+struct qfe_entry
+{
+    char kb[16];
+    WCHAR *caption;
+    WCHAR *description;
+    WCHAR *installedby;
+    WCHAR *installedon;
+};
+
+static WCHAR *utf8_to_wcs( const char *str, UINT len )
+{
+    WCHAR *ret;
+    int n = MultiByteToWideChar( CP_UTF8, 0, str, len, NULL, 0 );
+    if (!(ret = heap_alloc( (n + 1) * sizeof(WCHAR) ))) return NULL;
+    MultiByteToWideChar( CP_UTF8, 0, str, len, ret, n );
+    ret[n] = 0;
+    return ret;
+}
+
+/* value of attribute name="..." in the tag that starts at tag (up to its '>') */
+static WCHAR *get_xml_attr( const char *tag, const char *name )
+{
+    char pat[32], tagbuf[1024];
+    const char *end, *p, *q;
+
+    if (!(end = strchr( tag, '>' ))) return NULL;
+    if ((UINT)(end - tag) >= sizeof(tagbuf)) end = tag + sizeof(tagbuf) - 1;
+    memcpy( tagbuf, tag, end - tag );
+    tagbuf[end - tag] = 0;
+    sprintf( pat, " %s=\"", name );
+    if (!(p = strstr( tagbuf, pat ))) return NULL;
+    p += strlen( pat );
+    if (!(q = strchr( p, '"' ))) return NULL;
+    return utf8_to_wcs( p, q - p );
+}
+
+static WCHAR *get_qfe_installedby( const WCHAR *sidstr )
+{
+    WCHAR name[256], domain[256], *ret;
+    DWORD namelen = ARRAY_SIZE(name), domainlen = ARRAY_SIZE(domain);
+    SID_NAME_USE use;
+    PSID sid;
+
+    if (!sidstr || !ConvertStringSidToSidW( sidstr, &sid )) return NULL;
+    if (!LookupAccountSidW( NULL, sid, name, &namelen, domain, &domainlen, &use ))
+    {
+        LocalFree( sid );
+        return NULL;
+    }
+    LocalFree( sid );
+    if (!(ret = heap_alloc( (wcslen( domain ) + wcslen( name ) + 2) * sizeof(WCHAR) ))) return NULL;
+    if (domain[0]) swprintf( ret, L"%s\\%s", domain, name );
+    else wcscpy( ret, name );
+    return ret;
+}
+
+static WCHAR *get_qfe_installedon( DWORD high, DWORD low )
+{
+    FILETIME ft, lft;
+    SYSTEMTIME st;
+    WCHAR *ret;
+
+    ft.dwHighDateTime = high;
+    ft.dwLowDateTime = low;
+    if (!high && !low) return NULL;
+    if (!FileTimeToLocalFileTime( &ft, &lft ) || !FileTimeToSystemTime( &lft, &st )) return NULL;
+    if (!(ret = heap_alloc( 16 * sizeof(WCHAR) ))) return NULL;
+    swprintf( ret, L"%u/%u/%u", st.wMonth, st.wDay, st.wYear );
+    return ret;
+}
+
+static void free_qfe_entry( struct qfe_entry *e )
+{
+    heap_free( e->caption );
+    heap_free( e->description );
+    heap_free( e->installedby );
+    heap_free( e->installedon );
+}
+
+static BOOL qfe_seen( const struct qfe_entry *list, UINT count, const char *kb )
+{
+    UINT i;
+    for (i = 0; i < count; i++) if (!strcmp( list[i].kb, kb )) return TRUE;
+    return FALSE;
+}
+
+static BOOL read_qfe_package( const WCHAR *installname, struct qfe_entry *e )
+{
+    WCHAR path[MAX_PATH];
+    char *buf, *p, *q;
+    HANDLE file;
+    DWORD len = 0;
+    UINT i;
+
+    if (!GetWindowsDirectoryW( path, MAX_PATH - 1 )) return FALSE;
+    if (wcslen( path ) + wcslen( installname ) + 20 >= MAX_PATH) return FALSE;
+    wcscat( path, L"\\servicing\\Packages\\" );
+    wcscat( path, installname );
+    file = CreateFileW( path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+    /* the assembly and package elements are at the top of the manifest */
+    if (!(buf = heap_alloc( 65537 ))) { CloseHandle( file ); return FALSE; }
+    if (!ReadFile( file, buf, 65536, &len, NULL )) len = 0;
+    CloseHandle( file );
+    buf[len] = 0;
+
+    if (!(p = strstr( buf, "<package identifier=\"KB" ))) goto fail;
+    p += strlen( "<package identifier=\"" );
+    for (i = 0; i < sizeof(e->kb) - 1 && p[i] && p[i] != '"'; i++) e->kb[i] = p[i];
+    if (p[i] != '"') goto fail;
+    e->kb[i] = 0;
+    for (i = 2; e->kb[i]; i++) if (e->kb[i] < '0' || e->kb[i] > '9') goto fail;
+    if (i == 2) goto fail;
+    e->description = get_xml_attr( p - strlen( "<package identifier=\"" ), "releaseType" );
+    if ((q = strstr( buf, "<assembly " ))) e->caption = get_xml_attr( q, "supportInformation" );
+    heap_free( buf );
+    return TRUE;
+
+fail:
+    heap_free( buf );
+    return FALSE;
+}
+
+static enum fill_status fill_quickfixengineering( struct table *table, const struct expr *cond )
+{
+    static const WCHAR cbsW[] =
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\Component Based Servicing\\Packages";
+    struct record_quickfixengineering *rec;
+    struct qfe_entry *list = NULL, *tmp;
+    enum fill_status status = FILL_STATUS_UNFILTERED;
+    UINT row = 0, count = 0, alloc = 0, i, rec_offset = 0;
+    HKEY root, key;
+    WCHAR name[300], *installname, *user;
+    DWORD idx, namelen, state, size, type, high, low;
+    WCHAR *csname;
+
+    if (!RegOpenKeyExW( HKEY_LOCAL_MACHINE, cbsW, 0, KEY_READ | KEY_WOW64_64KEY, &root ))
+    {
+        for (idx = 0; ; idx++)
+        {
+            struct qfe_entry e;
+            const WCHAR *kbpos;
+            char kbname[16];
+
+            namelen = ARRAY_SIZE(name);
+            if (RegEnumKeyExW( root, idx, name, &namelen, NULL, NULL, NULL, NULL )) break;
+            if (wcsncmp( name, L"Package_", 8 ) || !wcsstr( name, L"_for_" )) continue;
+
+            /* skip a KB that is already listed without opening anything */
+            kbpos = wcsstr( name, L"_for_KB" );
+            if (kbpos)
+            {
+                UINT k = 0;
+                for (kbpos += 5; k < sizeof(kbname) - 1 && *kbpos && *kbpos != '~' && *kbpos < 128; k++)
+                    kbname[k] = (char)*kbpos++;
+                kbname[k] = 0;
+                if (qfe_seen( list, count, kbname )) continue;
+            }
+
+            if (RegOpenKeyExW( root, name, 0, KEY_READ | KEY_WOW64_64KEY, &key )) continue;
+            size = sizeof(state);
+            if (RegQueryValueExW( key, L"CurrentState", NULL, &type, (BYTE *)&state, &size ) ||
+                type != REG_DWORD || state != 0x70)
+            {
+                RegCloseKey( key );
+                continue;
+            }
+            {
+                WCHAR full[400];
+                swprintf( full, L"%s\\%s", cbsW, name );
+                installname = get_reg_string( HKEY_LOCAL_MACHINE, full, L"InstallName" );
+                user = get_reg_string( HKEY_LOCAL_MACHINE, full, L"InstallUser" );
+            }
+            high = low = 0;
+            size = sizeof(high);
+            if (RegQueryValueExW( key, L"InstallTimeHigh", NULL, &type, (BYTE *)&high, &size ) || type != REG_DWORD) high = 0;
+            size = sizeof(low);
+            if (RegQueryValueExW( key, L"InstallTimeLow", NULL, &type, (BYTE *)&low, &size ) || type != REG_DWORD) low = 0;
+            RegCloseKey( key );
+
+            memset( &e, 0, sizeof(e) );
+            if (installname && read_qfe_package( installname, &e ) && !qfe_seen( list, count, e.kb ))
+            {
+                if (count == alloc)
+                {
+                    UINT new_alloc = alloc ? alloc * 2 : 16;
+                    if (!(tmp = heap_realloc( list, new_alloc * sizeof(*list) )))
+                    {
+                        free_qfe_entry( &e );
+                        heap_free( installname );
+                        heap_free( user );
+                        break;
+                    }
+                    list = tmp;
+                    alloc = new_alloc;
+                }
+                e.installedby = get_qfe_installedby( user );
+                e.installedon = get_qfe_installedon( high, low );
+                list[count++] = e;
+            }
+            else free_qfe_entry( &e );
+            heap_free( installname );
+            heap_free( user );
+        }
+        RegCloseKey( root );
+    }
+
+    csname = get_computername();
+    for (i = 0; i < count; i++)
+    {
+        WCHAR *kbw;
+
+        if (!resize_table( table, row + 1, sizeof(*rec) )) break;
+        rec = (struct record_quickfixengineering *)(table->data + rec_offset);
+        rec->caption             = list[i].caption ? list[i].caption : heap_strdupW( L"" );
+        rec->csname              = heap_strdupW( csname ? csname : L"" );
+        rec->description         = list[i].description ? list[i].description : heap_strdupW( L"" );
+        rec->fixcomments         = L"";
+        kbw                      = utf8_to_wcs( list[i].kb, strlen( list[i].kb ) );
+        rec->hotfixid            = kbw;
+        rec->installdate         = NULL;
+        rec->installedby         = list[i].installedby ? list[i].installedby : heap_strdupW( L"" );
+        rec->installedon         = list[i].installedon ? list[i].installedon : heap_strdupW( L"" );
+        rec->name                = NULL;
+        rec->servicepackineffect = L"";
+        rec->status              = NULL;
+        /* ownership of the strings moved to the row */
+        list[i].caption = list[i].description = list[i].installedby = list[i].installedon = NULL;
+        if (!match_row( table, row, cond, &status )) free_row_values( table, row );
+        else
+        {
+            rec_offset += sizeof(*rec);
+            row++;
+        }
+    }
+    for (; i < count; i++) free_qfe_entry( &list[i] );
+    heap_free( csname );
+    heap_free( list );
+
+    TRACE("created %u rows\n", row);
+    table->num_rows = row;
+    return status;
+}
+
 static enum fill_status fill_keyboard( struct table *table, const struct expr *cond )
 {
     static const WCHAR deviceidW[] = L"ACPI\\PNP0303\\0";
@@ -6838,7 +7097,7 @@ static struct table builtin_classes[] =
     { class_processor2W, C(col_processor), 0, 0, NULL, fill_processor },
 #endif
     { class_qualifiersW, C(col_qualifier), D(data_qualifier) },
-    { class_quickfixengineeringW, C(col_quickfixengineering), D(data_quickfixengineering) },
+    { class_quickfixengineeringW, C(col_quickfixengineering), 0, 0, NULL, fill_quickfixengineering },
     { class_serviceW, C(col_service), 0, 0, NULL, fill_service },
     { class_sidW, C(col_sid), 0, 0, NULL, fill_sid },
     { class_sounddeviceW, C(col_sounddevice), D(data_sounddevice) },
