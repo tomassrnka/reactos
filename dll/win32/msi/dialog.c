@@ -1435,6 +1435,23 @@ static UINT combobox_add_items( struct msi_combobox_info *info, const WCHAR *pro
     return r;
 }
 
+#ifdef __REACTOS__
+static void dialog_set_default_control( msi_dialog *dialog, struct control *control, const WCHAR *name )
+{
+    struct control *old = dialog_find_control( dialog, dialog->control_default );
+    WCHAR *copy = wcsdup( name );
+
+    if (!copy) return;
+    free( dialog->control_default );
+    dialog->control_default = copy;
+
+    if (old && old != control && (GetWindowLongW( old->hwnd, GWL_STYLE ) & BS_TYPEMASK) == BS_DEFPUSHBUTTON)
+        SendMessageW( old->hwnd, BM_SETSTYLE, BS_PUSHBUTTON, TRUE );
+    if (!wcsicmp( control->type, L"PushButton" ))
+        SendMessageW( control->hwnd, BM_SETSTYLE, BS_DEFPUSHBUTTON, TRUE );
+}
+#endif
+
 static UINT dialog_set_control_condition( MSIRECORD *rec, void *param )
 {
     msi_dialog *dialog = param;
@@ -1461,7 +1478,15 @@ static UINT dialog_set_control_condition( MSIRECORD *rec, void *param )
         else if (!wcscmp( action, L"Enable" ))
             EnableWindow(control->hwnd, TRUE);
         else if (!wcscmp( action, L"Default" ))
+        {
+#ifdef __REACTOS__
+            /* The control becomes the dialog's default control: Enter activates it, not
+             * the one named in the Dialog table (installers such as WiX name a button
+             * there that only a ControlCondition shows later) */
+            dialog_set_default_control( dialog, control, name );
+#endif
             SetFocus(control->hwnd);
+        }
         else
             FIXME("Unhandled action %s\n", debugstr_w(action));
     }

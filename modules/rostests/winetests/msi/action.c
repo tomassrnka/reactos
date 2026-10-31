@@ -1993,6 +1993,85 @@ static const msi_table pp_tables[] =
     ADD_TABLE(property),
 };
 
+static const char ui_install_ui_seq_dat[] =
+    "Action\tCondition\tSequence\n"
+    "s72\tS255\tI2\n"
+    "InstallUISequence\tAction\n"
+    "CostInitialize\t\t800\n"
+    "FileCost\t\t900\n"
+    "CostFinalize\t\t1000\n"
+    "UITestDlg\tNOT Installed\t1298\n"
+    "ExecuteAction\t\t1300";
+
+static const char ui_install_exec_seq_dat[] =
+    "Action\tCondition\tSequence\n"
+    "s72\tS255\tI2\n"
+    "InstallExecuteSequence\tAction\n"
+    "CostInitialize\t\t800\n"
+    "FileCost\t\t900\n"
+    "CostFinalize\t\t1000\n"
+    "InstallValidate\t\t1400\n"
+    "InstallInitialize\t\t1500\n"
+    "ProcessComponents\t\t1600\n"
+    "UnpublishFeatures\t\t1800\n"
+    "RemoveFiles\t\t3500\n"
+    "InstallFiles\t\t4000\n"
+    "RegisterUser\t\t6000\n"
+    "RegisterProduct\t\t6100\n"
+    "PublishFeatures\t\t6300\n"
+    "PublishProduct\t\t6400\n"
+    "InstallFinalize\t\t6600";
+
+/* Like WiX's VerifyReadyDlg: the Dialog table names Repair as the default control,
+ * and a ControlCondition makes Install the default and hides Repair on a first install */
+static const char ui_dialog_dat[] =
+    "Dialog\tHCentering\tVCentering\tWidth\tHeight\tAttributes\tTitle\tControl_First\tControl_Default\tControl_Cancel\n"
+    "s72\ti2\ti2\ti2\ti2\tI4\tL128\ts50\tS50\tS50\n"
+    "Dialog\tDialog\n"
+    "UITestDlg\t50\t50\t370\t270\t7\tMsiUITestDlg\tInstall\tRepair\tCancel";
+
+static const char ui_control_dat[] =
+    "Dialog_\tControl\tType\tX\tY\tWidth\tHeight\tAttributes\tProperty\tText\tControl_Next\tHelp\n"
+    "s72\ts50\ts20\ti2\ti2\ti2\ti2\tI4\tS72\tL0\tS50\tL50\n"
+    "Control\tDialog_\tControl\n"
+    "UITestDlg\tInstall\tPushButton\t212\t243\t80\t17\t3\t\tInstall\tRepair\t\n"
+    "UITestDlg\tRepair\tPushButton\t212\t243\t80\t17\t3\t\tRepair\tCancel\t\n"
+    "UITestDlg\tCancel\tPushButton\t304\t243\t56\t17\t3\t\tCancel\tInstall\t\n";
+
+static const char ui_control_event_dat[] =
+    "Dialog_\tControl_\tEvent\tArgument\tCondition\tOrdering\n"
+    "s72\ts50\ts50\ts255\tS255\tI2\n"
+    "ControlEvent\tDialog_\tControl_\tEvent\tArgument\tCondition\n"
+    "UITestDlg\tInstall\tEndDialog\tReturn\t1\t1\n"
+    "UITestDlg\tRepair\tReinstallMode\tecmus\t1\t1\n"
+    "UITestDlg\tRepair\tReinstall\tAll\t1\t2\n"
+    "UITestDlg\tRepair\tEndDialog\tReturn\t1\t3\n"
+    "UITestDlg\tCancel\tEndDialog\tExit\t1\t1";
+
+static const char ui_control_condition_dat[] =
+    "Dialog_\tControl_\tAction\tCondition\n"
+    "s72\ts50\ts50\ts255\n"
+    "ControlCondition\tDialog_\tControl_\tAction\n"
+    "UITestDlg\tInstall\tDefault\tNOT Installed\n"
+    "UITestDlg\tRepair\tHide\tNOT Installed";
+
+static const msi_table ui_tables[] =
+{
+    ADD_TABLE(pp_component),
+    ADD_TABLE(directory),
+    ADD_TABLE(rof_feature),
+    ADD_TABLE(rof_feature_comp),
+    ADD_TABLE(rof_file),
+    ADD_TABLE(ui_install_ui_seq),
+    ADD_TABLE(ui_install_exec_seq),
+    ADD_TABLE(ui_dialog),
+    ADD_TABLE(ui_control),
+    ADD_TABLE(ui_control_event),
+    ADD_TABLE(ui_control_condition),
+    ADD_TABLE(rof_media),
+    ADD_TABLE(property),
+};
+
 static const msi_table ppc_tables[] =
 {
     ADD_TABLE(ppc_component),
@@ -2953,6 +3032,80 @@ error:
     DeleteFileA("msitest\\maximus");
     RemoveDirectoryA("msitest");
     LocalFree(usersid);
+}
+
+static DWORD WINAPI press_enter_thread(void *param)
+{
+    HWND hwnd = NULL;
+    int i;
+
+    for (i = 0; i < 300 && !hwnd; i++)
+    {
+        Sleep(100);
+        hwnd = FindWindowA(NULL, "MsiUITestDlg");
+        if (hwnd && !IsWindowVisible(hwnd)) hwnd = NULL;
+    }
+    if (!hwnd) return 1;
+    Sleep(500);
+    /* what IsDialogMessage turns the Enter key into */
+    PostMessageA(hwnd, WM_COMMAND, IDOK, 0);
+    return 0;
+}
+
+static void test_ui_install_default_button(void)
+{
+    INSTALLSTATE state;
+    HANDLE thread;
+    DWORD exit_code;
+    UINT r;
+
+#ifndef __REACTOS__ /* TokenElevationType is not reported, every install test would skip */
+    if (!is_process_elevated())
+    {
+        skip("process is limited\n");
+        return;
+    }
+#endif
+
+    CreateDirectoryA("msitest", NULL);
+    create_file("msitest\\maximus", 500);
+    create_database(msifile, ui_tables, ARRAY_SIZE(ui_tables));
+
+    state = MsiQueryProductStateA("{7DF88A48-996F-4EC8-A022-BF956F9B2CBB}");
+    ok(state == INSTALLSTATE_UNKNOWN, "got %d\n", state);
+
+    thread = CreateThread(NULL, 0, press_enter_thread, NULL, 0, NULL);
+    MsiSetInternalUI(INSTALLUILEVEL_FULL, NULL);
+    r = MsiInstallProductA(msifile, NULL);
+    MsiSetInternalUI(INSTALLUILEVEL_NONE, NULL);
+    if (r == ERROR_INSTALL_PACKAGE_REJECTED)
+    {
+        skip("Not enough rights to perform tests\n");
+        goto error;
+    }
+    WaitForSingleObject(thread, 5000);
+    GetExitCodeThread(thread, &exit_code);
+    ok(!exit_code, "the dialog did not appear\n");
+    ok(r == ERROR_SUCCESS, "Expected ERROR_SUCCESS, got %u\n", r);
+
+    /* Enter pressed the default control, Install, not the Repair button of the Dialog table */
+    state = MsiQueryProductStateA("{7DF88A48-996F-4EC8-A022-BF956F9B2CBB}");
+    ok(state == INSTALLSTATE_DEFAULT, "got %d\n", state);
+    ok(delete_pf("msitest\\maximus", TRUE), "File not installed\n");
+    ok(delete_pf("msitest", FALSE), "Directory not created\n");
+
+    r = MsiInstallProductA(msifile, "REMOVE=ALL");
+    ok(r == ERROR_SUCCESS, "Expected ERROR_SUCCESS, got %u\n", r);
+    state = MsiQueryProductStateA("{7DF88A48-996F-4EC8-A022-BF956F9B2CBB}");
+    ok(state == INSTALLSTATE_UNKNOWN, "got %d\n", state);
+
+error:
+    CloseHandle(thread);
+    delete_pf("msitest\\maximus", TRUE);
+    delete_pf("msitest", FALSE);
+    DeleteFileA("msitest\\maximus");
+    RemoveDirectoryA("msitest");
+    DeleteFileA(msifile);
 }
 
 static void test_publish_product(void)
@@ -6536,6 +6689,7 @@ START_TEST(action)
 
     test_register_product();
     test_publish_product();
+    test_ui_install_default_button();
     test_publish_features();
     test_register_user();
     test_process_components();
