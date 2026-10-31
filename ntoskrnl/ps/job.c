@@ -83,6 +83,19 @@ ULONG PspJobInfoAlign[] =
     sizeof(ULONG)
 };
 
+/* Job information classes past JobObjectJobSetInformation that user mode asks for: the JVM queries its job's
+   processor groups and CPU rate at startup and warns "Attempt to query job object information failed" when the
+   query is rejected. Jobs here have no processor group assignment and no CPU rate control. */
+#define PspJobObjectGroupInformation            11
+#define PspJobObjectGroupInformationEx          14
+#define PspJobObjectCpuRateControlInformation   15
+
+typedef struct _PS_JOB_CPU_RATE_CONTROL_INFORMATION
+{
+    ULONG ControlFlags;
+    ULONG Value; /* CpuRate, Weight, or MinRate/MaxRate according to the flags */
+} PS_JOB_CPU_RATE_CONTROL_INFORMATION;
+
 /* DATA TYPE DEFINITIONS *****************************************************/
 
 /*!
@@ -2906,26 +2919,60 @@ NtQueryInformationJobObject(
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION ExtendedLimit;
     JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION BasicAndIo;
     JOBOBJECT_BASIC_UI_RESTRICTIONS UiRestrictions;
+    GROUP_AFFINITY GroupAffinity;
+    PS_JOB_CPU_RATE_CONTROL_INFORMATION CpuRate;
     ULONG RequiredLength, RequiredAlign, ReturnRequiredLength;
+    BOOLEAN ExtraClass;
 
     PAGED_CODE();
 
     CurrentThread  = KeGetCurrentThread();
 
+    ExtraClass = (JobInformationClass == PspJobObjectGroupInformation ||
+                  JobInformationClass == PspJobObjectGroupInformationEx ||
+                  JobInformationClass == PspJobObjectCpuRateControlInformation);
+
     /* Validate that JobInformationClass is in the expected range */
-    if (JobInformationClass > JobObjectJobSetInformation ||
-        JobInformationClass < JobObjectBasicAccountingInformation)
+    if (!ExtraClass &&
+        (JobInformationClass > JobObjectJobSetInformation ||
+         JobInformationClass < JobObjectBasicAccountingInformation))
     {
         return STATUS_INVALID_INFO_CLASS;
     }
 
     /* Determine the required length and alignment for the class */
-    RequiredLength = PspJobInfoLengths[JobInformationClass];
-    RequiredAlign = PspJobInfoAlign[JobInformationClass];
+    if (!ExtraClass)
+    {
+        RequiredLength = PspJobInfoLengths[JobInformationClass];
+        RequiredAlign = PspJobInfoAlign[JobInformationClass];
+    }
+    else if (JobInformationClass == PspJobObjectGroupInformation)
+    {
+        /* An array of group numbers: empty without a group assignment, so any buffer that holds
+           one number does, and none is written */
+        RequiredLength = 0;
+        RequiredAlign = sizeof(USHORT);
+        if (JobInformationLength < sizeof(USHORT))
+            return STATUS_INFO_LENGTH_MISMATCH;
+    }
+    else if (JobInformationClass == PspJobObjectGroupInformationEx)
+    {
+        /* An array of group affinities: one entry, the active processors of group 0. The length
+           is a whole number of entries (checked after the probe, as it reports a length) */
+        RequiredLength = sizeof(GROUP_AFFINITY);
+        RequiredAlign = sizeof(ULONG);
+    }
+    else
+    {
+        RequiredLength = sizeof(CpuRate);
+        RequiredAlign = sizeof(ULONG);
+    }
     ReturnRequiredLength = RequiredLength;
 
     /* If length mismatch (needed versus provided) */
-    if (JobInformationLength != RequiredLength)
+    if (JobInformationClass != PspJobObjectGroupInformation &&
+        JobInformationClass != PspJobObjectGroupInformationEx &&
+        JobInformationLength != RequiredLength)
     {
         /* This can only be accepted if the class is variable length
            (JobObjectBasicProcessIdList or JobObjectSecurityLimitInformation) or
@@ -2973,6 +3020,28 @@ NtQueryInformationJobObject(
         _SEH2_END;
     }
 
+    /* The length of a group affinity array is a whole number of entries. Windows answers a zero
+       length with the size it needs (the callers size their buffer with it) and any other
+       length that is not a multiple with an invalid parameter, reporting the length it saw */
+    if (JobInformationClass == PspJobObjectGroupInformationEx &&
+        (JobInformationLength == 0 || (JobInformationLength % sizeof(GROUP_AFFINITY)) != 0))
+    {
+        _SEH2_TRY
+        {
+            if (ReturnLength != NULL)
+            {
+                *ReturnLength = JobInformationLength ? JobInformationLength : sizeof(GROUP_AFFINITY);
+            }
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            _SEH2_YIELD(return _SEH2_GetExceptionCode());
+        }
+        _SEH2_END;
+
+        return JobInformationLength ? STATUS_INVALID_PARAMETER : STATUS_BUFFER_TOO_SMALL;
+    }
+
     /* If a job handle was provided, use it */
     if (JobHandle != NULL)
     {
@@ -3005,7 +3074,7 @@ NtQueryInformationJobObject(
     /* By default, assume we'll have to copy data */
     NoOutput = FALSE;
 
-    switch (JobInformationClass)
+    switch ((ULONG)JobInformationClass)
     {
     case JobObjectBasicAccountingInformation:
     case JobObjectBasicAndIoAccountingInformation:
@@ -3040,6 +3109,31 @@ NtQueryInformationJobObject(
         JobInfoBuffer = &UiRestrictions;
         break;
     }
+    case PspJobObjectGroupInformation:
+    {
+        /* No group assignment: an empty array */
+        Status = STATUS_SUCCESS;
+        ReturnRequiredLength = 0;
+        NoOutput = TRUE;
+        break;
+    }
+    case PspJobObjectGroupInformationEx:
+    {
+        RtlZeroMemory(&GroupAffinity, sizeof(GroupAffinity));
+        GroupAffinity.Mask = KeActiveProcessors;
+        GroupAffinity.Group = 0;
+        Status = STATUS_SUCCESS;
+        JobInfoBuffer = &GroupAffinity;
+        break;
+    }
+    case PspJobObjectCpuRateControlInformation:
+    {
+        /* Rate control is not enabled on any job */
+        RtlZeroMemory(&CpuRate, sizeof(CpuRate));
+        Status = STATUS_SUCCESS;
+        JobInfoBuffer = &CpuRate;
+        break;
+    }
     case JobObjectSecurityLimitInformation:
     case JobObjectEndOfJobTimeInformation:
     case JobObjectAssociateCompletionPortInformation:
@@ -3047,7 +3141,6 @@ NtQueryInformationJobObject(
         DPRINT1("Class %d not implemented\n", JobInformationClass);
         Status = STATUS_NOT_IMPLEMENTED;
         break;
-    case MaxJobObjectInfoClass:
     default:
         DPRINT1("Invalid class %d\n", JobInformationClass);
         Status = STATUS_NOT_IMPLEMENTED;

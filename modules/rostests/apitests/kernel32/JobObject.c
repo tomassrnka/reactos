@@ -1014,6 +1014,87 @@ test_CrossAssignStress(void)
     CloseHandle(hY);
 }
 
+/* The classes past JobObjectJobSetInformation that a JVM queries at startup (and warns about when they fail):
+   JobObjectGroupInformation, JobObjectGroupInformationEx, JobObjectCpuRateControlInformation */
+static
+void
+test_GroupAndCpuRate(void)
+{
+    typedef struct { ULONG_PTR Mask; USHORT Group; USHORT Reserved[3]; } GROUP_AFF;
+    typedef struct { ULONG ControlFlags; ULONG Value; } CPU_RATE;
+    const JOBOBJECTINFOCLASS GroupInfo = (JOBOBJECTINFOCLASS)11;
+    const JOBOBJECTINFOCLASS GroupInfoEx = (JOBOBJECTINFOCLASS)14;
+    const JOBOBJECTINFOCLASS CpuRateInfo = (JOBOBJECTINFOCLASS)15;
+    HANDLE hJob;
+    USHORT Groups[4];
+    GROUP_AFF Aff[2];
+    CPU_RATE Rate;
+    DWORD Length;
+    BOOL Success;
+
+    hJob = CreateJobObjectW(NULL, NULL);
+    ok(hJob != NULL, "CreateJobObject failed with %lu\n", GetLastError());
+    if (!hJob)
+        return;
+
+    /* no group assignment: an empty array */
+    Length = 0x55555555;
+    memset(Groups, 0x55, sizeof(Groups));
+    Success = QueryInformationJobObject(hJob, GroupInfo, Groups, sizeof(Groups), &Length);
+    ok(Success, "JobObjectGroupInformation failed with %lu\n", GetLastError());
+    ok(Length == 0, "JobObjectGroupInformation returned %lu bytes\n", Length);
+
+    /* one affinity entry: group 0 with its processors */
+    Length = 0x55555555;
+    memset(Aff, 0x55, sizeof(Aff));
+    Success = QueryInformationJobObject(hJob, GroupInfoEx, Aff, sizeof(Aff), &Length);
+    ok(Success, "JobObjectGroupInformationEx failed with %lu\n", GetLastError());
+    ok(Length == sizeof(GROUP_AFF), "JobObjectGroupInformationEx returned %lu bytes, expected %lu\n",
+       Length, (DWORD)sizeof(GROUP_AFF));
+    if (Success)
+    {
+        ok(Aff[0].Mask != 0, "Empty group affinity mask\n");
+        ok(Aff[0].Group == 0, "Group %u\n", Aff[0].Group);
+    }
+    Success = QueryInformationJobObject(hJob, GroupInfoEx, Aff, sizeof(GROUP_AFF), &Length);
+    ok(Success, "JobObjectGroupInformationEx (exact size) failed with %lu\n", GetLastError());
+    /* the length is a whole number of entries; none at all asks for the size */
+    SetLastError(0xdeadbeef);
+    Length = 0x55555555;
+    Success = QueryInformationJobObject(hJob, GroupInfoEx, Aff, sizeof(ULONG), &Length);
+    ok(!Success && GetLastError() == ERROR_INVALID_PARAMETER,
+       "JobObjectGroupInformationEx with a short buffer: %d, %lu\n", Success, GetLastError());
+    SetLastError(0xdeadbeef);
+    Length = 0x55555555;
+    Success = QueryInformationJobObject(hJob, GroupInfoEx, Aff, sizeof(GROUP_AFF) + 8, &Length);
+    ok(!Success && GetLastError() == ERROR_INVALID_PARAMETER,
+       "JobObjectGroupInformationEx with a partial second entry: %d, %lu\n", Success, GetLastError());
+    SetLastError(0xdeadbeef);
+    Length = 0x55555555;
+    Success = QueryInformationJobObject(hJob, GroupInfoEx, NULL, 0, &Length);
+    ok(!Success && GetLastError() == ERROR_INSUFFICIENT_BUFFER,
+       "JobObjectGroupInformationEx sizing call: %d, %lu\n", Success, GetLastError());
+    ok(Length == sizeof(GROUP_AFF), "JobObjectGroupInformationEx sizing call returned %lu bytes\n", Length);
+    SetLastError(0xdeadbeef);
+    Success = QueryInformationJobObject(hJob, GroupInfo, Groups, 1, &Length);
+    ok(!Success && GetLastError() == ERROR_BAD_LENGTH,
+       "JobObjectGroupInformation with a one byte buffer: %d, %lu\n", Success, GetLastError());
+
+    /* rate control is off; the buffer must be exactly the structure */
+    Length = 0x55555555;
+    memset(&Rate, 0x55, sizeof(Rate));
+    Success = QueryInformationJobObject(hJob, CpuRateInfo, &Rate, sizeof(Rate), &Length);
+    ok(Success, "JobObjectCpuRateControlInformation failed with %lu\n", GetLastError());
+    ok(Length == sizeof(Rate), "JobObjectCpuRateControlInformation returned %lu bytes\n", Length);
+    ok(Rate.ControlFlags == 0, "Control flags %lx\n", Rate.ControlFlags);
+    SetLastError(0xdeadbeef);
+    Success = QueryInformationJobObject(hJob, CpuRateInfo, Aff, sizeof(Aff), &Length);
+    ok(!Success && GetLastError() == ERROR_BAD_LENGTH,
+       "JobObjectCpuRateControlInformation with a long buffer: %d, %lu\n", Success, GetLastError());
+
+    CloseHandle(hJob);
+}
+
 START_TEST(JobObject)
 {
     char **argv;
@@ -1052,4 +1133,5 @@ START_TEST(JobObject)
     test_NestedKillOnClose();
     test_NestedBreakaway();
     test_CrossAssignStress();
+    test_GroupAndCpuRate();
 }

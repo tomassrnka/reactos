@@ -1438,6 +1438,30 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         case JobObjectBasicAndIoAccountingInformation:
             if (!GuestRange32(Buffer, Length)) return STATUS_ACCESS_VIOLATION;
             return NtQueryInformationJobObject(Job, Class, PTR32(Buffer), Length, PTR32(ReturnLength));
+        case 11: /* JobObjectGroupInformation: an array of USHORT, same layout */
+        case 15: /* JobObjectCpuRateControlInformation: two ULONGs, same layout */
+            if (!GuestRange32(Buffer, Length)) return STATUS_ACCESS_VIOLATION;
+            return NtQueryInformationJobObject(Job, Class, PTR32(Buffer), Length, PTR32(ReturnLength));
+        case 14: /* JobObjectGroupInformationEx: GROUP_AFFINITY entries, 12 bytes in a 32-bit process */
+        {
+            struct { ULONG Mask; USHORT Group; USHORT Reserved[3]; } *To32 = PTR32(Buffer);
+            GROUP_AFFINITY From14;
+            if (ReturnLength) ProbeOutput(ReturnLength, sizeof(ULONG));
+            if (Length % sizeof(*To32) != 0 || Length == 0)
+            {
+                if (ReturnLength) *(ULONG *)PTR32(ReturnLength) = Length ? Length : sizeof(*To32);
+                return Length ? STATUS_INVALID_PARAMETER : STATUS_BUFFER_TOO_SMALL;
+            }
+            if (!GuestRange32(Buffer, sizeof(*To32))) return STATUS_ACCESS_VIOLATION;
+            Status = NtQueryInformationJobObject(Job, Class, &From14, sizeof(From14), NULL);
+            if (!NT_SUCCESS(Status)) return Status;
+            ProbeOutput(Buffer, sizeof(*To32));
+            To32->Mask = (ULONG)From14.Mask;
+            To32->Group = From14.Group;
+            To32->Reserved[0] = To32->Reserved[1] = To32->Reserved[2] = 0;
+            if (ReturnLength) *(ULONG *)PTR32(ReturnLength) = sizeof(*To32);
+            return STATUS_SUCCESS;
+        }
         case JobObjectBasicLimitInformation:
         case JobObjectExtendedLimitInformation:
         {
