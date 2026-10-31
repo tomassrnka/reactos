@@ -268,6 +268,10 @@ KeQueryPerformanceCounter(PLARGE_INTEGER PerformanceFrequency)
     /* Check if interrupts are disabled */
     if(!(__readeflags() & EFLAGS_INTERRUPT_MASK)) return HalpPerfCounter;
 
+    /* In the clock interrupt the counter was advanced on entry, and its value is the
+       time of the interrupt: do not read the 8254 or touch HalpLastPerfCounter there */
+    if (KeGetCurrentIrql() >= CLOCK2_LEVEL) return HalpPerfCounter;
+
     /* Raise irql to DISPATCH_LEVEL */
     OldIrql = KeGetCurrentIrql();
     if (OldIrql < DISPATCH_LEVEL) KfRaiseIrql(DISPATCH_LEVEL);
