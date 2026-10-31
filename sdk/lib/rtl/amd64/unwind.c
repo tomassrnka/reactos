@@ -118,13 +118,17 @@ RtlpLookupDynamicFunctionEntry(
 /*! RtlpLookupRawFunctionEntry
  * \brief Locates the RUNTIME_FUNCTION entry whose range contains a code
  *        address, without following an indirect entry.
+ * \param StaticOnly
+ *            TRUE to search only the function tables of loaded images; the
+ *            dynamic function tables are not consulted, so no callback runs.
  */
 static
 PRUNTIME_FUNCTION
 RtlpLookupRawFunctionEntry(
     _In_ DWORD64 ControlPc,
     _Out_ PDWORD64 ImageBase,
-    _Inout_opt_ PUNWIND_HISTORY_TABLE HistoryTable)
+    _Inout_opt_ PUNWIND_HISTORY_TABLE HistoryTable,
+    _In_ BOOLEAN StaticOnly)
 {
     PRUNTIME_FUNCTION FunctionTable, FunctionEntry;
     ULONG TableLength;
@@ -136,6 +140,11 @@ RtlpLookupRawFunctionEntry(
     /* If no table is found, try dynamic function tables */
     if (!FunctionTable)
     {
+        if (StaticOnly)
+        {
+            return NULL;
+        }
+
         return RtlpLookupDynamicFunctionEntry(ControlPc, ImageBase, HistoryTable);
     }
 
@@ -174,6 +183,41 @@ RtlpLookupRawFunctionEntry(
     return NULL;
 }
 
+/*! RtlpGetIndirectTarget
+ * \brief Returns the entry an indirect RUNTIME_FUNCTION entry points to.
+ * \return NULL if the target is not a RUNTIME_FUNCTION inside the image
+ *         (misaligned, or beyond SizeOfImage); entries of a dynamic function
+ *         table, whose base is not an image, are not range checked.
+ */
+static
+PRUNTIME_FUNCTION
+RtlpGetIndirectTarget(
+    _In_ DWORD64 ImageBase,
+    _In_ PRUNTIME_FUNCTION FunctionEntry)
+{
+    ULONG TargetRva = FunctionEntry->UnwindData & ~RUNTIME_FUNCTION_INDIRECT;
+    PIMAGE_NT_HEADERS NtHeaders;
+    PVOID Base;
+
+    if (TargetRva & (sizeof(ULONG) - 1))
+    {
+        return NULL;
+    }
+
+    if (RtlPcToFileHeader((PVOID)ImageBase, &Base) && ((DWORD64)Base == ImageBase))
+    {
+        NtHeaders = RtlImageNtHeader(Base);
+        if ((NtHeaders == NULL) ||
+            ((ULONG64)TargetRva + sizeof(RUNTIME_FUNCTION) >
+             NtHeaders->OptionalHeader.SizeOfImage))
+        {
+            return NULL;
+        }
+    }
+
+    return RVA(ImageBase, TargetRva);
+}
+
 /*! RtlLookupFunctionEntry
  * \brief Locates the RUNTIME_FUNCTION entry corresponding to a code address.
  * \remark An entry whose UnwindData has RUNTIME_FUNCTION_INDIRECT set
@@ -194,7 +238,7 @@ RtlLookupFunctionEntry(
     PRUNTIME_FUNCTION FunctionEntry;
     ULONG Links;
 
-    FunctionEntry = RtlpLookupRawFunctionEntry(ControlPc, ImageBase, HistoryTable);
+    FunctionEntry = RtlpLookupRawFunctionEntry(ControlPc, ImageBase, HistoryTable, FALSE);
 
     for (Links = 0;
          (FunctionEntry != NULL) &&
@@ -208,8 +252,7 @@ RtlLookupFunctionEntry(
             return NULL;
         }
 
-        FunctionEntry = RVA(*ImageBase,
-                            FunctionEntry->UnwindData & ~RUNTIME_FUNCTION_INDIRECT);
+        FunctionEntry = RtlpGetIndirectTarget(*ImageBase, FunctionEntry);
     }
 
     return FunctionEntry;
@@ -731,6 +774,10 @@ RtlVirtualUnwind(
     /* Get relative virtual address */
     ControlRva = ControlPc - ImageBase;
 
+    /* Do not leave the outputs unset when there is nothing to unwind */
+    *HandlerData = NULL;
+    *EstablisherFrame = Context->Rsp;
+
     /* An indirect entry stands for the entry it points to */
     for (i = 0; FunctionEntry->UnwindData & RUNTIME_FUNCTION_INDIRECT; i++)
     {
@@ -739,14 +786,22 @@ RtlVirtualUnwind(
             return NULL;
         }
 
-        FunctionEntry = RVA(ImageBase,
-                            FunctionEntry->UnwindData & ~RUNTIME_FUNCTION_INDIRECT);
+        FunctionEntry = RtlpGetIndirectTarget(ImageBase, FunctionEntry);
+        if (FunctionEntry == NULL)
+        {
+            return NULL;
+        }
     }
 
     /* Find the entry whose range holds the code. ControlPc can lie outside
        the function's range: in a part of the function separated from its
        body, which has an indirect entry pointing to the function's entry.
-       That code is in the body (past the prolog), as on Windows. */
+       That code is in the body (past the prolog), as on Windows. Such a part
+       is in the table of an image: do not search the dynamic function
+       tables, whose callbacks would run for every address outside the
+       function (Windows does not run them). Code that no entry holds is
+       unwound as code past the prolog, without looking at its bytes for an
+       epilog. */
     if ((ControlRva >= FunctionEntry->BeginAddress) &&
         (ControlRva < FunctionEntry->EndAddress))
     {
@@ -754,7 +809,7 @@ RtlVirtualUnwind(
     }
     else
     {
-        CodeEntry = RtlpLookupRawFunctionEntry(ControlPc, &CodeBase, NULL);
+        CodeEntry = RtlpLookupRawFunctionEntry(ControlPc, &CodeBase, NULL, TRUE);
         if ((CodeEntry != NULL) && (CodeBase != ImageBase))
         {
             CodeEntry = NULL;
