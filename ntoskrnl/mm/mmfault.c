@@ -376,6 +376,9 @@ MmAccessFault(IN ULONG FaultCode,
     ULONG NoProgressSpins = 0;
     LONGLONG WaitStart = 0;
 
+    /* One fault: a retry through Again is the same fault */
+    MI_PRCB_COUNT_ADD(MmPageFaultCount, 1);
+
     /* Before any lock: the fault may come from DISPATCH_LEVEL or above. User mode keeps its access violation. */
     if (MmSpecialPoolEnabled && (Mode == KernelMode) && ((ULONG_PTR)Address >= (ULONG_PTR)MmSystemRangeStart))
     {

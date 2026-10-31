@@ -37,6 +37,15 @@ extern MM_DRIVER_VERIFIER_DATA MmVerifierData;
 extern SIZE_T MmTotalCommitLimit;
 extern SIZE_T MmTotalCommitLimitMaximum;
 extern SIZE_T MmTotalCommittedPages;
+
+/*
+ * Page-fault statistics for SystemPerformanceInformation: counted per processor in the PRCB fields Windows
+ * uses (MmPageFaultCount, MmCopyOnWriteCount, ...) and summed when queried. Interlocked, never under a lock.
+ */
+#define MI_PRCB_COUNT_ADD(Field, N) \
+    ((VOID)InterlockedExchangeAdd((volatile LONG*)&KeGetCurrentPrcb()->Field, (LONG)(N)))
+#define MI_COUNT_PAGE_READ(Pages) \
+    do { MI_PRCB_COUNT_ADD(MmPageReadCount, (Pages)); MI_PRCB_COUNT_ADD(MmPageReadIoCount, 1); } while (0)
 extern SIZE_T MmSharedCommit;
 extern SIZE_T MmDriverCommit;
 extern SIZE_T MmProcessCommit;

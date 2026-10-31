@@ -195,6 +195,11 @@ MmWriteToSwapPage(SWAPENTRY SwapEntry, PFN_NUMBER Page)
     {
         MmUnmapLockedPages (Mdl->MappedSystemVa, Mdl);
     }
+    if (NT_SUCCESS(Status))
+    {
+        MI_PRCB_COUNT_ADD(MmDirtyPagesWriteCount, 1);
+        MI_PRCB_COUNT_ADD(MmDirtyWriteIoCount, 1);
+    }
     return(Status);
 }
 
@@ -263,6 +268,8 @@ MiReadPageFile(
     {
         MmUnmapLockedPages (Mdl->MappedSystemVa, Mdl);
     }
+    if (NT_SUCCESS(Status))
+        MI_COUNT_PAGE_READ(1);
     return(Status);
 }
 
