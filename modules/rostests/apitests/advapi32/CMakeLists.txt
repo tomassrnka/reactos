@@ -47,6 +47,7 @@ list(APPEND SOURCE
     RegNotifyChangeKeyValue.c
     RegLoadKey.c
     RegOpenKeyExW.c
+    RegPerformanceData.c
     RegQueryInfoKey.c
     RegQueryValueExW.c
     RegGetValue.c

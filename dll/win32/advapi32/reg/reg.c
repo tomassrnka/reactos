@@ -3736,6 +3736,12 @@ RegOpenKeyExW(HKEY hKey,
         return ERROR_INVALID_HANDLE;
     }
 
+    /* The performance data is not in the registry: there is nothing to open, with or without a subkey */
+    if (hKey == HKEY_PERFORMANCE_DATA)
+    {
+        return ERROR_INVALID_HANDLE;
+    }
+
     if (IsPredefKey(hKey) && (!lpSubKey || !*lpSubKey))
     {
         *phkResult = hKey;
@@ -4436,6 +4442,31 @@ RegQueryValueExA(
     if ((data && !count) || reserved)
         return ERROR_INVALID_PARAMETER;
 
+    /* The performance data is not in the registry. Without a value name, ANSI callers get "Global". */
+    if (RegpIsPerformanceKey(hkeyorg))
+    {
+        ULONG NameLength;
+        PWSTR NameBuffer = NULL;
+
+        if (name)
+        {
+            NameLength = (ULONG)strlen(name);
+            if (NameLength > 0xFFFF / sizeof(WCHAR) - 1)
+                return ERROR_INVALID_PARAMETER;
+
+            NameBuffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, (NameLength + 1) * sizeof(WCHAR));
+            if (!NameBuffer)
+                return ERROR_NOT_ENOUGH_MEMORY;
+            RtlMultiByteToUnicodeN(NameBuffer, NameLength * sizeof(WCHAR), NULL, name, NameLength);
+            NameBuffer[NameLength] = UNICODE_NULL;
+        }
+
+        ErrorCode = RegpQueryPerformanceValue(hkeyorg, NameBuffer, TRUE, type, data, count);
+        if (NameBuffer)
+            RtlFreeHeap(RtlGetProcessHeap(), 0, NameBuffer);
+        return ErrorCode;
+    }
+
     if (name)
     {
         if (!RtlCreateUnicodeStringFromAsciiz(&nameW, name))
@@ -4531,6 +4562,13 @@ RegQueryValueExW(
           (count && data) ? *count : 0 );
 
     if ((data && !count) || reserved) return ERROR_INVALID_PARAMETER;
+
+    /* The performance data is not in the registry */
+    if (RegpIsPerformanceKey(hkeyorg))
+    {
+        if (!name) return ERROR_INVALID_PARAMETER;
+        return RegpQueryPerformanceValue(hkeyorg, name, FALSE, type, data, count);
+    }
 
     status = MapDefaultKey(&hkey, hkeyorg);
     if (!NT_SUCCESS(status))

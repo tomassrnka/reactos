@@ -62,12 +62,13 @@ add_custom_target(advapi32_rpc_headers DEPENDS
 # This static library is for kernelbase and vista APIs in kernel32
 add_library(win32_registry STATIC
     reg/hkcr.c
+    reg/perfdata.c
     reg/reg.c
     reg/regtrans.c
 )
 
 add_dependencies(win32_registry advapi32_rpc_headers)
-target_link_libraries(win32_registry ${PSEH_LIB})
+target_link_libraries(win32_registry perfdata ${PSEH_LIB})
 target_compile_definitions(win32_registry PRIVATE _KERNEL32_ UNICODE _UNICODE)
 
 add_library(advapi32 MODULE
