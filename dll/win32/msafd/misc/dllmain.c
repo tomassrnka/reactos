@@ -2631,6 +2631,14 @@ WSPShutdown(SOCKET Handle,
        return SOCKET_ERROR;
     }
 
+    /* Shutting down a direction that is shut down already succeeds and does nothing, as on Windows */
+    if ((HowTo == SD_RECEIVE && Socket->SharedData->ReceiveShutdown) ||
+        (HowTo == SD_SEND && Socket->SharedData->SendShutdown) ||
+        (HowTo == SD_BOTH && Socket->SharedData->ReceiveShutdown && Socket->SharedData->SendShutdown))
+    {
+        return 0;
+    }
+
     Status = NtCreateEvent(&SockEvent,
                            EVENT_ALL_ACCESS,
                            NULL,

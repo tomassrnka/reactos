@@ -209,6 +209,8 @@ typedef struct _AFD_FCB {
     PAFD_DEVICE_EXTENSION DeviceExt;
     BOOLEAN DelayedAccept;
     BOOLEAN AbortingReceives; /* the cleanup of a stream socket is cancelling its receives */
+    BOOLEAN ReceiveShutdown; /* shutdown(SD_RECEIVE) left receives pending: they wait for data, the end or a reset */
+    BOOLEAN ShutdownBoth; /* ... and it shut the send direction down too (SD_BOTH) */
     ULONG Backlog;
     UINT ConnSeq;
     USHORT DisconnectFlags;
@@ -385,6 +387,7 @@ VOID UnlockHandles( PAFD_HANDLE HandleArray, UINT HandleCount );
 PVOID LockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp, BOOLEAN Output, KPROCESSOR_MODE *LockMode );
 VOID UnlockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp );
 VOID AfdAbortPendingReceives( PAFD_FCB FCB );
+VOID AfdCompleteReceiveShutdown( PAFD_FCB FCB );
 PVOID GetLockedData( PIRP Irp, PIO_STACK_LOCATION IrpSp );
 BOOLEAN AfdRequestLengthValid( PIRP Irp, PIO_STACK_LOCATION IrpSp, ULONG MinLength );
 NTSTATUS LeaveIrpUntilLater( PAFD_FCB FCB, PIRP Irp, UINT Function );

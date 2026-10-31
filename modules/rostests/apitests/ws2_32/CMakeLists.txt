@@ -41,6 +41,7 @@ list(APPEND SOURCE
     WSASendMsg.c
     send.c
     selecttimeval.c
+    shutdownrecv.c
     sotimeout.c
     socketscale.c
     udpbindretry.c

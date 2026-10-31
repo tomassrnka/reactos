@@ -10,13 +10,17 @@
 
 #include "afd.h"
 
-static VOID RefillSocketBuffer( PAFD_FCB FCB )
+/* After shutdown(SD_RECEIVE) only the receives that were pending are served: the buffer is refilled
+ * for them alone (ForPending), when the data that arrived did not satisfy them all */
+static VOID RefillSocketBufferEx( PAFD_FCB FCB, BOOLEAN ForPending )
 {
     /* Make sure nothing's in flight first */
     if (FCB->ReceiveIrp.InFlightRequest) return;
 
     /* Now ensure that receive is still allowed */
     if (FCB->TdiReceiveClosed) return;
+
+    if (FCB->ReceiveShutdown && !ForPending) return;
 
     /* Check if the buffer is full */
     if (FCB->Recv.Content == FCB->Recv.Size)
@@ -48,6 +52,11 @@ static VOID RefillSocketBuffer( PAFD_FCB FCB )
                 FCB->Recv.Size - FCB->Recv.Content,
                 ReceiveComplete,
                 FCB );
+}
+
+static VOID RefillSocketBuffer( PAFD_FCB FCB )
+{
+    RefillSocketBufferEx( FCB, FALSE );
 }
 
 static VOID HandleReceiveComplete( PAFD_FCB FCB, NTSTATUS Status, ULONG_PTR Information )
@@ -176,6 +185,29 @@ VOID AfdAbortPendingReceives( PAFD_FCB FCB ) {
     }
 }
 
+/* shutdown(SD_RECEIVE) with receives pending leaves them pending, as on Windows: they complete with the data
+ * that arrives later, with the end or the reset of the connection, or are cancelled. When none is left the
+ * shutdown takes effect, as it does at once for a socket without a pending receive. The state lock is held. */
+VOID AfdCompleteReceiveShutdown( PAFD_FCB FCB ) {
+    if( !FCB->ReceiveShutdown || !IsListEmpty( &FCB->PendingIrpList[FUNCTION_RECV] ) ) return;
+
+    FCB->ReceiveShutdown = FALSE;
+    FCB->ShutdownBoth = FALSE;
+    if( !FCB->TdiReceiveClosed ) {
+        FCB->TdiReceiveClosed = TRUE;
+        FCB->LastReceiveStatus = STATUS_SUCCESS;
+    }
+
+    /* Discard what has not been read */
+    FCB->Recv.Content = 0;
+    FCB->Recv.BytesUsed = 0;
+    FCB->PollState &= ~AFD_EVENT_RECEIVE;
+
+    /* The receive in flight, if any, ends by itself and its data is discarded (see AfdDisconnect) */
+    if( FCB->ReceiveIrp.InFlightRequest && (FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS) )
+        IoCancelIrp( FCB->ReceiveIrp.InFlightRequest );
+}
+
 static NTSTATUS ReceiveActivity( PAFD_FCB FCB, PIRP Irp ) {
     PLIST_ENTRY NextIrpEntry;
     PIRP NextIrp;
@@ -287,6 +319,12 @@ static NTSTATUS ReceiveActivity( PAFD_FCB FCB, PIRP Irp ) {
         FCB->PollStatus[FD_CLOSE_BIT] = FCB->LastReceiveStatus;
         PollReeval(FCB->DeviceExt, FCB->FileObject);
     }
+
+    /* The receives that shutdown(SD_RECEIVE) kept and the data did not satisfy wait for more */
+    if( FCB->ReceiveShutdown && !IsListEmpty( &FCB->PendingIrpList[FUNCTION_RECV] ) )
+        RefillSocketBufferEx( FCB, TRUE );
+
+    AfdCompleteReceiveShutdown( FCB );
 
     AFD_DbgPrint(MID_TRACE,("RetStatus for irp %p is %x\n", Irp, RetStatus));
 
@@ -924,6 +962,9 @@ PacketSocketRecvComplete(
         PollReeval( FCB->DeviceExt, FCB->FileObject );
     } else
         FCB->PollState &= ~AFD_EVENT_RECEIVE;
+
+    /* The receive that was kept after shutdown(SD_RECEIVE) is served */
+    AfdCompleteReceiveShutdown(FCB);
 
     /* Now relaunch the datagram request */
     RelaunchPacketReceive(FCB);

@@ -44,6 +44,7 @@ extern void func_rcvbuf(void);
 extern void func_recv(void);
 extern void func_send(void);
 extern void func_selecttimeval(void);
+extern void func_shutdownrecv(void);
 extern void func_sotimeout(void);
 extern void func_socketscale(void);
 extern void func_udpbindretry(void);
@@ -108,6 +109,7 @@ const struct test winetest_testlist[] =
     { "recv", func_recv },
     { "send", func_send },
     { "selecttimeval", func_selecttimeval },
+    { "shutdownrecv", func_shutdownrecv },
     { "sotimeout", func_sotimeout },
     { "socketscale", func_socketscale },
     { "udpbindretry", func_udpbindretry },

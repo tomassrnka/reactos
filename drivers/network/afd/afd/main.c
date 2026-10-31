@@ -592,9 +592,11 @@ AfdCleanupSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     for (Function = 0; Function < MAX_FUNCTIONS; Function++)
     {
         /* Closing a stream socket aborts its pending receives (STATUS_CONNECTION_ABORTED,
-           as Windows does); every other request, and any receive of a datagram socket, is cancelled */
+           as Windows does); every other request, and any receive of a datagram socket, is cancelled,
+           and so is a receive that shutdown(SD_BOTH) left pending */
         FCB->AbortingReceives = (Function == FUNCTION_RECV) &&
-                                !(FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS);
+                                !(FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS) &&
+                                !FCB->ShutdownBoth;
 
         CurrentEntry = FCB->PendingIrpList[Function].Flink;
         while (CurrentEntry != &FCB->PendingIrpList[Function])
@@ -969,28 +971,44 @@ AfdDisconnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     /* Receive direction or both */
     else
     {
-        /* Mark that we can't issue another receive request */
-        FCB->TdiReceiveClosed = TRUE;
+        if (!(DisReq->DisconnectType & AFD_DISCONNECT_ABORT) &&
+            !IsListEmpty(&FCB->PendingIrpList[FUNCTION_RECV]))
+        {
+            /* Receives are pending: Windows leaves them pending (they complete with data that
+               arrives later, with the end or the reset of the connection, with a cancel or at
+               the close), and the shutdown takes effect when none is left */
+            FCB->ReceiveShutdown = TRUE;
+            FCB->ShutdownBoth = (DisReq->DisconnectType & AFD_DISCONNECT_SEND) != 0;
+        }
+        else
+        {
+            /* Mark that we can't issue another receive request */
+            FCB->TdiReceiveClosed = TRUE;
 
-        /* An abortive close of a stream socket aborts the receives that are pending (the
-           cancel of the transport's receive below would complete them as cancelled) */
-        if ((DisReq->DisconnectType & AFD_DISCONNECT_ABORT) &&
-            !(FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS))
-            AfdAbortPendingReceives(FCB);
+            /* An abortive close of a stream socket aborts the receives that are pending (the
+               cancel of the transport's receive below would complete them as cancelled) */
+            if ((DisReq->DisconnectType & AFD_DISCONNECT_ABORT) &&
+                !(FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS))
+                AfdAbortPendingReceives(FCB);
 
-        /* Try to cancel a pending TDI receive IRP if there was one in progress */
-        if (FCB->ReceiveIrp.InFlightRequest)
-            IoCancelIrp(FCB->ReceiveIrp.InFlightRequest);
+            /* Try to cancel a pending TDI receive IRP if there was one in progress. Not the one of a
+               stream socket that is not aborted: its cancel breaks the sends of the socket, and what
+               it receives is discarded as the receive of a closed socket */
+            if (FCB->ReceiveIrp.InFlightRequest &&
+                ((DisReq->DisconnectType & AFD_DISCONNECT_ABORT) ||
+                 (FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS)))
+                IoCancelIrp(FCB->ReceiveIrp.InFlightRequest);
 
-        /* Discard any pending data */
-        FCB->Recv.Content = 0;
-        FCB->Recv.BytesUsed = 0;
+            /* Discard any pending data */
+            FCB->Recv.Content = 0;
+            FCB->Recv.BytesUsed = 0;
 
-        /* Set a successful receive status to indicate a shutdown on overread */
-        FCB->LastReceiveStatus = STATUS_SUCCESS;
+            /* Set a successful receive status to indicate a shutdown on overread */
+            FCB->LastReceiveStatus = STATUS_SUCCESS;
 
-        /* Clear the receive event */
-        FCB->PollState &= ~AFD_EVENT_RECEIVE;
+            /* Clear the receive event */
+            FCB->PollState &= ~AFD_EVENT_RECEIVE;
+        }
 
         /* Receive direction only */
         if ((DisReq->DisconnectType & AFD_DISCONNECT_RECV) &&
@@ -1604,6 +1622,9 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
                 AfdOrphanDatagramSend(FCB, Irp);
             RemoveEntryList(CurrentEntry);
             CleanupPendingIrp(FCB, Irp, IrpSp, NULL);
+            /* The last receive that shutdown(SD_RECEIVE) kept pending */
+            if (Function == FUNCTION_RECV)
+                AfdCompleteReceiveShutdown(FCB);
             if (Function == FUNCTION_PREACCEPT)
             {
                 /* Unlock the acceptor socket so that it can be reused */
