@@ -78,9 +78,11 @@ reference rasterizer; the point of the driver is the OpenGL version, not the spe
 18.6 MB (amd64) and 19.3 MB (i386); the images grow by the compressed size of the DLL, see the
 lane note for the measured values.
 
-llvmpipe (LLVM JIT) was built too (LLVM 19.1.7, the same toolchain) and is not used: the DLL is
-73 MB on i386, the first OpenGL call takes about 4 seconds, it was slower than softpipe on these
-scenes and its rasterizer threads stopped (deadlock) after a few seconds on i386.
+llvmpipe (LLVM JIT) was built for i386 too (LLVM 19.1.7, the same toolchain). A native i386 image does not use
+it (73 MB). On 2026-10-14 its rasterizer threads stopped after a few seconds on i386; that did not reproduce on
+2026-10-31 (main f7f7ad5419d, i386 Debug, 2 and 4 vCPUs: 120 s of the gear scene without swap interval, 600-1000
+frames per second, and 60 s of the GLSL scene, both without a stall, also with the keyed event fix 72cbf83131d
+reverted). The SysWOW64 part of amd64 images ships it, see below.
 
 ## Known differences from Windows
 
@@ -109,9 +111,7 @@ configure time, which fetches the GFX-01 artifact `gfx01-lavapipe-amd64-artifact
 `vulkan_lvp.dll`, `lvp_icd.json`, `mesa3d-licenses.txt` and `llvm-licenses.txt`. `CMakeLists.txt` then installs them in
 place of the softpipe-only DLL (and installs the two licence files to `system32`). `-DMESA3D_AMD64_LLVM=OFF`, or a build
 host without `rclone`/network/the artifact, skips the fetch and the in-tree softpipe-only driver stays the default (no
-Vulkan ICD) so the build never breaks. Set `LAVAPIPE_ARTIFACT=<local tar>` to stage from a local copy instead of S3. i386 keeps softpipe: llvmpipe on i386 was built once and
-stopped (rasterizer threads deadlocked after a few seconds, see above); amd64 ran 60 s soaks and the Chromium runs
-without a stall, but i386 was not retried.
+Vulkan ICD) so the build never breaks. Set `LAVAPIPE_ARTIFACT=<local tar>` to stage from a local copy instead of S3. A native i386 image keeps softpipe.
 
 * OpenGL: nothing to register beyond what is above; `GALLIUM_DRIVER=softpipe` in the environment of a process selects
   softpipe from the same DLL.
@@ -142,3 +142,28 @@ llvmpipe, 364 with softpipe and 1530 with the built-in OpenGL 1.1 implementation
 no shaders). Chromium 138 (Electron 37.6) with ANGLE on Vulkan, WebGL scene of 1280 by 720: 12.7 ms per frame with
 lavapipe against 30.8 ms with SwiftShader (mean of 5 launches); a page of 150 blurred layers animated by CSS reaches 4.5 frames
 per second against 3.0. The first draw call costs about 30 ms more with the JIT (130 ms against 100 ms).
+
+## 32-bit programs on amd64 (SysWOW64)
+
+The opengl32 of SysWOW64 finds its driver as the 64-bit one does, but a 32-bit process reads `HKLM\SOFTWARE` through
+`SOFTWARE\Wow6432Node`, so `boot/bootdata/hivesft_amd64.inf` registers Mesa3D in that view too (as Windows registers
+32-bit drivers), and `boot/bootdata/packages/syswow64.lst` puts the i386 `libgallium_wgl.dll` and its notices in
+SysWOW64. Without both, 32-bit programs got the built-in OpenGL 1.1.
+
+The i386 driver there is llvmpipe (OpenGL 4.6 core and compatibility, compute shaders), not softpipe: wgpu, the
+renderer of the 32-bit WordCraft, needs compute shaders and does not start on softpipe's OpenGL 3.3. The nested i386
+build of an amd64 image runs `stage-i386-llvm.sh` at configure time, which fetches
+`wow64-llvmpipe-i386-artifacts.tar.xz` from the S3 cold tier (`LLVMPIPE_I386_ARTIFACT=<local tar>` for a local copy),
+verifies it and populates `i386-llvm/` with `libgallium_wgl.dll` and `mesa3d-licenses.txt` (the Mesa notices of that
+build with the LLVM licence appended). `-DMESA3D_WOW64_LLVM=OFF`, or a host without the artifact, keeps the in-tree
+i386 softpipe driver in SysWOW64. The pack is `ARCHES=i386 I386_LLVM=1 ./build-mesa.sh WORKDIR` (the Mesa part
+rebuilt to the same DLL twice); its size is 73 MB installed, 18.6 MB compressed.
+
+```
+c1e739e70ae73d6617814cf54555c7620e735b94cd1e87a4c393df99df2a6fab  wow64-llvmpipe-i386-artifacts.tar.xz
+511f46e304d15230d269542a1bb3bc52e111c4f66a5295b7ca9e16ecd53f563a  i386-llvm/libgallium_wgl.dll
+5d8f01c41af2c53e3652ac82e9a42cf7990016e58a3073769034372adf162dea  i386-llvm/mesa3d-licenses.txt
+```
+
+Under WoW64 (amd64 Release, 4 vCPUs) the 32-bit driver gave the gear scene 776 frames per second for 120 s and the
+GLSL scene 22.8 ms per frame, without a stall.

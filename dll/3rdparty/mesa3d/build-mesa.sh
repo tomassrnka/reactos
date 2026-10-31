@@ -15,6 +15,9 @@ MESA_SHA256=bce5f7fbebb934373b86c999a064d52fb5065878dc57f287f95346648ec832e9
 PIP_PINS="meson==1.12.1 mako==1.4.3 MarkupSafe==3.0.4 PyYAML==6.0.3 packaging==26.3 ply==3.11"
 GALLIUM_DRIVERS=${GALLIUM_DRIVERS:-softpipe}
 AMD64_LLVM=${AMD64_LLVM:-1}
+# I386_LLVM=1 also builds the i386 driver with LLVM (llvmpipe next to softpipe, no Vulkan driver), for SysWOW64
+I386_LLVM=${I386_LLVM:-0}
+ARCHES=${ARCHES:-i386 amd64}
 OPT=${OPT:-2}
 JOBS=${JOBS:-8}
 
@@ -40,7 +43,7 @@ fi
 export PATH="$W/venv/bin:$PATH"
 export SOURCE_DATE_EPOCH=1760400000
 
-for arch in i386 amd64; do
+for arch in $ARCHES; do
     case $arch in i386) tool=i686; fam=x86;; amd64) tool=x86_64; fam=x86_64;; esac
     cat > "cross-$arch.ini" <<EOT
 [binaries]
@@ -68,6 +71,10 @@ EOT
         targets="$targets src/gallium/targets/lavapipe/vulkan_lvp.dll src/gallium/targets/lavapipe/lvp_icd.$fam.json"
         # meson finds the cross-built LLVM through its CMake package
         printf "\n[built-in options]\ncmake_prefix_path = ['%s']\n" "$W/llvm-inst/amd64" >> "cross-$arch.ini"
+    elif [ "$arch" = i386 ] && [ "$I386_LLVM" = 1 ]; then
+        "$HERE/build-llvm.sh" "$W" i386
+        drivers=llvmpipe,softpipe; llvm_args="-Dllvm=enabled -Dshared-llvm=disabled"
+        printf "\n[built-in options]\ncmake_prefix_path = ['%s']\n" "$W/llvm-inst/i386" >> "cross-$arch.ini"
     fi
     rm -rf "build-$arch"
     # zlib comes from Mesa's own wrap (hash-pinned there), never from the build host
