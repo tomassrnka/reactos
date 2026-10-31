@@ -1,5 +1,6 @@
 
 list(APPEND SOURCE
+    args.c
     wsf.c
     testlist.c)
 

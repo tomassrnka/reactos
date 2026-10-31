@@ -368,6 +368,8 @@ static void WINAPIV print_resource(unsigned int id, ...)
         case IDS_FILE_NOT_FOUND: str = L"Input Error: Can not find script file ""%1"".\n"; break;
         case IDS_SCRIPT_LOAD_ERROR: str = APPNAME L" Error: Loading script ""%1"" failed (%2).\n"; break;
         case IDS_TIMEOUT_EXCEEDED: str = L"Script execution time was exceeded on script ""%1"".\n\nScript execution was terminated.\n"; break;
+        case IDS_SETTINGS_SAVED: str = L"Command line options are saved.\n"; break;
+        case IDS_DEFAULT_HOST_SET: str = L"The default script host is now set to ""%1"".\n"; break;
     }
     if(!str)
     {
@@ -970,6 +972,129 @@ static HRESULT run_wsf(LPCWSTR xmlpath)
 }
 #endif
 
+#ifdef __REACTOS__
+static BOOL nologo_from_settings(const WCHAR *root_key, HKEY root, BOOL cur)
+{
+    HKEY hkey;
+    DWORD type, size;
+    BYTE buf[16 * sizeof(WCHAR)];
+
+    if(RegOpenKeyExW(root, root_key, 0, KEY_QUERY_VALUE, &hkey))
+        return cur;
+    size = sizeof(buf);
+    if(!RegQueryValueExW(hkey, L"DisplayLogo", NULL, &type, buf, &size))
+    {
+        /* HKLM stores DisplayLogo as a REG_SZ, the per-user value saved by //S is a REG_DWORD. */
+        if(type == REG_DWORD && size == sizeof(DWORD))
+            cur = !*(DWORD *)buf;
+        else if(type == REG_SZ && size >= sizeof(WCHAR))
+            cur = !wcstol((WCHAR *)buf, NULL, 10);
+    }
+    RegCloseKey(hkey);
+    return cur;
+}
+
+static LONG timeout_from_settings(HKEY root, const WCHAR *key, LONG cur)
+{
+    HKEY hkey;
+    DWORD type, size = sizeof(DWORD), v;
+
+    if(RegOpenKeyExW(root, key, 0, KEY_QUERY_VALUE, &hkey))
+        return cur;
+    if(!RegQueryValueExW(hkey, L"Timeout", NULL, &type, (BYTE *)&v, &size) &&
+       type == REG_DWORD && size == sizeof(DWORD) && v <= 0x7fffffff)
+        cur = v;
+    RegCloseKey(hkey);
+    return cur;
+}
+
+#define WSH_SETTINGS_KEY L"Software\\Microsoft\\Windows Script Host\\Settings"
+
+/* Defaults for the host options come from the registry; //S stores the current ones for the user. */
+static void load_host_settings(void)
+{
+    nologo = nologo_from_settings(WSH_SETTINGS_KEY, HKEY_LOCAL_MACHINE, nologo);
+    nologo = nologo_from_settings(WSH_SETTINGS_KEY, HKEY_CURRENT_USER, nologo);
+    wshTimeout = timeout_from_settings(HKEY_CURRENT_USER, WSH_SETTINGS_KEY, wshTimeout);
+}
+
+static void save_host_settings(void)
+{
+    HKEY hkey;
+    DWORD v;
+
+    if(RegCreateKeyExW(HKEY_CURRENT_USER, WSH_SETTINGS_KEY, 0, NULL, 0, KEY_SET_VALUE, NULL, &hkey, NULL))
+        return;
+    v = wshTimeout;
+    RegSetValueExW(hkey, L"Timeout", 0, REG_DWORD, (const BYTE *)&v, sizeof(v));
+    v = !nologo;
+    RegSetValueExW(hkey, L"DisplayLogo", 0, REG_DWORD, (const BYTE *)&v, sizeof(v));
+    RegCloseKey(hkey);
+}
+
+/* //H: makes the chosen host the default verb of the script file classes (Open = wscript, Open2 = cscript). */
+static void set_default_host(const WCHAR *verb)
+{
+    static const WCHAR *const classes[] = { L"JSFile", L"JSEFile", L"VBSFile", L"VBEFile", L"WSFFile", L"WSHFile" };
+    unsigned int i;
+
+    for(i = 0; i < ARRAY_SIZE(classes); i++)
+    {
+        WCHAR path[32];
+        HKEY hkey;
+
+        swprintf(path, ARRAY_SIZE(path), L"%s\\Shell", classes[i]);
+        if(RegOpenKeyExW(HKEY_CLASSES_ROOT, path, 0, KEY_SET_VALUE, &hkey))
+            continue;
+        RegSetValueExW(hkey, NULL, 0, REG_SZ, (const BYTE *)verb, (lstrlenW(verb) + 1) * sizeof(WCHAR));
+        RegCloseKey(hkey);
+    }
+}
+
+static BOOL save_options;
+static const WCHAR *default_host_exe, *default_host_verb;
+
+/* Windows Script Host splits its command line itself: whitespace separates arguments outside of quotes, a quote
+ * toggles quoting and is dropped, and backslashes are never an escape (unlike CommandLineToArgvW), so
+ * "a"b c"d" is the two arguments "ab" and "cd" and "a\\" is the argument a\\ . A quoted empty string is an argument. */
+static WCHAR **wsh_command_line_to_argv(const WCHAR *cmdline, int *argc)
+{
+    size_t len = lstrlenW(cmdline);
+    size_t max_args = len / 2 + 2;
+    WCHAR **argv;
+    WCHAR *out;
+    const WCHAR *p = cmdline;
+    int n = 0;
+
+    argv = malloc((max_args + 1) * sizeof(*argv) + (len + max_args) * sizeof(WCHAR));
+    if(!argv)
+        return NULL;
+    out = (WCHAR *)(argv + max_args + 1);
+
+    for(;;)
+    {
+        BOOL quoted = FALSE;
+
+        while(*p == ' ' || *p == '\t')
+            p++;
+        if(!*p)
+            break;
+        argv[n++] = out;
+        for(; *p && (quoted || (*p != ' ' && *p != '\t')); p++)
+        {
+            if(*p == '"')
+                quoted = !quoted;
+            else
+                *out++ = *p;
+        }
+        *out++ = 0;
+    }
+    argv[n] = NULL;
+    *argc = n;
+    return argv;
+}
+#endif
+
 static BOOL set_host_properties(const WCHAR *prop)
 {
     if(*prop == '/') {
@@ -995,7 +1120,11 @@ static BOOL set_host_properties(const WCHAR *prop)
     else if(wcsicmp(prop, L"u") == 0)
         WINE_FIXME("ignoring //u\n");
     else if(wcsicmp(prop, L"s") == 0)
+#ifdef __REACTOS__
+        save_options = TRUE;
+#else
         WINE_FIXME("ignoring //s\n");
+#endif
     else if(wcsnicmp(prop, L"e:", 2) == 0)
 #ifdef __REACTOS__
         g_force_engine = &prop[2];
@@ -1003,7 +1132,24 @@ static BOOL set_host_properties(const WCHAR *prop)
         WINE_FIXME("ignoring //e:\n");
 #endif
     else if(wcsnicmp(prop, L"h:", 2) == 0)
+    {
+#ifdef __REACTOS__
+        if(!wcsicmp(prop + 2, L"cscript"))
+        {
+            default_host_exe = L"cscript.exe";
+            default_host_verb = L"Open2";
+        }
+        else if(!wcsicmp(prop + 2, L"wscript"))
+        {
+            default_host_exe = L"wscript.exe";
+            default_host_verb = L"Open";
+        }
+        else
+            WINE_FIXME("ignoring //h:%s\n", wine_dbgstr_w(prop + 2));
+#else
         WINE_FIXME("ignoring //h:\n");
+#endif
+    }
     else if(wcsnicmp(prop, L"job:", 4) == 0)
         WINE_FIXME("ignoring //job:\n");
     else if(wcsnicmp(prop, L"t:", 2) == 0) {
@@ -1032,7 +1178,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrevInst, LPWSTR cmdline, int cm
 
     WINE_TRACE("(%p %p %s %x)\n", hInst, hPrevInst, wine_dbgstr_w(cmdline), cmdshow);
 
+#ifdef __REACTOS__
+    load_host_settings();
+    argv = wsh_command_line_to_argv(GetCommandLineW(), &argc);
+#else
     argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+#endif
     if(!argv)
         return 1;
 
@@ -1081,6 +1232,20 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrevInst, LPWSTR cmdline, int cm
 
     if(!nologo)
         print_banner();
+
+#ifdef __REACTOS__
+    if(default_host_exe)
+        set_default_host(default_host_verb);
+    if(save_options)
+        save_host_settings();
+    if(!filename && (default_host_exe || save_options)) {
+        if(default_host_exe)
+            print_resource(IDS_DEFAULT_HOST_SET, default_host_exe);
+        if(save_options)
+            print_resource(IDS_SETTINGS_SAVED);
+        return 0;
+    }
+#endif
 
     if(!filename) {
         print_resource(IDS_NO_SCRIPT_FILE);
