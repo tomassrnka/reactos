@@ -12,11 +12,12 @@
 #define NDEBUG
 #include <debug.h>
 
+/* IO_DISK_INCREMENT for the waiter, as for the core's transfers (NgReadCompletion). */
 static NTSTATUS NTAPI NgPagingCompletion(PDEVICE_OBJECT DeviceObject, PIRP Irp, PVOID Context)
 {
     UNREFERENCED_PARAMETER(DeviceObject);
     UNREFERENCED_PARAMETER(Irp);
-    KeSetEvent(Context, IO_NO_INCREMENT, FALSE);
+    KeSetEvent(Context, IO_DISK_INCREMENT, FALSE);
     return STATUS_MORE_PROCESSING_REQUIRED;
 }
 
