@@ -790,6 +790,49 @@ static int cbc(const struct cparams *cp, const uint8_t *key, const uint8_t *iv, 
     return P12_OK;
 }
 
+/* Content encryption for CMS EnvelopedData (crypt32 msg.c): CBC with PKCS #7 padding, or RC4.
+ * Single DES runs as 3DES with the key repeated. */
+int p12_cms_crypt(int cipher, const uint8_t *key, size_t keylen, unsigned rc2bits, const uint8_t *iv,
+                  int encrypt, const uint8_t *in, size_t inlen, uint8_t **out, size_t *outlen)
+{
+    struct cparams cp;
+    uint8_t k3[24];
+    int r;
+
+    memset(&cp, 0, sizeof(cp));
+    memset(k3, 0, sizeof(k3));
+    switch (cipher)
+    {
+    case P12_CIPHER_3DES:
+        if (keylen != 24) return P12_ERR_UNSUPPORTED;
+        cp.cipher = C_3DES; cp.keylen = 24; cp.ivlen = 8;
+        break;
+    case P12_CIPHER_DES:
+        if (keylen != 8) return P12_ERR_UNSUPPORTED;
+        memcpy(k3, key, 8); memcpy(k3 + 8, key, 8); memcpy(k3 + 16, key, 8);
+        key = k3; keylen = 24;
+        cp.cipher = C_3DES; cp.keylen = 24; cp.ivlen = 8;
+        break;
+    case P12_CIPHER_RC2:
+        if (!keylen || keylen > 128 || !rc2bits || rc2bits > 1024) return P12_ERR_UNSUPPORTED;
+        cp.cipher = C_RC2; cp.keylen = keylen; cp.rc2bits = rc2bits; cp.ivlen = 8;
+        break;
+    case P12_CIPHER_RC4:
+        if (!keylen || keylen > 256) return P12_ERR_UNSUPPORTED;
+        cp.cipher = C_RC4; cp.keylen = keylen;
+        break;
+    case P12_CIPHER_AES:
+        if (keylen != 16 && keylen != 24 && keylen != 32) return P12_ERR_UNSUPPORTED;
+        cp.cipher = C_AES; cp.keylen = keylen; cp.ivlen = 16;
+        break;
+    default:
+        return P12_ERR_UNSUPPORTED;
+    }
+    r = cbc(&cp, key, iv, encrypt, in, inlen, out, outlen);
+    p12_wipe(k3, sizeof(k3));
+    return r;
+}
+
 /* ------------------------------------------------------------------------------------------ */
 /* passwords                                                                                  */
 /* ------------------------------------------------------------------------------------------ */

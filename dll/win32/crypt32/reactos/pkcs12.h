@@ -73,4 +73,15 @@ int p12_write(const struct p12_item *certs, size_t ncerts, const struct p12_item
               const uint16_t *password, const struct p12_write_params *params, uint8_t **out, size_t *out_len);
 void p12_free(void *p);
 
+/* Symmetric content encryption for CMS (crypt32 msg.c). *out is allocated, release it with p12_free.
+ * Block ciphers use CBC with PKCS #7 padding (decryption checks it); RC4 is the plain stream cipher.
+ * The IV is 8 bytes (DES, 3DES, RC2) or 16 bytes (AES) and is not used for RC4. */
+#define P12_CIPHER_3DES 1
+#define P12_CIPHER_DES  2
+#define P12_CIPHER_RC2  3
+#define P12_CIPHER_RC4  4
+#define P12_CIPHER_AES  5
+int p12_cms_crypt(int cipher, const uint8_t *key, size_t keylen, unsigned rc2bits, const uint8_t *iv,
+                  int encrypt, const uint8_t *in, size_t inlen, uint8_t **out, size_t *outlen);
+
 #endif

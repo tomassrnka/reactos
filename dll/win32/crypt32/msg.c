@@ -29,6 +29,7 @@
 #include "wine/debug.h"
 #include "wine/exception.h"
 #include "crypt32_private.h"
+#include "reactos/cmsenv.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(crypt);
 
@@ -1473,6 +1474,10 @@ static HCRYPTMSG CSignedEncodeMsg_Open(DWORD dwFlags,
     return msg;
 }
 
+#ifndef CERT_NCRYPT_KEY_SPEC
+#define CERT_NCRYPT_KEY_SPEC 0xffffffff
+#endif
+
 typedef struct _CMSG_ENVELOPED_ENCODE_INFO_WITH_CMS
 {
     DWORD                       cbSize;
@@ -1494,319 +1499,18 @@ typedef struct _CMSG_ENVELOPED_ENCODE_INFO_WITH_CMS
 
 typedef struct _CEnvelopedEncodeMsg
 {
-    CryptMsgBase                   base;
-    CRYPT_ALGORITHM_IDENTIFIER     algo;
-    HCRYPTPROV                     prov;
-    HCRYPTKEY                      key;
-    DWORD                          cRecipientInfo;
-    CMSG_KEY_TRANS_RECIPIENT_INFO *recipientInfo;
-    CRYPT_DATA_BLOB                data;
+    CryptMsgBase    base;
+    HCRYPTPROV      prov;       /* the application's provider, released with the message on request */
+    struct cms_enc *enc;
 } CEnvelopedEncodeMsg;
-
-static BOOL CRYPT_ConstructAlgorithmId(CRYPT_ALGORITHM_IDENTIFIER *out,
- const CRYPT_ALGORITHM_IDENTIFIER *in)
-{
-    out->pszObjId = CryptMemAlloc(strlen(in->pszObjId) + 1);
-    if (out->pszObjId)
-    {
-        strcpy(out->pszObjId, in->pszObjId);
-        return CRYPT_ConstructBlob(&out->Parameters, &in->Parameters);
-    }
-    else
-        return FALSE;
-}
-
-static BOOL CRYPT_ConstructBitBlob(CRYPT_BIT_BLOB *out, const CRYPT_BIT_BLOB *in)
-{
-    out->cbData = in->cbData;
-    out->cUnusedBits = in->cUnusedBits;
-    if (out->cbData)
-    {
-        out->pbData = CryptMemAlloc(out->cbData);
-        if (out->pbData)
-            memcpy(out->pbData, in->pbData, out->cbData);
-        else
-            return FALSE;
-    }
-    else
-        out->pbData = NULL;
-    return TRUE;
-}
-
-static BOOL CRYPT_GenKey(CMSG_CONTENT_ENCRYPT_INFO *info, ALG_ID algID)
-{
-    static HCRYPTOIDFUNCSET set = NULL;
-    PFN_CMSG_GEN_CONTENT_ENCRYPT_KEY genKeyFunc = NULL;
-    HCRYPTOIDFUNCADDR hFunc;
-    BOOL ret;
-
-    if (!set)
-        set = CryptInitOIDFunctionSet(CMSG_OID_GEN_CONTENT_ENCRYPT_KEY_FUNC, 0);
-    CryptGetOIDFunctionAddress(set, X509_ASN_ENCODING,
-     info->ContentEncryptionAlgorithm.pszObjId, 0, (void **)&genKeyFunc, &hFunc);
-    if (genKeyFunc)
-    {
-        ret = genKeyFunc(info, 0, NULL);
-        CryptFreeOIDFunctionAddress(hFunc, 0);
-    }
-    else
-        ret = CryptGenKey(info->hCryptProv, algID, CRYPT_EXPORTABLE,
-         &info->hContentEncryptKey);
-    return ret;
-}
-
-static BOOL WINAPI CRYPT_ExportKeyTrans(
- PCMSG_CONTENT_ENCRYPT_INFO pContentEncryptInfo,
- PCMSG_KEY_TRANS_RECIPIENT_ENCODE_INFO pKeyTransEncodeInfo,
- PCMSG_KEY_TRANS_ENCRYPT_INFO pKeyTransEncryptInfo,
- DWORD dwFlags, void *pvReserved)
-{
-    CERT_PUBLIC_KEY_INFO keyInfo;
-    HCRYPTKEY expKey;
-    BOOL ret;
-
-    ret = CRYPT_ConstructAlgorithmId(&keyInfo.Algorithm,
-        &pKeyTransEncodeInfo->KeyEncryptionAlgorithm);
-    if (ret)
-        ret = CRYPT_ConstructBitBlob(&keyInfo.PublicKey,
-         &pKeyTransEncodeInfo->RecipientPublicKey);
-    if (ret)
-        ret = CryptImportPublicKeyInfo(pKeyTransEncodeInfo->hCryptProv,
-         X509_ASN_ENCODING, &keyInfo, &expKey);
-    if (ret)
-    {
-        DWORD size;
-
-        ret = CryptExportKey(pContentEncryptInfo->hContentEncryptKey, expKey,
-         SIMPLEBLOB, 0, NULL, &size);
-        if (ret)
-        {
-            BYTE *keyBlob;
-
-            keyBlob = CryptMemAlloc(size);
-            if (keyBlob)
-            {
-                ret = CryptExportKey(pContentEncryptInfo->hContentEncryptKey,
-                 expKey, SIMPLEBLOB, 0, keyBlob, &size);
-                if (ret)
-                {
-                    DWORD head = sizeof(BLOBHEADER) + sizeof(ALG_ID);
-
-                    pKeyTransEncryptInfo->EncryptedKey.pbData =
-                     CryptMemAlloc(size - head);
-                    if (pKeyTransEncryptInfo->EncryptedKey.pbData)
-                    {
-                        DWORD i, k = 0;
-
-                        pKeyTransEncryptInfo->EncryptedKey.cbData = size - head;
-                        for (i = size - 1; i >= head; --i, ++k)
-                            pKeyTransEncryptInfo->EncryptedKey.pbData[k] =
-                             keyBlob[i];
-                    }
-                    else
-                        ret = FALSE;
-                }
-                CryptMemFree(keyBlob);
-            }
-            else
-                ret = FALSE;
-        }
-        CryptDestroyKey(expKey);
-    }
-
-    CryptMemFree(keyInfo.PublicKey.pbData);
-    CryptMemFree(keyInfo.Algorithm.pszObjId);
-    CryptMemFree(keyInfo.Algorithm.Parameters.pbData);
-    return ret;
-}
-
-static BOOL CRYPT_ExportEncryptedKey(CMSG_CONTENT_ENCRYPT_INFO *info, DWORD i,
- CRYPT_DATA_BLOB *key)
-{
-    static HCRYPTOIDFUNCSET set = NULL;
-    PFN_CMSG_EXPORT_KEY_TRANS exportKeyFunc = NULL;
-    HCRYPTOIDFUNCADDR hFunc = NULL;
-    CMSG_KEY_TRANS_RECIPIENT_ENCODE_INFO *encodeInfo =
-     info->rgCmsRecipients[i].pKeyTrans;
-    CMSG_KEY_TRANS_ENCRYPT_INFO encryptInfo;
-    BOOL ret;
-
-    memset(&encryptInfo, 0, sizeof(encryptInfo));
-    encryptInfo.cbSize = sizeof(encryptInfo);
-    encryptInfo.dwRecipientIndex = i;
-    ret = CRYPT_ConstructAlgorithmId(&encryptInfo.KeyEncryptionAlgorithm,
-     &encodeInfo->KeyEncryptionAlgorithm);
-
-    if (!set)
-        set = CryptInitOIDFunctionSet(CMSG_OID_EXPORT_KEY_TRANS_FUNC, 0);
-    CryptGetOIDFunctionAddress(set, X509_ASN_ENCODING,
-     encryptInfo.KeyEncryptionAlgorithm.pszObjId, 0, (void **)&exportKeyFunc,
-     &hFunc);
-    if (!exportKeyFunc)
-        exportKeyFunc = CRYPT_ExportKeyTrans;
-    if (ret)
-    {
-        ret = exportKeyFunc(info, encodeInfo, &encryptInfo, 0, NULL);
-        if (ret)
-        {
-            key->cbData = encryptInfo.EncryptedKey.cbData;
-            key->pbData = encryptInfo.EncryptedKey.pbData;
-        }
-    }
-    if (hFunc)
-        CryptFreeOIDFunctionAddress(hFunc, 0);
-
-    CryptMemFree(encryptInfo.KeyEncryptionAlgorithm.pszObjId);
-    CryptMemFree(encryptInfo.KeyEncryptionAlgorithm.Parameters.pbData);
-    return ret;
-}
-
-static LPVOID WINAPI mem_alloc(size_t size)
-{
-    return CryptMemAlloc(size);
-}
-
-static VOID WINAPI mem_free(LPVOID pv)
-{
-    CryptMemFree(pv);
-}
-
-
-static BOOL CContentEncryptInfo_Construct(CMSG_CONTENT_ENCRYPT_INFO *info,
- const CMSG_ENVELOPED_ENCODE_INFO_WITH_CMS *in, HCRYPTPROV prov)
-{
-    BOOL ret;
-
-    info->cbSize = sizeof(CMSG_CONTENT_ENCRYPT_INFO);
-    info->hCryptProv = prov;
-    ret = CRYPT_ConstructAlgorithmId(&info->ContentEncryptionAlgorithm,
-     &in->ContentEncryptionAlgorithm);
-    info->pvEncryptionAuxInfo = in->pvEncryptionAuxInfo;
-    info->cRecipients = in->cRecipients;
-    if (ret)
-    {
-        info->rgCmsRecipients = CryptMemAlloc(in->cRecipients *
-         sizeof(CMSG_RECIPIENT_ENCODE_INFO));
-        if (info->rgCmsRecipients)
-        {
-            DWORD i;
-
-            for (i = 0; ret && i < in->cRecipients; ++i)
-            {
-                CMSG_KEY_TRANS_RECIPIENT_ENCODE_INFO *encodeInfo;
-                CERT_INFO *cert = in->rgpRecipientCert[i];
-
-                info->rgCmsRecipients[i].dwRecipientChoice =
-                 CMSG_KEY_TRANS_RECIPIENT;
-                encodeInfo = CryptMemAlloc(sizeof(*encodeInfo));
-                info->rgCmsRecipients[i].pKeyTrans = encodeInfo;
-                if (encodeInfo)
-                {
-                    encodeInfo->cbSize = sizeof(*encodeInfo);
-                    ret = CRYPT_ConstructAlgorithmId(
-                     &encodeInfo->KeyEncryptionAlgorithm,
-                     &cert->SubjectPublicKeyInfo.Algorithm);
-                    encodeInfo->pvKeyEncryptionAuxInfo = NULL;
-                    encodeInfo->hCryptProv = prov;
-                    if (ret)
-                        ret = CRYPT_ConstructBitBlob(
-                         &encodeInfo->RecipientPublicKey,
-                         &cert->SubjectPublicKeyInfo.PublicKey);
-                    if (ret)
-                        ret = CRYPT_ConstructBlob(
-                         &encodeInfo->RecipientId.IssuerSerialNumber.Issuer,
-                         &cert->Issuer);
-                    if (ret)
-                        ret = CRYPT_ConstructBlob(
-                         &encodeInfo->RecipientId.IssuerSerialNumber.SerialNumber,
-                         &cert->SerialNumber);
-                }
-                else
-                    ret = FALSE;
-            }
-        }
-        else
-            ret = FALSE;
-    }
-    info->pfnAlloc = mem_alloc;
-    info->pfnFree = mem_free;
-    return ret;
-}
-
-static void CContentEncryptInfo_Free(CMSG_CONTENT_ENCRYPT_INFO *info)
-{
-    CryptMemFree(info->ContentEncryptionAlgorithm.pszObjId);
-    CryptMemFree(info->ContentEncryptionAlgorithm.Parameters.pbData);
-    if (info->rgCmsRecipients)
-    {
-        DWORD i;
-
-        for (i = 0; i < info->cRecipients; ++i)
-        {
-            CMSG_KEY_TRANS_RECIPIENT_ENCODE_INFO *encodeInfo =
-             info->rgCmsRecipients[i].pKeyTrans;
-
-            CryptMemFree(encodeInfo->KeyEncryptionAlgorithm.pszObjId);
-            CryptMemFree(encodeInfo->KeyEncryptionAlgorithm.Parameters.pbData);
-            CryptMemFree(encodeInfo->RecipientPublicKey.pbData);
-            CryptMemFree(
-             encodeInfo->RecipientId.IssuerSerialNumber.Issuer.pbData);
-            CryptMemFree(
-             encodeInfo->RecipientId.IssuerSerialNumber.SerialNumber.pbData);
-            CryptMemFree(encodeInfo);
-        }
-        CryptMemFree(info->rgCmsRecipients);
-    }
-}
-
-static BOOL CRecipientInfo_Construct(CMSG_KEY_TRANS_RECIPIENT_INFO *info,
- const CERT_INFO *cert, CRYPT_DATA_BLOB *key)
-{
-    BOOL ret;
-
-    info->dwVersion = CMSG_KEY_TRANS_PKCS_1_5_VERSION;
-    info->RecipientId.dwIdChoice = CERT_ID_ISSUER_SERIAL_NUMBER;
-    ret = CRYPT_ConstructBlob(&info->RecipientId.IssuerSerialNumber.Issuer,
-     &cert->Issuer);
-    if (ret)
-        ret = CRYPT_ConstructBlob(
-         &info->RecipientId.IssuerSerialNumber.SerialNumber,
-         &cert->SerialNumber);
-    if (ret)
-        ret = CRYPT_ConstructAlgorithmId(&info->KeyEncryptionAlgorithm,
-         &cert->SubjectPublicKeyInfo.Algorithm);
-    info->EncryptedKey.cbData = key->cbData;
-    info->EncryptedKey.pbData = key->pbData;
-    return ret;
-}
-
-static void CRecipientInfo_Free(CMSG_KEY_TRANS_RECIPIENT_INFO *info)
-{
-    CryptMemFree(info->RecipientId.IssuerSerialNumber.Issuer.pbData);
-    CryptMemFree(info->RecipientId.IssuerSerialNumber.SerialNumber.pbData);
-    CryptMemFree(info->KeyEncryptionAlgorithm.pszObjId);
-    CryptMemFree(info->KeyEncryptionAlgorithm.Parameters.pbData);
-    CryptMemFree(info->EncryptedKey.pbData);
-}
 
 static void CEnvelopedEncodeMsg_Close(HCRYPTMSG hCryptMsg)
 {
     CEnvelopedEncodeMsg *msg = hCryptMsg;
 
-    CryptMemFree(msg->algo.pszObjId);
-    CryptMemFree(msg->algo.Parameters.pbData);
-    if (msg->base.open_flags & CMSG_CRYPT_RELEASE_CONTEXT_FLAG)
+    if (msg->prov && (msg->base.open_flags & CMSG_CRYPT_RELEASE_CONTEXT_FLAG))
         CryptReleaseContext(msg->prov, 0);
-    CryptDestroyKey(msg->key);
-    if (msg->recipientInfo)
-    {
-        DWORD i;
-
-        for (i = 0; i < msg->cRecipientInfo; ++i)
-            CRecipientInfo_Free(&msg->recipientInfo[i]);
-        CryptMemFree(msg->recipientInfo);
-    }
-    CryptMemFree(msg->data.pbData);
+    CMSEnv_EncFree(msg->enc);
 }
 
 static BOOL CEnvelopedEncodeMsg_GetParam(HCRYPTMSG hCryptMsg, DWORD dwParamType,
@@ -1821,21 +1525,7 @@ static BOOL CEnvelopedEncodeMsg_GetParam(HCRYPTMSG hCryptMsg, DWORD dwParamType,
         if (msg->base.streamed)
             SetLastError(E_INVALIDARG);
         else
-        {
-            char oid_rsa_data[] = szOID_RSA_data;
-            CRYPT_ENVELOPED_DATA envelopedData = {
-             CMSG_ENVELOPED_DATA_PKCS_1_5_VERSION, msg->cRecipientInfo,
-             msg->recipientInfo, { oid_rsa_data, {
-               msg->algo.pszObjId,
-               { msg->algo.Parameters.cbData, msg->algo.Parameters.pbData }
-              },
-              { msg->data.cbData, msg->data.pbData }
-             }
-            };
-
-            ret = CRYPT_AsnEncodePKCSEnvelopedData(&envelopedData, pvData,
-             pcbData);
-        }
+            ret = CMSEnv_EncGetBare(msg->enc, pvData, pcbData);
         break;
     case CMSG_CONTENT_PARAM:
     {
@@ -1896,48 +1586,86 @@ static BOOL CEnvelopedEncodeMsg_Update(HCRYPTMSG hCryptMsg, const BYTE *pbData,
         }
         else
         {
-            if (cbData)
-            {
-                DWORD dataLen = cbData;
-
-                msg->data.cbData = cbData;
-                msg->data.pbData = CryptMemAlloc(cbData);
-                if (msg->data.pbData)
-                {
-                    memcpy(msg->data.pbData, pbData, cbData);
-                    ret = CryptEncrypt(msg->key, 0, TRUE, 0, msg->data.pbData,
-                     &dataLen, msg->data.cbData);
-                    msg->data.cbData = dataLen;
-                    if (dataLen > cbData)
-                    {
-                        msg->data.pbData = CryptMemRealloc(msg->data.pbData,
-                         dataLen);
-                        if (msg->data.pbData)
-                        {
-                            dataLen = cbData;
-                            ret = CryptEncrypt(msg->key, 0, TRUE, 0,
-                             msg->data.pbData, &dataLen, msg->data.cbData);
-                        }
-                        else
-                            ret = FALSE;
-                    }
-                    if (!ret)
-                        CryptMemFree(msg->data.pbData);
-                }
-                else
-                    ret = FALSE;
-                if (!ret)
-                {
-                    msg->data.cbData = 0;
-                    msg->data.pbData = NULL;
-                }
-            }
-            else
-                ret = TRUE;
+            ret = CMSEnv_EncContent(msg->enc, pbData, cbData);
             msg->base.state = MsgStateFinalized;
         }
     }
     return ret;
+}
+
+/* Collects the recipients for CMSEnv_EncNew from either the CMS recipient structures or the
+ * certificates of the original structure. */
+static BOOL CEnvelopedEncodeMsg_GetRecipients(const CMSG_ENVELOPED_ENCODE_INFO_WITH_CMS *info,
+ struct cms_enc_recip **out)
+{
+    struct cms_enc_recip *r;
+    BOOL cms = info->cbSize == sizeof(CMSG_ENVELOPED_ENCODE_INFO_WITH_CMS) && info->rgCmsRecipients;
+    DWORD i;
+
+    *out = NULL;
+    if (!info->cRecipients)
+        return TRUE;
+    if (info->cRecipients > 0x10000 || !(cms ? (void *)info->rgCmsRecipients : (void *)info->rgpRecipientCert))
+    {
+        SetLastError(E_INVALIDARG);
+        return FALSE;
+    }
+    if (!(r = CryptMemAlloc(info->cRecipients * sizeof(*r))))
+        return FALSE;
+    memset(r, 0, info->cRecipients * sizeof(*r));
+    for (i = 0; i < info->cRecipients; ++i)
+    {
+        if (cms)
+        {
+            const CMSG_KEY_TRANS_RECIPIENT_ENCODE_INFO *kt;
+
+            if (info->rgCmsRecipients[i].dwRecipientChoice != CMSG_KEY_TRANS_RECIPIENT)
+            {
+                FIXME("recipient choice %ld unsupported\n", info->rgCmsRecipients[i].dwRecipientChoice);
+                SetLastError(E_NOTIMPL);
+                goto fail;
+            }
+            kt = info->rgCmsRecipients[i].pKeyTrans;
+            if (!kt || kt->cbSize < sizeof(*kt))
+            {
+                SetLastError(E_INVALIDARG);
+                goto fail;
+            }
+            r[i].id_choice = kt->RecipientId.dwIdChoice;
+            if (kt->RecipientId.dwIdChoice == CERT_ID_ISSUER_SERIAL_NUMBER)
+            {
+                r[i].issuer = kt->RecipientId.IssuerSerialNumber.Issuer;
+                r[i].serial_le = kt->RecipientId.IssuerSerialNumber.SerialNumber;
+            }
+            else if (kt->RecipientId.dwIdChoice == CERT_ID_KEY_IDENTIFIER)
+                r[i].key_id = kt->RecipientId.KeyId;
+            r[i].key_alg = kt->KeyEncryptionAlgorithm.pszObjId;
+            r[i].key_alg_params = kt->KeyEncryptionAlgorithm.Parameters;
+            r[i].oaep = kt->pvKeyEncryptionAuxInfo;
+            r[i].public_key = kt->RecipientPublicKey;
+        }
+        else
+        {
+            const CERT_INFO *cert = info->rgpRecipientCert[i];
+
+            if (!cert)
+            {
+                SetLastError(E_INVALIDARG);
+                goto fail;
+            }
+            r[i].id_choice = CERT_ID_ISSUER_SERIAL_NUMBER;
+            r[i].issuer = cert->Issuer;
+            r[i].serial_le = cert->SerialNumber;
+            r[i].key_alg = cert->SubjectPublicKeyInfo.Algorithm.pszObjId;
+            r[i].key_alg_params = cert->SubjectPublicKeyInfo.Algorithm.Parameters;
+            r[i].public_key = cert->SubjectPublicKeyInfo.PublicKey;
+        }
+    }
+    *out = r;
+    return TRUE;
+fail:
+    CryptMemFree(r);
+    return FALSE;
 }
 
 static HCRYPTMSG CEnvelopedEncodeMsg_Open(DWORD dwFlags,
@@ -1946,8 +1674,8 @@ static HCRYPTMSG CEnvelopedEncodeMsg_Open(DWORD dwFlags,
 {
     CEnvelopedEncodeMsg *msg;
     const CMSG_ENVELOPED_ENCODE_INFO_WITH_CMS *info = pvMsgEncodeInfo;
-    HCRYPTPROV prov;
-    ALG_ID algID;
+    struct cms_enc_recip *recipients;
+    BOOL cmsFields;
 
     if (info->cbSize != sizeof(CMSG_ENVELOPED_ENCODE_INFO) &&
      info->cbSize != sizeof(CMSG_ENVELOPED_ENCODE_INFO_WITH_CMS))
@@ -1955,73 +1683,45 @@ static HCRYPTMSG CEnvelopedEncodeMsg_Open(DWORD dwFlags,
         SetLastError(E_INVALIDARG);
         return NULL;
     }
-    if (info->cbSize == sizeof(CMSG_ENVELOPED_ENCODE_INFO_WITH_CMS))
-        FIXME("CMS fields unsupported\n");
-    if (!(algID = CertOIDToAlgId(info->ContentEncryptionAlgorithm.pszObjId)))
+    cmsFields = info->cbSize == sizeof(CMSG_ENVELOPED_ENCODE_INFO_WITH_CMS);
+    if (!CMSEnv_CheckContentAlg(info->ContentEncryptionAlgorithm.pszObjId))
+        return NULL;
+    if (cmsFields && info->cAttrCertEncoded)
     {
-        SetLastError(CRYPT_E_UNKNOWN_ALGO);
+        FIXME("attribute certificates unsupported\n");
+        SetLastError(E_NOTIMPL);
         return NULL;
     }
-    if (info->cRecipients && !info->rgpRecipientCert)
-    {
-        SetLastError(E_INVALIDARG);
+    if (!CEnvelopedEncodeMsg_GetRecipients(info, &recipients))
         return NULL;
-    }
-    if (info->hCryptProv)
-        prov = info->hCryptProv;
-    else
-    {
-        prov = I_CryptGetDefaultCryptProv(0);
-        dwFlags &= ~CMSG_CRYPT_RELEASE_CONTEXT_FLAG;
-    }
     msg = CryptMemAlloc(sizeof(CEnvelopedEncodeMsg));
     if (msg)
     {
-        CRYPT_DATA_BLOB encryptedKey = { 0, NULL };
-        CMSG_CONTENT_ENCRYPT_INFO encryptInfo;
-        BOOL ret;
-        DWORD i;
-
         CryptMsgBase_Init((CryptMsgBase *)msg, dwFlags, pStreamInfo,
          CEnvelopedEncodeMsg_Close, CEnvelopedEncodeMsg_GetParam,
          CEnvelopedEncodeMsg_Update, CRYPT_DefaultMsgControl);
-        ret = CRYPT_ConstructAlgorithmId(&msg->algo,
-         &info->ContentEncryptionAlgorithm);
-        msg->prov = prov;
-        msg->data.cbData = 0;
-        msg->data.pbData = NULL;
-        msg->cRecipientInfo = info->cRecipients;
-        msg->recipientInfo = CryptMemAlloc(info->cRecipients *
-         sizeof(CMSG_KEY_TRANS_RECIPIENT_INFO));
-        if (!msg->recipientInfo)
-            ret = FALSE;
-        memset(&encryptInfo, 0, sizeof(encryptInfo));
-        if (ret)
+        msg->prov = info->hCryptProv;
+        msg->enc = CMSEnv_EncNew(pszInnerContentObjID,
+         info->ContentEncryptionAlgorithm.pszObjId,
+         &info->ContentEncryptionAlgorithm.Parameters, info->pvEncryptionAuxInfo,
+         info->cRecipients, recipients,
+         cmsFields ? info->cCertEncoded : 0, cmsFields ? info->rgCertEncoded : NULL,
+         cmsFields ? info->cCrlEncoded : 0, cmsFields ? info->rgCrlEncoded : NULL,
+         cmsFields ? info->cUnprotectedAttr : 0, cmsFields ? info->rgUnprotectedAttr : NULL);
+        if (!msg->enc)
         {
-            ret = CContentEncryptInfo_Construct(&encryptInfo, info, prov);
-            if (ret)
-            {
-                ret = CRYPT_GenKey(&encryptInfo, algID);
-                if (ret)
-                    msg->key = encryptInfo.hContentEncryptKey;
-            }
-        }
-        for (i = 0; ret && i < msg->cRecipientInfo; ++i)
-        {
-            ret = CRYPT_ExportEncryptedKey(&encryptInfo, i, &encryptedKey);
-            if (ret)
-                ret = CRecipientInfo_Construct(&msg->recipientInfo[i],
-                 info->rgpRecipientCert[i], &encryptedKey);
-        }
-        CContentEncryptInfo_Free(&encryptInfo);
-        if (!ret)
-        {
-            CryptMsgClose(msg);
+            DWORD err = GetLastError();
+
+            /* the provider stays with the caller unless the message took it over */
+            msg->base.open_flags &= ~CMSG_CRYPT_RELEASE_CONTEXT_FLAG;
+            if (dwFlags & CMSG_CRYPT_RELEASE_CONTEXT_FLAG)
+                CryptReleaseContext(msg->prov, 0);
+            CryptMemFree(msg);
+            SetLastError(err);
             msg = NULL;
         }
     }
-    if (!msg && (dwFlags & CMSG_CRYPT_RELEASE_CONTEXT_FLAG))
-        CryptReleaseContext(prov, 0);
+    CryptMemFree(recipients);
     return msg;
 }
 
@@ -2068,8 +1768,9 @@ HCRYPTMSG WINAPI CryptMsgOpenToEncode(DWORD dwMsgEncodingType, DWORD dwFlags,
 
 typedef struct _CEnvelopedDecodeMsg
 {
-    CRYPT_ENVELOPED_DATA *data;
-    HCRYPTPROV            crypt_prov;
+    struct cms_env       *env;
+    ULONG_PTR             crypt_prov;       /* provider or NCrypt key handed over with CMSG_CRYPT_RELEASE_CONTEXT_FLAG */
+    BOOL                  crypt_prov_ncrypt;
     CRYPT_DATA_BLOB       content;
     BOOL                  decrypted;
 } CEnvelopedDecodeMsg;
@@ -2089,6 +1790,23 @@ typedef struct _CDecodeMsg
     CONTEXT_PROPERTY_LIST *properties;
 } CDecodeMsg;
 
+static void CEnvelopedDecodeMsg_ReleaseKey(CEnvelopedDecodeMsg *msg)
+{
+    if (msg->crypt_prov_ncrypt)
+    {
+        HMODULE ncrypt = LoadLibraryW(L"ncrypt.dll");
+        LONG (WINAPI *free_object)(ULONG_PTR) = ncrypt ? (void *)GetProcAddress(ncrypt, "NCryptFreeObject") : NULL;
+
+        if (free_object)
+            free_object(msg->crypt_prov);
+        if (ncrypt)
+            FreeLibrary(ncrypt);
+    }
+    else
+        CryptReleaseContext(msg->crypt_prov, 0);
+    msg->crypt_prov = 0;
+}
+
 static void CDecodeMsg_Close(HCRYPTMSG hCryptMsg)
 {
     CDecodeMsg *msg = hCryptMsg;
@@ -2103,8 +1821,8 @@ static void CDecodeMsg_Close(HCRYPTMSG hCryptMsg)
         break;
     case CMSG_ENVELOPED:
         if (msg->u.enveloped_data.crypt_prov)
-            CryptReleaseContext(msg->u.enveloped_data.crypt_prov, 0);
-        LocalFree(msg->u.enveloped_data.data);
+            CEnvelopedDecodeMsg_ReleaseKey(&msg->u.enveloped_data);
+        CMSEnv_Free(msg->u.enveloped_data.env);
         CryptMemFree(msg->u.enveloped_data.content.pbData);
         break;
     case CMSG_SIGNED:
@@ -2242,16 +1960,7 @@ static BOOL CDecodeMsg_DecodeHashedContent(CDecodeMsg *msg,
 static BOOL CDecodeMsg_DecodeEnvelopedContent(CDecodeMsg *msg,
  const CRYPT_DER_BLOB *blob)
 {
-    BOOL ret;
-    CRYPT_ENVELOPED_DATA *envelopedData;
-    DWORD size;
-
-    ret = CRYPT_AsnDecodePKCSEnvelopedData(blob->pbData, blob->cbData,
-     CRYPT_DECODE_ALLOC_FLAG, NULL, (CRYPT_ENVELOPED_DATA *)&envelopedData,
-     &size);
-    if (ret)
-        msg->u.enveloped_data.data = envelopedData;
-    return ret;
+    return CMSEnv_Decode(blob->pbData, blob->cbData, &msg->u.enveloped_data.env);
 }
 
 static BOOL CDecodeMsg_DecodeSignedContent(CDecodeMsg *msg,
@@ -2383,8 +2092,7 @@ static BOOL CDecodeMsg_FinalizeEnvelopedContent(CDecodeMsg *msg,
     if (msg->base.open_flags & CMSG_DETACHED_FLAG)
         content = &msg->detached_data;
     else
-        content =
-         &msg->u.enveloped_data.data->encryptedContentInfo.encryptedContent;
+        content = &msg->u.enveloped_data.env->content;
 
     return CRYPT_ConstructBlob(&msg->u.enveloped_data.content, content);
 }
@@ -2947,6 +2655,8 @@ static BOOL CDecodeEnvelopedMsg_GetParam(CDecodeMsg *msg, DWORD dwParamType,
  DWORD dwIndex, void *pvData, DWORD *pcbData)
 {
     BOOL ret = FALSE;
+    struct cms_env *env = msg->u.enveloped_data.env;
+    DWORD value;
 
     switch (dwParamType)
     {
@@ -2954,36 +2664,173 @@ static BOOL CDecodeEnvelopedMsg_GetParam(CDecodeMsg *msg, DWORD dwParamType,
         ret = CRYPT_CopyParam(pvData, pcbData, &msg->type, sizeof(msg->type));
         break;
     case CMSG_CONTENT_PARAM:
-        if (msg->u.enveloped_data.data)
+        if (env && msg->u.enveloped_data.decrypted && strcmp(env->content_type, szOID_RSA_data))
+        {
+            /* Windows returns decrypted content that is not data inside a SEQUENCE */
+            DWORD size;
+            BYTE *wrapped = CMSEnv_WrapContent(msg->u.enveloped_data.content.pbData,
+             msg->u.enveloped_data.content.cbData, &size);
+
+            if (wrapped)
+            {
+                ret = CRYPT_CopyParam(pvData, pcbData, wrapped, size);
+                CryptMemFree(wrapped);
+            }
+        }
+        else if (env)
             ret = CRYPT_CopyParam(pvData, pcbData,
              msg->u.enveloped_data.content.pbData,
              msg->u.enveloped_data.content.cbData);
         else
             SetLastError(CRYPT_E_INVALID_MSG_TYPE);
         break;
-    case CMSG_RECIPIENT_COUNT_PARAM:
-        if (msg->u.enveloped_data.data)
-            ret = CRYPT_CopyParam(pvData, pcbData,
-             &msg->u.enveloped_data.data->cRecipientInfo, sizeof(DWORD));
+    case CMSG_VERSION_PARAM:
+        if (env)
+            ret = CRYPT_CopyParam(pvData, pcbData, &env->version, sizeof(DWORD));
         else
             SetLastError(CRYPT_E_INVALID_MSG_TYPE);
         break;
+    case CMSG_INNER_CONTENT_TYPE_PARAM:
+        if (env)
+            ret = CRYPT_CopyParam(pvData, pcbData, env->content_type,
+             strlen(env->content_type) + 1);
+        else
+            SetLastError(CRYPT_E_INVALID_MSG_TYPE);
+        break;
+    case CMSG_ENVELOPE_ALGORITHM_PARAM:
+        if (env)
+            ret = CMSEnv_CopyAlgorithm(env, pvData, pcbData);
+        else
+            SetLastError(CRYPT_E_INVALID_MSG_TYPE);
+        break;
+    case CMSG_RECIPIENT_COUNT_PARAM:
+        if (env)
+            ret = CRYPT_CopyParam(pvData, pcbData, &env->n_ktri, sizeof(DWORD));
+        else
+            SetLastError(CRYPT_E_INVALID_MSG_TYPE);
+        break;
+    case CMSG_CMS_RECIPIENT_COUNT_PARAM:
+        if (env)
+            ret = CRYPT_CopyParam(pvData, pcbData, &env->n_recip, sizeof(DWORD));
+        else
+            SetLastError(CRYPT_E_INVALID_MSG_TYPE);
+        break;
+    case CMSG_RECIPIENT_INDEX_PARAM:
+    case CMSG_CMS_RECIPIENT_INDEX_PARAM:
+        /* Windows reports 0 here, whatever the index is */
+        value = 0;
+        if (env)
+            ret = CRYPT_CopyParam(pvData, pcbData, &value, sizeof(DWORD));
+        else
+            SetLastError(CRYPT_E_INVALID_MSG_TYPE);
+        break;
+    case CMSG_CMS_RECIPIENT_ENCRYPTED_KEY_INDEX_PARAM:
+        /* only key agreement recipients have more than one encrypted key */
+        SetLastError(env ? CRYPT_E_INVALID_INDEX : CRYPT_E_INVALID_MSG_TYPE);
+        break;
     case CMSG_RECIPIENT_INFO_PARAM:
-        if (msg->u.enveloped_data.data)
+        if (env)
         {
-            if (dwIndex < msg->u.enveloped_data.data->cRecipientInfo)
+            if (dwIndex < env->n_ktri)
             {
-                PCMSG_KEY_TRANS_RECIPIENT_INFO recipientInfo =
-                 &msg->u.enveloped_data.data->rgRecipientInfo[dwIndex];
+                struct cms_recip *recip = &env->recip[env->ktri_index[dwIndex]];
+                CERT_ISSUER_SERIAL_NUMBER ias;
 
-                ret = CRYPT_CopyRecipientInfo(pvData, pcbData,
-                 &recipientInfo->RecipientId.IssuerSerialNumber);
+                ias.Issuer = recip->legacy_issuer;
+                ias.SerialNumber = recip->legacy_serial;
+                ret = CRYPT_CopyRecipientInfo(pvData, pcbData, &ias);
             }
             else
                 SetLastError(CRYPT_E_INVALID_INDEX);
         }
         else
             SetLastError(CRYPT_E_INVALID_MSG_TYPE);
+        break;
+    case CMSG_CMS_RECIPIENT_INFO_PARAM:
+        if (env)
+        {
+            if (dwIndex < env->n_recip)
+                ret = CMSEnv_CopyCmsRecipient(&env->recip[dwIndex], pvData, pcbData);
+            else
+                SetLastError(CRYPT_E_INVALID_INDEX);
+        }
+        else
+            SetLastError(CRYPT_E_INVALID_MSG_TYPE);
+        break;
+    case CMSG_CERT_COUNT_PARAM:
+        if (env)
+            ret = CRYPT_CopyParam(pvData, pcbData, &env->n_cert, sizeof(DWORD));
+        else
+            SetLastError(CRYPT_E_INVALID_MSG_TYPE);
+        break;
+    case CMSG_CERT_PARAM:
+        if (env)
+        {
+            if (dwIndex < env->n_cert)
+                ret = CRYPT_CopyParam(pvData, pcbData, env->certs[dwIndex].pbData,
+                 env->certs[dwIndex].cbData);
+            else
+                SetLastError(CRYPT_E_INVALID_INDEX);
+        }
+        else
+            SetLastError(CRYPT_E_INVALID_MSG_TYPE);
+        break;
+    case CMSG_CRL_COUNT_PARAM:
+        if (env)
+            ret = CRYPT_CopyParam(pvData, pcbData, &env->n_crl, sizeof(DWORD));
+        else
+            SetLastError(CRYPT_E_INVALID_MSG_TYPE);
+        break;
+    case CMSG_CRL_PARAM:
+        if (env)
+        {
+            if (dwIndex < env->n_crl)
+                ret = CRYPT_CopyParam(pvData, pcbData, env->crls[dwIndex].pbData,
+                 env->crls[dwIndex].cbData);
+            else
+                SetLastError(CRYPT_E_INVALID_INDEX);
+        }
+        else
+            SetLastError(CRYPT_E_INVALID_MSG_TYPE);
+        break;
+    case CMSG_UNPROTECTED_ATTR_PARAM:
+        if (!env)
+            SetLastError(CRYPT_E_INVALID_MSG_TYPE);
+        else if (!env->has_attrs)
+            SetLastError(CRYPT_E_ATTRIBUTES_MISSING);
+        else
+        {
+            /* the [1] IMPLICIT SET OF Attribute is a SET OF Attribute with another tag */
+            BYTE *set = CryptMemAlloc(env->attrs.cbData);
+
+            if (set)
+            {
+                CRYPT_ATTRIBUTES *attrs;
+                DWORD size;
+
+                memcpy(set, env->attrs.pbData, env->attrs.cbData);
+                set[0] = 0x31;
+                ret = CryptDecodeObjectEx(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, PKCS_ATTRIBUTES, set,
+                 env->attrs.cbData, CRYPT_DECODE_ALLOC_FLAG, NULL, &attrs, &size);
+                CryptMemFree(set);
+                if (ret)
+                {
+                    DWORD need = CRYPT_SizeOfAttributes(attrs);
+
+                    if (!pvData)
+                        *pcbData = need;
+                    else if (*pcbData < need)
+                    {
+                        *pcbData = need;
+                        SetLastError(ERROR_MORE_DATA);
+                        ret = FALSE;
+                    }
+                    else
+                        ret = CRYPT_ConstructAttributes(pvData, attrs);
+                    LocalFree(attrs);
+                }
+            }
+        }
         break;
     default:
         FIXME("unimplemented for %ld\n", dwParamType);
@@ -3460,116 +3307,84 @@ static BOOL CDecodeSignedMsg_VerifySignatureEx(CDecodeMsg *msg,
     return ret;
 }
 
-static BOOL WINAPI CRYPT_ImportKeyTrans(
- PCRYPT_ALGORITHM_IDENTIFIER pContentEncryptionAlgorithm,
- PCMSG_CTRL_KEY_TRANS_DECRYPT_PARA pKeyTransDecryptPara, DWORD dwFlags,
- void *pvReserved, HCRYPTKEY *phContentEncryptKey)
-{
-    BOOL ret;
-    HCRYPTKEY key;
-
-    ret = CryptGetUserKey(pKeyTransDecryptPara->hCryptProv,
-     pKeyTransDecryptPara->dwKeySpec ? pKeyTransDecryptPara->dwKeySpec :
-     AT_KEYEXCHANGE, &key);
-    if (ret)
-    {
-        CMSG_KEY_TRANS_RECIPIENT_INFO *info =
-         &pKeyTransDecryptPara->pKeyTrans[pKeyTransDecryptPara->dwRecipientIndex];
-        CRYPT_DATA_BLOB *encryptedKey = &info->EncryptedKey;
-        DWORD size = encryptedKey->cbData + sizeof(BLOBHEADER) + sizeof(ALG_ID);
-        BYTE *keyBlob = CryptMemAlloc(size);
-
-        if (keyBlob)
-        {
-            DWORD i, k = size - 1;
-            BLOBHEADER *blobHeader = (BLOBHEADER *)keyBlob;
-            ALG_ID *algID = (ALG_ID *)(keyBlob + sizeof(BLOBHEADER));
-
-            blobHeader->bType = SIMPLEBLOB;
-            blobHeader->bVersion = CUR_BLOB_VERSION;
-            blobHeader->reserved = 0;
-            blobHeader->aiKeyAlg = CertOIDToAlgId(
-             pContentEncryptionAlgorithm->pszObjId);
-            *algID = CertOIDToAlgId(info->KeyEncryptionAlgorithm.pszObjId);
-            for (i = 0; i < encryptedKey->cbData; ++i, --k)
-                keyBlob[k] = encryptedKey->pbData[i];
-
-            ret = CryptImportKey(pKeyTransDecryptPara->hCryptProv, keyBlob,
-             size, key, 0, phContentEncryptKey);
-            CryptMemFree(keyBlob);
-        }
-        else
-            ret = FALSE;
-        CryptDestroyKey(key);
-    }
-    return ret;
-}
-
-static BOOL CRYPT_ImportEncryptedKey(PCRYPT_ALGORITHM_IDENTIFIER contEncrAlg,
- PCMSG_CTRL_DECRYPT_PARA para, PCMSG_KEY_TRANS_RECIPIENT_INFO info,
- HCRYPTKEY *key)
-{
-    static HCRYPTOIDFUNCSET set = NULL;
-    PFN_CMSG_IMPORT_KEY_TRANS importKeyFunc = NULL;
-    HCRYPTOIDFUNCADDR hFunc = NULL;
-    CMSG_CTRL_KEY_TRANS_DECRYPT_PARA decryptPara;
-    BOOL ret;
-
-    memset(&decryptPara, 0, sizeof(decryptPara));
-    decryptPara.cbSize = sizeof(decryptPara);
-    decryptPara.hCryptProv = para->hCryptProv;
-    decryptPara.dwKeySpec = para->dwKeySpec;
-    decryptPara.pKeyTrans = info;
-    decryptPara.dwRecipientIndex = para->dwRecipientIndex;
-
-    if (!set)
-        set = CryptInitOIDFunctionSet(CMSG_OID_IMPORT_KEY_TRANS_FUNC, 0);
-    CryptGetOIDFunctionAddress(set, X509_ASN_ENCODING, contEncrAlg->pszObjId, 0,
-     (void **)&importKeyFunc, &hFunc);
-    if (!importKeyFunc)
-        importKeyFunc = CRYPT_ImportKeyTrans;
-    ret = importKeyFunc(contEncrAlg, &decryptPara, 0, NULL, key);
-    if (hFunc)
-        CryptFreeOIDFunctionAddress(hFunc, 0);
-    return ret;
-}
-
-static BOOL CDecodeEnvelopedMsg_CrtlDecrypt(CDecodeMsg *msg,
- PCMSG_CTRL_DECRYPT_PARA para)
+/* Decrypts the content with the recipient at index (into all recipients), with the key at key.
+ * ktri is the application's copy of the recipient information, if it passed one. */
+static BOOL CDecodeEnvelopedMsg_Decrypt(CDecodeMsg *msg, DWORD index,
+ const CMSG_KEY_TRANS_RECIPIENT_INFO *ktri, ULONG_PTR key, DWORD keySpec, DWORD dwFlags)
 {
     BOOL ret = FALSE;
     CEnvelopedDecodeMsg *enveloped_data = &msg->u.enveloped_data;
-    CRYPT_ENVELOPED_DATA *data = enveloped_data->data;
+    struct cms_env *env = enveloped_data->env;
 
-    if (para->cbSize != sizeof(CMSG_CTRL_DECRYPT_PARA))
-        SetLastError(E_INVALIDARG);
-    else if (!data)
+    if (!env)
         SetLastError(CRYPT_E_INVALID_MSG_TYPE);
-    else if (para->dwRecipientIndex >= data->cRecipientInfo)
+    else if (index >= env->n_recip)
         SetLastError(CRYPT_E_INVALID_INDEX);
     else if (enveloped_data->decrypted)
         SetLastError(CRYPT_E_ALREADY_DECRYPTED);
-    else if (!para->hCryptProv)
+    else if (!key)
         SetLastError(ERROR_INVALID_PARAMETER);
+    else if (env->recip[index].choice != CMSG_KEY_TRANS_RECIPIENT)
+        SetLastError(CRYPT_E_UNKNOWN_ALGO);
     else if (enveloped_data->content.cbData)
     {
-        HCRYPTKEY key;
+        BYTE *plain;
+        DWORD plainLen;
 
-        ret = CRYPT_ImportEncryptedKey(
-         &data->encryptedContentInfo.contentEncryptionAlgorithm, para,
-         data->rgRecipientInfo, &key);
+        ret = CMSEnv_Decrypt(env, &env->recip[index], ktri, key, keySpec,
+         enveloped_data->content.pbData, enveloped_data->content.cbData, &plain,
+         &plainLen);
         if (ret)
         {
-            ret = CryptDecrypt(key, 0, TRUE, 0, enveloped_data->content.pbData,
-             &enveloped_data->content.cbData);
-            CryptDestroyKey(key);
+            memcpy(enveloped_data->content.pbData, plain, plainLen);
+            enveloped_data->content.cbData = plainLen;
+            SecureZeroMemory(plain, plainLen);
+            CryptMemFree(plain);
         }
     }
     else
         ret = TRUE;
     if (ret)
+    {
         enveloped_data->decrypted = TRUE;
+        if (dwFlags & CMSG_CRYPT_RELEASE_CONTEXT_FLAG)
+        {
+            enveloped_data->crypt_prov = key;
+            enveloped_data->crypt_prov_ncrypt = keySpec == CERT_NCRYPT_KEY_SPEC;
+        }
+    }
     return ret;
+}
+
+static BOOL CDecodeEnvelopedMsg_CrtlDecrypt(CDecodeMsg *msg,
+ PCMSG_CTRL_DECRYPT_PARA para, DWORD dwFlags)
+{
+    struct cms_env *env = msg->u.enveloped_data.env;
+
+    if (para->cbSize != sizeof(CMSG_CTRL_DECRYPT_PARA))
+    {
+        SetLastError(E_INVALIDARG);
+        return FALSE;
+    }
+    /* the index counts the key transport recipients */
+    if (env && para->dwRecipientIndex < env->n_ktri)
+        return CDecodeEnvelopedMsg_Decrypt(msg, env->ktri_index[para->dwRecipientIndex],
+         NULL, para->hCryptProv, para->dwKeySpec, dwFlags);
+    return CDecodeEnvelopedMsg_Decrypt(msg, env ? env->n_recip : 0, NULL,
+     para->hCryptProv, para->dwKeySpec, dwFlags);
+}
+
+static BOOL CDecodeEnvelopedMsg_CtrlKeyTransDecrypt(CDecodeMsg *msg,
+ const CMSG_CTRL_KEY_TRANS_DECRYPT_PARA *para, DWORD dwFlags)
+{
+    if (para->cbSize != sizeof(CMSG_CTRL_KEY_TRANS_DECRYPT_PARA))
+    {
+        SetLastError(E_INVALIDARG);
+        return FALSE;
+    }
+    /* the index counts all recipients; hCryptProv is an NCrypt key for CERT_NCRYPT_KEY_SPEC */
+    return CDecodeEnvelopedMsg_Decrypt(msg, para->dwRecipientIndex, para->pKeyTrans,
+     para->hCryptProv, para->dwKeySpec, dwFlags);
 }
 
 static BOOL CDecodeMsg_Control(HCRYPTMSG hCryptMsg, DWORD dwFlags,
@@ -3595,10 +3410,18 @@ static BOOL CDecodeMsg_Control(HCRYPTMSG hCryptMsg, DWORD dwFlags,
         {
         case CMSG_ENVELOPED:
             ret = CDecodeEnvelopedMsg_CrtlDecrypt(msg,
-             (PCMSG_CTRL_DECRYPT_PARA)pvCtrlPara);
-            if (ret && (dwFlags & CMSG_CRYPT_RELEASE_CONTEXT_FLAG))
-                msg->u.enveloped_data.crypt_prov =
-                 ((PCMSG_CTRL_DECRYPT_PARA)pvCtrlPara)->hCryptProv;
+             (PCMSG_CTRL_DECRYPT_PARA)pvCtrlPara, dwFlags);
+            break;
+        default:
+            SetLastError(CRYPT_E_INVALID_MSG_TYPE);
+        }
+        break;
+    case CMSG_CTRL_KEY_TRANS_DECRYPT:
+        switch (msg->type)
+        {
+        case CMSG_ENVELOPED:
+            ret = CDecodeEnvelopedMsg_CtrlKeyTransDecrypt(msg,
+             (PCMSG_CTRL_KEY_TRANS_DECRYPT_PARA)pvCtrlPara, dwFlags);
             break;
         default:
             SetLastError(CRYPT_E_INVALID_MSG_TYPE);
