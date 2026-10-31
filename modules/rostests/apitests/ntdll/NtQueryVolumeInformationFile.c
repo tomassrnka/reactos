@@ -248,6 +248,64 @@ TestFileFsAttributeInformation(HANDLE handle)
        "Got %x\n", AttributeInfo->FileSystemName[AttributeInfo->FileSystemNameLength / sizeof(WCHAR)]);
 }
 
+static
+VOID
+TestFileFsSizeInformation(HANDLE handle)
+{
+    /* two LARGE_INTEGERs, then two ULONGs: the same bytes for a 32-bit and a 64-bit caller */
+    UCHAR Buffer[64];
+    IO_STATUS_BLOCK IoStatusBlock;
+    LONGLONG Total, Available, Actual;
+    ULONG Sectors, Bytes;
+    NTSTATUS status;
+
+    RtlFillMemory(Buffer, sizeof(Buffer), 0x55);
+    RtlFillMemory(&IoStatusBlock, sizeof(IoStatusBlock), 0x55);
+    status = NtQueryVolumeInformationFile(handle, &IoStatusBlock, Buffer, 23, FileFsSizeInformation);
+    ok(status == STATUS_INFO_LENGTH_MISMATCH, "Got status 0x%lx\n", status);
+    ok(IoStatusBlock.Status == 0x55555555, "IoStatusBlock.Status = 0x%lx\n", IoStatusBlock.Status);
+    ok(Buffer[0] == 0x55, "buffer written by a refused request\n");
+
+    RtlFillMemory(Buffer, sizeof(Buffer), 0x55);
+    status = NtQueryVolumeInformationFile(handle, &IoStatusBlock, Buffer, 24, FileFsSizeInformation);
+    ok(status == STATUS_SUCCESS, "Got status 0x%lx\n", status);
+    ok(IoStatusBlock.Status == STATUS_SUCCESS, "IoStatusBlock.Status = 0x%lx\n", IoStatusBlock.Status);
+    ok(IoStatusBlock.Information == 24, "IoStatusBlock.Information = %Iu\n", IoStatusBlock.Information);
+    ok(Buffer[24] == 0x55, "wrote past 24 bytes\n");
+    RtlCopyMemory(&Total, Buffer, sizeof(Total));
+    RtlCopyMemory(&Available, Buffer + 8, sizeof(Available));
+    RtlCopyMemory(&Sectors, Buffer + 16, sizeof(Sectors));
+    RtlCopyMemory(&Bytes, Buffer + 20, sizeof(Bytes));
+    ok(Total > 0 && Available >= 0 && Available <= Total, "TotalAllocationUnits %I64d, AvailableAllocationUnits %I64d\n", Total, Available);
+    ok(Sectors > 0 && Sectors <= 0x10000, "SectorsPerAllocationUnit = %lu\n", Sectors);
+    ok(Bytes >= 512 && Bytes <= 0x10000 && !(Bytes & (Bytes - 1)), "BytesPerSector = %lu\n", Bytes);
+
+    RtlFillMemory(Buffer, sizeof(Buffer), 0x55);
+    RtlFillMemory(&IoStatusBlock, sizeof(IoStatusBlock), 0x55);
+    status = NtQueryVolumeInformationFile(handle, &IoStatusBlock, Buffer, 31, FileFsFullSizeInformation);
+    ok(status == STATUS_INFO_LENGTH_MISMATCH, "Got status 0x%lx\n", status);
+    ok(IoStatusBlock.Status == 0x55555555, "IoStatusBlock.Status = 0x%lx\n", IoStatusBlock.Status);
+    status = NtQueryVolumeInformationFile(handle, &IoStatusBlock, Buffer, 32, FileFsFullSizeInformation);
+    ok(status == STATUS_SUCCESS, "Got status 0x%lx\n", status);
+    ok(IoStatusBlock.Information == 32, "IoStatusBlock.Information = %Iu\n", IoStatusBlock.Information);
+    ok(Buffer[32] == 0x55, "wrote past 32 bytes\n");
+    RtlCopyMemory(&Total, Buffer, sizeof(Total));
+    RtlCopyMemory(&Available, Buffer + 8, sizeof(Available));
+    RtlCopyMemory(&Actual, Buffer + 16, sizeof(Actual));
+    RtlCopyMemory(&Sectors, Buffer + 24, sizeof(Sectors));
+    RtlCopyMemory(&Bytes, Buffer + 28, sizeof(Bytes));
+    ok(Total > 0 && Available >= 0 && Available <= Actual && Actual <= Total,
+       "Total %I64d, CallerAvailable %I64d, ActualAvailable %I64d\n", Total, Available, Actual);
+    ok(Sectors > 0 && Sectors <= 0x10000, "SectorsPerAllocationUnit = %lu\n", Sectors);
+    ok(Bytes >= 512 && Bytes <= 0x10000 && !(Bytes & (Bytes - 1)), "BytesPerSector = %lu\n", Bytes);
+
+    /* a request with no IO_STATUS_BLOCK or no buffer is the kernel's to refuse */
+    status = NtQueryVolumeInformationFile(handle, NULL, Buffer, 24, FileFsSizeInformation);
+    ok(status == STATUS_ACCESS_VIOLATION, "Got status 0x%lx\n", status);
+    status = NtQueryVolumeInformationFile(handle, &IoStatusBlock, NULL, 24, FileFsSizeInformation);
+    ok(status == STATUS_ACCESS_VIOLATION, "Got status 0x%lx\n", status);
+}
+
 START_TEST(NtQueryVolumeInformationFile)
 {
     IO_STATUS_BLOCK IoStatusBlock;
@@ -284,6 +342,7 @@ START_TEST(NtQueryVolumeInformationFile)
     TestFileFsDeviceInformation(handle);
     TestFileFsVolumeInformation(handle);
     TestFileFsAttributeInformation(handle);
+    TestFileFsSizeInformation(handle);
 
     NtClose(handle);
 }

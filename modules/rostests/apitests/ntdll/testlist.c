@@ -81,6 +81,7 @@ extern void func_NtOpenProcess(void);
 extern void func_NtOpenProcessToken(void);
 extern void func_NtOpenThreadToken(void);
 extern void func_NtProtectVirtualMemory(void);
+extern void func_NtQueryDirectoryFile(void);
 extern void func_NtQueryInformationFile(void);
 extern void func_NtQueryInformationProcess(void);
 extern void func_NtQueryInformationThread(void);
@@ -289,6 +290,7 @@ const struct test winetest_testlist[] =
     { "NtOpenProcessToken",             func_NtOpenProcessToken },
     { "NtOpenThreadToken",              func_NtOpenThreadToken },
     { "NtProtectVirtualMemory",         func_NtProtectVirtualMemory },
+    { "NtQueryDirectoryFile",           func_NtQueryDirectoryFile },
     { "NtQueryInformationFile",         func_NtQueryInformationFile },
     { "NtQueryInformationProcess",      func_NtQueryInformationProcess },
     { "NtQueryInformationThread",       func_NtQueryInformationThread },

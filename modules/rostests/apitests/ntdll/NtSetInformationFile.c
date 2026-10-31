@@ -603,6 +603,561 @@ Test_Kernel32(void)
     CloseHandle(File);
 }
 
+/* ---- file information classes whose 32-bit layout differs from the 64-bit one, and the plain ones ---- */
+
+#define PATTERN 0x55
+
+#ifndef FILE_DISPOSITION_DELETE
+#define FILE_DISPOSITION_DELETE 0x00000001
+#endif
+
+typedef struct
+{
+    ULONG Flags;
+    HANDLE Root;
+    ULONG Length;
+    WCHAR Name[MAX_PATH + 8];
+} RENAME_BUFFER;
+
+static
+ULONG_PTR
+PatternValue(void)
+{
+    ULONG_PTR Value;
+    RtlFillMemory(&Value, sizeof(Value), PATTERN);
+    return Value;
+}
+
+static
+void
+ResetIosb(
+    PIO_STATUS_BLOCK Iosb)
+{
+    RtlFillMemory(Iosb, sizeof(*Iosb), PATTERN);
+}
+
+/* a request refused before it started leaves the guest's block alone */
+static
+void
+CheckIosbUntouched(
+    PIO_STATUS_BLOCK Iosb,
+    const char *What)
+{
+    ok(Iosb->Status == 0x55555555 && Iosb->Information == PatternValue(),
+       "%s: IoStatusBlock changed to (0x%lx, %Iu)\n", What, Iosb->Status, Iosb->Information);
+}
+
+static
+void
+CheckIosbDone(
+    PIO_STATUS_BLOCK Iosb,
+    const char *What)
+{
+    ok(Iosb->Status == STATUS_SUCCESS, "%s: IoStatusBlock.Status = 0x%lx\n", What, Iosb->Status);
+    ok(Iosb->Information == 0, "%s: IoStatusBlock.Information = %Iu\n", What, Iosb->Information);
+}
+
+static
+NTSTATUS
+SetInfo(
+    HANDLE Handle,
+    ULONG Class,
+    PVOID Buffer,
+    ULONG Length,
+    PIO_STATUS_BLOCK Iosb)
+{
+    ResetIosb(Iosb);
+    return NtSetInformationFile(Handle, Iosb, Buffer, Length, Class);
+}
+
+static
+NTSTATUS
+QueryStandard(
+    HANDLE Handle,
+    LONGLONG *Allocation,
+    LONGLONG *EndOfFile,
+    ULONG *Links,
+    UCHAR *DeletePending,
+    UCHAR *Directory)
+{
+    /* the raw layout: two LARGE_INTEGERs, ULONG, two BOOLEANs, in 24 bytes */
+    UCHAR Buffer[24];
+    IO_STATUS_BLOCK Iosb;
+    NTSTATUS Status;
+
+    RtlFillMemory(Buffer, sizeof(Buffer), PATTERN);
+    Status = NtQueryInformationFile(Handle, &Iosb, Buffer, sizeof(Buffer), FileStandardInformation);
+    if (!NT_SUCCESS(Status)) return Status;
+    RtlCopyMemory(Allocation, Buffer + 0, sizeof(LONGLONG));
+    RtlCopyMemory(EndOfFile, Buffer + 8, sizeof(LONGLONG));
+    RtlCopyMemory(Links, Buffer + 16, sizeof(ULONG));
+    *DeletePending = Buffer[20];
+    *Directory = Buffer[21];
+    return Status;
+}
+
+static
+void
+CheckStandard(
+    HANDLE Handle,
+    LONGLONG EndOfFile,
+    ULONG Links,
+    UCHAR DeletePending,
+    const char *What)
+{
+    LONGLONG Allocation, Eof;
+    ULONG NumberOfLinks;
+    UCHAR Pending, Directory;
+    NTSTATUS Status;
+
+    Status = QueryStandard(Handle, &Allocation, &Eof, &NumberOfLinks, &Pending, &Directory);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+    ok(Eof == EndOfFile, "%s: EndOfFile = %I64d, expected %I64d\n", What, Eof, EndOfFile);
+    ok(Allocation >= Eof, "%s: AllocationSize = %I64d\n", What, Allocation);
+    if (Links != MAXULONG) ok(NumberOfLinks == Links, "%s: NumberOfLinks = %lu, expected %lu\n", What, NumberOfLinks, Links);
+    ok(Pending == DeletePending, "%s: DeletePending = %u\n", What, Pending);
+    ok(!Directory, "%s: Directory = %u\n", What, Directory);
+}
+
+static
+HANDLE
+OpenTemp(
+    PCWSTR Path,
+    ULONG Flags)
+{
+    static char Data[5000];
+    HANDLE File;
+    DWORD Written;
+
+    File = CreateFileW(Path, GENERIC_READ | GENERIC_WRITE | DELETE | FILE_WRITE_ATTRIBUTES,
+                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                       CREATE_ALWAYS, Flags, NULL);
+    ok(File != INVALID_HANDLE_VALUE, "CreateFileW failed, error %lu\n", GetLastError());
+    if (File == INVALID_HANDLE_VALUE) return NULL;
+    if (!(Flags & FILE_FLAG_OVERLAPPED))
+    {
+        RtlFillMemory(Data, sizeof(Data), 'A');
+        ok(WriteFile(File, Data, sizeof(Data), &Written, NULL), "WriteFile failed, error %lu\n", GetLastError());
+    }
+    return File;
+}
+
+static
+void
+Test_FixedSizeClasses(void)
+{
+    HANDLE File;
+    IO_STATUS_BLOCK Iosb;
+    NTSTATUS Status;
+    UCHAR Buffer[64];
+    LARGE_INTEGER Value;
+    BOOLEAN Delete;
+    ULONG Flags;
+
+    File = OpenTemp(TempFile, 0);
+    if (!File) return;
+
+    /* FileBasicInformation: 40 bytes, the times are LARGE_INTEGERs; zero fields change nothing */
+    RtlZeroMemory(Buffer, sizeof(Buffer));
+    Value.QuadPart = 0x01d0000000000000LL;
+    RtlCopyMemory(Buffer + 16, &Value, sizeof(Value)); /* LastWriteTime */
+    Status = SetInfo(File, FileBasicInformation, Buffer, 36, &Iosb);
+    ok_hex(Status, STATUS_INFO_LENGTH_MISMATCH);
+    CheckIosbUntouched(&Iosb, "basic, 36 bytes");
+    Status = SetInfo(File, FileBasicInformation, Buffer, 0, &Iosb);
+    ok_hex(Status, STATUS_INFO_LENGTH_MISMATCH);
+    CheckIosbUntouched(&Iosb, "basic, 0 bytes");
+    Status = SetInfo(File, FileBasicInformation, Buffer, 40, &Iosb);
+    ok_hex(Status, STATUS_SUCCESS);
+    CheckIosbDone(&Iosb, "basic");
+    RtlFillMemory(Buffer, sizeof(Buffer), PATTERN);
+    Status = NtQueryInformationFile(File, &Iosb, Buffer, 40, FileBasicInformation);
+    ok_hex(Status, STATUS_SUCCESS);
+    RtlCopyMemory(&Value, Buffer + 16, sizeof(Value));
+    ok(Value.QuadPart == 0x01d0000000000000LL, "LastWriteTime = 0x%I64x\n", Value.QuadPart);
+
+    /* FilePositionInformation: one LARGE_INTEGER */
+    Value.QuadPart = 100;
+    Status = SetInfo(File, FilePositionInformation, &Value, 4, &Iosb);
+    ok_hex(Status, STATUS_INFO_LENGTH_MISMATCH);
+    CheckIosbUntouched(&Iosb, "position, 4 bytes");
+    Status = SetInfo(File, FilePositionInformation, &Value, sizeof(Value), &Iosb);
+    ok_hex(Status, STATUS_SUCCESS);
+    CheckIosbDone(&Iosb, "position");
+    Value.QuadPart = 0;
+    Status = NtQueryInformationFile(File, &Iosb, &Value, sizeof(Value), FilePositionInformation);
+    ok_hex(Status, STATUS_SUCCESS);
+    ok(Value.QuadPart == 100, "CurrentByteOffset = %I64d\n", Value.QuadPart);
+
+    /* end of file and allocation */
+    Value.QuadPart = 1234;
+    Status = SetInfo(File, FileEndOfFileInformation, &Value, 4, &Iosb);
+    ok_hex(Status, STATUS_INFO_LENGTH_MISMATCH);
+    CheckIosbUntouched(&Iosb, "end of file, 4 bytes");
+    Status = SetInfo(File, FileEndOfFileInformation, &Value, sizeof(Value), &Iosb);
+    ok_hex(Status, STATUS_SUCCESS);
+    CheckIosbDone(&Iosb, "end of file");
+    CheckStandard(File, 1234, 1, 0, "after FileEndOfFileInformation");
+    Value.QuadPart = 8192;
+    Status = SetInfo(File, FileAllocationInformation, &Value, 4, &Iosb);
+    ok_hex(Status, STATUS_INFO_LENGTH_MISMATCH);
+    Status = SetInfo(File, FileAllocationInformation, &Value, sizeof(Value), &Iosb);
+    ok_hex(Status, STATUS_SUCCESS);
+    CheckIosbDone(&Iosb, "allocation");
+    CheckStandard(File, 1234, 1, 0, "after FileAllocationInformation");
+
+    /* FileDispositionInformation: a BOOLEAN, so even a ULONG is accepted */
+    Delete = TRUE;
+    Status = SetInfo(File, FileDispositionInformation, &Delete, 0, &Iosb);
+    ok_hex(Status, STATUS_INFO_LENGTH_MISMATCH);
+    CheckIosbUntouched(&Iosb, "disposition, 0 bytes");
+    Status = SetInfo(File, FileDispositionInformation, &Delete, sizeof(Delete), &Iosb);
+    ok_hex(Status, STATUS_SUCCESS);
+    CheckIosbDone(&Iosb, "disposition");
+    CheckStandard(File, 1234, MAXULONG, 1, "delete pending");
+    Delete = FALSE;
+    Status = SetInfo(File, FileDispositionInformation, &Delete, sizeof(Delete), &Iosb);
+    ok_hex(Status, STATUS_SUCCESS);
+    CheckStandard(File, 1234, 1, 0, "delete cancelled");
+
+    /* FileModeInformation can only be set to what the handle has... and the pipe/other classes are not for files */
+    Flags = FILE_SYNCHRONOUS_IO_NONALERT;
+    Status = SetInfo(File, FileModeInformation, &Flags, 3, &Iosb);
+    ok_hex(Status, STATUS_INFO_LENGTH_MISMATCH);
+    CheckIosbUntouched(&Iosb, "mode, 3 bytes");
+    Status = SetInfo(File, FilePipeInformation, &Flags, sizeof(Flags), &Iosb);
+    ok_hex(Status, STATUS_INFO_LENGTH_MISMATCH);
+
+    /* FileShortNameInformation is a FILE_NAME_INFORMATION: 8 bytes are enough to be looked at */
+    RtlZeroMemory(Buffer, sizeof(Buffer));
+    Status = SetInfo(File, FileShortNameInformation, Buffer, 7, &Iosb);
+    ok_hex(Status, STATUS_INFO_LENGTH_MISMATCH);
+    CheckIosbUntouched(&Iosb, "short name, 7 bytes");
+    Status = SetInfo(File, FileShortNameInformation, Buffer, 8, &Iosb);
+    ok(Status != STATUS_INFO_LENGTH_MISMATCH, "short name, 8 bytes: 0x%lx\n", Status);
+
+    CloseHandle(File);
+    DeleteFileW(TempFile);
+}
+
+static
+VOID
+FillRename(
+    RENAME_BUFFER *Rename,
+    ULONG Flags,
+    HANDLE Root,
+    PCWSTR Name,
+    ULONG *Size)
+{
+    RtlZeroMemory(Rename, sizeof(*Rename));
+    Rename->Flags = Flags;
+    Rename->Root = Root;
+    Rename->Length = (ULONG)wcslen(Name) * sizeof(WCHAR);
+    RtlCopyMemory(Rename->Name, Name, Rename->Length);
+    *Size = FIELD_OFFSET(RENAME_BUFFER, Name) + Rename->Length;
+}
+
+static
+BOOL
+Exists(
+    PCWSTR Path)
+{
+    return GetFileAttributesW(Path) != INVALID_FILE_ATTRIBUTES;
+}
+
+static
+BOOL
+NtPathOf(
+    PCWSTR Path,
+    PWSTR NtPath)
+{
+    UNICODE_STRING Name;
+    if (!RtlDosPathNameToNtPathName_U(Path, &Name, NULL, NULL)) return FALSE;
+    RtlCopyMemory(NtPath, Name.Buffer, Name.Length);
+    NtPath[Name.Length / sizeof(WCHAR)] = 0;
+    RtlFreeUnicodeString(&Name);
+    return TRUE;
+}
+
+static
+void
+Test_RenameAndLink(void)
+{
+    static const ULONG Classes[] = { FileRenameInformation, FileLinkInformation };
+    WCHAR Dir[MAX_PATH], Source[MAX_PATH], Target[MAX_PATH], Other[MAX_PATH], NtTarget[MAX_PATH], NtOther[MAX_PATH];
+    RENAME_BUFFER Rename;
+    IO_STATUS_BLOCK Iosb;
+    NTSTATUS Status;
+    HANDLE File, Root, Second;
+    ULONG Size, i;
+
+    wcscpy(Dir, TempFile);
+    *wcsrchr(Dir, L'\\') = 0;
+    StringCbPrintfW(Source, sizeof(Source), L"%ls\\kio_src.tmp", Dir);
+    StringCbPrintfW(Target, sizeof(Target), L"%ls\\kio_dst.tmp", Dir);
+    StringCbPrintfW(Other, sizeof(Other), L"%ls\\kio_other.tmp", Dir);
+    if (!NtPathOf(Target, NtTarget) || !NtPathOf(Other, NtOther))
+    {
+        ok(FALSE, "no NT path\n");
+        return;
+    }
+    DeleteFileW(Source); DeleteFileW(Target); DeleteFileW(Other);
+
+    for (i = 0; i < RTL_NUMBER_OF(Classes); i++)
+    {
+        ULONG Class = Classes[i];
+        BOOL Link = Class == FileLinkInformation;
+
+        File = OpenTemp(Source, 0);
+        if (!File) return;
+
+        /* size and name checks come before anything is done */
+        FillRename(&Rename, 0, NULL, NtTarget, &Size);
+        Status = SetInfo(File, Class, &Rename, FIELD_OFFSET(RENAME_BUFFER, Name) - 1, &Iosb);
+        ok_hex(Status, STATUS_INFO_LENGTH_MISMATCH);
+        CheckIosbUntouched(&Iosb, "name header too short");
+        Status = SetInfo(File, Class, &Rename, FIELD_OFFSET(RENAME_BUFFER, Name), &Iosb);
+        ok_hex(Status, STATUS_INFO_LENGTH_MISMATCH);
+        CheckIosbUntouched(&Iosb, "no room for the name");
+        Rename.Length += 1;
+        Status = SetInfo(File, Class, &Rename, Size, &Iosb);
+        ok_hex(Status, STATUS_INVALID_PARAMETER);
+        CheckIosbUntouched(&Iosb, "odd name length");
+        FillRename(&Rename, 0, NULL, NtTarget, &Size);
+        Rename.Length += 2 * sizeof(WCHAR);
+        Status = SetInfo(File, Class, &Rename, Size, &Iosb);
+        ok_hex(Status, STATUS_INVALID_PARAMETER);
+        CheckIosbUntouched(&Iosb, "name longer than the buffer");
+        FillRename(&Rename, 0, (HANDLE)(ULONG_PTR)0x7777, L"kio_x.tmp", &Size);
+        Status = SetInfo(File, Class, &Rename, Size, &Iosb);
+        ok_hex(Status, STATUS_INVALID_HANDLE);
+        CheckIosbUntouched(&Iosb, "bad root handle");
+
+        /* an NT path target */
+        FillRename(&Rename, 0, NULL, NtTarget, &Size);
+        Status = SetInfo(File, Class, &Rename, Size, &Iosb);
+        ok_hex(Status, STATUS_SUCCESS);
+        CheckIosbDone(&Iosb, Link ? "link" : "rename");
+        ok(Exists(Target), "%s: target does not exist\n", Link ? "link" : "rename");
+        ok(Exists(Source) == Link, "%s: source exists: %d\n", Link ? "link" : "rename", Exists(Source));
+        if (Link) CheckStandard(File, 5000, 2, 0, "after link");
+
+        /* a target that exists (and is not open): refused, unless replacing */
+        Second = OpenTemp(Other, 0);
+        if (Second) CloseHandle(Second);
+        FillRename(&Rename, 0, NULL, NtOther, &Size);
+        Status = SetInfo(File, Class, &Rename, Size, &Iosb);
+        ok_hex(Status, STATUS_OBJECT_NAME_COLLISION);
+        CheckIosbUntouched(&Iosb, "collision");
+        FillRename(&Rename, 1, NULL, NtOther, &Size);
+        Status = SetInfo(File, Class, &Rename, Size, &Iosb);
+        ok_hex(Status, STATUS_SUCCESS);
+        CheckIosbDone(&Iosb, "replace");
+        if (Link) CheckStandard(File, 5000, 3, 0, "after the second link");
+
+        /* a target relative to a directory handle */
+        Root = CreateFileW(Dir, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+        ok(Root != INVALID_HANDLE_VALUE, "opening the directory failed, error %lu\n", GetLastError());
+        if (Root != INVALID_HANDLE_VALUE)
+        {
+            FillRename(&Rename, 1, Root, L"kio_rel.tmp", &Size);
+            Status = SetInfo(File, Class, &Rename, Size, &Iosb);
+            ok_hex(Status, STATUS_SUCCESS);
+            CheckIosbDone(&Iosb, "relative to a root handle");
+            CloseHandle(Root);
+        }
+        CloseHandle(File);
+        DeleteFileW(Source); DeleteFileW(Target); DeleteFileW(Other);
+        StringCbPrintfW(Source, sizeof(Source), L"%ls\\kio_rel.tmp", Dir); DeleteFileW(Source);
+        StringCbPrintfW(Source, sizeof(Source), L"%ls\\kio_src.tmp", Dir);
+    }
+}
+
+static
+BOOL
+IsWow64(void)
+{
+    BOOL Wow64 = FALSE;
+    IsWow64Process(GetCurrentProcess(), &Wow64);
+    return Wow64;
+}
+
+static
+void
+Test_HandleAndPointerClasses(void)
+{
+    static const ULONG Bypass[] = { FileRenameInformationBypassAccessCheck, FileLinkInformationBypassAccessCheck,
+                                    FileRenameInformationExBypassAccessCheck, FileLinkInformationExBypassAccessCheck };
+    static const ULONG Ex[] = { FileRenameInformationEx, FileLinkInformationEx };
+    static const ULONG BypassLengths[] = { 0, 16, 140 };
+    WCHAR Dir[MAX_PATH], Source[MAX_PATH], Target[MAX_PATH], NtTarget[MAX_PATH], Name[128];
+    RENAME_BUFFER Rename;
+    IO_STATUS_BLOCK Iosb;
+    NTSTATUS Status;
+    HANDLE File, Port, Server;
+    ULONG Size, i, j, Flags;
+    UCHAR Buffer[64];
+
+    /* the classes meant for kernel callers are refused whatever the length or contents */
+    File = OpenTemp(TempFile, 0);
+    if (!File) return;
+    RtlZeroMemory(&Rename, sizeof(Rename));
+    for (i = 0; i < RTL_NUMBER_OF(Bypass); i++)
+        for (j = 0; j < RTL_NUMBER_OF(BypassLengths); j++)
+        {
+            Status = SetInfo(File, Bypass[i], &Rename, BypassLengths[j], &Iosb);
+            ok(Status == STATUS_INVALID_INFO_CLASS, "class %lu, %lu bytes: 0x%lx\n", Bypass[i], BypassLengths[j], Status);
+            CheckIosbUntouched(&Iosb, "bypass class");
+        }
+
+    /* The Ex variants take a ULONG of flags in place of the BOOLEAN */
+    wcscpy(Dir, TempFile);
+    *wcsrchr(Dir, L'\\') = 0;
+    StringCbPrintfW(Source, sizeof(Source), L"%ls\\kio_exsrc.tmp", Dir);
+    StringCbPrintfW(Target, sizeof(Target), L"%ls\\kio_exdst.tmp", Dir);
+    NtPathOf(Target, NtTarget);
+    DeleteFileW(Target);
+    for (i = 0; i < RTL_NUMBER_OF(Ex); i++)
+    {
+        HANDLE Moved = OpenTemp(Source, 0);
+        if (!Moved) break;
+        FillRename(&Rename, 0, NULL, NtTarget, &Size);
+        Status = SetInfo(Moved, Ex[i], &Rename, FIELD_OFFSET(RENAME_BUFFER, Name) - 1, &Iosb);
+        /* the guest's record is checked before the kernel is asked, so only the 32-bit caller gets this far */
+        todo_if(is_reactos() && !IsWow64()) ok_hex(Status, STATUS_INFO_LENGTH_MISMATCH);
+        FillRename(&Rename, 0, NULL, NtTarget, &Size);
+        Status = SetInfo(Moved, Ex[i], &Rename, Size, &Iosb);
+        todo_if(is_reactos()) ok_hex(Status, STATUS_SUCCESS);
+        todo_if(is_reactos()) ok(Exists(Target), "class %lu: target does not exist\n", Ex[i]);
+        CloseHandle(Moved);
+        DeleteFileW(Source);
+        DeleteFileW(Target);
+    }
+
+    /* FileDispositionInformationEx: one ULONG of flags */
+    Flags = FILE_DISPOSITION_DELETE;
+    Status = SetInfo(File, FileDispositionInformationEx, &Flags, sizeof(Flags), &Iosb);
+    todo_if(is_reactos()) ok_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status)) CheckStandard(File, 5000, MAXULONG, 1, "FileDispositionInformationEx(DELETE)");
+    Flags = 0;
+    Status = SetInfo(File, FileDispositionInformationEx, &Flags, sizeof(Flags), &Iosb);
+    todo_if(is_reactos()) ok_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status)) CheckStandard(File, 5000, 1, 0, "FileDispositionInformationEx(0)");
+    Status = SetInfo(File, FileDispositionInformationEx, &Flags, 3, &Iosb);
+    todo_if(is_reactos()) ok_hex(Status, STATUS_INFO_LENGTH_MISMATCH);
+    CloseHandle(File);
+    DeleteFileW(TempFile);
+
+    /* FileCompletionInformation: a port handle and the key, both 32 bits wide in a 32-bit caller */
+    File = OpenTemp(TempFile, 0);
+    if (File) CloseHandle(File);
+    File = CreateFileW(TempFile, GENERIC_READ | GENERIC_WRITE | DELETE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                       NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
+    ok(File != INVALID_HANDLE_VALUE, "CreateFileW failed, error %lu\n", GetLastError());
+    Port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
+    ok(Port != NULL, "CreateIoCompletionPort failed, error %lu\n", GetLastError());
+    if (File != INVALID_HANDLE_VALUE && Port)
+    {
+        FILE_COMPLETION_INFORMATION Completion;
+        OVERLAPPED Overlapped = {0};
+        ULONG_PTR Key = 0;
+        LPOVERLAPPED Returned = NULL;
+        DWORD Bytes = 0;
+        BYTE Data[16];
+        BOOL Ret;
+
+        Completion.Port = Port;
+        Completion.Key = (PVOID)(ULONG_PTR)0x80001234;
+        Status = SetInfo(File, FileCompletionInformation, &Completion, sizeof(Completion) - 1, &Iosb);
+        ok_hex(Status, STATUS_INFO_LENGTH_MISMATCH);
+        CheckIosbUntouched(&Iosb, "completion, short");
+        Status = SetInfo(File, FileCompletionInformation, &Completion, sizeof(Completion), &Iosb);
+        ok_hex(Status, STATUS_SUCCESS);
+        CheckIosbDone(&Iosb, "completion");
+        Status = SetInfo(File, FileCompletionInformation, &Completion, sizeof(Completion), &Iosb);
+        ok_hex(Status, STATUS_INVALID_PARAMETER);
+        Ret = ReadFile(File, Data, sizeof(Data), NULL, &Overlapped);
+        ok(Ret || GetLastError() == ERROR_IO_PENDING, "ReadFile failed, error %lu\n", GetLastError());
+        Ret = GetQueuedCompletionStatus(Port, &Bytes, &Key, &Returned, 5000);
+        ok(Ret, "no completion packet, error %lu\n", GetLastError());
+        ok(Key == (ULONG_PTR)0x80001234, "completion key 0x%Ix\n", Key);
+        ok(Returned == &Overlapped, "OVERLAPPED %p, expected %p\n", Returned, &Overlapped);
+        ok(Bytes == sizeof(Data), "%lu bytes\n", Bytes);
+    }
+    if (Port) CloseHandle(Port);
+    if (File != INVALID_HANDLE_VALUE) CloseHandle(File);
+    DeleteFileW(TempFile);
+
+    /* FileMailslotSetInformation: a pointer to the read timeout */
+    StringCbPrintfW(Name, sizeof(Name), L"\\\\.\\mailslot\\kio_%lu", GetCurrentProcessId());
+    Server = CreateMailslotW(Name, 0, MAILSLOT_WAIT_FOREVER, NULL);
+    ok(Server != INVALID_HANDLE_VALUE, "CreateMailslotW failed, error %lu\n", GetLastError());
+    if (Server != INVALID_HANDLE_VALUE)
+    {
+        LARGE_INTEGER Timeout;
+        PLARGE_INTEGER Pointer = &Timeout;
+        LARGE_INTEGER Read;
+
+        Timeout.QuadPart = -50000000;
+        Status = SetInfo(Server, FileMailslotSetInformation, &Pointer, 0, &Iosb);
+        ok_hex(Status, STATUS_INFO_LENGTH_MISMATCH);
+        CheckIosbUntouched(&Iosb, "mailslot, 0 bytes");
+        Status = SetInfo(Server, FileMailslotSetInformation, &Pointer, sizeof(Pointer), &Iosb);
+        ok_hex(Status, STATUS_SUCCESS);
+        CheckIosbDone(&Iosb, "mailslot");
+        RtlFillMemory(Buffer, sizeof(Buffer), PATTERN);
+        Status = NtQueryInformationFile(Server, &Iosb, Buffer, 24, FileMailslotQueryInformation);
+        ok_hex(Status, STATUS_SUCCESS);
+        ok(Iosb.Information == 24, "Information = %Iu\n", Iosb.Information);
+        RtlCopyMemory(&Read, Buffer + 16, sizeof(Read));
+        ok(Read.QuadPart == -50000000, "ReadTimeout = %I64d\n", Read.QuadPart);
+        Pointer = (PLARGE_INTEGER)(ULONG_PTR)0x1000;
+        Status = SetInfo(Server, FileMailslotSetInformation, &Pointer, sizeof(Pointer), &Iosb);
+        ok_hex(Status, STATUS_ACCESS_VIOLATION);
+        CloseHandle(Server);
+    }
+    File = OpenTemp(TempFile, 0);
+    if (File)
+    {
+        PLARGE_INTEGER Pointer = NULL;
+        Status = SetInfo(File, FileMailslotSetInformation, &Pointer, sizeof(Pointer), &Iosb);
+        ok_hex(Status, STATUS_INVALID_PARAMETER);
+        CheckIosbUntouched(&Iosb, "mailslot class on a file");
+
+        /* FileTrackingInformation: a handle, a length, and the bytes */
+        RtlZeroMemory(Buffer, sizeof(Buffer));
+        Status = SetInfo(File, FileTrackingInformation, Buffer, 8, &Iosb);
+        ok_hex(Status, STATUS_INFO_LENGTH_MISMATCH);
+        CheckIosbUntouched(&Iosb, "tracking, 8 bytes");
+        Status = SetInfo(File, FileTrackingInformation, Buffer, 16, &Iosb);
+        ok_hex(Status, STATUS_INVALID_PARAMETER);
+        CloseHandle(File);
+        DeleteFileW(TempFile);
+    }
+
+    /* FilePipeInformation on a pipe */
+    StringCbPrintfW(Name, sizeof(Name), L"\\\\.\\pipe\\kio_info_%lu", GetCurrentProcessId());
+    Server = CreateNamedPipeW(Name, PIPE_ACCESS_DUPLEX, PIPE_TYPE_MESSAGE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 4096, 4096, 0, NULL);
+    ok(Server != INVALID_HANDLE_VALUE, "CreateNamedPipeW failed, error %lu\n", GetLastError());
+    if (Server != INVALID_HANDLE_VALUE)
+    {
+        ULONG Mode[2] = { FILE_PIPE_MESSAGE_MODE, FILE_PIPE_QUEUE_OPERATION };
+        Status = SetInfo(Server, FilePipeInformation, Mode, 4, &Iosb);
+        ok_hex(Status, STATUS_INFO_LENGTH_MISMATCH);
+        CheckIosbUntouched(&Iosb, "pipe, 4 bytes");
+        Status = SetInfo(Server, FilePipeInformation, Mode, sizeof(Mode), &Iosb);
+        ok_hex(Status, STATUS_SUCCESS);
+        CheckIosbDone(&Iosb, "pipe");
+        Mode[0] = Mode[1] = 0xffffffff;
+        Status = NtQueryInformationFile(Server, &Iosb, Mode, sizeof(Mode), FilePipeInformation);
+        ok_hex(Status, STATUS_SUCCESS);
+        ok(Mode[0] == FILE_PIPE_MESSAGE_MODE && Mode[1] == FILE_PIPE_QUEUE_OPERATION, "pipe modes %lu, %lu\n", Mode[0], Mode[1]);
+        CloseHandle(Server);
+    }
+}
+
 START_TEST(NtSetInformationFile)
 {
     NTSTATUS Status;
@@ -617,6 +1172,9 @@ START_TEST(NtSetInformationFile)
     /* FileIoCompletionNotificationInformation */
     GetTempPathW(MAX_PATH, TempPath);
     GetTempFileNameW(TempPath, L"kio", 0, TempFile);
+    Test_FixedSizeClasses();
+    Test_RenameAndLink();
+    Test_HandleAndPointerClasses();
     Test_InfoClass();
     Test_SetSignalsFile();
     Test_SkipPort(FALSE);
