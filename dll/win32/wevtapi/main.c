@@ -17,27 +17,21 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#include <stdarg.h>
-#include <stdlib.h>
-#include <string.h>
-#include <wchar.h>
-
-#include "windef.h"
-#include "winbase.h"
-#include "winreg.h"
-#include "winerror.h"
-#include "winevt.h"
+#include "wevtapi_private.h"
 #include "wine/debug.h"
 #include "wine/list.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(wevtapi);
 
 /*
- * There is no event log service behind this library, which reads no event and writes none. What
- * it knows about are the classic logs that the registry lists under the EventLog key, which it
- * offers as channels. The handles, the arguments and the channel names are checked the way
- * Windows checks them. A call that would need the service fails with the error of an RPC server
- * that cannot be reached, after those checks.
+ * There is no event log service of the Vista kind behind this library, and no .evtx file. What
+ * it knows about are the classic logs that the registry lists under the EventLog key: it offers
+ * them as channels, reads their records through the classic eventlog API (see classic.c), and
+ * lets the sources that those logs register stand for publishers. The handles, the arguments and
+ * the channel names are checked the way Windows checks them. A call that would need what is not
+ * here (a server on another machine, a subscription, an .evtx file, the export or the clearing
+ * of a log) fails, after those checks, with the error of an RPC server that cannot be reached or
+ * with the error for a request that is not supported.
  */
 
 enum object_type
@@ -48,6 +42,45 @@ enum object_type
     OBJECT_RENDER_CONTEXT,
     OBJECT_BOOKMARK,
     OBJECT_PUBLISHER_ENUM,
+    OBJECT_QUERY,
+    OBJECT_EVENT,
+    OBJECT_LOG,
+    OBJECT_PUBLISHER,
+    OBJECT_ARRAY,
+    OBJECT_EVENT_ENUM,
+};
+
+/* what an array handle stands for */
+enum array_kind
+{
+    ARRAY_CHANNELS,                 /* the logs that a publisher writes to */
+    ARRAY_EMPTY,                    /* levels, tasks, opcodes and keywords, which a classic source has none of */
+};
+
+struct event_data
+{
+    EVENTLOGRECORD *rec;
+    WCHAR *channel;
+};
+
+struct render_context
+{
+    DWORD flags;
+    DWORD count;
+    int *indexes;
+};
+
+struct publisher_enum
+{
+    WCHAR **names;
+    DWORD count;
+};
+
+struct array_data
+{
+    enum array_kind kind;
+    WCHAR **items;
+    DWORD count;
 };
 
 struct bookmark_entry
@@ -69,6 +102,7 @@ struct object
     struct bookmark_entry *marks;   /* bookmark */
     DWORD mark_count;
     WCHAR *direction;               /* bookmark: the Direction attribute of the list, if it has one */
+    void *data;                     /* query, event, render context, publisher, publisher enumeration, array */
 };
 
 static CRITICAL_SECTION object_cs;
@@ -83,7 +117,13 @@ static CRITICAL_SECTION object_cs = { &object_cs_debug, -1, 0, 0, 0, 0 };
 static struct list object_list = LIST_INIT(object_list);
 
 static const WCHAR eventlog_key[] = L"System\\CurrentControlSet\\Services\\EventLog";
-static const WCHAR default_log_dir[] = L"%SystemRoot%\\System32\\Winevt\\Logs\\";
+
+/* Windows leaves no error behind from a call that works, and a caller may look at the last error whatever the result was */
+static BOOL succeed(void)
+{
+    SetLastError(ERROR_SUCCESS);
+    return TRUE;
+}
 
 static BOOL fail(DWORD error)
 {
@@ -122,6 +162,7 @@ static EVT_HANDLE new_object(enum object_type type, BOOL remote, const WCHAR *na
     EnterCriticalSection(&object_cs);
     list_add_head(&object_list, &object->entry);
     LeaveCriticalSection(&object_cs);
+    SetLastError(ERROR_SUCCESS);
     return (EVT_HANDLE)object;
 }
 
@@ -129,6 +170,45 @@ static void free_marks(struct bookmark_entry *marks, DWORD count);
 
 static void free_object(struct object *object)
 {
+    switch (object->type)
+    {
+    case OBJECT_QUERY:
+        classic_query_free(object->data);
+        break;
+    case OBJECT_EVENT:
+    {
+        struct event_data *event = object->data;
+
+        if (event) { free(event->rec); free(event->channel); free(event); }
+        break;
+    }
+    case OBJECT_RENDER_CONTEXT:
+    {
+        struct render_context *context = object->data;
+
+        if (context) { free(context->indexes); free(context); }
+        break;
+    }
+    case OBJECT_PUBLISHER:
+        classic_pub_free(object->data);
+        break;
+    case OBJECT_PUBLISHER_ENUM:
+    {
+        struct publisher_enum *list = object->data;
+
+        if (list) { classic_names_free(list->names, list->count); free(list); }
+        break;
+    }
+    case OBJECT_ARRAY:
+    {
+        struct array_data *array = object->data;
+
+        if (array) { classic_names_free(array->items, array->count); free(array); }
+        break;
+    }
+    default:
+        break;
+    }
     free_marks(object->marks, object->mark_count);
     free(object->direction);
     free(object->name);
@@ -450,15 +530,22 @@ static BOOL is_query_list(const WCHAR *query)
     return ret;
 }
 
-static DWORD check_path(const WCHAR *path, BOOL file)
+/* A path of a selection is a file when it is written as a URI of one, and a channel otherwise, whatever the query was opened for */
+static BOOL is_file_uri(const WCHAR *path)
 {
-    if (!file) return check_channel(path);
+    return !_wcsnicmp(path, L"file://", 7);
+}
+
+static DWORD check_path(const WCHAR *path)
+{
+    if (!is_file_uri(path)) return check_channel(path);
+    path += 7;
     if (!path[0]) return ERROR_EVT_INVALID_CHANNEL_PATH;
     return GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES ? GetLastError() : ERROR_SUCCESS;
 }
 
 /* The paths that a structured query selects. ERROR_SUCCESS when the query is well formed and all of them exist. */
-static DWORD check_query_list(const WCHAR *query, BOOL file)
+static DWORD check_query_list(const WCHAR *query)
 {
     WCHAR open[XML_MAX_DEPTH][XML_MAX_NAME];
     WCHAR *query_path = NULL;
@@ -504,7 +591,7 @@ static DWORD check_query_list(const WCHAR *query, BOOL file)
                 if (!path && !wcscmp(tag.name, L"Select")) error = ERROR_EVT_INVALID_QUERY;
                 if (path)
                 {
-                    error = check_path(path, file);
+                    error = check_path(path);
                     if (error == ERROR_EVT_INVALID_CHANNEL_PATH) error = ERROR_EVT_INVALID_QUERY;
                     found = found || !error;
                 }
@@ -512,7 +599,7 @@ static DWORD check_query_list(const WCHAR *query, BOOL file)
             if (!error && !tag.empty)
             {
                 if (depth == XML_MAX_DEPTH) error = ERROR_EVT_MALFORMED_XML_TEXT;
-                else lstrcpyW(open[depth++], tag.name);
+                else memcpy(open[depth++], tag.name, sizeof(tag.name));
             }
         }
         free_tag(&tag);
@@ -529,8 +616,12 @@ static DWORD check_query_list(const WCHAR *query, BOOL file)
 /* The checks of a query, a subscription or an export up to the point where the service is needed */
 static DWORD check_query(const WCHAR *path, const WCHAR *query, BOOL file)
 {
-    /* a structured query names its channels or files itself, and the path is not looked at */
-    if (is_query_list(query)) return check_query_list(query, file);
+    /* a structured query names its channels or files itself, and the path is not looked at, but for one that says it is a file and is empty */
+    if (is_query_list(query))
+    {
+        if (file && path && !path[0]) return ERROR_INVALID_PARAMETER;
+        return check_query_list(query);
+    }
 
     if (file)
     {
@@ -579,7 +670,7 @@ BOOL WINAPI EvtClose(EVT_HANDLE handle)
 
     if (!object) return fail(ERROR_INVALID_HANDLE);
     free_object(object);
-    return TRUE;
+    return succeed();
 }
 
 BOOL WINAPI EvtCancel(EVT_HANDLE handle)
@@ -589,7 +680,7 @@ BOOL WINAPI EvtCancel(EVT_HANDLE handle)
     TRACE("(%p)\n", handle);
 
     /* the handles that can be cancelled are queries and subscriptions, which are never created */
-    if (!handle) return TRUE;
+    if (!handle) return succeed();
     EnterCriticalSection(&object_cs);
     found = find_object(handle, 0) != NULL;
     LeaveCriticalSection(&object_cs);
@@ -609,7 +700,7 @@ EVT_HANDLE WINAPI EvtOpenChannelEnum(EVT_HANDLE session, DWORD flags)
 {
     BOOL remote;
 
-    FIXME("(%p %lu) semi-stub\n", session, flags);
+    TRACE("(%p %lu)\n", session, flags);
 
     if (flags)
     {
@@ -661,6 +752,7 @@ BOOL WINAPI EvtNextChannelPath(EVT_HANDLE channel_enum, DWORD buffer_len, WCHAR 
         }
     }
     LeaveCriticalSection(&object_cs);
+    if (ret) SetLastError(ERROR_SUCCESS);
     return ret;
 }
 
@@ -669,7 +761,7 @@ EVT_HANDLE WINAPI EvtOpenChannelConfig(EVT_HANDLE session, const WCHAR *path, DW
     DWORD error;
     BOOL remote;
 
-    FIXME("(%p %s %lu) semi-stub\n", session, debugstr_w(path), flags);
+    TRACE("(%p %s %lu)\n", session, debugstr_w(path), flags);
 
     if (flags)
     {
@@ -695,101 +787,22 @@ EVT_HANDLE WINAPI EvtOpenChannelConfig(EVT_HANDLE session, const WCHAR *path, DW
     return new_object(OBJECT_CHANNEL_CONFIG, FALSE, path);
 }
 
-static BOOL get_log_file_path(const WCHAR *channel, WCHAR **path)
-{
-    DWORD type, size = 0, len;
-    WCHAR *key_name, *value = NULL;
-    HKEY key;
-
-    len = lstrlenW(eventlog_key) + 1 + lstrlenW(channel) + 1;
-    if (!(key_name = calloc(len, sizeof(WCHAR)))) return FALSE;
-    lstrcpyW(key_name, eventlog_key);
-    lstrcatW(key_name, L"\\");
-    lstrcatW(key_name, channel);
-
-    *path = NULL;
-    if (!RegOpenKeyExW(HKEY_LOCAL_MACHINE, key_name, 0, KEY_READ, &key))
-    {
-        if (!RegQueryValueExW(key, L"File", NULL, &type, NULL, &size) && (type == REG_SZ || type == REG_EXPAND_SZ) && size >= sizeof(WCHAR))
-        {
-            /* the terminator is added, as a value is not guaranteed to have one */
-            value = calloc((size + sizeof(WCHAR) - 1) / sizeof(WCHAR) + 1, sizeof(WCHAR));
-            if (value && RegQueryValueExW(key, L"File", NULL, &type, (BYTE *)value, &size))
-            {
-                free(value);
-                value = NULL;
-            }
-        }
-        RegCloseKey(key);
-    }
-    free(key_name);
-
-    if (!value || !value[0])
-    {
-        free(value);
-        len = lstrlenW(default_log_dir) + lstrlenW(channel) + ARRAY_SIZE(L".evtx");
-        if (!(value = calloc(len, sizeof(WCHAR)))) return FALSE;
-        lstrcpyW(value, default_log_dir);
-        lstrcatW(value, channel);
-        lstrcatW(value, L".evtx");
-    }
-    *path = value;
-    return TRUE;
-}
-
 BOOL WINAPI EvtGetChannelConfigProperty(EVT_HANDLE config, EVT_CHANNEL_CONFIG_PROPERTY_ID id, DWORD flags,
                                         DWORD size, PEVT_VARIANT buffer, DWORD *used)
 {
     struct object *object;
-    WCHAR *path = NULL;
-    DWORD needed;
-    BOOL ret = FALSE;
+    DWORD error;
 
-    FIXME("(%p %i %lu %lu %p %p) semi-stub\n", config, id, flags, size, buffer, used);
+    TRACE("(%p %i %lu %lu %p %p)\n", config, id, flags, size, buffer, used);
 
     EnterCriticalSection(&object_cs);
     object = find_object(config, OBJECT_CHANNEL_CONFIG);
-    if (!object) SetLastError(ERROR_INVALID_HANDLE);
-    else if ((int)id < 0 || id >= EvtChannelConfigPropertyIdEND || flags || !used) SetLastError(ERROR_INVALID_PARAMETER);
-    else switch (id)
-    {
-    case EvtChannelConfigEnabled:
-    case EvtChannelConfigClassicEventlog:
-        *used = sizeof(EVT_VARIANT);
-        if (size < sizeof(EVT_VARIANT) || !buffer) SetLastError(ERROR_INSUFFICIENT_BUFFER);
-        else
-        {
-            buffer->BooleanVal = TRUE;
-            buffer->Type = EvtVarTypeBoolean;
-            ret = TRUE;
-        }
-        break;
-
-    case EvtChannelLoggingConfigLogFilePath:
-        if (!get_log_file_path(object->name, &path))
-        {
-            SetLastError(ERROR_OUTOFMEMORY);
-            break;
-        }
-        needed = sizeof(EVT_VARIANT) + (lstrlenW(path) + 1) * sizeof(WCHAR);
-        *used = needed;
-        if (size < needed || !buffer) SetLastError(ERROR_INSUFFICIENT_BUFFER);
-        else
-        {
-            buffer->StringVal = (WCHAR *)(buffer + 1);
-            lstrcpyW((WCHAR *)buffer->StringVal, path);
-            buffer->Type = EvtVarTypeString;
-            ret = TRUE;
-        }
-        free(path);
-        break;
-
-    default:
-        SetLastError(ERROR_NOT_SUPPORTED);
-        break;
-    }
+    if (!object) error = ERROR_INVALID_HANDLE;
+    else if ((int)id < 0 || id >= EvtChannelConfigPropertyIdEND || flags || !used) error = ERROR_INVALID_PARAMETER;
+    else error = classic_channel_property(object->name, id, size, buffer, used);
     LeaveCriticalSection(&object_cs);
-    return ret;
+
+    return error ? fail(error) : succeed();
 }
 
 BOOL WINAPI EvtSetChannelConfigProperty(EVT_HANDLE config, EVT_CHANNEL_CONFIG_PROPERTY_ID id, DWORD flags,
@@ -824,15 +837,104 @@ BOOL WINAPI EvtSaveChannelConfig(EVT_HANDLE config, DWORD flags)
     if (flags) return fail(ERROR_INVALID_PARAMETER);
 
     /* nothing can have been changed, so there is nothing to save */
+    return succeed();
+}
+
+/* The selections of a query: those of a structured query, or the one that the path and the query make */
+static void free_selects(struct classic_select *selects, DWORD count)
+{
+    DWORD i;
+
+    for (i = 0; i < count; i++)
+    {
+        free(selects[i].channel);
+        free(selects[i].xpath);
+    }
+    free(selects);
+}
+
+static BOOL add_select(struct classic_select **selects, DWORD *count, const WCHAR *channel, const WCHAR *xpath, DWORD group, BOOL suppress)
+{
+    struct classic_select *p = realloc(*selects, (*count + 1) * sizeof(*p)), *sel;
+
+    if (!p) return FALSE;
+    *selects = p;
+    sel = &p[*count];
+    memset(sel, 0, sizeof(*sel));
+    sel->group = group;
+    sel->suppress = suppress;
+    if (!(sel->channel = _wcsdup(channel))) return FALSE;
+    if (xpath && !(sel->xpath = _wcsdup(xpath))) { free(sel->channel); return FALSE; }
+    (*count)++;
     return TRUE;
+}
+
+static DWORD build_selects(const WCHAR *path, const WCHAR *query, struct classic_select **selects, DWORD *count)
+{
+    struct xml_tag tag;
+    const WCHAR *p = query;
+    WCHAR *query_path = NULL;
+    DWORD group = 0;
+    DWORD error = ERROR_SUCCESS;
+
+    *selects = NULL;
+    *count = 0;
+    if (!is_query_list(query))
+    {
+        if (!add_select(selects, count, path, query, 0, FALSE)) error = ERROR_OUTOFMEMORY;
+        goto done;
+    }
+
+    while (!error && next_tag(&p, &tag) == XML_TAG)
+    {
+        if (tag.closing)
+        {
+            if (!wcscmp(tag.name, L"Query"))
+            {
+                free(query_path);
+                query_path = NULL;
+            }
+        }
+        else if (!wcscmp(tag.name, L"Query"))
+        {
+            const WCHAR *value = find_attr(&tag, L"Path");
+
+            group++;
+            free(query_path);
+            query_path = value ? _wcsdup(value) : NULL;
+        }
+        else if (!tag.empty && (!wcscmp(tag.name, L"Select") || !wcscmp(tag.name, L"Suppress")))
+        {
+            const WCHAR *value = find_attr(&tag, L"Path"), *end = wcschr(p, '<');
+            WCHAR *xpath = end ? decode_value(p, end) : NULL;
+            BOOL suppress = !wcscmp(tag.name, L"Suppress");
+
+            if (!xpath) error = ERROR_EVT_MALFORMED_XML_TEXT;
+            else if (!value) value = query_path;
+            if (!error && value && is_file_uri(value)) error = ERROR_NOT_SUPPORTED;
+            else if (!error && value && !add_select(selects, count, value, xpath, group, suppress)) error = ERROR_OUTOFMEMORY;
+            free(xpath);
+        }
+        free_tag(&tag);
+    }
+    free(query_path);
+
+done:
+    if (error) free_selects(*selects, *count);
+    if (error) { *selects = NULL; *count = 0; }
+    return error;
 }
 
 EVT_HANDLE WINAPI EvtQuery(EVT_HANDLE session, const WCHAR *path, const WCHAR *query, DWORD flags)
 {
-    DWORD error;
+    struct classic_select *selects;
+    struct classic_query *result;
+    struct object *object;
+    EVT_HANDLE handle;
+    DWORD error, count;
     BOOL remote;
 
-    FIXME("(%p %s %s %#lx) semi-stub\n", session, debugstr_w(path), debugstr_w(query), flags);
+    TRACE("(%p %s %s %#lx)\n", session, debugstr_w(path), debugstr_w(query), flags);
 
     if ((flags & 3) != EvtQueryChannelPath && (flags & 3) != EvtQueryFilePath)
         goto invalid;
@@ -852,31 +954,116 @@ EVT_HANDLE WINAPI EvtQuery(EVT_HANDLE session, const WCHAR *path, const WCHAR *q
         SetLastError(error);
         return NULL;
     }
-    no_service();
-    return NULL;
+    /* the records of an .evtx file are not something that this library can read */
+    if ((flags & 3) == EvtQueryFilePath && !is_query_list(query))
+    {
+        SetLastError(ERROR_NOT_SUPPORTED);
+        return NULL;
+    }
+    if ((error = build_selects(path, query, &selects, &count)))
+    {
+        SetLastError(error);
+        return NULL;
+    }
+    error = classic_query_open(selects, count, (flags & EvtQueryReverseDirection) != 0, &result);
+    free_selects(selects, count);
+    if (error)
+    {
+        SetLastError(error);
+        return NULL;
+    }
+    if (!(handle = new_object(OBJECT_QUERY, FALSE, NULL)))
+    {
+        classic_query_free(result);
+        return NULL;
+    }
+    object = (struct object *)handle;
+    object->data = result;
+    return handle;
 
 invalid:
     SetLastError(ERROR_INVALID_PARAMETER);
     return NULL;
 }
 
+static EVT_HANDLE new_event(EVENTLOGRECORD *rec, const WCHAR *channel)
+{
+    struct event_data *event = calloc(1, sizeof(*event));
+    EVT_HANDLE handle;
+
+    if (!event) return NULL;
+    if (!(event->channel = _wcsdup(channel)) || !(handle = new_object(OBJECT_EVENT, FALSE, NULL)))
+    {
+        free(event->channel);
+        free(event);
+        return NULL;
+    }
+    /* the handle owns the record from here */
+    event->rec = rec;
+    ((struct object *)handle)->data = event;
+    return handle;
+}
+
 BOOL WINAPI EvtNext(EVT_HANDLE result_set, DWORD size, EVT_HANDLE *array, DWORD timeout, DWORD flags, DWORD *ret_count)
 {
-    FIXME("(%p %lu %p %lu %#lx %p) semi-stub\n", result_set, size, array, timeout, flags, ret_count);
+    struct object *object;
+    DWORD n = 0, error = ERROR_SUCCESS;
 
-    /* no result set exists, as no query succeeds */
-    return fail(ERROR_INVALID_HANDLE);
+    TRACE("(%p %lu %p %lu %#lx %p)\n", result_set, size, array, timeout, flags, ret_count);
+
+    EnterCriticalSection(&object_cs);
+    object = find_object(result_set, OBJECT_QUERY);
+    if (!object) error = ERROR_INVALID_HANDLE;
+    else if (!array || !ret_count || flags) error = ERROR_INVALID_PARAMETER;
+    /* room for no event is room for the end of the results, as far as Windows goes */
+    else if (!size) error = ERROR_NO_MORE_ITEMS;
+    else
+    {
+        while (n < size)
+        {
+            const WCHAR *channel;
+            EVENTLOGRECORD *rec = classic_query_next(object->data, &channel, &error);
+
+            if (!rec) break;
+            if (!(array[n] = new_event(rec, channel)))
+            {
+                free(rec);
+                error = ERROR_OUTOFMEMORY;
+                break;
+            }
+            n++;
+            error = ERROR_SUCCESS;
+        }
+        /* what was read is handed over, and the end or the error shows with the next call */
+        if (n) error = ERROR_SUCCESS;
+        else if (!error) error = ERROR_NO_MORE_ITEMS;
+        if (n) *ret_count = n;
+    }
+    LeaveCriticalSection(&object_cs);
+
+    return error ? fail(error) : succeed();
 }
 
 BOOL WINAPI EvtSeek(EVT_HANDLE result_set, LONGLONG position, EVT_HANDLE bookmark, DWORD timeout, DWORD flags)
 {
-    FIXME("(%p %s %p %lu %#lx) semi-stub\n", result_set, wine_dbgstr_longlong(position), bookmark, timeout, flags);
+    struct object *object;
+    DWORD error;
+
+    TRACE("(%p %s %p %lu %#lx)\n", result_set, wine_dbgstr_longlong(position), bookmark, timeout, flags);
 
     /* the origin is checked before the handle */
     if ((flags & EvtSeekOriginMask) < EvtSeekRelativeToFirst || (flags & EvtSeekOriginMask) > EvtSeekRelativeToBookmark ||
         (flags & ~(EvtSeekOriginMask | EvtSeekStrict)))
         return fail(ERROR_INVALID_PARAMETER);
-    return fail(ERROR_INVALID_HANDLE);
+
+    EnterCriticalSection(&object_cs);
+    object = find_object(result_set, OBJECT_QUERY);
+    if (!object) error = ERROR_INVALID_HANDLE;
+    else if ((flags & EvtSeekOriginMask) != EvtSeekRelativeToFirst || position < 0) error = ERROR_NOT_SUPPORTED;
+    else error = classic_query_rewind(object->data, position);
+    LeaveCriticalSection(&object_cs);
+
+    return error ? fail(error) : succeed();
 }
 
 EVT_HANDLE WINAPI EvtSubscribe(EVT_HANDLE session, HANDLE signal_event, const WCHAR *path, const WCHAR *query,
@@ -929,7 +1116,7 @@ EVT_HANDLE WINAPI EvtOpenLog(EVT_HANDLE session, const WCHAR *path, DWORD flags)
     DWORD error;
     BOOL remote;
 
-    FIXME("(%p %s %#lx) semi-stub\n", session, debugstr_w(path), flags);
+    TRACE("(%p %s %#lx)\n", session, debugstr_w(path), flags);
 
     if ((flags != EvtOpenChannelPath && flags != EvtOpenFilePath) || !path)
     {
@@ -951,24 +1138,48 @@ EVT_HANDLE WINAPI EvtOpenLog(EVT_HANDLE session, const WCHAR *path, DWORD flags)
         SetLastError(error);
         return NULL;
     }
-    no_service();
-    return NULL;
+    /* the records of an .evtx file are not something that this library can read */
+    if (flags == EvtOpenFilePath)
+    {
+        SetLastError(ERROR_NOT_SUPPORTED);
+        return NULL;
+    }
+    return new_object(OBJECT_LOG, FALSE, path);
 }
 
 BOOL WINAPI EvtGetLogInfo(EVT_HANDLE log, EVT_LOG_PROPERTY_ID id, DWORD size, PEVT_VARIANT buffer, DWORD *used)
 {
-    FIXME("(%p %i %lu %p %p) semi-stub\n", log, id, size, buffer, used);
+    struct object *object;
+    DWORD error;
 
-    /* no log is ever opened */
-    return fail(ERROR_INVALID_HANDLE);
+    TRACE("(%p %i %lu %p %p)\n", log, id, size, buffer, used);
+
+    EnterCriticalSection(&object_cs);
+    object = find_object(log, OBJECT_LOG);
+    if (!object) error = ERROR_INVALID_HANDLE;
+    else if ((int)id < 0 || id >= EvtLogPropertyIdEND || !used) error = ERROR_INVALID_PARAMETER;
+    else error = classic_log_property(object->name, id, size, buffer, used);
+    LeaveCriticalSection(&object_cs);
+
+    return error ? fail(error) : succeed();
 }
 
 BOOL WINAPI EvtGetQueryInfo(EVT_HANDLE query, EVT_QUERY_PROPERTY_ID id, DWORD size, PEVT_VARIANT buffer, DWORD *used)
 {
-    FIXME("(%p %i %lu %p %p) semi-stub\n", query, id, size, buffer, used);
+    struct object *object;
+    DWORD error;
 
-    /* no query or subscription exists */
-    return fail(ERROR_INVALID_HANDLE);
+    TRACE("(%p %i %lu %p %p)\n", query, id, size, buffer, used);
+
+    EnterCriticalSection(&object_cs);
+    object = find_object(query, OBJECT_QUERY);
+    if (!object) error = ERROR_INVALID_HANDLE;
+    else if (!used || (id != EvtQueryNames && id != EvtQueryStatuses)) error = ERROR_INVALID_PARAMETER;
+    else if (id == EvtQueryNames) error = classic_query_names(object->data, size, buffer, used);
+    else error = classic_query_statuses(object->data, size, buffer, used);
+    LeaveCriticalSection(&object_cs);
+
+    return error ? fail(error) : succeed();
 }
 
 BOOL WINAPI EvtExportLog(EVT_HANDLE session, const WCHAR *path, const WCHAR *query, const WCHAR *file, DWORD flags)
@@ -1005,9 +1216,11 @@ BOOL WINAPI EvtClearLog(EVT_HANDLE session, const WCHAR *path, const WCHAR *file
 
 EVT_HANDLE WINAPI EvtCreateRenderContext(DWORD count, const WCHAR **paths, DWORD flags)
 {
+    struct render_context *context;
+    EVT_HANDLE handle;
     DWORD i;
 
-    FIXME("(%lu %p %#lx) semi-stub\n", count, paths, flags);
+    TRACE("(%lu %p %#lx)\n", count, paths, flags);
 
     if (flags == EvtRenderContextValues)
     {
@@ -1021,10 +1234,29 @@ EVT_HANDLE WINAPI EvtCreateRenderContext(DWORD count, const WCHAR **paths, DWORD
     }
     else goto invalid;
 
-    return new_object(OBJECT_RENDER_CONTEXT, FALSE, NULL);
+    if (!(context = calloc(1, sizeof(*context)))) goto nomem;
+    context->flags = flags;
+    context->count = count;
+    if (count)
+    {
+        if (!(context->indexes = calloc(count, sizeof(*context->indexes)))) { free(context); goto nomem; }
+        for (i = 0; i < count; i++) context->indexes[i] = classic_value_index(paths[i]);
+    }
+    if (!(handle = new_object(OBJECT_RENDER_CONTEXT, FALSE, NULL)))
+    {
+        free(context->indexes);
+        free(context);
+        return NULL;
+    }
+    ((struct object *)handle)->data = context;
+    return handle;
 
 invalid:
     SetLastError(ERROR_INVALID_PARAMETER);
+    return NULL;
+
+nomem:
+    SetLastError(ERROR_OUTOFMEMORY);
     return NULL;
 }
 
@@ -1152,7 +1384,7 @@ EVT_HANDLE WINAPI EvtCreateBookmark(const WCHAR *bookmark_xml)
     EVT_HANDLE handle;
     int result;
 
-    FIXME("(%s) semi-stub\n", debugstr_w(bookmark_xml));
+    TRACE("(%s)\n", debugstr_w(bookmark_xml));
 
     if (bookmark_xml && (result = parse_bookmark_list(bookmark_xml, &marks, &count, &direction)))
     {
@@ -1251,57 +1483,153 @@ static SIZE_T render_bookmark(const struct object *bookmark, WCHAR *out)
     return b.len;
 }
 
+/* The event that a handle names, as the library sees it. The caller holds the lock and frees what is in it. */
+static BOOL get_event(EVT_HANDLE handle, struct classic_event *event)
+{
+    struct object *object = find_object(handle, OBJECT_EVENT);
+    struct event_data *data;
+
+    if (!object) return FALSE;
+    data = object->data;
+    return classic_event_init(event, data->rec, data->channel);
+}
+
 BOOL WINAPI EvtRender(EVT_HANDLE context, EVT_HANDLE fragment, DWORD flags, DWORD buffer_size, void *buffer,
                       DWORD *buffer_used, DWORD *property_count)
 {
     struct object *object;
-    DWORD needed;
-    BOOL ret = FALSE;
+    DWORD needed, error = ERROR_SUCCESS, dummy;
 
-    FIXME("(%p %p %#lx %lu %p %p %p) semi-stub\n", context, fragment, flags, buffer_size, buffer, buffer_used,
-          property_count);
+    TRACE("(%p %p %#lx %lu %p %p %p)\n", context, fragment, flags, buffer_size, buffer, buffer_used, property_count);
+
+    if (!property_count) property_count = &dummy;
 
     EnterCriticalSection(&object_cs);
-    if (flags > EvtRenderBookmark || !buffer_used || (buffer_size && !buffer)) SetLastError(ERROR_INVALID_PARAMETER);
-    else if (flags == EvtRenderEventValues && !context) SetLastError(ERROR_INVALID_PARAMETER);
-    else if (flags == EvtRenderBookmark && context) SetLastError(ERROR_INVALID_PARAMETER);
-    /* a bookmark is the only fragment that can exist, and only a bookmark is rendered as a bookmark */
-    else if (!(object = find_object(fragment, OBJECT_BOOKMARK)) || flags != EvtRenderBookmark) SetLastError(ERROR_INVALID_HANDLE);
-    else
+    if (flags > EvtRenderBookmark || !buffer_used || (buffer_size && !buffer)) error = ERROR_INVALID_PARAMETER;
+    else if (flags == EvtRenderEventValues && !context) error = ERROR_INVALID_PARAMETER;
+    else if (flags == EvtRenderBookmark && context) error = ERROR_INVALID_PARAMETER;
+    else if (flags == EvtRenderBookmark)
     {
-        SIZE_T length = render_bookmark(object, NULL);
-
-        if (length >= MAXDWORD / sizeof(WCHAR)) SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        if (!(object = find_object(fragment, OBJECT_BOOKMARK))) error = ERROR_INVALID_HANDLE;
         else
         {
-            needed = (length + 1) * sizeof(WCHAR);
-            *buffer_used = needed;
-            if (property_count) *property_count = 0;
-            if (buffer_size < needed) SetLastError(ERROR_INSUFFICIENT_BUFFER);
+            SIZE_T length = render_bookmark(object, NULL);
+
+            if (length >= MAXDWORD / sizeof(WCHAR)) error = ERROR_NOT_ENOUGH_MEMORY;
             else
             {
-                render_bookmark(object, buffer);
-                ret = TRUE;
+                needed = (length + 1) * sizeof(WCHAR);
+                *buffer_used = needed;
+                *property_count = 0;
+                if (buffer_size < needed) error = ERROR_INSUFFICIENT_BUFFER;
+                else render_bookmark(object, buffer);
             }
         }
     }
+    else
+    {
+        struct classic_event event;
+
+        /* the other fragments are events, and only an event is rendered as values or as XML */
+        if (!get_event(fragment, &event))
+            error = find_object(fragment, OBJECT_EVENT) ? ERROR_INVALID_DATA : ERROR_INVALID_HANDLE;
+        else
+        {
+            if (flags == EvtRenderEventXml)
+            {
+                WCHAR *xml = classic_render_xml(&event, NULL);
+
+                if (!xml) error = ERROR_OUTOFMEMORY;
+                else
+                {
+                    needed = (lstrlenW(xml) + 1) * sizeof(WCHAR);
+                    *buffer_used = needed;
+                    *property_count = 0;
+                    if (buffer_size < needed) error = ERROR_INSUFFICIENT_BUFFER;
+                    else memcpy(buffer, xml, needed);
+                    free(xml);
+                }
+            }
+            else
+            {
+                struct object *ctx = find_object(context, OBJECT_RENDER_CONTEXT);
+
+                if (!ctx) error = ERROR_INVALID_HANDLE;
+                else
+                {
+                    struct render_context *rc = ctx->data;
+
+                    error = classic_render_values(rc->flags, (const DWORD *)rc->indexes, rc->count, &event, buffer_size,
+                                                  buffer, buffer_used, property_count);
+                }
+            }
+            classic_event_free(&event);
+        }
+    }
     LeaveCriticalSection(&object_cs);
-    return ret;
+    return error ? fail(error) : succeed();
 }
 
 BOOL WINAPI EvtUpdateBookmark(EVT_HANDLE bookmark, EVT_HANDLE event)
 {
-    FIXME("(%p %p) semi-stub\n", bookmark, event);
+    struct object *object;
+    struct classic_event ev;
+    DWORD i, error = ERROR_SUCCESS;
 
-    /* no event exists to update a bookmark with */
-    return fail(ERROR_INVALID_HANDLE);
+    TRACE("(%p %p)\n", bookmark, event);
+
+    EnterCriticalSection(&object_cs);
+    if (!(object = find_object(bookmark, OBJECT_BOOKMARK)) || !get_event(event, &ev)) error = ERROR_INVALID_HANDLE;
+    else
+    {
+        struct bookmark_entry *entry = NULL;
+
+        /* a bookmark has one place in each log, and the one that was set last is the current one */
+        for (i = 0; i < object->mark_count; i++)
+            if (!_wcsicmp(object->marks[i].channel, ev.channel)) entry = &object->marks[i];
+        if (!entry)
+        {
+            struct bookmark_entry *marks = realloc(object->marks, (object->mark_count + 1) * sizeof(*marks));
+            WCHAR *channel = _wcsdup(ev.channel);
+
+            if (!marks || !channel)
+            {
+                free(channel);
+                if (marks) object->marks = marks;
+                error = ERROR_OUTOFMEMORY;
+            }
+            else
+            {
+                object->marks = marks;
+                entry = &marks[object->mark_count++];
+                memset(entry, 0, sizeof(*entry));
+                entry->channel = channel;
+            }
+        }
+        if (entry)
+        {
+            for (i = 0; i < object->mark_count; i++)
+            {
+                object->marks[i].is_current = FALSE;
+                object->marks[i].has_is_current = TRUE;
+            }
+            entry->record_id = ev.record_id;
+            entry->has_record_id = TRUE;
+            entry->is_current = TRUE;
+        }
+        classic_event_free(&ev);
+    }
+    LeaveCriticalSection(&object_cs);
+    return error ? fail(error) : succeed();
 }
 
 EVT_HANDLE WINAPI EvtOpenPublisherEnum(EVT_HANDLE session, DWORD flags)
 {
+    struct publisher_enum *list;
+    EVT_HANDLE handle;
     BOOL remote;
 
-    FIXME("(%p %#lx) semi-stub\n", session, flags);
+    TRACE("(%p %#lx)\n", session, flags);
 
     if (flags)
     {
@@ -1314,32 +1642,62 @@ EVT_HANDLE WINAPI EvtOpenPublisherEnum(EVT_HANDLE session, DWORD flags)
         no_service();
         return NULL;
     }
-    return new_object(OBJECT_PUBLISHER_ENUM, FALSE, NULL);
+    if (!(list = calloc(1, sizeof(*list))))
+    {
+        SetLastError(ERROR_OUTOFMEMORY);
+        return NULL;
+    }
+    /* the sources that the logs register, as they are when the enumeration opens */
+    list->count = classic_pub_list(&list->names);
+    if (!(handle = new_object(OBJECT_PUBLISHER_ENUM, FALSE, NULL)))
+    {
+        classic_names_free(list->names, list->count);
+        free(list);
+        return NULL;
+    }
+    ((struct object *)handle)->data = list;
+    return handle;
 }
 
 BOOL WINAPI EvtNextPublisherId(EVT_HANDLE publisher_enum, DWORD buffer_len, WCHAR *buffer, DWORD *used)
 {
-    BOOL found;
+    struct object *object;
+    struct publisher_enum *list;
+    DWORD len, error = ERROR_SUCCESS;
 
-    FIXME("(%p %lu %p %p) semi-stub\n", publisher_enum, buffer_len, buffer, used);
+    TRACE("(%p %lu %p %p)\n", publisher_enum, buffer_len, buffer, used);
 
     EnterCriticalSection(&object_cs);
-    found = find_object(publisher_enum, OBJECT_PUBLISHER_ENUM) != NULL;
+    if (!(object = find_object(publisher_enum, OBJECT_PUBLISHER_ENUM))) error = ERROR_INVALID_HANDLE;
+    else if (!used || (buffer_len && !buffer)) error = ERROR_INVALID_PARAMETER;
+    else
+    {
+        list = object->data;
+        if (object->index >= list->count) error = ERROR_NO_MORE_ITEMS;
+        else
+        {
+            len = lstrlenW(list->names[object->index]) + 1;
+            *used = len;
+            if (buffer_len < len) error = ERROR_INSUFFICIENT_BUFFER;
+            else
+            {
+                memcpy(buffer, list->names[object->index], len * sizeof(WCHAR));
+                object->index++;
+            }
+        }
+    }
     LeaveCriticalSection(&object_cs);
-
-    if (!found) return fail(ERROR_INVALID_HANDLE);
-    if (!used || (buffer_len && !buffer)) return fail(ERROR_INVALID_PARAMETER);
-
-    /* no publisher is registered */
-    return fail(ERROR_NO_MORE_ITEMS);
+    return error ? fail(error) : succeed();
 }
 
 EVT_HANDLE WINAPI EvtOpenPublisherMetadata(EVT_HANDLE session, const WCHAR *publisher, const WCHAR *log_file,
                                            LCID locale, DWORD flags)
 {
+    struct classic_pub *pub;
+    EVT_HANDLE handle;
     BOOL remote;
 
-    FIXME("(%p %s %s %#lx %#lx) semi-stub\n", session, debugstr_w(publisher), debugstr_w(log_file), locale, flags);
+    TRACE("(%p %s %s %#lx %#lx)\n", session, debugstr_w(publisher), debugstr_w(log_file), locale, flags);
 
     if (flags)
     {
@@ -1352,65 +1710,230 @@ EVT_HANDLE WINAPI EvtOpenPublisherMetadata(EVT_HANDLE session, const WCHAR *publ
         no_service();
         return NULL;
     }
-    /* no publisher is registered, and Windows reports the missing manifest as a missing file */
-    SetLastError(ERROR_FILE_NOT_FOUND);
-    return NULL;
+    if (log_file)
+    {
+        SetLastError(ERROR_NOT_SUPPORTED);
+        return NULL;
+    }
+    /* no name is the publisher of the standard messages, which is what the text of a level or a task comes from */
+    pub = publisher ? classic_pub_open(publisher) : classic_pub_default();
+    if (!pub)
+    {
+        /* a publisher that no log registers has no manifest, and Windows reports that as a missing file */
+        SetLastError(publisher ? ERROR_FILE_NOT_FOUND : ERROR_OUTOFMEMORY);
+        return NULL;
+    }
+    if (!(handle = new_object(OBJECT_PUBLISHER, FALSE, NULL)))
+    {
+        classic_pub_free(pub);
+        return NULL;
+    }
+    ((struct object *)handle)->data = pub;
+    return handle;
 }
 
-/*
- * The functions for publisher metadata, event metadata and events themselves take handles that no
- * function here makes: no publisher has metadata, and no event can be read.
- */
+/* A handle for an array of a publisher: its channel references, or the levels, tasks, opcodes and keywords that it has none of */
+static EVT_HANDLE new_array(enum array_kind kind, const struct classic_pub *pub)
+{
+    struct array_data *array = calloc(1, sizeof(*array));
+    EVT_HANDLE handle;
+    DWORD i;
+
+    if (!array) return NULL;
+    array->kind = kind;
+    if (kind == ARRAY_CHANNELS)
+    {
+        if (!(array->items = calloc(pub->log_count ? pub->log_count : 1, sizeof(*array->items)))) { free(array); return NULL; }
+        for (i = 0; i < pub->log_count; i++)
+        {
+            if (!(array->items[i] = _wcsdup(pub->logs[i]))) break;
+            array->count++;
+        }
+        if (array->count != pub->log_count)
+        {
+            classic_names_free(array->items, array->count);
+            free(array);
+            return NULL;
+        }
+    }
+    if (!(handle = new_object(OBJECT_ARRAY, FALSE, NULL)))
+    {
+        classic_names_free(array->items, array->count);
+        free(array);
+        return NULL;
+    }
+    ((struct object *)handle)->data = array;
+    return handle;
+}
+
+BOOL WINAPI EvtGetPublisherMetadataProperty(EVT_HANDLE metadata, EVT_PUBLISHER_METADATA_PROPERTY_ID id, DWORD flags, DWORD size, PEVT_VARIANT buffer, DWORD *used)
+{
+    struct object *object;
+    DWORD error = ERROR_SUCCESS;
+
+    TRACE("(%p %u %#lx %lu %p %p)\n", metadata, id, flags, size, buffer, used);
+
+    EnterCriticalSection(&object_cs);
+    if (!(object = find_object(metadata, OBJECT_PUBLISHER))) error = ERROR_INVALID_HANDLE;
+    else if ((int)id < 0 || id >= EvtPublisherMetadataPropertyIdEND || flags || !used) error = ERROR_INVALID_PARAMETER;
+    else if (id == EvtPublisherMetadataChannelReferences || id == EvtPublisherMetadataLevels ||
+             id == EvtPublisherMetadataTasks || id == EvtPublisherMetadataOpcodes || id == EvtPublisherMetadataKeywords)
+    {
+        *used = sizeof(EVT_VARIANT);
+        if (size < sizeof(EVT_VARIANT) || !buffer) error = ERROR_INSUFFICIENT_BUFFER;
+        else
+        {
+            EVT_HANDLE array = new_array(id == EvtPublisherMetadataChannelReferences ? ARRAY_CHANNELS : ARRAY_EMPTY, object->data);
+
+            if (!array) error = ERROR_OUTOFMEMORY;
+            else
+            {
+                buffer->UInt64Val = 0;
+                buffer->EvtHandleVal = array;
+                buffer->Type = EvtVarTypeEvtHandle;
+            }
+        }
+    }
+    else error = classic_pub_property(object->data, id, size, buffer, used);
+    LeaveCriticalSection(&object_cs);
+    return error ? fail(error) : succeed();
+}
 
 BOOL WINAPI EvtFormatMessage(EVT_HANDLE metadata, EVT_HANDLE event, DWORD message_id, DWORD count, PEVT_VARIANT values,
                              DWORD flags, DWORD size, WCHAR *buffer, DWORD *used)
 {
-    FIXME("(%p %p %lu %lu %p %#lx %lu %p %p) semi-stub\n", metadata, event, message_id, count, values, flags, size, buffer, used);
-    return fail(ERROR_INVALID_HANDLE);
+    struct object *object;
+    struct classic_event ev;
+    WCHAR *text = NULL;
+    DWORD length = 0, error = ERROR_SUCCESS;
+    BOOL have_event = FALSE;
+
+    TRACE("(%p %p %lu %lu %p %#lx %lu %p %p)\n", metadata, event, message_id, count, values, flags, size, buffer, used);
+
+    EnterCriticalSection(&object_cs);
+    object = metadata ? find_object(metadata, OBJECT_PUBLISHER) : NULL;
+    if (flags < EvtFormatMessageEvent || flags > EvtFormatMessageXml || !used || (size && !buffer) || (count && !values))
+        error = ERROR_INVALID_PARAMETER;
+    else if (event && !(have_event = get_event(event, &ev))) error = ERROR_INVALID_HANDLE;
+    else if (!object && !(flags == EvtFormatMessageXml && !metadata)) error = ERROR_INVALID_HANDLE;
+    else if (!object)
+    {
+        /* with no publisher, the XML of an event has nothing but the event in it */
+        if (!(text = classic_render_xml(&ev, NULL))) error = ERROR_OUTOFMEMORY;
+        else length = lstrlenW(text) + 1;
+    }
+    else error = classic_format(object->data, have_event ? &ev : NULL, message_id, flags, count, values, &text, &length);
+
+    if (!error)
+    {
+        *used = length;
+        if (size < length) error = ERROR_INSUFFICIENT_BUFFER;
+        else memcpy(buffer, text, length * sizeof(WCHAR));
+    }
+    free(text);
+    if (have_event) classic_event_free(&ev);
+    LeaveCriticalSection(&object_cs);
+    return error ? fail(error) : succeed();
 }
 
 BOOL WINAPI EvtGetEventInfo(EVT_HANDLE event, EVT_EVENT_PROPERTY_ID id, DWORD size, PEVT_VARIANT buffer, DWORD *used)
 {
-    FIXME("(%p %u %lu %p %p) semi-stub\n", event, id, size, buffer, used);
-    return fail(ERROR_INVALID_HANDLE);
+    struct classic_event ev;
+    DWORD error;
+
+    TRACE("(%p %u %lu %p %p)\n", event, id, size, buffer, used);
+
+    EnterCriticalSection(&object_cs);
+    if (!get_event(event, &ev)) error = ERROR_INVALID_HANDLE;
+    else
+    {
+        if ((int)id < 0 || id >= EvtEventPropertyIdEND || !used) error = ERROR_INVALID_PARAMETER;
+        else error = classic_event_info(&ev, id, size, buffer, used);
+        classic_event_free(&ev);
+    }
+    LeaveCriticalSection(&object_cs);
+    return error ? fail(error) : succeed();
 }
 
 BOOL WINAPI EvtGetEventMetadataProperty(EVT_HANDLE metadata, EVT_EVENT_METADATA_PROPERTY_ID id, DWORD flags, DWORD size, PEVT_VARIANT buffer, DWORD *used)
 {
     FIXME("(%p %u %#lx %lu %p %p) semi-stub\n", metadata, id, flags, size, buffer, used);
-    return fail(ERROR_INVALID_HANDLE);
-}
-
-BOOL WINAPI EvtGetPublisherMetadataProperty(EVT_HANDLE metadata, EVT_PUBLISHER_METADATA_PROPERTY_ID id, DWORD flags, DWORD size, PEVT_VARIANT buffer, DWORD *used)
-{
-    FIXME("(%p %u %#lx %lu %p %p) semi-stub\n", metadata, id, flags, size, buffer, used);
+    /* no publisher has events of its own, so no event metadata handle is made */
     return fail(ERROR_INVALID_HANDLE);
 }
 
 EVT_HANDLE WINAPI EvtOpenEventMetadataEnum(EVT_HANDLE metadata, DWORD flags)
 {
-    FIXME("(%p %#lx) semi-stub\n", metadata, flags);
-    SetLastError(ERROR_INVALID_HANDLE);
-    return NULL;
+    BOOL found;
+
+    TRACE("(%p %#lx)\n", metadata, flags);
+
+    EnterCriticalSection(&object_cs);
+    found = find_object(metadata, OBJECT_PUBLISHER) != NULL;
+    LeaveCriticalSection(&object_cs);
+    if (!found)
+    {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return NULL;
+    }
+    if (flags)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return NULL;
+    }
+    /* the sources of the classic logs define no events */
+    return new_object(OBJECT_EVENT_ENUM, FALSE, NULL);
 }
 
 EVT_HANDLE WINAPI EvtNextEventMetadata(EVT_HANDLE metadata_enum, DWORD flags)
 {
-    FIXME("(%p %#lx) semi-stub\n", metadata_enum, flags);
-    SetLastError(ERROR_INVALID_HANDLE);
+    BOOL found;
+
+    TRACE("(%p %#lx)\n", metadata_enum, flags);
+
+    EnterCriticalSection(&object_cs);
+    found = find_object(metadata_enum, OBJECT_EVENT_ENUM) != NULL;
+    LeaveCriticalSection(&object_cs);
+    SetLastError(!found ? ERROR_INVALID_HANDLE : flags ? ERROR_INVALID_PARAMETER : ERROR_NO_MORE_ITEMS);
     return NULL;
 }
 
 BOOL WINAPI EvtGetObjectArraySize(HANDLE array, DWORD *size)
 {
-    FIXME("(%p %p) semi-stub\n", array, size);
-    return fail(ERROR_INVALID_HANDLE);
+    struct object *object;
+    DWORD error = ERROR_SUCCESS;
+
+    TRACE("(%p %p)\n", array, size);
+
+    EnterCriticalSection(&object_cs);
+    if (!(object = find_object(array, OBJECT_ARRAY))) error = ERROR_INVALID_HANDLE;
+    else if (!size) error = ERROR_INVALID_PARAMETER;
+    else *size = ((struct array_data *)object->data)->count;
+    LeaveCriticalSection(&object_cs);
+    return error ? fail(error) : succeed();
 }
 
 BOOL WINAPI EvtGetObjectArrayProperty(HANDLE array, DWORD id, DWORD index, DWORD flags, DWORD size, PEVT_VARIANT buffer, DWORD *used)
 {
-    FIXME("(%p %lu %lu %#lx %lu %p %p) semi-stub\n", array, id, index, flags, size, buffer, used);
-    return fail(ERROR_INVALID_HANDLE);
+    struct object *object;
+    struct array_data *data;
+    DWORD error = ERROR_SUCCESS;
+
+    TRACE("(%p %lu %lu %#lx %lu %p %p)\n", array, id, index, flags, size, buffer, used);
+
+    EnterCriticalSection(&object_cs);
+    if (!(object = find_object(array, OBJECT_ARRAY))) error = ERROR_INVALID_HANDLE;
+    else if (flags || !used) error = ERROR_INVALID_PARAMETER;
+    else
+    {
+        data = object->data;
+        if (data->kind != ARRAY_CHANNELS || id < EvtPublisherMetadataChannelReferencePath || id > EvtPublisherMetadataChannelReferenceMessageID)
+            error = ERROR_INVALID_PARAMETER;
+        else if (index >= data->count) error = ERROR_NO_MORE_ITEMS;
+        else error = classic_array_property(data->items[index], index, id, size, buffer, used);
+    }
+    LeaveCriticalSection(&object_cs);
+    return error ? fail(error) : succeed();
 }
 
 BOOL WINAPI EvtSetObjectArrayProperty(HANDLE array, DWORD id, DWORD index, DWORD flags, PEVT_VARIANT value)

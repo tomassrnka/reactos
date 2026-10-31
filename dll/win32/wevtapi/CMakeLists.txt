@@ -2,6 +2,9 @@ spec2def(wevtapi.dll wevtapi.spec ADD_IMPORTLIB)
 
 list(APPEND SOURCE
     main.c
+    classic.c
+    xpath.c
+    wevtapi_private.h
     ${CMAKE_CURRENT_BINARY_DIR}/wevtapi_stubs.c
     ${CMAKE_CURRENT_BINARY_DIR}/wevtapi.def)
 
