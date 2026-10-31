@@ -90,7 +90,8 @@ list(APPEND SOURCE
     SetWindowExtEx.c
     SetWorldTransform.c
     StretchBlt.c
-    TextTransform.c)
+    TextTransform.c
+    UniscribeForwarders.c)
 
 list(APPEND PCH_SKIP_SOURCE
     testlist.c)
