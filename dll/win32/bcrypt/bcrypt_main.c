@@ -2275,12 +2275,13 @@ static NTSTATUS encrypt_rsa( const struct key *key, const UCHAR *input, ULONG in
         if (input_len % size) return STATUS_INVALID_PARAMETER;
 
         if (SymCryptRsaRawEncrypt( key->a.rsa.handle, input, input_len, SYMCRYPT_NUMBER_FORMAT_MSB_FIRST, 0, output,
-                                   output_len )) return STATUS_INTERNAL_ERROR;
+                                   size )) return STATUS_INTERNAL_ERROR;
     }
     else if (flags == BCRYPT_PAD_PKCS1)
     {
+        /* SymCrypt wants a destination of the modulus size: a larger output buffer is fine on Windows */
         if (SymCryptRsaPkcs1Encrypt( key->a.rsa.handle, input, input_len, SYMCRYPT_NUMBER_FORMAT_MSB_FIRST, 0, output,
-                                     output_len, &size )) return STATUS_INTERNAL_ERROR;
+                                     size, &size )) return STATUS_INTERNAL_ERROR;
         *ret_len = size;
     }
     else if (flags == BCRYPT_PAD_OAEP)
@@ -2297,7 +2298,7 @@ static NTSTATUS encrypt_rsa( const struct key *key, const UCHAR *input, ULONG in
             label_len = pad->cbLabel;
         }
         if (SymCryptRsaOaepEncrypt( key->a.rsa.handle, input, input_len, hash_desc, label, label_len, 0,
-                                    SYMCRYPT_NUMBER_FORMAT_MSB_FIRST, output, output_len, &size ))
+                                    SYMCRYPT_NUMBER_FORMAT_MSB_FIRST, output, size, &size ))
             return STATUS_INTERNAL_ERROR;
         *ret_len = size;
     }
@@ -3983,7 +3984,9 @@ static NTSTATUS verify_signature_rsa( const struct key *key, const void *padding
         return STATUS_NOT_SUPPORTED;
     }
 
-    if (error == SYMCRYPT_SIGNATURE_VERIFICATION_FAILURE) return STATUS_INVALID_SIGNATURE;
+    /* a signature that is not a number below the modulus is just a bad signature */
+    if (error == SYMCRYPT_SIGNATURE_VERIFICATION_FAILURE || error == SYMCRYPT_INVALID_ARGUMENT)
+        return STATUS_INVALID_SIGNATURE;
     if (error) return STATUS_INTERNAL_ERROR;
     return STATUS_SUCCESS;
 }
